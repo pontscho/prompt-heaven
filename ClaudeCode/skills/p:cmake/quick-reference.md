@@ -2,20 +2,21 @@
 
 Fast lookup for common patterns and syntax.
 
-## Static Linking Boilerplate
+**For static linking, see [p:static-linking skill](../p:static-linking/SKILL.md)** - dedicated guide with automated tools.
+
+## Static Linking (Quick)
 
 ```cmake
-# Copy-paste ready: Platform-specific static linking
+# Platform-specific static linking
 if(UNIX AND NOT APPLE)
-	# Linux: Full static
 	set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
 	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
 elseif(APPLE)
-	# macOS: Static third-party only
-	set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+	set(CMAKE_FIND_LIBRARY_SUFFIXES .a)  # NO -static on macOS
 endif()
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 ```
+
+Use `build-static.py --verify` from p:static-linking for automated builds.
 
 ## Library Finding Patterns
 

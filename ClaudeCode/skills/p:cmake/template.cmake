@@ -28,6 +28,8 @@ option( ENABLE_FEATURE "Enable optional feature" ON )
 # ==============================================================================
 # Platform-Specific Static Linking
 # ==============================================================================
+# For detailed static linking guide and automated tools, see:
+# ~/.claude/skills/p:static-linking/SKILL.md
 
 # Force static library builds
 set( BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE )

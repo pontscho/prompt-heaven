@@ -80,39 +80,29 @@ add_definitions( -DENABLE_FEATURE=1 )
 - `PUBLIC`: This target and consumers need it
 - `INTERFACE`: Only consumers need it ( header-only libs )
 
-### 2. Platform-Specific Static Linking
+### 2. Static Linking (Brief)
 
-**Critical lesson from real life**: macOS doesn't support full static linking.
+**For complete static linking guide, see [p:static-linking skill](../p:static-linking/SKILL.md)**
+
+Quick example for platform-specific static linking:
 
 ```cmake
-# Platform-specific static linking strategy
+# Platform-specific static linking
 if( UNIX AND NOT APPLE )
-	# Linux: Full static linking is possible
 	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )
 	set( CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static" )
-	message( STATUS "Linux: Building fully static binary" )
-
 elseif( APPLE )
-	# macOS: Only system libs must be dynamic ( libSystem.dylib )
-	# Third-party libs can be static
-	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )
-	message( STATUS "macOS: Building with static third-party libs" )
-
+	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )  # NO -static flag on macOS!
 elseif( WIN32 )
-	# Windows: Static linking with /MT flag
 	set( CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" )
 endif()
-
-# Force static library builds
-set( BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE )
 ```
 
-**Important**: On macOS, the result will have ONE dynamic dependency:
-```bash
-otool -L ./myapp
-# Output:
-#   /usr/lib/libSystem.B.dylib  <-- Required on macOS
-```
+**Note**: macOS requires system libraries dynamic. See **p:static-linking** skill for:
+- Platform-specific configurations
+- Automated build tools (`build-static.py`)
+- Verification tools (`verify-static-linking.py`)
+- Troubleshooting and best practices
 
 ### 3. Dependency Management
 
@@ -249,29 +239,23 @@ When helping with CMake, follow these steps:
    - Third-party libraries ( zlib, openssl, etc. )?
    - Homebrew/vcpkg/conan package manager?
 
-### Step 2: Set up platform-specific static linking
+### Step 2: Set up static linking (if needed)
 
-If static linking is needed:
+**For complete static linking setup, use [p:static-linking skill](../p:static-linking/SKILL.md)**
 
-1. **Always use the platform-specific pattern**:
+Quick pattern:
 ```cmake
 if( UNIX AND NOT APPLE )
 	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )
 	set( CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static" )
-
 elseif( APPLE )
-	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )
+	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )  # NO -static on macOS
 endif()
 ```
 
-2. **Explain the macOS limitation**: Inform the user that macOS doesn't support full static binaries due to Apple's restrictions on statically linking system libraries.
-
-3. **Add documentation comment**:
-```cmake
-# Platform-specific static linking
-# macOS doesn't support fully static binaries ( libSystem must be dynamic )
-# Only link third-party libraries statically on macOS
-```
+**Use p:static-linking tools**:
+- `build-static.py --verify` - Automated build with verification
+- `verify-static-linking.py` - Verify binaries post-build
 
 ### Step 3: Configure dependency finding
 
@@ -337,24 +321,17 @@ message( STATUS "" )
 
 ### Step 6: Verify static linking
 
-After build, provide verification commands:
-
-**Linux**:
+**Use p:static-linking verification tool** (cross-platform):
 ```bash
-ldd ./myapp
-# Should output: "not a dynamic executable"
+python3 verify-static-linking.py ./myapp
 ```
 
-**macOS**:
-```bash
-otool -L ./myapp
-# Should only show: /usr/lib/libSystem.B.dylib
-```
+Or manual verification:
+- **Linux**: `ldd ./myapp` → "not a dynamic executable"
+- **macOS**: `otool -L ./myapp` → Only libSystem.B.dylib
+- **Windows**: `dumpbin /dependents myapp.exe`
 
-**Windows**:
-```powershell
-dumpbin /dependents myapp.exe
-```
+See **[p:static-linking skill](../p:static-linking/SKILL.md)** for automated workflows.
 
 ## Common Patterns
 
@@ -486,76 +463,31 @@ project( myproject VERSION 1.0.0 LANGUAGES C CXX )
 
 ## Troubleshooting
 
-### Problem: macOS linker error "library not found for -lcrt0.o"
+### Common CMake Issues
 
-**Cause**: Using `-static` flag on macOS
+**Problem: Library not found**
+- Check `CMakeCache.txt` for what CMake found
+- Ensure development packages installed
+- Add HINTS with correct paths (Homebrew: `/usr/local/opt`, `/opt/homebrew/opt`)
 
-**Solution**: Remove `-static` flag for macOS, use hybrid approach:
+**Problem: Wrong library version linked**
+- Use explicit `find_library` with `REQUIRED`
+- Check `CMakeCache.txt` and clear cache if needed
+
+**Problem: Homebrew libraries not found (macOS)**
 ```cmake
-elseif( APPLE )
-	# Don't use -static flag on macOS
-	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )
-endif()
+find_library( ZLIB_LIBRARY NAMES z REQUIRED
+	HINTS /usr/local/opt/zlib/lib /opt/homebrew/opt/zlib/lib
+)
 ```
 
-### Problem: pkg-config returns dynamic libraries
+### Static Linking Issues
 
-**Cause**: pkg-config defaults to dynamic linking
-
-**Solution**: Use explicit find_library on macOS:
-```cmake
-if( APPLE )
-	find_library( PNG_LIBRARY NAMES png16 png REQUIRED HINTS /usr/local/opt/libpng/lib )
-
-else()
-	pkg_check_modules( PNG REQUIRED libpng16 )
-endif()
-```
-
-### Problem: Library not found with CMAKE_FIND_LIBRARY_SUFFIXES
-
-**Cause**: Set `.a` suffix too early, before all find operations
-
-**Solution**: Set suffix only in platform-specific block:
-```cmake
-if( UNIX AND NOT APPLE )
-	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )
-
-elseif( APPLE )
-	set( CMAKE_FIND_LIBRARY_SUFFIXES .a )
-endif()
-```
-
-### Problem: Homebrew libraries not found on macOS
-
-**Cause**: Homebrew installs to `/usr/local` or `/opt/homebrew` ( Apple Silicon )
-
-**Solution**: Add HINTS to find_library:
-```cmake
-find_library( ZLIB_LIBRARY NAMES z
-	HINTS
-		/usr/local/opt/zlib/lib
-		/usr/local/lib
-		/opt/homebrew/opt/zlib/lib
-		/opt/homebrew/lib
- )
-```
-
-### Problem: Tests link dynamically while app links statically
-
-**Cause**: Different target configurations
-
-**Solution**: Use shared library or ensure same flags:
-```cmake
-# Create static library for both
-add_library( mylib STATIC src/core.c )
-
-add_executable( myapp src/main.c )
-target_link_libraries( myapp PRIVATE mylib )
-
-add_executable( mytest tests/test.c )
-target_link_libraries( mytest PRIVATE mylib )
-```
+**For static linking troubleshooting, see [p:static-linking skill](../p:static-linking/SKILL.md)**:
+- macOS crt0.o error
+- Dynamic dependencies remaining
+- Linking order issues
+- Platform-specific verification
 
 ## Examples
 
@@ -809,30 +741,17 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-2. **Check dependencies** ( Linux ):
+2. **Verify static linking** (if applicable):
 ```bash
-ldd build/myapp
-# Expected: "not a dynamic executable" or only libc/libm
+# Use p:static-linking tool (cross-platform)
+python3 verify-static-linking.py build/myapp
 ```
+See **[p:static-linking skill](../p:static-linking/SKILL.md)** for detailed verification workflows.
 
-3. **Check dependencies** ( macOS ):
+3. **Test functionality**:
 ```bash
-otool -L build/myapp
-# Expected: Only /usr/lib/libSystem.B.dylib
-```
-
-4. **Check binary size**:
-```bash
-ls -lh build/myapp
-# Static binaries are larger ( contains all libs )
-```
-
-5. **Test portability**:
-```bash
-# Copy to system without dev libs
-scp build/myapp remote:/tmp/
-ssh remote /tmp/myapp --version
-# Should work without dependencies
+./build/myapp --version
+./build/myapp --help
 ```
 
 ## Additional Resources
@@ -842,6 +761,7 @@ ssh remote /tmp/myapp --version
 - **[template.cmake](./template.cmake)** - Production-ready template for new projects
 - **[quick-reference.md](./quick-reference.md)** - Quick lookup for common patterns and boilerplate
 - **[examples.md](./examples.md)** - Complete real-world project examples
+- **[p:static-linking skill](../p:static-linking/SKILL.md)** - Specialized guide for building and verifying static binaries
 
 ## Summary
 
@@ -849,12 +769,10 @@ When working with CMake:
 
 1. **Validate first**: Run `cmake-validator.py` to catch legacy patterns
 2. **Always use modern target-based commands**
-3. **Platform-specific static linking**: Linux full static, macOS hybrid
-4. **Explicit library finding on macOS** with Homebrew paths
-5. **Fallback strategy**: pkg-config → find_library → find_package
-6. **Document limitations** ( especially macOS static linking )
-7. **Verify results** with ldd/otool
-8. **Use generator expressions** for conditional config
-9. **Add configuration summary** for debugging
+3. **Explicit library finding on macOS** with Homebrew paths
+4. **Fallback strategy**: pkg-config → find_library → find_package
+5. **Use generator expressions** for conditional config
+6. **Add configuration summary** for debugging
+7. **For static linking**: Use **[p:static-linking skill](../p:static-linking/SKILL.md)** tools and guides
 
-The goal is **portable, maintainable, cross-platform builds** with clear static linking strategy.
+The goal is **portable, maintainable, cross-platform builds** with modern CMake practices.

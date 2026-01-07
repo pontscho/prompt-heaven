@@ -1,0 +1,240 @@
+# Example CMakeLists.txt for Static Linking
+#
+# This is a complete, production-ready example showing how to build
+# a statically linked binary across platforms (Linux, macOS, Windows).
+#
+# Usage:
+#   cp example-CMakeLists.txt CMakeLists.txt
+#   # Edit project name, sources, dependencies
+#   python3 build-static.py --verify
+
+cmake_minimum_required(VERSION 3.15)
+project(myapp VERSION 1.0.0 LANGUAGES C CXX)
+
+# ==============================================================================
+# Build Configuration
+# ==============================================================================
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Set default build type
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# ==============================================================================
+# Static Linking Configuration
+# ==============================================================================
+
+# Force static library preference globally
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
+
+# Platform-specific static linking strategy
+if(UNIX AND NOT APPLE)
+    # Linux: Full static linking (includes libc, libm, libpthread)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+    message(STATUS "Platform: Linux")
+    message(STATUS "  Static linking: FULL (all libraries)")
+
+elseif(APPLE)
+    # macOS: Hybrid static linking
+    # Third-party libs: static (.a)
+    # System libs: dynamic (libSystem.B.dylib - REQUIRED by macOS)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+    message(STATUS "Platform: macOS")
+    message(STATUS "  Static linking: HYBRID")
+    message(STATUS "    - Third-party libraries: static")
+    message(STATUS "    - System libraries: dynamic (required by Apple)")
+
+elseif(WIN32)
+    # Windows: Static runtime linking (/MT flag)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    message(STATUS "Platform: Windows")
+    message(STATUS "  Static linking: Runtime (/MT)")
+endif()
+
+# ==============================================================================
+# Compiler Flags
+# ==============================================================================
+
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(
+        -Wall
+        -Wextra
+        -O3
+        $<$<CONFIG:Debug>:-g>
+    )
+elseif(MSVC)
+    add_compile_options(
+        /W4
+        /O2
+    )
+endif()
+
+# ==============================================================================
+# Dependencies
+# ==============================================================================
+
+find_package(PkgConfig REQUIRED)
+
+# ------------------------------------------------------------------------------
+# Example: zlib (common compression library)
+# ------------------------------------------------------------------------------
+if(APPLE)
+    # macOS: Explicit static library search with Homebrew paths
+    find_library(ZLIB_LIBRARY NAMES z REQUIRED
+        HINTS
+            /usr/local/opt/zlib/lib
+            /usr/local/lib
+            /opt/homebrew/opt/zlib/lib
+            /opt/homebrew/lib
+    )
+    find_path(ZLIB_INCLUDE_DIR zlib.h
+        HINTS
+            /usr/local/opt/zlib/include
+            /usr/local/include
+            /opt/homebrew/opt/zlib/include
+            /opt/homebrew/include
+    )
+    set(ZLIB_LIBRARIES ${ZLIB_LIBRARY})
+    set(ZLIB_INCLUDE_DIRS ${ZLIB_INCLUDE_DIR})
+    set(ZLIB_FOUND TRUE)
+
+else()
+    # Linux/Windows: Use pkg-config
+    pkg_check_modules(ZLIB REQUIRED zlib)
+endif()
+
+message(STATUS "Dependencies:")
+message(STATUS "  zlib: ${ZLIB_LIBRARIES}")
+
+# ------------------------------------------------------------------------------
+# Add more dependencies here following the same pattern
+# ------------------------------------------------------------------------------
+# Example: libpng
+# if(APPLE)
+#     find_library(PNG_LIBRARY NAMES png16 png REQUIRED
+#         HINTS /usr/local/opt/libpng/lib /opt/homebrew/opt/libpng/lib)
+#     set(PNG_LIBRARIES ${PNG_LIBRARY})
+# else()
+#     pkg_check_modules(PNG REQUIRED libpng16)
+# endif()
+
+# ==============================================================================
+# Source Files
+# ==============================================================================
+
+set(APP_SOURCES
+    src/main.c
+    # Add your source files here
+)
+
+# ==============================================================================
+# Executable
+# ==============================================================================
+
+add_executable(myapp ${APP_SOURCES})
+
+# Modern target-based includes
+target_include_directories(myapp PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${ZLIB_INCLUDE_DIRS}
+)
+
+# Modern target-based linking
+target_link_libraries(myapp PRIVATE
+    ${ZLIB_LIBRARIES}
+)
+
+# Platform-specific system libraries
+if(UNIX AND NOT APPLE)
+    # Linux: Math and pthread libraries
+    target_link_libraries(myapp PRIVATE m pthread)
+endif()
+
+# ==============================================================================
+# Optional: Post-Build Verification
+# ==============================================================================
+
+# Find Python3 for running verification script
+find_package(Python3 COMPONENTS Interpreter)
+
+# Find verification script
+find_program(VERIFY_STATIC
+    NAMES verify-static-linking.py
+    HINTS
+        ${CMAKE_SOURCE_DIR}/scripts
+        ${CMAKE_SOURCE_DIR}/../p:static-linking
+        ~/.claude/skills/p:static-linking
+)
+
+if(Python3_FOUND AND VERIFY_STATIC)
+    # Add post-build verification
+    add_custom_command(TARGET myapp POST_BUILD
+        COMMAND ${Python3_EXECUTABLE} ${VERIFY_STATIC} $<TARGET_FILE:myapp>
+        COMMENT "Verifying static linking of ${PROJECT_NAME}"
+        VERBATIM
+    )
+    message(STATUS "Post-build verification: ENABLED")
+else()
+    if(NOT Python3_FOUND)
+        message(WARNING "Python3 not found, skipping post-build verification")
+    endif()
+    if(NOT VERIFY_STATIC)
+        message(WARNING "verify-static-linking.py not found, skipping post-build verification")
+    endif()
+endif()
+
+# ==============================================================================
+# Optional: Stripping Symbols (Release builds)
+# ==============================================================================
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    if(UNIX)
+        add_custom_command(TARGET myapp POST_BUILD
+            COMMAND strip $<TARGET_FILE:myapp>
+            COMMENT "Stripping debug symbols from ${PROJECT_NAME}"
+        )
+        message(STATUS "Symbol stripping: ENABLED (Release build)")
+    endif()
+endif()
+
+# ==============================================================================
+# Installation
+# ==============================================================================
+
+install(TARGETS myapp DESTINATION bin)
+
+# ==============================================================================
+# Build Summary
+# ==============================================================================
+
+message(STATUS "")
+message(STATUS "============================")
+message(STATUS "Build Configuration Summary")
+message(STATUS "============================")
+message(STATUS "Project: ${PROJECT_NAME} ${PROJECT_VERSION}")
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "C Standard: ${CMAKE_C_STANDARD}")
+message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
+message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
+message(STATUS "Processor: ${CMAKE_SYSTEM_PROCESSOR}")
+message(STATUS "Compiler: ${CMAKE_C_COMPILER_ID}")
+message(STATUS "")
+message(STATUS "Static Linking:")
+if(UNIX AND NOT APPLE)
+    message(STATUS "  Mode: FULL (Linux)")
+elseif(APPLE)
+    message(STATUS "  Mode: HYBRID (macOS)")
+    message(STATUS "  Expected result: Only libSystem.B.dylib")
+elseif(WIN32)
+    message(STATUS "  Mode: Runtime /MT (Windows)")
+endif()
+message(STATUS "")
+message(STATUS "Build directory: ${CMAKE_BINARY_DIR}")
+message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "============================")
+message(STATUS "")
