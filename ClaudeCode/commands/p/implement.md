@@ -78,10 +78,15 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
    - Check `complete: true`
    - Verify `p:implementation_plan` section exists
    - Verify `tasks` array is not empty
-3. **Read ALL source code files in `reference_files`** - these contain the **code patterns** you MUST follow (any language)
-4. **Read ALL documentation in `api_references`** - these explain the APIs and architecture
-5. Create a dependency graph from task dependencies
-6. Determine task execution order (topological sort)
+3. **Check task status in requirements.yaml**:
+   - Each task has a `status` field: `pending`, `in_progress`, `completed`, or `cancel`
+   - Skip tasks that are already `completed`
+   - Continue from tasks that are `pending` or `in_progress`
+   - This allows resuming interrupted implementations
+4. **Read ALL source code files in `reference_files`** - these contain the **code patterns** you MUST follow (any language)
+5. **Read ALL documentation in `api_references`** - these explain the APIs and architecture
+6. Create a dependency graph from task dependencies
+7. Determine task execution order (topological sort), excluding already completed tasks
 
 ## 2. Task Execution Loop
 
@@ -92,6 +97,7 @@ For each task in dependency order:
 - Check if file exists (for modify/delete operations)
 - **MANDATORY**: Read ALL code in `code_references` - understand the pattern before coding
 - Review the `note` field for each reference to understand WHY it's relevant
+- **Mark task as in_progress**: `python3 ~/.claude/skills/p:requirements/update_tasks.py in_progress <task_id>`
 
 ### b. Task execution
 
@@ -144,23 +150,33 @@ After each task:
    - Run the specific test: `build/src/tests/[test-application] [suite:test]`
    - Verify test passes
 4. **Validate**: Check that `test_requirements` are met
+5. **Mark task as completed** (ONLY if all above checks pass): `python3 ~/.claude/skills/p:requirements/update_tasks.py completed <task_id>`
+   - DO NOT mark completed if any check fails (build errors, test failures, linting warnings)
+   - DO NOT mark completed if implementation is incomplete
+   - Only mark completed when task is fully done and verified
 
 ### d. Error handling
 
 If any verification step fails:
 - Report the error with context (task_id, file, function)
 - Show compiler/test output
+- **DO NOT mark task as completed** - leave it as `in_progress`
 - Ask user whether to:
-  1. Fix the error automatically
-  2. Skip this task and continue
-  3. Abort implementation
+  1. Fix the error automatically (keep task `in_progress`)
+  2. Skip this task and continue (keep task `in_progress`)
+  3. Abort implementation (keep task `in_progress`)
 - DO NOT proceed to next task until current task is verified
+- Only mark `completed` when ALL verification steps pass
 
 ### e. Progress tracking
 
-- Use TodoWrite to track task progress
-- Mark each task as completed when verified
+- Use TodoWrite to track task progress in the current session
+- **Automatically update task status in requirements.yaml**:
+  - Mark `in_progress` when starting each task (pre-task validation step)
+  - Mark `completed` when task is fully verified (post-task verification step)
+  - This ensures requirements.yaml always reflects current implementation state
 - Keep user informed of progress
+- If using `/p:requirements` skill, the updated task status will be visible in the task list
 
 ## 3. Post-implementation
 
@@ -194,14 +210,23 @@ Before marking implementation complete:
 # Error Recovery
 
 If implementation is interrupted:
-- The TodoWrite task list shows progress
-- The YAML can be updated to mark completed tasks
+- The TodoWrite task list shows progress in the current session
+- **Task status is automatically saved in requirements.yaml**:
+  - `completed` tasks are automatically marked and will be skipped on resume
+  - `in_progress` tasks will be re-executed
+  - `pending` tasks haven't been started yet
 - Re-run `/p:implement` to continue from where it stopped
-- Completed tasks can be skipped based on TodoWrite state
+- The command automatically skips completed tasks based on status in requirements.yaml
+- Use `/p:requirements` to view current task status before resuming
 
 # Important Notes
 
 - **Autonomous execution**: This command should work without user intervention for well-defined tasks
+- **Automatic task status tracking**: Each task is automatically marked as:
+  - `in_progress` when starting (before implementation)
+  - `completed` when fully verified (after all checks pass)
+  - Status updates are written to requirements.yaml using the p:requirements skill
+  - This provides real-time visibility into implementation progress
 - **Test-driven**: Each task must be tested before proceeding
 - **Style compliance**: Follow CLAUDE.md and language-specific instructions (use specific skills)
 - **Language-aware**: Apply appropriate code quality tools and conventions based on file language
@@ -209,6 +234,7 @@ If implementation is interrupted:
 - **Documentation**: Reference implementation details from the YAML, don't guess
 - **No shortcuts**: Don't skip verification steps to save time
 - **Ask when unclear**: If implementation_details are ambiguous, ask before coding
+- **Status discipline**: Only mark tasks `completed` when ALL verification criteria are met (tests pass, build succeeds, linting passes)
 
 # Example Execution Flow
 
@@ -221,36 +247,44 @@ If implementation is interrupted:
 [Task 1/4: task-001]
 Description: Add ping/pong frame type constants to WebSocket header
 File: /path/to/file/websocket-server.h
+✓ Marked as in_progress
 ✓ Read reference code
 ✓ Modified file
 ✓ clang-tidy passed
 ✓ Build successful
+✓ Marked as completed
 
 [Task 2/4: task-002]
 Description: Implement websocket_send_ping function
 File: /path/to/file/websocket-server.c
 Function: websocket_send_ping
+✓ Marked as in_progress
 ✓ Read reference code: websocket_send_frame
 ✓ Created function
 ✓ clang-tidy passed
 ✓ Build successful
+✓ Marked as completed
 
 [Task 3/4: task-003]
 Description: Handle incoming ping frames and auto-respond with pong
 File: /path/to/file/websocket-server.c
 Function: websocket_handle_frame
+✓ Marked as in_progress
 ✓ Read existing function
 ✓ Modified function
 ✓ clang-tidy passed
 ✓ Build successful
+✓ Marked as completed
 
 [Task 4/4: task-004]
 Description: Create integration test for ping/pong functionality
 File: /path/to/file/test-websocket-ping-pong.c
+✓ Marked as in_progress
 ✓ Created test file
 ✓ clang-tidy passed
 ✓ Build successful
 ✓ Tests passed (3/3)
+✓ Marked as completed
 
 [Final verification]
 ✓ Full test suite passed
@@ -277,3 +311,18 @@ Example:
 /p:implement --continue
 /p:implement --task task-003
 ```
+
+# Checking Task Status
+
+Before or during implementation, you can check task status:
+```
+/p:requirements                    # Show all tasks with current status
+python3 ~/.claude/skills/p:requirements/show_tasks.py requirements.yaml
+python3 ~/.claude/skills/p:requirements/show_task_details.py task-001 task-002
+```
+
+This helps you understand:
+- Which tasks are already completed
+- Which tasks are in progress
+- Which tasks are still pending
+- Overall implementation progress
