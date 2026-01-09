@@ -203,7 +203,7 @@ If implementation is interrupted:
 
 - **Autonomous execution**: This command should work without user intervention for well-defined tasks
 - **Test-driven**: Each task must be tested before proceeding
-- **Style compliance**: Follow CLAUDE.md and language-specific instructions (.github/instructions/c.instructions.md, lua.instructions.md, etc.)
+- **Style compliance**: Follow CLAUDE.md and language-specific instructions (use specific skills)
 - **Language-aware**: Apply appropriate code quality tools and conventions based on file language
 - **Incremental**: Build and test after each task, not at the end
 - **Documentation**: Reference implementation details from the YAML, don't guess
