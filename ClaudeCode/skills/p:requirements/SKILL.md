@@ -33,7 +33,7 @@ When this skill is activated:
 1. **Display task status table**
    - Use the provided Python script to display tasks:
      ```bash
-     python3 /home/pontscho/.claude/skills/p:requirements/show_tasks.py requirements.yaml
+     python3 ~/.claude/skills/p:requirements/show_tasks.py requirements.yaml
      ```
    - This will show a formatted table with all tasks, their status, and progress summary
    - The script outputs: Task ID, Status (✅ completed or ⏳ pending, ❌ cancel, 🚧 in_progress), Description, and overall progress
@@ -42,7 +42,7 @@ When this skill is activated:
 1.25. **Display raw YAML blocks for specific tasks**
    - Use the show_task_details.py script to extract and display the raw YAML blocks for one or more tasks:
      ```bash
-     python3 /home/pontscho/.claude/skills/p:requirements/show_task_details.py task-001 task-002 task-003
+     python3 ~/.claude/skills/p:requirements/show_task_details.py task-001 task-002 task-003
      ```
    - This displays the complete raw YAML block for each task including all fields (task_id, description, status, type, file_path, function_name, implementation_details, dependencies, test_requirements, code_references, api_references)
    - Use this when:
@@ -52,21 +52,21 @@ When this skill is activated:
      - Understanding dependencies between tasks
      - Need to check test requirements or API references
    - Examples:
-     - Single task: `python3 /home/pontscho/.claude/skills/p:requirements/show_task_details.py task-017`
-     - Multiple tasks: `python3 /home/pontscho/.claude/skills/p:requirements/show_task_details.py task-017 task-018 task-019`
+     - Single task: `python3 ~/.claude/skills/p:requirements/show_task_details.py task-017`
+     - Multiple tasks: `python3 ~/.claude/skills/p:requirements/show_task_details.py task-017 task-018 task-019`
    - The script automatically finds requirements.yaml in the current directory or parent directories
    - Output is the raw YAML exactly as it appears in requirements.yaml - use this to understand implementation details
 
 1.5. **Update task status (single or batch)**
    - Use the update_tasks.py script to update task status in requirements.yaml:
      ```bash
-     python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py <status> <task1> <task2> ...
+     python3 ~/.claude/skills/p:requirements/update_tasks.py <status> <task1> <task2> ...
      ```
    - Valid statuses: `pending`, `completed`, `in_progress`, `cancel`
    - Examples:
-     - Single task: `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-017`
-     - Multiple tasks: `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-017 task-018 task-019`
-     - Batch update: `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py pending task-020 task-021 task-022 task-023`
+     - Single task: `python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-017`
+     - Multiple tasks: `python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-017 task-018 task-019`
+     - Batch update: `python3 ~/.claude/skills/p:requirements/update_tasks.py pending task-020 task-021 task-022 task-023`
    - The script will:
      - Update all specified tasks to the given status
      - Preserve YAML formatting and indentation
@@ -85,16 +85,16 @@ When this skill is activated:
         - Tests pass (if applicable)
         - Build succeeds (if applicable)
         - Code quality checks pass (clang-tidy, etc. if specified)
-     5. Automatically run: `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-XXX`
+     5. Automatically run: `python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-XXX`
    - **Example automatic workflow**:
      ```
      User: "Implement task-017"
      Assistant:
-       1. Run: python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py in_progress task-017
+       1. Run: python3 ~/.claude/skills/p:requirements/update_tasks.py in_progress task-017
        2. Read task details from requirements.yaml
        3. Implement the task
        4. Run tests
-       5. If all successful, run: python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-017
+       5. If all successful, run: python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-017
      ```
    - **Never mark a task as completed if**:
      - Tests are failing
@@ -174,36 +174,36 @@ When this skill is activated:
 **Response:** Find all tasks related to handshake, show their implementation_details and code_references.
 
 **User:** "Show me details for task-005"
-**Response:** Run `python3 /home/pontscho/.claude/skills/p:requirements/show_task_details.py task-005` to display the raw YAML block with complete implementation details, dependencies, test requirements, and code references.
+**Response:** Run `python3 ~/.claude/skills/p:requirements/show_task_details.py task-005` to display the raw YAML block with complete implementation details, dependencies, test requirements, and code references.
 
 **User:** "What do tasks 010, 011, and 012 involve?"
-**Response:** Run `python3 /home/pontscho/.claude/skills/p:requirements/show_task_details.py task-010 task-011 task-012` to show the raw YAML blocks for all three tasks.
+**Response:** Run `python3 ~/.claude/skills/p:requirements/show_task_details.py task-010 task-011 task-012` to show the raw YAML blocks for all three tasks.
 
 **User:** "Mark task-017 as completed"
-**Response:** Run `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-017` to update the task status, then show confirmation.
+**Response:** Run `python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-017` to update the task status, then show confirmation.
 
 **User:** "I finished task-020, task-021, and task-022"
-**Response:** Run `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-020 task-021 task-022` to update all three tasks at once.
+**Response:** Run `python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-020 task-021 task-022` to update all three tasks at once.
 
 **User:** "Set tasks 023 through 026 back to pending"
-**Response:** Run `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py pending task-023 task-024 task-025 task-026` for batch status update.
+**Response:** Run `python3 ~/.claude/skills/p:requirements/update_tasks.py pending task-023 task-024 task-025 task-026` for batch status update.
 
 **User:** "Implement task-017"
 **Response:**
 1. Read task-017 details from requirements.yaml
-2. Run `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py in_progress task-017`
+2. Run `python3 ~/.claude/skills/p:requirements/update_tasks.py in_progress task-017`
 3. Implement test-methods.c with 13 HTTP method tests
 4. Run build and tests
-5. If all pass, automatically run `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-017`
+5. If all pass, automatically run `python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-017`
 6. Show confirmation and updated progress
 
 **User:** "Work on task-019 and task-020"
 **Response:**
-1. Run `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py in_progress task-019 task-020`
+1. Run `python3 ~/.claude/skills/p:requirements/update_tasks.py in_progress task-019 task-020`
 2. Implement both tasks
 3. Run tests for each
-4. When task-019 is done: `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-019`
-5. When task-020 is done: `python3 /home/pontscho/.claude/skills/p:requirements/update_tasks.py completed task-020`
+4. When task-019 is done: `python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-019`
+5. When task-020 is done: `python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-020`
 6. Show final status
 
 ## Important Notes
