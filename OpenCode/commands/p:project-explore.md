@@ -1,0 +1,1 @@
+../../ClaudeCode/commands/p/project-explore.md
