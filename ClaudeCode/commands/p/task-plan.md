@@ -73,7 +73,7 @@ implementation_plan:
     - `test_requirements`: How to verify this task works correctly
     - `dependencies`: Task IDs that must be completed before this task
 
-# Schema language
+# Schema and document language
 
 English.
 
@@ -93,10 +93,10 @@ IMPORTANT: output of this step is the sole input for task generation. IT MUST BE
 
 ## Implementation document
 
-The final output of the plan command is a YAML document that serves as input for the `implement` command.
+The final output of the plan command is a YAML document that serves as input for the `p:implement` command.
 
 - Create a comprehensive implementation plan in YAML format (requirements.yaml in project root)
-- Add a detailed technical specification document to the `docs/` folder, naming the file according to the feature being implemented
+- Add a detailed technical specification document to the `docs/` folder if `docs/feature-implementation-plan.md` does not already exist, naming the file according to the feature being implemented
 - The YAML must include:
   - All gathered requirements with answers
   - All constraints and their impacts
@@ -115,7 +115,7 @@ The final output of the plan command is a YAML document that serves as input for
 
 ## Workflow
 
-0. Don't forget read that fuckin' CLAUDE.md !
+0. Don't forget read that fuckin' CLAUDE.md and docs/feature-implementation-plan.md if they exist!
 1. Search repository for existing patterns, similar implementations, and architectural decisions:
    - Use Glob and Grep to find similar **code patterns** (source code in any language: C, Lua, Python, etc.)
    - Search for relevant **documentation** (in docs/ directory)
@@ -141,13 +141,20 @@ The final output of the plan command is a YAML document that serves as input for
       - suggest an answer based on the patterns and conventions identified
    d. Immediately update YAML with answer and refine the remaining questions. Add new questions if necessary!
    e. THINK HARD to determine if sufficient clarity exists for technical specification
+      - ALL affected files identified? (not "probably" or "maybe")
+      - ALL external dependencies named? (not "some library")
+      - ALL new functions/types defined? (not "helper function")
+      - ALL new data structures specified? (not "some data structure")
+      - ALL new APIs/contracts detailed? (not "new API")
+      - ALL success criteria measurable and testable? (not "works well")
+      If NO to any: continue asking. If YES: proceed to 6.
 6. After all questions has been discussed, verify if the output allows:
    - Unambiguous implementation approach
    - Complete dependency identification
    - Measurable success criteria
    - Risk/constraint awareness
    - Creation of clear, explicit technical tasks to achieve all aspects of the goal set by the User
-   If any of these criteria are not met, go back to '2.'
+   If ANY of these criteria are not met, go back to '2.'
 7. Once all criteria are satisfied and mark `complete` is `true` in the YAML:
    a. Create the `implementation_plan` section with function-level tasks:
       - Identify all affected and new files
@@ -175,17 +182,17 @@ Here's an example of a complete implementation_plan section for adding WebSocket
 ```yaml
 implementation_plan:
   affected_files:
-    - /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.c
-    - /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.h
+    - /mnt/nvme/src/websocket-server.c
+    - /mnt/nvme/src/websocket-server.h
   new_files:
-    - /mnt/nvme/imaginarium/poluah/src/tests/integration/test-websocket-ping-pong.c
+    - /mnt/nvme/src/tests/integration/test-websocket-ping-pong.c
   reference_files:
-    - /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.c  # existing timeout handling
-    - /mnt/nvme/imaginarium/poluah/src/poluah-client2/poluah-client2-websocket.c  # client-side frame handling
+    - /mnt/nvme/src/websocket-server.c  # existing timeout handling
+    - /mnt/nvme/src/poluah-client2/poluah-client2-websocket.c  # client-side frame handling
   tasks:
     - task_id: task-001
       description: Add ping/pong frame type constants to WebSocket header
-      file_path: /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.h
+      file_path: /mnt/nvme/src/websocket-server.h
       function_name: null
       type: modify
       status: pending
@@ -193,7 +200,7 @@ implementation_plan:
         Add WS_FRAME_PING (0x09) and WS_FRAME_PONG (0x0A) constants to the existing
         frame type enum. Follow the pattern of existing WS_FRAME_* constants.
       code_references:
-        - file: /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.h
+        - file: /mnt/nvme/src/websocket-server.h
           function: null
           note: See existing WS_FRAME_TEXT and WS_FRAME_BINARY definitions
       api_references:
@@ -203,7 +210,7 @@ implementation_plan:
 
     - task_id: task-002
       description: Implement poluah_websocket_send_ping function
-      file_path: /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.c
+      file_path: /mnt/nvme/src/websocket-server.c
       function_name: poluah_websocket_send_ping
       type: create
       status: pending
@@ -213,7 +220,7 @@ implementation_plan:
         int poluah_websocket_send_ping(poluah_websocket_t *ws, const char *payload, size_t len)
         Return 0 on success, -1 on error.
       code_references:
-        - file: /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.c
+        - file: /mnt/nvme/src/websocket-server.c
           function: poluah_websocket_send_frame
           note: Use this to build and send the ping frame
       api_references:
@@ -223,7 +230,7 @@ implementation_plan:
 
     - task_id: task-003
       description: Handle incoming ping frames and auto-respond with pong
-      file_path: /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.c
+      file_path: /mnt/nvme/src/websocket-server.c
       function_name: poluah_websocket_handle_frame
       type: modify
       status: pending
@@ -232,7 +239,7 @@ implementation_plan:
         When ping is received, automatically send pong with same payload.
         Use poluah_websocket_send_frame() with WS_FRAME_PONG type.
       code_references:
-        - file: /mnt/nvme/imaginarium/poluah/src/poluah/websocket-server.c
+        - file: /mnt/nvme/src/websocket-server.c
           function: poluah_websocket_handle_frame
           note: See existing switch statement for frame type handling
       api_references:
@@ -242,7 +249,7 @@ implementation_plan:
 
     - task_id: task-004
       description: Create integration test for ping/pong functionality
-      file_path: /mnt/nvme/imaginarium/poluah/src/tests/integration/test-websocket-ping-pong.c
+      file_path: /mnt/nvme/src/tests/integration/test-websocket-ping-pong.c
       function_name: test_ping_pong_basic
       type: create
       status: pending
@@ -253,7 +260,7 @@ implementation_plan:
         3. test_multiple_pings - verify server handles multiple pings correctly
         Use ctest framework, follow pattern from test-websocket-server-integration2.c
       code_references:
-        - file: /mnt/nvme/imaginarium/poluah/src/tests/integration/poluah-websocket-client-integration-test.c
+        - file: /mnt/nvme/src/tests/integration/poluah-websocket-client-integration-test.c
           function: null
           note: Follow overall test structure and WebSocket client setup
       api_references:

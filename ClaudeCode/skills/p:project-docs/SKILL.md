@@ -362,7 +362,7 @@ code here
 ```
 ```
 
-Supported languages: `c`, `lua`, `bash`, `python`, `json`, `yaml`, `diff`
+Supported languages: `c`, `lua`, `bash`, `python`, `json`, `yaml`, `diff`, `javascript`, etc.
 
 ### Lists
 

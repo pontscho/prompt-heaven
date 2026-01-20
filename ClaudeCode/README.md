@@ -4,7 +4,7 @@ This document describes the complete workflow for implementing features using Cl
 
 ## TL;DR
 
-1. **Plan Mode** → Discuss requirements interactively with ClaudeCode and save the plan to a markdown file
+1. **/p:feature-plan** → Discuss requirements interactively with ClaudeCode and save the plan to a markdown file
 2. **`/p:task-plan`** → Generates `requirements.yaml` (REQUIRED - this is the input for implementation)
 3. **`/p:implement`** → Executes tasks autonomously from `requirements.yaml`
 4. **Token exhausted?** → `/p:implement --continue` to resume
@@ -15,7 +15,7 @@ This document describes the complete workflow for implementing features using Cl
 
 The workflow consists of four main phases:
 
-1. **Planning Phase** - Interactive requirement gathering and implementation planning (plan mode)
+1. **Planning Phase** - `/p:feature-plan` interactive requirement gathering and implementation planning agent creates a detailed plan
 2. **Task Generation** - `/p:task-plan` creates `requirements.yaml` with structured task list (REQUIRED)
 3. **Implementation Phase** - `/p:implement` executes tasks autonomously using `requirements.yaml`
 4. **Resume on Interruption** - Continue from where you left off if token budget runs out
@@ -24,7 +24,7 @@ The workflow consists of four main phases:
 
 ```bash
 # 1. Start planning phase (in ClaudeCode)
-# Describe your feature, answer questions interactively
+/p:feature-plan Describe your feature, answer questions interactively
 
 # 2. Generate structured task list (REQUIRED)
 /p:task-plan

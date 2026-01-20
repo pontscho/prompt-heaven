@@ -13,7 +13,7 @@ Execute a planned implementation based on a structured YAML document generated b
 # Purpose
 
 This command takes a completed implementation plan (from `/p:task-plan`) and executes it step-by-step:
-- Reads the YAML document with requirements and p:implementation_plan
+- Reads the requirements.yaml with use p:implementation_plan skill
 - Validates the plan is complete and ready for implementation
 - Executes tasks in dependency order
 - Tests each task after completion
