@@ -5,7 +5,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3:*)",
+      "Bash(file:*)",
+      "Bash(xxd:*)",
+      "Bash(cat:*)",
+
       "WebFetch(domain:cheatsheetseries.owasp.org)",
       "WebFetch(domain:www.portainer.io)",
       "WebFetch(domain:betterstack.com)",
@@ -37,6 +40,21 @@
       "WebFetch(domain:www.techbuddies.io)",
       "WebFetch(domain:arxiv.org)",
       "WebFetch(domain:deepwiki.com)"
+      "WebFetch(domain:iterm2.com)",
+      "WebFetch(domain:sw.kovidgoyal.net)",
+      "WebFetch(domain:developers.google.com)",
+      "WebFetch(domain:libjxl.readthedocs.io)",
+      "WebFetch(domain:filesamples.com)",
+      "WebFetch(domain:raw.pixls.us)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:libexif.github.io)",
+      "WebFetch(domain:exiv2.org)",
+      "WebFetch(domain:exiftool.org)",
+      "WebFetch(domain:conan.io)",
+      "WebFetch(domain:dev.exiv2.org)",
+      "WebFetch(domain:www.raw-files.com)",
+      "WebFetch(domain:www.rawsamples.ch)",
+      "WebFetch(domain:www.libraw.org)"
     ]
   }
 }

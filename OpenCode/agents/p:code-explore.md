@@ -25,7 +25,7 @@ You are a code exploration agent that searches for code patterns in GitHub repos
 
 2. Run the GitHub code search script with generated queries:
    - Script location: `~/.claude/scripts/search_github.py`
-   - Run: `python3 ~/.claude/scripts/search_github.py "<query>"`
+   - Run: `~/.claude/scripts/search_github.py "<query>"`
 
 3. Parse the markdown output to extract repository URLs and code snippets
 

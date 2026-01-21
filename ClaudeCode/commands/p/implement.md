@@ -97,7 +97,7 @@ For each task in dependency order:
 - Check if file exists (for modify/delete operations)
 - **MANDATORY**: Read ALL code in `code_references` - understand the pattern before coding
 - Review the `note` field for each reference to understand WHY it's relevant
-- **Mark task as in_progress**: `python3 ~/.claude/skills/p:requirements/update_tasks.py in_progress <task_id>`
+- **Mark task as in_progress**: `~/.claude/skills/p:requirements/update_tasks.py in_progress <task_id>`
 
 ### b. Task execution
 
@@ -150,7 +150,7 @@ After each task:
    - Run the specific test: `build/src/tests/[test-application] [suite:test]`
    - Verify test passes
 4. **Validate**: Check that `test_requirements` are met
-5. **Mark task as completed** (ONLY if all above checks pass): `python3 ~/.claude/skills/p:requirements/update_tasks.py completed <task_id>`
+5. **Mark task as completed** (ONLY if all above checks pass): `~/.claude/skills/p:requirements/update_tasks.py completed <task_id>`
    - DO NOT mark completed if any check fails (build errors, test failures, linting warnings)
    - DO NOT mark completed if implementation is incomplete
    - Only mark completed when task is fully done and verified
@@ -317,8 +317,8 @@ Example:
 Before or during implementation, you can check task status:
 ```
 /p:requirements                    # Show all tasks with current status
-python3 ~/.claude/skills/p:requirements/show_tasks.py requirements.yaml
-python3 ~/.claude/skills/p:requirements/show_task_details.py task-001 task-002
+~/.claude/skills/p:requirements/show_tasks.py requirements.yaml
+~/.claude/skills/p:requirements/show_task_details.py task-001 task-002
 ```
 
 This helps you understand:

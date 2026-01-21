@@ -60,7 +60,7 @@ You have access to the **p:web-search skill** which provides two powerful search
 ```bash
 # The search scripts are in the p:web-search skill directory
 # Use the Skill tool to activate p:web-search, or find the scripts via:
-python3 ~/.claude/scripts/search_duckduckgo.py "search query"
+ ~/.claude/scripts/search_duckduckgo.py "search query"
 ```
 
 ### 2. GitHub Code Search (grep.app)
@@ -74,12 +74,12 @@ python3 ~/.claude/scripts/search_duckduckgo.py "search query"
 **How to use:**
 ```bash
 # Basic search
-python3 ~/.claude/scripts/search_github.py "search query"
+~/.claude/scripts/search_github.py "search query"
 
 # With filters
-python3 ~/.claude/scripts/search_github.py "query" --lang Python --limit 5
-python3 ~/.claude/scripts/search_github.py "query" --repo owner/repo
-python3 ~/.claude/scripts/search_github.py "query" --path models/
+~/.claude/scripts/search_github.py "query" --lang Python --limit 5
+~/.claude/scripts/search_github.py "query" --repo owner/repo
+~/.claude/scripts/search_github.py "query" --path models/
 ```
 
 ### 3. WebFetch Tool
@@ -126,22 +126,22 @@ When the user requests web research, follow this systematic approach:
 
 For **web/documentation searches**:
 ```bash
-python3 ~/.claude/scripts/search_duckduckgo.py "search query"
+~/.claude/scripts/search_duckduckgo.py "search query"
 ```
 
 For **code examples**:
 ```bash
 # Basic code search
-python3 ~/.claude/scripts/search_github.py "function name or pattern"
+~/.claude/scripts/search_github.py "function name or pattern"
 
 # With language filter
-python3 ~/.claude/scripts/search_github.py "async await" --lang Python --limit 5
+~/.claude/scripts/search_github.py "async await" --lang Python --limit 5
 
 # Repository-specific
-python3 ~/.claude/scripts/search_github.py "useEffect" --repo facebook/react
+~/.claude/scripts/search_github.py "useEffect" --repo facebook/react
 
 # Path-filtered
-python3 ~/.claude/scripts/search_github.py "neural network" --lang Python --path models/
+~/.claude/scripts/search_github.py "neural network" --lang Python --path models/
 ```
 
 **Step 4: Initial Discovery**
@@ -277,9 +277,9 @@ Adapt your research depth based on the user's needs:
 **Your Approach:**
 1. Navigate to skill directory and run DuckDuckGo searches:
    ```bash
-   python3 ~/.claude/scripts/search_duckduckgo.py "REST API security best practices 2026"
-   python3 ~/.claude/scripts/search_duckduckgo.py "OWASP API security 2026"
-   python3 ~/.claude/scripts/search_duckduckgo.py "JWT authentication security vulnerabilities"
+   ~/.claude/scripts/search_duckduckgo.py "REST API security best practices 2026"
+   ~/.claude/scripts/search_duckduckgo.py "OWASP API security 2026"
+   ~/.claude/scripts/search_duckduckgo.py "JWT authentication security vulnerabilities"
    ```
 2. Analyze search results and identify top 5-7 authoritative sources
 3. Use WebFetch on those sources for detailed analysis
@@ -293,7 +293,7 @@ Adapt your research depth based on the user's needs:
 **Your Approach:**
 1. Navigate and run search:
    ```bash
-   python3 ~/.claude/scripts/search_duckduckgo.py "React stable version 2026"
+   ~/.claude/scripts/search_duckduckgo.py "React stable version 2026"
    ```
 2. Use WebFetch on official React documentation URL from results
 3. Brief summary with version number and release date
@@ -306,7 +306,7 @@ Adapt your research depth based on the user's needs:
 **Your Approach:**
 1. Navigate and run GitHub search for code examples:
    ```bash
-   python3 ~/.claude/scripts/search_github.py "async await try except" --lang Python --limit 10
+   ~/.claude/scripts/search_github.py "async await try except" --lang Python --limit 10
    ```
 2. Analyze code snippets from search results
 3. Identify common patterns (try/except blocks, asyncio.gather error handling, etc.)
@@ -320,12 +320,12 @@ Adapt your research depth based on the user's needs:
 **Your Approach:**
 1. Gather documentation via DuckDuckGo:
    ```bash
-   python3 ~/.claude/scripts/search_duckduckgo.py "JWT authentication Express.js best practices 2026"
+   ~/.claude/scripts/search_duckduckgo.py "JWT authentication Express.js best practices 2026"
    ```
 3. Find real-world implementations via GitHub:
    ```bash
-   python3 ~/.claude/scripts/search_github.py "JWT authentication middleware" --lang JavaScript
-   python3 ~/.claude/scripts/search_github.py "express jwt verify" --lang JavaScript --limit 5
+   ~/.claude/scripts/search_github.py "JWT authentication middleware" --lang JavaScript
+   ~/.claude/scripts/search_github.py "express jwt verify" --lang JavaScript --limit 5
    ```
 4. Use WebFetch on top documentation URLs for conceptual understanding
 5. Analyze code examples from GitHub results for practical patterns

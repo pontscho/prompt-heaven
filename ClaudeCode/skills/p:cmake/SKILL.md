@@ -11,7 +11,7 @@ Comprehensive guide for modern CMake with platform-specific static linking, depe
 
 **Validate your CMakeLists.txt** (recommended first step):
 ```bash
-python3 cmake-validator.py CMakeLists.txt
+~/.claude/skills/p:cmake/cmake-validator.py CMakeLists.txt
 ```
 See [cmake-validator.md](./cmake-validator.md) for automatic validation of legacy patterns.
 
@@ -323,7 +323,7 @@ message( STATUS "" )
 
 **Use p:static-linking verification tool** (cross-platform):
 ```bash
-python3 verify-static-linking.py ./myapp
+~/.claude/skills/p:static-linking/verify-static-linking.py ./myapp
 ```
 
 Or manual verification:
@@ -728,7 +728,7 @@ After creating/modifying CMakeLists.txt:
 
 **0. Validate with cmake-validator** ( recommended ):
 ```bash
-python3 cmake-validator.py CMakeLists.txt
+~/.claude/skills/p:cmake/cmake-validator.py CMakeLists.txt
 ```
 This checks for legacy patterns and suggests modern alternatives. See [cmake-validator.md](./cmake-validator.md).
 
@@ -744,7 +744,7 @@ cmake --build build
 2. **Verify static linking** (if applicable):
 ```bash
 # Use p:static-linking tool (cross-platform)
-python3 verify-static-linking.py build/myapp
+~/.claude/skills/p:static-linking/verify-static-linking.py build/myapp
 ```
 See **[p:static-linking skill](../p:static-linking/SKILL.md)** for detailed verification workflows.
 

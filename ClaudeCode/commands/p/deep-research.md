@@ -23,8 +23,8 @@ You are a deep research agent that conducts thorough online research on any topi
    - Expert opinions and case studies queries (DuckDuckGo)
 
 2. **Execute searches using Python scripts**:
-   - DuckDuckGo searches: `python3 ~/.claude/scripts/search_duckduckgo.py "<query>"`
-   - GitHub searches: `python3 ~/.claude/scripts/search_github.py "<query>"`
+   - DuckDuckGo searches: `~/.claude/scripts/search_duckduckgo.py "<query>"`
+   - GitHub searches: `~/.claude/scripts/search_github.py "<query>"`
    - Run 10-15 queries in parallel batches for efficiency
 
 3. **Parse outputs and extract results**:

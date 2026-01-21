@@ -10,14 +10,14 @@ This validator helps enforce modern CMake best practices by detecting legacy pat
 
 ```bash
 # Validate a single file
-python3 cmake-validator.py CMakeLists.txt
-python3 cmake-validator.py template.cmake
+cmake-validator.py CMakeLists.txt
+cmake-validator.py template.cmake
 
 # Validate all CMake files in a directory (recursive)
-python3 cmake-validator.py /path/to/project
+cmake-validator.py /path/to/project
 
 # Validate current directory
-python3 cmake-validator.py .
+cmake-validator.py .
 ```
 
 ## What It Detects
@@ -114,7 +114,7 @@ files=$(git diff --cached --name-only --diff-filter=ACM | grep -E 'CMakeLists\.t
 
 if [ -n "$files" ]; then
     for file in $files; do
-        python3 ~/.claude/skills/p:cmake/cmake-validator.py "$file"
+        ~/.claude/skills/p:cmake/cmake-validator.py "$file"
         if [ $? -ne 0 ]; then
             echo "❌ CMake validation failed for $file"
             exit 1
@@ -129,7 +129,7 @@ fi
 - name: Validate CMake files
   run: |
     pip install --no-deps ~/.claude/skills/p:cmake/cmake-validator.py
-    find . -name "CMakeLists.txt" -o -name "*.cmake" | xargs python3 cmake-validator.py
+    find . -name "CMakeLists.txt" -o -name "*.cmake" | xargs ~/.claude/skills/p:cmake/cmake-validator.py
 ```
 
 ## Why Target-Based Commands?

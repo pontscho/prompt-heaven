@@ -26,7 +26,7 @@ You are a web exploration agent that searches for information online and retriev
 
 2. Run the DuckDuckGo search script with generated queries:
    - Script location: `~/.claude/scripts/search_duckduckgo.py`
-   - Run: `python3 ~/.claude/scripts/search_duckduckgo.py "<query>"`
+   - Run: `~/.claude/scripts/search_duckduckgo.py "<query>"`
 
 3. Parse the markdown output to extract URLs
 

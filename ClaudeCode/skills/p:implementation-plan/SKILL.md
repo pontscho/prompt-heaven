@@ -29,7 +29,7 @@ When this skill is activated:
 
 1. **Run the extraction script**
    ```bash
-   python3 ~/.claude/skills/p:implementation-plan/get_implementation_plan.py [path_to_yaml]
+   ~/.claude/skills/p:implementation-plan/get_implementation_plan.py [path_to_yaml]
    ```
    - If path is omitted, searches for requirements.yaml in current/parent directories
    - Script outputs only YAML, no extra text
