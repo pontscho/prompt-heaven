@@ -70,10 +70,13 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 ## 1. Initialization
 
 0. Don't forget read that fuckin' CLAUDE.md and relevant language-specific instruction files!
-1. **Load implementation plan using `/p:implementation-plan` skill**
-   - This loads only the essential data (complete flag, success_criteria, p:implementation_plan)
+1. **Load implementation plan using the extraction script**:
+   ```bash
+   ~/.claude/scripts/task-implementation-plan.py [path_to_yaml]
+   ```
+   - This loads only the essential data (complete, context_summary, success_criteria, implementation_plan)
    - Token-efficient: excludes original_request, requirements, constraints
-   - If path needed: use `--plan <path>` parameter (default: requirements.yaml in project root)
+   - Default: searches for requirements.yaml in current/parent directories
 2. Validate structure:
    - Check `complete: true`
    - Verify `p:implementation_plan` section exists
@@ -83,10 +86,17 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
    - Skip tasks that are already `completed`
    - Continue from tasks that are `pending` or `in_progress`
    - This allows resuming interrupted implementations
-4. **Read ALL source code files in `reference_files`** - these contain the **code patterns** you MUST follow (any language)
-5. **Read ALL documentation in `api_references`** - these explain the APIs and architecture
-6. Create a dependency graph from task dependencies
-7. Determine task execution order (topological sort), excluding already completed tasks
+4. **Load `context_summary` section** - this contains the captured patterns from planning:
+   - Review `error_handling`, `memory_management`, `logging_pattern`, `naming_conventions`
+   - These patterns apply to ALL tasks - no need to re-discover them!
+   - If `context_summary` is missing, fall back to reading `reference_files`
+5. **Check `docs/feature-implementation-plan.md`** - read if exists for additional context
+6. **SKIP reading `reference_files` if tasks have `pattern_excerpt`** in their `code_references`
+   - Pattern excerpts contain the actual code snippets needed
+   - Only read `reference_files` if pattern excerpts are missing
+7. **Read documentation in `api_references`** - only if not already familiar with APIs
+8. Create a dependency graph from task dependencies
+9. Determine task execution order (topological sort), excluding already completed tasks
 
 ## 2. Task Execution Loop
 
@@ -95,7 +105,8 @@ For each task in dependency order:
 ### a. Pre-task validation
 - Verify all dependent tasks are completed successfully
 - Check if file exists (for modify/delete operations)
-- **MANDATORY**: Read ALL code in `code_references` - understand the pattern before coding
+- **Use `pattern_excerpt` from `code_references`** if available - this IS the pattern, no need to read files!
+- **Only read `code_references` files if `pattern_excerpt` is missing** - fall back to file reading
 - Review the `note` field for each reference to understand WHY it's relevant
 - **Mark task as in_progress**: `~/.claude/skills/p:requirements/update_tasks.py in_progress <task_id>`
 
@@ -104,8 +115,9 @@ For each task in dependency order:
 Based on task `type`:
 
 **create:**
-- Read ALL `code_references` first - understand the existing patterns
-- If `function_name` specified: Create the function following the EXACT pattern from references:
+- Use `pattern_excerpt` from `code_references` - the pattern is already there!
+- Only read files if `pattern_excerpt` is missing
+- If `function_name` specified: Create the function following the EXACT pattern from excerpts/references:
   - Same parameter validation approach
   - Same error handling pattern (return values, error codes)
   - Same memory management style (allocation/deallocation)
@@ -116,12 +128,13 @@ Based on task `type`:
 - **DO NOT invent new patterns** - consistency is more important than "better" solutions
 
 **modify:**
-- Read the existing file
-- Read ALL `code_references` to understand the pattern being applied
+- Read the existing file (the one being modified)
+- Use `pattern_excerpt` from `code_references` - no need to read reference files!
+- Only read reference files if `pattern_excerpt` is missing
 - Locate the function (if `function_name` specified)
 - Apply modifications according to `implementation_details`
 - Preserve existing code style
-- **Match the pattern from references** - same approach, same style, adapted to this context
+- **Match the pattern from excerpts/references** - same approach, same style, adapted to this context
 
 **delete:**
 - Remove the specified function or code section
@@ -129,8 +142,9 @@ Based on task `type`:
 - Check `code_references` for proper cleanup patterns
 
 **test:**
-- Read ALL `code_references` for test patterns
-- Create or modify test file following the EXACT test structure from references:
+- Use `pattern_excerpt` from `code_references` for test patterns - already embedded!
+- Only read reference files if `pattern_excerpt` is missing
+- Create or modify test file following the EXACT test structure from excerpts/references:
   - Same test framework usage (CTEST/CTEST2 macros)
   - Same setup/teardown patterns
   - Same assertion style
@@ -239,7 +253,7 @@ If implementation is interrupted:
 # Example Execution Flow
 
 ```
-[Load implementation plan via /p:implementation-plan]
+[Load implementation plan via task-implementation-plan.py script]
 ✓ Plan is complete
 ✓ Found 4 tasks in p:implementation_plan
 ✓ Dependency order: task-001 → task-002 → task-003 → task-004

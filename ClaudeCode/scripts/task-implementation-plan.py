@@ -9,7 +9,7 @@ import sys
 import os
 
 def extract_implementation_plan(yaml_file):
-    """Extract only implementation_plan, complete flag, and success_criteria"""
+    """Extract implementation_plan, complete flag, success_criteria, and context_summary"""
 
     with open(yaml_file, 'r') as f:
         content = f.read()
@@ -17,6 +17,10 @@ def extract_implementation_plan(yaml_file):
     # Extract complete flag
     complete_match = re.search(r'^complete:\s*(.+)$', content, re.MULTILINE)
     complete = complete_match.group(1).strip() if complete_match else "false"
+
+    # Extract context_summary section (captured patterns from planning)
+    context_match = re.search(r'^context_summary:(.*?)(?=^[a-z_]+:|\Z)', content, re.MULTILINE | re.DOTALL)
+    context_summary = context_match.group(1).strip() if context_match else ""
 
     # Extract implementation_plan section
     impl_match = re.search(r'^implementation_plan:(.*?)(?=^[a-z_]+:|\Z)', content, re.MULTILINE | re.DOTALL)
@@ -28,6 +32,10 @@ def extract_implementation_plan(yaml_file):
 
     # Output compact YAML
     print(f"complete: {complete}")
+
+    if context_summary:
+        print("context_summary:")
+        print(context_summary)
 
     if success_criteria:
         print("success_criteria:")

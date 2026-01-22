@@ -18,6 +18,12 @@ constraints:
     description: string
     impact: string
 success_criteria: [string]
+context_summary:                    # CAPTURED PATTERNS from planning phase (reduces re-reading)
+  error_handling: string?           # how errors are handled in this codebase
+  memory_management: string?        # allocation/deallocation patterns
+  logging_pattern: string?          # logging conventions
+  naming_conventions: string?       # function/variable naming style
+  key_patterns: [string]            # other important patterns discovered
 implementation_plan:
   affected_files: [string]          # existing files to be modified
   new_files: [string]               # new files to be created
@@ -34,6 +40,7 @@ implementation_plan:
         - file: string              # path to source code file
           function: string          # function name (or equivalent: method, module function, etc.)
           note: string              # why this reference is relevant
+          pattern_excerpt: string?  # KEY CODE SNIPPET showing the pattern to follow (10-30 lines max)
       api_references: [string]      # DOCUMENTATION files (.md, .txt, etc.) in docs/ directory
       test_requirements: string     # how to verify this task
       dependencies: [string]        # task_ids that must complete first
@@ -56,6 +63,12 @@ implementation_plan:
   - `description`: Clear description of the constraint
   - `impact`: How this constraint affects the implementation
 - `success_criteria`: Simple array of success criteria descriptions that define project success
+- `context_summary`: Captured patterns from exploration phase to avoid re-reading files during implementation
+  - `error_handling`: How errors are returned/handled (e.g., "return -1 on error, 0 on success")
+  - `memory_management`: Allocation patterns (e.g., "caller owns returned pointers")
+  - `logging_pattern`: Logging conventions (e.g., "use LOG_DEBUG/LOG_ERROR macros")
+  - `naming_conventions`: Naming style (e.g., "snake_case for functions, UPPER_CASE for constants")
+  - `key_patterns`: Other important patterns discovered during exploration
 - `implementation_plan`: Detailed, function-level task breakdown for implementation
   - `affected_files`: List of existing files that will be modified
   - `new_files`: List of new files that will be created
@@ -69,6 +82,7 @@ implementation_plan:
     - `status`: Task completion status - "pending" (default), "completed" or "cancel"
     - `implementation_details`: Specific technical approach and requirements
     - `code_references`: Similar **code implementations** in codebase to follow as examples (specific source file + function/method pairs)
+      - `pattern_excerpt`: **CRITICAL** - The actual code snippet (10-30 lines) showing the pattern. This eliminates re-reading during implementation.
     - `api_references`: **Documentation files** in docs/ directory relevant to this task (e.g., .md, .txt)
     - `test_requirements`: How to verify this task works correctly
     - `dependencies`: Task IDs that must be completed before this task
@@ -156,13 +170,21 @@ The final output of the plan command is a YAML document that serves as input for
    - Creation of clear, explicit technical tasks to achieve all aspects of the goal set by the User
    If ANY of these criteria are not met, go back to '2.'
 7. Once all criteria are satisfied and mark `complete` is `true` in the YAML:
-   a. Create the `implementation_plan` section with function-level tasks:
+   a. **FIRST: Create `context_summary`** to capture discovered patterns:
+      - Document error handling patterns (return values, errno usage)
+      - Document memory management patterns (ownership, allocation)
+      - Document logging patterns (macros, levels)
+      - Document naming conventions (prefixes, case style)
+      - List key patterns that apply across multiple tasks
+      - **This eliminates redundant file reading during implementation!**
+   b. Create the `implementation_plan` section with function-level tasks:
       - Identify all affected and new files
       - Break down implementation into function-level tasks
       - For each task, specify: file, function, implementation details, code references, test requirements
       - **IMPORTANT**: Set `status: pending` for all newly created tasks
       - **IMPORTANT**: Populate `code_references` with the similar **code implementations** found in step 1
       - For each code reference, specify: source file path, function/method name, and a note explaining why it's relevant
+      - **CRITICAL**: Include `pattern_excerpt` with the actual code (10-30 lines) - this prevents re-reading during implementation!
       - Add **source code files** with similar patterns to `reference_files` list
       - Link relevant **documentation files** in `api_references` for each task
       - Establish task dependencies and ordering
@@ -180,6 +202,16 @@ The final output of the plan command is a YAML document that serves as input for
 Here's an example of a complete implementation_plan section for adding WebSocket ping/pong support:
 
 ```yaml
+context_summary:
+  error_handling: "Return -1 on error with errno set, 0 on success"
+  memory_management: "Caller owns returned buffers, internal buffers freed on close"
+  logging_pattern: "LOG_DEBUG for flow, LOG_ERROR for failures, LOG_WARN for recoverable"
+  naming_conventions: "poluah_ prefix, snake_case functions, UPPER_CASE constants"
+  key_patterns:
+    - "All public functions validate ws pointer and state first"
+    - "Frame functions use poluah_websocket_send_frame() internally"
+    - "Tests use CTEST2 macro with ws_fixture"
+
 implementation_plan:
   affected_files:
     - /mnt/nvme/src/websocket-server.c
@@ -223,6 +255,22 @@ implementation_plan:
         - file: /mnt/nvme/src/websocket-server.c
           function: poluah_websocket_send_frame
           note: Use this to build and send the ping frame
+          pattern_excerpt: |
+            int poluah_websocket_send_frame(poluah_websocket_t *ws, uint8_t opcode,
+                                           const char *payload, size_t len) {
+                if (!ws || ws->state != WS_STATE_CONNECTED) {
+                    errno = EINVAL;
+                    return -1;
+                }
+
+                uint8_t header[14];
+                size_t header_len = websocket_build_header(header, opcode, len, false);
+
+                if (buffered_write(ws->fd, header, header_len) < 0) return -1;
+                if (len > 0 && buffered_write(ws->fd, payload, len) < 0) return -1;
+
+                return 0;
+            }
       api_references:
         - docs/websocket-api.md
       test_requirements: Send ping with payload, verify frame is correctly formatted

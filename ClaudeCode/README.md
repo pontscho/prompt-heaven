@@ -278,8 +278,8 @@ project-root/
 │   ├── commands/p/
 │   │   ├── task-plan.md          # Detailed planning workflow
 │   │   └── implement.md          # Detailed implementation workflow
-│   └── skills/
-│       └── p:implementation-plan/  # Helper skill for loading plans
+│   └── scripts/
+│       └── task-implementation-plan.py  # Token-efficient plan extraction
 └── src/                          # Your source code
 ```
 
@@ -366,7 +366,6 @@ project-root/
 
 - [Task Planning Schema and Workflow](commands/p/task-plan.md) - Detailed planning phase guide
 - [Implementation Command Reference](commands/p/implement.md) - Detailed implementation phase guide
-- [Implementation Plan Skill](skills/p:implementation-plan/SKILL.md) - Helper for loading plans efficiently
 - [Requirements Skill](skills/p:requirements/SKILL.md) - Task management and status updates
 
 ## Summary

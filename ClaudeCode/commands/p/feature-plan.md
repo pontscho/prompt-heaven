@@ -186,6 +186,30 @@ Use the Write tool to create `docs/feature-implementation-plan.md` with the foll
 [Configuration management approach]
 [Logging/monitoring patterns]
 
+## Captured Patterns (for implementation phase)
+
+These patterns are captured here to avoid re-reading files during implementation:
+
+### Error Handling
+- [How errors are returned: return values, errno, exceptions]
+- [Example code snippet if helpful]
+
+### Memory Management
+- [Allocation/deallocation patterns, ownership rules]
+
+### Logging
+- [Logging macros/functions, log levels used]
+
+### Naming Conventions
+- [Function naming: prefix, case style]
+- [Variable naming, constant naming]
+
+### Key Code Patterns
+```[language]
+// Include actual code snippets (10-30 lines) showing patterns to follow
+// These will be used directly during implementation
+```
+
 ## Alternative Approaches Evaluated
 
 ### Option 1: [Approach Name]

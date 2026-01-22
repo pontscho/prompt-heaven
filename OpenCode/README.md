@@ -540,7 +540,7 @@ python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-001
 
 ---
 
-### p:implementation-plan
+### task-implementation-plan.py (Script)
 
 **Purpose:** Efficient extraction of implementation plan data.
 
@@ -558,13 +558,14 @@ python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-001
 
 **Usage:**
 ```bash
-python3 ~/.claude/skills/p:implementation-plan/get_implementation_plan.py
+~/.claude/scripts/task-implementation-plan.py [path_to_yaml]
 ```
 
 **Output:** Compact YAML with:
 - Complete flag
+- Context summary (captured patterns from planning)
 - Success criteria
-- Implementation plan (affected files, new files, tasks)
+- Implementation plan (affected files, new files, tasks with pattern_excerpts)
 
 ---
 
@@ -759,7 +760,6 @@ Skills activate automatically based on context:
 | `p:cmake` | Working with CMakeLists.txt or cmake files |
 | `p:code-analysis` | Using /analyze commands |
 | `p:requirements` | Mentioning requirements.yaml or tasks |
-| `p:implementation-plan` | Reading implementation plan |
 | `p:static-linking` | Configuring static builds |
 
 ---
@@ -790,7 +790,6 @@ OpenCode/
     ├── p:static-linking/      # Static linking guide
     ├── p:code-analysis/       # Analysis commands guide
     ├── p:requirements/        # Requirements management
-    ├── p:implementation-plan/ # Plan extraction
     ├── p:project-docs/        # Documentation standards
     ├── p:agent-writer/        # Agent writing guide
     ├── p:skill-writer/        # Skill writing guide
