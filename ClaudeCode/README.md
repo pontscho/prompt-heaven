@@ -278,10 +278,162 @@ project-root/
 │   ├── commands/p/
 │   │   ├── task-plan.md          # Detailed planning workflow
 │   │   └── implement.md          # Detailed implementation workflow
+│   ├── hooks/                    # Post-edit hooks for quality checks
+│   │   ├── post-edit-clang-format.sh  # C/C++ auto-formatter
+│   │   ├── post-edit-clang-tidy.sh    # C/C++ linter
+│   │   └── post-edit-json-lint.sh     # JSON/JSONC/JSONL/JSON5 validator
 │   └── scripts/
 │       └── task-implementation-plan.py  # Token-efficient plan extraction
 └── src/                          # Your source code
 ```
+
+## Hooks Configuration
+
+Claude Code hooks run automatically after tool executions to ensure code quality. Configure them in your project's `.claude/settings.json`.
+
+### Prerequisites
+
+| Hook | Dependencies |
+|------|--------------|
+| `post-edit-clang-format.sh` | CMake configured build with `CLANG_FORMAT_EXE`, `.clang-format` config |
+| `post-edit-clang-tidy.sh` | CMake configured build with `CLANG_TIDY_EXE`, `.clang-tidy` config, `compile_commands.json` |
+| `post-edit-json-lint.sh` | `jq` (required), `npx json5` (optional, for full JSON5 support) |
+
+### Settings Configuration
+
+Add to `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "postToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "command": "/path/to/ClaudeCode/hooks/post-edit-clang-format.sh"
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "command": "/path/to/ClaudeCode/hooks/post-edit-clang-tidy.sh"
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "command": "/path/to/ClaudeCode/hooks/post-edit-json-lint.sh"
+      }
+    ]
+  }
+}
+```
+
+**Note:** Replace `/path/to/` with the actual path to your ClaudeCode hooks directory.
+
+### Hook Details
+
+#### 1. clang-format (Auto-formatter)
+
+**File:** `hooks/post-edit-clang-format.sh`
+
+| Property | Value |
+|----------|-------|
+| Triggers on | `.c`, `.cpp`, `.h`, `.hpp` files |
+| Tools | Edit, MultiEdit, Write |
+| Action | Auto-formats file in-place |
+| Exit codes | 0 = success, 1 = config error, 2 = format failed |
+
+**Requirements:**
+- `PROJECT_ROOT` or `CLAUDE_PROJECT_DIR` environment variable
+- `build/CMakeCache.txt` with `CLANG_FORMAT_EXE:FILEPATH=` entry
+- `.clang-format` config file in project root
+
+#### 2. clang-tidy (C/C++ Linter)
+
+**File:** `hooks/post-edit-clang-tidy.sh`
+
+| Property | Value |
+|----------|-------|
+| Triggers on | `.c`, `.cpp`, `.h`, `.hpp` files |
+| Tools | Edit, MultiEdit, Write |
+| Action | Runs static analysis, blocks on warnings |
+| Exit codes | 0 = success, 1 = config error, 2 = lint warnings (blocks) |
+
+**Requirements:**
+- `PROJECT_ROOT` or `CLAUDE_PROJECT_DIR` environment variable
+- `build/CMakeCache.txt` with `CLANG_TIDY_EXE:FILEPATH=` entry
+- `build/compile_commands.json` (CMake with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`)
+- `.clang-tidy` config file in project root
+
+#### 3. json-lint (JSON Validator)
+
+**File:** `hooks/post-edit-json-lint.sh`
+
+| Property | Value |
+|----------|-------|
+| Triggers on | `.json`, `.jsonc`, `.jsonl`, `.json5` files |
+| Tools | Edit, MultiEdit, Write |
+| Action | Validates JSON syntax, blocks on errors |
+| Exit codes | 0 = success (or jq not found), 2 = invalid JSON (blocks) |
+
+**Format handling:**
+
+| Extension | Validation Method |
+|-----------|-------------------|
+| `.json` | Direct `jq` validation |
+| `.jsonc` | Strip `//` and `/* */` comments, then `jq` |
+| `.jsonl` | Line-by-line `jq` validation |
+| `.json5` | Strip comments + trailing commas, `jq` → fallback to `npx json5` |
+
+**Requirements:**
+- `jq` installed and in PATH
+- (Optional) `npx` with `json5` package for full JSON5 support
+
+### Example: Minimal C/C++ Project Setup
+
+```bash
+# 1. Configure CMake with compile commands
+cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+# 2. Create .claude/settings.json
+mkdir -p .claude
+cat > .claude/settings.json << 'EOF'
+{
+  "hooks": {
+    "postToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "command": "/path/to/hooks/post-edit-clang-format.sh"
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "command": "/path/to/hooks/post-edit-clang-tidy.sh"
+      },
+      {
+         "matcher": "Edit|MultiEdit|Write",
+         "command": "/path/to/hooks/post-edit-json-lint.sh"
+      }
+    ]
+  }
+}
+EOF
+
+# 3. Ensure config files exist
+touch .clang-format .clang-tidy
+```
+
+### Troubleshooting Hooks
+
+**Problem:** Hook not running
+- Check that `.claude/settings.json` exists and has correct JSON syntax
+- Verify hook script is executable (`chmod +x`)
+- Check matcher regex matches the tool name
+
+**Problem:** "PROJECT_ROOT not set"
+- Set `CLAUDE_PROJECT_DIR` environment variable, or
+- Run Claude Code from the project root directory
+
+**Problem:** "No CMakeCache.txt found"
+- Run CMake configuration first: `cmake -B build`
+
+**Problem:** "jq not found"
+- Install jq: `brew install jq` (macOS) or `apt install jq` (Linux)
 
 ## Best Practices
 
