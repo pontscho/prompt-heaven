@@ -523,13 +523,13 @@ Skills provide specialized knowledge and guidelines for specific programming lan
 **Key Commands:**
 ```bash
 # Show all tasks
-python3 ~/.claude/skills/p:requirements/show_tasks.py requirements.yaml
+python3 ~/.claude/scripts/task-show-all.py requirements.yaml
 
 # Show task details
-python3 ~/.claude/skills/p:requirements/show_task_details.py task-001
+python3 ~/.claude/scripts/task-show-details.py task-001
 
 # Update task status
-python3 ~/.claude/skills/p:requirements/update_tasks.py completed task-001
+python3 ~/.claude/scripts/task-update.py completed task-001
 ```
 
 **Task Statuses:**

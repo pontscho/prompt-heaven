@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Mass update task status in requirements.yaml file.
-Usage: python3 update_tasks.py <status> <task1> <task2> ...
-Example: python3 update_tasks.py completed task-001 task-002 task-003
+Usage: task-update.py <status> <task1> <task2> ...
+Example: task-update.py completed task-001 task-002 task-003
 """
 
 import re
@@ -71,8 +71,8 @@ def update_task_status(yaml_file, status, task_ids):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python3 update_tasks.py <status> <task1> <task2> ...")
-        print("Example: python3 update_tasks.py completed task-001 task-002")
+        print("Usage: task-update.py <status> <task1> <task2> ...")
+        print("Example: task-update.py completed task-001 task-002")
         print("Valid statuses: pending, completed, in_progress")
         sys.exit(1)
 

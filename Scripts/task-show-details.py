@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Display raw YAML blocks for specific tasks from requirements.yaml file.
-Usage: python3 show_task_details.py task-001 task-002 task-003 ...
+Usage: task-show-details.py task-001 task-002 task-003 ...
 """
 
 import re
@@ -42,10 +42,10 @@ def find_task_yaml_block(content, task_id):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 show_task_details.py task-001 task-002 task-003 ...")
+        print("Usage: task-show-details.py task-001 task-002 task-003 ...")
         print("\nExample:")
-        print("  python3 show_task_details.py task-001")
-        print("  python3 show_task_details.py task-001 task-002 task-003")
+        print("  task-show-details.py task-001")
+        print("  task-show-details.py task-001 task-002 task-003")
         sys.exit(1)
 
     task_ids = sys.argv[1:]

@@ -10,9 +10,9 @@
       "Skill(p:implementation-plan)",
       "Skill(p:c)",
 
-      "Bash(~/.claude/skills/p:requirements/update_tasks.py:*)",
-      "Bash(~/.claude/skills/p:requirements/show_tasks.py:*)",
-      "Bash(~/.claude/skills/p:requirements/show_task_details.py:*)",
+      "Bash(~/.claude/scripts/task-update.py:*)",
+      "Bash(~/.claude/scripts/task-show-all.py:*)",
+      "Bash(~/.claude/scripts/task-show-details.py:*)",
 
       "Bash(pkg-config:*)",
       "Bash(grep:*)",

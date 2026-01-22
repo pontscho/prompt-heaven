@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Display task status from requirements.yaml file.
-Usage: python3 show_tasks.py /path/to/requirements.yaml
+Usage: task-show-all.py /path/to/requirements.yaml
 """
 
 import re
@@ -102,7 +102,7 @@ def show_tasks(yaml_file):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python3 show_tasks.py /path/to/requirements.yaml")
+        print("Usage: task-show-all.py /path/to/requirements.yaml")
         sys.exit(1)
 
     yaml_file = sys.argv[1]

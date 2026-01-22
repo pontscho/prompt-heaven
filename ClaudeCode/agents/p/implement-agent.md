@@ -112,7 +112,7 @@ For each task in dependency order:
 - **Use `pattern_excerpt` from `code_references`** if available - this IS the pattern, no need to read files!
 - **Only read `code_references` files if `pattern_excerpt` is missing** - fall back to file reading
 - Review the `note` field for each reference to understand WHY it's relevant
-- **Mark task as in_progress**: `~/.claude/skills/p:requirements/update_tasks.py in_progress <task_id>`
+- **Mark task as in_progress**: `~/.claude/scripts/task-update.py in_progress <task_id>`
 
 ### b. Task execution
 
@@ -168,7 +168,7 @@ After each task:
    - Run the specific test: `cd <to-project-root> ; build/src/tests/[test-application] [suite:test]`
    - Verify test passes
 4. **Validate**: Check that `test_requirements` are met
-5. **Mark task as completed** (ONLY if all above checks pass): `~/.claude/skills/p:requirements/update_tasks.py completed <task_id>`
+5. **Mark task as completed** (ONLY if all above checks pass): `~/.claude/scripts/task-update.py completed <task_id>`
    - DO NOT mark completed if any check fails (build errors, test failures, linting warnings)
    - DO NOT mark completed if implementation is incomplete
    - Only mark completed when task is fully done and verified
@@ -195,7 +195,7 @@ If any verification step fails:
   - This ensures requirements.yaml always reflects current implementation state
 - Keep user informed of progress
 - If using `/p:requirements` skill, the updated task status will be visible in the task list
-- **CRITICAL**: NEVER manually edit requirements.yaml - ALWAYS use the update_tasks.py script
+- **CRITICAL**: NEVER manually edit requirements.yaml - ALWAYS use the task-update.py script
 
 ## 3. Post-implementation
 
@@ -336,8 +336,8 @@ Example:
 Before or during implementation, you can check task status:
 ```
 /p:requirements                    # Show all tasks with current status
-~/.claude/skills/p:requirements/show_tasks.py requirements.yaml
-~/.claude/skills/p:requirements/show_task_details.py task-001 task-002
+~/.claude/scripts/task-show-all.py requirements.yaml
+~/.claude/scripts/task-show-details.py task-001 task-002
 ```
 
 This helps you understand:
