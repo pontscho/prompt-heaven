@@ -1,5 +1,6 @@
 ---
 description: Search GitHub repositories for code patterns using grep.app
+mode: subagent
 permissions:
   - read
   - webfetch

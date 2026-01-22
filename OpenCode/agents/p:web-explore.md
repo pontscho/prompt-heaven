@@ -1,5 +1,6 @@
 ---
 description: Search the web using DuckDuckGo and fetch URLs
+mode: subagent
 permissions:
   - read
   - webfetch

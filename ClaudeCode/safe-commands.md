@@ -5,9 +5,26 @@
 {
   "permissions": {
     "allow": [
-      "Bash(file:*)",
+      "Skill(p:requirements)",
+      "Skill(p:skill-writer)",
+      "Skill(p:implementation-plan)",
+      "Skill(p:c)",
+
+      "Bash(~/.claude/skills/p:requirements/update_tasks.py:*)",
+      "Bash(~/.claude/skills/p:requirements/show_tasks.py:*)",
+      "Bash(~/.claude/skills/p:requirements/show_task_details.py:*)",
+
+      "Bash(pkg-config:*)",
+      "Bash(grep:*)",
+      "Bash(make:*)",
+      "Bash(cmake:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(ctest:*)",
+      "Bash(ldd:*)",
+      "Bash(nm:*)",
       "Bash(xxd:*)",
-      "Bash(cat:*)",
+      "Bash(file:*)",
 
       "WebFetch(domain:cheatsheetseries.owasp.org)",
       "WebFetch(domain:www.portainer.io)",
