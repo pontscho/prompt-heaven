@@ -281,7 +281,8 @@ project-root/
 │   ├── hooks/                    # Post-edit hooks for quality checks
 │   │   ├── post-edit-clang-format.sh  # C/C++ auto-formatter
 │   │   ├── post-edit-clang-tidy.sh    # C/C++ linter
-│   │   └── post-edit-json-lint.sh     # JSON/JSONC/JSONL/JSON5 validator
+│   │   ├── post-edit-json-lint.sh     # JSON/JSONC/JSONL/JSON5 validator
+│   │   └── post-edit-vue-lint.sh      # Vue/JS/TS linter (auto-detect)
 │   └── scripts/
 │       └── task-implementation-plan.py  # Token-efficient plan extraction
 └── src/                          # Your source code
@@ -298,6 +299,7 @@ Claude Code hooks run automatically after tool executions to ensure code quality
 | `post-edit-clang-format.sh` | CMake configured build with `CLANG_FORMAT_EXE`, `.clang-format` config |
 | `post-edit-clang-tidy.sh` | CMake configured build with `CLANG_TIDY_EXE`, `.clang-tidy` config, `compile_commands.json` |
 | `post-edit-json-lint.sh` | `jq` (required), `npx json5` (optional, for full JSON5 support) |
+| `post-edit-vue-lint.sh` | `jq` (required), `package.json` with linter, linter config file |
 
 ### Settings Configuration
 
@@ -318,6 +320,10 @@ Add to `.claude/settings.json`:
       {
         "matcher": "Edit|MultiEdit|Write",
         "command": "/path/to/ClaudeCode/hooks/post-edit-json-lint.sh"
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "command": "/path/to/ClaudeCode/hooks/post-edit-vue-lint.sh"
       }
     ]
   }
@@ -385,6 +391,36 @@ Add to `.claude/settings.json`:
 - `jq` installed and in PATH
 - (Optional) `npx` with `json5` package for full JSON5 support
 
+#### 4. vue-lint (Vue/JS/TS Linter)
+
+**File:** `hooks/post-edit-vue-lint.sh`
+
+| Property | Value |
+|----------|-------|
+| Triggers on | `.vue`, `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, `.cts` files |
+| Tools | Edit, MultiEdit, Write |
+| Action | Auto-detects and runs linter, blocks on errors |
+| Exit codes | 0 = success (or no linter found), 2 = lint errors (blocks) |
+
+**Auto-detection priority:**
+
+| Priority | Linter | Detection |
+|----------|--------|-----------|
+| 1 | Biome | `@biomejs/biome` in package.json + `biome.json` config |
+| 2 | oxlint | `oxlint` in package.json |
+| 3 | ESLint | `eslint` in package.json + eslint config file |
+
+**Supported ESLint configs:**
+- Flat config: `eslint.config.js`, `eslint.config.mjs`, `eslint.config.cjs`
+- Legacy: `.eslintrc`, `.eslintrc.js`, `.eslintrc.cjs`, `.eslintrc.json`, `.eslintrc.yml`, `.eslintrc.yaml`
+- package.json: `eslintConfig` field
+
+**Requirements:**
+- `jq` installed and in PATH
+- `package.json` with linter dependency
+- Linter config file (varies by linter)
+- `npx` for running linters
+
 ### Example: Minimal C/C++ Project Setup
 
 ```bash
@@ -416,6 +452,41 @@ EOF
 
 # 3. Ensure config files exist
 touch .clang-format .clang-tidy
+```
+
+### Example: Vue/JS/TS Project Setup
+
+```bash
+# 1. Ensure ESLint is configured (or Biome/oxlint)
+# Example with ESLint + Vue:
+npm install -D eslint eslint-plugin-vue @vue/eslint-config-typescript
+
+# 2. Create eslint config (flat config example)
+cat > eslint.config.js << 'EOF'
+import pluginVue from 'eslint-plugin-vue'
+export default [
+  ...pluginVue.configs['flat/recommended'],
+]
+EOF
+
+# 3. Create .claude/settings.json
+mkdir -p .claude
+cat > .claude/settings.json << 'EOF'
+{
+  "hooks": {
+    "postToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "command": "/path/to/hooks/post-edit-json-lint.sh"
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "command": "/path/to/hooks/post-edit-vue-lint.sh"
+      }
+    ]
+  }
+}
+EOF
 ```
 
 ### Troubleshooting Hooks
