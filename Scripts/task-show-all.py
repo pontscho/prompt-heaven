@@ -21,9 +21,9 @@ def show_tasks(yaml_file):
 
     tasks_text = tasks_match.group(1)
 
-    print("=" * 120)
-    print(f"{'Task ID':<30} | {'Status':<15} | {'Description':<70}")
-    print("=" * 120)
+    print("=" * 130)
+    print(f"{'Task ID':<30} | {'Status':<15} | {'Size':<6} | {'Description':<70}")
+    print("=" * 130)
 
     current_category = None
     tasks_list = []
@@ -42,7 +42,7 @@ def show_tasks(yaml_file):
                 if tasks_list:  # Print previous category's tasks if any
                     print()
                 print(f"\n{current_category}")
-                print("-" * 120)
+                print("-" * 130)
 
         # Check for task entries
         elif '    - task_id:' in line:
@@ -50,11 +50,12 @@ def show_tasks(yaml_file):
             if task_id_match:
                 task_id = task_id_match.group(1)
 
-                # Look ahead for description and status
+                # Look ahead for description, status, and size
                 description = None
                 status = "pending"
+                size = "-"
 
-                for j in range(i+1, min(i+10, len(lines))):
+                for j in range(i+1, min(i+15, len(lines))):
                     if 'description:' in lines[j]:
                         desc_match = re.search(r'description:\s*(.+)', lines[j])
                         if desc_match:
@@ -63,6 +64,10 @@ def show_tasks(yaml_file):
                         status_match = re.search(r'status:\s*(\w+)', lines[j])
                         if status_match:
                             status = status_match.group(1)
+                    elif re.match(r'\s+size:\s*\w+', lines[j]) and 'size_rationale' not in lines[j]:
+                        size_match = re.search(r'size:\s*(\w+)', lines[j])
+                        if size_match:
+                            size = size_match.group(1).upper()
                     elif '    - task_id:' in lines[j]:
                         break
 
@@ -74,20 +79,26 @@ def show_tasks(yaml_file):
                         "pending": "⏳"
                     }.get(status, "⏳")
 
-                    desc_short = description[:68] + "..." if len(description) > 68 else description
-                    print(f"{task_id:<30} | {status_icon} {status:<12} | {desc_short:<70}")
-                    tasks_list.append((task_id, status))
+                    desc_short = description[:66] + "..." if len(description) > 66 else description
+                    print(f"{task_id:<30} | {status_icon} {status:<12} | {size:<6} | {desc_short:<70}")
+                    tasks_list.append((task_id, status, size))
 
         i += 1
 
-    print("=" * 120)
+    print("=" * 130)
 
     # Summary statistics
     total = len(tasks_list)
-    completed = sum(1 for _, status in tasks_list if status == "completed")
-    in_progress = sum(1 for _, status in tasks_list if status == "in_progress")
-    pending = sum(1 for _, status in tasks_list if status == "pending")
-    cancelled = sum(1 for _, status in tasks_list if status == "cancel")
+    completed = sum(1 for _, status, _ in tasks_list if status == "completed")
+    in_progress = sum(1 for _, status, _ in tasks_list if status == "in_progress")
+    pending = sum(1 for _, status, _ in tasks_list if status == "pending")
+    cancelled = sum(1 for _, status, _ in tasks_list if status == "cancel")
+
+    # Effort breakdown
+    size_counts = {"SS": 0, "S": 0, "M": 0, "L": 0, "XL": 0, "XXL": 0}
+    for _, _, size in tasks_list:
+        if size in size_counts:
+            size_counts[size] += 1
 
     print(f"\n📊 Summary: {completed}/{total} tasks completed")
     print(f"   ✅ Completed: {completed}")
@@ -99,6 +110,15 @@ def show_tasks(yaml_file):
     if total > 0:
         percentage = (completed / total) * 100
         print(f"   Progress: {percentage:.1f}%")
+
+    # Show effort breakdown if any sizes are defined
+    if any(size_counts.values()):
+        print(f"\n📏 Effort breakdown:")
+        effort_parts = []
+        for size_name in ["SS", "S", "M", "L", "XL", "XXL"]:
+            if size_counts[size_name] > 0:
+                effort_parts.append(f"{size_name}:{size_counts[size_name]}")
+        print(f"   {' | '.join(effort_parts)}")
 
 if __name__ == "__main__":
     yaml_file = "requirements.yaml"

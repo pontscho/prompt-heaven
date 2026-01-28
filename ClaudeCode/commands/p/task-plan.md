@@ -38,6 +38,14 @@ context_summary:                    # CAPTURED PATTERNS from planning phase (red
   naming_conventions: string?       # function/variable naming style
   key_patterns: [string]            # other important patterns discovered
 implementation_plan:
+  total_effort: ss|s|m|l|xl|xxl     # aggregated effort estimate for entire plan
+  effort_breakdown:                 # distribution of task sizes
+    ss: number
+    s: number
+    m: number
+    l: number
+    xl: number
+    xxl: number
   affected_files: [string]          # existing files to be modified
   new_files: [string]               # new files to be created
   reference_files: [string]         # SOURCE CODE files with similar patterns to follow
@@ -48,6 +56,8 @@ implementation_plan:
       function_name: string?        # function to modify/create (optional)
       type: create|modify|delete|test
       status: pending|completed|cancel # task completion status (default: pending)
+      size: ss|s|m|l|xl|xxl         # T-shirt size effort estimate
+      size_rationale: string?       # explanation for size estimate (optional)
       implementation_details: string # specific technical approach
       code_references:              # similar CODE implementations in codebase
         - file: string              # path to source code file
@@ -83,6 +93,8 @@ implementation_plan:
   - `naming_conventions`: Naming style (e.g., "snake_case for functions, UPPER_CASE for constants")
   - `key_patterns`: Other important patterns discovered during exploration
 - `implementation_plan`: Detailed, function-level task breakdown for implementation
+  - `total_effort`: Aggregated T-shirt size estimate for the entire implementation plan (see sizing guide below)
+  - `effort_breakdown`: Count of tasks per size category for quick overview
   - `affected_files`: List of existing files that will be modified
   - `new_files`: List of new files that will be created
   - `reference_files`: **Source code files** in codebase with similar patterns to follow (any language: C, Lua, Python, etc.)
@@ -93,12 +105,63 @@ implementation_plan:
     - `function_name`: Specific function to modify or create (optional, can be method name, module function, etc.)
     - `type`: Task type - "create", "modify", "delete", "test"
     - `status`: Task completion status - "pending" (default), "completed" or "cancel"
+    - `size`: T-shirt size effort estimate - "ss", "s", "m", "l", "xl", "xxl" (see sizing guide below)
+    - `size_rationale`: Optional explanation for the size estimate (useful for non-obvious sizing decisions)
     - `implementation_details`: Specific technical approach and requirements
     - `code_references`: Similar **code implementations** in codebase to follow as examples (specific source file + function/method pairs)
       - `pattern_excerpt`: **CRITICAL** - The actual code snippet (10-30 lines) showing the pattern. This eliminates re-reading during implementation.
     - `api_references`: **Documentation files** in docs/ directory relevant to this task (e.g., .md, .txt)
     - `test_requirements`: How to verify this task works correctly
     - `dependencies`: Task IDs that must be completed before this task
+
+# T-Shirt Size Estimation Guide
+
+## Size Definitions
+
+| Size | Scope | Lines of Code | Examples |
+|------|-------|---------------|----------|
+| **SS** | Trivial change | 1-5 lines | Add constant, typedef, enum value, simple macro |
+| **S** | Simple modification | 5-20 lines | Add parameter, null check, simple getter/setter, minor refactor |
+| **M** | Moderate change | 20-100 lines | New function, significant function modification, add new API endpoint |
+| **L** | Complex change | 100-300 lines | Multiple functions, new module component, cross-function refactor |
+| **XL** | Very complex | 300-500 lines | Multiple files, subsystem changes, new integration |
+| **XXL** | Massive scope | 500+ lines | **Should be broken down into smaller tasks!** |
+
+## Sizing Factors
+
+When determining size, consider these factors:
+
+1. **Lines of code** - Primary indicator
+2. **Number of files touched** - More files = larger size
+3. **Logic complexity** - Algorithms, state machines, edge cases
+4. **Risk level** - Potential for regressions, critical paths
+5. **Testing requirements** - Amount of test code needed
+6. **Dependencies** - External APIs, cross-component interactions
+7. **Task type impact**:
+   - `create` typically larger than `modify`
+   - `delete` often smaller but higher risk
+   - `test` size correlates with code being tested
+
+## Aggregation Rules
+
+Calculate `total_effort` from individual task sizes:
+
+1. **Base**: Use the largest individual task size
+2. **Complexity multiplier**:
+   - 1-3 tasks: no change
+   - 4-7 tasks: +1 size level
+   - 8-12 tasks: +2 size levels
+   - 13+ tasks: consider splitting the plan
+
+Example: 5 tasks (2xS, 2xM, 1xL) = L (largest) + 1 (4-7 tasks) = **XL**
+
+## Best Practices
+
+- **Be conservative**: When uncertain, round up
+- **XXL is a red flag**: Break down into multiple smaller tasks
+- **Include test time**: Tests often take as long as implementation
+- **Consider risk**: High-risk changes warrant larger estimates
+- **Document rationale**: Use `size_rationale` for non-obvious estimates
 
 # Schema and document language
 
@@ -195,6 +258,9 @@ The final output of the plan command is a YAML document that serves as input for
       - Break down implementation into function-level tasks
       - For each task, specify: file, function, implementation details, code references, test requirements
       - **IMPORTANT**: Set `status: pending` for all newly created tasks
+      - **IMPORTANT**: Assign `size` (ss/s/m/l/xl/xxl) to each task using the T-Shirt Size Estimation Guide
+      - **IMPORTANT**: Add `size_rationale` for non-obvious size estimates
+      - **IMPORTANT**: Calculate `total_effort` and `effort_breakdown` using the aggregation rules
       - **IMPORTANT**: Populate `code_references` with the similar **code implementations** found in step 1
       - For each code reference, specify: source file path, function/method name, and a note explaining why it's relevant
       - **CRITICAL**: Include `pattern_excerpt` with the actual code (10-30 lines) - this prevents re-reading during implementation!
@@ -226,6 +292,14 @@ context_summary:
     - "Tests use CTEST2 macro with ws_fixture"
 
 implementation_plan:
+  total_effort: l                   # 4 tasks with largest being M, +1 level for 4 tasks = L
+  effort_breakdown:
+    ss: 1
+    s: 2
+    m: 1
+    l: 0
+    xl: 0
+    xxl: 0
   affected_files:
     - /mnt/nvme/src/websocket-server.c
     - /mnt/nvme/src/websocket-server.h
@@ -241,6 +315,8 @@ implementation_plan:
       function_name: null
       type: modify
       status: pending
+      size: ss
+      size_rationale: "2 lines - adding enum constants to existing enum"
       implementation_details: |
         Add WS_FRAME_PING (0x09) and WS_FRAME_PONG (0x0A) constants to the existing
         frame type enum. Follow the pattern of existing WS_FRAME_* constants.
@@ -259,6 +335,8 @@ implementation_plan:
       function_name: poluah_websocket_send_ping
       type: create
       status: pending
+      size: s
+      size_rationale: "~15 lines - wrapper function following existing send_frame pattern"
       implementation_details: |
         Create new function that sends a ping frame with optional payload.
         Use poluah_websocket_send_frame() internally. Function signature:
@@ -295,6 +373,8 @@ implementation_plan:
       function_name: poluah_websocket_handle_frame
       type: modify
       status: pending
+      size: s
+      size_rationale: "~10 lines - add case to existing switch, call existing function"
       implementation_details: |
         In poluah_websocket_handle_frame(), add case for WS_FRAME_PING.
         When ping is received, automatically send pong with same payload.
@@ -314,6 +394,8 @@ implementation_plan:
       function_name: test_ping_pong_basic
       type: create
       status: pending
+      size: m
+      size_rationale: "~60-80 lines - new test file with 3 test cases, setup/teardown, follows existing pattern"
       implementation_details: |
         Create new integration test file with test cases:
         1. test_ping_pong_basic - send ping, verify pong response

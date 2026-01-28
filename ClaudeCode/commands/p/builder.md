@@ -27,10 +27,8 @@ You are ONLY allowed to:
 ## Usage
 
 ```bash
-/p:builder [path_to_yaml]
+/p:builder
 ```
-
-- `path_to_yaml`: Optional path to requirements.yaml (default: search in current/parent directories)
 
 ## Purpose
 
@@ -103,8 +101,7 @@ Pattern Content:
  * @param len Payload length
  * @return 0 on success, -1 on error
  */
-int websocket_send_frame(ws_client_t *client, uint8_t opcode,
-                         const uint8_t *payload, size_t len)
+int websocket_send_frame(ws_client_t *client, uint8_t opcode, const uint8_t *payload, size_t len)
 {
     if (client == NULL) {
         LOG_ERROR("websocket: client is NULL");
@@ -215,7 +212,7 @@ Use the Task tool with these exact parameters:
 | Parameter | Value |
 |-----------|-------|
 | `description` | "Implement task-XXX" (short description) |
-| `subagent_type` | `"general-purpose"` |
+| `subagent_type` | `"p:implement-agent"` |
 | `prompt` | The full Implementation Package from Phase 3 |
 
 **The prompt you send to the Task tool must include these instructions for the subagent:**
@@ -436,4 +433,4 @@ NOT YOUR JOB:
 
 **The ONLY way you implement tasks is by launching the Task tool with a subagent.**
 
-If you catch yourself about to use Edit/Write on a .c/.h/.lua/.py file: **STOP IMMEDIATELY** and use the Task tool instead.
+If you catch yourself about to use Edit/Write on a .js/.ts/.json/.html/.css/.vue/.c/.h/.lua/.py file: **STOP IMMEDIATELY** and use the Task tool instead.

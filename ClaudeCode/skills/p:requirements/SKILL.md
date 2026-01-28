@@ -116,6 +116,8 @@ When this skill is activated:
    - `constraints`: Technical and business constraints
    - `success_criteria`: Criteria for successful completion
    - `implementation_plan`: Detailed implementation plan with:
+     - `total_effort`: Aggregated T-shirt size estimate (ss/s/m/l/xl/xxl)
+     - `effort_breakdown`: Count of tasks per size category
      - `affected_files`: Files to be modified
      - `new_files`: Files to be created
      - `reference_files`: Files to use as reference
@@ -125,6 +127,8 @@ When this skill is activated:
        - `file_path`: Target file
        - `function_name`: Function to implement (if applicable)
        - `type`: create/modify/delete
+       - `size`: T-shirt size effort estimate (ss/s/m/l/xl/xxl)
+       - `size_rationale`: Explanation for the size estimate (optional)
        - `implementation_details`: Detailed implementation instructions
        - `code_references`: Related code to reference
        - `api_references`: Documentation references
