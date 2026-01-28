@@ -101,9 +101,8 @@ def show_tasks(yaml_file):
         print(f"   Progress: {percentage:.1f}%")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: task-show-all.py /path/to/requirements.yaml")
-        sys.exit(1)
+    yaml_file = "requirements.yaml"
+    if len(sys.argv) == 2:
+        yaml_file = sys.argv[1]
 
-    yaml_file = sys.argv[1]
     show_tasks(yaml_file)
