@@ -98,9 +98,54 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 8. Create a dependency graph from task dependencies
 9. Determine task execution order (topological sort), excluding already completed tasks
 
-## 2. Task Execution Loop
+## 2. Task Status Update Policy
+
+**Script location**: `~/.claude/scripts/task-update.py`
+
+**Syntax**:
+- Single task: `~/.claude/scripts/task-update.py <status> <task_id>`
+- Multiple tasks: `~/.claude/scripts/task-update.py <status> <task1> <task2> ...`
+
+**When to use batch update**:
+- Multiple independent tasks can be executed in parallel (no interdependencies)
+- Cancelling multiple tasks at once (interruption, scope change, user abort)
+- Rolling back a group of related tasks after failure
+
+**Examples**:
+```bash
+# Single task update
+~/.claude/scripts/task-update.py in_progress task-001
+
+# Batch update - parallel tasks starting
+~/.claude/scripts/task-update.py in_progress task-002 task-003 task-004
+
+# Batch update - parallel tasks completed
+~/.claude/scripts/task-update.py completed task-002 task-003 task-004
+
+# Batch cancel - abort remaining tasks
+~/.claude/scripts/task-update.py cancel task-005 task-006 task-007
+```
+
+## 3. Task Execution Loop
 
 For each task in dependency order:
+
+### Parallel Execution Strategy
+
+When the dependency graph allows, multiple tasks can be executed in parallel:
+
+1. **Identify parallelizable tasks**: Tasks with no interdependencies (same or no dependencies)
+2. **Batch mark as in_progress**:
+   ```bash
+   ~/.claude/scripts/task-update.py in_progress task-002 task-003 task-004
+   ```
+3. **Execute tasks** (can use parallel tool calls if appropriate)
+4. **Batch mark as completed** (only after ALL parallel tasks pass verification):
+   ```bash
+   ~/.claude/scripts/task-update.py completed task-002 task-003 task-004
+   ```
+
+**Note**: If any parallel task fails, do NOT batch complete - handle the failure individually.
 
 ### a. Pre-task validation
 - Verify all dependent tasks are completed successfully
@@ -178,7 +223,10 @@ If any verification step fails:
 - Ask user whether to:
   1. Fix the error automatically (keep task `in_progress`)
   2. Skip this task and continue (keep task `in_progress`)
-  3. Abort implementation (keep task `in_progress`)
+  3. Abort implementation:
+     - Keep failed task as `in_progress`
+     - **Batch cancel all remaining `pending` tasks**:
+       `~/.claude/scripts/task-update.py cancel <remaining_task_ids>`
 - DO NOT proceed to next task until current task is verified
 - Only mark `completed` when ALL verification steps pass
 
@@ -193,7 +241,7 @@ If any verification step fails:
 - If using `/p:requirements` skill, the updated task status will be visible in the task list
 - **CRITICAL**: NEVER manually edit requirements.yaml - ALWAYS use the task-update.py script
 
-## 3. Post-implementation
+## 4. Post-implementation
 
 After all tasks are completed:
 
@@ -211,7 +259,7 @@ After all tasks are completed:
    - Add `implementation_date: YYYY-MM-DD`
    - Add any notes about implementation deviations
 
-## 4. Quality Checks
+## 5. Quality Checks
 
 Before marking implementation complete:
 
