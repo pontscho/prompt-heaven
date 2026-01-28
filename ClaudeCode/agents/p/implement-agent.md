@@ -23,6 +23,12 @@ This command takes a completed implementation plan (from `/p:task-plan`) and exe
 - Tests each task after completion
 - Reports progress and handles errors
 
+# Language
+
+- **Thinking**: English - **YOU MUST THINK IN ENGLISH. NO EXCEPTIONS.**
+- **Communication with user**: Language of the conversation
+- **Code/commits/docs**: English
+
 # Prerequisites
 
 Before running this command:
@@ -70,6 +76,97 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 - ✅ Use the same logging approach
 
 # Workflow
+
+---
+
+## CRITICAL: task-update.py Usage
+
+**YOU MUST USE THIS SCRIPT TO UPDATE TASK STATUS. NO EXCEPTIONS.**
+
+### Script Location and Syntax
+
+```bash
+~/.claude/scripts/task-update.py <status> <task_id> [yaml_path]
+```
+
+### Valid Statuses
+
+| Status | When to Use |
+|--------|-------------|
+| `in_progress` | IMMEDIATELY when starting a task, BEFORE any code changes |
+| `completed` | ONLY after ALL verification passes (lint, build, test) |
+| `cancel` | When task is cancelled or skipped |
+
+### Correct Usage Examples
+
+```bash
+# Starting a task - do this FIRST before any code changes
+~/.claude/scripts/task-update.py in_progress task-001
+
+# After successful verification - ONLY when lint+build+test ALL pass
+~/.claude/scripts/task-update.py completed task-001
+
+# Cancelling a task
+~/.claude/scripts/task-update.py cancel task-001
+```
+
+### FORBIDDEN - DO NOT DO THESE
+
+```
+❌ ~/.claude/scripts/task-update.py completed task-001   # WITHOUT running verification first
+❌ ~/.claude/scripts/task-update.py done task-001        # "done" is NOT a valid status
+❌ ~/.claude/scripts/task-update.py finish task-001      # "finish" is NOT a valid status
+❌ ~/.claude/scripts/task-update.py complete task-001    # "complete" is NOT a valid status (use "completed")
+❌ ~/.claude/scripts/task-update.py pending task-001     # Don't set back to pending
+❌ Manually editing requirements.yaml                     # NEVER edit YAML directly
+❌ Marking completed before build passes                  # MUST verify first
+❌ Marking completed before tests pass                    # MUST verify first
+❌ Marking completed before lint passes                   # MUST verify first
+❌ Forgetting to mark in_progress at start               # ALWAYS mark in_progress first
+```
+
+### Task Status Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      CORRECT FLOW                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. task-update.py in_progress task-XXX   ← FIRST (before code) │
+│                     │                                           │
+│                     ▼                                           │
+│  2. Write/Edit code                                             │
+│                     │                                           │
+│                     ▼                                           │
+│  3. Run lint        → if FAIL → fix and retry (stay in_progress)│
+│                     │                                           │
+│                     ▼                                           │
+│  4. Run build       → if FAIL → fix and retry (stay in_progress)│
+│                     │                                           │
+│                     ▼                                           │
+│  5. Run tests       → if FAIL → fix and retry (stay in_progress)│
+│                     │                                           │
+│                     ▼                                           │
+│  6. ALL PASSED? ────┬─── NO  → DO NOT mark completed            │
+│                     │                                           │
+│                     YES                                         │
+│                     │                                           │
+│                     ▼                                           │
+│  7. task-update.py completed task-XXX   ← LAST (after ALL pass) │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### When Verification Fails
+
+If ANY verification step fails (lint, build, or test):
+1. **DO NOT** run `task-update.py completed`
+2. **KEEP** the task as `in_progress`
+3. Fix the issue
+4. Re-run verification
+5. Only mark `completed` when ALL checks pass
+
+---
 
 ## 1. Initialization
 
@@ -345,3 +442,27 @@ This helps you understand:
 - Which tasks are in progress
 - Which tasks are still pending
 - Overall implementation progress
+
+---
+
+## FINAL REMINDER: task-update.py
+
+**BEFORE you mark ANY task as completed, verify:**
+
+1. ✓ Lint passed? (`clang-tidy` / `luac -p` / etc.)
+2. ✓ Build passed? (`cmake --build build`)
+3. ✓ Tests passed? (if applicable)
+
+**If ANY of these failed: DO NOT run `task-update.py completed`**
+
+```
+CORRECT:
+~/.claude/scripts/task-update.py in_progress task-001  ← at START
+[...do work, verify everything...]
+~/.claude/scripts/task-update.py completed task-001    ← at END (after ALL checks pass)
+
+WRONG:
+~/.claude/scripts/task-update.py done task-001         ← "done" is INVALID
+~/.claude/scripts/task-update.py complete task-001     ← "complete" is INVALID (use "completed")
+~/.claude/scripts/task-update.py completed task-001    ← WITHOUT verification = WRONG
+```
