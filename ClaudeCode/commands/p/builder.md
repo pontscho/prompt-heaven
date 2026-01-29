@@ -44,58 +44,77 @@ This command is a **lightweight orchestrator** - it passes minimal task informat
 
 ## Workflow
 
-### Phase 1: Initialization
+### Phase 1: Initialization & Planning
 
-1. **Load requirements.yaml**:
-   - Path: `${PROJECT_ROOT}/requirements.yaml`
-   - If file doesn't exist, report error and exit
-   - Extract task list only (no need for full context)
+**Run the combined task-plan script** to display status and batch plan:
 
-2. **Display current task status**:
-   ```bash
-   ~/.claude/scripts/task-show-all.py ${PROJECT_ROOT}/requirements.yaml
-   ```
+```bash
+~/.claude/scripts/task-plan.py ${PROJECT_ROOT}/requirements.yaml
+```
 
-3. **Identify incomplete tasks**:
-   - Look for tasks with status `pending` or `in_progress`
+This single script outputs:
+1. **Task Status** - All tasks with status, size, description
+2. **Summary** - Statistics (completed, pending, in_progress, effort breakdown)
+3. **Dependency Analysis** - Execution levels based on task dependencies
+4. **Batch Plan** - Optimized batches for execution
 
-4. **Ask for confirmation**:
-   - "Found X pending/in_progress tasks. Proceed with implementation?"
-   - Allow user to cancel
+#### What the Script Does
 
-### Phase 2: Task Batching Analysis
+1. **Parses requirements.yaml** and extracts all task metadata
+2. **Builds dependency graph** from task `dependencies` field
+3. **Topological sort** to create execution levels:
+   - Level 1: Tasks with no dependencies (can run first)
+   - Level N: Tasks whose dependencies are all in levels < N
+4. **File conflict detection**: Tasks sharing files (target or references) cannot be batched
+5. **Greedy best-fit batching** within each level (smallest tasks first)
 
-Same batching rules as original builder:
+#### Batching Rules (implemented by script)
 
-#### Size Score Mapping
+Tasks can be batched if ALL conditions are met:
+1. **Same execution level** (no dependencies between them)
+2. **Combined score ≤ 6** (SS=1, S=2, M=3, L=4, XL=5, XXL=6)
+3. **No file conflicts** (no shared files in their scope)
+4. **No maximum batch size** (limited only by combined score)
 
-| Size | Score |
-|------|-------|
-| SS | 1 |
-| S | 2 |
-| M | 3 |
-| L | 4 |
-| XL | 5 |
-| XXL | 6 |
-| - (undefined) | 3 (default to M) |
-
-#### Batching Rules
-
-Two consecutive tasks can be batched if ALL conditions are met:
-1. **Combined score ≤ 4**
-2. **No interdependencies**
-3. **No file conflicts**
-4. **Maximum batch size**: 2 tasks
-
-#### Display Batching Plan
+#### Example Output
 
 ```
-Task Batching Plan:
-   Batch 1: task-001 (SS) + task-002 (S) -> combined score: 3
-   Batch 2: task-003 (M) -> single task
+TASK STATUS
+--------------------------------------------------------------------------------------------------------------------
+  Task ID  | Status     | Size | Description
+  ---------+------------+------+------------------------------------------------------------------------------------
+  task-001 | ⏳ pending | SS   | Update tools.h to include correct mimalloc header based on version
+  task-002 | ⏳ pending | M    | Create shared mimalloc initialization helper header
+  task-003 | ⏳ pending | S    | Update ngs-stream-proxy main.c to use shared mimalloc init
 
-   Total: 3 tasks in 2 batches
+📊 SUMMARY: 0/3 tasks completed (0%)
+   ✅ Completed:   0
+   🚧 In Progress: 0
+   ⏳ Pending:     3
+   📏 Effort: SS:1 | S:1 | M:1
+
+DEPENDENCY ANALYSIS
+--------------------------------------------------------------------------------------------------------------------
+  Level 1 (independent): task-001
+  Level 2 (after L1): task-002
+  Level 3 (after L2): task-003
+
+BATCH PLAN
+--------------------------------------------------------------------------------------------------------------------
+  Batch  | Tasks                          | Score | Note
+  -------+--------------------------------+-------+-----------------------------------------------------------------
+  1      | task-001                       | 1     | file conflict / no compatible
+  2      | task-002                       | 3     | file conflict / no compatible
+  3      | task-003                       | 2     | file conflict / no compatible
+
+📊 TOTAL: 3 tasks in 3 batches across 3 levels
 ```
+
+#### Ask for Confirmation
+
+After displaying the plan:
+- "Found X pending/in_progress tasks in Y batches. Proceed with implementation?"
+- Allow user to cancel
 
 ### Phase 3: Launch Implementation Agent
 
@@ -252,17 +271,18 @@ All verifications passed: Yes
 
 ```
 YOUR JOB:
-+---------------------------------------+
-| 1. Read requirements.yaml             |  <- OK
-| 2. Show tasks, ask confirmation       |  <- OK
-| 3. Calculate batches                  |  <- OK
-| 4. Launch Task with minimal info      |  <- OK (KEY STEP)
-| 5. Check result                       |  <- OK
-| 6. STOP on error, continue on success |  <- OK
-+---------------------------------------+
++--------------------------------------------------+
+| 1. Run task-plan.py (status + batch plan)        |  <- OK (ONE SCRIPT)
+| 2. Ask user confirmation                         |  <- OK
+| 3. Iterate batches, launch Task for each         |  <- OK (KEY STEP)
+| 4. Check result                                  |  <- OK
+| 5. STOP on error, continue on success            |  <- OK
++--------------------------------------------------+
 
 NOT YOUR JOB:
 +------------------------------------+
+| X Calculate dependencies manually  |  <- Script does this
+| X Detect file conflicts manually   |  <- Script does this
 | X Read code references             |  <- Agent does this
 | X Read target file contents        |  <- Agent does this
 | X Assemble implementation packages |  <- Agent handles it
