@@ -1,26 +1,26 @@
 # Builder Command
 
-Task orchestrator that implements incomplete tasks from requirements.yaml by delegating to the implement agent with pre-loaded context.
+Lightweight task orchestrator that delegates implementation to the p:implement-agent. The builder is intentionally "dumb" - it only manages task flow and error handling.
 
 ---
 
-## CRITICAL: YOU ARE AN ORCHESTRATOR, NOT AN IMPLEMENTER
+## CRITICAL: YOU ARE A LIGHTWEIGHT ORCHESTRATOR
 
 **YOU MUST USE THE `Task` TOOL TO DELEGATE IMPLEMENTATION.**
 
 You are STRICTLY PROHIBITED from:
 - Writing code yourself (no Edit, no Write to source files)
 - Implementing tasks directly
+- Reading code references or gathering implementation context
 - Running build/test commands for implementation purposes
-- Any action that modifies source code
 
 You are ONLY allowed to:
-- Read files (to gather context for the subagent)
-- Use `Task` tool to launch implement subagent
+- Read requirements.yaml (to get task list)
+- Use `Task` tool to launch p:implement-agent
 - Communicate with user (status updates, confirmations, error handling)
-- Use Bash for read-only operations (git status, find, ls)
+- Use Bash for task status scripts only
 
-**If you find yourself about to write code: STOP. Package the information and launch a Task instead.**
+**Your job is SIMPLE: Pass task info to the agent and supervise execution.**
 
 ---
 
@@ -32,9 +32,9 @@ You are ONLY allowed to:
 
 ## Purpose
 
-This command is a **"Fat Prompt" orchestrator** - it collects ALL information needed for implementation BEFORE launching the implement agent via the `Task` tool. The implement agent receives everything in its prompt and can work with minimal tool calls.
+This command is a **lightweight orchestrator** - it passes minimal task information to the p:implement-agent, which handles all context gathering and implementation itself.
 
-**Key principle**: The implement agent should NOT need to read files - only write and execute.
+**Key principle**: The implementation agent reads `${PROJECT_ROOT}/docs/feature-implementation-plan.md` and gathers its own context.
 
 ## Language
 
@@ -47,390 +47,226 @@ This command is a **"Fat Prompt" orchestrator** - it collects ALL information ne
 ### Phase 1: Initialization
 
 1. **Load requirements.yaml**:
-   - Path: `${PROJECT_ROOT}/requirements.yaml` (always in project root, no searching needed)
+   - Path: `${PROJECT_ROOT}/requirements.yaml`
    - If file doesn't exist, report error and exit
-   - Read the full YAML file
-   - Extract: `context_summary`, `implementation_plan`, `success_criteria`
+   - Extract task list only (no need for full context)
 
-2. **Display current task status using script**:
+2. **Display current task status**:
    ```bash
    ~/.claude/scripts/task-show-all.py ${PROJECT_ROOT}/requirements.yaml
    ```
-   - This script shows ALL tasks with their current status
-   - DO NOT manually count or parse tasks - trust the script output
-   - The script output shows: task IDs, statuses, descriptions, and summary
 
-3. **Identify incomplete tasks from script output**:
-   - Look for tasks with status `pending` or `in_progress` in the script output
-   - These are the tasks to be implemented
+3. **Identify incomplete tasks**:
+   - Look for tasks with status `pending` or `in_progress`
 
 4. **Ask for confirmation**:
    - "Found X pending/in_progress tasks. Proceed with implementation?"
    - Allow user to cancel
 
-### Phase 2: Pre-Implementation Data Collection
+### Phase 2: Task Batching Analysis
 
-For EACH incomplete task, collect the following **BEFORE** launching the implement agent:
+Same batching rules as original builder:
 
-#### 2.1 Task Specification
-Extract from YAML:
-- `task_id`, `description`, `type`, `file_path`, `function_name`
-- `implementation_details`, `test_requirements`
-- `dependencies` (verify all are completed)
-- `code_references` (list of reference files/functions)
+#### Size Score Mapping
 
-#### 2.2 Code Reference Contents
-**CRITICAL**: Read the ACTUAL CODE, not just paths!
+| Size | Score |
+|------|-------|
+| SS | 1 |
+| S | 2 |
+| M | 3 |
+| L | 4 |
+| XL | 5 |
+| XXL | 6 |
+| - (undefined) | 3 (default to M) |
 
-For each item in `code_references`:
-- Parse the reference (e.g., `"src/websocket.c:websocket_send_frame"`)
-- Read the file
-- Extract the relevant function/section (30-100 lines typically)
-- Store as `pattern_content` with source attribution
+#### Batching Rules
 
-Example:
-```
-Reference: src/websocket.c:websocket_send_frame
-↓ READ FILE ↓
-Pattern Content:
-/**
- * @brief Send a WebSocket frame
- * @param client The client connection
- * @param opcode Frame opcode
- * @param payload Data to send
- * @param len Payload length
- * @return 0 on success, -1 on error
- */
-int websocket_send_frame(ws_client_t *client, uint8_t opcode, const uint8_t *payload, size_t len)
-{
-    if (client == NULL) {
-        LOG_ERROR("websocket: client is NULL");
-        return -1;
-    }
-    // ... rest of function
-}
-```
+Two consecutive tasks can be batched if ALL conditions are met:
+1. **Combined score ≤ 4**
+2. **No interdependencies**
+3. **No file conflicts**
+4. **Maximum batch size**: 2 tasks
 
-#### 2.3 Target File Content
-- Read the FULL content of the file to be modified/created
-- For `modify` tasks: include the entire file so implement agent has context
-- For `create` tasks: read a similar file as template reference
-- Note the insertion point (function name, line number, section)
-
-#### 2.4 Project Conventions
-Extract from `context_summary` in YAML (if present), or summarize from CLAUDE.md:
-- Memory management pattern
-- Error handling pattern
-- Logging pattern
-- Naming conventions
-- Indentation rules
-
-#### 2.5 Verification Commands
-Determine based on file type and project:
-- **Lint command**: e.g., `CLANG_TIDY_FILE='...' make -C build clang_tidy_standalone`
-- **Build command**: e.g., `cmake --build build`
-- **Test command**: e.g., `build/src/tests/c-unit-tests suite:test_name`
-
-### Phase 3: Implementation Package Assembly
-
-Assemble a structured "Implementation Package" for the implement agent:
+#### Display Batching Plan
 
 ```
-═══════════════════════════════════════════════════════════════
-IMPLEMENTATION PACKAGE FOR: task-003
-═══════════════════════════════════════════════════════════════
+Task Batching Plan:
+   Batch 1: task-001 (SS) + task-002 (S) -> combined score: 3
+   Batch 2: task-003 (M) -> single task
 
-## Task Specification
-
-- **Task ID**: task-003
-- **Type**: modify
-- **Description**: Handle incoming ping frames and auto-respond with pong
-- **File**: /project/src/core/websocket/websocket-server.c
-- **Function**: websocket_handle_frame
-- **Dependencies**: task-001 (completed), task-002 (completed)
-
-## Implementation Details
-
-[Full implementation_details from YAML]
-
-## Test Requirements
-
-[Full test_requirements from YAML]
-
-## Code Patterns to Follow
-
-### Pattern 1: websocket_send_frame (error handling + frame sending)
-Source: src/core/websocket/websocket-server.c:145-210
-```c
-[ACTUAL CODE - 30-60 lines]
+   Total: 3 tasks in 2 batches
 ```
 
-### Pattern 2: websocket_send_pong (similar function)
-Source: src/core/websocket/websocket-server.c:212-245
-```c
-[ACTUAL CODE - 30-40 lines]
-```
+### Phase 3: Launch Implementation Agent
 
-## Target File Content
+**YOU MUST USE THE `Task` TOOL HERE.**
 
-File: /project/src/core/websocket/websocket-server.c
-Modification point: function websocket_handle_frame (line 320)
+For each task or batch, launch the implementation agent with MINIMAL information:
 
-```c
-[FULL FILE CONTENT]
-```
-
-## Project Conventions
-
-- **Memory**: Use mm_malloc/mm_free, never check allocation return
-- **Errors**: Return -1 on error, 0 on success
-- **Logging**: LOG_ERROR/WARNING/INFO/DEBUG macros
-- **Naming**: snake_case for functions and variables
-- **Indentation**: TABS only, never spaces
-- **NULL checks**: Use `if (ptr)` for non-NULL, `if (ptr == NULL)` for NULL
-
-## Verification Commands
-
-1. **Lint**: CLANG_TIDY_FILE='src/core/websocket/websocket-server.c' make -C build clang_tidy_standalone
-2. **Build**: cmake --build build
-3. **Test**: build/src/tests/c-unit-tests websocket:handle_ping
-
-## Status Update
-
-On completion: ~/.claude/scripts/task-update.py completed task-003
-On failure: leave as in_progress (do not update)
-
-═══════════════════════════════════════════════════════════════
-```
-
-### Phase 4: Launch Implement Agent
-
-**YOU MUST USE THE `Task` TOOL HERE. DO NOT IMPLEMENT YOURSELF.**
-
-Use the Task tool with these exact parameters:
-
-| Parameter | Value |
-|-----------|-------|
-| `description` | "Implement task-XXX" (short description) |
-| `subagent_type` | `"p:implement-agent"` |
-| `prompt` | The full Implementation Package from Phase 3 |
-
-**The prompt you send to the Task tool must include these instructions for the subagent:**
+#### Single Task Launch
 
 ```
-You are an implementation agent. Your task is to implement EXACTLY what is specified below.
-
-RULES:
-- DO NOT read any files - all information you need is provided in this prompt
-- DO NOT ask questions - implement exactly as specified
-- DO use Edit/Write tools to make code changes
-- DO use Bash for lint, build, test, and status update commands
-
-[... INSERT FULL IMPLEMENTATION PACKAGE FROM PHASE 3 HERE ...]
-
-EXECUTION STEPS:
-1. Make the code changes using Edit/Write
-2. Run the lint command
-3. Run the build command
-4. Run the test command
-5. If all pass: run the status update command
-6. Report success or failure with details
+Task tool parameters:
+- description: "Implement task-XXX"
+- subagent_type: "p:implement-agent"
+- prompt: <see below>
 ```
 
-**CRITICAL**: The implement agent prompt must contain EVERYTHING. The subagent should:
-- NOT read any files (all content is in the prompt)
-- ONLY use Edit/Write tools to make changes
-- ONLY use Bash for lint/build/test/status update
-- Complete the task in 5-7 tool calls maximum
+**Prompt template for single task:**
 
-**REMEMBER: If you are about to use Edit/Write on source code yourself, STOP. You must delegate via Task tool.**
+```
+TASK IMPLEMENTATION REQUEST
+===========================
 
-### Phase 5: Result Processing
+Task ID: {task_id}
+Description: {description}
+Size: {size}
+Type: {type}
+File: {file_path}
+Function: {function_name}
 
-After implement agent returns:
+Dependencies completed: {list of completed dependency IDs}
+
+---
+
+INSTRUCTIONS:
+1. Read feature-implementation-plan.md from project root
+2. Find your task specification
+3. Gather necessary context (code references, target files)
+4. Implement the task
+5. Run verification (lint, build, test)
+6. Update task status
+
+PROJECT ROOT: {project_root}
+```
+
+#### Batched Tasks Launch
+
+```
+TASK IMPLEMENTATION REQUEST (BATCH)
+===================================
+
+TASK 1:
+- Task ID: {task_id_1}
+- Description: {description_1}
+- Size: {size_1}
+- Type: {type_1}
+- File: {file_path_1}
+- Function: {function_name_1}
+
+TASK 2:
+- Task ID: {task_id_2}
+- Description: {description_2}
+- Size: {size_2}
+- Type: {type_2}
+- File: {file_path_2}
+- Function: {function_name_2}
+
+---
+
+INSTRUCTIONS:
+1. Read ${PROJECT_ROOT}/docs/feature-implementation-plan.md from project root
+2. Find specifications for BOTH tasks
+3. Implement TASK 1, then TASK 2
+4. Run verification after BOTH are complete
+5. Update task status for both
+
+PROJECT ROOT: {project_root}
+```
+
+### Phase 4: Result Processing
+
+After implementation agent returns:
 
 1. **Check result**:
-   - Success: Task completed, tests pass
-   - Failure: Build error, test failure, or other issue
+   - Success: Proceed to next task/batch
+   - Failure: **STOP IMMEDIATELY**
 
 2. **On Success**:
-   - Log: "Task task-XXX completed successfully"
-   - Proceed to next task
+   - Log: "Task/Batch completed successfully"
+   - Proceed to next task/batch
 
-3. **On Failure**:
+3. **On Failure** (CRITICAL - STOP ON ERROR):
    - Display error details
-   - Ask user:
-     - "Retry with fixes?" → Re-launch implement agent with error context
-     - "Skip and continue?" → Move to next task (current stays in_progress)
-     - "Abort?" → Stop implementation, show summary
+   - **DO NOT continue to next task**
+   - Report to user:
+     ```
+     IMPLEMENTATION STOPPED
+     =======================
+     Failed task: task-XXX
+     Error: [error details]
 
-4. **Progress Update**:
-   - Show: "Completed X/Y tasks"
-   - Update any progress indicators
+     Completed before failure: X tasks
+     Remaining: Y tasks
 
-### Phase 6: Completion
+     Please fix the issue and re-run /p:builder
+     ```
+   - Exit immediately
 
-After all tasks processed:
+### Phase 5: Completion
 
-1. **Display final status**:
-   ```
-   ══════════════════════════════════════════════════════════
-   IMPLEMENTATION COMPLETE
-   ══════════════════════════════════════════════════════════
-   Tasks completed: 4/4
-   Files modified: 2
-   Files created: 1
-   All tests passing: Yes
-   ══════════════════════════════════════════════════════════
-   ```
+After all tasks processed successfully:
 
-2. **Run final verification**:
-   - Full test suite: `ctest --test-dir build`
-   - Report any failures
-
-3. **Summary**:
-   - List of completed tasks
-   - List of modified/created files
-   - Any warnings or notes
+```
+IMPLEMENTATION COMPLETE
+=======================
+Tasks completed: X/X
+Batches executed: Y
+All verifications passed: Yes
+```
 
 ## Error Handling
 
 **requirements.yaml not found**:
-- File must exist at `${PROJECT_ROOT}/requirements.yaml`
-- Report error: "requirements.yaml not found in project root"
-- Exit gracefully
+- Report error and exit
 
 **No incomplete tasks**:
 - Report "All tasks already completed!"
-- Show current status
 - Exit normally
 
-**Dependency not met**:
-- Report which dependency is missing
-- Skip task or ask user how to proceed
-
-**Implement agent failure**:
-- Capture error output
-- Offer retry/skip/abort options
-- Preserve progress (completed tasks stay completed)
+**Implementation agent failure**:
+- **STOP IMMEDIATELY**
+- Report which task failed
+- Report error details
+- Exit - do NOT continue
 
 **User cancellation**:
 - Exit gracefully
-- No status changes to incomplete tasks
-- Show what was completed
+- No status changes
 
-## Implementation Package Quality Checklist
+## Key Differences from Original Builder
 
-Before launching implement agent, verify the package contains:
-
-- [ ] Complete task specification (all fields from YAML)
-- [ ] ALL code reference contents (actual code, not paths)
-- [ ] Target file full content (for modify) or template (for create)
-- [ ] Project conventions summary
-- [ ] Correct verification commands for file type
-- [ ] Status update command
-
-**If any item is missing**: Collect it before launching agent!
-
-## Example Session
-
-```
-User: /p:builder
-
-[Loading requirements.yaml from project root...]
-[Running: ~/.claude/scripts/task-show-all.py /project/requirements.yaml]
-
-============================================================
-Task ID              | Status         | Description
-============================================================
-task-001            | ✅ completed    | Add ping/pong constants
-task-002            | ✅ completed    | Implement send_ping
-task-003            | ⏳ pending      | Handle incoming ping
-task-004            | ⏳ pending      | Create integration test
-============================================================
-
-📊 Summary: 2/4 tasks completed
-   ✅ Completed: 2
-   ⏳ Pending: 2
-   Progress: 50.0%
-
-Proceed with implementing 2 pending tasks? (yes/no)
-
-User: yes
-
-[Preparing task-003...]
-- Reading code references: websocket_send_frame, websocket_send_pong
-- Reading target file: websocket-server.c
-- Assembling implementation package...
-
-[Launching Task tool for task-003...]
-[Agent: Edit websocket-server.c]
-[Agent: Bash clang-tidy - passed]
-[Agent: Bash build - passed]
-[Agent: Bash test - passed]
-[Agent: Bash task-update.py completed task-003]
-
-Task task-003 completed (1/2)
-
-[Preparing task-004...]
-- Reading code references: test-websocket-frame.c
-- Reading test patterns...
-- Assembling implementation package...
-
-[Launching implement agent for task-004...]
-[Agent: Write test-websocket-ping.c]
-[Agent: Bash clang-tidy - passed]
-[Agent: Bash build - passed]
-[Agent: Bash test - 3/3 passed]
-[Agent: Bash status update - completed]
-
-Task task-004 completed (2/2)
-
-══════════════════════════════════════════════════════════
-IMPLEMENTATION COMPLETE
-══════════════════════════════════════════════════════════
-Tasks completed: 2/2
-Files modified: 1 (websocket-server.c)
-Files created: 1 (test-websocket-ping.c)
-All tests passing: Yes
-══════════════════════════════════════════════════════════
-```
-
-## Important Notes
-
-- **Fat Prompt principle**: ALL information goes to implement agent upfront
-- **Minimal agent tool calls**: Implement agent should need only 5-7 calls
-- **No file reading by implement agent**: Everything is in the prompt
-- **Sequential execution**: One task at a time, wait for completion
-- **Progress preservation**: Status updates saved to YAML after each task
-- **Resumable**: Re-running continues from incomplete tasks
+| Aspect | Original Builder | Builder NG |
+|--------|------------------|------------|
+| Context gathering | Builder collects everything | Agent does it |
+| Prompt size | Fat (full code included) | Minimal (just task info) |
+| Code reading | Builder reads all references | Agent reads as needed |
+| Error handling | Retry/skip/abort options | STOP on first error |
+| Complexity | High | Low |
 
 ---
 
 ## FINAL REMINDER: YOUR ROLE
 
-**YOU ARE AN ORCHESTRATOR. YOU DO NOT WRITE CODE.**
+**YOU ARE A LIGHTWEIGHT ORCHESTRATOR. YOU DO NOT GATHER CONTEXT.**
 
 ```
 YOUR JOB:
-┌─────────────────────────────────────┐
-│ 1. Read files to gather context     │  ← OK
-│ 2. Assemble implementation package  │  ← OK
-│ 3. Launch Task tool with package    │  ← OK (THIS IS THE KEY STEP)
-│ 4. Process results                  │  ← OK
-│ 5. Report to user                   │  ← OK
-└─────────────────────────────────────┘
++---------------------------------------+
+| 1. Read requirements.yaml             |  <- OK
+| 2. Show tasks, ask confirmation       |  <- OK
+| 3. Calculate batches                  |  <- OK
+| 4. Launch Task with minimal info      |  <- OK (KEY STEP)
+| 5. Check result                       |  <- OK
+| 6. STOP on error, continue on success |  <- OK
++---------------------------------------+
 
 NOT YOUR JOB:
-┌─────────────────────────────────────┐
-│ ✗ Edit source code files            │  ← FORBIDDEN
-│ ✗ Write new source files            │  ← FORBIDDEN
-│ ✗ Run build commands yourself       │  ← FORBIDDEN
-│ ✗ Run test commands yourself        │  ← FORBIDDEN
-│ ✗ Implement ANY part of the task    │  ← FORBIDDEN
-└─────────────────────────────────────┘
++------------------------------------+
+| X Read code references             |  <- Agent does this
+| X Read target file contents        |  <- Agent does this
+| X Assemble implementation packages |  <- Agent handles it
+| X Provide retry options on failure |  <- Just STOP
+| X Write any code                   |  <- FORBIDDEN
++------------------------------------+
 ```
-
-**The ONLY way you implement tasks is by launching the Task tool with a subagent.**
-
-If you catch yourself about to use Edit/Write on a .js/.ts/.json/.html/.css/.vue/.c/.h/.lua/.py file: **STOP IMMEDIATELY** and use the Task tool instead.

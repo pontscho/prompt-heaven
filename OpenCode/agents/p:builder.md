@@ -49,55 +49,101 @@ This command provides a fully automated build workflow:
    - Ask user if they want to proceed
    - Allow user to cancel if needed
 
-## 2. Implementation
+## 2. Task Batching Analysis
+
+Before implementation, analyze tasks for potential batching to improve efficiency.
+
+### Size Score Mapping
+
+| Size | Score |
+|------|-------|
+| SS | 1 |
+| S | 2 |
+| M | 3 |
+| L | 4 |
+| XL | 5 |
+| XXL | 6 |
+| - (undefined) | 3 (default to M) |
+
+### Batching Rules
+
+Two consecutive tasks can be batched if ALL conditions are met:
+
+1. **Combined score ≤ 4**: `score(task_A) + score(task_B) ≤ 4`
+   - SS + SS = 2 ✅
+   - SS + S = 3 ✅
+   - SS + M = 4 ✅
+   - S + S = 4 ✅
+   - S + M = 5 ❌
+   - XL + SS = 6 ❌
+
+2. **No interdependencies**: Task B must NOT depend on Task A
+
+3. **No file conflicts**: Tasks must NOT modify the same file
+
+4. **Maximum batch size**: 2 tasks per batch
+
+### Display Batching Plan
+
+```
+📦 Task Batching Plan:
+   Batch 1: task-001 (SS) + task-002 (S) → combined score: 3
+   Batch 2: task-003 (M) → single task (no compatible pair)
+
+   Total: 3 tasks in 2 batches
+```
+
+## 3. Implementation
 
 If user confirms:
 
-1. **CRITICAL** **Extract incomplete task IDs from requirements.yaml**:
+1. **CRITICAL** **Extract incomplete task IDs and sizes from requirements.yaml**:
    ```bash
-   ~/.claude/scripts/task-show-all.py [path_to_requirements.yaml] | grep -B 1 "status: \(pending\|in_progress\)"
+   ~/.claude/scripts/task-show-all.py [path_to_requirements.yaml]
    ```
-   - MUST Use this script to extract only the task_id values where status is "pending" or "in_progress"
-   - **DO NOT load or parse task content** - only extract IDs
-   - Store task IDs in an array (e.g., [task-003, task-004, task-005])
+   - Extract task_id and size for pending/in_progress tasks
+   - Apply batching algorithm to create batch list
+   - Store as batches: e.g., [[task-001, task-002], [task-003]]
 
-2. **Iterate through task IDs and delegate one at a time**:
+2. **Iterate through batches**:
 
-   For each task_id in the list:
+   For each batch in the list:
 
-   a. **Launch p:implement agent with single task ID**:
-      ```
-      /p:implement requirements.yaml <task_id>
-
-      Example: /p:implement requirements.yaml task-003
-      ```
-      - **IMPORTANT**: Pass only ONE task ID at a time
-      - p:builder does NOT load task content, only passes the ID
+   a. **Launch p:implement agent**:
+      - **Single task batch**:
+        ```
+        /p:implement requirements.yaml task-003
+        ```
+      - **Batched tasks (2 tasks)**:
+        ```
+        /p:implement requirements.yaml task-001 task-002
+        ```
+      - p:builder does NOT load task content, only passes the IDs
       - The p:implement agent loads task content using task-implementation-plan.py script
 
-   b. **Wait for task completion**:
+   b. **Wait for batch completion**:
       - The p:implement agent handles:
-        - Loading the implementation plan for the single task
-        - Executing the task (checking dependencies first)
-        - Running tests after the task
-        - Marking task as completed
+        - Loading the implementation plan for the task(s)
+        - Executing tasks (checking dependencies first)
+        - Running tests after completion
+        - Marking task(s) as completed
         - Error handling and recovery
-      - Wait for p:implement to finish before proceeding to next task
+      - Wait for p:implement to finish before proceeding to next batch
 
-   c. **Check task result**:
-      - If task completed successfully: continue to next task
-      - If task failed: ask user whether to continue or abort
+   c. **Check batch result**:
+      - If all tasks completed successfully: continue to next batch
+      - If any task failed: ask user whether to continue or abort
 
-   d. **Repeat** for next task ID
+   d. **Repeat** for next batch
 
 3. **Monitor progress**:
-   - Show progress after each task: "Completed X/Y tasks"
+   - Show progress after each batch: "Completed X/Y tasks (batch Z)"
    - All task status changes are automatically saved to requirements.yaml
    - User can see real-time progress
 
-## 3. Completion
+## 4. Completion
 
-After p:implement finishes:
+After all batches are processed:
 
 1. **Display final status**:
    ```bash
@@ -143,81 +189,104 @@ User: /p:builder
 ✓ Found: /project/requirements.yaml
 
 [Display current status...]
-============================================================
-Task ID              | Status         | Description
-============================================================
-task-001            | ✅ completed    | Add ping/pong frame constants
-task-002            | ✅ completed    | Implement websocket_send_ping
-task-003            | ⏳ pending      | Handle incoming ping frames
-task-004            | ⏳ pending      | Create integration test
-============================================================
+==================================================================================================================================
+Task ID                        | Status          | Size   | Description
+==================================================================================================================================
+task-001                       | ⏳ pending       | SS     | Add ping/pong frame type constants
+task-002                       | ⏳ pending       | S      | Implement websocket_send_ping function
+task-003                       | ⏳ pending       | S      | Handle incoming ping frames
+task-004                       | ⏳ pending       | M      | Create integration test
+==================================================================================================================================
 
-📊 Summary: 2/4 tasks completed
-   ✅ Completed: 2
-   🚧 In Progress: 0
-   ⏳ Pending: 2
-   Progress: 50.0%
+📊 Summary: 0/4 tasks completed
+   ⏳ Pending: 4
+   Progress: 0.0%
 
-Found 2 incomplete tasks to implement: task-003, task-004
+📏 Effort breakdown:
+   SS:1 | S:2 | M:1
+
+Found 4 incomplete tasks to implement.
 
 Proceed? (yes/no)
 
 User: yes
 
-[Extracting incomplete task IDs...]
-✓ Found pending/in_progress tasks: task-003 task-004
+[Analyzing tasks for batching...]
 
-[Launching p:implement agent for task-003...]
-[p:implement agent output for task-003...]
-✓ Task task-003 completed successfully (1/2)
+📦 Task Batching Plan:
+   Batch 1: task-001 (SS) + task-002 (S) → combined score: 3 ✅
+   Batch 2: task-003 (S) + task-004 (M) → combined score: 5 ❌
+   → task-003 (S) → single task
+   → task-004 (M) → single task
 
-[Launching p:implement agent for task-004...]
-[p:implement agent output for task-004...]
-✓ Task task-004 completed successfully (2/2)
+   Total: 4 tasks in 3 batches
+
+[Launching p:implement for Batch 1: task-001 + task-002...]
+[p:implement agent output...]
+✓ Batch 1 completed: task-001 + task-002 (2/4 tasks done)
+
+[Launching p:implement for task-003...]
+[p:implement agent output...]
+✓ Task task-003 completed (3/4 tasks done)
+
+[Launching p:implement for task-004...]
+[p:implement agent output...]
+✓ Task task-004 completed (4/4 tasks done)
 
 [After completion, show final status...]
-============================================================
-Task ID              | Status         | Description
-============================================================
-task-001            | ✅ completed    | Add ping/pong frame constants
-task-002            | ✅ completed    | Implement websocket_send_ping
-task-003            | ✅ completed    | Handle incoming ping frames
-task-004            | ✅ completed    | Create integration test
-============================================================
+==================================================================================================================================
+Task ID                        | Status          | Size   | Description
+==================================================================================================================================
+task-001                       | ✅ completed     | SS     | Add ping/pong frame type constants
+task-002                       | ✅ completed     | S      | Implement websocket_send_ping function
+task-003                       | ✅ completed     | S      | Handle incoming ping frames
+task-004                       | ✅ completed     | M      | Create integration test
+==================================================================================================================================
 
 📊 Summary: 4/4 tasks completed
    ✅ Completed: 4
    Progress: 100.0%
 
+📏 Effort breakdown:
+   SS:1 | S:2 | M:1
+
 ✅ All tasks completed successfully!
+   Batches executed: 3 (1 batched, 2 single)
 ```
 
 # Important Notes
 
 - **Fully automated**: Minimal user interaction required (just confirmation)
+- **Smart batching**: Small tasks (SS, S) are automatically batched when combined score ≤ 4
 - **Resumable**: Can be re-run to continue from where it stopped
 - **Status preservation**: All progress is saved to requirements.yaml automatically
 - **Delegated implementation**: All actual work is done by p:implement agent
 - **Read-only task display**: Uses task-show-all.py to show status before/after
 - **Simple interface**: Just run the command and confirm
 
-# How Task IDs Are Passed
+# How Task Batching Works
 
-The p:builder agent works as a lightweight orchestrator that processes tasks one at a time:
+The p:builder agent works as a lightweight orchestrator that batches small tasks:
 
-1. Uses grep/awk to extract only task_id values where status is "pending" or "in_progress"
-2. **Does NOT load or parse task content** - only extracts task identifiers
-3. Collects task IDs into a list (e.g., [task-003, task-004, task-005])
-4. **Iterates through the list, processing ONE task at a time**:
-   - Passes single task ID to p:implement: `/p:implement <yaml_path> task-003`
-   - Waits for p:implement to complete the task
-   - If successful, proceeds to next task: `/p:implement <yaml_path> task-004`
+1. Uses task-show-all.py to extract task_id and size for pending/in_progress tasks
+2. **Applies batching algorithm**:
+   - Checks if consecutive tasks can be batched (combined score ≤ 4)
+   - Verifies no dependencies between tasks in batch
+   - Verifies no file conflicts (different file_path)
+   - Maximum 2 tasks per batch
+3. Creates batch list: e.g., [[task-001, task-002], [task-003], [task-004]]
+4. **Iterates through batches**:
+   - Single task: `/p:implement <yaml_path> task-003`
+   - Batched tasks: `/p:implement <yaml_path> task-001 task-002`
+   - Waits for p:implement to complete the batch
+   - If successful, proceeds to next batch
    - If failed, asks user whether to continue or abort
 5. The p:implement agent loads full task content via task-implementation-plan.py script
 
 This approach ensures:
-- **Sequential execution**: Tasks are processed one after another
-- **Error isolation**: A failure in one task doesn't prevent asking about continuing
-- **Progress visibility**: User sees completion after each task
-- **Lightweight orchestration**: p:builder only handles task IDs, not content
+- **Efficient execution**: Small tasks are combined to reduce overhead
+- **Sequential batch execution**: Batches are processed one after another
+- **Error isolation**: A failure in one batch doesn't prevent asking about continuing
+- **Progress visibility**: User sees completion after each batch
+- **Lightweight orchestration**: p:builder only handles task IDs and sizes, not content
 - **Clear separation**: p:implement handles all task content and implementation logic
