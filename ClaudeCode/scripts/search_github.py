@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 GitHub code search using grep.app API with Python standard library only.
-Usage: python3 search_github.py "search query" [options]
+Usage:
+  python3 search_github.py "search query" [options]
+  python3 search_github.py "query1" "query2" "query3"  # batch mode
 """
 
 import sys
@@ -211,12 +213,13 @@ def build_github_url(repo, path, branch, line_number=None):
     return base
 
 
-def format_results(results):
+def format_results(results, query=None):
     """
     Format search results for output.
 
     Args:
         results: List of result dicts
+        query: Optional query string for section header
 
     Returns:
         Formatted string for output
@@ -225,6 +228,10 @@ def format_results(results):
         return "No results found."
 
     output = []
+
+    if query:
+        output.append(f"## Query: {query}")
+        output.append("")
 
     for i, result in enumerate(results, 1):
         repo = result.get('repo', 'Unknown')
@@ -235,19 +242,21 @@ def format_results(results):
         url = result.get('url', '')
 
         # Result header
-        output.append(f"# Result {i}: {repo} - {file_path}")
-        output.append(f"URL: {url}")
-        output.append(f"Branch: {branch}")
-        output.append(f"Language: {language}")
+        output.append(f"### Result {i}: {repo} - {file_path}")
+        output.append(f"**URL**: {url}")
+        output.append(f"**Branch**: {branch}")
+        output.append(f"**Language**: {language}")
 
         # Code snippet with line numbers
         if code_lines:
             first_line = code_lines[0][0]
             last_line = code_lines[-1][0]
-            output.append(f"Line {first_line}-{last_line}:")
+            output.append(f"**Line {first_line}-{last_line}:**")
+            output.append("```")
 
             for line_num, code in code_lines:
-                output.append(f"    {code}")
+                output.append(f"{code}")
+            output.append("```")
         else:
             output.append("No code snippet available")
 
@@ -274,12 +283,14 @@ Examples:
   %(prog)s "useEffect" --repo facebook/react
   %(prog)s "import torch" --path models/
   %(prog)s "neural network" --lang Python --path src/ --limit 5
+  %(prog)s "query1" "query2" "query3"  # batch mode
         '''
     )
 
     parser.add_argument(
         'query',
-        help='Search query string'
+        nargs='+',
+        help='Search query string(s) - multiple queries for batch mode'
     )
 
     parser.add_argument(
@@ -311,20 +322,51 @@ def main():
     """Main function."""
     args = parse_arguments()
 
-    # Perform search
-    results = search_github(
-        query=args.query,
-        lang=args.lang,
-        repo=args.repo,
-        path=args.path,
-        limit=args.limit
-    )
+    # Get queries list
+    queries = args.query if isinstance(args.query, list) else [args.query]
 
-    if not results:
-        sys.exit(1)
+    # Single query mode
+    if len(queries) == 1:
+        results = search_github(
+            query=queries[0],
+            lang=args.lang,
+            repo=args.repo,
+            path=args.path,
+            limit=args.limit
+        )
 
-    # Format and print results
-    print(format_results(results))
+        if not results:
+            sys.exit(1)
+
+        print(format_results(results))
+    else:
+        # Batch mode: process multiple queries
+        output_sections = []
+        has_results = False
+
+        for query in queries:
+            results = search_github(
+                query=query,
+                lang=args.lang,
+                repo=args.repo,
+                path=args.path,
+                limit=args.limit
+            )
+
+            if results:
+                has_results = True
+                output_sections.append(format_results(results, query=query))
+            else:
+                # Include failed query in output
+                output_sections.append(f"## Query: {query}\n\nNo results found.\n")
+
+        if not has_results:
+            print("No results found for any query.", file=sys.stderr)
+            sys.exit(1)
+
+        # Print markdown document with all results
+        print("# GitHub Search Results\n")
+        print('\n---\n\n'.join(output_sections))
 
 
 if __name__ == '__main__':

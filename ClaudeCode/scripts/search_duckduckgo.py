@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 DuckDuckGo search script using only Python standard library.
-Usage: python3 search_duckduckgo.py "search phrase"
+Usage:
+  python3 search_duckduckgo.py "search phrase"
+  python3 search_duckduckgo.py "query1" "query2" "query3"  # batch mode
 """
 
 import sys
@@ -106,18 +108,27 @@ def search_duckduckgo(query):
         return []
 
 
-def format_results(results):
-    """Format search results for output."""
+def format_results(results, query=None):
+    """Format search results for output.
+
+    Args:
+        results: List of result dicts
+        query: Optional query string for section header
+    """
     output = []
+
+    if query:
+        output.append(f"## Query: {query}")
+        output.append("")
 
     for i, result in enumerate(results, 1):
         title = result.get('title', 'No title')
         url = result.get('url', 'No URL')
         snippet = result.get('snippet', 'No snippet available')
 
-        output.append(f"# Result {i}: {title}")
-        output.append(f"URL: {url}")
-        output.append(f"Snippet: {snippet}")
+        output.append(f"### Result {i}: {title}")
+        output.append(f"**URL**: {url}")
+        output.append(f"**Snippet**: {snippet}")
         output.append("")  # Empty line between results
 
     return '\n'.join(output)
@@ -125,18 +136,40 @@ def format_results(results):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 search_duckduckgo.py \"search phrase\"", file=sys.stderr)
+        print("Usage: python3 search_duckduckgo.py \"search phrase\" [\"query2\" \"query3\" ...]", file=sys.stderr)
         sys.exit(1)
 
-    query = ' '.join(sys.argv[1:])
+    # Batch mode: each argument is a separate query
+    queries = sys.argv[1:]
 
-    results = search_duckduckgo(query)
+    # If only one argument, treat as single query
+    if len(queries) == 1:
+        results = search_duckduckgo(queries[0])
+        if not results:
+            print("No results found or error occurred.", file=sys.stderr)
+            sys.exit(1)
+        print(format_results(results))
+    else:
+        # Batch mode: process multiple queries
+        output_sections = []
+        has_results = False
 
-    if not results:
-        print("No results found or error occurred.", file=sys.stderr)
-        sys.exit(1)
+        for query in queries:
+            results = search_duckduckgo(query)
+            if results:
+                has_results = True
+                output_sections.append(format_results(results, query=query))
+            else:
+                # Include failed query in output
+                output_sections.append(f"## Query: {query}\n\nNo results found.\n")
 
-    print(format_results(results))
+        if not has_results:
+            print("No results found for any query.", file=sys.stderr)
+            sys.exit(1)
+
+        # Print markdown document with all results
+        print("# DuckDuckGo Search Results\n")
+        print('\n---\n\n'.join(output_sections))
 
 
 if __name__ == '__main__':
