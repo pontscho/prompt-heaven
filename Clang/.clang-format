@@ -161,30 +161,12 @@ IncludeCategories:
   - Regex: '^<(net|arpa).*/'
     Priority: 4
     SortPriority: 40
+  - Regex: '^<std.*\.h>'
+    Priority: 4
+    SortPriority: 45
   - Regex: '^<[^/].*\.h'
     Priority: 6
     SortPriority: 60
-  - Regex: '^<jpeglib\.h>'
-    Priority: 7
-    SortPriority: 65
-  - Regex: '^<png\.h>'
-    Priority: 7
-    SortPriority: 65
-  - Regex: 'poluah-internal.h'
-    Priority: 7
-    SortPriority: 70
-  - Regex: 'poluah-cdefs.h'
-    Priority: 7
-    SortPriority: 70
-  - Regex: 'poluah-mem.h'
-    Priority: 7
-    SortPriority: 70
-  - Regex: 'poluah-endian.h'
-    Priority: 7
-    SortPriority: 70
-  - Regex: 'polua.h'
-    Priority: 8
-    SortPriority: 70
   - Regex: '^\".*\.h\"' # keep this last, but order with prio
     Priority: 8
     SortPriority: 80
