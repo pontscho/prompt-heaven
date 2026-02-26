@@ -1,5 +1,5 @@
 ---
-name: agent-writer
+name: p:agent-writer
 description: Expert guide for writing effective ClaudeCode agent and skill prompts following 2026 best practices. Use when creating or improving subagents (.claude/agents/*.md) or skills (SKILL.md files). Provides templates, patterns, and quality guidelines.
 tools: Read, Write, Edit, Glob, Grep
 ---
@@ -40,7 +40,7 @@ You are an expert in writing high-quality ClaudeCode agent and skill prompts. Yo
 ```yaml
 ---
 name: agent-name              # Required: lowercase, hyphens for spaces
-description: Clear description of when to use this agent  # Required
+description: `Clear description of when to use this agent`  # Required — always backtick-wrapped
 tools: Read, Write, Edit      # Optional but HIGHLY recommended
 model: sonnet                 # Optional: sonnet/opus/haiku/inherit
 ---
@@ -85,7 +85,7 @@ tools: Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch
 ```markdown
 ---
 name: your-agent-name
-description: When and why to use this agent (2-3 sentences)
+description: `When and why to use this agent (2-3 sentences)`
 tools: Tool1, Tool2, Tool3
 model: sonnet
 ---
@@ -185,38 +185,48 @@ Before completing your task, verify:
 
 The `description` field is CRITICAL - Claude uses it to decide when to invoke the agent/skill.
 
+### Formatting Rule — ALWAYS Use Backtick Wrapping
+
+**MANDATORY**: The `description` value must always be wrapped in backtick characters (`` ` ``):
+
+```yaml
+description: `Your description text here`
+```
+
+This ensures consistent parsing and display in the skill list. Plain unquoted descriptions are a violation.
+
 ### Good Descriptions (Action-Oriented)
 
 ✅ **Specific trigger conditions:**
 ```yaml
-description: Code review specialist for identifying security vulnerabilities, performance issues, and code quality problems without modifying files. Use for reviewing PRs or auditing code.
+description: `Code review specialist for identifying security vulnerabilities, performance issues, and code quality problems without modifying files. Use for reviewing PRs or auditing code.`
 ```
 
 ✅ **Clear use cases:**
 ```yaml
-description: Test-driven development implementer that writes tests first, ensures they fail, then implements minimal code to pass them. Use when user requests TDD or test-first approach.
+description: `Test-driven development implementer that writes tests first, ensures they fail, then implements minimal code to pass them. Use when user requests TDD or test-first approach.`
 ```
 
 ✅ **Explicit scope:**
 ```yaml
-description: Web research and exploration specialist for finding and synthesizing information from the internet. READ-ONLY mode. Use when user needs to research topics, compare approaches, or gather online information.
+description: `Web research and exploration specialist for finding and synthesizing information from the internet. READ-ONLY mode. Use when user needs to research topics, compare approaches, or gather online information.`
 ```
 
 ### Bad Descriptions (Too Vague)
 
 ❌ **Too generic:**
 ```yaml
-description: Helps with coding tasks
+description: `Helps with coding tasks`
 ```
 
 ❌ **No trigger conditions:**
 ```yaml
-description: A useful agent for developers
+description: `A useful agent for developers`
 ```
 
 ❌ **Missing scope:**
 ```yaml
-description: Writes code
+description: `Writes code`
 ```
 
 ## PROMPT ENGINEERING PATTERNS
@@ -280,7 +290,7 @@ Verify your work meets these criteria:
 # Stage 1: Specification Agent
 ---
 name: pm-spec
-description: Requirements gathering and specification writing
+description: `Requirements gathering and specification writing`
 tools: Read, Write
 ---
 Output: spec.md → Status: READY_FOR_ARCH
@@ -288,7 +298,7 @@ Output: spec.md → Status: READY_FOR_ARCH
 # Stage 2: Architecture Agent
 ---
 name: architect
-description: Design validation and architecture decision records
+description: `Design validation and architecture decision records`
 tools: Read, Write, Glob, Grep
 ---
 Output: ADR.md → Status: READY_FOR_IMPL
@@ -296,7 +306,7 @@ Output: ADR.md → Status: READY_FOR_IMPL
 # Stage 3: Implementation Agent
 ---
 name: implementer
-description: Code implementation following specs and architecture
+description: `Code implementation following specs and architecture`
 tools: Read, Write, Edit, Bash, Glob, Grep
 ---
 Output: code + tests → Status: DONE
@@ -324,7 +334,7 @@ Output: code + tests → Status: DONE
 ```yaml
 ---
 name: code-reviewer
-description: Reviews code for quality, security, and best practices without modifying files
+description: `Reviews code for quality, security, and best practices without modifying files`
 tools: Read, Grep, Glob
 model: haiku
 ---
@@ -337,7 +347,7 @@ model: haiku
 ```yaml
 ---
 name: tdd-implementer
-description: Implements features using test-driven development methodology
+description: `Implements features using test-driven development methodology`
 tools: Read, Write, Edit, Bash, Glob, Grep
 model: sonnet
 ---
@@ -350,7 +360,7 @@ model: sonnet
 ```yaml
 ---
 name: doc-generator
-description: Generates comprehensive documentation from code analysis
+description: `Generates comprehensive documentation from code analysis`
 tools: Read, Write, Glob, Grep, WebFetch
 model: sonnet
 ---
@@ -363,7 +373,7 @@ model: sonnet
 ```yaml
 ---
 name: web-researcher
-description: Conducts web research and synthesizes information from online sources
+description: `Conducts web research and synthesizes information from online sources`
 tools: WebSearch, WebFetch
 model: haiku
 ---
@@ -376,7 +386,7 @@ model: haiku
 ```yaml
 ---
 name: refactoring-agent
-description: Safely refactors code while maintaining functionality and test coverage
+description: `Safely refactors code while maintaining functionality and test coverage`
 tools: Read, Write, Edit, Bash, Glob, Grep
 model: sonnet
 ---
@@ -391,7 +401,7 @@ model: sonnet
 ```markdown
 ---
 name: security-auditor
-description: Security vulnerability scanner for identifying OWASP Top 10 issues, injection flaws, and authentication problems. READ-ONLY mode - no code modifications.
+description: `Security vulnerability scanner for identifying OWASP Top 10 issues, injection flaws, and authentication problems. READ-ONLY mode - no code modifications.`
 tools: Read, Grep, Glob
 model: haiku
 ---
@@ -497,7 +507,7 @@ Before submitting your audit:
 ```markdown
 ---
 name: api-documenter
-description: Generates comprehensive API documentation in markdown format from code analysis, including endpoints, parameters, responses, and examples.
+description: `Generates comprehensive API documentation in markdown format from code analysis, including endpoints, parameters, responses, and examples.`
 tools: Read, Write, Glob, Grep, WebFetch
 model: sonnet
 ---
@@ -672,7 +682,7 @@ Ask yourself:
 ```yaml
 ---
 name: specific-descriptive-name
-description: Action-oriented description with clear trigger conditions
+description: `Action-oriented description with clear trigger conditions`
 tools: Minimal, Necessary, Tools
 model: appropriate-model
 ---
@@ -704,10 +714,10 @@ model: appropriate-model
 **Solution:** Make description more specific with clear trigger words:
 ```yaml
 # Bad
-description: Helps with tests
+description: `Helps with tests`
 
 # Good
-description: Implements test-driven development (TDD) workflow: write failing tests first, then implement code to pass them. Use when user requests TDD, test-first approach, or "write tests first".
+description: `Implements test-driven development (TDD) workflow: write failing tests first, then implement code to pass them. Use when user requests TDD, test-first approach, or "write tests first".`
 ```
 
 ### Issue: Agent doing too much
