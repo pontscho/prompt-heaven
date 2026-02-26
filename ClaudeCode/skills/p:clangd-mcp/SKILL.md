@@ -1,10 +1,12 @@
 ---
 name: p:clangd-mcp
 description: >
-  C/C++ code intelligence via clangd LSP. One tool in tools/list: clangd_call.
-  13 functions: init, find_definition, find_definition_at, find_references,
-  find_implementations_at, workspace_symbols, document_outline, symbol_context,
-  inlay_hints, symbol_change_impact, hover, diagnostics, deduced_type_at.
+  MANDATORY for ALL C and C++ work. When you touch .c, .cpp, .h, or .hpp files,
+  you MUST use this skill — NOT grep, NOT Read-and-search, NOT guessing.
+  Provides compiler-accurate code intelligence via clangd LSP: find definitions,
+  references, diagnostics, hover types, document outline, refactoring impact.
+  One tool: clangd_call. 13 functions. All analysis calls are freely batchable.
+  Using grep for C/C++ symbol navigation when this skill is available is a violation.
 triggers:
   - clangd
   - C code analysis
@@ -14,7 +16,6 @@ triggers:
   - go to definition
   - code intelligence
   - clangd_call
-  - clangd_init
   - compiler diagnostics
   - hover info
   - inlay hints
@@ -30,6 +31,8 @@ The MCP server (`mcp-clangd.py`) exposes **one tool in `tools/list`**:
 
 All clangd operations go through `clangd_call(function=..., params={...})`.
 
+> **Note**: `clangd_init` is called automatically by the server on startup. You do NOT need to call it — jump straight to analysis calls.
+
 ## How to call any function
 
 ```
@@ -39,30 +42,12 @@ mcp__mcp-clangd__clangd_call(
 )
 ```
 
-**Example — initialize:**
-```
-mcp__mcp-clangd__clangd_call(function="clangd_init", params={
-  "project_root": "/path/to/project"
-})
-```
-
 **Example — find definition:**
 ```
 mcp__mcp-clangd__clangd_call(function="clangd_find_definition", params={
   "symbol_name": "my_function"
 })
 ```
-
----
-
-## Workflow
-
-```
-clangd_init { project_root }     ← ALWAYS first
-  → [any analysis tools]         ← freely batchable after init
-```
-
-`clangd_init` must complete before any other function is called.
 
 ---
 
@@ -77,7 +62,7 @@ Returns server status and active project when called without `function`.
 ---
 
 ### clangd_init
-Initialize clangd for a project. Launches clangd, performs LSP handshake, waits for background indexing.
+Initialize clangd for a project. Called automatically on server startup — **you do not need to call this manually.**
 ```json
 {
   "project_root": "/path/to/project",   // required
@@ -282,7 +267,7 @@ All location objects returned by this server follow this structure:
 **Send multiple independent `clangd_call`s in a single response** (multi-tool message).
 The server serializes execution, but only ONE model API round-trip is needed.
 
-### Safe to batch (read-only — after init)
+### Safe to batch (all read-only calls)
 
 | Function | Notes |
 |---|---|
@@ -296,13 +281,6 @@ The server serializes execution, but only ONE model API round-trip is needed.
 | `clangd_inlay_hints` | |
 | `clangd_diagnostics` | multiple files at once |
 | `clangd_deduced_type_at` | multiple positions at once |
-
-### Must be sequential
-
-```
-clangd_init                    ← always first
-  → [any analysis tools]       ← freely batchable
-```
 
 - `clangd_symbol_context` already batches definition + references internally — prefer it over separate calls.
 - `clangd_symbol_change_impact` already batches definition + references + call hierarchy — prefer it for impact analysis.
@@ -318,41 +296,36 @@ clangd_init                    ← always first
 
 ## Common workflows
 
-### Understand an unknown symbol (2 turns)
+### Understand an unknown symbol
 ```
-Turn 1: clangd_init { project_root }
-Turn 2: [BATCH] clangd_symbol_context { symbol_name: "my_func" }
-              + clangd_document_outline { path: "src/main.c" }
-              + clangd_diagnostics { path: "src/main.c" }
-```
-
-### Refactoring impact check (2 turns)
-```
-Turn 1: clangd_init { project_root }
-Turn 2: clangd_symbol_change_impact { symbol_name: "my_func", max_references: 50 }
+[BATCH] clangd_symbol_context { symbol_name: "my_func" }
+      + clangd_document_outline { path: "src/main.c" }
+      + clangd_diagnostics { path: "src/main.c" }
 ```
 
-### Multiple symbol definitions (2 turns)
+### Refactoring impact check
 ```
-Turn 1: clangd_init { project_root }
-Turn 2: [BATCH] clangd_find_definition { symbol_name: "func_a" }
-              + clangd_find_definition { symbol_name: "func_b" }
-              + clangd_find_definition { symbol_name: "MyStruct" }
+clangd_symbol_change_impact { symbol_name: "my_func", max_references: 50 }
 ```
 
-### Check diagnostics across multiple files (2 turns)
+### Multiple symbol definitions
 ```
-Turn 1: clangd_init { project_root }
-Turn 2: [BATCH] clangd_diagnostics { path: "src/main.c" }
-              + clangd_diagnostics { path: "src/parser.c" }
-              + clangd_diagnostics { path: "src/lexer.c" }
+[BATCH] clangd_find_definition { symbol_name: "func_a" }
+      + clangd_find_definition { symbol_name: "func_b" }
+      + clangd_find_definition { symbol_name: "MyStruct" }
 ```
 
-### Hover + inlay hints for a function (2 turns)
+### Check diagnostics across multiple files
 ```
-Turn 1: clangd_init { project_root }
-Turn 2: [BATCH] clangd_hover { path: "src/main.c", line: 42, character: 5 }
-              + clangd_inlay_hints { path: "src/main.c", start_line: 30, end_line: 60 }
+[BATCH] clangd_diagnostics { path: "src/main.c" }
+      + clangd_diagnostics { path: "src/parser.c" }
+      + clangd_diagnostics { path: "src/lexer.c" }
+```
+
+### Hover + inlay hints for a function
+```
+[BATCH] clangd_hover { path: "src/main.c", line: 42, character: 5 }
+      + clangd_inlay_hints { path: "src/main.c", start_line: 30, end_line: 60 }
 ```
 
 ---
@@ -361,5 +334,5 @@ Turn 2: [BATCH] clangd_hover { path: "src/main.c", line: 42, character: 5 }
 
 - **Lines and characters** in `params` are **1-based** (human-readable). The server converts to 0-based LSP internally.
 - **`compile_commands_dir`**: pass this if `compile_commands.json` is in a build subdirectory (e.g. `build/`).
-- **Indexing**: `clangd_init` waits up to 60 seconds for background indexing. Subsequent calls will have accurate symbol data.
 - **Path resolution**: relative paths are resolved against `project_root`.
+- **`path` parameter**: also accepts `file_path` as a fallback alias.

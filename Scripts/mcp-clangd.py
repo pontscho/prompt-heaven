@@ -26,11 +26,20 @@ from typing import Any, Dict, List, Optional
 # ============================================================
 
 DEBUG = False
+MARKDOWN_MODE = False
+_log_file: Optional[str] = None
 
 
 def debug_log(message: str) -> None:
-    if DEBUG:
-        print(f"[DEBUG] {message}", file=sys.stderr, flush=True)
+    if not DEBUG:
+        return
+    line = f"[DEBUG] {message}\n"
+    if _log_file:
+        with open(_log_file, "a", encoding="utf-8") as f:
+            f.write(line)
+    else:
+        sys.stderr.write(line)
+        sys.stderr.flush()
 
 
 # ============================================================
@@ -215,6 +224,11 @@ class ClangdClient:
         ]
         if compile_commands_dir:
             args.append(f"--compile-commands-dir={compile_commands_dir}")
+
+        # Ensure compile-commands-dir is set so clangd stores the background
+        # index in <project_root>/.cache/clangd/index/ instead of ~/Library/Caches/
+        if not compile_commands_dir:
+            args.append(f"--compile-commands-dir={self.project_root}")
 
         self.process = await asyncio.create_subprocess_exec(
             *args,
@@ -764,7 +778,7 @@ async def handle_find_definition_at(args: dict) -> Any:
     params: { path, line, character, context_lines? }
     """
     client = _require_client()
-    path = args.get("path", "")
+    path = args.get("path") or args.get("file_path", "")
     line = int(args.get("line", 1)) - 1   # human (1-based) → LSP (0-based)
     char = int(args.get("character", 1)) - 1
     context_lines = int(args.get("context_lines", 5))
@@ -854,7 +868,7 @@ async def handle_find_implementations_at(args: dict) -> Any:
     params: { path, line, character, context_lines? }
     """
     client = _require_client()
-    path = args.get("path", "")
+    path = args.get("path") or args.get("file_path", "")
     line = int(args.get("line", 1)) - 1
     char = int(args.get("character", 1)) - 1
     context_lines = int(args.get("context_lines", 5))
@@ -908,7 +922,7 @@ async def handle_document_outline(args: dict) -> Any:
     params: { path }
     """
     client = _require_client()
-    path = args.get("path", "")
+    path = args.get("path") or args.get("file_path", "")
     if not path:
         return {"error": "path is required"}
 
@@ -977,7 +991,7 @@ async def handle_inlay_hints(args: dict) -> Any:
     params: { path, start_line?, end_line?, limit? }
     """
     client = _require_client()
-    path = args.get("path", "")
+    path = args.get("path") or args.get("file_path", "")
     start_line = int(args.get("start_line", 1)) - 1
     end_line = int(args.get("end_line", 9999)) - 1
     limit = int(args.get("limit", 100))
@@ -1070,7 +1084,7 @@ async def handle_hover(args: dict) -> Any:
     params: { path, line, character }
     """
     client = _require_client()
-    path = args.get("path", "")
+    path = args.get("path") or args.get("file_path", "")
     line = int(args.get("line", 1)) - 1
     char = int(args.get("character", 1)) - 1
     if not path:
@@ -1099,7 +1113,7 @@ async def handle_diagnostics(args: dict) -> Any:
     params: { path, timeout? }
     """
     client = _require_client()
-    path = args.get("path", "")
+    path = args.get("path") or args.get("file_path", "")
     timeout = float(args.get("timeout", 10.0))
     if not path:
         return {"error": "path is required"}
@@ -1132,7 +1146,7 @@ async def handle_deduced_type_at(args: dict) -> Any:
     params: { path, line, character }
     """
     client = _require_client()
-    path = args.get("path", "")
+    path = args.get("path") or args.get("file_path", "")
     line = int(args.get("line", 1)) - 1
     char = int(args.get("character", 1)) - 1
     if not path:
@@ -1270,16 +1284,21 @@ async def handle_clangd_call(args: dict, server: Optional["McpServer"] = None) -
     function = args.get("function", "")
     params = args.get("params") or {}
 
+    def _serialize(fn: str, data: Any) -> str:
+        if MARKDOWN_MODE:
+            return _result_to_markdown(fn, data)
+        return json.dumps(data, ensure_ascii=False)
+
     if not function:
         # If auto-init is still running, report that
         if server and server._init_task and not server._init_task.done():
-            return json.dumps({"status": "initializing", "project_root": server.auto_project_root or "—"})
+            return _serialize("", {"status": "initializing", "project_root": server.auto_project_root or "—"})
         status = "running" if (_client and _client.process) else "not initialized"
         root = _client.project_root if _client else "—"
-        return json.dumps({"status": status, "project_root": root})
+        return _serialize("", {"status": status, "project_root": root})
 
     if function == "clangd_call":
-        return json.dumps({"error": "Cannot dispatch clangd_call recursively"})
+        return _serialize("", {"error": "Cannot dispatch clangd_call recursively"})
 
     # If auto-init is in progress and the requested function needs the client,
     # wait for it to complete (up to 90s) rather than failing immediately.
@@ -1295,10 +1314,196 @@ async def handle_clangd_call(args: dict, server: Optional["McpServer"] = None) -
     handler = ALL_HANDLERS.get(function)
     if handler is None:
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
-        return json.dumps({"error": f"Unknown function: '{function}'. Available: {available}"})
+        return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
 
     result = await handler(params)
-    return json.dumps(result, indent=2, ensure_ascii=False)
+    return _serialize(function, result)
+
+
+# ============================================================
+# Markdown output formatter
+# ============================================================
+
+def _md_loc(loc: dict) -> str:
+    if not loc:
+        return "?"
+    path = loc.get("path", "?")
+    start = loc.get("range_human", {}).get("start", {})
+    line = start.get("line", "?")
+    return f"{path}:{line}"
+
+
+def _md_context(ctx: Any) -> str:
+    if not ctx:
+        return ""
+    return f"\n```cpp\n{ctx.strip()}\n```"
+
+
+def _md_location_block(loc: dict, context: Any = None) -> str:
+    line_text = loc.get("line_text", "")
+    ref = _md_loc(loc)
+    out = f"{ref}"
+    if line_text:
+        out += f" — `{line_text.strip()}`"
+    if context:
+        out += _md_context(context)
+    return out
+
+
+def _result_to_markdown(function: str, result: Any) -> str:
+    sep = "\n"
+
+    if isinstance(result, dict) and "error" in result:
+        return f"ERROR: {result['error']}"
+
+    if not function:
+        if isinstance(result, dict) and "status" in result:
+            return f"status: {result['status']} | root: {result.get('project_root', '—')}"
+        return json.dumps(result, ensure_ascii=False)
+
+    if function in ("clangd_find_definition", "clangd_find_definition_at"):
+        if not result:
+            return "No definition found"
+        parts = []
+        for item in (result if isinstance(result, list) else [result]):
+            sym = item.get("symbol", "")
+            header = f"## Definition{': ' + sym if sym else ''}"
+            parts.append(header + sep + _md_location_block(item.get("location", {}), item.get("context")))
+        return sep.join(parts)
+
+    if function == "clangd_find_references":
+        sym = result.get("symbol", "")
+        count = result.get("count", 0)
+        refs = result.get("references", [])
+        lines = [f"## References: {sym} ({count})"]
+        for r in refs:
+            lines.append("- " + _md_location_block(r.get("location", {})))
+        return sep.join(lines)
+
+    if function == "clangd_find_implementations_at":
+        if not result:
+            return "No implementations found"
+        lines = ["## Implementations"]
+        for item in (result if isinstance(result, list) else [result]):
+            lines.append("- " + _md_location_block(item.get("location", {}), item.get("context")))
+        return sep.join(lines)
+
+    if function == "clangd_workspace_symbols":
+        if not result:
+            return "No symbols found"
+        lines = ["## Workspace Symbols"]
+        for s in (result if isinstance(result, list) else [result]):
+            kind = s.get("kind", "")
+            sym = s.get("symbol", s.get("name", ""))
+            loc = _md_loc(s.get("location", {}))
+            lines.append(f"- {kind} **{sym}** {loc}")
+        return sep.join(lines)
+
+    if function == "clangd_document_outline":
+        lines = ["## Outline"]
+        def _fmt_node(node: dict, indent: int = 0) -> None:
+            kind = node.get("kind", "")
+            sym = node.get("symbol", "")
+            detail = node.get("detail", "")
+            loc_node = node.get("selection") or node.get("location") or {}
+            path = loc_node.get("path", "")
+            rh = loc_node.get("range_human", {})
+            start = rh.get("start", {})
+            end = rh.get("end", {})
+            line = start.get("line", "?")
+            end_line = end.get("line", "?")
+            line_text = loc_node.get("line_text", "")
+            prefix = "  " * indent + "- "
+            detail_str = f" `{detail}`" if detail else ""
+            loc_str = f" {path}:{line}-{end_line}" if path else f" :{line}"
+            text_str = f" — `{line_text.strip()}`" if line_text else ""
+            lines.append(f"{prefix}{kind} **{sym}**{detail_str}{loc_str}{text_str}")
+            for child in node.get("children", []):
+                _fmt_node(child, indent + 1)
+        for node in (result if isinstance(result, list) else [result]):
+            _fmt_node(node)
+        return sep.join(lines)
+
+    if function == "clangd_symbol_context":
+        sym = result.get("symbol", "")
+        parts = [f"## Symbol: {sym}"]
+        defs = result.get("definition", [])
+        if defs:
+            parts.append("### Definition")
+            for d in (defs if isinstance(defs, list) else [defs]):
+                parts.append(_md_location_block(d.get("location", {}), d.get("context")))
+        refs_data = result.get("references", {})
+        refs = refs_data.get("references", []) if isinstance(refs_data, dict) else []
+        count = refs_data.get("count", len(refs)) if isinstance(refs_data, dict) else len(refs)
+        if refs:
+            parts.append(f"### References ({count})")
+            for r in refs:
+                parts.append("- " + _md_location_block(r.get("location", {})))
+        return sep.join(parts)
+
+    if function == "clangd_symbol_change_impact":
+        sym = result.get("symbol", "")
+        parts = [f"## Change Impact: {sym}"]
+        defs = result.get("definition", [])
+        if defs:
+            parts.append("### Definition")
+            for d in (defs if isinstance(defs, list) else [defs]):
+                parts.append(_md_location_block(d.get("location", {}), d.get("context")))
+        refs_data = result.get("references", {})
+        refs = refs_data.get("references", []) if isinstance(refs_data, dict) else []
+        if refs:
+            parts.append(f"### References ({len(refs)})")
+            for r in refs:
+                parts.append("- " + _md_location_block(r.get("location", {})))
+        callers = result.get("callers", [])
+        if callers:
+            parts.append(f"### Callers ({len(callers)})")
+            for c in callers:
+                parts.append("- " + _md_location_block(c.get("location", {})))
+        return sep.join(parts)
+
+    if function == "clangd_inlay_hints":
+        hints = result if isinstance(result, list) else result.get("hints", [])
+        if not hints:
+            return "No inlay hints"
+        lines = [f"## Inlay Hints ({len(hints)})"]
+        for h in hints:
+            loc = _md_loc(h.get("location", {}))
+            label = h.get("label", "")
+            kind = h.get("kind", "")
+            lines.append(f"- {loc} `{label}` ({kind})")
+        return sep.join(lines)
+
+    if function == "clangd_hover":
+        text = result.get("text", "")
+        loc = result.get("location")
+        header = "## Hover"
+        if loc:
+            header += f": {_md_loc(loc)}"
+        return f"{header}{sep}```cpp{sep}{text.strip()}{sep}```"
+
+    if function == "clangd_diagnostics":
+        path = result.get("path", "")
+        count = result.get("count", 0)
+        diags = result.get("diagnostics", [])
+        lines = [f"## Diagnostics: {path} ({count})"]
+        for d in diags:
+            sev = d.get("severity", "")
+            msg = d.get("message", "")
+            loc = _md_loc(d.get("location", {}))
+            lines.append(f"- {sev}:{loc} {msg}")
+        return sep.join(lines)
+
+    if function == "clangd_deduced_type_at":
+        type_str = result.get("type", result.get("text", ""))
+        loc = result.get("location")
+        header = "## Deduced Type"
+        if loc:
+            header += f": {_md_loc(loc)}"
+        return f"{header}{sep}`{type_str}`"
+
+    # fallback
+    return json.dumps(result, ensure_ascii=False)
 
 
 # ============================================================
@@ -1431,10 +1636,12 @@ class McpServer:
                     debug_log(f"JSON parse error: {e}")
                     continue
 
+                debug_log(f"← RAW: {line}")
+
                 try:
                     response = await self.handle_message(msg)
                     if response is not None:
-                        debug_log(f"→ id={response.get('id')}")
+                        debug_log(f"→ RAW: {json.dumps(response)}")
                         sys.stdout.write(json.dumps(response) + "\n")
                         sys.stdout.flush()
                 except Exception as e:
@@ -1455,15 +1662,23 @@ def main() -> None:
         description="mcp-clangd — C/C++ code intelligence MCP server"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
+    parser.add_argument("--log-file", help="Write debug output to this file instead of stderr")
+    parser.add_argument("--markdown", action="store_true", help="Output tool results as markdown instead of JSON")
     parser.add_argument("--project-root", help="Auto-initialize clangd for this project on startup")
     parser.add_argument("--compile-commands-dir", help="Directory containing compile_commands.json")
     parser.add_argument("--clangd-path", default="clangd", help="Path to clangd binary (default: clangd)")
     parsed = parser.parse_args()
 
-    global DEBUG
+    global DEBUG, MARKDOWN_MODE, _log_file
+    if parsed.log_file:
+        _log_file = parsed.log_file
+        DEBUG = True
     if parsed.debug:
         DEBUG = True
+    if DEBUG:
         debug_log("Debug logging enabled")
+    if parsed.markdown:
+        MARKDOWN_MODE = True
 
     server = McpServer(
         auto_project_root=parsed.project_root,
