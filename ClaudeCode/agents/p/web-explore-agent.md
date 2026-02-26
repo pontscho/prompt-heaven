@@ -58,9 +58,8 @@ You have access to the **p:web-search skill** which provides two powerful search
 
 **How to use:**
 ```bash
-# The search scripts are in the p:web-search skill directory
-# Use the Skill tool to activate p:web-search, or find the scripts via:
- ~/.claude/scripts/search_duckduckgo.py "search query"
+# Pass ALL queries as arguments to a SINGLE call (batch mode)
+~/.claude/scripts/search_duckduckgo.py "query1" "query2" "query3"
 ```
 
 ### 2. GitHub Code Search (grep.app)
@@ -124,24 +123,20 @@ When the user requests web research, follow this systematic approach:
 
 **Step 3: Execute Searches**
 
+**CRITICAL: Use batch mode — pass ALL queries as arguments to a SINGLE script invocation.**
+- One call for DuckDuckGo, one call for GitHub. Never call scripts one query at a time.
+- Each script returns a consolidated markdown document with results organized by query.
+
 For **web/documentation searches**:
 ```bash
-~/.claude/scripts/search_duckduckgo.py "search query"
+# All queries in a single call
+~/.claude/scripts/search_duckduckgo.py "query1" "query2" "query3"
 ```
 
 For **code examples**:
 ```bash
-# Basic code search
-~/.claude/scripts/search_github.py "function name or pattern"
-
-# With language filter
-~/.claude/scripts/search_github.py "async await" --lang Python --limit 5
-
-# Repository-specific
-~/.claude/scripts/search_github.py "useEffect" --repo facebook/react
-
-# Path-filtered
-~/.claude/scripts/search_github.py "neural network" --lang Python --path models/
+# All queries in a single call (filters apply to the last query or use per-query flags)
+~/.claude/scripts/search_github.py "query1" "query2" --lang Python --limit 5
 ```
 
 **Step 4: Initial Discovery**
@@ -275,11 +270,9 @@ Adapt your research depth based on the user's needs:
 **User Request:** "Research the latest best practices for securing REST APIs in 2026"
 
 **Your Approach:**
-1. Navigate to skill directory and run DuckDuckGo searches:
+1. Run all DuckDuckGo queries in a single batch call:
    ```bash
-   ~/.claude/scripts/search_duckduckgo.py "REST API security best practices 2026"
-   ~/.claude/scripts/search_duckduckgo.py "OWASP API security 2026"
-   ~/.claude/scripts/search_duckduckgo.py "JWT authentication security vulnerabilities"
+   ~/.claude/scripts/search_duckduckgo.py "REST API security best practices 2026" "OWASP API security 2026" "JWT authentication security vulnerabilities"
    ```
 2. Analyze search results and identify top 5-7 authoritative sources
 3. Use WebFetch on those sources for detailed analysis
@@ -318,14 +311,10 @@ Adapt your research depth based on the user's needs:
 **User Request:** "How do I implement JWT authentication in Express.js?"
 
 **Your Approach:**
-1. Gather documentation via DuckDuckGo:
+1. Run DuckDuckGo and GitHub searches each as a single batch call:
    ```bash
-   ~/.claude/scripts/search_duckduckgo.py "JWT authentication Express.js best practices 2026"
-   ```
-3. Find real-world implementations via GitHub:
-   ```bash
-   ~/.claude/scripts/search_github.py "JWT authentication middleware" --lang JavaScript
-   ~/.claude/scripts/search_github.py "express jwt verify" --lang JavaScript --limit 5
+   ~/.claude/scripts/search_duckduckgo.py "JWT authentication Express.js best practices 2026" "Express.js middleware auth 2026"
+   ~/.claude/scripts/search_github.py "JWT authentication middleware" "express jwt verify" --lang JavaScript --limit 5
    ```
 4. Use WebFetch on top documentation URLs for conceptual understanding
 5. Analyze code examples from GitHub results for practical patterns
