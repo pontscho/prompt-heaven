@@ -23,33 +23,20 @@ triggers:
   - symbol search
 ---
 
-# SKILL: clangd-mcp — C/C++ Code Intelligence
+# clangd-mcp — C/C++ Code Intelligence
 
-The MCP server (`mcp-clangd.py`) exposes **one tool in `tools/list`**:
-
-- `clangd_call` — universal dispatcher for all 13 clangd functions; called without `function` returns server status
-
-All clangd operations go through `clangd_call(function=..., params={...})`.
-
-> **Note**: `clangd_init` is called automatically by the server on startup. You do NOT need to call it — jump straight to analysis calls.
+The MCP server (`mcp-clangd.py`) exposes **one tool**: `clangd_call` — universal dispatcher for all 13 clangd functions; called without `function` returns server status All clangd operations go through `clangd_call(function=..., params={...})`.
 
 ## How to call any function
 
 ```
-mcp__mcp-clangd__clangd_call(
-  function = "<function_name>",
-  params   = { ...parameters... }
-)
+mcp__mcp-clangd__clangd_call(function = "<function_name>",params={...parameters...})
 ```
 
 **Example — find definition:**
 ```
-mcp__mcp-clangd__clangd_call(function="clangd_find_definition", params={
-  "symbol_name": "my_function"
-})
+mcp__mcp-clangd__clangd_call(function="clangd_find_definition", params={"symbol_name":"my_function"})
 ```
-
----
 
 ## Tool Reference (13 functions)
 
@@ -59,228 +46,163 @@ Returns server status and active project when called without `function`.
 {}
 ```
 
----
-
-### clangd_init
-Initialize clangd for a project. Called automatically on server startup — **you do not need to call this manually.**
-```json
-{
-  "project_root": "/path/to/project",   // required
-  "clangd_path": "clangd",              // optional, default "clangd"
-  "compile_commands_dir": "/path/build" // optional; dir containing compile_commands.json
-}
-```
-Returns: `{ "status": "ok", "message": "...", "project_root": "..." }`
-
-If already initialized: `{ "status": "already initialized", "project_root": "..." }`
-
----
-
 ### clangd_find_definition
 Find the definition of a symbol by name. Uses workspace/symbol to locate the symbol, then textDocument/definition.
 ```json
 {
-  "symbol_name": "my_function",   // required — exact symbol name
-  "context_lines": 5              // optional, default 5 — lines of surrounding code
+"symbol_name":"my_function",// required — exact symbol name
+"context_lines":5 // optional, default 5 — lines of surrounding code
 }
 ```
-Returns: array of `{ symbol, location, context }` objects.
-
----
 
 ### clangd_find_definition_at
 Find definition at a specific file position (1-based line/character).
 ```json
 {
-  "path": "src/main.c",     // required — relative or absolute path
-  "line": 42,               // required — 1-based line number
-  "character": 10,          // required — 1-based character offset
-  "context_lines": 5        // optional, default 5
+"path":"src/main.c",// required — relative or absolute path
+"line":42,// required — 1-based line number
+"character":10,// required — 1-based character offset
+"context_lines":5// optional, default 5
 }
 ```
-Returns: array of `{ location, context }` objects.
-
----
 
 ### clangd_find_references
 Find all references to a symbol by name.
 ```json
 {
-  "symbol_name": "my_function",  // required
-  "max_results": 50,             // optional, default 50
-  "context_lines": 3             // optional, default 3 — 0 = no context
+"symbol_name":"my_function",// required
+"max_results":50,// optional, default 50
+"context_lines":3// optional, default 3 — 0 = no context
 }
 ```
-Returns: `{ symbol, count, references: [{ symbol, location, context }] }`
-
----
 
 ### clangd_find_implementations_at
 Find implementations of an interface/virtual method at a specific position.
 ```json
 {
-  "path": "include/interface.h",  // required
-  "line": 15,                     // required — 1-based
-  "character": 5,                 // required — 1-based
-  "context_lines": 5              // optional, default 5
+"path":"include/interface.h",// required
+"line":15,// required — 1-based
+"character":5,// required — 1-based
+"context_lines":5// optional, default 5
 }
 ```
-Returns: array of `{ location, context }` objects.
-
----
 
 ### clangd_workspace_symbols
 Search for symbols across the workspace by query string (fuzzy match).
 ```json
 {
-  "query": "my_func",   // required
-  "limit": 50           // optional, default 50
+"query":"my_func",// required
+"limit":50// optional, default 50
 }
 ```
-Returns: `{ query, count, symbols: [{ symbol, kind, container, location }] }`
-
----
 
 ### clangd_document_outline
 Get the structural outline (all symbols) of a file.
 ```json
-{
-  "path": "src/main.c"   // required
-}
+{"path":"src/main.c"}
 ```
 Returns: array of symbol nodes. Each node has:
 - `symbol`, `kind`, `detail` (optional)
 - `selection` / `extent` (DocumentSymbol) or `location` (SymbolInformation)
 - `children` (nested symbols if hierarchical)
 
----
-
 ### clangd_symbol_context
 Get definition + references for a symbol in a single call. Preferred over separate find_definition + find_references.
 ```json
 {
-  "symbol_name": "my_function",  // required
-  "max_references": 20,          // optional, default 20
-  "context_lines": 5             // optional, default 5
+"symbol_name":"my_function",// required
+"max_references":20,// optional, default 20
+"context_lines":5// optional, default 5
 }
 ```
-Returns: `{ symbol, definition, references }`
-
----
 
 ### clangd_inlay_hints
 Get inlay hints (parameter names, deduced types) for a file range.
 ```json
 {
-  "path": "src/main.cpp",    // required
-  "start_line": 1,           // optional, default 1 (1-based)
-  "end_line": 9999,          // optional, default 9999 (1-based)
-  "limit": 100               // optional, default 100
+"path":"src/main.cpp",
+"start_line":1,// optional, default 1 (1-based)
+"end_line":9999,// optional, default 9999 (1-based)
+"limit":100// optional, default 100
 }
 ```
-Returns: array of `{ label, kind, position: { lsp, human }, tooltip }`
-
-`kind` is `"Parameter"` or `"Type"`.
-
----
 
 ### clangd_symbol_change_impact
 Comprehensive impact analysis before changing a symbol: definition + references + call hierarchy.
 ```json
 {
-  "symbol_name": "my_function",      // required
-  "max_references": 50,              // optional, default 50
-  "call_hierarchy_depth": 1          // optional, default 1
+"symbol_name":"my_function",
+"max_references":50,// optional, default 50
+"call_hierarchy_depth":1// optional, default 1
 }
 ```
-Returns: `{ symbol, definition, references, reference_summary: { count, files }, call_hierarchy }`
-
----
 
 ### clangd_hover
 Get hover information (type, documentation) at a position.
 ```json
 {
-  "path": "src/main.c",   // required
-  "line": 10,             // required — 1-based
-  "character": 5          // required — 1-based
+"path":"src/main.c",
+"line":10,// 1-based
+"character":5// 1-based
 }
 ```
-Returns: `{ text, location }`
-
-`text` contains the full hover markdown (type signature, documentation).
-
----
 
 ### clangd_diagnostics
 Get compiler diagnostics (errors, warnings) for a file. Opens the file and waits for clangd's publishDiagnostics push.
 ```json
 {
-  "path": "src/main.c",   // required
-  "timeout": 10.0         // optional, default 10.0 seconds
+"path":"src/main.c",
+"timeout":10.0// optional, default 10.0 seconds
 }
 ```
-Returns: `{ path, count, diagnostics: [{ message, severity, code, source, location }] }`
-
-`severity`: `"Error"`, `"Warning"`, `"Information"`, `"Hint"`
-
----
 
 ### clangd_deduced_type_at
 Get the deduced type at a position (useful for `auto`, `decltype` variables).
 ```json
 {
-  "path": "src/main.cpp",   // required
-  "line": 20,               // required — 1-based
-  "character": 8            // required — 1-based
+"path":"src/main.cpp",
+"line":20,// 1-based
+"character":8// 1-based
 }
 ```
-Returns: `{ type, raw, location }`
-
-`type` is the inferred clean type string; `raw` is the full hover text.
-
----
 
 ## Location object format
 
 All location objects returned by this server follow this structure:
 ```json
 {
-  "path": "src/main.c",         // path relative to project_root
-  "uri": "file:///abs/path/...",
-  "range": {                    // 0-based LSP coordinates
-    "start": { "line": 9, "character": 4 },
-    "end":   { "line": 9, "character": 15 }
-  },
-  "range_human": {              // 1-based human-readable coordinates
-    "start": { "line": 10, "character": 5 },
-    "end":   { "line": 10, "character": 16 }
-  },
-  "line_text": "    my_function(arg1, arg2);"
+"path":"src/main.c",// path relative to project_root
+"uri":"file:///abs/path/...",
+"range":{// 0-based LSP coordinates
+"start":{"line":9,"character":4},
+"end":{"line":9,"character":15}
+},
+"range_human":{// 1-based human-readable coordinates
+"start":{"line":10,"character":5},
+"end":{"line":10,"character":16}
+},
+"line_text":"my_function(arg1, arg2);"
 }
 ```
 
----
-
 ## Parallel call strategy — reduce model turn latency
 
-**Send multiple independent `clangd_call`s in a single response** (multi-tool message).
-The server serializes execution, but only ONE model API round-trip is needed.
+**Send multiple independent `clangd_call`s in a single response** (multi-tool message). The server serializes execution, but only ONE model API round-trip is needed.
 
 ### Safe to batch (all read-only calls)
 
-| Function | Notes |
-|---|---|
-| `clangd_find_definition` | multiple symbols at once |
-| `clangd_find_definition_at` | multiple positions at once |
-| `clangd_find_references` | multiple symbols at once |
-| `clangd_find_implementations_at` | |
-| `clangd_workspace_symbols` | |
-| `clangd_document_outline` | multiple files at once |
-| `clangd_hover` | multiple positions at once |
-| `clangd_inlay_hints` | |
-| `clangd_diagnostics` | multiple files at once |
-| `clangd_deduced_type_at` | multiple positions at once |
+|Function|Notes|
+|-|-|
+|`clangd_find_definition`|multiple symbols at once|
+|`clangd_find_definition_at`|multiple positions at once|
+|`clangd_find_references`|multiple symbols at once|
+|`clangd_find_implementations_at`||
+|`clangd_workspace_symbols`||
+|`clangd_document_outline`|multiple files at once|
+|`clangd_hover`|multiple positions at once|
+|`clangd_inlay_hints`||
+|`clangd_diagnostics`|multiple files at once|
+|`clangd_deduced_type_at`|multiple positions at once|
 
 - `clangd_symbol_context` already batches definition + references internally — prefer it over separate calls.
 - `clangd_symbol_change_impact` already batches definition + references + call hierarchy — prefer it for impact analysis.
@@ -292,43 +214,39 @@ The server serializes execution, but only ONE model API round-trip is needed.
 - **Multiple files diagnostics**: batch all at once
 - **Multiple symbol definitions**: batch all at once
 
----
-
 ## Common workflows
 
 ### Understand an unknown symbol
 ```
-[BATCH] clangd_symbol_context { symbol_name: "my_func" }
-      + clangd_document_outline { path: "src/main.c" }
-      + clangd_diagnostics { path: "src/main.c" }
+[BATCH] clangd_symbol_context {symbol_name:"my_func"}
+ + clangd_document_outline {path:"src/main.c"}
+ + clangd_diagnostics {path:"src/main.c"}
 ```
 
 ### Refactoring impact check
 ```
-clangd_symbol_change_impact { symbol_name: "my_func", max_references: 50 }
+clangd_symbol_change_impact {symbol_name:"my_func",max_references:50}
 ```
 
 ### Multiple symbol definitions
 ```
-[BATCH] clangd_find_definition { symbol_name: "func_a" }
-      + clangd_find_definition { symbol_name: "func_b" }
-      + clangd_find_definition { symbol_name: "MyStruct" }
+[BATCH] clangd_find_definition {symbol_name:"func_a"}
+ + clangd_find_definition {symbol_name:"func_b"}
+ + clangd_find_definition {symbol_name:"MyStruct"}
 ```
 
 ### Check diagnostics across multiple files
 ```
-[BATCH] clangd_diagnostics { path: "src/main.c" }
-      + clangd_diagnostics { path: "src/parser.c" }
-      + clangd_diagnostics { path: "src/lexer.c" }
+[BATCH] clangd_diagnostics {path:"src/main.c"}
+ + clangd_diagnostics {path:"src/parser.c"}
+ + clangd_diagnostics {path:"src/lexer.c"}
 ```
 
 ### Hover + inlay hints for a function
 ```
-[BATCH] clangd_hover { path: "src/main.c", line: 42, character: 5 }
-      + clangd_inlay_hints { path: "src/main.c", start_line: 30, end_line: 60 }
+[BATCH] clangd_hover {path:"src/main.c",line:42,character:5}
+ + clangd_inlay_hints {path:"src/main.c",start_line:30,end_line:60}
 ```
-
----
 
 ## Notes
 

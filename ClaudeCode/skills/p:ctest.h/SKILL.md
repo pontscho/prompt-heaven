@@ -8,8 +8,7 @@ allowed-tools: Read, Grep, Glob, Bash, Edit, Write
 
 ## Overview
 
-`ctest.h` is a lightweight C unit testing framework used in the POLUAH project. It's a single-header library located at `src/tests/ctest.h`.
-
+`ctest.h` is a lightweight C unit testing framework, it's a single-header library located at `src/tests/ctest.h`.
 **CRITICAL**: This is NOT CMake's CTest. This is a custom framework with its own macros and conventions.
 
 ## Test Structure
@@ -37,14 +36,14 @@ Use `CTEST2` when tests need:
 // 1. Define the data structure
 CTEST_DATA(suite_name)
 {
-	poluah_client_t *client;
+	client_t *client;
 	int socket_fd;
 };
 
 // 2. Define setup (runs before each test)
 CTEST_SETUP(suite_name)
 {
-	data->client = poluah_client_create();
+	data->client = client_create();
 	data->socket_fd = -1;
 }
 
@@ -52,7 +51,7 @@ CTEST_SETUP(suite_name)
 CTEST_TEARDOWN(suite_name)
 {
 	if (data->client != NULL) {
-		poluah_client_destroy(data->client);
+		client_destroy(data->client);
 		data->client = NULL;
 	}
 	if (data->socket_fd != -1) {
@@ -199,7 +198,7 @@ CTEST_TEARDOWN(module_name)
 		data->instance = NULL;
 	}
 	if (data->buffer != NULL) {
-		poluah_free(data->buffer);
+		client_free(data->buffer);
 		data->buffer = NULL;
 	}
 }
@@ -262,7 +261,7 @@ CTEST_TEARDOWN(suite_name)
 Always check for NULL before cleanup:
 ```c
 if (data->client != NULL) {
-	poluah_client_destroy(data->client);
+	client_destroy(data->client);
 	data->client = NULL;
 }
 ```
@@ -351,7 +350,6 @@ add_executable(test-unit
 )
 
 target_link_libraries(test-unit
-	poluah
 	${CMAKE_THREAD_LIBS_INIT}
 )
 ```
@@ -393,5 +391,3 @@ Activate this skill when:
 - Reviewing test code for correctness
 - Setting up test infrastructure
 - Understanding test output or failures
-
-This skill ensures proper usage of the ctest.h framework following POLUAH project conventions.

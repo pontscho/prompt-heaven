@@ -58,13 +58,13 @@ Run clang-tidy static analysis on C/C++ source files. **Supports multiple files 
 
 ## Command parameters
 
-| Flag | Purpose |
-|------|---------|
-| `-p=${PROJECT_ROOT}/build` | Compilation database location |
-| `--config-file=${PROJECT_ROOT}/.clang-tidy` | Project-specific config |
-| `--quiet` | Suppress unnecessary output |
-| `--format-style=file` | Use .clang-format from project |
-| `--header-filter="${PROJECT_ROOT}/src/.*"` | Only check project headers |
+|Flag|Purpose|
+|-|-|
+|`-p=${PROJECT_ROOT}/build`|Compilation database location|
+|`--config-file=${PROJECT_ROOT}/.clang-tidy`|Project-specific config|
+|`--quiet`|Suppress unnecessary output|
+|`--format-style=file`|Use .clang-format from project|
+|`--header-filter="${PROJECT_ROOT}/src/.*"`|Only check project headers|
 
 ## Error handling
 
