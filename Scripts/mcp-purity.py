@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+"""MCP-Purity: Pure Python file operations MCP server.
+
+Single-tool dispatcher pattern: exposes one MCP tool (purity_call) that routes
+to internal handler functions via the 'function' parameter.
+
+Requires only Python 3.9+ stdlib modules.
+"""
+
+import argparse
+import asyncio
+import fnmatch
+import json
+import logging
+import os
+import re
+import sys
+from typing import Any, Callable, Dict, List, Optional
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+log = logging.getLogger("mcp-purity")
+
+
+# ---------------------------------------------------------------------------
+# Sandbox utility
+# ---------------------------------------------------------------------------
+
+def safe_path(project_root: str, relative_path: str) -> str:
+    """Resolve *relative_path* under *project_root* and verify it stays inside."""
+    resolved = os.path.realpath(os.path.join(project_root, relative_path))
+    if not resolved.startswith(project_root + os.sep) and resolved != project_root:
+        raise ValueError(f"Path escapes project root: {relative_path}")
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Parameter aliases — models often use short/alternative names
+# ---------------------------------------------------------------------------
+
+PARAM_ALIASES = {
+    "path": "relative_path",
+    "pattern": "substring_pattern",
+    "new_content": "content",
+    "line_start": "start_line",
+    "line_end": "end_line",
+}
+
+
+def _resolve_aliases(params: dict) -> dict:
+    """Return a new dict with aliased parameter names resolved to canonical names."""
+    resolved = {}
+    for key, value in params.items():
+        canonical = PARAM_ALIASES.get(key, key)
+        if canonical not in resolved:
+            resolved[canonical] = value
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Gitignore helpers (simplified)
+# ---------------------------------------------------------------------------
+
+def _parse_gitignore(gitignore_path: str) -> List[str]:
+    """Return a list of fnmatch patterns from a .gitignore file."""
+    patterns: List[str] = []
+    if not os.path.isfile(gitignore_path):
+        return patterns
+    with open(gitignore_path, "r", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            patterns.append(line.rstrip("/"))
+    return patterns
+
+
+def _is_ignored(rel: str, patterns: List[str]) -> bool:
+    """Check if a relative path matches any gitignore pattern."""
+    name = os.path.basename(rel)
+    for pat in patterns:
+        if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel, pat):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# File handlers
+# ---------------------------------------------------------------------------
+
+def handle_read_file(params: dict, project_root: str) -> dict:
+    rel = params.get("relative_path")
+    if not rel:
+        raise ValueError("Missing required parameter: relative_path")
+    path = safe_path(project_root, rel)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {rel}")
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+
+    start = params.get("start_line", 1)  # 1-based
+    end = params.get("end_line")          # 1-based, inclusive
+    idx_start = start - 1
+    if end is not None:
+        selected = lines[idx_start:end]
+    else:
+        selected = lines[idx_start:]
+        end = len(lines)
+
+    content = "".join(selected)
+
+    max_chars = params.get("max_answer_chars", -1)
+    truncated = False
+    if max_chars > 0 and len(content) > max_chars:
+        content = content[:max_chars]
+        truncated = True
+
+    header = f"[{rel}] lines {start}-{start + len(selected) - 1} of {len(lines)}"
+    if truncated:
+        header += " (truncated)"
+    return {"__raw_text__": f"{header}\n{content}"}
+
+
+def handle_create_text_file(params: dict, project_root: str) -> dict:
+    rel = params.get("relative_path")
+    if not rel:
+        raise ValueError("Missing required parameter: relative_path")
+    content = params.get("content")
+    if content is None:
+        raise ValueError("Missing required parameter: content")
+
+    path = safe_path(project_root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+
+    nbytes = len(content.encode("utf-8"))
+    return {"__raw_text__": f"Created {rel} ({nbytes} bytes)"}
+
+
+def handle_list_dir(params: dict, project_root: str) -> dict:
+    rel = params.get("relative_path", ".")
+    recursive = params.get("recursive", False)
+    skip_ignored = params.get("skip_ignored_files", False)
+
+    path = safe_path(project_root, rel)
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"Directory not found: {rel}")
+
+    ignore_patterns: List[str] = []
+    if skip_ignored:
+        ignore_patterns = _parse_gitignore(os.path.join(project_root, ".gitignore"))
+
+    entries: List[str] = []
+    if recursive:
+        for dirpath, dirnames, filenames in os.walk(path):
+            if skip_ignored:
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not _is_ignored(d, ignore_patterns) and d != ".git"
+                ]
+            for name in sorted(dirnames):
+                entry_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
+                if skip_ignored and _is_ignored(entry_rel, ignore_patterns):
+                    continue
+                entries.append(entry_rel + "/")
+            for name in sorted(filenames):
+                entry_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
+                if skip_ignored and _is_ignored(entry_rel, ignore_patterns):
+                    continue
+                entries.append(entry_rel)
+    else:
+        for name in sorted(os.listdir(path)):
+            if skip_ignored and (_is_ignored(name, ignore_patterns) or name == ".git"):
+                continue
+            full = os.path.join(path, name)
+            entry_rel = os.path.relpath(full, project_root)
+            if os.path.isdir(full):
+                entries.append(entry_rel + "/")
+            else:
+                entries.append(entry_rel)
+
+    listing = "\n".join(entries)
+    max_chars = params.get("max_answer_chars", -1)
+    truncated = False
+    if max_chars > 0 and len(listing) > max_chars:
+        listing = listing[:max_chars]
+        truncated = True
+
+    header = f"[{rel}] {len(entries)} entries"
+    if truncated:
+        header += " (truncated)"
+    return {"__raw_text__": f"{header}\n{listing}"}
+
+
+def handle_find_file(params: dict, project_root: str) -> dict:
+    file_mask = params.get("file_mask")
+    if not file_mask:
+        raise ValueError("Missing required parameter: file_mask")
+    rel = params.get("relative_path", ".")
+    path = safe_path(project_root, rel)
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"Directory not found: {rel}")
+
+    matches: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        for name in filenames:
+            if fnmatch.fnmatch(name, file_mask):
+                match_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
+                matches.append(match_rel)
+
+    header = f"Found {len(matches)} file(s) matching '{file_mask}'"
+    return {"__raw_text__": f"{header}\n" + "\n".join(matches) if matches else header}
+
+
+def handle_replace_content(params: dict, project_root: str) -> dict:
+    rel = params.get("relative_path")
+    if not rel:
+        raise ValueError("Missing required parameter: relative_path")
+    needle = params.get("needle")
+    if needle is None:
+        raise ValueError("Missing required parameter: needle")
+    repl = params.get("repl")
+    if repl is None:
+        raise ValueError("Missing required parameter: repl")
+    mode = params.get("mode")
+    if mode not in ("literal", "regex"):
+        raise ValueError("Parameter 'mode' must be 'literal' or 'regex'")
+    allow_multiple = params.get("allow_multiple_occurrences", False)
+
+    path = safe_path(project_root, rel)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {rel}")
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        content = fh.read()
+
+    if mode == "literal":
+        count = content.count(needle)
+        if count == 0:
+            raise ValueError(f"Needle not found in {rel}")
+        if count > 1 and not allow_multiple:
+            raise ValueError(
+                f"Multiple occurrences ({count}) found in {rel}. "
+                "Set allow_multiple_occurrences=true to replace all."
+            )
+        new_content = content.replace(needle, repl)
+    else:
+        matches = list(re.finditer(needle, content))
+        if not matches:
+            raise ValueError(f"Pattern not found in {rel}")
+        if len(matches) > 1 and not allow_multiple:
+            raise ValueError(
+                f"Multiple matches ({len(matches)}) found in {rel}. "
+                "Set allow_multiple_occurrences=true to replace all."
+            )
+        new_content = re.sub(needle, repl, content)
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(new_content)
+
+    n = count if mode == "literal" else len(matches)
+    return {"__raw_text__": f"Replaced {n} occurrence(s) in {rel}"}
+
+
+def handle_delete_lines(params: dict, project_root: str) -> dict:
+    rel = params.get("relative_path")
+    if not rel:
+        raise ValueError("Missing required parameter: relative_path")
+    start_line = params.get("start_line")  # 1-based
+    end_line = params.get("end_line")      # 1-based, inclusive
+    single = params.get("line")            # shorthand: line=N means start_line=N, end_line=N
+    if single is not None and start_line is None:
+        start_line = single
+    if single is not None and end_line is None:
+        end_line = single
+    if start_line is None or end_line is None:
+        raise ValueError("Missing required parameters: start_line, end_line (or line)")
+
+    path = safe_path(project_root, rel)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {rel}")
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+
+    if start_line < 1 or end_line > len(lines) or start_line > end_line:
+        raise ValueError(
+            f"Invalid line range [{start_line}, {end_line}] for file with {len(lines)} lines"
+        )
+
+    idx_start = start_line - 1
+    idx_end = end_line  # end_line is 1-based inclusive, so slice to end_line
+    deleted = lines[idx_start:idx_end]
+    new_lines = lines[:idx_start] + lines[idx_end:]
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(new_lines)
+
+    return {"__raw_text__": f"Deleted lines {start_line}-{end_line} from {rel}"}
+
+
+def handle_replace_lines(params: dict, project_root: str) -> dict:
+    rel = params.get("relative_path")
+    if not rel:
+        raise ValueError("Missing required parameter: relative_path")
+    start_line = params.get("start_line")  # 1-based
+    end_line = params.get("end_line")      # 1-based, inclusive
+    single = params.get("line")            # shorthand: line=N means start_line=N, end_line=N
+    if single is not None and start_line is None:
+        start_line = single
+    if single is not None and end_line is None:
+        end_line = single
+    content = params.get("content")
+    if start_line is None or end_line is None:
+        raise ValueError("Missing required parameters: start_line, end_line (or line)")
+    if content is None:
+        raise ValueError("Missing required parameter: content")
+
+    path = safe_path(project_root, rel)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {rel}")
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+
+    if start_line < 1 or end_line > len(lines) or start_line > end_line:
+        raise ValueError(
+            f"Invalid line range [{start_line}, {end_line}] for file with {len(lines)} lines"
+        )
+
+    idx_start = start_line - 1
+    idx_end = end_line
+    if not content.endswith("\n"):
+        content += "\n"
+    new_lines = lines[:idx_start] + [content] + lines[idx_end:]
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(new_lines)
+
+    return {"__raw_text__": f"Replaced lines {start_line}-{end_line} in {rel}"}
+
+
+def handle_insert_at_line(params: dict, project_root: str) -> dict:
+    rel = params.get("relative_path")
+    if not rel:
+        raise ValueError("Missing required parameter: relative_path")
+    line_num = params.get("line")  # 1-based: insert before this line
+    content = params.get("content")
+    if line_num is None:
+        raise ValueError("Missing required parameter: line")
+    if content is None:
+        raise ValueError("Missing required parameter: content")
+
+    path = safe_path(project_root, rel)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {rel}")
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+
+    idx = line_num - 1
+    if idx < 0 or idx > len(lines):
+        raise ValueError(
+            f"Invalid line number {line_num} for file with {len(lines)} lines"
+        )
+
+    if not content.endswith("\n"):
+        content += "\n"
+    lines.insert(idx, content)
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+
+    return {"__raw_text__": f"Inserted at line {line_num} in {rel}"}
+
+
+def handle_search_for_pattern(params: dict, project_root: str) -> dict:
+    pattern_str = params.get("substring_pattern")
+    if not pattern_str:
+        raise ValueError("Missing required parameter: substring_pattern")
+
+    ctx_before = params.get("context_lines_before", 0)
+    ctx_after = params.get("context_lines_after", 0)
+    include_glob = params.get("paths_include_glob", "")
+    exclude_glob = params.get("paths_exclude_glob", "")
+    search_rel = params.get("relative_path", "")
+    max_chars = params.get("max_answer_chars", -1)
+
+    search_root = safe_path(project_root, search_rel) if search_rel else project_root
+
+    try:
+        pattern = re.compile(pattern_str)
+    except re.error as exc:
+        raise ValueError(f"Invalid regex pattern: {exc}")
+
+    output_lines: List[str] = []
+    match_count = 0
+    total_chars = 0
+    truncated = False
+
+    for dirpath, dirnames, filenames in os.walk(search_root):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            file_rel = os.path.relpath(full, project_root)
+
+            if include_glob and not fnmatch.fnmatch(file_rel, include_glob):
+                continue
+            if exclude_glob and fnmatch.fnmatch(file_rel, exclude_glob):
+                continue
+
+            try:
+                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                    lines = fh.readlines()
+            except (OSError, PermissionError):
+                continue
+
+            for i, line in enumerate(lines):
+                if pattern.search(line):
+                    line_num = i + 1
+                    if ctx_before or ctx_after:
+                        start = max(0, i - ctx_before)
+                        end = min(len(lines), i + ctx_after + 1)
+                        ctx = "".join(lines[start:end]).rstrip("\n")
+                        entry = f"{file_rel}:{line_num}:\n{ctx}"
+                    else:
+                        entry = f"{file_rel}:{line_num}: {line.rstrip(chr(10))}"
+
+                    if max_chars > 0 and total_chars + len(entry) + 1 > max_chars:
+                        truncated = True
+                        break
+                    output_lines.append(entry)
+                    total_chars += len(entry) + 1
+                    match_count += 1
+
+            if truncated:
+                break
+        if truncated:
+            break
+
+    header = f"{match_count} match(es)"
+    if truncated:
+        header += " (truncated)"
+    return {"__raw_text__": f"{header}\n" + "\n".join(output_lines) if output_lines else header}
+
+
+# ---------------------------------------------------------------------------
+# Handler registry
+# ---------------------------------------------------------------------------
+
+HANDLERS: Dict[str, Callable[[dict, str], dict]] = {
+    "read_file": handle_read_file,
+    "create_text_file": handle_create_text_file,
+    "list_dir": handle_list_dir,
+    "find_file": handle_find_file,
+    "replace_content": handle_replace_content,
+    "delete_lines": handle_delete_lines,
+    "replace_lines": handle_replace_lines,
+    "insert_at_line": handle_insert_at_line,
+    "search_for_pattern": handle_search_for_pattern,
+}
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher
+# ---------------------------------------------------------------------------
+
+def handle_purity_call(arguments: dict, project_root: str) -> dict:
+    """Route a purity_call invocation to the appropriate handler."""
+    function = (arguments.get("function") or "").strip()
+    params = _resolve_aliases(arguments.get("params") or {})
+
+    if not function:
+        func_list = "\n".join(f"  {name}" for name in sorted(HANDLERS.keys()))
+        return {"__raw_text__": f"mcp-purity OK — project: {project_root}\nAvailable functions:\n{func_list}"}
+
+    handler = HANDLERS.get(function)
+    if not handler:
+        func_list = ", ".join(sorted(HANDLERS.keys()))
+        return {"error": f"Unknown function: {function}. Available: {func_list}"}
+
+    try:
+        return handler(params, project_root)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# MCP Server
+# ---------------------------------------------------------------------------
+
+PURITY_CALL_TOOL = {
+    "name": "purity_call",
+    "description": (
+        "File operations dispatcher. "
+        "Call without 'function' for status and available functions."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "function": {
+                "type": "string",
+                "description": "Function name to call",
+            },
+            "params": {
+                "type": "object",
+                "description": "Function parameters",
+            },
+        },
+    },
+}
+
+
+class McpServer:
+    """Minimal MCP server over stdio (JSON-RPC 2.0, one JSON object per line)."""
+
+    def __init__(self, project_root: str):
+        self.project_root = os.path.realpath(project_root)
+
+    async def run(self) -> None:
+        loop = asyncio.get_running_loop()
+        log.info("MCP server starting, project_root=%s", self.project_root)
+        try:
+            while True:
+                line = await loop.run_in_executor(None, sys.stdin.readline)
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    log.warning("Invalid JSON: %s", exc)
+                    continue
+
+                log.debug("← %s", json.dumps(msg)[:200])
+                response = self._handle_message(msg)
+                if response is not None:
+                    out = json.dumps(response)
+                    log.debug("→ %s", out[:200])
+                    sys.stdout.write(out + "\n")
+                    sys.stdout.flush()
+        finally:
+            log.info("MCP server shutting down")
+
+    def _handle_message(self, msg: dict) -> Optional[dict]:
+        msg_id = msg.get("id")
+        method = msg.get("method", "")
+        params = msg.get("params") or {}
+
+        # Notifications (no id) — no response
+        if msg_id is None:
+            log.debug("Notification: %s", method)
+            return None
+
+        if method == "initialize":
+            return self._result(msg_id, {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "mcp-purity", "version": "0.1.0"},
+                "capabilities": {"tools": {}},
+            })
+
+        if method == "ping":
+            return self._result(msg_id, {})
+
+        if method == "tools/list":
+            return self._result(msg_id, {"tools": [PURITY_CALL_TOOL]})
+
+        if method == "tools/call":
+            return self._handle_tool_call(msg_id, params)
+
+        return self._error(msg_id, -32601, f"Method not found: {method}")
+
+    def _handle_tool_call(self, msg_id: Any, params: dict) -> dict:
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments") or {}
+
+        if tool_name != "purity_call":
+            return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
+
+        result = handle_purity_call(arguments, self.project_root)
+        is_error = "error" in result
+        text = result.get("__raw_text__") or result.get("error", "")
+
+        return self._result(msg_id, {
+            "content": [{"type": "text", "text": text}],
+            "isError": is_error,
+        })
+
+    @staticmethod
+    def _result(msg_id: Any, result: Any) -> dict:
+        return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+    @staticmethod
+    def _error(msg_id: Any, code: int, message: str) -> dict:
+        return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+HANDLER_DESCRIPTIONS = {
+    "read_file":           "Read file contents (with optional line range)",
+    "create_text_file":    "Create or overwrite a file",
+    "list_dir":            "List directory contents (optionally recursive)",
+    "find_file":           "Find files by wildcard pattern",
+    "replace_content":     "Replace text in a file (literal or regex)",
+    "delete_lines":        "Delete a range of lines",
+    "replace_lines":       "Replace a range of lines with new content",
+    "insert_at_line":      "Insert content before a given line",
+    "search_for_pattern":  "Regex search across project files",
+}
+
+
+def main() -> None:
+    if "--list" in sys.argv:
+        print("mcp-purity — available functions:\n")
+        for name in sorted(HANDLERS.keys()):
+            desc = HANDLER_DESCRIPTIONS.get(name, "")
+            print(f"  {name:25s} {desc}")
+        sys.exit(0)
+
+    parser = argparse.ArgumentParser(description="MCP-Purity: Pure Python file operations MCP server")
+    parser.add_argument("--project-root", required=True, help="Project root directory")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
+    parser.add_argument("--log-file", help="Log to file (implies --debug)")
+    args = parser.parse_args()
+
+    level = logging.DEBUG if (args.debug or args.log_file) else logging.WARNING
+    log_handlers: list = []
+    if args.log_file:
+        log_handlers.append(logging.FileHandler(args.log_file))
+    else:
+        log_handlers.append(logging.StreamHandler(sys.stderr))
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=log_handlers,
+    )
+
+    if not os.path.isdir(args.project_root):
+        print(f"Error: project root is not a directory: {args.project_root}", file=sys.stderr)
+        sys.exit(1)
+
+    server = McpServer(args.project_root)
+    asyncio.run(server.run())
+
+
+if __name__ == "__main__":
+    main()
