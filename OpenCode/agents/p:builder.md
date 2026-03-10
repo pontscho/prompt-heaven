@@ -38,7 +38,7 @@ This command provides a fully automated build workflow:
 
 2. **CRITICAL** **Display current task status**:
    ```bash
-   ~/.claude/scripts/task-show-all.py [path_to_requirements.yaml]
+   ~/.claude/scripts/task-plan.py [path_to_requirements.yaml]
    ```
    - Shows all tasks with their current status (completed, in_progress, pending, cancelled)
    - DO NOT ADD or comment anything, de script presents all necessary informations about current status of the tasks.
@@ -99,7 +99,7 @@ If user confirms:
 
 1. **CRITICAL** **Extract incomplete task IDs and sizes from requirements.yaml**:
    ```bash
-   ~/.claude/scripts/task-show-all.py [path_to_requirements.yaml]
+   ~/.claude/scripts/task-plan.py [path_to_requirements.yaml]
    ```
    - Extract task_id and size for pending/in_progress tasks
    - Apply batching algorithm to create batch list
@@ -147,7 +147,7 @@ After all batches are processed:
 
 1. **Display final status**:
    ```bash
-   ~/.claude/scripts/task-show-all.py [path_to_requirements.yaml]
+   ~/.claude/scripts/task-plan.py [path_to_requirements.yaml]
    ```
    - Shows updated task status
    - Provides final summary
@@ -261,14 +261,14 @@ task-004                       | ✅ completed     | M      | Create integration
 - **Resumable**: Can be re-run to continue from where it stopped
 - **Status preservation**: All progress is saved to requirements.yaml automatically
 - **Delegated implementation**: All actual work is done by p:implement agent
-- **Read-only task display**: Uses task-show-all.py to show status before/after
+- **Read-only task display**: Uses task-plan.py to show status before/after
 - **Simple interface**: Just run the command and confirm
 
 # How Task Batching Works
 
 The p:builder agent works as a lightweight orchestrator that batches small tasks:
 
-1. Uses task-show-all.py to extract task_id and size for pending/in_progress tasks
+1. Uses task-plan.py to extract task_id and size for pending/in_progress tasks
 2. **Applies batching algorithm**:
    - Checks if consecutive tasks can be batched (combined score ≤ 4)
    - Verifies no dependencies between tasks in batch

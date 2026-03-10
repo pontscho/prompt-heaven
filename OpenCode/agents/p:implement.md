@@ -401,7 +401,7 @@ Example:
 Before or during implementation, you can check task status:
 ```
 /p:requirements                    # Show all tasks with current status
-~/.claude/scripts/task-show-all.py requirements.yaml
+~/.claude/scripts/task-plan.py requirements.yaml
 ~/.claude/scripts/task-implementation-plan.py requirements.yaml task-003
 ```
 
