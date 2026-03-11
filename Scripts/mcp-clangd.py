@@ -1283,6 +1283,8 @@ async def handle_clangd_call(args: dict, server: Optional["McpServer"] = None) -
     """Universal dispatcher: routes to one of 13 clangd handlers."""
     function = args.get("function", "")
     params = args.get("params") or {}
+    if isinstance(params, str):
+        params = json.loads(params)
 
     def _serialize(fn: str, data: Any) -> str:
         if MARKDOWN_MODE:
