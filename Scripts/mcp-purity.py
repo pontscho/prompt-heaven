@@ -28,8 +28,13 @@ log = logging.getLogger("mcp-purity")
 # Sandbox utility
 # ---------------------------------------------------------------------------
 
-def safe_path(project_root: str, relative_path: str) -> str:
-    """Resolve *relative_path* under *project_root* and verify it stays inside."""
+def safe_path(project_root: str, relative_path: str, strict: bool = False) -> str:
+    """Resolve *relative_path* under *project_root* and verify it stays inside.
+
+    When *strict* is False (default), absolute paths are allowed as-is.
+    """
+    if os.path.isabs(relative_path) and not strict:
+        return os.path.realpath(relative_path)
     resolved = os.path.realpath(os.path.join(project_root, relative_path))
     if not resolved.startswith(project_root + os.sep) and resolved != project_root:
         raise ValueError(f"Path escapes project root: {relative_path}")
@@ -90,11 +95,11 @@ def _is_ignored(rel: str, patterns: List[str]) -> bool:
 # File handlers
 # ---------------------------------------------------------------------------
 
-def handle_read_file(params: dict, project_root: str) -> dict:
+def handle_read_file(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path")
     if not rel:
         raise ValueError("Missing required parameter: relative_path")
-    path = safe_path(project_root, rel)
+    path = safe_path(project_root, rel, strict)
     if not os.path.isfile(path):
         raise FileNotFoundError(f"File not found: {rel}")
 
@@ -124,7 +129,7 @@ def handle_read_file(params: dict, project_root: str) -> dict:
     return {"__raw_text__": f"{header}\n{content}"}
 
 
-def handle_create_text_file(params: dict, project_root: str) -> dict:
+def handle_create_text_file(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path")
     if not rel:
         raise ValueError("Missing required parameter: relative_path")
@@ -132,7 +137,7 @@ def handle_create_text_file(params: dict, project_root: str) -> dict:
     if content is None:
         raise ValueError("Missing required parameter: content")
 
-    path = safe_path(project_root, rel)
+    path = safe_path(project_root, rel, strict)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
@@ -141,12 +146,12 @@ def handle_create_text_file(params: dict, project_root: str) -> dict:
     return {"__raw_text__": f"Created {rel} ({nbytes} bytes)"}
 
 
-def handle_list_dir(params: dict, project_root: str) -> dict:
+def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path", ".")
     recursive = params.get("recursive", False)
     skip_ignored = params.get("skip_ignored_files", False)
 
-    path = safe_path(project_root, rel)
+    path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
         raise FileNotFoundError(f"Directory not found: {rel}")
 
@@ -196,12 +201,12 @@ def handle_list_dir(params: dict, project_root: str) -> dict:
     return {"__raw_text__": f"{header}\n{listing}"}
 
 
-def handle_find_file(params: dict, project_root: str) -> dict:
+def handle_find_file(params: dict, project_root: str, strict: bool = False) -> dict:
     file_mask = params.get("file_mask")
     if not file_mask:
         raise ValueError("Missing required parameter: file_mask")
     rel = params.get("relative_path", ".")
-    path = safe_path(project_root, rel)
+    path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
         raise FileNotFoundError(f"Directory not found: {rel}")
 
@@ -217,7 +222,7 @@ def handle_find_file(params: dict, project_root: str) -> dict:
     return {"__raw_text__": f"{header}\n" + "\n".join(matches) if matches else header}
 
 
-def handle_replace_content(params: dict, project_root: str) -> dict:
+def handle_replace_content(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path")
     if not rel:
         raise ValueError("Missing required parameter: relative_path")
@@ -232,7 +237,7 @@ def handle_replace_content(params: dict, project_root: str) -> dict:
         raise ValueError("Parameter 'mode' must be 'literal' or 'regex'")
     allow_multiple = params.get("allow_multiple_occurrences", False)
 
-    path = safe_path(project_root, rel)
+    path = safe_path(project_root, rel, strict)
     if not os.path.isfile(path):
         raise FileNotFoundError(f"File not found: {rel}")
 
@@ -267,7 +272,7 @@ def handle_replace_content(params: dict, project_root: str) -> dict:
     return {"__raw_text__": f"Replaced {n} occurrence(s) in {rel}"}
 
 
-def handle_delete_lines(params: dict, project_root: str) -> dict:
+def handle_delete_lines(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path")
     if not rel:
         raise ValueError("Missing required parameter: relative_path")
@@ -281,7 +286,7 @@ def handle_delete_lines(params: dict, project_root: str) -> dict:
     if start_line is None or end_line is None:
         raise ValueError("Missing required parameters: start_line, end_line (or line)")
 
-    path = safe_path(project_root, rel)
+    path = safe_path(project_root, rel, strict)
     if not os.path.isfile(path):
         raise FileNotFoundError(f"File not found: {rel}")
 
@@ -304,7 +309,7 @@ def handle_delete_lines(params: dict, project_root: str) -> dict:
     return {"__raw_text__": f"Deleted lines {start_line}-{end_line} from {rel}"}
 
 
-def handle_replace_lines(params: dict, project_root: str) -> dict:
+def handle_replace_lines(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path")
     if not rel:
         raise ValueError("Missing required parameter: relative_path")
@@ -321,7 +326,7 @@ def handle_replace_lines(params: dict, project_root: str) -> dict:
     if content is None:
         raise ValueError("Missing required parameter: content")
 
-    path = safe_path(project_root, rel)
+    path = safe_path(project_root, rel, strict)
     if not os.path.isfile(path):
         raise FileNotFoundError(f"File not found: {rel}")
 
@@ -345,7 +350,7 @@ def handle_replace_lines(params: dict, project_root: str) -> dict:
     return {"__raw_text__": f"Replaced lines {start_line}-{end_line} in {rel}"}
 
 
-def handle_insert_at_line(params: dict, project_root: str) -> dict:
+def handle_insert_at_line(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path")
     if not rel:
         raise ValueError("Missing required parameter: relative_path")
@@ -356,7 +361,7 @@ def handle_insert_at_line(params: dict, project_root: str) -> dict:
     if content is None:
         raise ValueError("Missing required parameter: content")
 
-    path = safe_path(project_root, rel)
+    path = safe_path(project_root, rel, strict)
     if not os.path.isfile(path):
         raise FileNotFoundError(f"File not found: {rel}")
 
@@ -379,7 +384,7 @@ def handle_insert_at_line(params: dict, project_root: str) -> dict:
     return {"__raw_text__": f"Inserted at line {line_num} in {rel}"}
 
 
-def handle_search_for_pattern(params: dict, project_root: str) -> dict:
+def handle_search_for_pattern(params: dict, project_root: str, strict: bool = False) -> dict:
     pattern_str = params.get("substring_pattern")
     if not pattern_str:
         raise ValueError("Missing required parameter: substring_pattern")
@@ -391,7 +396,7 @@ def handle_search_for_pattern(params: dict, project_root: str) -> dict:
     search_rel = params.get("relative_path", "")
     max_chars = params.get("max_answer_chars", -1)
 
-    search_root = safe_path(project_root, search_rel) if search_rel else project_root
+    search_root = safe_path(project_root, search_rel, strict) if search_rel else project_root
 
     try:
         pattern = re.compile(pattern_str)
@@ -453,7 +458,7 @@ def handle_search_for_pattern(params: dict, project_root: str) -> dict:
 # Handler registry
 # ---------------------------------------------------------------------------
 
-HANDLERS: Dict[str, Callable[[dict, str], dict]] = {
+HANDLERS: Dict[str, Callable[..., dict]] = {
     "read_file": handle_read_file,
     "create_text_file": handle_create_text_file,
     "list_dir": handle_list_dir,
@@ -470,10 +475,13 @@ HANDLERS: Dict[str, Callable[[dict, str], dict]] = {
 # Dispatcher
 # ---------------------------------------------------------------------------
 
-def handle_purity_call(arguments: dict, project_root: str) -> dict:
-    """Route a purity_call invocation to the appropriate handler."""
-    function = (arguments.get("function") or "").strip()
-    params = _resolve_aliases(arguments.get("params") or {})
+def handle_purity_call(arguments: dict, project_root: str, strict: bool = False) -> dict:
+    """Route a purity_call invocation to the appropriate handler.
+
+    Accepts both long and short keys: function/f, params/p.
+    """
+    function = (arguments.get("function") or arguments.get("f") or "").strip()
+    params = _resolve_aliases(arguments.get("params") or arguments.get("p") or {})
 
     if not function:
         func_list = "\n".join(f"  {name}" for name in sorted(HANDLERS.keys()))
@@ -485,7 +493,7 @@ def handle_purity_call(arguments: dict, project_root: str) -> dict:
         return {"error": f"Unknown function: {function}. Available: {func_list}"}
 
     try:
-        return handler(params, project_root)
+        return handler(params, project_root, strict)
     except (ValueError, FileNotFoundError, OSError) as exc:
         return {"error": str(exc)}
 
@@ -519,8 +527,9 @@ PURITY_CALL_TOOL = {
 class McpServer:
     """Minimal MCP server over stdio (JSON-RPC 2.0, one JSON object per line)."""
 
-    def __init__(self, project_root: str):
+    def __init__(self, project_root: str, strict: bool = False):
         self.project_root = os.path.realpath(project_root)
+        self.strict = strict
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -585,7 +594,7 @@ class McpServer:
         if tool_name != "purity_call":
             return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
 
-        result = handle_purity_call(arguments, self.project_root)
+        result = handle_purity_call(arguments, self.project_root, self.strict)
         is_error = "error" in result
         text = result.get("__raw_text__") or result.get("error", "")
 
@@ -630,6 +639,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="MCP-Purity: Pure Python file operations MCP server")
     parser.add_argument("--project-root", required=True, help="Project root directory")
+    parser.add_argument("--strict", action="store_true", help="Reject paths outside project root")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
     parser.add_argument("--log-file", help="Log to file (implies --debug)")
     args = parser.parse_args()
@@ -651,7 +661,7 @@ def main() -> None:
         print(f"Error: project root is not a directory: {args.project_root}", file=sys.stderr)
         sys.exit(1)
 
-    server = McpServer(args.project_root)
+    server = McpServer(args.project_root, strict=args.strict)
     asyncio.run(server.run())
 
 

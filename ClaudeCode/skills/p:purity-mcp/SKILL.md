@@ -1,12 +1,14 @@
 ---
 name: p:purity-mcp
 description: >
-  MANDATORY — load this skill BEFORE any purity_call invocation or you WILL fail with wrong parameter names.
-  The ONLY correct API reference for mcp-purity file operations: read_file, create_text_file, list_dir, find_file, replace_content, delete_lines, replace_lines, insert_at_line, search_for_pattern. Use when reading, writing, searching, listing, or editing files via mcp-purity MCP server.
-  Trigger: purity_call, mcp-purity, file operations in purity-managed projects."
-  - Reading, creating, editing, listing, searching files in a purity-managed project
-  - Using purity_call tool or mcp__mcp-purity__purity_call
-  - When the user mentions purity, mcp-purity, or purity_call
+  NEVER USE Glob, Search or Write. Use purity_call instead.
+  MANDATORY — mcp-purity file operations: create_text_file, list_dir, find_file, replace_content, delete_lines, replace_lines, insert_at_line, search_for_pattern. Use when writing, searching, listing, or editing files.
+  Trigger:
+    - Creating or editing files.
+    - Listing directories, searching for files or patterns.
+    - When the user mentions purity, mcp-purity, or purity_call.
+    - GLOB_TOOL_NAME = mcp__mcp-purity__purity_call with function "find_file"
+    - GREP_TOOL_NAME = mcp__mcp-purity__purity_call with function "search_for_pattern"
 ---
 
 ## Overview
@@ -16,7 +18,7 @@ MCP-Purity is a file operations MCP server. It exposes a single tool `purity_cal
 ## Quick Start
 
 ```json
-{"function":"","params":{}}
+{"f":"","p":{}}
 ```
 Returns server status and list of available functions.
 
@@ -32,7 +34,7 @@ Returns server status and list of available functions.
 |`max_answer_chars`|int|no|-1|Character limit; -1 = unlimited|
 
 ```json
-{"function":"read_file","params":{"relative_path":"src/main.py","start_line":0,"end_line":49}}
+{"f":"read_file","p":{"relative_path":"src/main.py","start_line":0,"end_line":49}}
 ```
 
 ### 2. `create_text_file` — Create or overwrite a file
@@ -45,7 +47,7 @@ Returns server status and list of available functions.
 Creates parent directories automatically. **Destructive** — overwrites existing files.
 
 ```json
-{"function":"create_text_file","params":{"relative_path":"src/utils.py","content":"def add(a, b):\n    return a + b\n"}}
+{"f":"create_text_file","p":{"relative_path":"src/utils.py","content":"def add(a, b):\n    return a + b\n"}}
 ```
 
 ### 3. `list_dir` — List directory contents
@@ -58,7 +60,7 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 |`max_answer_chars`|int|no|-1|Character limit|
 
 ```json
-{"function":"list_dir","params":{"relative_path":"src","recursive":true,"skip_ignored_files":true}}
+{"f":"list_dir","p":{"relative_path":"src","recursive":true,"skip_ignored_files":true}}
 ```
 
 ### 4. `find_file` — Find files by wildcard pattern
@@ -69,7 +71,7 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 |`relative_path`|string|no|"."|Directory subtree to search|
 
 ```json
-{"function":"find_file","params":{"file_mask":"*.test.ts","relative_path":"src"}}
+{"f":"find_file","p":{"file_mask":"*.test.ts","relative_path":"src"}}
 ```
 
 ### 5. `replace_content` — Replace content in a file
@@ -85,7 +87,7 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 Regex mode uses standard Python `re.sub()` backreferences: `\1`, `\2`, `\g<name>`.
 
 ```json
-{"function":"replace_content","params":{"relative_path":"config.py","needle":"DEBUG = True","repl":"DEBUG = False","mode":"literal"}}
+{"f":"replace_content","p":{"relative_path":"config.py","needle":"DEBUG = True","repl":"DEBUG = False","mode":"literal"}}
 ```
 
 ### 6. `delete_lines` — Delete a range of lines
@@ -97,7 +99,7 @@ Regex mode uses standard Python `re.sub()` backreferences: `\1`, `\2`, `\g<name>
 |`end_line`|int|yes|0-based last line to delete (inclusive)|
 
 ```json
-{"function":"delete_lines","params":{"relative_path":"src/app.py","start_line":10,"end_line":15}}
+{"f":"delete_lines","p":{"relative_path":"src/app.py","start_line":10,"end_line":15}}
 ```
 
 ### 7. `replace_lines` — Replace a range of lines
@@ -110,7 +112,7 @@ Regex mode uses standard Python `re.sub()` backreferences: `\1`, `\2`, `\g<name>
 |`content`|string|yes|New content to insert|
 
 ```json
-{"function":"replace_lines","params":{"relative_path":"src/app.py","start_line":5,"end_line":7,"content":"    return new_value\n"}}
+{"f":"replace_lines","p":{"relative_path":"src/app.py","start_line":5,"end_line":7,"content":"    return new_value\n"}}
 ```
 
 ### 8. `insert_at_line` — Insert content at a line
@@ -124,7 +126,7 @@ Regex mode uses standard Python `re.sub()` backreferences: `\1`, `\2`, `\g<name>
 Existing content at `line` shifts down. Does not replace.
 
 ```json
-{"function":"insert_at_line","params":{"relative_path":"src/main.py","line":0,"content":"# Auto-generated\n"}}
+{"f":"insert_at_line","p":{"relative_path":"src/main.py","line":0,"content":"# Auto-generated\n"}}
 ```
 
 ### 9. `search_for_pattern` — Regex search across files
@@ -140,7 +142,7 @@ Existing content at `line` shifts down. Does not replace.
 |`max_answer_chars`|int|no|-1|Character limit|
 
 ```json
-{"function":"search_for_pattern","params":{"substring_pattern":"TODO|FIXME","context_lines_after":1,"paths_include_glob":"**/*.py"}}
+{"f":"search_for_pattern","p":{"substring_pattern":"TODO|FIXME","context_lines_after":1,"paths_include_glob":"**/*.py"}}
 ```
 
 ## Error Handling
