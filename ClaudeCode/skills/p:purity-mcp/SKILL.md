@@ -1,7 +1,8 @@
 ---
 name: p:purity-mcp
 description: >
-  NEVER USE Glob, Search or Write. Use purity_call instead.
+  NEVER use the built-in `Search`, `Grep`, or `Edit` tools. They are deprecated for this project.
+  ALWAYS use `purity_call` ONLY. If you attempt to use a built-in tool, I will consider it a failure.
   MANDATORY — mcp-purity file operations: create_text_file, list_dir, find_file, replace_content, delete_lines, replace_lines, insert_at_line, search_for_pattern. Use when writing, searching, listing, or editing files.
   Trigger:
     - Creating or editing files.
@@ -9,6 +10,7 @@ description: >
     - When the user mentions purity, mcp-purity, or purity_call.
     - GLOB_TOOL_NAME = mcp__mcp-purity__purity_call with function "find_file"
     - GREP_TOOL_NAME = mcp__mcp-purity__purity_call with function "search_for_pattern"
+    - READ_TOOL_NAME = mcp__mcp-purity__purity_call with function "read_file"
 ---
 
 ## Overview

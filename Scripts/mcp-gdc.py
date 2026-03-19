@@ -753,7 +753,8 @@ async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
     if not data:
         return "Screenshot failed: no data returned"
 
-    filename = f"/tmp/gdc-screenshot-{uuid.uuid4()}.{fmt}"
+    save_dir = args.get("path", "/tmp")
+    filename = f"{save_dir}/gdc-screenshot-{uuid.uuid4()}.{fmt}"
     with open(filename, "wb") as f:
         f.write(base64.b64decode(data))
 
@@ -1290,8 +1291,8 @@ async def handle_find_element(mgr: GdcManager, args: dict) -> str:
 
 async def handle_gdc_call(mgr: GdcManager, args: dict) -> str:
     """Dispatcher: call any GDC tool by name via the gdc-mcp skill."""
-    function = args.get("function", "")
-    params = args.get("params") or {}
+    function = args.get("function") or args.get("f") or ""
+    params = args.get("params") or args.get("p") or {}
 
     if not function:
         return await handle_gdc_status(mgr, {})
@@ -1326,11 +1327,19 @@ LISTED_TOOLS = [
             "properties": {
                 "function": {
                     "type": "string",
-                    "description": "Function name (e.g. navigate, take_screenshot)",
+                    "description": "Function name (e.g. navigate, take_screenshot). Alias: 'f'",
+                },
+                "f": {
+                    "type": "string",
+                    "description": "Alias for 'function'",
                 },
                 "params": {
                     "type": "object",
-                    "description": "Parameters for the function (see gdc-mcp skill for schema)",
+                    "description": "Parameters for the function (see gdc-mcp skill for schema). Alias: 'p'",
+                },
+                "p": {
+                    "type": "object",
+                    "description": "Alias for 'params'",
                 },
             },
             "required": [],

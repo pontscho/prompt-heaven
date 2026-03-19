@@ -1,12 +1,9 @@
 ---
 name: p:gdc-mcp
 description: >
-  Full API reference for the GDC (Chrome DevTools) MCP server. Use when
-  working with Chrome DevTools via MCP: browser automation, DOM inspection,
-  network monitoring, screenshots, JavaScript execution, page navigation,
-  form filling, input simulation, accessibility tree, console logs.
+  Use when working with Chrome DevTools via MCP: browser automation, DOM inspection, webpage network monitoring, screenshots,
+  JavaScript execution, page navigation, form filling, input simulation, accessibility tree, console logs.
   One tool: gdc_call. All functions invoked via gdc_call dispatcher.
-  Called without 'function' returns server status.
 triggers:
   - gdc
   - gdc_call
@@ -27,20 +24,23 @@ triggers:
 
 Tool: `gdc_call`
 Parameters: `function` (string), `params` (object, optional)
+Short aliases: `f` for `function`, `p` for `params`
 Called without `function` → returns server status (same as `gdc_status`).
 
 ## How to call any function
 
 ```
 mcp__mcp-gdc__gdc_call(function="<function_name>",params={...parameters...})
+mcp__mcp-gdc__gdc_call(f="<function_name>",p={...parameters...})
 ```
 
 **Example — navigate:**
 ```
 mcp__mcp-gdc__gdc_call(function="navigate",params={"url":"https://example.com"})
+mcp__mcp-gdc__gdc_call(f="navigate",p={"url":"https://example.com"})
 ```
 
-> **Sessions**: CDP sessions open lazily on first use and persist until `close_page` or server shutdown. Invalid `target_id` returns a tool error immediately.
+**Sessions**: CDP sessions open lazily on first use and persist until `close_page` or server shutdown. Invalid `target_id` returns a tool error immediately.
 
 ## Meta
 
@@ -128,7 +128,7 @@ Poll `document.body.innerText` until `text` appears or timeout expires.
 
 Returns: `"Text found: '<text>' (after <elapsed>s)"` or `"Timeout after <timeout>s: text not found: '<text>'"`.
 
-> **Note**: Polls visible rendered text only (`innerText`). Does not match hidden elements, `<script>`/`<style>` content, or text inside iframes. Use `evaluate()` for more complex conditions.
+**Note**: Polls visible rendered text only (`innerText`). Does not match hidden elements, `<script>`/`<style>` content, or text inside iframes. Use `evaluate()` for more complex conditions.
 
 ## Input
 
@@ -216,19 +216,21 @@ Dispatch a mouseWheel event.
 ## Debugging
 
 ### `take_screenshot`
-Capture screenshot, save to `/tmp/gdc-screenshot-<uuid>.<format>`, return file path.
+Capture screenshot, save to `<path>/gdc-screenshot-<uuid>.<format>`, return file path.
 
 ```json
 {"function":"take_screenshot"}
 {"function":"take_screenshot","params":{"format":"jpeg","quality":90}}
 {"function":"take_screenshot","params":{"full_page":true}}
+{"function":"take_screenshot","params":{"path":".claude/tmp/"}}
 ```
 
+- `path` — optional, default `"/tmp"`. Directory where the screenshot file is saved.
 - `format` — optional, `"png"` (default) or `"jpeg"`.
 - `quality` — optional, default `80`. Only used for `"jpeg"`.
 - `full_page` — optional, default `false`. Capture entire scrollable page.
 
-Returns: `"Screenshot saved: /tmp/gdc-screenshot-<uuid>.<fmt>"`.
+Returns: `"Screenshot saved: <path>/gdc-screenshot-<uuid>.<fmt>"`.
 
 ### `evaluate`
 Run JavaScript in the page context and return the result. Promises are awaited.
@@ -243,15 +245,15 @@ Run JavaScript in the page context and return the result. Promises are awaited.
 
 Returns: `"Result (<type>): <value>"` or `"Exception: <message>"`.
 
-> **Type limitations** — only JSON-serializable values are returned by value:
-> - Primitives, plain objects, arrays → returned as JSON.
-> - **DOM nodes** → `"Result (node): HTMLDivElement"` (no actual node data).
-> - **Functions** → `"Result (function): function name() {...}"`.
-> - **`undefined`** → `"Result (undefined): undefined"`.
-> - **`null`** → `"Result (object): undefined"` (known edge case: null treated as no-value).
-> - Circular / non-serializable objects → `"Exception: ..."`.
->
-> To work with DOM content, use `element.textContent`, `element.outerHTML`, etc. — not the element itself.
+**Type limitations** — only JSON-serializable values are returned by value:
+- Primitives, plain objects, arrays → returned as JSON.
+- **DOM nodes** → `"Result (node): HTMLDivElement"` (no actual node data).
+- **Functions** → `"Result (function): function name() {...}"`.
+- **`undefined`** → `"Result (undefined): undefined"`.
+- **`null`** → `"Result (object): undefined"` (known edge case: null treated as no-value).
+- Circular / non-serializable objects → `"Exception: ..."`.
+
+To work with DOM content, use `element.textContent`, `element.outerHTML`, etc. — not the element itself.
 
 ### `list_console_messages`
 Return in-memory console log (captured since session opened). Buffer: last 1000 entries; up to 50 shown per call.
@@ -286,7 +288,7 @@ Accessibility tree (<total_node_count> nodes):
 ... (truncated)
 ```
 
-> **Hard limit**: output is truncated to 100 lines regardless of tree size. There is no parameter to increase this limit. If you need full DOM content, use `evaluate("document.body.outerHTML")` or `evaluate("document.querySelector('...').outerHTML")` instead.
+**Hard limit**: output is truncated to 100 lines regardless of tree size. There is no parameter to increase this limit. If you need full DOM content, use `evaluate("document.body.outerHTML")` or `evaluate("document.querySelector('...').outerHTML")` instead.
 
 ## Network
 
