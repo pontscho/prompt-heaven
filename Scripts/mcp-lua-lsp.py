@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import pathlib
+import shutil
 import sys
 import argparse
 from typing import Any, Dict, List, Optional
@@ -1461,13 +1462,25 @@ class McpServer:
         if self.auto_project_root:
             debug_log(f"Auto-init: {self.auto_project_root}")
             self._init_task = asyncio.create_task(
-                handle_init({
-                    "project_root": self.auto_project_root,
-                    "luals_path": self.auto_luals_path,
-                    "config_path": self.auto_config_path,
-                })
+                self._auto_init()
             )
 
+        await self._read_loop()
+
+    async def _auto_init(self) -> None:
+        result = await handle_init({
+            "project_root": self.auto_project_root,
+            "luals_path": self.auto_luals_path,
+            "config_path": self.auto_config_path,
+        })
+        if isinstance(result, dict) and "error" in result:
+            sys.stderr.write(f"mcp-lua-lsp auto-init FAILED: {result['error']}\n")
+            sys.stderr.flush()
+        else:
+            debug_log(f"Auto-init OK: {result}")
+
+    async def _read_loop(self) -> None:
+        loop = asyncio.get_running_loop()
         try:
             while True:
                 line = await loop.run_in_executor(None, sys.stdin.readline)
@@ -1529,6 +1542,12 @@ def main() -> None:
         debug_log("Debug logging enabled")
     if parsed.markdown:
         MARKDOWN_MODE = True
+
+    if not shutil.which(parsed.luals_path):
+        print(f"ERROR: '{parsed.luals_path}' not found in PATH. "
+              "Install lua-language-server: https://github.com/LuaLS/lua-language-server/releases",
+              file=sys.stderr)
+        sys.exit(1)
 
     server = McpServer(
         auto_project_root=parsed.project_root,

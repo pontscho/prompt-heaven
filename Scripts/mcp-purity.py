@@ -47,6 +47,8 @@ def safe_path(project_root: str, relative_path: str, strict: bool = False) -> st
 
 PARAM_ALIASES = {
     "path": "relative_path",
+    "file_path": "relative_path",
+    "root": "relative_path",
     "pattern": "substring_pattern",
     "new_content": "content",
     "line_start": "start_line",
@@ -202,10 +204,12 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
 
 
 def handle_find_file(params: dict, project_root: str, strict: bool = False) -> dict:
-    file_mask = params.get("file_mask")
+    file_mask = params.get("file_mask") or params.get("pattern") or params.get("substring_pattern")
     if not file_mask:
         raise ValueError("Missing required parameter: file_mask")
     rel = params.get("relative_path", ".")
+    head_limit = params.get("head_limit", 0)  # 0 = unlimited
+    offset = params.get("offset", 0)
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
         raise FileNotFoundError(f"Directory not found: {rel}")
@@ -218,7 +222,17 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
                 match_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
                 matches.append(match_rel)
 
-    header = f"Found {len(matches)} file(s) matching '{file_mask}'"
+    total = len(matches)
+    if offset:
+        matches = matches[offset:]
+    truncated = False
+    if head_limit > 0 and len(matches) > head_limit:
+        matches = matches[:head_limit]
+        truncated = True
+
+    header = f"Found {total} file(s) matching '{file_mask}'"
+    if truncated or offset:
+        header += f" (showing {offset+1}-{offset+len(matches)} of {total})"
     return {"__raw_text__": f"{header}\n" + "\n".join(matches) if matches else header}
 
 
@@ -389,12 +403,18 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     if not pattern_str:
         raise ValueError("Missing required parameter: substring_pattern")
 
+    output_mode = params.get("output_mode", "files_with_matches")  # files_with_matches | content | count
+    if output_mode not in ("files_with_matches", "content", "count"):
+        raise ValueError("Parameter 'output_mode' must be 'files_with_matches', 'content', or 'count'")
+
     ctx_before = params.get("context_lines_before", 0)
     ctx_after = params.get("context_lines_after", 0)
     include_glob = params.get("paths_include_glob", "")
     exclude_glob = params.get("paths_exclude_glob", "")
     search_rel = params.get("relative_path", "")
     max_chars = params.get("max_answer_chars", -1)
+    head_limit = params.get("head_limit", 0)  # 0 = unlimited
+    offset = params.get("offset", 0)
 
     search_root = safe_path(project_root, search_rel, strict) if search_rel else project_root
 
@@ -403,8 +423,10 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     except re.error as exc:
         raise ValueError(f"Invalid regex pattern: {exc}")
 
-    output_lines: List[str] = []
-    match_count = 0
+    # Collect all matches first (for count and files_with_matches we need file-level info)
+    file_matches: Dict[str, int] = {}  # file_rel -> match count
+    content_entries: List[str] = []
+    total_match_count = 0
     total_chars = 0
     truncated = False
 
@@ -425,33 +447,79 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
             except (OSError, PermissionError):
                 continue
 
+            file_hit_count = 0
             for i, line in enumerate(lines):
                 if pattern.search(line):
-                    line_num = i + 1
-                    if ctx_before or ctx_after:
-                        start = max(0, i - ctx_before)
-                        end = min(len(lines), i + ctx_after + 1)
-                        ctx = "".join(lines[start:end]).rstrip("\n")
-                        entry = f"{file_rel}:{line_num}:\n{ctx}"
-                    else:
-                        entry = f"{file_rel}:{line_num}: {line.rstrip(chr(10))}"
+                    file_hit_count += 1
+                    total_match_count += 1
 
-                    if max_chars > 0 and total_chars + len(entry) + 1 > max_chars:
-                        truncated = True
-                        break
-                    output_lines.append(entry)
-                    total_chars += len(entry) + 1
-                    match_count += 1
+                    if output_mode == "content":
+                        line_num = i + 1
+                        if ctx_before or ctx_after:
+                            start = max(0, i - ctx_before)
+                            end = min(len(lines), i + ctx_after + 1)
+                            ctx = "".join(lines[start:end]).rstrip("\n")
+                            entry = f"{file_rel}:{line_num}:\n{ctx}"
+                        else:
+                            entry = f"{file_rel}:{line_num}: {line.rstrip(chr(10))}"
+
+                        if max_chars > 0 and total_chars + len(entry) + 1 > max_chars:
+                            truncated = True
+                            break
+                        content_entries.append(entry)
+                        total_chars += len(entry) + 1
+
+                        if head_limit > 0 and len(content_entries) >= offset + head_limit:
+                            truncated = True
+                            break
+
+            if file_hit_count > 0:
+                file_matches[file_rel] = file_hit_count
 
             if truncated:
                 break
+
+            # For non-content modes, check head_limit on file count
+            if output_mode != "content" and head_limit > 0 and len(file_matches) >= offset + head_limit:
+                truncated = True
+                break
+
         if truncated:
             break
 
-    header = f"{match_count} match(es)"
-    if truncated:
-        header += " (truncated)"
-    return {"__raw_text__": f"{header}\n" + "\n".join(output_lines) if output_lines else header}
+    # Format output based on mode
+    if output_mode == "count":
+        entries = [f"{f}: {c}" for f, c in file_matches.items()]
+        if offset:
+            entries = entries[offset:]
+        if head_limit > 0:
+            entries = entries[:head_limit]
+        header = f"{total_match_count} match(es) in {len(file_matches)} file(s)"
+        if truncated:
+            header += " (truncated)"
+        return {"__raw_text__": f"{header}\n" + "\n".join(entries) if entries else header}
+
+    elif output_mode == "files_with_matches":
+        entries = list(file_matches.keys())
+        if offset:
+            entries = entries[offset:]
+        if head_limit > 0:
+            entries = entries[:head_limit]
+        header = f"{len(file_matches)} file(s) with matches"
+        if truncated:
+            header += " (truncated)"
+        return {"__raw_text__": f"{header}\n" + "\n".join(entries) if entries else header}
+
+    else:  # content
+        entries = content_entries
+        if offset:
+            entries = entries[offset:]
+        if head_limit > 0:
+            entries = entries[:head_limit]
+        header = f"{total_match_count} match(es)"
+        if truncated:
+            header += " (truncated)"
+        return {"__raw_text__": f"{header}\n" + "\n".join(entries) if entries else header}
 
 
 # ---------------------------------------------------------------------------
@@ -463,11 +531,14 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "create_text_file": handle_create_text_file,
     "list_dir": handle_list_dir,
     "find_file": handle_find_file,
+    "glob": handle_find_file,
     "replace_content": handle_replace_content,
     "delete_lines": handle_delete_lines,
     "replace_lines": handle_replace_lines,
     "insert_at_line": handle_insert_at_line,
     "search_for_pattern": handle_search_for_pattern,
+    "grep": handle_search_for_pattern,
+    "search": handle_search_for_pattern,
 }
 
 
@@ -625,7 +696,7 @@ HANDLER_DESCRIPTIONS = {
     "delete_lines":        "Delete a range of lines",
     "replace_lines":       "Replace a range of lines with new content",
     "insert_at_line":      "Insert content before a given line",
-    "search_for_pattern":  "Regex search across project files",
+    "search_for_pattern":  "Regex search across project files (output_mode: files_with_matches|content|count, head_limit, offset)",
 }
 
 
