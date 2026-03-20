@@ -53,6 +53,12 @@ PARAM_ALIASES = {
     "new_content": "content",
     "line_start": "start_line",
     "line_end": "end_line",
+    # replace_content aliases
+    "search": "needle",
+    "find": "needle",
+    "replacement": "repl",
+    "replace": "repl",
+    "replace_with": "repl",
 }
 
 
@@ -246,7 +252,7 @@ def handle_replace_content(params: dict, project_root: str, strict: bool = False
     repl = params.get("repl")
     if repl is None:
         raise ValueError("Missing required parameter: repl")
-    mode = params.get("mode")
+    mode = params.get("mode", "literal")
     if mode not in ("literal", "regex"):
         raise ValueError("Parameter 'mode' must be 'literal' or 'regex'")
     allow_multiple = params.get("allow_multiple_occurrences", False)
