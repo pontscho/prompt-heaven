@@ -216,21 +216,23 @@ Dispatch a mouseWheel event.
 ## Debugging
 
 ### `take_screenshot`
-Capture screenshot, save to `<path>/gdc-screenshot-<uuid>.<format>`, return file path.
+Capture screenshot and save to file. Returns file path.
 
 ```json
 {"function":"take_screenshot"}
+{"function":"take_screenshot","params":{"savePath":"/tmp/my-screenshot.png"}}
 {"function":"take_screenshot","params":{"format":"jpeg","quality":90}}
 {"function":"take_screenshot","params":{"full_page":true}}
 {"function":"take_screenshot","params":{"path":".claude/tmp/"}}
 ```
 
-- `path` — optional, default `"/tmp"`. Directory where the screenshot file is saved.
+- `savePath` (alias: `save_path`) — optional. Full file path to save the screenshot. Parent directories are created automatically. When set, `path` is ignored.
+- `path` — optional, default `"/tmp"`. Directory where the screenshot file is saved with auto-generated name (`gdc-screenshot-<uuid>.<fmt>`). Only used when `savePath` is not set.
 - `format` — optional, `"png"` (default) or `"jpeg"`.
 - `quality` — optional, default `80`. Only used for `"jpeg"`.
 - `full_page` — optional, default `false`. Capture entire scrollable page.
 
-Returns: `"Screenshot saved: <path>/gdc-screenshot-<uuid>.<fmt>"`.
+Returns: `"Screenshot saved: <filepath>"`.
 
 ### `evaluate`
 Run JavaScript in the page context and return the result. Promises are awaited.

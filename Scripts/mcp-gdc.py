@@ -753,8 +753,15 @@ async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
     if not data:
         return "Screenshot failed: no data returned"
 
-    save_dir = args.get("path", "/tmp")
-    filename = f"{save_dir}/gdc-screenshot-{uuid.uuid4()}.{fmt}"
+    save_path = args.get("savePath") or args.get("save_path")
+    if save_path:
+        # savePath is a full file path — ensure parent directory exists
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        filename = save_path
+    else:
+        save_dir = args.get("path", "/tmp")
+        filename = f"{save_dir}/gdc-screenshot-{uuid.uuid4()}.{fmt}"
+
     with open(filename, "wb") as f:
         f.write(base64.b64decode(data))
 
