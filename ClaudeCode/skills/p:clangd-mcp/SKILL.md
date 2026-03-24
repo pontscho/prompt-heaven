@@ -5,7 +5,7 @@ description: >
   you MUST use this skill — NOT grep, NOT Read-and-search, NOT guessing.
   Provides compiler-accurate code intelligence via clangd LSP: find definitions,
   references, diagnostics, hover types, document outline, refactoring impact.
-  One tool: clangd_call. 13 functions. All analysis calls are freely batchable.
+  One tool: clangd_call. 14 functions. All analysis calls are freely batchable.
   Using grep for C/C++ symbol navigation when this skill is available is a violation.
 triggers:
   - clangd
@@ -25,7 +25,7 @@ triggers:
 
 # clangd-mcp — C/C++ Code Intelligence
 
-The MCP server (`mcp-clangd.py`) exposes **one tool**: `clangd_call` — universal dispatcher for all 13 clangd functions; called without `function` returns server status All clangd operations go through `clangd_call(function=..., params={...})`.
+The MCP server (`mcp-clangd.py`) exposes **one tool**: `clangd_call` — universal dispatcher for all 14 clangd functions; called without `function` returns server status All clangd operations go through `clangd_call(function=..., params={...})`.
 
 ## How to call any function
 
@@ -38,7 +38,7 @@ mcp__mcp-clangd__clangd_call(function = "<function_name>",params={...parameters.
 mcp__mcp-clangd__clangd_call(function="clangd_find_definition", params={"symbol_name":"my_function"})
 ```
 
-## Tool Reference (13 functions)
+## Tool Reference (14 functions)
 
 ### clangd_call (status check)
 Returns server status and active project when called without `function`.
@@ -71,6 +71,18 @@ Find all references to a symbol by name.
 ```json
 {
 "symbol_name":"my_function",// required
+"max_results":50,// optional, default 50
+"context_lines":3// optional, default 3 — 0 = no context
+}
+```
+
+### clangd_find_references_at
+Find all references at a specific file position (1-based line/character).
+```json
+{
+"path":"src/main.c",// required — relative or absolute path
+"line":42,// required — 1-based line number
+"character":10,// required — 1-based character offset
 "max_results":50,// optional, default 50
 "context_lines":3// optional, default 3 — 0 = no context
 }
@@ -196,6 +208,7 @@ All location objects returned by this server follow this structure:
 |`clangd_find_definition`|multiple symbols at once|
 |`clangd_find_definition_at`|multiple positions at once|
 |`clangd_find_references`|multiple symbols at once|
+|`clangd_find_references_at`|multiple positions at once|
 |`clangd_find_implementations_at`||
 |`clangd_workspace_symbols`||
 |`clangd_document_outline`|multiple files at once|

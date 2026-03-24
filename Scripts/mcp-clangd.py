@@ -862,6 +862,49 @@ async def handle_find_references(args: dict) -> Any:
     }
 
 
+async def handle_find_references_at(args: dict) -> Any:
+    """
+    Find all references at a specific file position.
+    params: { path, line, character, max_results?, context_lines? }
+    """
+    client = _require_client()
+    path = args.get("path") or args.get("file_path", "")
+    line = int(args.get("line", 1)) - 1   # human (1-based) → LSP (0-based)
+    char = int(args.get("character", 1)) - 1
+    max_results = int(args.get("max_results", 50))
+    context_lines = int(args.get("context_lines", 3))
+    if not path:
+        return {"error": "path is required"}
+
+    abs_path = client._abs_path(path)
+    refs = await client.references(abs_path, line, char)
+    all_refs = []
+    seen = set()
+    for ref in refs:
+        if max_results > 0 and len(all_refs) >= max_results:
+            break
+        ref_uri = ref.get("uri", "")
+        ref_start = ref.get("range", {}).get("start", {})
+        key = f"{ref_uri}:{ref_start.get('line')}:{ref_start.get('character')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        location = _location_from_payload(ref, client.project_root)
+        if not location:
+            continue
+        ref_abs_path = uri_to_path(location["uri"])
+        ref_line = location["range"]["start"]["line"]
+        all_refs.append({
+            "location": location,
+            "context": extract_surrounding_code(ref_abs_path, ref_line, context_lines) if context_lines > 0 else None,
+        })
+
+    return {
+        "count": len(all_refs),
+        "references": all_refs,
+    }
+
+
 async def handle_find_implementations_at(args: dict) -> Any:
     """
     Find implementations at a specific file position.
@@ -1263,6 +1306,7 @@ ALL_HANDLERS = {
     "clangd_find_definition":         handle_find_definition,
     "clangd_find_definition_at":      handle_find_definition_at,
     "clangd_find_references":         handle_find_references,
+    "clangd_find_references_at":      handle_find_references_at,
     "clangd_find_implementations_at": handle_find_implementations_at,
     "clangd_workspace_symbols":       handle_workspace_symbols,
     "clangd_document_outline":        handle_document_outline,
@@ -1378,6 +1422,14 @@ def _result_to_markdown(function: str, result: Any) -> str:
         count = result.get("count", 0)
         refs = result.get("references", [])
         lines = [f"## References: {sym} ({count})"]
+        for r in refs:
+            lines.append("- " + _md_location_block(r.get("location", {})))
+        return sep.join(lines)
+
+    if function == "clangd_find_references_at":
+        count = result.get("count", 0)
+        refs = result.get("references", [])
+        lines = [f"## References at position ({count})"]
         for r in refs:
             lines.append("- " + _md_location_block(r.get("location", {})))
         return sep.join(lines)
