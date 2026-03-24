@@ -1371,6 +1371,8 @@ ALL_HANDLERS = {
     "list_network_requests":        handle_list_network_requests,
     "get_network_request":          handle_get_network_request,
     "emulate":                      handle_emulate,
+    # Aliases
+    "execute_js":                   handle_evaluate,
     # Extensions
     "hover":                        handle_hover,
     "get_cookies":                  handle_get_cookies,
