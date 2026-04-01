@@ -423,11 +423,17 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     offset = params.get("offset", 0)
 
     search_root = safe_path(project_root, search_rel, strict) if search_rel else project_root
+    max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
+    skip_ignored = params.get("skip_ignored_files", True)
 
     try:
         pattern = re.compile(pattern_str)
     except re.error as exc:
         raise ValueError(f"Invalid regex pattern: {exc}")
+
+    ignore_patterns: List[str] = []
+    if skip_ignored:
+        ignore_patterns = _parse_gitignore(os.path.join(project_root, ".gitignore"))
 
     # Collect all matches first (for count and files_with_matches we need file-level info)
     file_matches: Dict[str, int] = {}  # file_rel -> match count
@@ -438,7 +444,12 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
 
     for dirpath, dirnames, filenames in os.walk(search_root):
         dirnames[:] = [d for d in dirnames if d != ".git"]
+        if skip_ignored:
+            dirnames[:] = [d for d in dirnames if not _is_ignored(d, ignore_patterns)]
         for name in filenames:
+            if skip_ignored and _is_ignored(name, ignore_patterns):
+                continue
+
             full = os.path.join(dirpath, name)
             file_rel = os.path.relpath(full, project_root)
 
@@ -447,37 +458,72 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
             if exclude_glob and fnmatch.fnmatch(file_rel, exclude_glob):
                 continue
 
+            # Skip files exceeding size limit
             try:
-                with open(full, "r", encoding="utf-8", errors="replace") as fh:
-                    lines = fh.readlines()
+                if os.path.getsize(full) > max_file_size:
+                    continue
+            except OSError:
+                continue
+
+            # Skip binary files (check first 8KB for null bytes)
+            try:
+                with open(full, "rb") as fb:
+                    chunk = fb.read(8192)
+                if b"\x00" in chunk:
+                    continue
+            except (OSError, PermissionError):
+                continue
+
+            try:
+                fh = open(full, "r", encoding="utf-8", errors="replace")
             except (OSError, PermissionError):
                 continue
 
             file_hit_count = 0
-            for i, line in enumerate(lines):
-                if pattern.search(line):
-                    file_hit_count += 1
-                    total_match_count += 1
+            need_context = output_mode == "content" and (ctx_before or ctx_after)
 
-                    if output_mode == "content":
+            if need_context:
+                # Need surrounding lines — read all lines for context access
+                try:
+                    lines = fh.readlines()
+                finally:
+                    fh.close()
+                for i, line in enumerate(lines):
+                    if pattern.search(line):
+                        file_hit_count += 1
+                        total_match_count += 1
                         line_num = i + 1
-                        if ctx_before or ctx_after:
-                            start = max(0, i - ctx_before)
-                            end = min(len(lines), i + ctx_after + 1)
-                            ctx = "".join(lines[start:end]).rstrip("\n")
-                            entry = f"{file_rel}:{line_num}:\n{ctx}"
-                        else:
-                            entry = f"{file_rel}:{line_num}: {line.rstrip(chr(10))}"
-
+                        start = max(0, i - ctx_before)
+                        end = min(len(lines), i + ctx_after + 1)
+                        ctx = "".join(lines[start:end]).rstrip("\n")
+                        entry = f"{file_rel}:{line_num}:\n{ctx}"
                         if max_chars > 0 and total_chars + len(entry) + 1 > max_chars:
                             truncated = True
                             break
                         content_entries.append(entry)
                         total_chars += len(entry) + 1
-
                         if head_limit > 0 and len(content_entries) >= offset + head_limit:
                             truncated = True
                             break
+            else:
+                # Stream line-by-line — no need to hold entire file in memory
+                try:
+                    for i, line in enumerate(fh):
+                        if pattern.search(line):
+                            file_hit_count += 1
+                            total_match_count += 1
+                            if output_mode == "content":
+                                entry = f"{file_rel}:{i + 1}: {line.rstrip(chr(10))}"
+                                if max_chars > 0 and total_chars + len(entry) + 1 > max_chars:
+                                    truncated = True
+                                    break
+                                content_entries.append(entry)
+                                total_chars += len(entry) + 1
+                                if head_limit > 0 and len(content_entries) >= offset + head_limit:
+                                    truncated = True
+                                    break
+                finally:
+                    fh.close()
 
             if file_hit_count > 0:
                 file_matches[file_rel] = file_hit_count
