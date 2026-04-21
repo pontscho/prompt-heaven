@@ -59,6 +59,10 @@ PARAM_ALIASES = {
     "replacement": "repl",
     "replace": "repl",
     "replace_with": "repl",
+    # search_for_pattern aliases
+    "glob": "paths_include_glob",
+    "include": "paths_include_glob",
+    "exclude": "paths_exclude_glob",
 }
 
 
@@ -435,6 +439,9 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     if skip_ignored:
         ignore_patterns = _parse_gitignore(os.path.join(project_root, ".gitignore"))
 
+    # If search_root is a single file, search only that file
+    search_single_file = os.path.isfile(search_root)
+
     # Collect all matches first (for count and files_with_matches we need file-level info)
     file_matches: Dict[str, int] = {}  # file_rel -> match count
     content_entries: List[str] = []
@@ -442,12 +449,18 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     total_chars = 0
     truncated = False
 
-    for dirpath, dirnames, filenames in os.walk(search_root):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
-        if skip_ignored:
-            dirnames[:] = [d for d in dirnames if not _is_ignored(d, ignore_patterns)]
+    if search_single_file:
+        file_iter = [(os.path.dirname(search_root), [], [os.path.basename(search_root)])]
+    else:
+        file_iter = os.walk(search_root)
+
+    for dirpath, dirnames, filenames in file_iter:
+        if not search_single_file:
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            if skip_ignored:
+                dirnames[:] = [d for d in dirnames if not _is_ignored(d, ignore_patterns)]
         for name in filenames:
-            if skip_ignored and _is_ignored(name, ignore_patterns):
+            if not search_single_file and skip_ignored and _is_ignored(name, ignore_patterns):
                 continue
 
             full = os.path.join(dirpath, name)
