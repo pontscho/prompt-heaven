@@ -279,6 +279,7 @@ def handle_replace_content(params: dict, project_root: str, strict: bool = False
             )
         new_content = content.replace(needle, repl)
     else:
+        needle = needle.replace("\\|", "|")
         matches = list(re.finditer(needle, content))
         if not matches:
             raise ValueError(f"Pattern not found in {rel}")
@@ -429,6 +430,9 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     search_root = safe_path(project_root, search_rel, strict) if search_rel else project_root
     max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
     skip_ignored = params.get("skip_ignored_files", True)
+
+    # LLMs frequently escape | as \| which turns alternation into a literal pipe
+    pattern_str = pattern_str.replace(r"\|", "|")
 
     try:
         pattern = re.compile(pattern_str)
