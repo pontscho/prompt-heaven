@@ -33,7 +33,7 @@ When this skill is activated:
 1. **Display task status table**
    - Use the provided Python script to display tasks:
      ```bash
-     ~/.claude/scripts/task-show-all.py requirements.yaml
+     ~/.claude/scripts/task-plan.py requirements.yaml
      ```
    - This will show a formatted table with all tasks, their status, and progress summary
    - The script outputs: Task ID, Status (✅ completed or ⏳ pending, ❌ cancel, 🚧 in_progress), Description, and overall progress

@@ -13,7 +13,7 @@ Execute a planned implementation based on a structured YAML document generated b
 # Purpose
 
 This command takes a completed implementation plan (from `/p:task-plan`) and executes it step-by-step:
-- Reads the requirements.yaml with use `~/.claude/scripts/task-implementation-plan.py [path_to_yaml]`
+- Reads the requirements.yaml with use `~/.claude/scripts/task-plan.py [path_to_yaml]`
 - Validates the plan is complete and ready for implementation
 - Executes tasks in dependency order
 - Tests each task after completion
