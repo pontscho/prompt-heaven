@@ -33,7 +33,6 @@ STATUS_ICONS = {
 	"pending": "⏳",
 }
 
-
 class Task:
 	"""Represents a single task with its metadata."""
 
@@ -398,6 +397,8 @@ def main():
 						help="Path to requirements.yaml")
 	parser.add_argument("--max-score", type=int, default=6,
 						help="Maximum combined score per batch (default: 6)")
+	parser.add_argument("--full", action="store_true",
+						help="Show full output (reserved for future use)")
 
 	args = parser.parse_args()
 

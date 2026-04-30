@@ -72,7 +72,7 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 0. Don't forget read that fuckin' CLAUDE.md and relevant language-specific instruction files!
 1. **Load implementation plan using the extraction script**:
    ```bash
-   ~/.claude/scripts/task-implementation-plan.py [path_to_yaml]
+   ~/.claude/scripts/task-plan.py [path_to_yaml]
    ```
    - This loads only the essential data (complete, context_summary, success_criteria, implementation_plan)
    - Token-efficient: excludes original_request, requirements, constraints
@@ -302,7 +302,7 @@ If implementation is interrupted:
 # Example Execution Flow
 
 ```
-[Load implementation plan via task-implementation-plan.py script]
+[Load implementation plan via task-plan.py script]
 ✓ Plan is complete
 ✓ Found 4 tasks in implementation_plan
 ✓ Dependency order: task-001 → task-002 → task-003 → task-004

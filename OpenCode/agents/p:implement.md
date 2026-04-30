@@ -320,7 +320,7 @@ If implementation is interrupted:
 # Example Execution Flow
 
 ```
-[Load implementation plan via task-implementation-plan.py script]
+[Load implementation plan via task-plan.py script]
 ✓ Plan is complete
 ✓ Found 4 tasks in implementation_plan
 ✓ Dependency order: task-001 → task-002 → task-003 → task-004
