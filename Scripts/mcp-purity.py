@@ -158,10 +158,27 @@ def handle_create_text_file(params: dict, project_root: str, strict: bool = Fals
     return {"__raw_text__": f"Created {rel} ({nbytes} bytes)"}
 
 
+def _format_size(size: int) -> str:
+    if size < 1024:
+        return f"{size}B"
+    val = float(size)
+    for unit in ("K", "M", "G", "T"):
+        val /= 1024
+        if val < 1024:
+            return f"{val:.1f}{unit}"
+    return f"{val:.1f}P"
+
+
+def _format_mtime(mtime: float) -> str:
+    import datetime
+    return datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+
 def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path", ".")
     recursive = params.get("recursive", False)
     skip_ignored = params.get("skip_ignored_files", False)
+    long_format = bool(params.get("long", False))
 
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
@@ -171,7 +188,7 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     if skip_ignored:
         ignore_patterns = _parse_gitignore(os.path.join(project_root, ".gitignore"))
 
-    entries: List[str] = []
+    raw: List[tuple] = []  # (display_rel, is_dir, abs_path)
     if recursive:
         for dirpath, dirnames, filenames in os.walk(path):
             if skip_ignored:
@@ -179,35 +196,49 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
                     d for d in dirnames
                     if not _is_ignored(d, ignore_patterns) and d != ".git"
                 ]
+            else:
+                dirnames[:] = [d for d in dirnames if d != ".git"]
             for name in sorted(dirnames):
                 entry_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
                 if skip_ignored and _is_ignored(entry_rel, ignore_patterns):
                     continue
-                entries.append(entry_rel + "/")
+                raw.append((entry_rel, True, os.path.join(dirpath, name)))
             for name in sorted(filenames):
                 entry_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
                 if skip_ignored and _is_ignored(entry_rel, ignore_patterns):
                     continue
-                entries.append(entry_rel)
+                raw.append((entry_rel, False, os.path.join(dirpath, name)))
     else:
         for name in sorted(os.listdir(path)):
             if skip_ignored and (_is_ignored(name, ignore_patterns) or name == ".git"):
                 continue
             full = os.path.join(path, name)
             entry_rel = os.path.relpath(full, project_root)
-            if os.path.isdir(full):
-                entries.append(entry_rel + "/")
-            else:
-                entries.append(entry_rel)
+            raw.append((entry_rel, os.path.isdir(full), full))
 
-    listing = "\n".join(entries)
+    if long_format:
+        lines: List[str] = []
+        for entry_rel, is_dir, full in raw:
+            try:
+                st = os.stat(full)
+                size_str = "-" if is_dir else _format_size(st.st_size)
+                mtime_str = _format_mtime(st.st_mtime)
+            except OSError:
+                size_str = "?"
+                mtime_str = "?"
+            display = entry_rel + ("/" if is_dir else "")
+            lines.append(f"{size_str:>7}  {mtime_str}  {display}")
+    else:
+        lines = [entry_rel + ("/" if is_dir else "") for entry_rel, is_dir, _ in raw]
+
+    listing = "\n".join(lines)
     max_chars = params.get("max_answer_chars", -1)
     truncated = False
     if max_chars > 0 and len(listing) > max_chars:
         listing = listing[:max_chars]
         truncated = True
 
-    header = f"[{rel}] {len(entries)} entries"
+    header = f"[{rel}] {len(raw)} entries"
     if truncated:
         header += " (truncated)"
     return {"__raw_text__": f"{header}\n{listing}"}
@@ -414,12 +445,8 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     if not pattern_str:
         raise ValueError("Missing required parameter: substring_pattern")
 
-    output_mode = params.get("output_mode", "files_with_matches")  # files_with_matches | content | count
-    if output_mode not in ("files_with_matches", "content", "count"):
-        raise ValueError("Parameter 'output_mode' must be 'files_with_matches', 'content', or 'count'")
-
-    ctx_before = params.get("context_lines_before", 0)
-    ctx_after = params.get("context_lines_after", 0)
+    ctx_before = params.get("context_lines_before", 0) or 0
+    ctx_after = params.get("context_lines_after", 0) or 0
     include_glob = params.get("paths_include_glob", "")
     exclude_glob = params.get("paths_exclude_glob", "")
     search_rel = params.get("relative_path", "")
@@ -428,6 +455,22 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     offset = params.get("offset", 0)
 
     search_root = safe_path(project_root, search_rel, strict) if search_rel else project_root
+    search_single_file = os.path.isfile(search_root)
+
+    # Smart default: switch to "content" mode when context-line params are set
+    # or when the search target is a single file — otherwise the user-passed
+    # context params are silently ignored and a single-file search would only
+    # answer "yes/no this file matches", which is rarely the actual intent.
+    explicit_mode = params.get("output_mode")
+    if explicit_mode:
+        output_mode = explicit_mode
+    elif ctx_before > 0 or ctx_after > 0 or search_single_file:
+        output_mode = "content"
+    else:
+        output_mode = "files_with_matches"
+    if output_mode not in ("files_with_matches", "content", "count"):
+        raise ValueError("Parameter 'output_mode' must be 'files_with_matches', 'content', or 'count'")
+
     max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
     skip_ignored = params.get("skip_ignored_files", True)
 
@@ -442,9 +485,6 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     ignore_patterns: List[str] = []
     if skip_ignored:
         ignore_patterns = _parse_gitignore(os.path.join(project_root, ".gitignore"))
-
-    # If search_root is a single file, search only that file
-    search_single_file = os.path.isfile(search_root)
 
     # Collect all matches first (for count and files_with_matches we need file-level info)
     file_matches: Dict[str, int] = {}  # file_rel -> match count
@@ -599,6 +639,7 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "read_file": handle_read_file,
     "create_text_file": handle_create_text_file,
     "list_dir": handle_list_dir,
+    "ls": handle_list_dir,
     "find_file": handle_find_file,
     "glob": handle_find_file,
     "replace_content": handle_replace_content,
@@ -645,8 +686,27 @@ def handle_purity_call(arguments: dict, project_root: str, strict: bool = False)
 PURITY_CALL_TOOL = {
     "name": "purity_call",
     "description": (
-        "File operations dispatcher. "
-        "Call without 'function' for status and available functions."
+        "Project file operations: search, glob, list (ls), write, surgical edits.\n\n"
+        "When NOT to use:\n"
+        "  - Plain reading → built-in Read (less MCP overhead).\n"
+        "  - C/C++ symbols → mcp-clangd. Lua symbols → mcp-luals.\n"
+        "  - Git → mcp-git. Build → mcp-compile.\n\n"
+        "NEVER use Bash for file/dir ops — these mappings are MANDATORY:\n"
+        "  Bash(\"ls ...\")    → function=\"ls\"\n"
+        "  Bash(\"find ...\")  → function=\"find_file\" (alias \"glob\")\n"
+        "  Bash(\"grep ...\")  → function=\"search_for_pattern\" (alias \"grep\")\n"
+        "  Bash(\"cat ...\")   → built-in Read\n"
+        "  Bash(\"sed/awk\")   → function=\"replace_content\"\n"
+        "Also prefer this OVER built-in Write/Edit/Glob/Grep.\n\n"
+        "Functions: search_for_pattern (grep), find_file (glob), list_dir (ls),\n"
+        "create_text_file, replace_content, replace_lines, delete_lines,\n"
+        "insert_at_line, read_file. Project-root-scoped, .gitignore-aware, binary-safe.\n\n"
+        "Examples:\n"
+        "  ls -l:      function=\"ls\", params={\"path\":\"src/\",\"long\":true}\n"
+        "  find files: function=\"find_file\", params={\"pattern\":\"*.cu\",\"path\":\"src/\"}\n"
+        "  grep:       function=\"search_for_pattern\", "
+        "params={\"pattern\":\"forward_moe\",\"path\":\"src/\",\"glob\":\"*.cu\"}\n"
+        "Call without 'function' for full function list."
     ),
     "inputSchema": {
         "type": "object",
@@ -759,7 +819,7 @@ class McpServer:
 HANDLER_DESCRIPTIONS = {
     "read_file":           "Read file contents (with optional line range)",
     "create_text_file":    "Create or overwrite a file",
-    "list_dir":            "List directory contents (optionally recursive)",
+    "list_dir":            "List directory contents (recursive=True, long=True for size+mtime; alias: ls)",
     "find_file":           "Find files by wildcard pattern",
     "replace_content":     "Replace text in a file (literal or regex)",
     "delete_lines":        "Delete a range of lines",

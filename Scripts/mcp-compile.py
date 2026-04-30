@@ -345,19 +345,20 @@ def handle_compile_call(arguments: dict, project_root: str,
 COMPILE_CALL_TOOL = {
 	"name": "compile_call",
 	"description": (
-		"Build command runner with output filtering. "
-		"Call without 'function' for status and available functions.\n\n"
-		"Functions: build — Run a build command, filter output, return Markdown.\n\n"
-		"build params:\n"
-		"command (string): Build command to run. Optional if --default-command is set.\n"
-		"cwd (string): Working directory. Default: project root.\n"
-		"timeout (int): Timeout in seconds. Default: 600.\n"
-		"filter (object): Output filter config with keys:\n"
-		" grep (string): Regex pattern to match lines.\n"
-		" head (int): Keep first N lines.\n"
-		" tail (int): Keep last N lines.\n"
-		"Filter order: grep → head/tail. Both head+tail supported.\n\n"
-		"Aliases: cmd→command, dir→cwd, pattern→grep, context→grep_context."
+		"Build/compile runner (make, cmake, ninja, npm/cargo/gradle/mvn) with output "
+		"filtering (grep/head/tail).\n\n"
+		"When NOT to use:\n"
+		"  - Ad-hoc shell → Bash. Tests → Bash.\n"
+		"  - Read-only git → mcp-git. File search/edit → mcp-purity.\n\n"
+		"Prefer this OVER Bash(\"make ...\"), Bash(\"cmake ...\"), Bash(\"ninja ...\"), "
+		"Bash(\"npm run build\"), etc. — those flood context with build noise.\n\n"
+		"Functions: build. build params: command (optional if --default-command set), "
+		"cwd (default project root), timeout (default 600s), "
+		"filter ({grep, head, tail} — applied as grep → head/tail). "
+		"Aliases: cmd→command, dir→cwd, pattern→grep.\n\n"
+		"Example: function=\"build\", "
+		"params={\"command\":\"make -C build -j4\",\"filter\":{\"grep\":\"error|warning\"}}\n"
+		"Call without 'function' for status."
 	),
 	"inputSchema": {
 		"type": "object",
