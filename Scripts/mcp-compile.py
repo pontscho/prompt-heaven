@@ -209,7 +209,7 @@ def handle_build(params: dict, project_root: str, default_command: Optional[str]
 
 	timeout = params.get("timeout", default_timeout)
 	merge_stderr = params.get("merge_stderr", True)
-	filter_cfg = params.get("filter")
+	filter_cfg = _ensure_dict(params.get("filter"), "filter")
 
 	log.info("Running: %s (cwd=%s, timeout=%ds)", command, cwd, timeout)
 
@@ -313,13 +313,30 @@ HANDLERS = {
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+def _ensure_dict(value: Any, name: str = "params") -> dict:
+	"""Parse JSON string to dict if needed."""
+	if value is None:
+		return {}
+	if isinstance(value, str):
+		try:
+			parsed = json.loads(value)
+		except json.JSONDecodeError as exc:
+			raise ValueError(f"{name} is not valid JSON: {exc}")
+		if not isinstance(parsed, dict):
+			raise ValueError(f"{name} must be a JSON object, got {type(parsed).__name__}")
+		return parsed
+	if isinstance(value, dict):
+		return value
+	raise ValueError(f"{name} must be a dict or JSON string, got {type(value).__name__}")
+
+
 def handle_compile_call(arguments: dict, project_root: str,
                         default_command: Optional[str],
                         default_timeout: int) -> dict:
 	"""Route a compile_call invocation to the appropriate handler."""
 	function = (arguments.get("function") or arguments.get("f") or "").strip()
-	params = _resolve_aliases(arguments.get("params") or arguments.get("p") or {},
-	                          PARAM_ALIASES)
+	raw_params = arguments.get("params") or arguments.get("p") or {}
+	params = _resolve_aliases(_ensure_dict(raw_params, "params"), PARAM_ALIASES)
 
 	if not function:
 		info = f"mcp-compile OK — project: {project_root}"
