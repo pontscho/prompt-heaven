@@ -63,6 +63,10 @@ PARAM_ALIASES = {
     "glob": "paths_include_glob",
     "include": "paths_include_glob",
     "exclude": "paths_exclude_glob",
+    # general aliases
+    "file": "relative_path",
+    "start": "start_line",
+    "end": "end_line",
 }
 
 
