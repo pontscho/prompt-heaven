@@ -22,6 +22,36 @@ from typing import Any, Dict, List, Optional
 
 
 # ============================================================
+# Parameter aliases (liberal matching for LLM-generated params)
+# ============================================================
+
+PARAM_ALIASES = {
+    "file": "path",
+    "file_path": "path",
+    "filepath": "path",
+    "symbol": "symbol_name",
+    "name": "symbol_name",
+    "col": "character",
+    "column": "character",
+    "char": "character",
+    "ctx_lines": "context_lines",
+    "context": "context_lines",
+    "max": "max_results",
+    "count": "max_results",
+    "max_refs": "max_references",
+    "depth": "call_hierarchy_depth",
+}
+
+
+def _resolve_aliases(params: dict) -> dict:
+    resolved = {}
+    for key, value in params.items():
+        canonical = PARAM_ALIASES.get(key, key)
+        resolved[canonical] = value
+    return resolved
+
+
+# ============================================================
 # Debug logging
 # ============================================================
 
@@ -1362,7 +1392,7 @@ async def handle_clangd_call(args: dict, server: Optional["McpServer"] = None) -
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
         return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
 
-    result = await handler(params)
+    result = await handler(_resolve_aliases(params))
     return _serialize(function, result)
 
 
@@ -1571,6 +1601,14 @@ LISTED_TOOLS = [
             "Call any clangd C/C++ code intelligence function by name. "
             "Returns server status if called without 'function'. "
             "Invoke the clangd-mcp skill for the full API reference."
+            "\n\n"
+            "When NOT to use:\n"
+            "  - Build/compile → mcp-compile. Git → mcp-git. File search/edit → mcp-purity.\n\n"
+            "Prefer this OVER grep/Read-and-search for C/C++ symbol navigation — "
+            "clangd gives compiler-accurate definitions, references, types, and diagnostics "
+            "that grep cannot.\n\n"
+            "IMPORTANT: Before first use, load the p:clangd-mcp skill for full API reference "
+            "and parameter schemas."
         ),
         "inputSchema": {
             "type": "object",

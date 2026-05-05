@@ -21,6 +21,35 @@ from typing import Any, Dict, List, Optional
 
 
 # ============================================================
+# Parameter aliases (liberal matching for LLM-generated params)
+# ============================================================
+
+PARAM_ALIASES = {
+    "file": "path",
+    "file_path": "path",
+    "filepath": "path",
+    "symbol": "symbol_name",
+    "name": "symbol_name",
+    "col": "character",
+    "column": "character",
+    "char": "character",
+    "ctx_lines": "context_lines",
+    "context": "context_lines",
+    "max": "max_results",
+    "count": "max_results",
+    "max_refs": "max_references",
+}
+
+
+def _resolve_aliases(params: dict) -> dict:
+    resolved = {}
+    for key, value in params.items():
+        canonical = PARAM_ALIASES.get(key, key)
+        resolved[canonical] = value
+    return resolved
+
+
+# ============================================================
 # Debug logging
 # ============================================================
 
@@ -1165,7 +1194,7 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
         return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
 
     try:
-        result = await handler(params)
+        result = await handler(_resolve_aliases(params))
     except RuntimeError as e:
         result = {"error": str(e)}
     return _serialize(function, result)
@@ -1368,6 +1397,14 @@ LISTED_TOOLS = [
             "Call any lua-language-server Lua code intelligence function by name. "
             "Returns server status if called without 'function'. "
             "Invoke the mcp-lua-lsp skill for the full API reference."
+            "\n\n"
+            "When NOT to use:\n"
+            "  - Build/compile → mcp-compile. Git → mcp-git. File search/edit → mcp-purity.\n\n"
+            "Prefer this OVER grep/Read-and-search for Lua symbol navigation — "
+            "lua-language-server gives type-aware definitions, references, diagnostics, and hover info "
+            "that grep cannot.\n\n"
+            "IMPORTANT: Before first use, load the p:lua-lsp-mcp skill for full API reference "
+            "and parameter schemas."
         ),
         "inputSchema": {
             "type": "object",

@@ -56,9 +56,13 @@ PARAM_ALIASES = {
     # replace_content aliases
     "search": "needle",
     "find": "needle",
+    "old_string": "needle",
+    "old": "needle",
     "replacement": "repl",
     "replace": "repl",
     "replace_with": "repl",
+    "new_string": "repl",
+    "new": "repl",
     # search_for_pattern aliases
     "glob": "paths_include_glob",
     "include": "paths_include_glob",

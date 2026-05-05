@@ -723,6 +723,13 @@ LISTED_TOOLS = [
             "Call any LLDB function by name. "
             "Returns server status and active session count if called without 'function'. "
             "Invoke the lldb-mcp skill for the full list of available functions and their parameters."
+            "\n\n"
+            "When NOT to use:\n"
+            "  - Ad-hoc shell → Bash. Build → mcp-compile. Code navigation → mcp-clangd.\n\n"
+            "Prefer this OVER Bash(\"lldb ...\") — interactive LLDB in Bash doesn't work; "
+            "this gives structured, scriptable access to all LLDB operations.\n\n"
+            "IMPORTANT: Before first use, load the p:lldb-mcp skill for full API reference "
+            "and parameter schemas."
         ),
         "inputSchema": {
             "type": "object",
