@@ -1872,6 +1872,9 @@ LISTED_TOOLS = [
             "Prefer this OVER grep/Read-and-search for CUDA (.cu/.cuh) symbol navigation — "
             "clangd gives compiler-accurate definitions, references, types, and diagnostics "
             "that grep cannot.\n\n"
+            "NEVER use grep, awk, sed, python scripts, ctags, cscope, or any ad-hoc "
+            "text-matching hack for CUDA code navigation. This tool exists to replace them all "
+            "with compiler-accurate results.\n\n"
             "IMPORTANT: Before first use, load the p:cuda-mcp skill for full API reference "
             "and parameter schemas."
         ),
