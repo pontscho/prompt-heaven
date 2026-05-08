@@ -369,8 +369,13 @@ COMPILE_CALL_TOOL = {
 		"  - Read-only git → mcp-git. File search/edit → mcp-purity.\n\n"
 		"Prefer this OVER Bash(\"make ...\"), Bash(\"cmake ...\"), Bash(\"ninja ...\"), "
 		"Bash(\"npm run build\"), etc. — those flood context with build noise.\n\n"
+		"CALLING CONVENTION — two-level dispatch:\n"
+		"  Top-level keys: function, params (or aliases f, p). Nothing else.\n"
+		"  All build arguments (command, cwd, timeout, filter) go INSIDE params.\n"
+		"  WRONG: compile_call(command=\"make\")  ← command is not a top-level key\n"
+		"  RIGHT: compile_call(function=\"build\", params={\"command\":\"make\"})\n\n"
 		"Functions: build. build params: command (optional if --default-command set), "
-		"cwd (default project root), timeout (default 600s), "
+		"cwd (default project root), timeout (default 600s), merge_stderr (default true), "
 		"filter ({grep, head, tail} — applied as grep → head/tail). "
 		"Aliases: cmd→command, dir→cwd, pattern→grep.\n\n"
 		"Example: function=\"build\", "
@@ -382,17 +387,21 @@ COMPILE_CALL_TOOL = {
 		"properties": {
 			"function": {
 				"type": "string",
-				"description": "Function name to call: 'build'",
+				"description": "Function name to call: 'build'. Alias: 'f'",
 			},
 			"params": {
 				"type": "object",
 				"description": (
-					"Function parameters. For build: "
+					"Function parameters — all build arguments go here, NOT at top level. "
+					"For build: "
 					"{command?, cwd?, timeout?, merge_stderr?, "
-					"filter?: {grep?, grep_context?, invert_grep?, head?, tail?}}"
+					"filter?: {grep?, grep_context?, invert_grep?, head?, tail?}}. "
+					"Alias: 'p'"
 				),
 			},
 		},
+		"required": [],
+		"additionalProperties": False,
 	},
 }
 

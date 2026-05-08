@@ -187,14 +187,32 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     recursive = params.get("recursive", False)
     skip_ignored = params.get("skip_ignored_files", False)
     long_format = bool(params.get("long", False))
+    show_hidden = bool(params.get("show_hidden", False) or params.get("all", False) or params.get("hidden", False))
+    glob_pattern = params.get("glob", None) or params.get("paths_include_glob", None) or params.get("filter", None)
+    grep_pattern = params.get("grep", None) or params.get("grep_pattern", None)
+    head_limit = params.get("head_limit", 0)
+    offset = params.get("offset", 0)
 
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
         raise FileNotFoundError(f"Directory not found: {rel}")
 
+    if grep_pattern:
+        grep_re = re.compile(grep_pattern, re.IGNORECASE)
+    else:
+        grep_re = None
+
     ignore_patterns: List[str] = []
     if skip_ignored:
         ignore_patterns = _parse_gitignore(os.path.join(project_root, ".gitignore"))
+
+    def _accept_name(name: str, is_dir: bool) -> bool:
+        if not show_hidden and name.startswith("."):
+            return False
+        if glob_pattern and not is_dir:
+            if not fnmatch.fnmatch(name, glob_pattern):
+                return False
+        return True
 
     raw: List[tuple] = []  # (display_rel, is_dir, abs_path)
     if recursive:
@@ -206,12 +224,18 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
                 ]
             else:
                 dirnames[:] = [d for d in dirnames if d != ".git"]
+            if not show_hidden:
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for name in sorted(dirnames):
+                if not _accept_name(name, True):
+                    continue
                 entry_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
                 if skip_ignored and _is_ignored(entry_rel, ignore_patterns):
                     continue
                 raw.append((entry_rel, True, os.path.join(dirpath, name)))
             for name in sorted(filenames):
+                if not _accept_name(name, False):
+                    continue
                 entry_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
                 if skip_ignored and _is_ignored(entry_rel, ignore_patterns):
                     continue
@@ -219,6 +243,8 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     else:
         for name in sorted(os.listdir(path)):
             if skip_ignored and (_is_ignored(name, ignore_patterns) or name == ".git"):
+                continue
+            if not _accept_name(name, os.path.isdir(os.path.join(path, name))):
                 continue
             full = os.path.join(path, name)
             entry_rel = os.path.relpath(full, project_root)
@@ -239,6 +265,15 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     else:
         lines = [entry_rel + ("/" if is_dir else "") for entry_rel, is_dir, _ in raw]
 
+    if grep_re:
+        lines = [l for l in lines if grep_re.search(l)]
+
+    total = len(lines)
+    if offset:
+        lines = lines[offset:]
+    if head_limit > 0:
+        lines = lines[:head_limit]
+
     listing = "\n".join(lines)
     max_chars = params.get("max_answer_chars", -1)
     truncated = False
@@ -247,6 +282,10 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
         truncated = True
 
     header = f"[{rel}] {len(raw)} entries"
+    if grep_re:
+        header += f", {total} matched"
+    if offset or head_limit > 0:
+        header += f" (showing {offset+1}-{offset+len(lines)} of {total})"
     if truncated:
         header += " (truncated)"
     return {"__raw_text__": f"{header}\n{listing}"}
@@ -827,7 +866,7 @@ class McpServer:
 HANDLER_DESCRIPTIONS = {
     "read_file":           "Read file contents (with optional line range)",
     "create_text_file":    "Create or overwrite a file",
-    "list_dir":            "List directory contents (recursive=True, long=True for size+mtime; alias: ls)",
+    "list_dir":            "List directory contents (recursive, long for size+mtime, glob for fnmatch filter, grep for regex on output, show_hidden for dotfiles, head_limit+offset for pagination; alias: ls)",
     "find_file":           "Find files by wildcard pattern",
     "replace_content":     "Replace text in a file (literal or regex)",
     "delete_lines":        "Delete a range of lines",
