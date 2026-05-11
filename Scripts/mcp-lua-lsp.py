@@ -1153,6 +1153,14 @@ ALL_HANDLERS = {
     "luals_diagnostics":             handle_diagnostics,
 }
 
+FUNCTION_ALIASES = {
+    "luals_workspace_symbol":         "luals_workspace_symbols",
+    "luals_find_reference":           "luals_find_references",
+    "luals_find_implementation_at":   "luals_find_implementations_at",
+    "luals_inlay_hint":               "luals_inlay_hints",
+    "luals_diagnostic":               "luals_diagnostics",
+}
+
 
 # ============================================================
 # MCP dispatcher
@@ -1177,6 +1185,8 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
 
     if function == "luals_call":
         return _serialize("", {"error": "Cannot dispatch luals_call recursively"})
+
+    function = FUNCTION_ALIASES.get(function, function)
 
     # If auto-init is in progress and the client isn't ready yet, wait for it
     if (function != "luals_init"

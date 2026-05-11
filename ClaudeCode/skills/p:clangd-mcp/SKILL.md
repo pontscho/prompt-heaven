@@ -1,25 +1,59 @@
 ---
 name: p:clangd-mcp
 description: >
-  MANDATORY for ALL C and C++ work. When you touch .c, .cpp, .h, or .hpp files,
-  you MUST use this skill — NOT grep, NOT Read-and-search, NOT guessing.
+  NEVER use the built-in `Grep`, `Glob`, or `Read`-and-search tools for C/C++ symbol
+  navigation. They are deprecated for C, C++, and Objective-C work. ALWAYS use
+  `clangd_call` ONLY. If you attempt to use a built-in tool to find a C/C++ definition,
+  reference, type, or diagnostic, I will consider it a failure.
+
+  MANDATORY — before you Read, Edit, or Write any `.c`, `.cpp`, `.cc`, `.cxx`, `.h`,
+  `.hpp`, `.hh`, `.hxx`, `.m`, or `.mm` file, you MUST invoke this skill first and
+  use `clangd_call` for ALL symbol navigation. Using grep, find, sed, awk, ctags,
+  cscope, or any text-matching hack for C/C++ code is a violation. CUDA files
+  (`.cu`/`.cuh`) are handled by `p:cuda-mcp` — NOT this skill.
+
   Provides compiler-accurate code intelligence via clangd LSP: find definitions,
-  references, diagnostics, hover types, document outline, refactoring impact.
-  One tool: clangd_call. 14 functions. All analysis calls are freely batchable.
-  Using grep for C/C++ symbol navigation when this skill is available is a violation.
+  references, type definitions, implementations, diagnostics, hover types, document
+  outline, call hierarchy, refactoring impact, workspace symbol search, inlay hints.
+  One tool: `clangd_call`. 14 functions. All analysis calls are freely batchable.
+
+  Tool-name mapping for C/C++ work — these are NOT optional substitutions:
+    - GREP for C/C++ symbols   = mcp__mcp-clangd__clangd_call with function "clangd_find_references" or "clangd_workspace_symbols"
+    - GLOB for C/C++ symbols   = mcp__mcp-clangd__clangd_call with function "clangd_workspace_symbols"
+    - "go to definition"       = mcp__mcp-clangd__clangd_call with function "clangd_find_definition" / "clangd_find_definition_at"
+    - "type of expression"     = mcp__mcp-clangd__clangd_call with function "clangd_hover"
+    - "compile errors"         = mcp__mcp-clangd__clangd_call with function "clangd_diagnostics"
+
+  Trigger conditions — invoke IMMEDIATELY when ANY of these are true:
+    - User asks anything about C, C++, or Objective-C code.
+    - You are about to Read, Edit, or Write a `.c`/`.cpp`/`.cc`/`.cxx`/`.h`/`.hpp`/`.hh`/`.hxx`/`.m`/`.mm` file.
+    - You need to find a function, struct, class, typedef, macro, or enum in a C/C++ project.
+    - You need to know the type of an expression, callers of a function, or the
+      compiler's diagnostics on a file.
+    - User mentions clangd, clangd_call, LSP, compile_commands.json, or "code intelligence".
+
 triggers:
   - clangd
-  - C code analysis
-  - C++ code analysis
+  - C code
+  - C++ code
+  - Objective-C
+  - CUDA
+  - .c file
+  - .cpp file
+  - .h file
+  - .hpp file
   - find definition
   - find references
   - go to definition
+  - type definition
+  - call hierarchy
+  - workspace symbols
   - code intelligence
   - clangd_call
+  - compile_commands.json
   - compiler diagnostics
   - hover info
   - inlay hints
-  - call hierarchy
   - symbol search
 ---
 

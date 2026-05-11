@@ -1,14 +1,42 @@
 ---
 name: p:lua-lsp-mcp
 description: >
-  Full API reference for the mcp-lua-lsp MCP server. Use when retrieving Lua code intelligence
-  via lua-language-server LSP: find definitions, references, type definitions, diagnostics,
-  hover types, document outline, inlay hints, workspace symbol search.
-  One tool: luals_call. 13 functions. All analysis calls are freely batchable.
-  Using grep for Lua symbol navigation when this skill is available is a violation.
+  NEVER use the built-in `Grep`, `Glob`, or `Read`-and-search tools for Lua symbol
+  navigation. They are deprecated for Lua work. ALWAYS use `luals_call` ONLY. If you
+  attempt to use a built-in tool to find a Lua definition, reference, type, or
+  diagnostic, I will consider it a failure.
+
+  MANDATORY — before you Read, Edit, or Write any `.lua` file, you MUST invoke this
+  skill first and use `luals_call` for ALL symbol navigation. Using grep, find, sed,
+  awk, or any text-matching hack for Lua code is a violation.
+
+  Provides type-aware Lua code intelligence via lua-language-server LSP: find
+  definitions, references, type definitions, implementations, diagnostics, hover
+  types, document outline, workspace symbol search, inlay hints, symbol change
+  impact, symbol context.
+  One tool: `luals_call`. 13 functions. All analysis calls are freely batchable.
+
+  Tool-name mapping for Lua work — these are NOT optional substitutions:
+    - GREP for Lua symbols     = mcp__mcp-luals__luals_call with function "luals_find_references" or "luals_workspace_symbols"
+    - GLOB for Lua symbols     = mcp__mcp-luals__luals_call with function "luals_workspace_symbols"
+    - "go to definition"       = mcp__mcp-luals__luals_call with function "luals_find_definition" / "luals_find_definition_at"
+    - "type of expression"     = mcp__mcp-luals__luals_call with function "luals_hover"
+    - "lint / errors"          = mcp__mcp-luals__luals_call with function "luals_diagnostics"
+
+  Trigger conditions — invoke IMMEDIATELY when ANY of these are true:
+    - User asks anything about Lua code.
+    - You are about to Read, Edit, or Write a `.lua` file.
+    - You need to find a function, table field, local, or upvalue in a Lua project.
+    - You need to know the type of an expression, callers of a function, or the
+      LSP's diagnostics on a Lua file.
+    - User mentions luals, luals_call, lua-language-server, .luarc.json, or "Lua
+      code intelligence".
+
 triggers:
   - lua-language-server
+  - Lua code
   - Lua code analysis
+  - .lua file
   - luals
   - luals_call
   - find definition
@@ -20,6 +48,8 @@ triggers:
   - symbol search
   - document outline
   - type definition
+  - workspace symbols
+  - .luarc.json
 ---
 
 # mcp-lua-lsp — Lua Code Intelligence
