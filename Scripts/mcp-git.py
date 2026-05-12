@@ -123,16 +123,20 @@ def validate_remote(args: List[str]) -> None:
 
 
 def validate_stash(args: List[str]) -> None:
+    allowed = {
+        "list", "show",
+        "push", "save",
+        "pop", "apply",
+        "drop", "clear",
+        "branch",
+        "create", "store",
+    }
     positional = [a for a in args if not a.startswith("-")]
     if not positional:
-        raise ValueError(
-            "git stash with no subcommand defaults to 'push' (mutates). "
-            "Specify 'list' or 'show'."
-        )
-    allowed = {"list", "show"}
+        return
     if positional[0] not in allowed:
         raise ValueError(
-            f"git stash subcommand '{positional[0]}' not allowed. "
+            f"git stash subcommand '{positional[0]}' not recognized. "
             f"Allowed: {', '.join(sorted(allowed))}."
         )
 
@@ -207,7 +211,7 @@ SUBCOMMAND_DESCRIPTIONS = {
     "branch":         "List branches (mutating flags blocked)",
     "tag":            "List tags (mutating flags blocked)",
     "remote":         "List remotes / show / get-url",
-    "stash":          "stash list / stash show only",
+    "stash":          "Full stash support: list/show/push/save/pop/apply/drop/clear/branch/create/store",
     "config":         "Read config (--list / --get*)",
     "fetch":          "Network read with --dry-run only",
     "apply":          "Patch validity check with --check only",
@@ -345,7 +349,8 @@ GIT_CALL_TOOL = {
     "description": (
         "Read-only git inspection: log, diff, status, show, blame, reflog, etc.\n\n"
         "Mutating ops (commit, add, push, reset, checkout, merge, rebase, "
-        "stash push, branch -d, ...) are NOT exposed — use Bash with manual approval.\n\n"
+        "branch -d, ...) are NOT exposed — use Bash with manual approval. "
+        "Exception: full `git stash` is supported (list/show/push/pop/apply/drop/clear/branch/create/store).\n\n"
         "Prefer this OVER Bash(\"git ...\") — every Bash git call wastes a permission prompt.\n\n"
         "Params: args (CLI args list), cwd (sub-repo, default project root), "
         "max_answer_chars (default 100000), timeout (default 60s). Markdown output.\n\n"
