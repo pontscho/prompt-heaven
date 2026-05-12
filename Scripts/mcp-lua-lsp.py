@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import shutil
 import sys
 import argparse
@@ -818,22 +819,105 @@ async def handle_find_type_definition_at(args: dict) -> Any:
     return results
 
 
+def _find_text_references_lua(project_root: str, symbol_name: str,
+                              existing_keys: set, max_remaining: int) -> List[dict]:
+    """
+    Fallback text scan over .lua files for word-boundary occurrences of symbol_name.
+    Skips comment-only lines (lines whose first non-whitespace is '--') and any
+    line already covered by LSP results (keyed by uri:line in existing_keys).
+
+    Returns a list of {uri, range} dicts in LSP shape so the caller can format
+    them identically to LSP-sourced references.
+    """
+    pattern = re.compile(rf"\b{re.escape(symbol_name)}\b")
+    results: List[dict] = []
+    skip_dirs = {"build", "out", "dist", ".git", "node_modules", "vendor"}
+
+    for root, dirs, files in os.walk(project_root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in skip_dirs]
+        for fname in files:
+            if not fname.endswith(".lua"):
+                continue
+            abs_path = os.path.join(root, fname)
+            try:
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            uri = pathlib.Path(abs_path).as_uri()
+            for lineno, line_text in enumerate(content.splitlines()):
+                match = pattern.search(line_text)
+                if not match:
+                    continue
+                stripped = line_text.lstrip()
+                if stripped.startswith("--") and not stripped.startswith("---"):
+                    # Pure line comment (skip), but keep luadoc lines '---'.
+                    continue
+                key = f"{uri}:{lineno}"
+                if key in existing_keys:
+                    continue
+                col = match.start()
+                results.append({
+                    "uri": uri,
+                    "range": {
+                        "start": {"line": lineno, "character": col},
+                        "end": {"line": lineno, "character": col + len(symbol_name)},
+                    },
+                })
+                if max_remaining > 0 and len(results) >= max_remaining:
+                    return results
+
+    return results
+
+
 async def handle_find_references(args: dict) -> Any:
     """
     Find all references to a symbol by name.
-    params: { symbol_name, max_results?, context_lines? }
+
+    Combines LSP textDocument/references results with a text-grep fallback over
+    .lua files. The fallback catches references that LSP misses due to Lua's
+    dynamic dispatch (e.g. self:method() calls where 'method' is assigned to a
+    table field at runtime — common idiom in this codebase).
+
+    Results are deduplicated by uri:line (LSP often returns the same logical
+    reference with slightly different column offsets when queried from multiple
+    workspace symbol positions).
+
+    params: { symbol_name, max_results?, context_lines?, include_text_fallback? }
     """
     client = _require_client()
     symbol_name = args.get("symbol_name", "")
     max_results = int(args.get("max_results", 50))
     context_lines = int(args.get("context_lines", 3))
+    include_text_fallback = bool(args.get("include_text_fallback", True))
     if not symbol_name:
         return {"error": "symbol_name is required"}
 
     symbols = await client.workspace_symbol(symbol_name)
-    all_refs = []
-    seen = set()
+    all_refs: List[dict] = []
+    seen: set = set()
 
+    def _try_add_ref(uri: str, lsp_range: Optional[dict], source: str) -> bool:
+        if not uri or not lsp_range:
+            return False
+        start = lsp_range.get("start", {})
+        line = start.get("line", 0)
+        key = f"{uri}:{line}"
+        if key in seen:
+            return False
+        seen.add(key)
+        location = _format_location(uri, lsp_range, client.project_root)
+        abs_path = uri_to_path(uri)
+        all_refs.append({
+            "symbol": symbol_name,
+            "source": source,
+            "location": location,
+            "context": extract_surrounding_code(abs_path, line, context_lines) if context_lines > 0 else None,
+        })
+        return True
+
+    # LSP references for every matching workspace symbol with definition kind.
     for sym in symbols:
         if sym.get("name") != symbol_name:
             continue
@@ -850,28 +934,34 @@ async def handle_find_references(args: dict) -> Any:
         for ref in refs:
             if max_results > 0 and len(all_refs) >= max_results:
                 break
-            ref_uri = ref.get("uri", "")
-            ref_start = ref.get("range", {}).get("start", {})
-            key = f"{ref_uri}:{ref_start.get('line')}:{ref_start.get('character')}"
-            if key in seen:
-                continue
-            seen.add(key)
-            location = _location_from_payload(ref, client.project_root)
-            if not location:
-                continue
-            abs_path = uri_to_path(location["uri"])
-            ref_line = location["range"]["start"]["line"]
-            all_refs.append({
-                "symbol": symbol_name,
-                "location": location,
-                "context": extract_surrounding_code(abs_path, ref_line, context_lines) if context_lines > 0 else None,
-            })
+            ref_uri = ref.get("uri", "") or ref.get("targetUri", "")
+            lsp_range = (ref.get("range")
+                         or ref.get("targetSelectionRange")
+                         or ref.get("targetRange"))
+            _try_add_ref(ref_uri, lsp_range, "lsp")
         if max_results > 0 and len(all_refs) >= max_results:
             break
+
+    lsp_count = len(all_refs)
+
+    # Text-grep fallback for references LSP misses (Lua dynamic dispatch).
+    if include_text_fallback and (max_results <= 0 or len(all_refs) < max_results):
+        remaining = (max_results - len(all_refs)) if max_results > 0 else 0
+        text_hits = _find_text_references_lua(
+            client.project_root, symbol_name, seen, remaining
+        )
+        for hit in text_hits:
+            _try_add_ref(hit["uri"], hit["range"], "text")
+            if max_results > 0 and len(all_refs) >= max_results:
+                break
+
+    text_count = len(all_refs) - lsp_count
 
     return {
         "symbol": symbol_name,
         "count": len(all_refs),
+        "lsp_count": lsp_count,
+        "text_fallback_count": text_count,
         "references": all_refs,
     }
 
@@ -1272,10 +1362,18 @@ def _result_to_markdown(function: str, result: Any) -> str:
     if function == "luals_find_references":
         sym = result.get("symbol", "")
         count = result.get("count", 0)
+        lsp_count = result.get("lsp_count", count)
+        text_count = result.get("text_fallback_count", 0)
         refs = result.get("references", [])
-        lines = [f"## References: {sym} ({count})"]
+        if text_count > 0:
+            header = f"## References: {sym} ({count} = {lsp_count} LSP + {text_count} text-fallback)"
+        else:
+            header = f"## References: {sym} ({count})"
+        lines = [header]
         for r in refs:
-            lines.append("- " + _md_location_block(r.get("location", {})))
+            src = r.get("source", "lsp")
+            tag = "[TEXT]" if src == "text" else "[LSP] "
+            lines.append(f"- {tag} " + _md_location_block(r.get("location", {})))
         return sep.join(lines)
 
     if function == "luals_workspace_symbols":
