@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -1373,6 +1374,86 @@ def handle_run_and_wait(params: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Handler: inspect_build (recipe — parallel bundle)
+# ---------------------------------------------------------------------------
+
+def handle_inspect_build(params: dict) -> dict:
+    """Bundle the common investigation chain: job info + build status +
+    pipeline overview, plus optional test report (auto-included on failed
+    builds) and console log tail. Runs the sub-queries in parallel.
+    """
+    missing = _require_config()
+    if missing is not None:
+        return missing
+
+    job_path = params.get("job_path")
+    if not job_path:
+        raise ValueError("Missing required parameter: job_path")
+    build_number = str(params.get("build_number") or "lastBuild")
+    log_tail = int(params.get("log_tail", 0))
+    include_tests = params.get("include_tests", "auto")  # auto | true | false
+    recent_limit = int(params.get("recent_builds_limit", 5))
+
+    tasks = {
+        "job": lambda: handle_get_job_info({"job_path": job_path,
+                                            "recent_builds_limit": recent_limit}),
+        "build": lambda: handle_get_build_status({"job_path": job_path,
+                                                  "build_number": build_number}),
+        "pipeline": lambda: handle_get_build_log({"job_path": job_path,
+                                                  "build_number": build_number,
+                                                  "mode": "pipeline"}),
+    }
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = {key: pool.submit(fn) for key, fn in tasks.items()}
+        results = {key: _parse_handler_payload(fut.result()) for key, fut in futures.items()}
+
+    out = {
+        "jobPath": job_path,
+        "buildNumber": build_number,
+        "job": results["job"],
+        "build": results["build"],
+        "pipeline": results["pipeline"],
+    }
+
+    build_result = (results["build"] or {}).get("result")
+    want_tests = (include_tests is True
+                  or include_tests == "true"
+                  or (include_tests in ("auto", None) and build_result in ("FAILURE", "UNSTABLE")))
+
+    follow_up: Dict[str, Callable[[], dict]] = {}
+    if want_tests:
+        follow_up["testReport"] = lambda: handle_get_test_report({
+            "job_path": job_path,
+            "build_number": build_number,
+            "only_failed": True,
+        })
+    if log_tail > 0:
+        follow_up["logTail"] = lambda: handle_get_build_log({
+            "job_path": job_path,
+            "build_number": build_number,
+            "max_lines": 100000,
+        })
+
+    if follow_up:
+        with ThreadPoolExecutor(max_workers=len(follow_up)) as pool:
+            futures = {key: pool.submit(fn) for key, fn in follow_up.items()}
+            for key, fut in futures.items():
+                payload = _parse_handler_payload(fut.result())
+                if key == "logTail":
+                    log_text = (payload or {}).get("log") or ""
+                    lines = log_text.split("\n") if log_text else []
+                    tail = lines[-log_tail:]
+                    out["logTail"] = "\n".join(tail)
+                    out["logTailLines"] = len(tail)
+                    out["logTotalLines"] = len(lines)
+                else:
+                    out[key] = payload
+
+    return _ok(out)
+
+
+# ---------------------------------------------------------------------------
 # Status / handler registry
 # ---------------------------------------------------------------------------
 
@@ -1469,6 +1550,11 @@ HANDLERS: Dict[str, Callable[[dict], dict]] = {
     "wait_build": handle_run_and_wait,
     "build_wait": handle_run_and_wait,
     "run_build": handle_run_and_wait,
+    "inspect_build": handle_inspect_build,
+    "inspect": handle_inspect_build,
+    "summary": handle_inspect_build,
+    "summarize_build": handle_inspect_build,
+    "overview": handle_inspect_build,
 }
 
 # canonical name -> aliases (for status listing)
@@ -1476,6 +1562,7 @@ _CANONICAL_FUNCTIONS = {
     "status", "get_job_info", "get_build_status", "get_build_log",
     "start_build", "get_queue_item", "download_artifact",
     "list_jobs", "cancel_build", "get_test_report", "replay_build", "run_and_wait",
+    "inspect_build",
 }
 _ALIAS_TARGETS = set(HANDLERS.keys()) - _CANONICAL_FUNCTIONS
 
@@ -1532,6 +1619,8 @@ JENKINS_CALL_TOOL = {
         "  replay_build      (replay)                - replay a Pipeline build, optional main_script override\n"
         "  get_queue_item    (queue)                 - resolve a queue URL to a build number; wait=true to poll\n"
         "  run_and_wait      (wait_build, run_build) - RECIPE: start_build -> wait queue -> poll until done\n"
+        "  inspect_build     (inspect, summary)      - RECIPE: job_info + build_status + pipeline overview\n"
+        "                                              in parallel; auto-includes test report on FAILURE/UNSTABLE\n"
         "  download_artifact (artifact, download)    - download an artifact (return_type: text | base64)\n\n"
         "JOB PATHS: Use `foo/bar/baz` form (slash-separated). For multibranch pipelines the leaf is the branch, "
         "e.g. `sl/my-project/my-project/master`. The parent multibranch folder has NO lastBuild - always go down "
@@ -1545,7 +1634,10 @@ JENKINS_CALL_TOOL = {
         "      1) start_build              -> returns queueUrl\n"
         "      2) get_queue_item wait=true -> returns buildNumber once Jenkins picks it up\n"
         "      3) Poll get_build_status until building=false, then optionally get_build_log / get_test_report.\n"
-        "  - Investigate a failed build:\n"
+        "  - Investigate a build (one call):\n"
+        "      Use `inspect_build` - returns job_info + build_status + pipeline overview in one shot\n"
+        "      (parallel HTTP). On FAILURE/UNSTABLE auto-fetches the test report. log_tail=N for log tail.\n"
+        "  - Investigate a failed build (manual):\n"
         "      get_build_status (read result), get_build_log mode='pipeline' (find failed stage),\n"
         "      get_build_log mode='stage' stage_name='...' (drill into that stage),\n"
         "      get_test_report only_failed=true (failing cases).\n"
@@ -1560,6 +1652,7 @@ JENKINS_CALL_TOOL = {
         "  build status:     function=\"get_build_status\", params={\"job_path\":\"my/job/master\",\"build_number\":\"lastBuild\"}\n"
         "  trigger + wait:   function=\"run_and_wait\", params={\"job_path\":\"my/job/master\",\"parameters\":{\"VERSION\":\"1.2.3\"},\"log_tail\":50}\n"
         "  failing tests:    function=\"get_test_report\", params={\"job_path\":\"my/job/master\",\"only_failed\":true}\n"
+        "  inspect build:    function=\"inspect_build\", params={\"job_path\":\"my/job/master\",\"build_number\":\"lastBuild\",\"log_tail\":40}\n"
         "  cancel:           function=\"cancel_build\", params={\"job_path\":\"my/job/master\",\"build_number\":42,\"mode\":\"term\"}"
     ),
     "inputSchema": {
@@ -1683,6 +1776,7 @@ HANDLER_DESCRIPTIONS = {
     "replay_build":       "Replay a Pipeline build (optional main_script override)",
     "get_queue_item":     "Resolve a queue URL to a build number (set wait=true to poll)",
     "run_and_wait":       "RECIPE: start_build -> wait queue -> poll until !building. log_tail=N for tail",
+    "inspect_build":      "RECIPE: job_info + build_status + pipeline (parallel). Auto-adds test report on failure",
     "download_artifact":  "Download an artifact (return_type='text' or 'base64'; supports lastSuccessful)",
 }
 
@@ -1711,7 +1805,7 @@ def main() -> None:
         print("mcp-jenkins - available functions:\n")
         for name in ("status", "list_jobs", "get_job_info", "get_build_status", "get_build_log",
                      "get_test_report", "start_build", "cancel_build", "replay_build",
-                     "get_queue_item", "run_and_wait", "download_artifact"):
+                     "get_queue_item", "run_and_wait", "inspect_build", "download_artifact"):
             print(f"  {name:20s} {HANDLER_DESCRIPTIONS.get(name, '')}")
         aliases = sorted(_ALIAS_TARGETS)
         if aliases:
