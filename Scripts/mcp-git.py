@@ -3,7 +3,9 @@
 
 Single-tool dispatcher pattern (like mcp-purity): one tool (git_call) routes
 to whitelisted git subcommands. Mutating commands are NOT exposed — those must
-go through the user's normal Bash tool with manual approval.
+go through the user's normal Bash tool with manual approval. Exception: the
+full `git stash` subcommand surface is allowed (list/show/push/pop/apply/
+drop/clear/branch/create/store).
 
 Whitelist strategy:
   - Pure read-only subcommands: any args allowed.
@@ -12,6 +14,19 @@ Whitelist strategy:
   - Anything not in the whitelist: rejected.
 
 Output is always Markdown (no JSON/YAML).
+
+Usage:
+  python3 mcp-git.py --project-root <path>
+                     [--strict]
+                     [--debug]
+                     [--log-file <path>]   # implies --debug
+
+  --project-root  Required. Git working tree the dispatcher runs `git` in.
+  --strict        Reject `cwd` parameters that resolve outside --project-root.
+                  Useful when the dispatcher is shared between repos.
+
+Call `git_call` with no `function` to print the full allowlist (also available
+via `python3 mcp-git.py --list`).
 """
 
 import argparse

@@ -5,6 +5,17 @@ Single-tool dispatcher pattern: exposes one MCP tool (compile_call) that routes
 to internal handler functions via the 'function' parameter.
 
 Requires only Python 3.9+ stdlib modules.
+
+Usage:
+  python3 mcp-compile.py --project-root <path>
+                         [--default-command "<cmd>"]
+                         [--default-timeout <seconds>]   # default 600
+                         [--debug]
+                         [--log-file <path>]             # implies --debug
+
+  --project-root      Required. Repository root that compile_call commands run in.
+  --default-command   Fallback build command when the caller omits `command`.
+  --default-timeout   Per-call timeout when not overridden by params.timeout.
 """
 
 import argparse

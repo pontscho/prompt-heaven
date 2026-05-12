@@ -6,6 +6,16 @@ to internal handler functions via the 'function' parameter.
 
 Reads project-forge.yaml (custom minimal YAML subset, see PARSER section).
 Requires only Python 3.9+ stdlib modules.
+
+Usage:
+  python3 mcp-forge.py --project-root <path>
+                       [--config <yaml-path>]    # default: project-forge.yaml
+                       [--debug]
+                       [--log-file <path>]       # implies --debug
+
+  --project-root  Required. Project root containing project-forge.yaml.
+  --config        Override the YAML descriptor (path is relative to
+                  --project-root, or absolute).
 """
 
 import argparse

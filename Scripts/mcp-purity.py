@@ -5,6 +5,17 @@ Single-tool dispatcher pattern: exposes one MCP tool (purity_call) that routes
 to internal handler functions via the 'function' parameter.
 
 Requires only Python 3.9+ stdlib modules.
+
+Usage:
+  python3 mcp-purity.py --project-root <path>
+                        [--strict]
+                        [--debug]
+                        [--log-file <path>]   # implies --debug
+
+  --project-root  Required. Sandbox root for all file operations.
+  --strict        Reject any path (search/edit/glob/ls) that escapes
+                  --project-root, even if the caller passes an absolute path.
+                  Without --strict, absolute paths outside the root are allowed.
 """
 
 import argparse
