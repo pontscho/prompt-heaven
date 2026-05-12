@@ -6,6 +6,40 @@ routes to internal handler functions via the 'function' parameter. Port of
 the TypeScript jenkins-mcp-server with the same JSON-shaped responses.
 
 Requires only Python 3.9+ stdlib modules.
+
+Environment variables
+---------------------
+All variables can be overridden by the matching CLI flag. The lowercase
+variants (`jenkins_endpoint`, ...) are also accepted as fallbacks.
+
+  JENKINS_ENDPOINT  (required, --endpoint)
+      Jenkins base URL, e.g. ``https://jenkins.example.com``. Do NOT include
+      a trailing ``/job`` segment — the server appends ``/job/<name>`` itself
+      when navigating into folders. A trailing slash is tolerated and stripped.
+
+  JENKINS_USERNAME  (required, --username)
+      Jenkins user name used for HTTP basic auth.
+
+  JENKINS_TOKEN     (required, --token)
+      Jenkins API token (not the UI password) used for HTTP basic auth.
+
+  JENKINS_PROJECT   (optional, --project)
+      Default project / folder prefix. When set, every ``job_path`` passed by
+      the model is resolved relative to this project, so the model does not
+      have to walk parent folders first. Accepted forms (all normalized to
+      ``sl/foo``):
+          ``sl/foo``           ``/sl/foo/``           ``job/sl/job/foo``
+      Resolution rules:
+          missing / empty job_path  -> project itself
+          job_path starts with '/'  -> absolute path (escape hatch)
+          starts with project/      -> idempotent, untouched
+          otherwise                 -> prefixed with ``<project>/``
+      Call ``jenkins_call`` with no function to see the effective project in
+      the status output.
+
+Server start-up refuses to launch if any of the required variables (endpoint /
+username / token) is missing. JENKINS_PROJECT is optional — when unset the
+server behaves exactly as before.
 """
 
 import argparse
