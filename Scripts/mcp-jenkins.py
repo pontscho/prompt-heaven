@@ -39,6 +39,10 @@ class JenkinsConfig:
     username: Optional[str] = None
     token: Optional[str] = None
     timeout: int = 30
+    log_file: Optional[str] = None
+    debug: bool = False
+    # Records which env var (or CLI flag) supplied each value, for diagnostics.
+    sources: Dict[str, str] = {}
 
     @classmethod
     def is_ready(cls) -> bool:
@@ -48,6 +52,15 @@ class JenkinsConfig:
     def auth_header(cls) -> str:
         raw = f"{cls.username}:{cls.token}".encode("utf-8")
         return "Basic " + base64.b64encode(raw).decode("ascii")
+
+    @classmethod
+    def masked_token(cls) -> Optional[str]:
+        if not cls.token:
+            return None
+        token = cls.token
+        if len(token) >= 8:
+            return f"{token[:4]}...{token[-2:]} (len={len(token)})"
+        return f"*** (len={len(token)})"
 
 
 # ---------------------------------------------------------------------------
@@ -1363,20 +1376,63 @@ def handle_run_and_wait(params: dict) -> dict:
 # Status / handler registry
 # ---------------------------------------------------------------------------
 
-def handle_status(_params: dict) -> dict:
+def handle_status(params: dict) -> dict:
+    """Effective configuration + available functions. Pass `test:true` to probe
+    the Jenkins endpoint with a GET /api/json — handy to verify auth/network.
+    """
     available = sorted({name for name in HANDLERS.keys() if name not in _ALIAS_TARGETS})
-    return _ok({
+
+    out: dict = {
         "server": "mcp-jenkins",
         "version": "0.1.0",
         "endpoint": JenkinsConfig.endpoint,
         "username": JenkinsConfig.username,
+        "tokenPreview": JenkinsConfig.masked_token(),
+        "tokenConfigured": bool(JenkinsConfig.token),
         "auth": "configured" if JenkinsConfig.is_ready() else "missing",
+        "timeoutSec": JenkinsConfig.timeout,
+        "debug": JenkinsConfig.debug,
+        "logFile": JenkinsConfig.log_file,
+        "configSources": dict(JenkinsConfig.sources),
         "functions": available,
-    })
+    }
+
+    if params.get("test") or params.get("probe"):
+        out["connection"] = _probe_connection()
+
+    return _ok(out)
+
+
+def _probe_connection() -> dict:
+    """GET /api/json on the Jenkins endpoint to verify reachability + auth."""
+    if not JenkinsConfig.is_ready():
+        return {"reachable": False, "reason": "auth not configured"}
+    url = f"{JenkinsConfig.endpoint}/api/json?tree=mode,nodeName,quietingDown,useSecurity,numExecutors"
+    try:
+        r = _do_request("GET", url, timeout=10)
+    except Exception as exc:
+        return {"reachable": False, "error": f"{type(exc).__name__}: {exc}"}
+    info: dict = {"status": r.status, "reachable": r.status == 200}
+    jenkins_version = r.headers.get("X-Jenkins")
+    if jenkins_version:
+        info["jenkinsVersion"] = jenkins_version
+    if r.status == 200 and isinstance(r.body, dict):
+        info["mode"] = r.body.get("mode")
+        info["nodeName"] = r.body.get("nodeName")
+        info["quietingDown"] = r.body.get("quietingDown")
+        info["useSecurity"] = r.body.get("useSecurity")
+        info["numExecutors"] = r.body.get("numExecutors")
+    elif r.status == 401 or r.status == 403:
+        info["hint"] = "Auth rejected by Jenkins. Verify JENKINS_USERNAME / JENKINS_TOKEN."
+    elif r.status >= 400:
+        info["body"] = _extract_message(r.body)
+    return info
 
 
 HANDLERS: Dict[str, Callable[[dict], dict]] = {
     "status": handle_status,
+    "config": handle_status,
+    "info": handle_status,
     "get_job_info": handle_get_job_info,
     "job_info": handle_get_job_info,
     "job": handle_get_job_info,
@@ -1631,12 +1687,23 @@ HANDLER_DESCRIPTIONS = {
 }
 
 
-def _env_first(*names: str) -> Optional[str]:
+def _env_first(*names: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (value, env_name_that_provided_it) — or (None, None)."""
     for n in names:
         v = os.environ.get(n)
         if v:
-            return v
-    return None
+            return v, n
+    return None, None
+
+
+def _pick(cli_value: Optional[str], cli_flag: str, *env_names: str) -> Tuple[Optional[str], str]:
+    """CLI flag overrides env. Returns (value, source description)."""
+    if cli_value:
+        return cli_value, cli_flag
+    val, env = _env_first(*env_names)
+    if val:
+        return val, f"env:{env}"
+    return None, "<unset>"
 
 
 def main() -> None:
@@ -1663,10 +1730,22 @@ def main() -> None:
     parser.add_argument("--strict", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    JenkinsConfig.endpoint = (args.endpoint or _env_first("JENKINS_ENDPOINT", "jenkins_endpoint") or "").rstrip("/")
-    JenkinsConfig.username = args.username or _env_first("JENKINS_USERNAME", "jenkins_username")
-    JenkinsConfig.token = args.token or _env_first("JENKINS_TOKEN", "jenkins_token")
+    endpoint, ep_src = _pick(args.endpoint, "--endpoint", "JENKINS_ENDPOINT", "jenkins_endpoint")
+    username, user_src = _pick(args.username, "--username", "JENKINS_USERNAME", "jenkins_username")
+    token, token_src = _pick(args.token, "--token", "JENKINS_TOKEN", "jenkins_token")
+
+    JenkinsConfig.endpoint = (endpoint or "").rstrip("/")
+    JenkinsConfig.username = username
+    JenkinsConfig.token = token
     JenkinsConfig.timeout = max(1, int(args.timeout or 30))
+    JenkinsConfig.log_file = args.log_file
+    JenkinsConfig.debug = bool(args.debug or args.log_file)
+    JenkinsConfig.sources = {
+        "endpoint": ep_src,
+        "username": user_src,
+        "token": token_src,
+        "timeout": "--timeout" if args.timeout != 30 else "default",
+    }
 
     level = logging.DEBUG if (args.debug or args.log_file) else logging.WARNING
     log_handlers: list = []
