@@ -73,6 +73,11 @@ PARAM_ALIASES = {
     "job": "job_path",
     "jobPath": "job_path",
     "path": "job_path",
+    "folder": "job_path",
+    "folderPath": "job_path",
+    "folder_path": "job_path",
+    "project": "job_path",
+    "project_path": "job_path",
     # build number
     "build": "build_number",
     "buildNumber": "build_number",
