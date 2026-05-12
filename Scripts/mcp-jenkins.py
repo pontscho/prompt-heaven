@@ -39,6 +39,7 @@ class JenkinsConfig:
     endpoint: Optional[str] = None
     username: Optional[str] = None
     token: Optional[str] = None
+    project: Optional[str] = None
     timeout: int = 30
     log_file: Optional[str] = None
     debug: bool = False
@@ -138,6 +139,45 @@ def _resolve_aliases(params: dict) -> dict:
         if canonical not in resolved:
             resolved[canonical] = value
     return resolved
+
+
+def _normalize_project(raw: Optional[str]) -> Optional[str]:
+    """Normalize JENKINS_PROJECT: drop leading/trailing slashes and any embedded
+    `job/` segments. So both 'sl/foo', '/sl/foo/', and 'job/sl/job/foo' all
+    yield 'sl/foo'.
+    """
+    if not raw:
+        return None
+    parts = [p for p in raw.split("/") if p and p != "job"]
+    return "/".join(parts) or None
+
+
+def _apply_project_scope(params: dict) -> dict:
+    """When JENKINS_PROJECT is configured, treat user-provided `job_path` as
+    relative to the project so the model doesn't have to traverse parent
+    folders. Semantics:
+      - missing/empty job_path -> project itself
+      - job_path starts with '/' -> absolute, escape hatch (leading '/' stripped)
+      - already starts with the project prefix -> idempotent, left as-is
+      - otherwise -> prefixed with '<project>/'
+    """
+    project = JenkinsConfig.project
+    if not project:
+        return params
+    raw = params.get("job_path")
+    if raw is None or raw == "":
+        new_path = project
+    elif not isinstance(raw, str):
+        return params
+    elif raw.startswith("/"):
+        new_path = raw.lstrip("/")
+    elif raw == project or raw.startswith(project + "/"):
+        return params
+    else:
+        new_path = f"{project}/{raw}"
+    result = dict(params)
+    result["job_path"] = new_path
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1476,6 +1516,12 @@ def handle_status(params: dict) -> dict:
         "tokenPreview": JenkinsConfig.masked_token(),
         "tokenConfigured": bool(JenkinsConfig.token),
         "auth": "configured" if JenkinsConfig.is_ready() else "missing",
+        "project": JenkinsConfig.project,
+        "projectScope": (
+            f"All job_path params are relative to '{JenkinsConfig.project}'. "
+            "Prefix with '/' to use an absolute path."
+            if JenkinsConfig.project else "disabled"
+        ),
         "timeoutSec": JenkinsConfig.timeout,
         "debug": JenkinsConfig.debug,
         "logFile": JenkinsConfig.log_file,
@@ -1582,6 +1628,7 @@ def handle_jenkins_call(arguments: dict) -> dict:
     if not isinstance(params_in, dict):
         return _err(f"'params' must be an object, got {type(params_in).__name__}")
     params = _resolve_aliases(params_in)
+    params = _apply_project_scope(params)
 
     if not function:
         return handle_status(params)
@@ -1630,6 +1677,11 @@ JENKINS_CALL_TOOL = {
         "JOB PATHS: Use `foo/bar/baz` form (slash-separated). For multibranch pipelines the leaf is the branch, "
         "e.g. `sl/my-project/my-project/master`. The parent multibranch folder has NO lastBuild - always go down "
         "to the branch level. URL-encode '/' inside branch names as %2F.\n\n"
+        "PROJECT SCOPE: If JENKINS_PROJECT (or --project) is set, every `job_path` you pass is RESOLVED "
+        "RELATIVE TO that project — so call `status` first to see the effective project. Empty/missing "
+        "`job_path` defaults to the project itself (e.g. `list_jobs` with no params lists jobs inside the "
+        "project). Prefix `job_path` with `/` to escape the scope and use an absolute path "
+        "(e.g. `/other-project/job/master`).\n\n"
         "WORKFLOW RECIPES:\n"
         "  - Trigger and wait for a build:\n"
         "      Use `run_and_wait` (chained: start_build -> get_queue_item wait=true -> poll get_build_status).\n"
@@ -1686,8 +1738,10 @@ class McpServer:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        log.info("MCP server starting, endpoint=%s, auth=%s",
-                 JenkinsConfig.endpoint, "configured" if JenkinsConfig.is_ready() else "missing")
+        log.info("MCP server starting, endpoint=%s, auth=%s, project=%s",
+                 JenkinsConfig.endpoint,
+                 "configured" if JenkinsConfig.is_ready() else "missing",
+                 JenkinsConfig.project or "(none)")
         try:
             while True:
                 line = await loop.run_in_executor(None, sys.stdin.readline)
@@ -1821,6 +1875,12 @@ def main() -> None:
     parser.add_argument("--endpoint", help="Jenkins base URL (overrides JENKINS_ENDPOINT)")
     parser.add_argument("--username", help="Jenkins username (overrides JENKINS_USERNAME)")
     parser.add_argument("--token", help="Jenkins API token (overrides JENKINS_TOKEN)")
+    parser.add_argument(
+        "--project",
+        help=("Default project/folder prefix (overrides JENKINS_PROJECT). When set, "
+              "user-supplied job_path values are treated as relative to this project; "
+              "prefix a job_path with '/' to use an absolute path."),
+    )
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds (default: 30)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
     parser.add_argument("--log-file", help="Log to file (implies --debug)")
@@ -1832,10 +1892,12 @@ def main() -> None:
     endpoint, ep_src = _pick(args.endpoint, "--endpoint", "JENKINS_ENDPOINT", "jenkins_endpoint")
     username, user_src = _pick(args.username, "--username", "JENKINS_USERNAME", "jenkins_username")
     token, token_src = _pick(args.token, "--token", "JENKINS_TOKEN", "jenkins_token")
+    project_raw, proj_src = _pick(args.project, "--project", "JENKINS_PROJECT", "jenkins_project")
 
     JenkinsConfig.endpoint = (endpoint or "").rstrip("/")
     JenkinsConfig.username = username
     JenkinsConfig.token = token
+    JenkinsConfig.project = _normalize_project(project_raw)
     JenkinsConfig.timeout = max(1, int(args.timeout or 30))
     JenkinsConfig.log_file = args.log_file
     JenkinsConfig.debug = bool(args.debug or args.log_file)
@@ -1843,6 +1905,7 @@ def main() -> None:
         "endpoint": ep_src,
         "username": user_src,
         "token": token_src,
+        "project": proj_src,
         "timeout": "--timeout" if args.timeout != 30 else "default",
     }
 
