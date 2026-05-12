@@ -1760,7 +1760,21 @@ def main() -> None:
     )
 
     if not JenkinsConfig.is_ready():
-        log.warning("Jenkins credentials not fully configured — handlers will return an auth error.")
+        missing = []
+        if not JenkinsConfig.endpoint:
+            missing.append("JENKINS_ENDPOINT (or --endpoint)")
+        if not JenkinsConfig.username:
+            missing.append("JENKINS_USERNAME (or --username)")
+        if not JenkinsConfig.token:
+            missing.append("JENKINS_TOKEN (or --token)")
+        print(
+            "mcp-jenkins: refusing to start — missing required configuration:\n  - "
+            + "\n  - ".join(missing)
+            + "\n\nSet these as environment variables or pass via CLI flags. "
+              "See `mcp-jenkins.py --help`.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     server = McpServer()
     asyncio.run(server.run())
