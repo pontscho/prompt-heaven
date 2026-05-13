@@ -995,6 +995,89 @@ def _iter_document_symbols(symbols: List[dict]):
 
 
 # ============================================================
+# Filesystem fallback for workspace_symbols (static-inline / __device__
+# helpers in headers — clangd excludes internal-linkage symbols from
+# the global workspace/symbol index)
+# ============================================================
+
+_FALLBACK_EXTS = (".cu", ".cuh", ".c", ".cc", ".cpp", ".cxx",
+                  ".h", ".hpp", ".hh", ".hxx")
+_FALLBACK_SKIP_DIRS = {
+    "build", "vendor", "third_party", "third-party", "node_modules",
+    ".git", ".cache", ".clangd", ".ccache", "_deps",
+}
+
+
+def _find_files_with_word(root: str, word: str, exts=_FALLBACK_EXTS,
+                          limit: int = 20) -> List[str]:
+    """
+    Walk *root* and return up to *limit* source files whose content contains
+    *word* as a whole identifier (\\bword\\b). Pure Python, no shell deps.
+    """
+    rx = re.compile(rb"\b" + re.escape(word.encode("utf-8", "ignore")) + rb"\b")
+    hits: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _FALLBACK_SKIP_DIRS and not d.startswith(".")]
+        for fn in filenames:
+            if not fn.endswith(exts):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                with open(full, "rb") as f:
+                    if rx.search(f.read()):
+                        hits.append(full)
+                        if len(hits) >= limit:
+                            return hits
+            except (OSError, IOError):
+                continue
+    return hits
+
+
+async def _fallback_workspace_symbols(client: ClangdClient, query: str,
+                                       limit: int = 50) -> List[dict]:
+    """
+    Locate symbols clangd's global index drops (notably static-inline,
+    `__device__`, and other internal-linkage helpers in CUDA headers) by
+    grepping the project for the identifier, then asking clangd for the
+    DocumentSymbol of each candidate file and filtering by name.
+    """
+    candidates = _find_files_with_word(client.project_root, query, limit=20)
+    results: List[dict] = []
+    seen: set = set()
+    for path in candidates:
+        try:
+            doc_syms = await client.document_symbol(path)
+        except Exception:
+            continue
+        file_uri = pathlib.Path(path).as_uri()
+        for sym in _iter_document_symbols(doc_syms):
+            name = sym.get("name", "")
+            if query not in name:
+                continue
+            # Reshape into SymbolInformation-like dict so the existing
+            # handler/formatter code paths work unchanged.
+            if "selectionRange" in sym:
+                lsp_range = sym.get("selectionRange") or sym.get("range") or {}
+                location = {"uri": file_uri, "range": lsp_range}
+            else:
+                location = sym.get("location") or {"uri": file_uri, "range": {}}
+            key = (name, location.get("uri"),
+                   location.get("range", {}).get("start", {}).get("line"))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                "name": name,
+                "kind": sym.get("kind", 0),
+                "containerName": sym.get("containerName") or sym.get("detail"),
+                "location": location,
+            })
+            if len(results) >= limit:
+                return results
+    return results
+
+
+# ============================================================
 # Symbol lookup: name → position
 # ============================================================
 
@@ -1289,13 +1372,29 @@ async def handle_find_implementations_at(args: dict) -> Any:
 
 
 async def handle_workspace_symbols(args: dict) -> Any:
+    """
+    Search workspace symbols by query string.
+    params: { query, limit?, strict? }
+
+    When clangd's global index returns no hits (e.g. for static-inline or
+    `__device__` helpers in CUDA headers — internal-linkage symbols are
+    excluded from workspace/symbol), a filesystem fallback runs: grep the
+    project for the identifier, then re-query via documentSymbol on each
+    candidate file. Pass strict=true to disable the fallback.
+    """
     client = _require_client()
     query = args.get("query", "")
     limit = int(args.get("limit", 50))
+    strict = bool(args.get("strict", False))
     if not query:
         return {"error": "query is required"}
 
     symbols = await client.workspace_symbol(query)
+    fallback_used = False
+    if not symbols and not strict and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", query):
+        symbols = await _fallback_workspace_symbols(client, query, limit=limit)
+        fallback_used = True
+
     results = []
     for sym in symbols[:limit]:
         loc = sym.get("location", {})
@@ -1307,7 +1406,10 @@ async def handle_workspace_symbols(args: dict) -> Any:
             "container": sym.get("containerName"),
             "location": _format_location(uri, lsp_range, client.project_root) if uri else None,
         })
-    return {"query": query, "count": len(results), "symbols": results}
+    out = {"query": query, "count": len(results), "symbols": results}
+    if fallback_used:
+        out["source"] = "fallback:document_symbol"
+    return out
 
 
 async def handle_document_outline(args: dict) -> Any:
@@ -1764,10 +1866,27 @@ def _result_to_markdown(function: str, result: Any) -> str:
         return sep.join(lines)
 
     if function == "cuda_workspace_symbols":
-        if not result:
-            return "No symbols found"
+        # Handler returns envelope: {query, count, symbols, source?}
+        if isinstance(result, dict):
+            query = result.get("query", "")
+            symbols = result.get("symbols") or []
+            source = result.get("source")
+        else:
+            query = ""
+            symbols = result if isinstance(result, list) else []
+            source = None
+        if not symbols:
+            tail = f" for `{query}`" if query else ""
+            return f"## Workspace Symbols\nNo symbols found{tail}"
         lines = ["## Workspace Symbols"]
-        for s in (result if isinstance(result, list) else [result]):
+        meta = []
+        if query:
+            meta.append(f"query=`{query}`")
+        meta.append(f"count={len(symbols)}")
+        if source:
+            meta.append(f"source={source}")
+        lines.append("_" + " · ".join(meta) + "_")
+        for s in symbols:
             kind = s.get("kind", "")
             sym = s.get("symbol", s.get("name", ""))
             loc = _md_loc(s.get("location", {}))
