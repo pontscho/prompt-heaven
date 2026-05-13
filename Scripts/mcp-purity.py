@@ -522,10 +522,8 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     explicit_mode = params.get("output_mode")
     if explicit_mode:
         output_mode = explicit_mode
-    elif ctx_before > 0 or ctx_after > 0 or search_single_file:
-        output_mode = "content"
     else:
-        output_mode = "files_with_matches"
+        output_mode = "content"
     if output_mode not in ("files_with_matches", "content", "count"):
         raise ValueError("Parameter 'output_mode' must be 'files_with_matches', 'content', or 'count'")
 
