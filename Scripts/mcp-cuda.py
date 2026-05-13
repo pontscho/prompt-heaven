@@ -999,10 +999,24 @@ def _iter_document_symbols(symbols: List[dict]):
 # ============================================================
 
 async def _symbol_to_location(client: ClangdClient, symbol_name: str,
+                               preferred_path: Optional[str] = None,
                                max_retries: int = 3) -> Optional[dict]:
+    if preferred_path:
+        await client.open_document(client._abs_path(preferred_path))
+    abs_preferred = client._abs_path(preferred_path) if preferred_path else None
+
+    def _make_entry(uri: str, start: dict) -> dict:
+        return {
+            "path": uri_to_path(uri),
+            "uri": uri,
+            "line": start.get("line", 0),
+            "char": start.get("character", 0),
+        }
+
     for attempt in range(max_retries):
         symbols = await client.workspace_symbol(symbol_name)
 
+        best = None
         for sym in symbols:
             kind = symbol_kind_name(sym.get("kind", 0))
             if sym.get("name") != symbol_name:
@@ -1013,13 +1027,15 @@ async def _symbol_to_location(client: ClangdClient, symbol_name: str,
             uri = loc.get("uri", "")
             start = loc.get("range", {}).get("start", {})
             if uri:
-                return {
-                    "path": uri_to_path(uri),
-                    "uri": uri,
-                    "line": start.get("line", 0),
-                    "char": start.get("character", 0),
-                }
+                entry = _make_entry(uri, start)
+                if abs_preferred and entry["path"] == abs_preferred:
+                    return entry
+                if best is None:
+                    best = entry
+        if best:
+            return best
 
+        best = None
         for sym in symbols:
             if sym.get("name") != symbol_name:
                 continue
@@ -1027,12 +1043,13 @@ async def _symbol_to_location(client: ClangdClient, symbol_name: str,
             uri = loc.get("uri", "")
             start = loc.get("range", {}).get("start", {})
             if uri:
-                return {
-                    "path": uri_to_path(uri),
-                    "uri": uri,
-                    "line": start.get("line", 0),
-                    "char": start.get("character", 0),
-                }
+                entry = _make_entry(uri, start)
+                if abs_preferred and entry["path"] == abs_preferred:
+                    return entry
+                if best is None:
+                    best = entry
+        if best:
+            return best
 
         if attempt < max_retries - 1:
             debug_log(f"workspace/symbol retry {attempt + 1} for '{symbol_name}'")
@@ -1092,11 +1109,12 @@ async def handle_init(args: dict) -> Any:
 async def handle_find_definition(args: dict) -> Any:
     client = _require_client()
     symbol_name = args.get("symbol_name", "")
+    path = args.get("path", "")
     context_lines = int(args.get("context_lines", 5))
     if not symbol_name:
         return {"error": "symbol_name is required"}
 
-    loc = await _symbol_to_location(client, symbol_name)
+    loc = await _symbol_to_location(client, symbol_name, preferred_path=path or None)
     if not loc:
         return {"error": f"Symbol '{symbol_name}' not found in workspace"}
 
@@ -1152,10 +1170,14 @@ async def handle_find_definition_at(args: dict) -> Any:
 async def handle_find_references(args: dict) -> Any:
     client = _require_client()
     symbol_name = args.get("symbol_name", "")
+    path = args.get("path", "")
     max_results = int(args.get("max_results", 50))
     context_lines = int(args.get("context_lines", 3))
     if not symbol_name:
         return {"error": "symbol_name is required"}
+
+    if path:
+        await client.open_document(client._abs_path(path))
 
     symbols = await client.workspace_symbol(symbol_name)
     all_refs = []
@@ -1328,14 +1350,16 @@ async def handle_document_outline(args: dict) -> Any:
 async def handle_symbol_context(args: dict) -> Any:
     client = _require_client()
     symbol_name = args.get("symbol_name", "")
+    path = args.get("path", "")
     max_references = int(args.get("max_references", 20))
     context_lines = int(args.get("context_lines", 5))
     if not symbol_name:
         return {"error": "symbol_name is required"}
 
-    definition = await handle_find_definition({"symbol_name": symbol_name, "context_lines": context_lines})
+    definition = await handle_find_definition({"symbol_name": symbol_name, "path": path, "context_lines": context_lines})
     references = await handle_find_references({
         "symbol_name": symbol_name,
+        "path": path,
         "max_results": max_references,
         "context_lines": 2,
     })
@@ -1382,14 +1406,16 @@ async def handle_inlay_hints(args: dict) -> Any:
 async def handle_symbol_change_impact(args: dict) -> Any:
     client = _require_client()
     symbol_name = args.get("symbol_name", "")
+    path = args.get("path", "")
     max_references = int(args.get("max_references", 50))
     depth = int(args.get("call_hierarchy_depth", 1))
     if not symbol_name:
         return {"error": "symbol_name is required"}
 
-    definition = await handle_find_definition({"symbol_name": symbol_name, "context_lines": 3})
+    definition = await handle_find_definition({"symbol_name": symbol_name, "path": path, "context_lines": 3})
     references = await handle_find_references({
         "symbol_name": symbol_name,
+        "path": path,
         "max_results": max_references,
         "context_lines": 2,
     })
