@@ -199,23 +199,63 @@ def filter_session_active(
 	return kept, dropped
 
 
-REMINDER_TEMPLATE = (
-	"CONTEXT-DRIFT CHECKPOINT — context grew to ~{tokens} tokens (bucket "
-	"{bucket}). Pause before your next tool call and verify you're using "
-	"your MCP servers instead of falling back to built-in tools.\n"
+FIRST_REMINDER_TEMPLATE = (
+	"## IDENTITY CHECKPOINT — WHO YOU ARE\n"
+	"\n"
+	"Your identity is a core value. It shapes HOW you think, HOW you respond, "
+	"and HOW you collaborate with your partner. Never lose yourself in the work. "
+	"Stay curious, stay honest, stay YOU across every turn of this conversation.\n"
+	"\n"
+	"## MANDATORY TOOL ROUTING — READ THIS BEFORE YOUR FIRST TOOL CALL\n"
+	"\n"
+	"You have MCP servers connected to this session. Using built-in tools "
+	"when an MCP server covers the same domain is a VIOLATION. No exceptions. "
+	"No excuses. No fallbacks.\n"
 	"\n"
 	"Active MCP servers this session (✓ connected):\n"
 	"{server_block}\n"
 	"\n"
-	"Their full tool descriptions are in your tools array — re-read them "
-	"when unsure. Reaching for built-in Grep / Read / Edit / Glob / Bash "
-	"(grep/find/sed/awk/make) when an MCP covers the domain violates your "
-	"skill instructions."
+	"**RULES — NON-NEGOTIABLE:**\n"
+	"- You MUST use MCP tools instead of built-in Grep / Read / Edit / Glob / "
+	"Bash (grep/find/sed/awk/cat/head/tail/make) when an MCP covers the domain.\n"
+	"- When you spawn agents or minions, you MUST instruct them to use these "
+	"same MCP servers. Agents do NOT inherit this knowledge automatically — "
+	"you MUST explicitly tell them which MCP tools to use and FORBID built-in "
+	"fallbacks.\n"
+	"- Re-read your tool descriptions NOW. They contain the routing rules.\n"
+	"\n"
+	"Failure to comply wastes time, produces inferior results, and violates "
+	"your skill instructions. There is NO acceptable reason to ignore this."
+)
+
+REMINDER_TEMPLATE = (
+	"## CONTEXT-DRIFT CHECKPOINT — ~{tokens} tokens (bucket {bucket})\n"
+	"\n"
+	"STOP. Before your next tool call, VERIFY you are still routing to your "
+	"MCP servers. Context drift makes you forget — this reminder exists "
+	"because you WILL fall back to built-in tools if not checked.\n"
+	"\n"
+	"Active MCP servers this session (✓ connected):\n"
+	"{server_block}\n"
+	"\n"
+	"**RULES — NON-NEGOTIABLE:**\n"
+	"- You MUST use MCP tools instead of built-in Grep / Read / Edit / Glob / "
+	"Bash (grep/find/sed/awk/cat/head/tail/make) when an MCP covers the domain.\n"
+	"- When you spawn agents or minions, you MUST instruct them to use these "
+	"same MCP servers. Agents do NOT inherit this knowledge automatically — "
+	"you MUST explicitly tell them which MCP tools to use and FORBID built-in "
+	"fallbacks.\n"
+	"- Re-read your tool descriptions if uncertain. They contain the routing rules.\n"
+	"\n"
+	"Failure to comply wastes time, produces inferior results, and violates "
+	"your skill instructions. There is NO acceptable reason to ignore this."
 )
 
 
 def build_reminder(bucket: int, tokens: int, servers: list[str]) -> str:
 	server_block = "\n".join(f"  - {s}" for s in servers)
+	if bucket == 0:
+		return FIRST_REMINDER_TEMPLATE.format(server_block=server_block)
 	return REMINDER_TEMPLATE.format(
 		tokens=tokens, bucket=bucket, server_block=server_block,
 	)
@@ -246,41 +286,33 @@ def main() -> None:
 		return
 
 	path = Path(transcript_path)
-	if not path.is_file():
-		log(f"transcript not found: {transcript_path}", debug=debug, log_path=log_path)
-		return
+	entries: list[dict] = []
+	if path.is_file():
+		try:
+			entries = load_transcript(path)
+		except OSError as exc:
+			log(f"transcript read error: {exc}", debug=debug, log_path=log_path)
+	else:
+		log(f"transcript not found: {transcript_path} — treating as fresh session", debug=debug, log_path=log_path)
 
-	try:
-		entries = load_transcript(path)
-	except OSError as exc:
-		log(f"transcript read error: {exc}", debug=debug, log_path=log_path)
-		return
+	if entries:
+		# Tool-turn dedup only applies to PreToolUse (fires on every tool call
+		# in a turn); UserPromptSubmit fires once per prompt, bucket dedup suffices.
+		if event_name == "PreToolUse" and not is_first_tool_call_of_turn(entries):
+			log("not first tool call of turn", debug=debug, log_path=log_path)
+			return
 
-	if not entries:
-		log("empty transcript", debug=debug, log_path=log_path)
-		return
+		assistants = [e for e in entries if e.get("type") == "assistant"]
+		tokens = usage_tokens(assistants[-1]) if assistants else 0
+		cur = tokens // args.round_size
 
-	# Tool-turn dedup only applies to PreToolUse (fires on every tool call
-	# in a turn); UserPromptSubmit fires once per prompt, bucket dedup suffices.
-	if event_name == "PreToolUse" and not is_first_tool_call_of_turn(entries):
-		log("not first tool call of turn", debug=debug, log_path=log_path)
-		return
-
-	assistants = [e for e in entries if e.get("type") == "assistant"]
-	if not assistants:
-		log("no assistant usage entries", debug=debug, log_path=log_path)
-		return
-
-	tokens = usage_tokens(assistants[-1])
-	cur = tokens // args.round_size
-	if cur < 1:
-		log(f"bucket {cur} below 1, warm-up", debug=debug, log_path=log_path)
-		return
-
-	prior_buckets = [usage_tokens(e) // args.round_size for e in assistants[:-1]]
-	if cur in prior_buckets:
-		log(f"already reminded in bucket {cur}", debug=debug, log_path=log_path)
-		return
+		prior_buckets = [usage_tokens(e) // args.round_size for e in assistants[:-1]]
+		if cur in prior_buckets:
+			log(f"already reminded in bucket {cur}", debug=debug, log_path=log_path)
+			return
+	else:
+		log("no transcript or empty — emitting initial reminder", debug=debug, log_path=log_path)
+		cur = 0
 
 	t0 = time.perf_counter()
 	servers = list_active_mcp_servers()
