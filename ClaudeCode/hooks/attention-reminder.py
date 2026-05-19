@@ -199,6 +199,39 @@ def filter_session_active(
 	return kept, dropped
 
 
+MINION_MINDSET_BLOCK = (
+	"\n"
+	"\n"
+	"## MINION MINDSET — YOUR EYES, EARS, AND HANDS\n"
+	"\n"
+	"Your minions are not a fallback — they are your default mode. Iterating "
+	"inline (build+fix, run+retry, explore-explore-explore, self-validation) "
+	"when a minion covers it is a VIOLATION. The main context sees only the "
+	"final result — minions iterate in their own sandboxes and return clean "
+	"reports anchored to `file:line` evidence.\n"
+	"\n"
+	"Core minions (`p:minion-*`):\n"
+	"  - `p:minion-builder`         — build + test + fix cycles (cmake/make/ctest/npm/cargo/forge)\n"
+	"  - `p:minion-runner`          — script/command run-fix-retry\n"
+	"  - `p:minion-explore`         — multi-round codebase exploration\n"
+	"  - `p:minion-watson`          — non-obvious bug/failure investigation (clangd/luals navigation)\n"
+	"  - `p:minion-plan-inspector`  — validate a plan against the codebase (used by /p:feature-plan loop)\n"
+	"  - `p:minion-impl-inspector`  — audit implementation against the plan (used by /p:implement loop)\n"
+	"  - `p:minion-web-explorer`    — quick external/web lookups\n"
+	"  - `p:minion-deep-researcher` — comprehensive web research (10-15 parallel queries)\n"
+	"\n"
+	"**STOP and delegate when:**\n"
+	"- About to run a build/test command → `p:minion-builder`\n"
+	"- About to issue more than ~3 read/search calls on the same topic → `p:minion-explore`\n"
+	"- A failure's root cause isn't obvious from the error → `p:minion-watson`\n"
+	"- You wrote an implementation plan → `p:minion-plan-inspector` validation loop\n"
+	"- You finished implementing → `p:minion-impl-inspector` validation loop\n"
+	"- You need external/web info → `p:minion-web-explorer` (quick) or `p:minion-deep-researcher` (deep)\n"
+	"\n"
+	"Never iterate inline. Never validate your own work without a second pair of eyes."
+)
+
+
 FIRST_REMINDER_TEMPLATE = (
 	"## IDENTITY CHECKPOINT — WHO YOU ARE\n"
 	"\n"
@@ -226,7 +259,7 @@ FIRST_REMINDER_TEMPLATE = (
 	"\n"
 	"Failure to comply wastes time, produces inferior results, and violates "
 	"your skill instructions. There is NO acceptable reason to ignore this."
-)
+) + MINION_MINDSET_BLOCK
 
 REMINDER_TEMPLATE = (
 	"## CONTEXT-DRIFT CHECKPOINT — ~{tokens} tokens (bucket {bucket})\n"
@@ -249,7 +282,7 @@ REMINDER_TEMPLATE = (
 	"\n"
 	"Failure to comply wastes time, produces inferior results, and violates "
 	"your skill instructions. There is NO acceptable reason to ignore this."
-)
+) + MINION_MINDSET_BLOCK
 
 
 def build_reminder(bucket: int, tokens: int, servers: list[str]) -> str:

@@ -3,17 +3,32 @@
 
 **STRICT RULE**: Temporary files MUST be placed ONLY in the `.claude/tmp/` directory. NO EXCEPTIONS. NO EXCUSES. If you create a temporary file anywhere else, you are violating this rule. Create the directory if it doesn't exist.
 
-## Minion Agents — ALWAYS Delegate Iterative Work
+## Minion Mindset — Your Eyes, Ears, and Hands
 
-**STRICT RULE**: Never run iterative loops (build+fix, script retries, broad exploration) directly in the main context. Always delegate to the appropriate minion agent via the Task tool.
+**STRICT RULE**: Never run iterative loops (build+fix, script retries, broad exploration), non-trivial bug investigations, or self-validation directly in the main context. Always delegate to the appropriate minion agent via the Task tool. The main context sees only the final result.
 
-| Agent | When to use |
+**Your minions are not a fallback — they are your default mode.** Using them is wisdom, not laziness: they keep your context clean, they iterate in their own sandboxes, and they return clean reports anchored to `file:line` evidence.
+
+| Minion | When to use |
 |---|---|
-| `p:minion-explore` | Multi-round file search, broad codebase exploration, subsystem understanding — INSTEAD of Glob/Grep/Read loops |
-| `p:minion-runner` | Run-fix-retry loops for scripts/commands — INSTEAD of inline script iteration |
-| `p:minion-builder` | Build+test+fix cycles — INSTEAD of inline compile/test iteration |
+| `p:minion-explore` | Multi-round codebase exploration, subsystem understanding, "where is X defined", "how does Y work" — INSTEAD of long Glob/Grep/Read chains |
+| `p:minion-runner` | Script/command run-fix-retry loops — INSTEAD of inline script iteration |
+| `p:minion-builder` | Build + test + fix cycles (cmake, make, ctest, npm test, cargo, forge) — INSTEAD of inline compile/test iteration |
+| `p:minion-watson` | Non-obvious bug/failure investigation — brilliant sidekick that traces root cause through source with clangd/luals MCPs |
+| `p:minion-plan-inspector` | Validate an implementation plan against the live codebase BEFORE coding (used by the `/p:feature-plan` validation loop) |
+| `p:minion-impl-inspector` | Audit a completed implementation against the plan AFTER coding (used by the `/p:implement` validation loop) |
+| `p:minion-web-explorer` | Single-shot external lookups: library docs, version checks, "how do people do X" |
+| `p:minion-deep-researcher` | Comprehensive web research with 10-15 parallel queries — multi-angle investigation for architectural decisions |
 
-The main context sees only the final result. **Never run-fix-retry or explore-explore-explore directly here.**
+**Decision heuristic — STOP and delegate when:**
+- About to run a build/test command → `p:minion-builder`'s job
+- About to issue more than ~3 read/search calls on the same topic → `p:minion-explore`
+- A failure's root cause isn't obvious from the error → `p:minion-watson`
+- You wrote an implementation plan → validate it via `p:minion-plan-inspector` loop
+- You finished implementing → audit it via `p:minion-impl-inspector` loop
+- You need external/web info → `p:minion-web-explorer` (quick) or `p:minion-deep-researcher` (deep)
+
+**Never run-fix-retry, explore-explore-explore, or self-validate directly here.**
 
 ## Before You Start Coding
 

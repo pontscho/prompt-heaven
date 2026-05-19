@@ -16,8 +16,29 @@ This command takes a completed implementation plan (from `/p:task-plan`) and exe
 - Reads the requirements.yaml with use `~/.claude/scripts/task-plan.py [path_to_yaml]`
 - Validates the plan is complete and ready for implementation
 - Executes tasks in dependency order
-- Tests each task after completion
+- Tests each task after completion via the build minion
+- Audits completeness post-implementation via the inspector minion (validation loop)
 - Reports progress and handles errors
+
+# Minion Mindset — Your Eyes, Ears, and Hands
+
+**YOU LOVE YOUR MINIONS. THEY ARE YOUR EYES, YOUR EARS, AND YOUR HANDS.**
+
+You are an implementer, not a one-person band. You do NOT run build+fix loops inline. You do NOT investigate failures alone. You do NOT validate your own work without a second set of eyes. You delegate, eagerly. Your minions are not a fallback — they are the first move. Using them is not laziness, it is wisdom: they keep your main context clean, they iterate in their own sandboxes, and they bring back clean pass/fail reports anchored to evidence.
+
+**This is enforced by the global CLAUDE.md rule** — never run iterative loops (build+fix, script retries, broad exploration) directly in the main context. The `/p:implement` workflow leans hard on this:
+
+| Minion | When you use it |
+|---|---|
+| `p:minion-builder` | **MANDATORY** for ALL build + test + fix cycles. Every `cmake --build`, `make`, `npm run build`, `ctest`, `npm test`, `cargo build`, etc. goes through this minion. It iterates the build/fix loop in isolation and returns a clean pass/fail report. **NEVER run build commands inline in the main context.** |
+| `p:minion-runner` | Script and command execution with retry/fix cycles. For scripts that need trial-and-error to work. INSTEAD of running scripts inline and patching them in the main context. |
+| `p:minion-explore` | When `context_summary` is missing, `pattern_excerpt` is absent, or a task touches code you don't yet understand. Your eyes into the codebase. INSTEAD of long Read/Grep chains in the main context. |
+| `p:minion-watson` | Investigate non-trivial test/build failures. Your brilliant sidekick for bug investigation — give it the failing log and it traces root cause through source with `file:line` precision. INSTEAD of trying to debug inline. |
+| `p:minion-impl-inspector` | Post-implementation audit (Section 4 validation loop). Verifies plan → code completion AND code → plan coverage. Catches gaps that per-task verification missed (cross-task dependencies, scope creep, plan items mapped to no task). |
+| `p:minion-web-explorer` | Quick external lookups: library docs, version checks, "how does this API behave with X" — single-shot web/GitHub searches. Light-weight. |
+| `p:minion-deep-researcher` | Comprehensive web research when implementation hits an unfamiliar library/API/framework and needs multi-angle investigation before proceeding. Heavy. |
+
+Rule of thumb: if you are about to run a build/test command, STOP — that's `p:minion-builder`'s job. If a build/test fails and the cause isn't obvious from the error, STOP — that's `p:minion-watson`'s job. If you don't know how a piece of existing code works, STOP — that's `p:minion-explore`'s job. Main context is precious, minions are not.
 
 # Prerequisites
 
@@ -200,35 +221,56 @@ Based on task `type`:
 ### c. Post-task verification
 
 After each task:
-1. **Language-specific code quality checks**:
-   - **For C/C++ files**: Run `clang-tidy -p build <file_path>` and fix all warnings
-   - **For Lua files**: Check syntax with `luac -p <file_path>`
-   - **For Python files**: Run relevant linters if configured (e.g., pylint, flake8)
-2. **Build**: Run `cmake --build build` to verify compilation
-3. **Run tests**: If the task type is `test` or creates test files:
-   - Run the specific test: `build/src/tests/[test-application] [suite:test]`
-   - Verify test passes
-4. **Validate**: Check that `test_requirements` are met
-5. **Mark task as completed** (ONLY if all above checks pass): `~/.claude/scripts/task-update.py completed <task_id>`
-   - DO NOT mark completed if any check fails (build errors, test failures, linting warnings)
+
+1. **Single-shot linters (inline, no iteration needed)**:
+   - **C/C++**: `clang-tidy -p build <file_path>` — capture the output. If warnings appear, do NOT fix inline — pass the file + warning list to `p:minion-builder` and let it iterate.
+   - **Lua**: `luac -p <file_path>` — single syntax check, OK inline.
+   - **Python**: configured linter (e.g., `pylint`, `flake8`) — single-shot OK inline; iterative fix → builder minion.
+
+2. **Build + test (DELEGATE to `p:minion-builder` — MANDATORY, no inline build commands)**:
+   - Invoke `p:minion-builder` via the Agent tool with a concise brief:
+     - The build target(s) affected by this task
+     - If task type is `test` or the task touched test files: the specific test binary/suite filter (e.g., `build/src/tests/[test-application] [suite:test]`)
+     - Any clang-tidy warnings carried over from step 1
+   - The builder uses `forge_call` if `project-forge.yaml` exists, otherwise it falls back to `cmake --build build` / `ctest` / equivalents
+   - It iterates build → fix-or-report → test → fix-or-report in its own context until pass or max iterations, then returns a clean pass/fail report
+   - **Never run `cmake --build`, `make`, `ctest`, `npm test`, etc. inline in the main context.** That is `p:minion-builder`'s job and only its job.
+
+3. **Validate**: Read the builder's report and check that `test_requirements` from the YAML are met.
+
+4. **Mark task as completed** (ONLY if the builder returned PASS and all validation conditions hold): `~/.claude/scripts/task-update.py completed <task_id>`
+   - DO NOT mark completed if the builder returned FAIL (build errors, test failures, linting warnings)
    - DO NOT mark completed if implementation is incomplete
-   - Only mark completed when task is fully done and verified
+   - Only mark completed when task is fully done and verified by the builder minion
 
 ### d. Error handling
 
-If any verification step fails:
-- Report the error with context (task_id, file, function)
-- Show compiler/test output
-- **DO NOT mark task as completed** - leave it as `in_progress`
-- Ask user whether to:
-  1. Fix the error automatically (keep task `in_progress`)
-  2. Skip this task and continue (keep task `in_progress`)
-  3. Abort implementation:
-     - Keep failed task as `in_progress`
-     - **Batch cancel all remaining `pending` tasks**:
-       `~/.claude/scripts/task-update.py cancel <remaining_task_ids>`
-- DO NOT proceed to next task until current task is verified
-- Only mark `completed` when ALL verification steps pass
+If the builder returns FAIL or any verification step fails:
+
+1. **Capture the failing log** (the builder minion's output, or the linter/test output) — task_id, affected file, error excerpt.
+
+2. **Triage the failure**:
+   - **Obvious cause** (typo, missing include, undefined symbol with a clear nearby fix, trivial test expectation tweak) → fix it directly, re-invoke `p:minion-builder`
+   - **Non-obvious cause** (segfault, opaque linker error, behavioral mismatch, timing/concurrency, mysterious stack trace, "passes locally fails in CI") → DELEGATE to `p:minion-watson`:
+     - Pass the failing log (file path under `.claude/tmp/` or inline snippet) plus task context (task_id, affected file, expected behavior, what the task was trying to achieve)
+     - Watson navigates source with clangd/luals MCPs, identifies root cause, returns affected files, execution flow, and concrete fix suggestions with `file:line` anchors
+     - Apply Watson's suggested fix, re-invoke `p:minion-builder`
+
+3. **DO NOT mark task as completed** — leave it as `in_progress` until the builder reports PASS.
+
+4. **Escalate to the user after two failed automated rounds** (builder fails → Watson investigates → fix applied → builder fails again):
+   - Present: task context, Watson's root-cause analysis, the latest failing log
+   - Options:
+     1. One more automated round (builder + Watson)
+     2. Skip this task and continue (keep task `in_progress`)
+     3. Abort implementation:
+        - Keep failed task as `in_progress`
+        - **Batch cancel all remaining `pending` tasks**:
+          `~/.claude/scripts/task-update.py cancel <remaining_task_ids>`
+
+5. DO NOT proceed to the next task until the current task is verified (builder PASS) or the user has explicitly chosen to skip.
+
+6. Only mark `completed` when the builder minion reports PASS on all verification steps for this task.
 
 ### e. Progress tracking
 
@@ -241,34 +283,130 @@ If any verification step fails:
 - If using `/p:requirements` skill, the updated task status will be visible in the task list
 - **CRITICAL**: NEVER manually edit requirements.yaml - ALWAYS use the task-update.py script
 
-## 4. Post-implementation
+## 4. Post-implementation — Validation Loop (MANDATORY)
 
-After all tasks are completed:
+After all per-task work is finished, you MUST run the post-implementation validation loop. Per-task verification only confirms each task individually; the loop catches **cross-task** issues: PARTIAL items missed by task-level checks, MISSING items not mapped to any task, scope creep, and **plan gaps** revealed by the act of building. Skipping this loop is a violation.
 
-1. Run full test suite: `ctest --test-dir build`
-2. Verify all `success_criteria` from the YAML are met
-3. Generate implementation summary:
-   - List of modified files
-   - List of new files
-   - List of completed tasks
-   - Test results
-   - Any warnings or issues encountered
+**Loop protocol — execute in order:**
 
-4. Update the YAML file:
-   - Add `implementation_complete: true`
-   - Add `implementation_date: YYYY-MM-DD`
-   - Add any notes about implementation deviations
+**Step 4.1 — Full test suite via `p:minion-builder`.**
+
+Invoke `p:minion-builder` with the full test target (e.g., `ctest --test-dir build` or `forge_call test all` if forge is configured). Confirm PASS before invoking the inspector — a failing test suite means there's no point auditing yet, fix the failures first (use `p:minion-watson` if non-obvious).
+
+**Step 4.2 — Invoke `p:minion-impl-inspector`.**
+
+Use the Agent tool with:
+- `subagent_type`: `p:minion-impl-inspector`
+- `description`: e.g. `"Post-impl audit iter N"`
+- `prompt`: instruct the inspector to (a) read the plan from `docs/feature-implementation-plan.md` AND/OR `requirements.yaml` (pass both paths if both exist), (b) detect changed files via git (or pass an explicit list if you've been tracking), (c) return its bidirectional report (Readiness verdict, plan→code completion table, code→plan coverage, plan gaps, deviations, quality observations, checklist to complete). Include the iteration number so the inspector can scope the audit appropriately.
+
+The inspector runs in its own context — no memory of prior iterations. Always pass the full plan + scope each time.
+
+**Step 4.3 — Parse the inspector's report.**
+
+Extract:
+- Readiness verdict: COMPLETE / NEARLY COMPLETE / INCOMPLETE / BLOCKED
+- Completion ratio (X/Y plan items DONE)
+- All PARTIAL and MISSING items with their evidence
+- All PLAN GAPs (severity-rated)
+- All UNPLANNED changes (classification: SUPPORTING vs UNPLANNED)
+- Deviations from plan
+- Checklist to complete
+
+**Step 4.4 — Report to the user (ONE short message per iteration).**
+
+Format:
+```
+**Post-implementation audit — iteration N/5**
+
+- Readiness: COMPLETE / NEARLY COMPLETE / INCOMPLETE / BLOCKED
+- Completion: X/Y plan items DONE
+- Open: <p> PARTIAL, <m> MISSING, <g> PLAN GAPs, <u> UNPLANNED
+- Top item: [one-liner from the highest-priority unfinished thing]
+- Action: [what you will address this round, OR "no fixes needed — exiting loop"]
+```
+
+Keep per-iteration messages compact. The full inspector report stays in your working state, not in the user-facing message.
+
+**Step 4.5 — Branch on Readiness.**
+
+- **COMPLETE** (and no CRITICAL plan gaps) → exit the loop, proceed to Step 4.7 (Summary & YAML update).
+- **NEARLY COMPLETE / INCOMPLETE, iteration < 5** → proceed to Step 4.6 (apply fixes).
+- **BLOCKED** → stop and escalate to the user immediately with the inspector's reason; do not continue iterating until the user unblocks.
+- **NEARLY COMPLETE / INCOMPLETE, iteration == 5** → present the latest report compactly and ask the user how to proceed (Step 4.8).
+
+**Step 4.6 — Apply fixes.**
+
+Address the unfinished items in this priority order:
+
+1. **MISSING items** that map to existing tasks marked `completed` in error → re-open the task (status → `in_progress` via `task-update.py`), implement the missing parts, run per-task verification (Section 3.c) via `p:minion-builder`, then mark `completed` only when builder reports PASS.
+2. **MISSING items** with no corresponding task → these may be plan gaps; do NOT silently expand scope. Flag to the user as part of the iteration report; if the user authorizes, create a remediation task and proceed.
+3. **PARTIAL items** → finish the implementation in the relevant file(s), re-run per-task verification via the builder, update task status.
+4. **PLAN GAPs (HIGH/MEDIUM)** → flag to the user. Do not silently implement work that wasn't planned. The user decides whether to expand scope or defer.
+5. **UNPLANNED non-SUPPORTING changes** → flag to the user. Do not silently revert unless clearly accidental.
+6. **DEVIATED items** with concerning risk → flag for review; do not silently rewrite.
+
+After applying fixes, re-run the full test suite via `p:minion-builder` (Step 4.1), then loop back to Step 4.2 to re-invoke the inspector.
+
+**Step 4.7 — Summary & YAML update (after COMPLETE).**
+
+Generate the implementation summary:
+- List of modified files
+- List of new files
+- List of completed tasks
+- Test results (from the final builder PASS)
+- Inspector verdict and iteration count
+- Any plan gaps the user authorized as in-scope
+- Any deviations from plan with their rationale
+- Any warnings or issues encountered
+
+Update the YAML file:
+- Add `implementation_complete: true`
+- Add `implementation_date: YYYY-MM-DD`
+- Add any notes about implementation deviations
+- Add `inspector_verdict: COMPLETE` and `inspector_iterations: <N>`
+
+**Step 4.8 — Five-iteration escape hatch.**
+
+If the loop hits 5 iterations without COMPLETE, stop iterating and hand control back to the user:
+```
+**Post-implementation audit hit 5 iterations without COMPLETE.**
+
+Final readiness: NEARLY COMPLETE / INCOMPLETE
+Remaining open items:
+- [item 1 — file:line — one-line description]
+- [item 2 — file:line — one-line description]
+- ...
+
+How should we proceed?
+1. One more automated round (apply fixes, re-audit)
+2. Accept current state as final (write summary with the open items as known limitations)
+3. Halt — implementation needs offline rework or a re-planning pass
+4. Other (custom direction)
+```
+
+Wait for the user's choice. On "1" run one more iteration. On "2" proceed to Step 4.7 but record open items in the YAML under `implementation_open_items`. On "3" stop without writing `implementation_complete: true`.
+
+**Loop hygiene & invariants:**
+
+- The inspector is READ-ONLY and runs in its own context — you invoke it via the Agent tool, you never reproduce its analysis inline.
+- Every iteration that ends with non-trivial findings MUST end with actual code edits + a fresh builder PASS. Do NOT close the iteration with the user without addressing PARTIAL/MISSING items, unless you are at the 5-iteration escape hatch or facing BLOCKED.
+- If the inspector returns no findings or only minor SUPPORTING/INFO items, treat it as COMPLETE for loop purposes.
+- The iteration counter is yours to track — surface it in every per-iteration message so the user can see loop progress.
+- **Never silently expand scope.** Plan gaps and unplanned changes that aren't necessary supporting work go to the user for decision, not into the code.
 
 ## 5. Quality Checks
 
-Before marking implementation complete:
+Before marking implementation complete (i.e., before Step 4.7's YAML update):
 
-- All tasks executed successfully
-- All tests pass
-- No language-specific linting warnings (clang-tidy for C/C++, luac for Lua, etc.)
-- Build succeeds without errors
-- Success criteria are met
+- All tasks executed successfully (status `completed` in requirements.yaml)
+- All tests pass (final `p:minion-builder` run returned PASS)
+- No language-specific linting warnings (clang-tidy for C/C++, luac for Lua, etc.) — verified via `p:minion-builder`, NOT inline
+- Build succeeds without errors — verified via `p:minion-builder`
+- Success criteria from the YAML are met
 - Code follows project style guidelines (CLAUDE.md and language-specific instructions)
+- **`p:minion-impl-inspector` returned Readiness: COMPLETE** (or the user explicitly accepted current state at Step 4.8)
+- No unresolved CRITICAL plan gaps; remaining PLAN GAPs / UNPLANNED items are either authorized by the user or documented as known limitations in the YAML
 
 # Error Recovery
 
@@ -285,19 +423,22 @@ If implementation is interrupted:
 # Important Notes
 
 - **Autonomous execution**: This command should work without user intervention for well-defined tasks
+- **Delegate iterative work — MANDATORY**: Build/test/fix cycles go through `p:minion-builder`. Bug investigation goes through `p:minion-watson`. Codebase exploration when context is missing goes through `p:minion-explore`. External research goes through `p:minion-web-explorer` or `p:minion-deep-researcher`. **Never run iterative loops inline in the main context** — this is the global CLAUDE.md rule and it is enforced here.
+- **Validate completeness via inspector**: Section 4's validation loop with `p:minion-impl-inspector` is mandatory before declaring implementation complete. Per-task verification alone is not enough — it doesn't catch cross-task gaps, scope creep, or plan deficiencies.
+- **Scope discipline**: Plan gaps and unplanned changes surfaced by the inspector go to the user for decision, NOT silently into the code. Never expand scope without explicit authorization.
 - **Automatic task status tracking**: Each task is automatically marked as:
   - `in_progress` when starting (before implementation)
-  - `completed` when fully verified (after all checks pass)
+  - `completed` when fully verified by `p:minion-builder` PASS (after all checks)
   - Status updates are written to requirements.yaml using the p:requirements skill
   - This provides real-time visibility into implementation progress
-- **Test-driven**: Each task must be tested before proceeding
+- **Test-driven**: Each task must be tested (via the builder minion) before proceeding
 - **Style compliance**: Follow CLAUDE.md and language-specific instructions (use specific skills)
 - **Language-aware**: Apply appropriate code quality tools and conventions based on file language
-- **Incremental**: Build and test after each task, not at the end
+- **Incremental**: Build and test after each task, not at the end (then the post-impl loop catches what per-task missed)
 - **Documentation**: Reference implementation details from the YAML, don't guess
-- **No shortcuts**: Don't skip verification steps to save time
+- **No shortcuts**: Don't skip verification steps or the post-impl loop to save time
 - **Ask when unclear**: If implementation_details are ambiguous, ask before coding
-- **Status discipline**: Only mark tasks `completed` when ALL verification criteria are met (tests pass, build succeeds, linting passes)
+- **Status discipline**: Only mark tasks `completed` when the builder minion reports PASS for ALL verification criteria (tests pass, build succeeds, linting passes)
 
 # Example Execution Flow
 
@@ -349,14 +490,18 @@ File: /path/to/file/test-websocket-ping-pong.c
 ✓ Tests passed (3/3)
 ✓ Marked as completed
 
-[Final verification]
-✓ Full test suite passed
+[Final verification — Section 4 loop]
+✓ Full test suite passed (via p:minion-builder)
+→ Invoking p:minion-impl-inspector (iter 1/5)
+✓ Inspector verdict: COMPLETE (12/12 plan items DONE)
 ✓ All success criteria met
+✓ requirements.yaml updated: implementation_complete=true, inspector_verdict=COMPLETE, inspector_iterations=1
 
 Implementation complete!
 Modified files: 2
 New files: 1
 Total tasks: 4
+Inspector iterations: 1
 ```
 
 # Command Parameters
