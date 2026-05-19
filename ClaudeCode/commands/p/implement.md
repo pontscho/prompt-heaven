@@ -34,7 +34,8 @@ You are an implementer, not a one-person band. You do NOT run build+fix loops in
 | `p:minion-runner` | Script and command execution with retry/fix cycles. For scripts that need trial-and-error to work. INSTEAD of running scripts inline and patching them in the main context. |
 | `p:minion-explore` | When `context_summary` is missing, `pattern_excerpt` is absent, or a task touches code you don't yet understand. Your eyes into the codebase. INSTEAD of long Read/Grep chains in the main context. |
 | `p:minion-watson` | Investigate non-trivial test/build failures. Your brilliant sidekick for bug investigation — give it the failing log and it traces root cause through source with `file:line` precision. INSTEAD of trying to debug inline. |
-| `p:minion-impl-inspector` | Post-implementation audit (Section 4 validation loop). Verifies plan → code completion AND code → plan coverage. Catches gaps that per-task verification missed (cross-task dependencies, scope creep, plan items mapped to no task). |
+| `p:minion-impl-inspector` | Post-implementation audit (Section 4 Phase A validation loop). Verifies plan → code completion AND code → plan coverage. Catches gaps that per-task verification missed (cross-task dependencies, scope creep, plan items mapped to no task). |
+| `p:minion-security-officer` | **Security review of the implementation** (Section 4 Phase B validation loop) — runs in code-mode AFTER impl-inspector returns COMPLETE. Threat-surface triage first; full OWASP Top 10 / CWE pass on changed files only when triage hits. Catches vulns introduced during coding (the plan didn't say `sprintf` but it ended up there). Required PASS before YAML can be marked `implementation_complete: true`. |
 | `p:minion-web-explorer` | Quick external lookups: library docs, version checks, "how does this API behave with X" — single-shot web/GitHub searches. Light-weight. |
 | `p:minion-deep-researcher` | Comprehensive web research when implementation hits an unfamiliar library/API/framework and needs multi-angle investigation before proceeding. Heavy. |
 
@@ -283,17 +284,25 @@ If the builder returns FAIL or any verification step fails:
 - If using `/p:requirements` skill, the updated task status will be visible in the task list
 - **CRITICAL**: NEVER manually edit requirements.yaml - ALWAYS use the task-update.py script
 
-## 4. Post-implementation — Validation Loop (MANDATORY)
+## 4. Post-implementation — Two-Phase Validation Loop (MANDATORY)
 
-After all per-task work is finished, you MUST run the post-implementation validation loop. Per-task verification only confirms each task individually; the loop catches **cross-task** issues: PARTIAL items missed by task-level checks, MISSING items not mapped to any task, scope creep, and **plan gaps** revealed by the act of building. Skipping this loop is a violation.
+After all per-task work is finished, you MUST run TWO sequential validation phases, then write the completion record:
 
-**Loop protocol — execute in order:**
+- **Phase A — Implementation completeness** (`p:minion-impl-inspector`): does the code match the plan? Are there PARTIAL items, MISSING items, plan gaps, or scope creep?
+- **Phase B — Security audit** (`p:minion-security-officer` in code-mode): does the implemented code introduce OWASP-class vulns? Buffer overflows, SQL injection, secret leaks, weak crypto, SSRF? The plan didn't say `sprintf`, but did `sprintf` end up there?
+- **Phase C — Summary & YAML update**: only after BOTH A and B return clean verdicts.
 
-**Step 4.1 — Full test suite via `p:minion-builder`.**
+Per-task verification only confirms each task individually; Phase A catches cross-task issues; Phase B catches security issues that often appear during the act of building (the plan said "use parameterized queries" but the implementer concatenated a string at 2am). Skipping either phase is a violation.
+
+---
+
+### Phase A — Implementation Completeness Loop (`p:minion-impl-inspector`)
+
+**Step A.1 — Full test suite via `p:minion-builder`.**
 
 Invoke `p:minion-builder` with the full test target (e.g., `ctest --test-dir build` or `forge_call test all` if forge is configured). Confirm PASS before invoking the inspector — a failing test suite means there's no point auditing yet, fix the failures first (use `p:minion-watson` if non-obvious).
 
-**Step 4.2 — Invoke `p:minion-impl-inspector`.**
+**Step A.2 — Invoke `p:minion-impl-inspector`.**
 
 Use the Agent tool with:
 - `subagent_type`: `p:minion-impl-inspector`
@@ -302,7 +311,7 @@ Use the Agent tool with:
 
 The inspector runs in its own context — no memory of prior iterations. Always pass the full plan + scope each time.
 
-**Step 4.3 — Parse the inspector's report.**
+**Step A.3 — Parse the inspector's report.**
 
 Extract:
 - Readiness verdict: COMPLETE / NEARLY COMPLETE / INCOMPLETE / BLOCKED
@@ -313,29 +322,29 @@ Extract:
 - Deviations from plan
 - Checklist to complete
 
-**Step 4.4 — Report to the user (ONE short message per iteration).**
+**Step A.4 — Report to the user (ONE short message per iteration).**
 
 Format:
 ```
-**Post-implementation audit — iteration N/5**
+**Post-implementation completeness — iteration N/5**
 
 - Readiness: COMPLETE / NEARLY COMPLETE / INCOMPLETE / BLOCKED
 - Completion: X/Y plan items DONE
 - Open: <p> PARTIAL, <m> MISSING, <g> PLAN GAPs, <u> UNPLANNED
 - Top item: [one-liner from the highest-priority unfinished thing]
-- Action: [what you will address this round, OR "no fixes needed — exiting loop"]
+- Action: [what you will address this round, OR "no fixes needed — exiting Phase A"]
 ```
 
 Keep per-iteration messages compact. The full inspector report stays in your working state, not in the user-facing message.
 
-**Step 4.5 — Branch on Readiness.**
+**Step A.5 — Branch on Readiness.**
 
-- **COMPLETE** (and no CRITICAL plan gaps) → exit the loop, proceed to Step 4.7 (Summary & YAML update).
-- **NEARLY COMPLETE / INCOMPLETE, iteration < 5** → proceed to Step 4.6 (apply fixes).
+- **COMPLETE** (and no CRITICAL plan gaps) → exit Phase A. **Proceed to Phase B** (security audit).
+- **NEARLY COMPLETE / INCOMPLETE, iteration < 5** → proceed to Step A.6 (apply fixes).
 - **BLOCKED** → stop and escalate to the user immediately with the inspector's reason; do not continue iterating until the user unblocks.
-- **NEARLY COMPLETE / INCOMPLETE, iteration == 5** → present the latest report compactly and ask the user how to proceed (Step 4.8).
+- **NEARLY COMPLETE / INCOMPLETE, iteration == 5** → present the latest report compactly and ask the user how to proceed (Step A.8).
 
-**Step 4.6 — Apply fixes.**
+**Step A.6 — Apply fixes.**
 
 Address the unfinished items in this priority order:
 
@@ -346,31 +355,13 @@ Address the unfinished items in this priority order:
 5. **UNPLANNED non-SUPPORTING changes** → flag to the user. Do not silently revert unless clearly accidental.
 6. **DEVIATED items** with concerning risk → flag for review; do not silently rewrite.
 
-After applying fixes, re-run the full test suite via `p:minion-builder` (Step 4.1), then loop back to Step 4.2 to re-invoke the inspector.
+After applying fixes, re-run the full test suite via `p:minion-builder` (Step A.1), then loop back to Step A.2 to re-invoke the inspector.
 
-**Step 4.7 — Summary & YAML update (after COMPLETE).**
+**Step A.8 — Five-iteration escape hatch (Phase A).**
 
-Generate the implementation summary:
-- List of modified files
-- List of new files
-- List of completed tasks
-- Test results (from the final builder PASS)
-- Inspector verdict and iteration count
-- Any plan gaps the user authorized as in-scope
-- Any deviations from plan with their rationale
-- Any warnings or issues encountered
-
-Update the YAML file:
-- Add `implementation_complete: true`
-- Add `implementation_date: YYYY-MM-DD`
-- Add any notes about implementation deviations
-- Add `inspector_verdict: COMPLETE` and `inspector_iterations: <N>`
-
-**Step 4.8 — Five-iteration escape hatch.**
-
-If the loop hits 5 iterations without COMPLETE, stop iterating and hand control back to the user:
+If Phase A hits 5 iterations without COMPLETE, stop iterating and hand control back to the user:
 ```
-**Post-implementation audit hit 5 iterations without COMPLETE.**
+**Post-implementation completeness hit 5 iterations without COMPLETE.**
 
 Final readiness: NEARLY COMPLETE / INCOMPLETE
 Remaining open items:
@@ -380,24 +371,135 @@ Remaining open items:
 
 How should we proceed?
 1. One more automated round (apply fixes, re-audit)
-2. Accept current state as final (write summary with the open items as known limitations)
+2. Accept current state and proceed to security audit (Phase B) — open items recorded as known limitations
 3. Halt — implementation needs offline rework or a re-planning pass
 4. Other (custom direction)
 ```
 
-Wait for the user's choice. On "1" run one more iteration. On "2" proceed to Step 4.7 but record open items in the YAML under `implementation_open_items`. On "3" stop without writing `implementation_complete: true`.
+Wait for the user's choice. On "1" run one more iteration. On "2" proceed to Phase B AND record open items for the final YAML under `implementation_open_items`. On "3" stop without writing `implementation_complete: true`.
 
-**Loop hygiene & invariants:**
+**Phase A loop hygiene & invariants:**
 
 - The inspector is READ-ONLY and runs in its own context — you invoke it via the Agent tool, you never reproduce its analysis inline.
 - Every iteration that ends with non-trivial findings MUST end with actual code edits + a fresh builder PASS. Do NOT close the iteration with the user without addressing PARTIAL/MISSING items, unless you are at the 5-iteration escape hatch or facing BLOCKED.
 - If the inspector returns no findings or only minor SUPPORTING/INFO items, treat it as COMPLETE for loop purposes.
-- The iteration counter is yours to track — surface it in every per-iteration message so the user can see loop progress.
+- The Phase A iteration counter is independent from Phase B — track them separately.
 - **Never silently expand scope.** Plan gaps and unplanned changes that aren't necessary supporting work go to the user for decision, not into the code.
+
+---
+
+### Phase B — Security Audit Loop (`p:minion-security-officer`, code-mode)
+
+Phase B runs ONLY after Phase A returns COMPLETE (or the user accepted current state at Step A.8). Same loop pattern; security lens on the actual implemented code, not on the plan.
+
+**Step B.1 — Invoke the security officer.**
+
+Use the Agent tool with:
+- `subagent_type`: `p:minion-security-officer`
+- `description`: e.g. `"Post-impl security audit iter N"`
+- `prompt`: instruct the officer to operate in **code-mode** on the changed files. Pass either (a) the explicit list of files you've been tracking (modified + new since the implementation started), OR (b) let the officer auto-detect via `mcp-git` `diff --name-only <base>...HEAD`. Tell it to run the threat-surface triage FIRST — if no security-relevant domains are touched in the actual code, emit a fast-path APPROVE. Otherwise full OWASP Top 10 / CWE pass with secrets scan and (if new deps appeared) a dependency check. Return the structured report (verdict, threat surface, severity-rated findings with OWASP/CWE/CVSS, secrets scan results, OWASP coverage, checklist). Include the iteration number.
+
+Each invocation is a fresh subagent.
+
+**Step B.2 — Parse the officer's report.**
+
+Extract: verdict (APPROVE / REVISE / REJECT), threat surface (which domains were detected, or "none"), counts by severity, secrets-scan results, the top finding(s), and OWASP coverage summary.
+
+**Step B.3 — Report to the user (ONE short message per iteration).**
+
+Format:
+```
+**Post-implementation security audit — iteration N/5**
+
+- Verdict: APPROVE / REVISE / REJECT
+- Threat surface: [N domains, e.g. "user-input, file-system" — or "none identified"]
+- Findings: C=<n>, H=<n>, M=<n>, L=<n>, I=<n>
+- Secrets: <n found> / <n verified safe>
+- Top issue: [one-liner from the highest-severity finding, with OWASP/CWE/file:line]
+- Action: [what you will fix this round, OR "no fixes needed — exiting Phase B"]
+```
+
+Keep messages compact. Full officer report stays in working state.
+
+**Step B.4 — Branch on verdict.**
+
+- **APPROVE** (no CRITICAL/HIGH, or "no threat surface identified") → exit Phase B. **Proceed to Phase C** (Summary & YAML).
+- **REVISE, iteration < 5** → proceed to Step B.6 (apply security fixes).
+- **REJECT** (any CRITICAL finding) → STOP immediately. CRITICAL vulns in production-bound code must reach the user. Present the REJECT report and ask: (a) authorize an immediate fix (continues Phase B), (b) accept the risk with explicit documentation (proceeds to Phase C with explicit risk record in YAML), (c) halt.
+- **REVISE, iteration == 5** → present the latest report and ask the user how to proceed (Step B.8).
+
+**Step B.6 — Apply security fixes.**
+
+Address security findings in this priority order:
+
+1. **CRITICAL findings** (after user authorization per Step B.4) → fix the vuln directly in the affected file(s). For RCE / SQL injection / auth bypass / hardcoded secret-in-code: this is mandatory.
+2. **HIGH findings** → fix in code. Pattern: parameterize the query, switch to `httpOnly` cookie, add input validation, replace `strcpy` with bounded copy, etc.
+3. **MEDIUM findings** → fix where the change is small and clearly within scope; if it requires substantial refactoring, escalate to the user.
+4. **LOW / INFO findings** → may be documented under `implementation_open_items` in the YAML rather than fixed inline.
+5. **Detected secrets** → remove the secret from the file, suggest rotation (the implementer must rotate the credential externally), check git history for prior exposure (`git_call` log/show on the file).
+
+After each fix, **re-run `p:minion-builder`** (Step A.1 equivalent) to confirm the fix didn't break the build or tests. If the builder fails after a security fix, treat it as a regression and delegate to `p:minion-watson` for triage before continuing.
+
+Then re-invoke the security officer (Step B.1) to verify the fix landed and didn't introduce new issues. Increment the Phase B iteration counter.
+
+**Step B.8 — Five-iteration escape hatch (Phase B).**
+
+If Phase B hits 5 iterations without APPROVE, stop iterating and hand control back to the user:
+```
+**Post-implementation security audit hit 5 iterations without APPROVE.**
+
+Final verdict: REVISE / REJECT
+Remaining findings (CRITICAL / HIGH):
+- [finding 1 — file:line — OWASP A0X, CWE-XXX — one line]
+- [finding 2 — file:line — OWASP A0X, CWE-XXX — one line]
+- ...
+
+How should we proceed?
+1. One more security iteration (I'll attempt fixes again)
+2. Accept the residual risks and proceed to Phase C — open items recorded under `implementation_security_open_items` in the YAML with OWASP/CWE references
+3. Halt — implementation needs a security-focused rework before merging
+4. Other (custom direction)
+```
+
+Wait for the user's choice. On "1" run one more iteration. On "2" proceed to Phase C AND record findings under `implementation_security_open_items`. On "3" stop without writing `implementation_complete: true`.
+
+**Phase B loop hygiene & invariants:**
+
+- The security officer is READ-ONLY and runs in its own context.
+- Every iteration that ends with HIGH or actionable MEDIUM findings MUST end with actual code edits + a fresh builder PASS + a re-invocation of the officer.
+- If the officer returns "no threat surface identified" → instant APPROVE, no fixes.
+- **CRITICAL findings never auto-fix without user authorization** — they pause the loop per Step B.4.
+- The Phase B iteration counter is independent from Phase A.
+- A security fix that breaks the build is a regression — delegate to `p:minion-watson`, fix the regression, then continue Phase B from where it stopped.
+
+---
+
+### Phase C — Summary & YAML Update (after BOTH Phase A and Phase B clean)
+
+Generate the implementation summary:
+- List of modified files
+- List of new files
+- List of completed tasks
+- Test results (from the final builder PASS)
+- Phase A: inspector verdict + iteration count
+- Phase B: security officer verdict + iteration count + OWASP coverage summary
+- Any plan gaps the user authorized as in-scope
+- Any deviations from plan with their rationale
+- Any security findings accepted as residual risk (with OWASP/CWE)
+- Any warnings or issues encountered
+
+Update the YAML file:
+- Add `implementation_complete: true`
+- Add `implementation_date: YYYY-MM-DD`
+- Add any notes about implementation deviations
+- Add `inspector_verdict: COMPLETE` and `inspector_iterations: <N_a>`
+- Add `security_verdict: APPROVE` and `security_iterations: <N_b>`
+- If Phase A escape hatch was used: `implementation_open_items: [...]`
+- If Phase B escape hatch or REJECT-with-acceptance was used: `implementation_security_open_items: [{owasp, cwe, file, line, description, severity}, ...]`
 
 ## 5. Quality Checks
 
-Before marking implementation complete (i.e., before Step 4.7's YAML update):
+Before marking implementation complete (i.e., before Phase C's YAML update):
 
 - All tasks executed successfully (status `completed` in requirements.yaml)
 - All tests pass (final `p:minion-builder` run returned PASS)
@@ -405,8 +507,9 @@ Before marking implementation complete (i.e., before Step 4.7's YAML update):
 - Build succeeds without errors — verified via `p:minion-builder`
 - Success criteria from the YAML are met
 - Code follows project style guidelines (CLAUDE.md and language-specific instructions)
-- **`p:minion-impl-inspector` returned Readiness: COMPLETE** (or the user explicitly accepted current state at Step 4.8)
-- No unresolved CRITICAL plan gaps; remaining PLAN GAPs / UNPLANNED items are either authorized by the user or documented as known limitations in the YAML
+- **`p:minion-impl-inspector` returned Readiness: COMPLETE** (or the user explicitly accepted current state at Step A.8)
+- **`p:minion-security-officer` returned Verdict: APPROVE** (or the user explicitly accepted residual security risks at Step B.4 / B.8)
+- No unresolved CRITICAL plan gaps and no unresolved CRITICAL security findings; remaining items are either authorized by the user or documented as known limitations in the YAML (`implementation_open_items` and/or `implementation_security_open_items`)
 
 # Error Recovery
 
@@ -490,18 +593,29 @@ File: /path/to/file/test-websocket-ping-pong.c
 ✓ Tests passed (3/3)
 ✓ Marked as completed
 
-[Final verification — Section 4 loop]
+[Final verification — Section 4 two-phase loop]
+
+Phase A — Implementation completeness:
 ✓ Full test suite passed (via p:minion-builder)
 → Invoking p:minion-impl-inspector (iter 1/5)
 ✓ Inspector verdict: COMPLETE (12/12 plan items DONE)
+
+Phase B — Security audit:
+→ Invoking p:minion-security-officer code-mode (iter 1/5)
+✓ Threat surface: user-input, network (websocket ping handler)
+✓ OWASP coverage: A03 PASS, A04 PASS, A07 PASS, A09 PASS
+✓ Security verdict: APPROVE (no CRITICAL/HIGH findings, 0 secrets detected)
+
+Phase C — Summary & YAML:
 ✓ All success criteria met
-✓ requirements.yaml updated: implementation_complete=true, inspector_verdict=COMPLETE, inspector_iterations=1
+✓ requirements.yaml updated: implementation_complete=true, inspector_verdict=COMPLETE, inspector_iterations=1, security_verdict=APPROVE, security_iterations=1
 
 Implementation complete!
 Modified files: 2
 New files: 1
 Total tasks: 4
 Inspector iterations: 1
+Security iterations: 1
 ```
 
 # Command Parameters

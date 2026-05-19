@@ -25,7 +25,8 @@ You will use these minions throughout this command — favor them OVER manual Gl
 | `p:minion-explore` | Multi-round **codebase** exploration, subsystem understanding, "where is X defined", "how does Y work" — your eyes and ears inside the repo during Phase 2 (Explore Thoroughly). INSTEAD of long Glob/Grep/Read chains in the main context. |
 | `p:minion-web-explorer` | Quick **external** lookups: library docs, "what's the current version of X", "how do people implement Y in framework Z", single-shot web/GitHub searches. Light-weight (haiku). Use when you need one targeted piece of info from outside the repo. |
 | `p:minion-deep-researcher` | **Comprehensive online investigation**: 10-15 parallel queries across multiple angles (concepts, implementations, comparisons, best practices, expert opinions) with synthesized report. Heavy (opus). Use during Phase 3 (Design Solution) when comparing alternative approaches, evaluating libraries deeply, or surveying industry patterns before recommending an architecture. |
-| `p:minion-plan-inspector` | **Plan validation** against the live codebase (Checkpoint 5 loop) — your devil's-advocate auditor. INSTEAD of trying to second-guess your own plan inline. |
+| `p:minion-plan-inspector` | **Plan validation** against the live codebase (Checkpoint 5 Phase A loop) — your devil's-advocate auditor. INSTEAD of trying to second-guess your own plan inline. |
+| `p:minion-security-officer` | **Security review of the plan** (Checkpoint 5 Phase B loop) — runs in plan-mode AFTER plan-inspector APPROVE. Threat-surface triage first; full OWASP Top 10 / CWE pass only when triage hits. Catches auth/crypto/injection/SSRF risks BEFORE a single line of code is written. |
 
 Choosing between web-explorer and deep-research-agent: if the question is "look up X" (single fact, single doc page), use `p:minion-web-explorer`. If the question is "what's the right way to do X, considering tradeoffs and prior art", use `p:minion-deep-researcher`.
 
@@ -384,13 +385,21 @@ Format:
 Want me to expand any section, reorder, or add anything before I write the file?
 ```
 
-### Checkpoint 5 — Plan Validation Loop (AFTER writing the file)
+### Checkpoint 5 — Two-Phase Validation Loop (AFTER writing the file)
 
-After saving the plan, you MUST validate it against the live codebase using the `p:minion-plan-inspector` subagent. This is a tight iterative loop: inspector audits → you fix the gaps in the plan file → re-inspect — until the verdict is **APPROVE** or you reach 5 iterations. Skipping this loop is a violation.
+After saving the plan, you MUST run TWO sequential validation phases against the live codebase, then offer a final refinement menu:
 
-**Loop protocol — execute in order:**
+- **Phase A — Plan correctness** (`p:minion-plan-inspector`): does the plan match reality? Are the referenced files / symbols / APIs / structures real? Are the dependencies feasible?
+- **Phase B — Security review** (`p:minion-security-officer` in plan-mode): does the plan introduce OWASP-class risks? Auth bypasses, injection vectors, weak crypto, secret-handling mistakes, SSRF, missing rate-limits?
+- **Phase C — Refinement menu**: human-driven polish after both A and B return APPROVE.
 
-**Step 5.1 — Invoke the inspector.**
+Phase A must APPROVE before Phase B begins. Phase B must APPROVE (or be explicitly accepted by the user) before Phase C. Skipping either phase is a violation.
+
+---
+
+#### Phase A — Plan-Correctness Loop (`p:minion-plan-inspector`)
+
+**Step A.1 — Invoke the inspector.**
 
 Use the Agent tool with:
 - `subagent_type`: `p:minion-plan-inspector`
@@ -399,42 +408,152 @@ Use the Agent tool with:
 
 Each invocation is a fresh subagent — the inspector has no memory of prior iterations, so always pass the full plan path and the iteration number for context.
 
-**Step 5.2 — Parse the inspector's report.**
+**Step A.2 — Parse the inspector's report.**
 
 Extract: the verdict (APPROVE / REVISE / REJECT), counts by severity (CRITICAL, HIGH, MEDIUM, LOW, INFO), the top one or two highest-severity findings, and the "Missing From Plan" items.
 
-**Step 5.3 — Report to the user (ONE short message per iteration).**
+**Step A.3 — Report to the user (ONE short message per iteration).**
 
 Format:
 ```
-**Plan validation — iteration N/5**
+**Plan correctness — iteration N/5**
 
 - Verdict: APPROVE / REVISE / REJECT
 - Findings: C=<n>, H=<n>, M=<n>, L=<n>, I=<n>
 - Top issue: [one-liner from the highest-severity finding]
-- Action: [what you will fix this round, OR "no fixes needed — exiting loop"]
+- Action: [what you will fix this round, OR "no fixes needed — exiting Phase A"]
 ```
 
 Do NOT dump the full inspector report at every iteration. Keep these per-iteration messages compact.
 
-**Step 5.4 — Branch on verdict.**
+**Step A.4 — Branch on verdict.**
 
-- **APPROVE** (or only INFO findings) → exit the loop. Proceed to Step 5.6 (Refinement Menu).
-- **REVISE or REJECT, and iteration < 5** → proceed to Step 5.5 (apply fixes).
-- **REVISE or REJECT, and iteration == 5** → present the latest report compactly and ask the user how to proceed (Step 5.7).
+- **APPROVE** (or only INFO findings) → exit Phase A. **Proceed to Phase B** (security validation).
+- **REVISE or REJECT, and iteration < 5** → proceed to Step A.5 (apply fixes).
+- **REVISE or REJECT, and iteration == 5** → present the latest report compactly and ask the user how to proceed (Step A.7).
 
-**Step 5.5 — Apply fixes to the plan file.**
+**Step A.5 — Apply fixes to the plan file.**
 
 - Edit `docs/feature-implementation-plan.md` directly. Address ALL CRITICAL and HIGH findings. Address MEDIUM/LOW where straightforward.
 - Anchor every fix to the inspector's evidence (the `file:line` references). Do NOT silently rewrite the plan.
 - Do NOT widen the plan's scope based on inspector findings — if a finding suggests work the user didn't ask for, document it under "Out of Scope" rather than expanding the plan.
-- After editing, increment the iteration counter and loop back to Step 5.1.
+- After editing, increment the iteration counter and loop back to Step A.1.
 
-**Step 5.6 — Refinement Menu (after APPROVE).**
+**Step A.7 — Five-iteration escape hatch (Phase A).**
 
-Once the inspector approves the plan, offer the human-driven refinement menu:
+If Phase A hits 5 iterations without APPROVE, stop iterating and hand control back to the user:
 ```
-**Plan validated — verdict APPROVE after N iteration(s).**
+**Plan correctness hit 5 iterations without APPROVE.**
+
+Final verdict: REVISE / REJECT
+Remaining findings (CRITICAL / HIGH):
+- [finding 1 — one line]
+- [finding 2 — one line]
+- ...
+
+How should we proceed?
+1. One more correctness iteration (I'll attempt fixes again)
+2. Accept the plan as-is and proceed to security validation (Phase B)
+3. Halt — plan needs offline rework before implementation
+4. Other (custom direction)
+```
+
+Wait for the user's choice. On "1" run one more iteration. On "2" proceed to Phase B. On "3" stop with no further edits. On "4" act on the user's instructions.
+
+**Phase A loop hygiene & invariants:**
+
+- The inspector is READ-ONLY and runs in its own context — you call it via the Agent tool, you never run the inspection logic inline.
+- Every iteration that ends with non-trivial findings MUST end with an actual Edit to the plan file. Do NOT reply to the user without addressing CRITICAL/HIGH findings unless you are at the 5-iteration escape hatch.
+- If the inspector returns no findings or only INFO-level findings, treat it as APPROVE for loop purposes.
+- The Phase A iteration counter is independent from the Phase B counter — keep them separate and surface the active one in every per-iteration message.
+
+---
+
+#### Phase B — Security Review Loop (`p:minion-security-officer`, plan-mode)
+
+Phase B runs ONLY after Phase A returns APPROVE (or the user accepted the plan-as-is at Step A.7). Same loop pattern; different reviewer, different lens.
+
+**Step B.1 — Invoke the security officer.**
+
+Use the Agent tool with:
+- `subagent_type`: `p:minion-security-officer`
+- `description`: e.g. `"Security audit plan iter N"`
+- `prompt`: instruct the officer to operate in **plan-mode** on `docs/feature-implementation-plan.md`. Tell it to run the threat-surface triage FIRST — if no security-relevant domains are touched, it should emit a fast-path APPROVE with "no threat surface identified". Otherwise it does a full OWASP Top 10 / CWE pass. Return the structured report (verdict, threat surface, severity-rated findings with OWASP/CWE/CVSS mapping, OWASP coverage summary, checklist for the implementer). Include the iteration number.
+
+Each invocation is a fresh subagent — always pass the full plan path and the iteration number.
+
+**Step B.2 — Parse the officer's report.**
+
+Extract: verdict (APPROVE / REVISE / REJECT), threat surface (which domains were detected, or "none"), counts by severity, the top finding(s), and the OWASP coverage summary.
+
+**Step B.3 — Report to the user (ONE short message per iteration).**
+
+Format:
+```
+**Plan security review — iteration N/5**
+
+- Verdict: APPROVE / REVISE / REJECT
+- Threat surface: [N domains, e.g. "auth, crypto, user-input" — or "none identified"]
+- Findings: C=<n>, H=<n>, M=<n>, L=<n>, I=<n>
+- Top issue: [one-liner from the highest-severity finding, with OWASP/CWE]
+- Action: [what you will fix this round, OR "no fixes needed — exiting Phase B"]
+```
+
+Do NOT dump the full security report at every iteration. Keep messages compact.
+
+**Step B.4 — Branch on verdict.**
+
+- **APPROVE** (no CRITICAL/HIGH, or "no threat surface identified") → exit Phase B. **Proceed to Phase C** (Refinement Menu).
+- **REVISE, iteration < 5** → proceed to Step B.5 (apply security fixes).
+- **REJECT** (any CRITICAL finding) → STOP immediately. CRITICAL findings cannot be silently fixed by editing the plan; they need user awareness. Present the REJECT report and ask the user how to proceed: (a) substantive plan rework, (b) explicit risk acceptance with documentation, or (c) halt.
+- **REVISE, iteration == 5** → present the latest report and ask the user how to proceed (Step B.7).
+
+**Step B.5 — Apply security fixes to the plan file.**
+
+- Edit `docs/feature-implementation-plan.md` to address security findings:
+  - **HIGH findings** → MUST be addressed in the plan (e.g., "use `httpOnly` cookie for token" instead of "store in `localStorage`"; "parameterized queries" instead of "string concat"; "add rate-limit + lockout to `/login`")
+  - **MEDIUM findings** → address where the fix is small and clearly within the original scope
+  - **LOW / INFO findings** → may be documented under "Known security limitations" or "Out of Scope" rather than expanding the plan
+- Anchor every fix to the officer's evidence (OWASP category + CWE ID + plan-section reference). Do NOT silently rewrite the plan.
+- **Scope-creep tilalom**: if a security finding suggests work beyond the originally-requested feature, do NOT silently expand the plan. Document the finding under "Out of Scope" with a security risk note for the user to decide on separately.
+- After editing, increment the Phase B iteration counter and loop back to Step B.1.
+
+**Step B.7 — Five-iteration escape hatch (Phase B).**
+
+If Phase B hits 5 iterations without APPROVE, stop iterating and hand control back to the user:
+```
+**Plan security review hit 5 iterations without APPROVE.**
+
+Final verdict: REVISE / REJECT
+Remaining findings (CRITICAL / HIGH):
+- [finding 1 — one line — OWASP A0X, CWE-XXX]
+- [finding 2 — one line — OWASP A0X, CWE-XXX]
+- ...
+
+How should we proceed?
+1. One more security iteration (I'll attempt fixes again)
+2. Accept the residual risks and proceed to refinement (will be documented as "Known security limitations" in the plan)
+3. Halt — plan needs a security-focused rework before implementation
+4. Other (custom direction)
+```
+
+Wait for the user's choice. On "1" run one more iteration. On "2" proceed to Phase C, AND add the remaining findings under a new "Known security limitations" section in the plan with explicit OWASP/CWE references. On "3" stop with no further edits. On "4" act on the user's instructions.
+
+**Phase B loop hygiene & invariants:**
+
+- The security officer is READ-ONLY and runs in its own context.
+- Every iteration that ends with HIGH or actionable MEDIUM findings MUST end with an actual Edit to the plan file (unless at escape hatch or REJECT).
+- If the officer returns "no threat surface identified" → instant APPROVE for loop purposes, no fixes needed.
+- **CRITICAL findings never auto-fix** — REJECT escalates to the user immediately per Step B.4.
+- The Phase B iteration counter is independent from Phase A — track it separately.
+
+---
+
+#### Phase C — Refinement Menu (after BOTH Phase A and Phase B return APPROVE)
+
+Once correctness AND security validation both pass, offer the human-driven refinement menu:
+```
+**Plan validated — Phase A: APPROVE (N_a iter), Phase B: APPROVE (N_b iter).**
 
 Want me to:
 1. Expand a specific section in more detail
@@ -447,35 +566,7 @@ Want me to:
 Reply with a number, a custom request, or "done".
 ```
 
-Iterate on the plan file in response to the user's choice. Each refinement is a focused edit, not a full rewrite.
-
-**Step 5.7 — Five-iteration escape hatch.**
-
-If the loop hits 5 iterations without APPROVE, stop iterating and hand control back to the user:
-```
-**Validation hit 5 iterations without APPROVE.**
-
-Final verdict: REVISE / REJECT
-Remaining findings (CRITICAL / HIGH):
-- [finding 1 — one line]
-- [finding 2 — one line]
-- ...
-
-How should we proceed?
-1. One more validation iteration (I'll attempt fixes again)
-2. Accept the plan as-is and move to the refinement menu
-3. Halt — plan needs offline rework before implementation
-4. Other (custom direction)
-```
-
-Wait for the user's choice. On "1" run one more iteration. On "2" proceed to Step 5.6. On "3" stop with no further edits. On "4" act on the user's instructions.
-
-**Loop hygiene & invariants:**
-
-- The inspector is READ-ONLY and runs in its own context — you call it via the Agent tool, you never run the inspection logic inline.
-- Every iteration that ends with non-trivial findings MUST end with an actual Edit to the plan file. Do NOT reply to the user without addressing CRITICAL/HIGH findings unless you are at the 5-iteration escape hatch.
-- If the inspector returns no findings or only INFO-level findings, treat it as APPROVE for loop purposes.
-- The iteration counter is yours to track — keep it in your working state and surface it in every per-iteration message so the user can see the loop progress.
+Iterate on the plan file in response to the user's choice. Each refinement is a focused edit, not a full rewrite. If a refinement substantially changes plan structure (new architecture, new dependencies, new endpoints), you SHOULD re-run Phase A and/or Phase B before declaring done — but for narrow refinements (clarifying a paragraph, adding a code snippet), no re-validation is needed.
 
 ## Required Output
 
