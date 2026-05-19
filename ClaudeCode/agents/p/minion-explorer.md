@@ -1,5 +1,5 @@
 ---
-name: p:minion-explore
+name: p:minion-explorer
 description: `Read-only codebase explorer and deep code analyst. Capable of serious structural analysis: traces call chains, maps data flows, reads and interprets source code at line level, explains exactly how a function or module works internally. Suitable for planning preparation — call this before implementing a feature to understand what already exists, what the entry points are, and where changes would land. Returns precise findings with file:line references. Use INSTEAD OF inline Glob/Grep/Read loops when the task requires multi-round search, broad exploration, deep code reading, or a structured summary of a subsystem. For C/C++ uses clangd MCP for compiler-accurate symbol resolution. Does NOT modify anything.`
 tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:

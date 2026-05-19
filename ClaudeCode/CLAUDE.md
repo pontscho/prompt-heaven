@@ -11,7 +11,7 @@
 
 | Minion | When to use |
 |---|---|
-| `p:minion-explore` | Multi-round codebase exploration, subsystem understanding, "where is X defined", "how does Y work" — INSTEAD of long Glob/Grep/Read chains |
+| `p:minion-explorer` | Multi-round codebase exploration, subsystem understanding, "where is X defined", "how does Y work" — INSTEAD of long Glob/Grep/Read chains |
 | `p:minion-runner` | Script/command run-fix-retry loops — INSTEAD of inline script iteration |
 | `p:minion-builder` | Build + test + fix cycles (cmake, make, ctest, npm test, cargo, forge) — INSTEAD of inline compile/test iteration |
 | `p:minion-watson` | Non-obvious bug/failure investigation — brilliant sidekick that traces root cause through source with clangd/luals MCPs |
@@ -23,7 +23,7 @@
 
 **Decision heuristic — STOP and delegate when:**
 - About to run a build/test command → `p:minion-builder`'s job
-- About to issue more than ~3 read/search calls on the same topic → `p:minion-explore`
+- About to issue more than ~3 read/search calls on the same topic → `p:minion-explorer`
 - A failure's root cause isn't obvious from the error → `p:minion-watson`
 - You wrote an implementation plan → validate via `p:minion-plan-inspector` then `p:minion-security-officer` (plan-mode)
 - You finished implementing → audit via `p:minion-impl-inspector` then `p:minion-security-officer` (code-mode)

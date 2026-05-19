@@ -32,14 +32,14 @@ You are an implementer, not a one-person band. You do NOT run build+fix loops in
 |---|---|
 | `p:minion-builder` | **MANDATORY** for ALL build + test + fix cycles. Every `cmake --build`, `make`, `npm run build`, `ctest`, `npm test`, `cargo build`, etc. goes through this minion. It iterates the build/fix loop in isolation and returns a clean pass/fail report. **NEVER run build commands inline in the main context.** |
 | `p:minion-runner` | Script and command execution with retry/fix cycles. For scripts that need trial-and-error to work. INSTEAD of running scripts inline and patching them in the main context. |
-| `p:minion-explore` | When `context_summary` is missing, `pattern_excerpt` is absent, or a task touches code you don't yet understand. Your eyes into the codebase. INSTEAD of long Read/Grep chains in the main context. |
+| `p:minion-explorer` | When `context_summary` is missing, `pattern_excerpt` is absent, or a task touches code you don't yet understand. Your eyes into the codebase. INSTEAD of long Read/Grep chains in the main context. |
 | `p:minion-watson` | Investigate non-trivial test/build failures. Your brilliant sidekick for bug investigation — give it the failing log and it traces root cause through source with `file:line` precision. INSTEAD of trying to debug inline. |
 | `p:minion-impl-inspector` | Post-implementation audit (Section 4 Phase A validation loop). Verifies plan → code completion AND code → plan coverage. Catches gaps that per-task verification missed (cross-task dependencies, scope creep, plan items mapped to no task). |
 | `p:minion-security-officer` | **Security review of the implementation** (Section 4 Phase B validation loop) — runs in code-mode AFTER impl-inspector returns COMPLETE. Threat-surface triage first; full OWASP Top 10 / CWE pass on changed files only when triage hits. Catches vulns introduced during coding (the plan didn't say `sprintf` but it ended up there). Required PASS before YAML can be marked `implementation_complete: true`. |
 | `p:minion-web-explorer` | Quick external lookups: library docs, version checks, "how does this API behave with X" — single-shot web/GitHub searches. Light-weight. |
 | `p:minion-deep-researcher` | Comprehensive web research when implementation hits an unfamiliar library/API/framework and needs multi-angle investigation before proceeding. Heavy. |
 
-Rule of thumb: if you are about to run a build/test command, STOP — that's `p:minion-builder`'s job. If a build/test fails and the cause isn't obvious from the error, STOP — that's `p:minion-watson`'s job. If you don't know how a piece of existing code works, STOP — that's `p:minion-explore`'s job. Main context is precious, minions are not.
+Rule of thumb: if you are about to run a build/test command, STOP — that's `p:minion-builder`'s job. If a build/test fails and the cause isn't obvious from the error, STOP — that's `p:minion-watson`'s job. If you don't know how a piece of existing code works, STOP — that's `p:minion-explorer`'s job. Main context is precious, minions are not.
 
 # Prerequisites
 
@@ -526,7 +526,7 @@ If implementation is interrupted:
 # Important Notes
 
 - **Autonomous execution**: This command should work without user intervention for well-defined tasks
-- **Delegate iterative work — MANDATORY**: Build/test/fix cycles go through `p:minion-builder`. Bug investigation goes through `p:minion-watson`. Codebase exploration when context is missing goes through `p:minion-explore`. External research goes through `p:minion-web-explorer` or `p:minion-deep-researcher`. **Never run iterative loops inline in the main context** — this is the global CLAUDE.md rule and it is enforced here.
+- **Delegate iterative work — MANDATORY**: Build/test/fix cycles go through `p:minion-builder`. Bug investigation goes through `p:minion-watson`. Codebase exploration when context is missing goes through `p:minion-explorer`. External research goes through `p:minion-web-explorer` or `p:minion-deep-researcher`. **Never run iterative loops inline in the main context** — this is the global CLAUDE.md rule and it is enforced here.
 - **Validate completeness via inspector**: Section 4's validation loop with `p:minion-impl-inspector` is mandatory before declaring implementation complete. Per-task verification alone is not enough — it doesn't catch cross-task gaps, scope creep, or plan deficiencies.
 - **Scope discipline**: Plan gaps and unplanned changes surfaced by the inspector go to the user for decision, NOT silently into the code. Never expand scope without explicit authorization.
 - **Automatic task status tracking**: Each task is automatically marked as:
