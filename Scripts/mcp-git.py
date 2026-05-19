@@ -284,7 +284,8 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     if args is None:
         args = []
     if isinstance(args, str):
-        args = [args]
+        import shlex
+        args = shlex.split(args)
     if not isinstance(args, list):
         return {"error": "params.args must be a list of strings"}
     args = [str(a) for a in args]
