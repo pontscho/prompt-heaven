@@ -258,6 +258,53 @@ def _quote_arg(a: str) -> str:
 
 DEFAULT_MAX_CHARS = 100_000
 
+# Keys in params that are handled specially (not forwarded as git CLI flags)
+_META_KEYS = {"args", "cwd", "timeout", "max_answer_chars"}
+
+# Keys that map to positional arguments (appended after flags, not as --key=val)
+_POSITIONAL_KEYS = {
+    "revisions", "revision", "ref", "object", "pathspec",
+    "paths", "path", "commit", "commits", "tree_ish", "treeish",
+}
+
+
+def _semantic_params_to_args(params: dict) -> List[str]:
+    """Convert semantic parameter names to CLI args.
+
+    Models sometimes pass named parameters (e.g. max_count=5, pretty="%h %s")
+    instead of raw args lists.  This converts them to CLI flags so both
+    calling styles work.
+    """
+    flags: List[str] = []
+    positionals: List[str] = []
+
+    for key, value in params.items():
+        if key in _META_KEYS:
+            continue
+        if key in _POSITIONAL_KEYS:
+            if isinstance(value, list):
+                positionals.extend(str(v) for v in value)
+            else:
+                positionals.append(str(value))
+            continue
+
+        cli_key = key.replace("_", "-")
+
+        if isinstance(value, bool):
+            if value:
+                flags.append(f"--{cli_key}")
+        elif isinstance(value, int):
+            flags.append(f"--{cli_key}={value}")
+        elif isinstance(value, float):
+            flags.append(f"--{cli_key}={int(value) if value == int(value) else value}")
+        elif isinstance(value, str):
+            flags.append(f"--{cli_key}={value}")
+        elif isinstance(value, list):
+            for v in value:
+                flags.append(f"--{cli_key}={v}")
+
+    return flags + positionals
+
 
 def handle_git_call(arguments: dict, project_root: str, strict: bool = False) -> dict:
     function = (arguments.get("function") or arguments.get("f") or "").strip()
@@ -280,6 +327,8 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
             "Use the Bash tool for mutating operations."
         )}
 
+    semantic_args = _semantic_params_to_args(params)
+
     args = params.get("args", [])
     if args is None:
         args = []
@@ -289,6 +338,7 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     if not isinstance(args, list):
         return {"error": "params.args must be a list of strings"}
     args = [str(a) for a in args]
+    args = semantic_args + args
 
     if validator is not None:
         try:
