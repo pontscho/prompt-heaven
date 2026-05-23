@@ -254,9 +254,9 @@ def _discover_chrome():
 	import urllib.error
 	candidates = [os.environ.get("CHROME_CDP_URL", "")]
 	candidates += [
+		"http://192.168.2.2:9222",
 		"http://localhost:9222",
 		"http://127.0.0.1:9222",
-		"http://192.168.2.2:9222",
 		"http://localhost:9229",
 	]
 	for base in candidates:
@@ -268,6 +268,9 @@ def _discover_chrome():
 			targets = json.loads(resp.read())
 			for t in targets:
 				if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+					url = t.get("url", "")
+					if url.startswith("devtools://") or url.startswith("chrome://"):
+						continue
 					return base, t["webSocketDebuggerUrl"]
 		except Exception:
 			continue
@@ -290,15 +293,7 @@ class CDPSearcher:
 				self._id += 1
 				return result
 
-	def warmup(self):
-		if self._warm:
-			return
-		self._send("Page.navigate", {"url": "https://lite.duckduckgo.com/lite/"})
-		time.sleep(1.5)
-		self._warm = True
-
 	def search(self, query):
-		self.warmup()
 		js = """
 		(async () => {
 			const fd = new URLSearchParams();
