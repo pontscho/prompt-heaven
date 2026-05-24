@@ -54,7 +54,21 @@ Compared `curl_cffi` (impersonate="chrome146") against real Chrome 148 using `tl
 
 The JA3 hash difference is **expected and harmless** — Chrome 110+ deliberately randomizes TLS extension order via GREASE, so the JA3 hash changes on every connection even for the same browser. JA4, which normalizes extension order, matches exactly.
 
-**The TLS/HTTP2 fingerprint is NOT the detection vector.** curl_cffi's impersonation is essentially perfect at this level.
+### 2.4 Skepticism — Hash Match ≠ Byte-level Match
+
+> **FIGYELEM: Erős kétségeink vannak, hogy a TLS fingerprinting valóban megfelelő.**
+
+A fenti összehasonlítás **magas szintű hash-eket** vetett össze (JA4, Akamai hash, peetprint). Ezek aggregált, normalizált értékek — **nem a nyers TLS handshake byte-ok**. Ami a hash-ek mögött eltérhet:
+
+- **TLS extension payload-ok**: A hash-ek az extension ID-ket számolják, de nem az extension-ök belső tartalmát (pl. `supported_versions` extension tartalma, `key_share` csoport méretei, ECH payload struktúra)
+- **ClientHello record framing**: Record layer fragment határok, padding, record verziószám (`0x0301` vs `0x0303`)
+- **GREASE értékek**: A hash-ek `GREASE`-ként összesítik, de a konkrét GREASE byte-értékek eltérhetnek (`0x1A1A` vs `0xCACA` vs `0xBABA`) — DDG szerver-oldalon az egzakt értékeket látja
+- **HTTP/2 frame timing**: A SETTINGS és WINDOW_UPDATE frame-ek küldési sorrendje, timing-ja, TCP segment határai
+- **TLS Encrypted Client Hello (ECH)**: curl_cffi és Chrome eltérő ECH implementációval rendelkezhet — a `tls.peet.ws` kimutatja a jelenlétet, de a payload struktúra eltérhet
+- **ALPN/NPN negotiáció részletei**: Mikroszintű eltérések a protocol negotiation-ben
+- **TCP segment coalescing**: A TLS ClientHello hány TCP szegmensben érkezik — egy nagy vs több kisebb szegmens más fingerprint-et ad egyes rendszereknél
+
+**A `tls.peet.ws` összehasonlítás szükséges de NEM elégséges.** Igazi byte-szintű összehasonlítás `tcpdump` / Wireshark capture-ökkel kell, közvetlenül a wire-on, mindkét forrásból (real Chrome és curl_cffi) ugyanarra a célszerverre. Ez a tervezett következő lépés a tcpdump MCP szerverrel.
 
 ---
 
