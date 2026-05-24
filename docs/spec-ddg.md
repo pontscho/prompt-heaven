@@ -219,6 +219,131 @@ Given that byte-level TLS impersonation is **demonstrably insufficient**, the re
 
 **Pragmatic conclusion confirmed**: The script's current architecture (DDG-first with Bing auto-fallback + opt-in CDP via real Chrome) remains the correct approach. byte-level TLS work is interesting forensically but does NOT unlock DDG access.
 
+### 2.7 HTTP/2 Header Layer Analysis (Bug Found)
+
+**Date**: 2026-05-24
+
+After confirming TLS handshake is byte-equivalent, we enabled `CURLOPT_VERBOSE=1` to inspect the **HTTP/2 frames that curl_cffi sends** after the TLS handshake completes.
+
+#### Connection establishment (from `curl -v` output)
+
+```
+* Cipher selection: TLS_AES_128_GCM_SHA256:... (matches Chrome list)
+* ALPS: offers h2                              ← Application-Layer Protocol Settings
+* ECH: requested but no ECHConfig available
+* ECH: falling back to GREASE                  ← curl_cffi sends FAKE ECH
+* ALPN: curl offers h2,http/1.1
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384
+* ALPN: server accepted h2                     ← HTTP/2 confirmed
+* using HTTP/2
+```
+
+#### HTTP/2 HEADERS frame sent by curl_cffi (verbose dump)
+
+```
+:method: POST
+:authority: lite.duckduckgo.com
+:scheme: https
+:path: /lite/
+sec-ch-ua: "Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"
+sec-ch-ua-mobile: ?0
+sec-ch-ua-platform: "macOS"
+upgrade-insecure-requests: 1
+user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
+            (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,
+        image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
+sec-fetch-site: none                           ← 🔴 BUG (see below)
+sec-fetch-mode: navigate
+sec-fetch-user: ?1
+sec-fetch-dest: document
+accept-encoding: gzip, deflate, br, zstd
+accept-language: en-US,en;q=0.9
+priority: u=0, i
+referer: https://lite.duckduckgo.com/lite/    ← Referer is set
+content-length: 18
+content-type: application/x-www-form-urlencoded
+```
+
+#### Discovered issues at HTTP layer
+
+##### 🔴 Issue 1: Sec-Fetch-Site / Referer contradiction
+
+`Sec-Fetch-Site: none` means **no referrer / direct user navigation** (typed URL, bookmark, app launch). But the same request includes `Referer: https://lite.duckduckgo.com/lite/`.
+
+**A real Chrome browser submitting a form on lite.duckduckgo.com to itself would send:**
+- `Sec-Fetch-Site: same-origin` (because Referer matches destination)
+- `Sec-Fetch-Mode: navigate`
+- `Sec-Fetch-User: ?1`
+- `Sec-Fetch-Dest: document`
+
+curl_cffi's chrome146 profile **hard-codes `Sec-Fetch-Site: none`** regardless of context. This creates a header coherence violation — SearXNG documented Sec-Fetch checks as one of DDG's detection mechanisms.
+
+**Test outcome**: Overriding `Sec-Fetch-Site: same-origin` per-request did NOT bypass CAPTCHA in our test environment, but the IP was already heavily rate-limited. This is still a real bug that should be fixed for first-contact requests on clean IPs.
+
+##### 🟡 Issue 2: ECH GREASE vs real ECHConfig
+
+```
+* ECH: requested but no ECHConfig available
+* ECH: falling back to GREASE
+```
+
+curl_cffi sends **GREASE-ECH** (fake camouflage payload) because it didn't fetch the real ECHConfig from DNS HTTPS records. Real Chrome:
+1. Performs DNS HTTPS query (`HTTPS` resource record) for the target hostname
+2. Extracts the `ech=` value (real ECHConfig)
+3. Uses real ECH in ClientHello
+
+In our captures:
+- curl_cffi: ECH Config ID 4 / 145 (varying — GREASE) with 208-byte fake payload
+- Real Chrome: ECH Config ID 243 / 218 (DDG's actual configs) with 208-byte real payload
+
+While both have the same payload SIZE (the GREASE algorithm matches Chrome's behavior), the **Config ID space** differs. Real Chrome uses IDs from DDG's published list; curl_cffi's GREASE uses random IDs.
+
+DDG could potentially detect "GREASE ECH" vs "real ECH" by checking if the Config ID matches one of its currently published configs. **This is a structural difference, not just timing or randomness.**
+
+##### 🟡 Issue 3: User-Agent / OS / TCP stack mismatch
+
+curl_cffi running on Linux but claims to be Chrome on macOS:
+- `User-Agent: Macintosh; Intel Mac OS X 10_15_7 ... Chrome/146.0.0.0`
+- `sec-ch-ua-platform: "macOS"`
+- **Actual OS: Linux** (visible via TCP TTL=64, TCP options ordering, kernel-derived window scaling)
+
+A real Chrome on macOS would have TCP TTL=64 (same as Linux) but different TCP option ordering and kernel behavior. A real Chrome on Linux would have UA showing X11/Linux. This **UA-vs-network-stack inconsistency** is detectable via:
+- p0f-style passive OS fingerprinting
+- TTL initial value (macOS=64, Linux=64, Windows=128 — Mac/Linux indistinguishable on TTL alone)
+- TCP options order (different per OS)
+- Initial window size (we documented this is different)
+
+The simplest mitigation: configure curl_cffi to use a Linux Chrome User-Agent (`X11; Linux x86_64`), making UA consistent with the underlying OS. Our script's `PROFILES` should be updated.
+
+##### 🟢 Issue 4: sec-ch-ua brand string format
+
+| Source | sec-ch-ua value |
+|--------|-----------------|
+| curl_cffi chrome146 | `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"` |
+| Real Chrome 148 | `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"` |
+
+Chrome uses **randomized GREASE brand names** that rotate over versions: `"Not-A.Brand"`, `"Not/A)Brand"`, `"Not_A Brand"`, `"Not?A_Brand"`, etc. The brand list order also differs (curl_cffi: Chromium → Not-A.Brand → Chrome; Chrome 148: Chromium → Chrome → Not/A)Brand).
+
+This is a **per-version GREASE pattern** that curl_cffi's chrome146 profile may have slightly stale. Probably not the main detection vector but contributes to fingerprint mismatch in aggregate.
+
+#### Summary of HTTP layer findings
+
+| # | Issue | Severity | Fix difficulty |
+|---|-------|----------|----------------|
+| 1 | `Sec-Fetch-Site: none` with Referer set | 🔴 HIGH (coherence violation) | Easy: per-request override |
+| 2 | GREASE-ECH vs real ECHConfig | 🟡 MEDIUM | Hard: requires DNS HTTPS query |
+| 3 | UA claims macOS, OS is Linux | 🟡 MEDIUM | Easy: use Linux UA profile |
+| 4 | Stale GREASE brand strings | 🟢 LOW | Maintained by curl_cffi upstream |
+
+**The user's question answered**: curl_cffi DOES use HTTP/2 (`* using HTTP/2`). After the byte-equivalent TLS handshake, the divergence is in the HTTP/2 HEADERS frame — specifically the Sec-Fetch header coherence and OS/platform consistency with the underlying network stack.
+
+#### Actionable fixes for the script
+
+1. **Override `Sec-Fetch-Site: same-origin`** when Referer is set to a same-origin URL (DDG lite POSTs from itself)
+2. **Use a Linux Chrome User-Agent** (not macOS) — match the actual host OS
+3. **Optional**: Add DNS HTTPS query for real ECHConfig (complex, may need patches to curl_cffi)
+
 ---
 
 ## 3. What DDG Actually Detects (Server-side, Lite/HTML Endpoints)

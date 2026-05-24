@@ -214,7 +214,12 @@ def search_ddg(query, session):
 		resp = session.post(
 			"https://lite.duckduckgo.com/lite/",
 			data={"q": query, "kl": ""},
-			headers={"Referer": "https://lite.duckduckgo.com/lite/"},
+			headers={
+				"Referer": "https://lite.duckduckgo.com/lite/",
+				# Override curl_cffi's chrome146 default "none" — same-origin POST with Referer
+				# requires Sec-Fetch-Site: same-origin for header coherence (SearXNG-documented)
+				"Sec-Fetch-Site": "same-origin",
+			},
 			timeout=15,
 		)
 		if "anomaly-modal" in resp.text or "Please complete the following" in resp.text:
