@@ -70,6 +70,155 @@ A fenti összehasonlítás **magas szintű hash-eket** vetett össze (JA4, Akama
 
 **A `tls.peet.ws` összehasonlítás szükséges de NEM elégséges.** Igazi byte-szintű összehasonlítás `tcpdump` / Wireshark capture-ökkel kell, közvetlenül a wire-on, mindkét forrásból (real Chrome és curl_cffi) ugyanarra a célszerverre. Ez a tervezett következő lépés a tcpdump MCP szerverrel.
 
+### 2.5 Wire-level Comparison (tcpdump)
+
+**Date**: 2026-05-24
+**Captures**:
+- `ddg.pcap` frame #896, #3176 — real Chrome → `duckduckgo.com` (40.114.177.156)
+- `ddg-curl.pcap` frame #5 — curl_cffi chrome146 → `lite.duckduckgo.com` (40.114.177.156)
+
+#### Identical between curl_cffi and real Chrome
+
+| Field | Value |
+|-------|-------|
+| **JA4** | `t13d1516h2_8daaf6152771_d8a2da3f94cd` (byte-identical) |
+| **JA4_r** | Identical (same sorted ciphers + extensions + sig algos) |
+| **TLS legacy_version** | `0x0303` |
+| **Cipher Suites** | 16 ciphers in identical order (GREASE + AES-128/256-GCM + CHACHA20 + ECDHE + RSA) |
+| **Compression Methods** | `null` only |
+| **Extension count** | 18 (16 + 2 GREASE wrappers) |
+| **Extension set** | Identical 18 extensions present |
+| **Signature Algorithms** | 8 algos identical: ECDSA-P256/384, RSA-PSS-256/384/512, RSA-PKCS1-256/384/512 |
+| **Supported Groups** | GREASE + X25519MLKEM768 + x25519 + secp256r1 + secp384r1 |
+| **Key Share** | X25519MLKEM768 (1216 byte PQ key) + x25519 (32 byte) |
+| **ALPN** | h2, http/1.1 |
+| **ECH cipher** | HKDF-SHA256/AES-128-GCM |
+| **Compress Certificate** | brotli |
+| **application_settings (ALPS)** | h2 |
+| **PSK Key Exchange Modes** | psk_dhe_ke (1) |
+| **EC Point Formats** | uncompressed (0) |
+
+#### Detected differences
+
+| Field | curl_cffi chrome146 | Real Chrome | Comment |
+|-------|---------------------|-------------|---------|
+| **Extension ORDER** | `GREASE,11,45,65281,13,35,16,43,27,23,5,18,17613,51,0,65037,10,GREASE` | `GREASE,35,16,5,17613,23,51,13,65281,11,43,18,45,10,65037,27,0,GREASE` | Both random per connection (Chrome 110+ behavior). Could be statistically distinguishable across many connections. |
+| **JA3 hash** | `9834aa9a4eb053665948f2e3555c8d11` | `e5c9b4890495471d8d69d39f25f21afa` | Consequence of extension order randomization. **Not** the detection vector. |
+| **GREASE byte values** | 0x3A3A, 0xCACA, 0x2A2A, 0xEAEA | 0x4A4A, 0xBABA, 0x1A1A, 0xBABA | Both pick GREASE values from the spec range (`0x?A?A`). Both random. |
+| **ECH Config ID** | **4** | **243** (#896), **218** (#3176) | DDG publishes multiple ECH configs. curl_cffi's BoringSSL may use a stale or hardcoded one. Mild concern, probably not detection. |
+| **🔴 TCP Window Size** | **502** (scale 128 → eff. **64256**) | **2070** (scale 64 → eff. **132480**) | **TCP-level fingerprint difference.** Set via `SO_RCVBUF`. Distinct between libcurl and Chrome. **Captured by JA4T fingerprint.** |
+| **TCP Window Scale Factor** | 128 | 64 | Kernel-derived from `SO_RCVBUF`, app-controllable |
+| **SNI** | lite.duckduckgo.com | duckduckgo.com | Different endpoint used for testing — not a fingerprint issue |
+
+#### Smoking gun candidates (ranked)
+
+1. **🔴 TCP window size / scaling factor (JA4T)** — clear, deterministic difference
+   - Real Chrome: window 2070, scale 64
+   - curl_cffi/libcurl: window 502, scale 128
+   - Detectable on every connection at L4 (TCP), independent of TLS layer
+   - **Fixable** via `setsockopt(SO_RCVBUF)` in curl_cffi callback
+
+2. **🟡 Extension order randomization PRNG** — possible weak signal
+   - Both libraries randomize, but PRNG bias could differ
+   - Not detectable per-connection, possibly aggregated detection
+
+3. **🟢 ECH Config ID** — unlikely main vector
+   - DDG accepts multiple configs simultaneously
+   - More of a "stale software" indicator
+
+4. **🟢 ALPN/HTTP2 frame ordering** — needs further investigation
+   - HTTP/2 SETTINGS frame contents match (Akamai hash identical)
+   - Timing/frame coalescing patterns untested
+
+#### Key conclusion
+
+**At the TLS handshake layer, curl_cffi chrome146 is byte-equivalent to real Chrome 146** within the bounds of expected randomization (extension order, GREASE values, random/session bytes, ephemeral keys). The JA4 fingerprint matches identically.
+
+**The only deterministic, byte-level difference is at the TCP layer** — specifically the receive window size and scaling factor, which derive from the application's `SO_RCVBUF` socket option setting. This is a known JA4T detection vector.
+
+**Next step**: Patch curl_cffi to set `SO_RCVBUF` to match Chrome's window (~132480 bytes effective = ~16KB buffer with scale 64), recapture, verify JA4T alignment, and test against DDG.
+
+### 2.6 SO_RCVBUF Shim Experiment (Failed)
+
+**Date**: 2026-05-24
+
+#### Implementation
+
+LD_PRELOAD C shim (`/tmp/tcp_window_shim.c`) wrapping `socket()` to call `setsockopt(SO_RCVBUF)` before `connect()`. Configurable via `TCP_WINDOW_SHIM_RCVBUF` env var.
+
+```bash
+TCP_WINDOW_SHIM_RCVBUF=262144 LD_PRELOAD=/tmp/tcp_window_shim.so python3 script.py
+```
+
+#### Wire-level results (ddg-curl-shim.pcap)
+
+| Source | Window | Scale | Effective | JA4 |
+|--------|--------|-------|-----------|-----|
+| Real Chrome | 2070 | 64 | 132480 | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+| curl_cffi (no shim) | 502 | 128 | 64256 | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+| curl_cffi (SO_RCVBUF=262144) | 16384 | 4 | 65536 | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+
+The shim changed the window/scale combination but **did not match Chrome's exact (2070, 64) values**. Reason: Linux kernel auto-selects window scale shift based on `sk_rcvbuf` size, capped by `net.core.rmem_max`. On the test system `rmem_max=212992` caps actual `sk_rcvbuf` at 425984 regardless of `SO_RCVBUF` value, yielding shift=2 (scale=4). To get Chrome's shift=6 (scale=64), `sk_rcvbuf` needs to be ~4MB, requiring `sysctl net.core.rmem_max=4194304` (root privilege needed).
+
+#### CAPTCHA test outcome — STILL BLOCKED
+
+```
+Status: 202, len: 14235, CAPTCHA: True
+```
+
+**DDG still returned the anomaly modal even with:**
+- Identical JA4 (`t13d1516h2_8daaf6152771_d8a2da3f94cd`)
+- Identical JA4_r (sorted cipher/extension/sigalg sets)
+- Identical HTTP/2 SETTINGS frame (Akamai hash)
+- Modified TCP window/scale closer to Chrome
+- All curl_cffi auto-generated headers preserved (no manual overrides)
+- Only `Accept-Language` and per-request `Referer` set by us
+
+#### Conclusion: TCP window is NOT the primary detection vector
+
+**Three independent test outcomes:**
+1. curl_cffi default (window 502/scale 128) → CAPTCHA
+2. curl_cffi with shim (window 16384/scale 4) → CAPTCHA
+3. Real Chrome (window 2070/scale 64) → SUCCESS
+
+Window size and scale differ across all three, yet Chrome succeeds while both curl_cffi variants fail. If TCP window were the discriminator, at least one of the variants should have produced a different DDG response. Both got CAPTCHA.
+
+**This rules out**:
+- JA4T fingerprinting as the primary detection mechanism (TCP-level)
+- All known TLS-layer fingerprints (JA3, JA4, JA4_r, Akamai HTTP/2)
+- HTTP-layer header values (Sec-Fetch already correct in curl_cffi auto-generated)
+- TLS extension contents (byte-identical at the parsed-field level)
+
+#### What's left as the detection vector
+
+Given that byte-level TLS impersonation is **demonstrably insufficient**, the remaining candidates are:
+
+1. **IP reputation / behavioral pattern across past requests**
+   - Our IP has been making curl_cffi requests for days
+   - DDG may track per-IP request "personality" (timing, retry patterns, success/failure ratios)
+   - A single request from a clean IP might pass; a flagged IP will fail regardless of TLS
+
+2. **Subtle TLS-layer behavior we haven't measured**
+   - TLS extension randomization PRNG fingerprint (statistical, requires many connections)
+   - HTTP/2 frame timing/coalescing patterns (sub-millisecond)
+   - TCP-layer behavior: retransmission patterns, ACK timing, MSS clamping
+   - Connection reuse vs fresh handshake patterns
+
+3. **DDG maintains a behavioral signature database of known scraping tools**
+   - May correlate libcurl version + curl_cffi patch signatures
+   - This would be a "known-tool blocklist" rather than a fingerprint test
+
+4. **HTTP/2 layer differences not yet captured**
+   - We have not byte-diffed the encrypted HTTP/2 frames after handshake
+   - SETTINGS frame ordering, WINDOW_UPDATE timing, HEADERS frame structure
+   - Akamai hash matches at the aggregate level but individual frames could differ
+
+#### Final assessment
+
+**Byte-level TLS impersonation from Python is not achievable to a level that bypasses DDG.** The detection operates at a higher abstraction than JA4/JA4T. Pursuing this path further (HTTP/2 frame analysis, sub-millisecond timing, statistical PRNG analysis) is unlikely to yield a Python-pure solution.
+
+**Pragmatic conclusion confirmed**: The script's current architecture (DDG-first with Bing auto-fallback + opt-in CDP via real Chrome) remains the correct approach. byte-level TLS work is interesting forensically but does NOT unlock DDG access.
+
 ---
 
 ## 3. What DDG Actually Detects (Server-side, Lite/HTML Endpoints)
