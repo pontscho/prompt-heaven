@@ -206,7 +206,7 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
 
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
-        raise FileNotFoundError(f"Directory not found: {rel}")
+        return {"text": f"(directory does not exist: {rel})", "count": 0}
 
     if grep_pattern:
         grep_re = re.compile(grep_pattern, re.IGNORECASE)
@@ -311,7 +311,7 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
     offset = params.get("offset", 0)
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
-        raise FileNotFoundError(f"Directory not found: {rel}")
+        return {"text": f"(directory does not exist: {rel})", "count": 0}
 
     matches: List[str] = []
     for dirpath, dirnames, filenames in os.walk(path):
