@@ -13,38 +13,76 @@ Environment:
   DDG_BACKEND     — force backend: "bing", "cdp", or "ddg" (default: ddg with bing fallback)
   CHROME_CDP_URL  — Chrome debug endpoint for CDP backend (default: http://localhost:9222)
 
-Note on curl_cffi impersonation:
-  Do NOT manually override headers like User-Agent, Sec-CH-UA, Sec-Fetch-*, Accept,
-  Accept-Encoding — curl_cffi auto-generates these with correct values and ordering
-  when impersonate= is set. Overriding them BREAKS the fingerprint and triggers CAPTCHAs.
-  Only Accept-Language needs manual setting (curl_cffi omits it by default).
+Platform-aware backend selection:
+  - Linux: primp (chrome_133 + impersonate_os="linux") with a manual Linux
+    Chrome 133 header dict. primp 0.15.0 does not auto-inject browser
+    headers over HTTP/2, so we supply them ourselves.
+  - macOS / Windows / other: curl_cffi (chrome146 etc.) — auto-generates all
+    browser headers when impersonate= is set. Do NOT override User-Agent,
+    Sec-CH-UA, Sec-Fetch-*, Accept, Accept-Encoding on curl_cffi sessions
+    or the fingerprint breaks. Only Accept-Language needs manual setting.
 """
-
 import sys
 import re
 import html as html_mod
 import json
+import platform
 import random
 import time
 import os
 import base64
 from urllib.parse import parse_qs, urlparse
 
-from curl_cffi import requests
 from lxml.html import document_fromstring
 
-
 # ---------------------------------------------------------------------------
-# Impersonation profiles — MINIMAL: only fingerprint ID + Accept-Language
-# curl_cffi handles all other headers automatically when impersonate= is set.
-# DO NOT add User-Agent, Sec-CH-UA, Sec-Fetch-*, Accept, Accept-Encoding here.
+# Impersonation profiles — platform-aware backend selection
+# Linux: primp + manual Linux Chrome 133 header dict (primp does not auto-inject)
+# macOS / Windows / other: curl_cffi (auto-injects everything via impersonate=)
 # ---------------------------------------------------------------------------
 
-IMPERSONATIONS = [
+CURL_CFFI_PROFILES = [
 	"chrome146",
 	"chrome145",
 	"chrome136",
 	"safari260",
+]
+
+# Linux Chrome HTTP/2 header set factory. primp 0.15.0 does NOT auto-inject
+# these over HTTP/2 (verified vs tls.peet.ws on 2026-05-24) so we supply them
+# manually. Order and values mirror real Chrome on Linux x86_64; the major
+# version is parameterized so it stays coherent with the rotating TLS profile.
+def _linux_chrome_headers(major):
+	return {
+		"sec-ch-ua": f'"Not(A:Brand";v="99", "Google Chrome";v="{major}", "Chromium";v="{major}"',
+		"sec-ch-ua-mobile": "?0",
+		"sec-ch-ua-platform": '"Linux"',
+		"upgrade-insecure-requests": "1",
+		"user-agent": (
+			"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+			f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+		),
+		"accept": (
+			"text/html,application/xhtml+xml,application/xml;q=0.9,"
+			"image/avif,image/webp,image/apng,*/*;q=0.8,"
+			"application/signed-exchange;v=b3;q=0.7"
+		),
+		"sec-fetch-site": "none",
+		"sec-fetch-mode": "navigate",
+		"sec-fetch-user": "?1",
+		"sec-fetch-dest": "document",
+		"accept-encoding": "gzip, deflate, br, zstd",
+		"accept-language": "en-US,en;q=0.9",
+		"priority": "u=0, i",
+	}
+
+
+# primp profile + matching Chrome major for HTTP header coherence.
+PRIMP_LINUX_BUNDLES = [
+	("chrome_133", 133),
+	("chrome_131", 131),
+	("chrome_130", 130),
+	("chrome_128", 128),
 ]
 
 ROTATE_EVERY = 4
@@ -183,12 +221,28 @@ def parse_bing_results(html_text):
 
 
 # ---------------------------------------------------------------------------
-# curl_cffi session management
+# Session management (platform-aware backend)
 # ---------------------------------------------------------------------------
 
 def create_session(imp=None):
+	if platform.system() == "Linux":
+		import primp
+		if imp is None:
+			profile, major = random.choice(PRIMP_LINUX_BUNDLES)
+		else:
+			match = next((b for b in PRIMP_LINUX_BUNDLES if b[0] == imp), None)
+			profile, major = match if match else (imp, 133)
+		session = primp.Client(
+			impersonate=profile,
+			impersonate_os="linux",
+			headers=_linux_chrome_headers(major),
+			timeout=20,
+		)
+		return session, profile
+
+	from curl_cffi import requests
 	if imp is None:
-		imp = random.choice(IMPERSONATIONS)
+		imp = random.choice(CURL_CFFI_PROFILES)
 	session = requests.Session(impersonate=imp)
 	session.headers["Accept-Language"] = "en-US,en;q=0.9"
 	return session, imp
@@ -215,10 +269,17 @@ def search_ddg(query, session):
 			"https://lite.duckduckgo.com/lite/",
 			data={"q": query, "kl": ""},
 			headers={
-				"Referer": "https://lite.duckduckgo.com/lite/",
-				# Override curl_cffi's chrome146 default "none" — same-origin POST with Referer
-				# requires Sec-Fetch-Site: same-origin for header coherence (SearXNG-documented)
+				# Mimic real Chrome AJAX (fetch) POST from the lite page.
+				# CDP Network.requestWillBeSentExtraInfo on 2026-05-24 showed Chrome
+				# sends cors/empty/same-origin + Accept */* + Priority u=1 for XHR.
+				# Chrome's request went through (status 200) where curl_cffi/primp
+				# with navigation pattern (navigate/document) hit CAPTCHA.
+				"Accept": "*/*",
+				"Referer": "https://lite.duckduckgo.com/",
 				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+				"Sec-Fetch-Dest": "empty",
+				"Priority": "u=1, i",
 			},
 			timeout=15,
 		)

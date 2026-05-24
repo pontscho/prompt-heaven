@@ -329,20 +329,77 @@ This is a **per-version GREASE pattern** that curl_cffi's chrome146 profile may 
 
 #### Summary of HTTP layer findings
 
-| # | Issue | Severity | Fix difficulty |
-|---|-------|----------|----------------|
-| 1 | `Sec-Fetch-Site: none` with Referer set | 🔴 HIGH (coherence violation) | Easy: per-request override |
-| 2 | GREASE-ECH vs real ECHConfig | 🟡 MEDIUM | Hard: requires DNS HTTPS query |
-| 3 | UA claims macOS, OS is Linux | 🟡 MEDIUM | Easy: use Linux UA profile |
-| 4 | Stale GREASE brand strings | 🟢 LOW | Maintained by curl_cffi upstream |
+| #  | Issue | Severity | Fix difficulty |
+|----|-------|----------|----------------|
+| 1  | `sec-fetch-mode: navigate` on POST (see §2.8) | 🔴 CRITICAL (the actual bot signature) | Easy: per-request XHR pattern override |
+| 1' | `Sec-Fetch-Site: none` with Referer set | 🟡 SECONDARY (coherence violation, subsumed by #1's fix) | Easy: per-request override |
+| 2  | GREASE-ECH vs real ECHConfig | 🟡 MEDIUM | Hard: requires DNS HTTPS query |
+| 3  | UA claims macOS, OS is Linux | 🟢 SOLVED (primp Linux mode) | Done in `create_session()` |
+| 4  | Stale GREASE brand strings | 🟢 LOW | Maintained by curl_cffi upstream |
 
 **The user's question answered**: curl_cffi DOES use HTTP/2 (`* using HTTP/2`). After the byte-equivalent TLS handshake, the divergence is in the HTTP/2 HEADERS frame — specifically the Sec-Fetch header coherence and OS/platform consistency with the underlying network stack.
 
 #### Actionable fixes for the script
 
-1. **Override `Sec-Fetch-Site: same-origin`** when Referer is set to a same-origin URL (DDG lite POSTs from itself)
-2. **Use a Linux Chrome User-Agent** (not macOS) — match the actual host OS
-3. **Optional**: Add DNS HTTPS query for real ECHConfig (complex, may need patches to curl_cffi)
+1. **PRIMARY (done)**: Switch DDG POST headers to the Chrome XHR pattern — `cors` / `empty` / `*/*` / `u=1`. See §2.8.
+2. **Secondary (done)**: Override `Sec-Fetch-Site: same-origin` and Referer to a same-origin URL on the same POST (subsumed by #1).
+3. **Done**: Use a Linux Chrome User-Agent on Linux hosts via primp Linux mode.
+4. **Optional**: Add DNS HTTPS query for real ECHConfig (complex, may need patches to curl_cffi).
+
+### 2.8 Breakthrough: `sec-fetch-mode: navigate` vs `cors` — The Real Discriminator
+
+**Date:** 2026-05-24
+
+After exhausting TLS-layer hypotheses (JA4 match, TCP window shim, Akamai HTTP/2 match) and the Section 2.7 `Sec-Fetch-Site` coherence fix alone, the script still hit CAPTCHA. We captured a **real Chrome lite POST** via Chrome DevTools Protocol Network domain (`Network.requestWillBeSentExtraInfo` event) on a host where Chrome **passes lite without challenge**:
+
+| Header                       | Real Chrome (XHR fetch)            | curl_cffi/primp default (navigation)         |
+|------------------------------|------------------------------------|----------------------------------------------|
+| `accept`                     | `*/*`                              | `text/html,application/xhtml+xml,…`          |
+| `sec-fetch-mode`             | **`cors`**                         | **`navigate`**                               |
+| `sec-fetch-dest`             | `empty`                            | `document`                                   |
+| `sec-fetch-user`             | (absent)                           | `?1`                                         |
+| `upgrade-insecure-requests`  | (absent)                           | `1`                                          |
+| `priority`                   | `u=1, i`                           | `u=0, i`                                     |
+| `referer`                    | `https://lite.duckduckgo.com/`     | `https://lite.duckduckgo.com/lite/`          |
+
+Chrome's POST originates from `fetch()` inside the lite page's JavaScript (the lite UI intercepts the `<form>` submit and re-issues the POST as an XHR). This produces a textbook XHR pattern: `cors` / `empty` / `*/*` / `u=1`.
+
+curl_cffi and primp, by default, emit navigation-pattern headers for any POST because their Chrome impersonation profile assumes a top-level navigation / form submit. **DDG treats `sec-fetch-mode: navigate` POST as a bot signature** — most headless scrapers and HTTP clients emit exactly this pattern, while real-world humans on lite end up sending XHR via the page JS.
+
+This finally reconciles SearXNG's earlier-discovered "Sec-Fetch-Mode is one method DDG uses to block bots" (cf. Section 3.1) with the actual mechanics: it is not that `Sec-Fetch-Mode` must be present — it is that for **POSTs from `/lite/`** the value must be `cors`, not `navigate`.
+
+#### Fix
+
+`search_ddg()` overrides per-request headers to the Chrome XHR pattern:
+
+```python
+headers={
+    "Accept": "*/*",
+    "Referer": "https://lite.duckduckgo.com/",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+    "Priority": "u=1, i",
+}
+```
+
+#### Measured Impact
+
+- **Before XHR fix**: 100% CAPTCHA on lite POSTs (curl_cffi chrome146 / primp Linux mode with navigation defaults).
+- **After XHR fix**: ~80% pass-through on lite POST; remaining ~20% (typically after session rotation or rapid sequential queries) degrade gracefully via Bing fallback (`_run_ddg_with_bing_fallback`).
+
+#### Remaining Coherence Gaps (Open)
+
+Two navigation-only headers still leak from the session-level dict because primp does not delete session-level headers via per-request override:
+
+- `upgrade-insecure-requests: 1` — Chrome XHR omits this entirely (UIR is a navigation-only directive).
+- `sec-fetch-user: ?1` — only emitted on user-initiated top-level navigation.
+
+Cleanup paths under consideration:
+
+- Split the session-level header dict into `_chrome_navigation_headers()` and `_chrome_xhr_headers()` factories; `create_session()` picks one based on the script's primary endpoint usage pattern (DDG lite → XHR).
+- Use `Client.headers_update()` per call to flip the session-level dict before each request.
+
 
 ---
 
