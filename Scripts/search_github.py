@@ -1,373 +1,337 @@
 #!/usr/bin/env python3
 """
-GitHub code search using grep.app API with Python standard library only.
+GitHub code search via grep.app API with browser impersonation.
+
 Usage:
-  python3 search_github.py "search query" [options]
+  python3 search_github.py "search query"
   python3 search_github.py "query1" "query2" "query3"  # batch mode
+  python3 search_github.py "useEffect" --lang JavaScript --repo facebook/react
+
+Options:
+  --lang   Programming language filter
+  --repo   Repository filter (owner/repo format)
+  --path   Path filter for directory-specific searches
+  --limit  Maximum results per query (default: 10)
+
+Platform-aware backend selection:
+  - Linux: primp (chrome_133 + impersonate_os="linux") with a manual Linux
+    Chrome 133 header dict. primp 0.15.0 does not auto-inject browser
+    headers over HTTP/2, so we supply them ourselves.
+  - macOS / Windows / other: curl_cffi (chrome146 etc.) — auto-generates all
+    browser headers when impersonate= is set. Do NOT override User-Agent,
+    Sec-CH-UA, Sec-Fetch-*, Accept, Accept-Encoding on curl_cffi sessions
+    or the fingerprint breaks. Only Accept-Language needs manual setting.
 """
-
 import sys
-import urllib.request
-import urllib.parse
-import json
-import argparse
 import re
-import html as html_module
+import html as html_mod
+import json
+import platform
+import random
+import time
 import os
+import argparse
+from urllib.parse import urlencode
+
+# ---------------------------------------------------------------------------
+# Impersonation profiles — platform-aware backend selection
+# Linux: primp + manual Linux Chrome 133 header dict (primp does not auto-inject)
+# macOS / Windows / other: curl_cffi (auto-injects everything via impersonate=)
+# ---------------------------------------------------------------------------
+
+CURL_CFFI_PROFILES = [
+	"chrome146",
+	"chrome145",
+	"chrome136",
+	"safari260",
+]
+
+def _linux_chrome_headers(major):
+	return {
+		"sec-ch-ua": f'"Not(A:Brand";v="99", "Google Chrome";v="{major}", "Chromium";v="{major}"',
+		"sec-ch-ua-mobile": "?0",
+		"sec-ch-ua-platform": '"Linux"',
+		"upgrade-insecure-requests": "1",
+		"user-agent": (
+			"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+			f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+		),
+		"accept": (
+			"text/html,application/xhtml+xml,application/xml;q=0.9,"
+			"image/avif,image/webp,image/apng,*/*;q=0.8,"
+			"application/signed-exchange;v=b3;q=0.7"
+		),
+		"sec-fetch-site": "none",
+		"sec-fetch-mode": "navigate",
+		"sec-fetch-user": "?1",
+		"sec-fetch-dest": "document",
+		"accept-encoding": "gzip, deflate, br, zstd",
+		"accept-language": "en-US,en;q=0.9",
+		"priority": "u=0, i",
+	}
 
 
-def detect_language_from_path(file_path):
-    """
-    Detect programming language from file extension.
+PRIMP_LINUX_BUNDLES = [
+	("chrome_133", 133),
+	("chrome_131", 131),
+	("chrome_130", 130),
+	("chrome_128", 128),
+]
 
-    Args:
-        file_path: File path string
-
-    Returns:
-        Language name or None
-    """
-    ext_to_lang = {
-        '.py': 'Python',
-        '.js': 'JavaScript',
-        '.ts': 'TypeScript',
-        '.tsx': 'TypeScript',
-        '.jsx': 'JavaScript',
-        '.java': 'Java',
-        '.cpp': 'C++',
-        '.cc': 'C++',
-        '.c': 'C',
-        '.h': 'C/C++',
-        '.hpp': 'C++',
-        '.cs': 'C#',
-        '.go': 'Go',
-        '.rs': 'Rust',
-        '.rb': 'Ruby',
-        '.php': 'PHP',
-        '.swift': 'Swift',
-        '.kt': 'Kotlin',
-        '.scala': 'Scala',
-        '.sh': 'Shell',
-        '.bash': 'Bash',
-        '.html': 'HTML',
-        '.css': 'CSS',
-        '.scss': 'SCSS',
-        '.json': 'JSON',
-        '.xml': 'XML',
-        '.yaml': 'YAML',
-        '.yml': 'YAML',
-        '.md': 'Markdown',
-        '.sql': 'SQL',
-        '.r': 'R',
-        '.m': 'Objective-C',
-        '.vim': 'Vim Script',
-        '.lua': 'Lua',
-        '.pl': 'Perl',
-    }
-
-    ext = os.path.splitext(file_path)[1].lower()
-    return ext_to_lang.get(ext, None)
+ROTATE_EVERY = 4
 
 
-def search_github(query, lang=None, repo=None, path=None, limit=10):
-    """
-    Search GitHub using grep.app API.
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
-    Args:
-        query: Search query string
-        lang: Programming language filter (e.g., "Python", "JavaScript")
-        repo: Repository filter in "owner/repo" format
-        path: Path filter for directory-specific searches
-        limit: Maximum number of results to return (default: 10)
+def clean_html_tags(text):
+	text = re.sub(r'<[^>]+>', '', text)
+	text = html_mod.unescape(text)
+	return text.strip()
 
-    Returns:
-        List of dicts with keys: repo, file_path, branch, language, code_lines, url
-    """
-    # Build API URL
-    base_url = "https://grep.app/api/search"
 
-    params = {'q': query}
-    if lang:
-        params['f.lang'] = lang
-    if repo:
-        params['f.repo'] = repo
-    if path:
-        params['f.path'] = path
+# ---------------------------------------------------------------------------
+# grep.app response parsing
+# ---------------------------------------------------------------------------
 
-    url = f"{base_url}?{urllib.parse.urlencode(params)}"
+EXT_TO_LANG = {
+	'.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript',
+	'.tsx': 'TypeScript', '.jsx': 'JavaScript', '.java': 'Java',
+	'.cpp': 'C++', '.cc': 'C++', '.c': 'C', '.h': 'C/C++',
+	'.hpp': 'C++', '.cs': 'C#', '.go': 'Go', '.rs': 'Rust',
+	'.rb': 'Ruby', '.php': 'PHP', '.swift': 'Swift', '.kt': 'Kotlin',
+	'.scala': 'Scala', '.sh': 'Shell', '.bash': 'Bash',
+	'.html': 'HTML', '.css': 'CSS', '.scss': 'SCSS',
+	'.json': 'JSON', '.xml': 'XML', '.yaml': 'YAML', '.yml': 'YAML',
+	'.md': 'Markdown', '.sql': 'SQL', '.r': 'R',
+	'.m': 'Objective-C', '.vim': 'Vim Script', '.lua': 'Lua', '.pl': 'Perl',
+}
 
-    # Set user agent
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-    }
 
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode('utf-8'))
-
-        # Parse results
-        results = []
-        hits = data.get('hits', {}).get('hits', [])
-
-        for hit in hits[:limit]:
-            file_path = hit.get('path', 'Unknown')
-            result = {
-                'repo': hit.get('repo', 'Unknown'),
-                'file_path': file_path,
-                'branch': hit.get('branch', 'main'),
-                'language': detect_language_from_path(file_path) or 'Unknown',
-                'code_lines': []
-            }
-
-            # Extract code snippet
-            snippet_html = hit.get('content', {}).get('snippet', '')
-            if snippet_html:
-                result['code_lines'] = extract_code_from_snippet(snippet_html)
-
-            # Build GitHub URL
-            if result['code_lines']:
-                first_line = result['code_lines'][0][0]
-                result['url'] = build_github_url(
-                    result['repo'],
-                    result['file_path'],
-                    result['branch'],
-                    first_line
-                )
-            else:
-                result['url'] = build_github_url(
-                    result['repo'],
-                    result['file_path'],
-                    result['branch']
-                )
-
-            results.append(result)
-
-        return results
-
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            print("No results found.", file=sys.stderr)
-        elif e.code == 429:
-            print("Rate limit exceeded. Please try again later.", file=sys.stderr)
-        else:
-            print(f"HTTP Error {e.code}: {e.reason}", file=sys.stderr)
-        return []
-    except urllib.error.URLError as e:
-        print(f"Network error: {e.reason}", file=sys.stderr)
-        return []
-    except json.JSONDecodeError as e:
-        print(f"Error parsing API response: {e}", file=sys.stderr)
-        return []
-    except Exception as e:
-        print(f"Error searching GitHub: {e}", file=sys.stderr)
-        return []
+def detect_language(file_path):
+	ext = os.path.splitext(file_path)[1].lower()
+	return EXT_TO_LANG.get(ext)
 
 
 def extract_code_from_snippet(html_snippet):
-    """
-    Extract code lines and line numbers from HTML snippet.
-
-    Args:
-        html_snippet: HTML string with code snippet
-
-    Returns:
-        List of (line_number, code_line) tuples
-    """
-    lines = []
-
-    # Pattern: <tr data-line="123">...<pre>code content</pre>...
-    # Extract each table row with line number and code
-    pattern = r'<tr data-line="(\d+)">.*?<pre>(.*?)</pre>'
-    matches = re.findall(pattern, html_snippet, re.DOTALL)
-
-    for line_num, code_html in matches:
-        # Clean HTML tags (remove <span>, <mark>, etc.)
-        code_text = re.sub(r'<[^>]+>', '', code_html)
-        # Decode HTML entities
-        code_text = html_module.unescape(code_text)
-        # Strip whitespace but keep leading indentation
-        code_text = code_text.rstrip()
-
-        if code_text:  # Only add non-empty lines
-            lines.append((int(line_num), code_text))
-
-    return lines
+	lines = []
+	for m in re.finditer(r'<tr data-line="(\d+)">.*?<pre>(.*?)</pre>', html_snippet, re.DOTALL):
+		code_text = clean_html_tags(m.group(2)).rstrip()
+		if code_text:
+			lines.append((int(m.group(1)), code_text))
+	return lines
 
 
 def build_github_url(repo, path, branch, line_number=None):
-    """
-    Build direct GitHub file URL with optional line number.
+	base = f"https://github.com/{repo}/blob/{branch}/{path}"
+	if line_number:
+		return f"{base}#L{line_number}"
+	return base
 
-    Args:
-        repo: Repository name in "owner/repo" format
-        path: File path in repository
-        branch: Branch name
-        line_number: Optional line number
 
-    Returns:
-        Full GitHub URL
-    """
-    base = f"https://github.com/{repo}/blob/{branch}/{path}"
-    if line_number:
-        return f"{base}#L{line_number}"
-    return base
+def parse_grep_results(data, limit):
+	results = []
+	for hit in data.get('hits', {}).get('hits', [])[:limit]:
+		file_path = hit.get('path', 'Unknown')
+		result = {
+			'repo': hit.get('repo', 'Unknown'),
+			'file_path': file_path,
+			'branch': hit.get('branch', 'main'),
+			'language': detect_language(file_path) or 'Unknown',
+			'code_lines': [],
+		}
 
+		snippet_html = hit.get('content', {}).get('snippet', '')
+		if snippet_html:
+			result['code_lines'] = extract_code_from_snippet(snippet_html)
+
+		first_line = result['code_lines'][0][0] if result['code_lines'] else None
+		result['url'] = build_github_url(
+			result['repo'], result['file_path'], result['branch'], first_line
+		)
+		results.append(result)
+
+	return results
+
+
+# ---------------------------------------------------------------------------
+# Session management (platform-aware backend)
+# ---------------------------------------------------------------------------
+
+def create_session(imp=None):
+	if platform.system() == "Linux":
+		import primp
+		if imp is None:
+			profile, major = random.choice(PRIMP_LINUX_BUNDLES)
+		else:
+			match = next((b for b in PRIMP_LINUX_BUNDLES if b[0] == imp), None)
+			profile, major = match if match else (imp, 133)
+		session = primp.Client(
+			impersonate=profile,
+			impersonate_os="linux",
+			headers=_linux_chrome_headers(major),
+			timeout=20,
+		)
+		return session, profile
+
+	from curl_cffi import requests
+	if imp is None:
+		imp = random.choice(CURL_CFFI_PROFILES)
+	session = requests.Session(impersonate=imp)
+	session.headers["Accept-Language"] = "en-US,en;q=0.9"
+	return session, imp
+
+
+def warmup_session(session):
+	try:
+		session.get("https://grep.app/", timeout=10)
+	except Exception:
+		pass
+	time.sleep(random.uniform(0.8, 1.5))
+
+
+# ---------------------------------------------------------------------------
+# GitHub search via grep.app
+# ---------------------------------------------------------------------------
+
+def search_github(query, session, lang=None, repo=None, path=None, limit=10):
+	params = {'q': query}
+	if lang:
+		params['f.lang'] = lang
+	if repo:
+		params['f.repo'] = repo
+	if path:
+		params['f.path'] = path
+
+	url = f"https://grep.app/api/search?{urlencode(params)}"
+
+	try:
+		resp = session.get(
+			url,
+			headers={
+				"Accept": "application/json, text/plain, */*",
+				"Referer": "https://grep.app/search",
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+				"Sec-Fetch-Dest": "empty",
+				"Priority": "u=1, i",
+			},
+			timeout=15,
+		)
+		if resp.status_code == 429:
+			print(f"  [Rate limited for: {query}]", file=sys.stderr)
+			return []
+		if resp.status_code != 200:
+			print(f"  [HTTP {resp.status_code} for: {query}]", file=sys.stderr)
+			return []
+		data = json.loads(resp.text)
+		return parse_grep_results(data, limit)
+	except Exception as e:
+		print(f"  [grep.app error: {e}]", file=sys.stderr)
+		return []
+
+
+# ---------------------------------------------------------------------------
+# Output formatting
+# ---------------------------------------------------------------------------
 
 def format_results(results, query=None):
-    """
-    Format search results for output.
+	if not results:
+		return "No results found."
 
-    Args:
-        results: List of result dicts
-        query: Optional query string for section header
+	output = []
+	if query:
+		output.append(f"## Query: {query}")
+		output.append("")
 
-    Returns:
-        Formatted string for output
-    """
-    if not results:
-        return "No results found."
+	for i, result in enumerate(results, 1):
+		output.append(f"### Result {i}: {result['repo']} - {result['file_path']}")
+		output.append(f"**URL**: {result['url']}")
+		output.append(f"**Branch**: {result['branch']}")
+		output.append(f"**Language**: {result['language']}")
 
-    output = []
+		if result['code_lines']:
+			first_line = result['code_lines'][0][0]
+			last_line = result['code_lines'][-1][0]
+			output.append(f"**Line {first_line}-{last_line}:**")
+			output.append("```")
+			for _num, code in result['code_lines']:
+				output.append(code)
+			output.append("```")
+		else:
+			output.append("No code snippet available")
 
-    if query:
-        output.append(f"## Query: {query}")
-        output.append("")
+		output.append("")
 
-    for i, result in enumerate(results, 1):
-        repo = result.get('repo', 'Unknown')
-        file_path = result.get('file_path', 'Unknown')
-        branch = result.get('branch', 'main')
-        language = result.get('language', 'Unknown')
-        code_lines = result.get('code_lines', [])
-        url = result.get('url', '')
-
-        # Result header
-        output.append(f"### Result {i}: {repo} - {file_path}")
-        output.append(f"**URL**: {url}")
-        output.append(f"**Branch**: {branch}")
-        output.append(f"**Language**: {language}")
-
-        # Code snippet with line numbers
-        if code_lines:
-            first_line = code_lines[0][0]
-            last_line = code_lines[-1][0]
-            output.append(f"**Line {first_line}-{last_line}:**")
-            output.append("```")
-
-            for line_num, code in code_lines:
-                output.append(f"{code}")
-            output.append("```")
-        else:
-            output.append("No code snippet available")
-
-        # URL
-        output.append("")  # Empty line between results
-
-    return '\n'.join(output)
+	return '\n'.join(output)
 
 
-def parse_arguments():
-    """
-    Parse command line arguments.
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    Returns:
-        Parsed arguments namespace
-    """
-    parser = argparse.ArgumentParser(
-        description='Search GitHub code repositories using grep.app API',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
+def _run_github(queries, lang=None, repo=None, path=None, limit=10):
+	session, _imp = create_session()
+	warmup_session(session)
+
+	output_sections = []
+	has_results = False
+
+	for i, query in enumerate(queries):
+		if i > 0:
+			time.sleep(random.uniform(1.5, 3.0))
+
+		if i > 0 and i % ROTATE_EVERY == 0:
+			session, _imp = create_session()
+			warmup_session(session)
+
+		results = search_github(query, session, lang=lang, repo=repo, path=path, limit=limit)
+
+		if results:
+			has_results = True
+			section = format_results(results, query=query) if len(queries) > 1 else format_results(results)
+			output_sections.append(section)
+		elif len(queries) > 1:
+			output_sections.append(f"## Query: {query}\n\nNo results found.\n")
+
+	return output_sections, has_results
+
+
+def main():
+	parser = argparse.ArgumentParser(
+		description='Search GitHub code via grep.app API',
+		formatter_class=argparse.RawDescriptionHelpFormatter,
+		epilog='''
 Examples:
   %(prog)s "async function"
   %(prog)s "machine learning" --lang Python
   %(prog)s "useEffect" --repo facebook/react
   %(prog)s "import torch" --path models/
-  %(prog)s "neural network" --lang Python --path src/ --limit 5
-  %(prog)s "query1" "query2" "query3"  # batch mode
-        '''
-    )
+  %(prog)s "query1" "query2" "query3"
+		'''
+	)
+	parser.add_argument('query', nargs='+', help='Search query string(s)')
+	parser.add_argument('--lang', help='Programming language filter')
+	parser.add_argument('--repo', help='Repository filter (owner/repo)')
+	parser.add_argument('--path', help='Path filter')
+	parser.add_argument('--limit', type=int, default=10, help='Max results per query (default: 10)')
+	args = parser.parse_args()
 
-    parser.add_argument(
-        'query',
-        nargs='+',
-        help='Search query string(s) - multiple queries for batch mode'
-    )
+	output_sections, has_results = _run_github(
+		args.query, lang=args.lang, repo=args.repo, path=args.path, limit=args.limit
+	)
 
-    parser.add_argument(
-        '--lang',
-        help='Programming language filter (e.g., Python, JavaScript, Go)'
-    )
+	if not has_results:
+		print("No results found for any query.", file=sys.stderr)
+		sys.exit(1)
 
-    parser.add_argument(
-        '--repo',
-        help='Repository filter in "owner/repo" format (e.g., facebook/react)'
-    )
-
-    parser.add_argument(
-        '--path',
-        help='Path filter for directory-specific searches (e.g., src/, models/)'
-    )
-
-    parser.add_argument(
-        '--limit',
-        type=int,
-        default=10,
-        help='Maximum number of results to return (default: 10)'
-    )
-
-    return parser.parse_args()
-
-
-def main():
-    """Main function."""
-    args = parse_arguments()
-
-    # Get queries list
-    queries = args.query if isinstance(args.query, list) else [args.query]
-
-    # Single query mode
-    if len(queries) == 1:
-        results = search_github(
-            query=queries[0],
-            lang=args.lang,
-            repo=args.repo,
-            path=args.path,
-            limit=args.limit
-        )
-
-        if not results:
-            sys.exit(1)
-
-        print(format_results(results))
-    else:
-        # Batch mode: process multiple queries
-        output_sections = []
-        has_results = False
-
-        for query in queries:
-            results = search_github(
-                query=query,
-                lang=args.lang,
-                repo=args.repo,
-                path=args.path,
-                limit=args.limit
-            )
-
-            if results:
-                has_results = True
-                output_sections.append(format_results(results, query=query))
-            else:
-                # Include failed query in output
-                output_sections.append(f"## Query: {query}\n\nNo results found.\n")
-
-        if not has_results:
-            print("No results found for any query.", file=sys.stderr)
-            sys.exit(1)
-
-        # Print markdown document with all results
-        print("# GitHub Search Results\n")
-        print('\n---\n\n'.join(output_sections))
+	if len(args.query) > 1:
+		print("# GitHub Search Results\n")
+		print('\n---\n\n'.join(output_sections))
+	else:
+		print(output_sections[0] if output_sections else "")
 
 
 if __name__ == '__main__':
-    main()
+	main()
