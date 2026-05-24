@@ -388,17 +388,14 @@ headers={
 - **Before XHR fix**: 100% CAPTCHA on lite POSTs (curl_cffi chrome146 / primp Linux mode with navigation defaults).
 - **After XHR fix**: ~80% pass-through on lite POST; remaining ~20% (typically after session rotation or rapid sequential queries) degrade gracefully via Bing fallback (`_run_ddg_with_bing_fallback`).
 
-#### Remaining Coherence Gaps (Open)
+#### Remaining Coherence Gaps (Empirically Resolved: Keep the Leak)
 
-Two navigation-only headers still leak from the session-level dict because primp does not delete session-level headers via per-request override:
+Two navigation-only headers leak from the session-level dict into the XHR POST because primp does not delete session-level headers via per-request override:
 
 - `upgrade-insecure-requests: 1` — Chrome XHR omits this entirely (UIR is a navigation-only directive).
 - `sec-fetch-user: ?1` — only emitted on user-initiated top-level navigation.
 
-Cleanup paths under consideration:
-
-- Split the session-level header dict into `_chrome_navigation_headers()` and `_chrome_xhr_headers()` factories; `create_session()` picks one based on the script's primary endpoint usage pattern (DDG lite → XHR).
-- Use `Client.headers_update()` per call to flip the session-level dict before each request.
+**Empirical finding (2026-05-24)**: removing both headers from `_linux_chrome_headers()` was tested and **degraded** the DDG success rate from the post-fix ~80% baseline. The committed code (256c6ae) keeps them. Likely mechanism: the warmup `GET https://lite.duckduckgo.com/lite/` is a top-level navigation — there a real Chrome would emit UIR + sec-fetch-user, so their absence in the warmup phase becomes a *worse* coherence violation than their unwanted presence on the subsequent XHR POST. Conclusion: in this script's two-request pattern (nav warmup → XHR POST), the navigation-mode session-level dict is the right default and the per-request XHR override on the POST is the right shape.
 
 
 ---
