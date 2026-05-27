@@ -39,6 +39,12 @@ PARAM_ALIASES = {
     "max": "max_results",
     "count": "max_results",
     "max_refs": "max_references",
+    "root": "project_root",
+    "project": "project_root",
+    "path_root": "project_root",
+    "workspace": "project_root",
+    "workspace_root": "project_root",
+    "cwd": "project_root",
 }
 
 
@@ -707,7 +713,20 @@ async def handle_init(args: dict) -> Any:
     config_path = args.get("config_path")
 
     if _client is not None and _client.process is not None:
-        return {"status": "already initialized", "project_root": _client.project_root}
+        requested = str(pathlib.Path(project_root).resolve())
+        active = _client.project_root
+        if requested != active:
+            return {
+                "status": "already initialized",
+                "warning": (
+                    f"lua-language-server is already running on a different project_root. "
+                    f"Requested: {requested}, active: {active}. "
+                    f"The MCP server must be restarted to switch projects."
+                ),
+                "project_root": active,
+                "requested_project_root": requested,
+            }
+        return {"status": "already initialized", "project_root": active}
 
     _client = LuaLsClient()
     try:
