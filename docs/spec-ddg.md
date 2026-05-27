@@ -1,10 +1,19 @@
-# DuckDuckGo Bot Detection — Technical Analysis & Bypass Research
-
-**Date**: 2026-05-23
-**Status**: Active investigation
-**Script**: `Scripts/search_duckduckgo.py`
-
 ---
+name: spec-ddg
+type: concept
+status: current
+title: DuckDuckGo Bot Detection Research
+description: Why DDG blocks Python HTTP clients, and the DDG-first/Bing-fallback strategy used by the search script.
+sources:
+  - Scripts/search_duckduckgo.py
+verified:
+  commit: 51dd5f3
+  date: 2026-05-27
+links:
+  - scripts
+---
+
+# DuckDuckGo Bot Detection — Technical Analysis & Bypass Research
 
 ## Executive Summary
 
