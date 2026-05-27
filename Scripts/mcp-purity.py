@@ -56,12 +56,16 @@ def safe_path(project_root: str, relative_path: str, strict: bool = False) -> st
 # Parameter aliases — models often use short/alternative names
 # ---------------------------------------------------------------------------
 
+# Global aliases — applied regardless of which function is being called.
+# Only put aliases here when the canonical target is unambiguous across all
+# handlers. Context-dependent aliases (e.g. new_content meaning either
+# `content` or `repl` depending on the function) belong in
+# PARAM_ALIASES_BY_FUNC below.
 PARAM_ALIASES = {
     "path": "relative_path",
     "file_path": "relative_path",
     "root": "relative_path",
     "pattern": "substring_pattern",
-    "new_content": "content",
     "line_start": "start_line",
     "line_end": "end_line",
     # replace_content aliases
@@ -84,12 +88,52 @@ PARAM_ALIASES = {
     "end": "end_line",
 }
 
+# Function-specific aliases — applied BEFORE the global PARAM_ALIASES.
+# Use this when the same caller-supplied key needs to map to different
+# canonical parameter names depending on the handler. Keys here override
+# anything in PARAM_ALIASES for the listed function.
+PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
+    "replace_content": {
+        "old_content": "needle",
+        "new_content": "repl",
+    },
+    "create_text_file": {
+        "new_content": "content",
+    },
+    "replace_lines": {
+        "new_content": "content",
+    },
+    "insert_at_line": {
+        "new_content": "content",
+    },
+}
 
-def _resolve_aliases(params: dict) -> dict:
-    """Return a new dict with aliased parameter names resolved to canonical names."""
-    resolved = {}
+# Function-name aliases — handler registry exposes several aliases (ls, glob,
+# grep, search) for the canonical handler names. Resolve to the canonical
+# name before looking up PARAM_ALIASES_BY_FUNC / HANDLER_ACCEPTED_PARAMS.
+FUNCTION_ALIASES = {
+    "ls": "list_dir",
+    "glob": "find_file",
+    "grep": "search_for_pattern",
+    "search": "search_for_pattern",
+}
+
+
+def _canonical_function(function: str) -> str:
+    return FUNCTION_ALIASES.get(function, function)
+
+
+def _resolve_aliases(params: dict, function: Optional[str] = None) -> dict:
+    """Return a new dict with aliased parameter names resolved to canonical names.
+
+    Function-specific aliases (PARAM_ALIASES_BY_FUNC) take precedence over the
+    global PARAM_ALIASES. ``function`` should be the canonical handler name
+    (use ``_canonical_function`` if the caller may pass an alias).
+    """
+    func_aliases = PARAM_ALIASES_BY_FUNC.get(function or "", {})
+    resolved: dict = {}
     for key, value in params.items():
-        canonical = PARAM_ALIASES.get(key, key)
+        canonical = func_aliases.get(key) or PARAM_ALIASES.get(key, key)
         if canonical not in resolved:
             resolved[canonical] = value
     return resolved
@@ -707,6 +751,49 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "search": handle_search_for_pattern,
 }
 
+# Per-handler accepted (canonical) parameter names. Used only to augment
+# error messages with an "Unknown params: ..." hint when a handler raises.
+# Keys here are POST-alias canonical names — by the time this set is
+# consulted, _resolve_aliases has already mapped caller-supplied aliases
+# onto these canonical names.
+HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
+    "read_file": {
+        "relative_path", "start_line", "end_line", "max_answer_chars",
+    },
+    "create_text_file": {
+        "relative_path", "content",
+    },
+    "list_dir": {
+        "relative_path", "recursive", "skip_ignored_files",
+        "long", "show_hidden", "all", "hidden",
+        "paths_include_glob", "filter", "grep", "grep_pattern",
+        "head_limit", "offset", "max_answer_chars",
+    },
+    "find_file": {
+        "file_mask", "pattern", "substring_pattern", "relative_path",
+        "head_limit", "offset",
+    },
+    "replace_content": {
+        "relative_path", "needle", "repl", "mode",
+        "allow_multiple_occurrences",
+    },
+    "delete_lines": {
+        "relative_path", "start_line", "end_line", "line",
+    },
+    "replace_lines": {
+        "relative_path", "start_line", "end_line", "line", "content",
+    },
+    "insert_at_line": {
+        "relative_path", "line", "content",
+    },
+    "search_for_pattern": {
+        "substring_pattern", "context_lines_before", "context_lines_after",
+        "paths_include_glob", "paths_exclude_glob", "relative_path",
+        "max_answer_chars", "head_limit", "offset", "output_mode",
+        "max_file_size", "skip_ignored_files",
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Dispatcher
@@ -718,7 +805,9 @@ def handle_purity_call(arguments: dict, project_root: str, strict: bool = False)
     Accepts both long and short keys: function/f, params/p.
     """
     function = (arguments.get("function") or arguments.get("f") or "").strip()
-    params = _resolve_aliases(arguments.get("params") or arguments.get("p") or {})
+    canonical_func = _canonical_function(function)
+    raw_params = arguments.get("params") or arguments.get("p") or {}
+    params = _resolve_aliases(raw_params, canonical_func)
 
     if not function:
         func_list = "\n".join(f"  {name}" for name in sorted(HANDLERS.keys()))
@@ -732,7 +821,16 @@ def handle_purity_call(arguments: dict, project_root: str, strict: bool = False)
     try:
         return handler(params, project_root, strict)
     except (ValueError, FileNotFoundError, OSError) as exc:
-        return {"error": str(exc)}
+        err = str(exc)
+        accepted = HANDLER_ACCEPTED_PARAMS.get(canonical_func)
+        if accepted:
+            unknown = sorted(set(params.keys()) - accepted)
+            if unknown:
+                err += (
+                    f" | Unknown params for '{canonical_func}': {', '.join(unknown)}."
+                    f" Accepted: {', '.join(sorted(accepted))}."
+                )
+        return {"error": err}
 
 
 # ---------------------------------------------------------------------------
