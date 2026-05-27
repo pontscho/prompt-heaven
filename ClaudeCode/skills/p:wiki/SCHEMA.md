@@ -190,6 +190,19 @@ MUST keep frontmatter within this subset:
 3. Generate `overview.md` from the repo's top-level structure.
 4. Run `scripts/reindex.py`.
 
+### Adopt (onboard an existing docs tree)
+For a repo that already has hand-written docs. Adopt **preserves the prose** and
+backfills the contract; it does not rewrite content.
+1. `scripts/reindex.py --check` -> the `malformed` list is the worklist.
+2. Per doc, without touching its body: classify into a page type, infer
+   `sources` anchors (locate the described code via the language MCP), add
+   frontmatter with `verified.commit: <HEAD>` and `status: draft`.
+3. Verify pass: check each adopted page's claims against the code. Only on
+   success flip `draft -> current`; a hand-written doc may already be stale, so
+   `verified.commit = HEAD` is an *assertion* until verified.
+4. Propose splits for docs spanning multiple types; never auto-split.
+5. Reindex and re-check.
+
 ## 7. Verification routing (MANDATORY)
 
 Anchor resolution and code reading use the MCP servers, never grep / find / sed:

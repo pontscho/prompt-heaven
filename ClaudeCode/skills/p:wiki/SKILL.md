@@ -1,6 +1,6 @@
 ---
 name: p:wiki
-description: Build and maintain a project's documentation wiki under docs/ as a persistent, compounding, code-verified knowledge base (Karpathy LLM-wiki pattern). Use to keep docs in sync with code, audit stale/broken docs, answer questions from docs, or bootstrap docs for a repo. Trigger: /p:wiki, /p:wiki ingest, /p:wiki lint, /p:wiki query, /p:wiki init, "update the docs", "is the documentation stale", "document this subsystem", "dokumentacio frissites".
+description: Build and maintain a project's documentation wiki under docs/ as a persistent, compounding, code-verified knowledge base (Karpathy LLM-wiki pattern). Use to keep docs in sync with code, audit stale/broken docs, answer questions from docs, or bootstrap docs for a repo. Trigger: /p:wiki, /p:wiki ingest, /p:wiki lint, /p:wiki query, /p:wiki init, /p:wiki adopt, "update the docs", "is the documentation stale", "document this subsystem", "onboard existing docs into the wiki", "dokumentacio frissites", "meglevo doksik beszervezese".
 ---
 
 # Project Wiki Engine
@@ -29,8 +29,8 @@ it with its own `docs/SCHEMA.md`; if that exists, it wins.
 
 ## Operations
 
-Dispatch on the argument: `ingest`, `lint`, `query`, `init`. With no argument,
-ask which operation, or infer from the request.
+Dispatch on the argument: `ingest`, `lint`, `query`, `init`, `adopt`. With no
+argument, ask which operation, or infer from the request.
 
 ### `/p:wiki ingest [<base-ref>]`
 Code changed -> update affected pages.
@@ -71,6 +71,35 @@ Bootstrap a repo.
 3. Draft `overview.md` from the repo's top-level structure (use the MCP servers
    to survey it — consider delegating the survey to `p:minion-explorer`).
 4. Run `python scripts/reindex.py --root docs`.
+
+### `/p:wiki adopt [--root docs]`
+Onboard a repo that *already* has hand-written docs into the wiki. Unlike
+`ingest`, adopt **preserves the existing prose** — it backfills the frontmatter
+contract and infers anchors; it does not rewrite the doc.
+
+1. Point `--root` at the existing docs directory.
+2. `python scripts/reindex.py --root <dir> --check` -> the `malformed` list is
+   your worklist: every doc lacking frontmatter needs adopting.
+3. For each doc, **without changing its body**:
+   a. Classify it into a page type (SCHEMA §2).
+   b. Infer `sources` anchors: read the doc and locate the code it describes via
+      clangd / luals / purity. Delegate the code-location to `p:minion-explorer`
+      for anything non-trivial. Mark anchors you are unsure about.
+   c. Add frontmatter with `verified.commit: <HEAD>` and **`status: draft`**
+      (NOT `current`). Add `[[links]]` to connect related pages.
+4. **Verify pass (this is what earns `current`).** For each adopted page, check
+   its claims against the code with the language MCP. `verified.commit = HEAD`
+   is only an *assertion* until verified — a hand-written doc may already be
+   stale. If the claims hold, flip `status: draft -> current`; otherwise leave
+   it `draft` and report the discrepancies. Do not silently "fix" the prose.
+5. A monolithic doc that spans multiple types -> **propose** a split; do not
+   auto-split.
+6. If there is no `overview.md`, draft one (as in `init`).
+7. Run `python scripts/reindex.py --root <dir>` and `freshness.py` to confirm a
+   clean structure.
+
+For a repo with many docs, adopt in batches and let the human review the `draft`
+pages before promoting them.
 
 ## Scripts
 
