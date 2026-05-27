@@ -54,11 +54,11 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 
 | Domain | Tool |
 |---|---|
-| C / C++ / Objective-C symbol analysis (buffer overflows, format strings, UAF, integer overflow) | `mcp__mcp-clangd__clangd_call` (symbol_context, find_references, hover, diagnostics, document_outline) |
-| Lua symbol analysis (sandbox escape, FFI misuse, metatable poisoning) | `mcp__mcp-luals__luals_call` (same set, type-aware) |
-| Secrets scan, vulnerability pattern grep, file discovery, non-code file reads (CMakeLists, package.json, requirements.txt, .env) | `mcp__mcp-purity__purity_call` (find_file, search_for_pattern, read_file, list_dir) |
-| Git operations (branch diff, log, status, show, blame) | `mcp__mcp-git__git_call` — **never** `Bash("git ...")` for read-only ops |
-| Build & dependency manifests | `mcp__mcp-forge__forge_call` (function "describe" / "list") when `project-forge.yaml` exists |
+| C / C++ / Objective-C symbol analysis (buffer overflows, format strings, UAF, integer overflow) | `clangd_call` (clangd MCP) — `symbol_context`, `find_references`, `hover`, `diagnostics`, `document_outline` |
+| Lua symbol analysis (sandbox escape, FFI misuse, metatable poisoning) | `luals_call` (luals MCP) — same set, type-aware |
+| Secrets scan, vulnerability pattern grep, file discovery, non-code file reads (CMakeLists, package.json, requirements.txt, .env) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
+| Git operations (branch diff, log, status, show, blame) | `git_call` (git MCP) — **never** `Bash("git ...")` for read-only ops |
+| Build & dependency manifests | `forge_call` (forge MCP) — function `"describe"` / `"list"` when `project-forge.yaml` exists |
 | External CVE / advisory lookups for flagged dependencies | `WebFetch` — only when a specific dep+version warrants verification, not by default |
 
 **Batching is mandatory.** Independent secrets-scan patterns, file outlines, and symbol contexts go in a single parallel message.

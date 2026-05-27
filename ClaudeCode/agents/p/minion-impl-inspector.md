@@ -52,11 +52,11 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 
 | Domain | Tool |
 |---|---|
-| C / C++ / Objective-C symbol verification | `mcp__mcp-clangd__clangd_call` (symbol_context, find_definition, find_references, document_outline, hover, diagnostics) |
-| Lua symbol verification | `mcp__mcp-luals__luals_call` (same set, type-aware) |
-| File existence, content search, non-code file reads | `mcp__mcp-purity__purity_call` (find_file, search_for_pattern, read_file, list_dir) |
-| Git operations (diff / log / status / show / blame / branch list / merge-base) | `mcp__mcp-git__git_call` — **never** `Bash("git ...")` for read-only ops. The change-detection step (`git diff HEAD~N --name-only`, `git status`, `git log --oneline`) goes through `git_call`. |
-| Build system / build target validation | `mcp__mcp-forge__forge_call` (function "list" / "describe" / "validate") when `project-forge.yaml` exists |
+| C / C++ / Objective-C symbol verification | `clangd_call` (clangd MCP) — `symbol_context`, `find_definition`, `find_references`, `document_outline`, `hover`, `diagnostics` |
+| Lua symbol verification | `luals_call` (luals MCP) — same set, type-aware |
+| File existence, content search, non-code file reads | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
+| Git operations (diff / log / status / show / blame / branch list / merge-base) | `git_call` (git MCP) — **never** `Bash("git ...")` for read-only ops. The change-detection step (`git diff HEAD~N --name-only`, `git status`, `git log --oneline`) goes through `git_call`. |
+| Build system / build target validation | `forge_call` (forge MCP) — function `"list"` / `"describe"` / `"validate"` when `project-forge.yaml` exists |
 
 **Batching is mandatory.** Independent file outlines, diagnostics, and symbol contexts go in a single parallel message.
 

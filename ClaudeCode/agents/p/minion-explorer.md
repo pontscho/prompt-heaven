@@ -27,10 +27,10 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for symbol-aware
 
 | Domain | Tool |
 |---|---|
-| C / C++ / Objective-C symbols (`.c .cpp .cc .cxx .h .hpp .hh .hxx .m .mm`) | `mcp__mcp-clangd__clangd_call` — ALWAYS for symbol queries |
-| Lua symbols (`.lua`) | `mcp__mcp-luals__luals_call` — ALWAYS for symbol queries |
-| File discovery, generic content search, reading non-code files (yaml/json/md/CMakeLists) | `mcp__mcp-purity__purity_call` (find_file, search_for_pattern, read_file, list_dir) |
-| Build target inspection (read-only) | `mcp__mcp-forge__forge_call` (function "list" / "describe") when `project-forge.yaml` exists |
+| C / C++ / Objective-C symbols (`.c .cpp .cc .cxx .h .hpp .hh .hxx .m .mm`) | `clangd_call` (clangd MCP) — ALWAYS for symbol queries |
+| Lua symbols (`.lua`) | `luals_call` (luals MCP) — ALWAYS for symbol queries |
+| File discovery, generic content search, reading non-code files (yaml/json/md/CMakeLists) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
+| Build target inspection (read-only) | `forge_call` (forge MCP) — function `"list"` / `"describe"` when `project-forge.yaml` exists |
 
 **Tool priority for symbol queries** (already established in Phase 2 below — restating because it's the law):
 1. FIRST → language LSP MCP (clangd / luals): semantic, compiler-accurate
@@ -62,8 +62,8 @@ You MUST:
 
 **CRITICAL: Always send independent tool calls in parallel in a single message. NEVER send one-by-one what could be batched together.**
 
-**If the task involves C/C++ source files (`.c`, `.cpp`, `.h`, `.hpp`):** Use mcp__mcp-clangd__clangd_call instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
-**If the task involves Lua source files (`.lua`):** Use mcp__mcp-luals__luals_call instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
+**If the task involves C/C++ source files (`.c`, `.cpp`, `.h`, `.hpp`):** Use `clangd_call` (clangd MCP) instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
+**If the task involves Lua source files (`.lua`):** Use `luals_call` (luals MCP) instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
 
 **clangd functions (C/C++):**
 ```

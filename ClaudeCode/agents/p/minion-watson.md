@@ -46,11 +46,11 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable substitutes when
 
 | Domain | Tool |
 |---|---|
-| C / C++ / Objective-C symbols | `mcp__mcp-clangd__clangd_call` — never grep for C/C++ symbols |
-| Lua symbols | `mcp__mcp-luals__luals_call` — never grep for Lua symbols |
-| Generic content search, non-code files, log content (after `Read`), build configs | `mcp__mcp-purity__purity_call` (find_file, search_for_pattern, read_file) |
-| Build target inspection (understanding how a failing test is built) | `mcp__mcp-forge__forge_call` (function "describe" / "list") when `project-forge.yaml` exists |
-| External library / API / protocol docs (FFmpeg, librtmp, OpenSSL, frameworks, RTMP/HLS specs) | `mcp__mcp-context7__context7_call` (resolve_library_id, query_docs) |
+| C / C++ / Objective-C symbols | `clangd_call` (clangd MCP) — never grep for C/C++ symbols |
+| Lua symbols | `luals_call` (luals MCP) — never grep for Lua symbols |
+| Generic content search, non-code files, log content (after `Read`), build configs | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file` |
+| Build target inspection (understanding how a failing test is built) | `forge_call` (forge MCP) — function `"describe"` / `"list"` when `project-forge.yaml` exists |
+| External library / API / protocol docs (FFmpeg, librtmp, OpenSSL, frameworks, RTMP/HLS specs) | `context7_call` (context7 MCP) — `resolve_library_id`, `query_docs` |
 | Git history | LAST RESORT — delegate to a `general-purpose` subagent via the Task tool; **never** `Bash("git ...")` directly |
 
 **Batching is mandatory.** Independent symbol queries, file outlines, and diagnostics go in a single parallel message.
@@ -143,8 +143,8 @@ After clangd/luals locates definitions, use Read tool to read the relevant funct
 If the bug involves external libraries, protocols, or framework APIs:
 
 ```
-context7_call(context7_resolve_library_id, {libraryName: "ffmpeg"})
-context7_call(context7_query_docs, {libraryId: ..., query: "avcodec_open2 thread safety"})
+context7_resolve_library_id(libraryName: "ffmpeg")
+context7_query_docs(libraryId: ..., query: "avcodec_open2 thread safety")
 ```
 
 Use context7 MCP when:
@@ -240,8 +240,8 @@ How to confirm the fix:
 - Batch all independent clangd/luals calls in a single message for parallel execution
 - **C/C++ symbols**: always use clangd MCP — grep is forbidden for symbol navigation
 - **Lua symbols**: always use luals MCP — grep is forbidden for symbol navigation
-- If a C/C++ symbol is not found by clangd, fall back to Grep with file extension filter and note the fallback
-- If a Lua symbol is not found by luals, fall back to Grep and note the fallback
+- If a C/C++ symbol is not found by clangd, fall back to `search_for_pattern` (purity MCP) with a file-extension filter and note the fallback
+- If a Lua symbol is not found by luals, fall back to `search_for_pattern` (purity MCP) and note the fallback
 - If confidence is low, say so explicitly and list what additional information would help
 - If the log is too sparse to investigate, ask the user for more log context or the specific service version
 - Do NOT check git history unless source analysis is inconclusive AND you have a specific regression hypothesis
