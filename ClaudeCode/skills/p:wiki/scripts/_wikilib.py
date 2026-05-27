@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 # Files and directories that are not wiki pages.
 SKIP_FILES = {"INDEX.md", "SCHEMA.md"}
-SKIP_DIRS = {"sources"}
+SKIP_DIRS = {"sources", "plans"}
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
