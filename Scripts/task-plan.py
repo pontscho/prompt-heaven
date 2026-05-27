@@ -135,13 +135,16 @@ def parse_requirements_yaml(yaml_file: str) -> Dict[str, Task]:
 		if size_match:
 			task.size = size_match.group(1).upper()
 
-		# Extract dependencies
-		deps_match = re.search(r'dependencies:\s*\n((?:\s+-\s+\S+\n?)+)', block)
-		if deps_match:
-			deps_text = deps_match.group(1)
-			task.dependencies = re.findall(r'-\s+(\S+)', deps_text)
-		elif 'dependencies: []' in block:
-			task.dependencies = []
+		# Extract dependencies — supports inline `[a, b]` and multi-line `- a\n- b` formats
+		inline_deps_match = re.search(r'dependencies:\s*\[([^\]]*)\]', block)
+		if inline_deps_match:
+			deps_str = inline_deps_match.group(1).strip()
+			task.dependencies = [d.strip() for d in deps_str.split(',') if d.strip()]
+		else:
+			multiline_deps_match = re.search(r'dependencies:\s*\n((?:\s+-\s+\S+\n?)+)', block)
+			if multiline_deps_match:
+				deps_text = multiline_deps_match.group(1)
+				task.dependencies = re.findall(r'-\s+(\S+)', deps_text)
 
 		# Extract code_references files
 		refs_match = re.search(r'code_references:\s*\n((?:.*\n)*?)(?=\s+(?:api_references|test_requirements|dependencies):|\s+-\s+task_id:|\Z)', block)
