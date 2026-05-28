@@ -392,11 +392,8 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     elif not stderr and result.returncode == 0:
         parts.append("_(no output)_")
     if truncated_stdout:
-        parts.append("")
         parts.append(f"_stdout truncated at {max_chars} chars_")
     if stderr.strip():
-        parts.append("")
-        parts.append("**stderr:**")
         parts.append(_md_fence(stderr.strip()))
 
     md = "\n".join(parts)
