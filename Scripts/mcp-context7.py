@@ -33,6 +33,31 @@ def debug_log(message: str) -> None:
         print(f"[DEBUG] {message}", file=sys.stderr, flush=True)
 
 
+def _ensure_dict(value: Any, name: str = "params") -> dict:
+    """Coerce *value* to a dict.
+
+    Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
+    Raises ValueError on a non-JSON string, JSON that is not an object,
+    or any other type.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"'{name}' was a string but not valid JSON: {exc}. "
+                f"Pass '{name}' as an object, not a JSON-encoded string."
+            )
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"'{name}' must be an object (dict) or a JSON-encoded object string; "
+            f"got {type(value).__name__}."
+        )
+    return value
+
+
 # ============================================================
 # Configuration
 # ============================================================
@@ -202,7 +227,11 @@ async def handle_context7_query_docs(args: dict) -> str:
 async def handle_context7_call(args: dict) -> str:
     """Dispatcher: call any Context7 tool by name."""
     function = args.get("function", "")
-    params = args.get("params") or {}
+    raw_params = args.get("params") or {}
+    try:
+        params = _ensure_dict(raw_params)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     if not function:
         has_key = API_KEY is not None

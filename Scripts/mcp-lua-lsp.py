@@ -48,7 +48,24 @@ PARAM_ALIASES = {
 }
 
 
-def _resolve_aliases(params: dict) -> dict:
+def _resolve_aliases(params: Any) -> dict:
+    """Resolve parameter aliases. Accepts dict or JSON-encoded object string.
+    Raises ValueError for non-parseable strings or wrong types."""
+    if not params:
+        return {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"'params' was a string but not valid JSON: {exc}. "
+                "Pass params as an object, not a JSON-encoded string."
+            )
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"'params' must be an object (dict) or a JSON-encoded object string; "
+            f"got {type(params).__name__}."
+        )
     resolved = {}
     for key, value in params.items():
         canonical = PARAM_ALIASES.get(key, key)
@@ -1314,8 +1331,13 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
 
     try:
         result = await handler(_resolve_aliases(params))
+    except ValueError as e:
+        return _serialize(function, {"error": str(e)})
     except RuntimeError as e:
         result = {"error": str(e)}
+    except Exception as e:
+        debug_log(f"Unhandled exception in handler '{function}': {e}")
+        result = {"error": f"Internal error in '{function}': {type(e).__name__}: {e}"}
     return _serialize(function, result)
 
 

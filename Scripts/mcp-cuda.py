@@ -58,7 +58,22 @@ PARAM_ALIASES = {
 }
 
 
-def _resolve_aliases(params: dict) -> dict:
+def _resolve_aliases(params: Any) -> dict:
+    if params is None:
+        return {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"'params' was a string but not valid JSON: {exc}. "
+                "Pass params as an object, not a JSON-encoded string."
+            )
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"'params' must be an object (dict) or a JSON-encoded object string; "
+            f"got {type(params).__name__}."
+        )
     resolved = {}
     for key, value in params.items():
         canonical = PARAM_ALIASES.get(key, key)
@@ -1749,9 +1764,11 @@ ALL_HANDLERS = {
 
 async def handle_cuda_call(args: dict, server: Optional["McpServer"] = None) -> str:
     function = args.get("function", "")
-    params = args.get("params") or {}
-    if isinstance(params, str):
-        params = json.loads(params)
+    raw_params = args.get("params") or {}
+    try:
+        params = _resolve_aliases(raw_params)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
     def _serialize(fn: str, data: Any) -> str:
         if MARKDOWN_MODE:
@@ -1785,7 +1802,7 @@ async def handle_cuda_call(args: dict, server: Optional["McpServer"] = None) -> 
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
         return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
 
-    result = await handler(_resolve_aliases(params))
+    result = await handler(params)
     return _serialize(function, result)
 
 
@@ -2101,6 +2118,11 @@ class McpServer:
         tool_args = params.get("arguments") or {}
 
         if name == "cuda_call":
+            if not isinstance(tool_args, dict):
+                return self._tool_error(
+                    msg_id,
+                    f"'arguments' must be an object; got {type(tool_args).__name__}."
+                )
             try:
                 result = await handle_cuda_call(tool_args, server=self)
                 return self._ok(msg_id, {"content": [{"type": "text", "text": result}]})

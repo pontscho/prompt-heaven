@@ -1360,19 +1360,28 @@ def handle_clean(cfg: Dict[str, Any], params: dict, project_root: str) -> dict:
 # ===========================================================================
 
 def _ensure_dict(value: Any, name: str = "params") -> dict:
+	"""Coerce *value* to a dict.
+
+	Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
+	Raises ValueError on a non-JSON string, JSON that is not an object,
+	or any other type.
+	"""
 	if value is None:
 		return {}
 	if isinstance(value, str):
 		try:
-			parsed = json.loads(value)
+			value = json.loads(value)
 		except json.JSONDecodeError as exc:
-			raise ValueError(f"{name} is not valid JSON: {exc}")
-		if not isinstance(parsed, dict):
-			raise ValueError(f"{name} must be a JSON object, got {type(parsed).__name__}")
-		return parsed
-	if isinstance(value, dict):
-		return value
-	raise ValueError(f"{name} must be a dict or JSON string, got {type(value).__name__}")
+			raise ValueError(
+				f"'{name}' was a string but not valid JSON: {exc}. "
+				f"Pass '{name}' as an object, not a JSON-encoded string."
+			)
+	if not isinstance(value, dict):
+		raise ValueError(
+			f"'{name}' must be an object (dict) or a JSON-encoded object string; "
+			f"got {type(value).__name__}."
+		)
+	return value
 
 
 def handle_forge_call(arguments: dict,
@@ -1433,6 +1442,9 @@ def handle_forge_call(arguments: dict,
 			return handle_clean(cfg, params, project_root)
 	except (ValueError, OSError) as exc:
 		return {"error": str(exc)}
+	except Exception as exc:
+		log.exception("Unhandled exception in handler '%s'", function)
+		return {"error": f"Internal error in '{function}': {type(exc).__name__}: {exc}"}
 
 	return {"error": (
 		f"unknown function: {function}. "
@@ -1596,7 +1608,14 @@ class McpServer:
 					log.warning("Invalid JSON: %s", exc)
 					continue
 				log.debug("<- %s", json.dumps(msg)[:200])
-				response = self._handle_message(msg)
+				try:
+					response = self._handle_message(msg)
+				except Exception as exc:
+					log.exception("Unhandled exception while handling message")
+					response = self._error(
+						msg.get("id"), -32603,
+						f"Internal error: {type(exc).__name__}: {exc}"
+					)
 				if response is not None:
 					out = json.dumps(response)
 					log.debug("-> %s", out[:200])
@@ -1631,7 +1650,17 @@ class McpServer:
 		arguments = params.get("arguments") or {}
 		if tool_name != "forge_call":
 			return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
-		result = handle_forge_call(arguments, self.project_root, self.cfg_path)
+		if not isinstance(arguments, dict):
+			return self._result(msg_id, {
+				"content": [{"type": "text", "text":
+					f"'arguments' must be an object; got {type(arguments).__name__}."}],
+				"isError": True,
+			})
+		try:
+			result = handle_forge_call(arguments, self.project_root, self.cfg_path)
+		except Exception as exc:
+			log.exception("Unhandled exception in handle_forge_call")
+			result = {"error": f"Internal server error: {type(exc).__name__}: {exc}"}
 		is_error = "error" in result
 		text = result.get("__raw_text__") or result.get("error", "")
 		return self._result(msg_id, {

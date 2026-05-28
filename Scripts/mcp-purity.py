@@ -123,13 +123,32 @@ def _canonical_function(function: str) -> str:
     return FUNCTION_ALIASES.get(function, function)
 
 
-def _resolve_aliases(params: dict, function: Optional[str] = None) -> dict:
+def _resolve_aliases(params: Any, function: Optional[str] = None) -> dict:
     """Return a new dict with aliased parameter names resolved to canonical names.
 
     Function-specific aliases (PARAM_ALIASES_BY_FUNC) take precedence over the
     global PARAM_ALIASES. ``function`` should be the canonical handler name
     (use ``_canonical_function`` if the caller may pass an alias).
+
+    Accepts a dict natively. If a JSON-encoded string is passed (clients
+    sometimes serialize ``params`` as a string), it is decoded first. Anything
+    else, or an unparseable string, raises ``ValueError`` so the dispatch
+    layer can return a clean error instead of crashing the server.
     """
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"'params' was a string but not valid JSON: {exc}. "
+                "Pass params as an object, not a JSON-encoded string."
+            )
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"'params' must be an object (dict) or a JSON-encoded object string; "
+            f"got {type(params).__name__}."
+        )
+
     func_aliases = PARAM_ALIASES_BY_FUNC.get(function or "", {})
     resolved: dict = {}
     for key, value in params.items():
@@ -807,7 +826,11 @@ def handle_purity_call(arguments: dict, project_root: str, strict: bool = False)
     function = (arguments.get("function") or arguments.get("f") or "").strip()
     canonical_func = _canonical_function(function)
     raw_params = arguments.get("params") or arguments.get("p") or {}
-    params = _resolve_aliases(raw_params, canonical_func)
+
+    try:
+        params = _resolve_aliases(raw_params, canonical_func)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     if not function:
         func_list = "\n".join(f"  {name}" for name in sorted(HANDLERS.keys()))
@@ -831,6 +854,9 @@ def handle_purity_call(arguments: dict, project_root: str, strict: bool = False)
                     f" Accepted: {', '.join(sorted(accepted))}."
                 )
         return {"error": err}
+    except Exception as exc:
+        log.exception("Unhandled exception in handler '%s'", canonical_func)
+        return {"error": f"Internal error in '{canonical_func}': {type(exc).__name__}: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -995,7 +1021,19 @@ class McpServer:
         if tool_name != "purity_call":
             return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
 
-        result = handle_purity_call(arguments, self.project_root, self.strict)
+        if not isinstance(arguments, dict):
+            return self._result(msg_id, {
+                "content": [{"type": "text", "text":
+                    f"'arguments' must be an object; got {type(arguments).__name__}."}],
+                "isError": True,
+            })
+
+        try:
+            result = handle_purity_call(arguments, self.project_root, self.strict)
+        except Exception as exc:
+            log.exception("Unhandled exception in handle_purity_call")
+            result = {"error": f"Internal server error: {type(exc).__name__}: {exc}"}
+
         is_error = "error" in result
         text = result.get("__raw_text__") or result.get("error", "")
 

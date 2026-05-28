@@ -235,7 +235,22 @@ PARAM_ALIASES: Dict[str, str] = {
 }
 
 
-def _resolve_aliases(params: dict) -> dict:
+def _resolve_aliases(params: Any) -> dict:
+    if params is None:
+        return {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"'params' was a string but not valid JSON: {exc}. "
+                "Pass params as an object, not a JSON-encoded string."
+            )
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"'params' must be an object (dict) or a JSON-encoded object string; "
+            f"got {type(params).__name__}."
+        )
     resolved = {}
     for key, value in params.items():
         canonical = PARAM_ALIASES.get(key, key)
@@ -866,7 +881,11 @@ _PRIMARY_FUNCTIONS = {
 # ---------------------------------------------------------------------------
 def handle_tshark_call(arguments: dict, project_root: str) -> dict:
     function = (arguments.get("function") or arguments.get("f") or "").strip()
-    params = _resolve_aliases(arguments.get("params") or arguments.get("p") or {})
+    raw_params = arguments.get("params") or arguments.get("p") or {}
+    try:
+        params = _resolve_aliases(raw_params)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     if not function:
         func_list = "\n".join(f"  {n}" for n in sorted(HANDLERS))
@@ -886,6 +905,9 @@ def handle_tshark_call(arguments: dict, project_root: str) -> dict:
         return handler(params, project_root)
     except (ValueError, FileNotFoundError, OSError) as exc:
         return {"error": str(exc)}
+    except Exception as exc:
+        log.exception("Unhandled exception in handler '%s'", function)
+        return {"error": f"Internal error in '{function}': {type(exc).__name__}: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1023,17 @@ class McpServer:
         arguments = params.get("arguments") or {}
         if tool_name != "tshark_call":
             return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
-        result = handle_tshark_call(arguments, self.project_root)
+        if not isinstance(arguments, dict):
+            return self._result(msg_id, {
+                "content": [{"type": "text", "text":
+                    f"'arguments' must be an object; got {type(arguments).__name__}."}],
+                "isError": True,
+            })
+        try:
+            result = handle_tshark_call(arguments, self.project_root)
+        except Exception as exc:
+            log.exception("Unhandled exception in handle_tshark_call")
+            result = {"error": f"Internal server error: {type(exc).__name__}: {exc}"}
         is_error = "error" in result
         text = result.get("__raw_text__") or result.get("error", "")
         return self._result(msg_id, {

@@ -36,6 +36,31 @@ def debug_log(message: str) -> None:
         print(f"[DEBUG] {message}", file=sys.stderr, flush=True)
 
 
+def _ensure_dict(value: Any, name: str = "params") -> dict:
+    """Coerce *value* to a dict.
+
+    Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
+    Raises ValueError on a non-JSON string, JSON that is not an object,
+    or any other type.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"'{name}' was a string but not valid JSON: {exc}. "
+                f"Pass '{name}' as an object, not a JSON-encoded string."
+            )
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"'{name}' must be an object (dict) or a JSON-encoded object string; "
+            f"got {type(value).__name__}."
+        )
+    return value
+
+
 # ============================================================
 # Log helpers (FIX-4: bounded log growth)
 # ============================================================
@@ -1304,7 +1329,11 @@ async def handle_find_element(mgr: GdcManager, args: dict) -> str:
 async def handle_gdc_call(mgr: GdcManager, args: dict) -> str:
     """Dispatcher: call any GDC tool by name via the gdc-mcp skill."""
     function = args.get("function") or args.get("f") or ""
-    params = args.get("params") or args.get("p") or {}
+    raw_params = args.get("params") or args.get("p") or {}
+    try:
+        params = _ensure_dict(raw_params)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     if not function:
         return await handle_gdc_status(mgr, {})

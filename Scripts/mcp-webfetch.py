@@ -382,9 +382,38 @@ HANDLERS: Dict[str, Callable[[dict, str], dict]] = {
 _PRIMARY_FUNCTIONS = {"fetch"}
 
 
+def _ensure_dict(value: Any, name: str = "params") -> dict:
+	"""Coerce *value* to a dict.
+
+	Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
+	Raises ValueError on a non-JSON string, JSON that is not an object,
+	or any other type.
+	"""
+	if value is None:
+		return {}
+	if isinstance(value, str):
+		try:
+			value = json.loads(value)
+		except json.JSONDecodeError as exc:
+			raise ValueError(
+				f"'{name}' was a string but not valid JSON: {exc}. "
+				f"Pass '{name}' as an object, not a JSON-encoded string."
+			)
+	if not isinstance(value, dict):
+		raise ValueError(
+			f"'{name}' must be an object (dict) or a JSON-encoded object string; "
+			f"got {type(value).__name__}."
+		)
+	return value
+
+
 def handle_webfetch_call(arguments: dict, project_root: str) -> dict:
 	function = (arguments.get("function") or arguments.get("f") or "").strip()
-	params = arguments.get("params") or arguments.get("p") or {}
+	raw_params = arguments.get("params") or arguments.get("p") or {}
+	try:
+		params = _ensure_dict(raw_params)
+	except ValueError as exc:
+		return {"error": str(exc)}
 
 	if not function:
 		backend = "primp (Linux)" if platform.system() == "Linux" else "curl_cffi"
@@ -405,6 +434,9 @@ def handle_webfetch_call(arguments: dict, project_root: str) -> dict:
 		return handler(params, project_root)
 	except (ValueError, FileNotFoundError, OSError) as exc:
 		return {"error": str(exc)}
+	except Exception as exc:
+		log.exception("Unhandled exception in handler '%s'", function)
+		return {"error": f"Internal error in '{function}': {type(exc).__name__}: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +545,17 @@ class McpServer:
 		arguments = params.get("arguments") or {}
 		if tool_name != "webfetch_call":
 			return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
-		result = handle_webfetch_call(arguments, self.project_root)
+		if not isinstance(arguments, dict):
+			return self._result(msg_id, {
+				"content": [{"type": "text", "text":
+					f"'arguments' must be an object; got {type(arguments).__name__}."}],
+				"isError": True,
+			})
+		try:
+			result = handle_webfetch_call(arguments, self.project_root)
+		except Exception as exc:
+			log.exception("Unhandled exception in handle_webfetch_call")
+			result = {"error": f"Internal server error: {type(exc).__name__}: {exc}"}
 		is_error = "error" in result
 		text = result.get("__raw_text__") or result.get("error", "")
 		return self._result(msg_id, {
