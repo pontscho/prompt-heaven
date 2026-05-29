@@ -10,19 +10,29 @@ written under `docs/`. The rules below are NOT preferences. If you write a
 page, run an operation, or answer a query without satisfying them, you have
 violated this skill.
 
+- You MUST delegate the body of every operation (`ingest`, `lint`, `query`,
+  `init`, `adopt`) to the `p:minion-wiki-janitor` agent. Executing the steps
+  inline in the main context — opening pages, running scripts, verifying
+  anchors, rewriting prose — wastes the main context for work the minion was
+  built to do. The skill is the **contract**; the janitor is the **executor**.
+  See [Delegation](#delegation-mandatory) below.
 - You MUST read [SCHEMA.md](SCHEMA.md) (or `docs/SCHEMA.md` if present) BEFORE
-  any operation — not after, not "if relevant". First. The schema is law.
+  any operation — not after, not "if relevant". First. The schema is law. (The
+  janitor reads the schema too; you read it so you can validate its report.)
 - You MUST end every operation with the [Self-check](#self-check-must-run-before-reporting-any-operation-done)
-  at the bottom of this file. Skipping it is a violation.
+  at the bottom of this file. The janitor includes its own self-check in the
+  report; you verify it before declaring the operation done.
 - You MUST resolve every code anchor via the language MCP (clangd / cuda /
   luals / purity / git). Using grep / find / sed / cat / awk / head / tail to
-  locate or read code is a violation.
+  locate or read code is a violation. (Enforced inside the janitor — but the
+  same rule applies to any follow-up work you do in the main context.)
 - You MUST NOT rewrite, restyle, or "improve" existing prose during `adopt`.
   The body is sacred — frontmatter only.
 - You MUST NOT paste code blocks larger than a single signature. Anchor and
   link to the source; never inline a function body.
-- You MUST NOT auto-delete pages or silently fix discrepancies. Propose; the
-  human approves.
+- You MUST NOT auto-delete pages or silently fix discrepancies. The janitor
+  surfaces these as proposals; the human approves; you (main agent) execute
+  the approved deletion.
 
 No "consider", no "try to", no "should". MUST and NEVER are the only modal
 verbs that apply to this skill.
@@ -39,102 +49,143 @@ it with its own `docs/SCHEMA.md`; if that exists, it wins.
 
 ## Golden rules (violations are failures, not preferences)
 
-1. **READ [SCHEMA.md](SCHEMA.md) FIRST.** Every operation, every time. The
+1. **DELEGATE TO `p:minion-wiki-janitor`.** Every operation runs in the janitor's
+   sandbox, not the main context. The janitor reads pages, verifies anchors,
+   runs scripts, and applies non-destructive changes. The main context only
+   sees the result. Executing the work inline is a violation.
+2. **READ [SCHEMA.md](SCHEMA.md) FIRST.** Every operation, every time. The
    schema defines layout, page types, and the exact frontmatter subset the
-   scripts can parse. Obey it literally — deviation is a violation.
-2. **Scripts run first, you read second.** ALWAYS run `freshness.py` /
-   `reindex.py` to find *what* to look at before opening any page.
-   Hand-scanning the tree is a violation.
-3. **MCP routing is mandatory.** Resolve symbols and read code via clangd /
+   scripts can parse. Obey it literally — deviation is a violation. (The
+   janitor reads it too; you read it so you can sanity-check the report.)
+3. **Scripts run first, you read second.** ALWAYS run `freshness.py` /
+   `reindex.py` to find *what* to look at before opening any page. The janitor
+   enforces this — if its report skips them, reject the report.
+4. **MCP routing is mandatory.** Resolve symbols and read code via clangd /
    cuda / luals / purity / git MCP — NEVER grep / find / sed / cat / awk /
-   head / tail. See SCHEMA §7. No exceptions, no fallbacks.
-4. **NEVER auto-delete or silently rewrite.** Propose changes in prose; the
-   human approves. Touching a page without approval is a violation.
-5. **The code wins.** When code and a page disagree, the page is stale — full
-   stop. Do not "harmonize" the two; mark the page and propose a fix.
-6. **End every operation with the [Self-check](#self-check-must-run-before-reporting-any-operation-done).**
-   Skipping it is a violation.
+   head / tail. See SCHEMA §7. No exceptions, no fallbacks. Applies to the
+   janitor and to any follow-up work in the main context.
+5. **NEVER auto-delete or silently rewrite.** The janitor surfaces deletions
+   and other destructive changes as proposals; the human approves; you (main
+   agent) execute the approved deletion. Touching a page without approval is
+   a violation.
+6. **The code wins.** When code and a page disagree, the page is stale — full
+   stop. Do not "harmonize" the two; the janitor marks the page stale and
+   surfaces the conflict.
+7. **End every operation with the [Self-check](#self-check-must-run-before-reporting-any-operation-done).**
+   The janitor includes its own self-check in the report; verify it before
+   declaring done. Skipping is a violation.
+
+## Delegation (MANDATORY)
+
+Every operation delegates execution to **`p:minion-wiki-janitor`** via the Task
+tool. Pass:
+
+- `op` — one of `ingest`, `lint`, `query`, `init`, `adopt`.
+- Operation-specific params (see [Operations](#operations) below).
+- Optional: a one-line note about the context the human gave you (e.g. "after
+  feature/auth merge", "preparing release").
+
+The janitor returns a structured report with these sections:
+
+| Section | Your handling |
+|---|---|
+| **Summary** | Relay to the human as the headline. |
+| **Applied Changes** | Already applied by the janitor (frontmatter bumps, prose updates during ingest, INDEX regeneration, anchor re-verifications). Surface the list; no action needed. |
+| **Proposed Changes** | Each item is one of `[PROPOSE-DELETE]`, `[PROPOSE-NEW-PAGE]`, `[PROPOSE-SPLIT]`, `[PROPOSE-STATUS-DOWNGRADE]`, etc. The janitor did NOT apply these. Present them to the human, get approval, and execute approved deletions / page creations yourself via `purity_call`. |
+| **Findings** | For `lint` / `query`: severity-grouped issues (broken anchors, drift, contradictions). Relay to the human. |
+| **Self-check** | The janitor's own checklist. Verify every applicable item is ticked (or explicitly explained). If any `[ ]` or `[!]` remains and the report does not justify it, **reject the report and re-invoke the janitor with a follow-up**. |
+
+**Inline exception (very narrow):** for `/p:wiki query` with a question that is
+clearly answerable from a single already-read page in the current conversation,
+you MAY answer inline without delegating — but only if no anchor verification
+or write-back is required. When in doubt, delegate.
+
+The janitor is forbidden from deleting files. File deletion is YOUR job, only
+after explicit human approval, via `purity_call` (or `Bash("rm <path>")` if the
+human prefers — but only with approval).
 
 ## Operations
 
 Dispatch on the argument: `ingest`, `lint`, `query`, `init`, `adopt`. With no
 argument, ask which operation, or infer from the request.
 
+For each operation: (1) read SCHEMA.md, (2) invoke `p:minion-wiki-janitor` with
+the params below, (3) review the report and surface it to the human, (4)
+execute any approved destructive proposals yourself.
+
 ### `/p:wiki ingest [<base-ref>]`
 Code changed -> update affected pages.
-1. Get the changed files: `git diff --name-only <base-ref>..HEAD` (default base:
-   the merge-base with the main branch, or `HEAD~1` if unsure — ask if ambiguous).
-2. Map changed files -> affected pages via each page's frontmatter `sources`.
-   (`freshness.py` already computes this mapping — use its report.)
-3. For each affected page: rewrite the prose to match reality, re-verify inline
-   `path:symbol` anchors with the language MCP, then bump `verified.commit` and
-   `verified.date` and set `status: current`.
-4. Significant changed files mapping to **no** page -> propose new pages (list
-   them, do not create silently).
-5. Run `python scripts/reindex.py --root docs` to refresh `INDEX.md`.
+
+Delegate with `op=ingest`, `base=<base-ref>` (default: merge-base with main, or
+`HEAD~1` if unsure — ask if ambiguous).
+
+The janitor will: diff against base; map changed files to pages via
+frontmatter `sources`; for each affected page rewrite the prose, re-verify
+inline `path:symbol` anchors via MCP, bump `verified.commit` / `verified.date`,
+set `status: current`; reindex. Significant changed files mapping to NO page
+are surfaced as `[PROPOSE-NEW-PAGE]` items — your job to confirm with the
+human and create them.
 
 ### `/p:wiki lint`
 Audit without any code change.
-1. `python scripts/freshness.py --root docs` -> prose report: which pages are `stale` /
-   `unverified` / `orphaned-source`.
-2. `python scripts/reindex.py --root docs --check` -> orphans (no inbound link),
-   duplicate slugs, malformed frontmatter.
-3. **Only then** open the flagged pages. For each inline `path:symbol` anchor,
-   resolve it via the language MCP: missing -> `broken`; signature changed ->
-   `drifted`. Detect cross-page contradictions.
-4. Report findings grouped by severity. Propose fixes; do not apply destructive
-   ones without approval.
+
+Delegate with `op=lint`.
+
+The janitor will: run `freshness.py` (stale / unverified / orphaned-source
+report) and `reindex.py --check` (orphans, dup slugs, malformed frontmatter);
+open only flagged pages; resolve every inline anchor via MCP (missing →
+**broken**; signature changed → **drifted**); detect cross-page contradictions.
+It applies the automatic `status: stale` flip for code-drift cases, and
+surfaces every other fix (including deletions) as a proposal.
 
 ### `/p:wiki query "<question>"`
 Answer from the wiki, fall back to code.
-1. Search `docs/` pages first; fall back to clangd / luals / purity on the code.
-2. Answer with citations: page slugs + code anchors.
-3. If you derived something durable not yet captured, file it back into the
-   right page (and reindex).
+
+Delegate with `op=query`, `question="<question>"`.
+
+The janitor will: search pages first; fall back to clangd / luals / purity on
+the code; answer with citations (page slugs + code anchors). If the answer
+required deriving something durable not yet captured, the janitor files it
+back into the right page (and reindexes); if no page is a clean home, a
+`[PROPOSE-NEW-PAGE]` is surfaced.
 
 ### `/p:wiki init [--root docs]`
 Bootstrap a repo.
-1. Create the `docs/` skeleton (see SCHEMA §1).
-2. Offer to copy `SCHEMA.md` to `docs/SCHEMA.md` for per-repo customization.
-3. Draft `overview.md` from the repo's top-level structure. For anything
-   beyond ~3 read/search calls you MUST delegate the survey to
-   `p:minion-explorer` — inline exploration is a violation.
-4. Run `python scripts/reindex.py --root docs`.
+
+Delegate with `op=init`, `root=<dir>`.
+
+The janitor will: create the `docs/` skeleton (SCHEMA §1); surface a proposal
+to copy `SCHEMA.md` to `docs/SCHEMA.md` for per-repo customization; draft
+`overview.md` from the repo's top-level structure (batched survey, not
+unbounded exploration); reindex. Your job: review the drafted overview,
+approve the schema copy proposal, and confirm with the human.
 
 ### `/p:wiki adopt [--root docs]`
 Onboard a repo that *already* has hand-written docs into the wiki. Unlike
 `ingest`, adopt **preserves the existing prose verbatim** — it backfills the
 frontmatter contract and infers anchors. It does NOT rewrite, restyle, or
-"improve" the body. Touching the body during `adopt` is a violation.
+"improve" the body. Touching the body during `adopt` is a violation (enforced
+in the janitor).
 
-1. Point `--root` at the existing docs directory.
-2. `python scripts/reindex.py --root <dir> --check` -> the `malformed` list is
-   your worklist: every doc lacking frontmatter needs adopting.
-3. For each doc, **without changing its body**:
-   a. Classify it into a page type (SCHEMA §2).
-   b. Infer `sources` anchors: read the doc and locate the code it describes
-      via clangd / luals / purity. For non-trivial code-location you MUST
-      delegate to `p:minion-explorer`. Mark anchors you are unsure about.
-   c. Add frontmatter with `verified.commit: <HEAD>` and **`status: draft`**
-      (NOT `current`). Add `[[links]]` to connect related pages.
-4. **Verify pass (this is what earns `current`).** For each adopted page, check
-   its claims against the code with the language MCP. `verified.commit = HEAD`
-   is only an *assertion* until verified — a hand-written doc may already be
-   stale. If the claims hold, flip `status: draft -> current`; otherwise leave
-   it `draft` and report the discrepancies. Do not silently "fix" the prose.
-5. A monolithic doc that spans multiple types -> **propose** a split; do not
-   auto-split.
-6. If there is no `overview.md`, draft one (as in `init`).
-7. Run `python scripts/reindex.py --root <dir>` and `freshness.py` to confirm a
-   clean structure.
+Delegate with `op=adopt`, `root=<dir>`, optional `batch_size=<n>`.
 
-For a repo with many docs, adopt in batches and let the human review the `draft`
-pages before promoting them.
+The janitor will: run `reindex.py --check` to find malformed docs; for each
+doc, without changing its body, classify into a page type, infer `sources`
+anchors via MCP, add frontmatter with `verified.commit: <HEAD>` and
+`status: draft`. Then verify pass: where claims hold, flip `draft → current`;
+otherwise leave `draft` and record discrepancies. Multi-type monoliths are
+surfaced as `[PROPOSE-SPLIT]` items. If `overview.md` is missing, the janitor
+drafts one (as in `init`). Reindex + freshness confirm a clean structure.
+
+For a repo with many docs, ask the human about batching: the janitor can
+adopt in batches (`batch_size=N`) and let the human review the `draft` pages
+before promoting them.
 
 ## Scripts
 
 Both are stdlib-only, Python 3.9+, and never call an LLM or modify pages
-(`reindex.py` only writes `INDEX.md`). Run them from the repo root.
+(`reindex.py` only writes `INDEX.md`). They are invoked by the janitor — you
+do not normally run them yourself, but they live here for reference:
 
 ```bash
 python scripts/freshness.py --root docs [--head <ref>] [--quiet]
@@ -145,37 +196,61 @@ python scripts/reindex.py   --root docs [--check]
 - `reindex.py` regenerates `INDEX.md` by default; `--check` audits without
   writing. It exits non-zero on duplicate slugs or malformed frontmatter.
 
-For large surveys or multi-round exploration during `ingest` / `init` /
-`adopt`, you MUST delegate to `p:minion-explorer` rather than scanning inline.
-More than ~3 read/search calls on the same topic in the main context is a
-violation.
+If you ever need to run them in the main context (e.g. a CI gate, or a quick
+sanity check after a human-applied deletion), that is fine — they are cheap
+and have no side effects beyond `INDEX.md`. Any deeper work (reading flagged
+pages, verifying anchors) goes through the janitor.
 
 ## Self-check (MUST run before reporting any operation done)
 
+Most of the operational checklist runs **inside the janitor** — its report
+includes a Self-check section against the items below. Your job in the main
+context is to **verify** the janitor's self-check honestly covered every
+applicable item, and to handle the two items the janitor cannot certify (the
+delegation itself, and execution of approved destructive proposals).
+
 Before you say "done" on `ingest` / `lint` / `init` / `adopt` / `query`, you
 MUST be able to answer YES to every applicable item below. If any answer is
-NO, fix it or surface it explicitly in your report — do NOT silently ship.
+NO, fix it or surface it explicitly — do NOT silently ship.
 
-- [ ] I read SCHEMA.md (or `docs/SCHEMA.md` if present) at the start of this
-      operation.
-- [ ] Every page I wrote or modified has the full frontmatter from SCHEMA §3,
-      using the constrained subset from SCHEMA §5.
+**You (main agent):**
+
+- [ ] I delegated the operation to `p:minion-wiki-janitor` (or used the narrow
+      inline-query exception and stated so explicitly).
+- [ ] I read SCHEMA.md (or `docs/SCHEMA.md` if present) before validating the
+      janitor's report.
+- [ ] The janitor's Self-check section is filled in honestly — no missing
+      ticks, no unjustified `[ ]` or `[!]`. If any item is incomplete, I
+      either re-invoked the janitor with a follow-up or surfaced the gap to
+      the human.
+- [ ] I surfaced every Proposed Change to the human and got explicit approval
+      before executing any deletion / split / new-page creation / status
+      downgrade.
+
+**The janitor's report MUST be able to claim** (you verify, you do not re-run):
+
+- [ ] The janitor read SCHEMA.md (or `docs/SCHEMA.md` if present) at the start
+      of the operation.
+- [ ] Every page the janitor wrote or modified has the full frontmatter from
+      SCHEMA §3, using the constrained subset from SCHEMA §5.
 - [ ] Every inline factual claim about code carries an anchor (`path` or
       `path:symbol`).
-- [ ] Every anchor I added was resolved via the language MCP — NOT grep /
-      find / sed / cat. Anchors I could not resolve are explicitly flagged in
-      my report.
+- [ ] Every anchor the janitor added was resolved via the language MCP —
+      NOT grep / find / sed / cat. Anchors it could not resolve are explicitly
+      flagged in its report.
 - [ ] No code block in any page is larger than a signature or a few essential
       lines.
 - [ ] For `adopt`: the body prose of every adopted page is byte-identical to
-      what was there before. I only touched the frontmatter.
-- [ ] I ran `python scripts/reindex.py --root <docs> --check` and it exited 0.
-- [ ] I ran `python scripts/freshness.py --root <docs>` and either it exited 0
-      or I reported every remaining stale / unverified / orphaned-source page.
-- [ ] I proposed (did not silently apply) every destructive change: deletions,
-      splits, body rewrites, status downgrades.
+      what was there before. The janitor only touched the frontmatter.
+- [ ] `python scripts/reindex.py --root <docs> --check` exited 0.
+- [ ] `python scripts/freshness.py --root <docs>` exited 0, or every remaining
+      stale / unverified / orphaned-source page is reported.
+- [ ] The janitor proposed (did not silently apply) every destructive change:
+      deletions, splits, body rewrites, status downgrades unrelated to
+      code-drift.
 - [ ] No discrepancy between code and page was silently "harmonized". Where
-      they disagreed, I marked the page stale and surfaced the conflict.
+      they disagreed, the page was marked stale and the conflict was
+      surfaced.
 
 If an item is not applicable (e.g. `query` does not write pages), state so
 explicitly. Silence is a violation.
@@ -184,3 +259,8 @@ explicitly. Silence is a violation.
 
 - [SCHEMA.md](SCHEMA.md) — layout, page types, frontmatter anatomy, anchors,
   freshness model, lint rules, verification routing, anti-scope.
+- `p:minion-wiki-janitor` (`ClaudeCode/agents/p/minion-wiki-janitor.md`) — the
+  executor agent. Reads the schema, runs the scripts, opens pages, verifies
+  anchors via MCP, applies non-destructive updates, surfaces destructive
+  proposals. Forbidden from deleting files — that stays with the main agent
+  under explicit human approval.
