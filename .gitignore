@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.pyo
 .claude/tmp
+
+# Tooling caches (mcp-webfetch, etc.)
+.cache/
