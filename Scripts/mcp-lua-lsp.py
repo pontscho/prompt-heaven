@@ -660,19 +660,128 @@ def _flatten_hover(contents: Any) -> str:
 
 
 # ============================================================
+# Filesystem fallback for workspace_symbols (local / module-private
+# functions — luals excludes non-global symbols from its workspace/symbol
+# index, so a filesystem grep → per-file documentSymbol recovers them).
+# ============================================================
+
+_FALLBACK_EXTS = (".lua",)
+_FALLBACK_SKIP_DIRS = {
+    "build", "out", "dist", ".git", "node_modules",
+    "vendor", "third_party", "third-party",
+}
+
+
+def _find_files_with_word(root: str, word: str, exts=_FALLBACK_EXTS,
+                          limit: int = 20) -> List[str]:
+    """
+    Walk *root* and return up to *limit* source files whose content contains
+    *word* as a whole identifier (\\bword\\b). Pure Python, no shell deps.
+    """
+    rx = re.compile(rb"\b" + re.escape(word.encode("utf-8", "ignore")) + rb"\b")
+    hits: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _FALLBACK_SKIP_DIRS and not d.startswith(".")]
+        for fn in filenames:
+            if not fn.endswith(exts):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                with open(full, "rb") as f:
+                    if rx.search(f.read()):
+                        hits.append(full)
+                        if len(hits) >= limit:
+                            return hits
+            except (OSError, IOError):
+                continue
+    return hits
+
+
+def _iter_document_symbols(symbols: List[dict]):
+    for s in symbols:
+        if not isinstance(s, dict):
+            continue
+        yield s
+        for child in _iter_document_symbols(s.get("children") or []):
+            yield child
+
+
+async def _fallback_workspace_symbols(client: LuaLsClient, query: str,
+                                       limit: int = 50) -> List[dict]:
+    """
+    Locate symbols luals' global index drops (notably `local`/module-private
+    functions, which are excluded from workspace/symbol) by grepping the
+    project for the identifier, then asking luals for the DocumentSymbol of
+    each candidate file and filtering by name.
+    """
+    candidates = _find_files_with_word(client.project_root, query, limit=20)
+    results: List[dict] = []
+    seen: set = set()
+    for path in candidates:
+        try:
+            doc_syms = await client.document_symbol(path)
+        except Exception:
+            continue
+        file_uri = pathlib.Path(path).as_uri()
+        for sym in _iter_document_symbols(doc_syms):
+            name = sym.get("name", "")
+            if query not in name:
+                continue
+            # Reshape into SymbolInformation-like dict so the existing
+            # handler/formatter code paths work unchanged.
+            if "selectionRange" in sym:
+                lsp_range = sym.get("selectionRange") or sym.get("range") or {}
+                location = {"uri": file_uri, "range": lsp_range}
+            else:
+                location = sym.get("location") or {"uri": file_uri, "range": {}}
+            key = (name, location.get("uri"),
+                   location.get("range", {}).get("start", {}).get("line"))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                "name": name,
+                "kind": sym.get("kind", 0),
+                "containerName": sym.get("containerName") or sym.get("detail"),
+                "location": location,
+            })
+            if len(results) >= limit:
+                return results
+    return results
+
+
+# ============================================================
 # Symbol lookup: name → position
 # ============================================================
 
 async def _symbol_to_location(client: LuaLsClient, symbol_name: str,
+                               preferred_path: Optional[str] = None,
                                max_retries: int = 3) -> Optional[dict]:
     """
     Find the first workspace symbol matching symbol_name with a definition kind.
     Retries to handle cases where the index isn't fully populated yet.
+
+    When *preferred_path* is given and the same name is defined in several
+    files, a match in that file wins; otherwise the first match is returned
+    (so the non-preferred behavior is identical to before).
     """
+    if preferred_path:
+        await client.open_document(client._abs_path(preferred_path))
+    abs_preferred = client._abs_path(preferred_path) if preferred_path else None
+
+    def _make_entry(uri: str, start: dict) -> dict:
+        return {
+            "path": uri_to_path(uri),
+            "uri": uri,
+            "line": start.get("line", 0),
+            "char": start.get("character", 0),
+        }
+
     for attempt in range(max_retries):
         symbols = await client.workspace_symbol(symbol_name)
 
         # First pass: exact name with definition kind
+        best = None
         for sym in symbols:
             kind = symbol_kind_name(sym.get("kind", 0))
             if sym.get("name") != symbol_name:
@@ -683,14 +792,16 @@ async def _symbol_to_location(client: LuaLsClient, symbol_name: str,
             uri = loc.get("uri", "")
             start = loc.get("range", {}).get("start", {})
             if uri:
-                return {
-                    "path": uri_to_path(uri),
-                    "uri": uri,
-                    "line": start.get("line", 0),
-                    "char": start.get("character", 0),
-                }
+                entry = _make_entry(uri, start)
+                if abs_preferred and entry["path"] == abs_preferred:
+                    return entry
+                if best is None:
+                    best = entry
+        if best:
+            return best
 
         # Second pass: exact name, any kind
+        best = None
         for sym in symbols:
             if sym.get("name") != symbol_name:
                 continue
@@ -698,12 +809,13 @@ async def _symbol_to_location(client: LuaLsClient, symbol_name: str,
             uri = loc.get("uri", "")
             start = loc.get("range", {}).get("start", {})
             if uri:
-                return {
-                    "path": uri_to_path(uri),
-                    "uri": uri,
-                    "line": start.get("line", 0),
-                    "char": start.get("character", 0),
-                }
+                entry = _make_entry(uri, start)
+                if abs_preferred and entry["path"] == abs_preferred:
+                    return entry
+                if best is None:
+                    best = entry
+        if best:
+            return best
 
         if attempt < max_retries - 1:
             debug_log(f"workspace/symbol retry {attempt + 1} for '{symbol_name}'")
@@ -757,20 +869,25 @@ async def handle_init(args: dict) -> Any:
 async def handle_find_definition(args: dict) -> Any:
     """
     Find definition of a Lua symbol by name.
-    params: { symbol_name, context_lines? }
+    params: { symbol_name, path?, context_lines? }
+
+    When the same name is defined in several files, *path* (the file the caller
+    is asking from) is preferred as the definition site.
     """
     client = _require_client()
     symbol_name = args.get("symbol_name", "")
+    path = args.get("path") or args.get("file_path", "")
     context_lines = int(args.get("context_lines", 5))
     if not symbol_name:
         return {"error": "symbol_name is required"}
 
-    loc = await _symbol_to_location(client, symbol_name)
+    loc = await _symbol_to_location(client, symbol_name, preferred_path=path or None)
     if not loc:
         return {"error": f"Symbol '{symbol_name}' not found in workspace"}
 
-    path, line, char = loc["path"], loc["line"], loc["char"]
-    def_result = await client.definition(path, line, char)
+    preferred_abs = client._abs_path(path) if path else None
+    sym_path, line, char = loc["path"], loc["line"], loc["char"]
+    def_result = await client.definition(sym_path, line, char)
     if not def_result:
         return {"error": f"No definition found for '{symbol_name}'"}
 
@@ -787,6 +904,26 @@ async def handle_find_definition(args: dict) -> Any:
             "location": location,
             "context": extract_surrounding_code(abs_path, def_line, context_lines),
         })
+
+    # #5: honor the caller's preferred file. luals collapses duplicate global
+    # definitions to one canonical site, so the textDocument/definition
+    # round-trip can return a different file than the caller hinted at. Prefer a
+    # result already in the hint file; failing that, if the symbol itself
+    # resolved there, surface that location directly.
+    if preferred_abs and results:
+        in_pref = [r for r in results
+                   if uri_to_path(r["location"]["uri"]) == preferred_abs]
+        if in_pref:
+            return in_pref
+        if sym_path == preferred_abs:
+            lsp_range = {"start": {"line": line, "character": char},
+                         "end": {"line": line, "character": char}}
+            return [{
+                "symbol": symbol_name,
+                "location": _format_location(loc["uri"], lsp_range, client.project_root),
+                "context": extract_surrounding_code(sym_path, line, context_lines),
+            }]
+
     return results
 
 
@@ -1033,15 +1170,26 @@ async def handle_find_implementations_at(args: dict) -> Any:
 async def handle_workspace_symbols(args: dict) -> Any:
     """
     Search workspace symbols by query string.
-    params: { query, limit? }
+    params: { query, limit?, strict? }
+
+    luals' global workspace/symbol index excludes `local`/module-private
+    functions, so when it returns nothing for a plain identifier a filesystem
+    grep → per-file documentSymbol fallback recovers them. Pass strict=true to
+    disable the fallback (index-only results).
     """
     client = _require_client()
     query = args.get("query", "")
     limit = int(args.get("limit", 50))
+    strict = bool(args.get("strict", False))
     if not query:
         return {"error": "query is required"}
 
     symbols = await client.workspace_symbol(query)
+    fallback_used = False
+    if not symbols and not strict and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", query):
+        symbols = await _fallback_workspace_symbols(client, query, limit=limit)
+        fallback_used = True
+
     results = []
     for sym in symbols[:limit]:
         loc = sym.get("location", {})
@@ -1053,7 +1201,10 @@ async def handle_workspace_symbols(args: dict) -> Any:
             "container": sym.get("containerName"),
             "location": _format_location(uri, lsp_range, client.project_root) if uri else None,
         })
-    return {"query": query, "count": len(results), "symbols": results}
+    out = {"query": query, "count": len(results), "symbols": results}
+    if fallback_used:
+        out["source"] = "fallback:document_symbol"
+    return out
 
 
 async def handle_document_outline(args: dict) -> Any:
