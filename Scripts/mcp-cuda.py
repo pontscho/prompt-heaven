@@ -419,6 +419,29 @@ def _generate_minimal_compile_commands(project_root: str, cuda_path: str,
     return entries
 
 
+def _has_cuda_sources(project_root: str,
+                      cc_entries: Optional[List[dict]] = None) -> bool:
+    """True if the project is actually a CUDA project.
+
+    A project counts as CUDA if its compile_commands.json references at least
+    one .cu/.cuh translation unit, or if the source tree contains any .cu/.cuh
+    file. A bare CUDA SDK installed on the host is NOT sufficient — that only
+    means clangd *could* run, not that there is anything for it to index.
+    """
+    if cc_entries:
+        for entry in cc_entries:
+            f = str(entry.get("file", "")).lower()
+            if f.endswith(".cu") or f.endswith(".cuh"):
+                return True
+
+    for root, dirs, files in os.walk(project_root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("build", "out", "dist")]
+        for fname in files:
+            if pathlib.Path(fname).suffix.lower() in (".cu", ".cuh"):
+                return True
+    return False
+
+
 # ============================================================
 # LSP framing
 # ============================================================
@@ -1190,6 +1213,13 @@ async def handle_init(args: dict) -> Any:
                 break
             except Exception:
                 pass
+
+    # A CUDA SDK on the host is not a reason to spin up clangd or write a
+    # .cache/mcp-cuda dir — only do that for projects that actually contain
+    # CUDA sources (or reference them in compile_commands.json).
+    if not _has_cuda_sources(project_root, cc_entries):
+        debug_log("No .cu/.cuh sources and no CUDA compile entries — skipping CUDA init")
+        return {"status": "skipped", "reason": "no CUDA sources in project"}
 
     cuda_arch = explicit_cuda_arch or _detect_cuda_arch(project_root, cc_entries) or "sm_86"
 
