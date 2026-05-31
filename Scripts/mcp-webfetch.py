@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#     "beautifulsoup4",
+#     "markdownify",
+#     "lxml",
+#     "primp",
+#     "curl_cffi",
+# ]
+# ///
 """mcp-webfetch — MCP server for browser-emulated URL fetching with HTML→Markdown extraction.
 
 Usage:
@@ -508,7 +518,14 @@ class McpServer:
 					log.warning("Invalid JSON: %s", exc)
 					continue
 				log.debug("← %s", json.dumps(msg)[:200])
-				response = self._handle_message(msg)
+				try:
+					response = self._handle_message(msg)
+				except Exception as exc:
+					log.exception("Unhandled exception while handling message")
+					response = self._error(
+						msg.get("id"), -32603,
+						f"Internal error: {type(exc).__name__}: {exc}",
+					)
 				if response is not None:
 					out = json.dumps(response)
 					log.debug("→ %s", out[:200])
@@ -529,7 +546,7 @@ class McpServer:
 		if method == "initialize":
 			return self._result(msg_id, {
 				"protocolVersion": "2024-11-05",
-				"serverInfo": {"name": "mcp-webfetch", "version": "0.1.0"},
+				"serverInfo": {"name": "mcp-webfetch", "version": "1.0.0"},
 				"capabilities": {"tools": {}},
 			})
 		if method == "ping":
@@ -576,20 +593,6 @@ class McpServer:
 # CLI entry
 # ---------------------------------------------------------------------------
 
-def _setup_logging(verbose: bool, log_file: str = "") -> None:
-	level = logging.DEBUG if verbose else logging.INFO
-	handlers = []
-	if log_file:
-		handlers.append(logging.FileHandler(log_file))
-	else:
-		handlers.append(logging.StreamHandler(sys.stderr))
-	logging.basicConfig(
-		level=level,
-		handlers=handlers,
-		format="[%(asctime)s] %(name)s %(levelname)s %(message)s",
-	)
-
-
 def main() -> None:
 	parser = argparse.ArgumentParser(description="mcp-webfetch MCP server")
 	parser.add_argument("--project-root", default=os.getcwd(),
@@ -606,7 +609,17 @@ def main() -> None:
 	                    help="Log to file instead of stderr.")
 	parser.add_argument("-v", "--verbose", action="store_true")
 	args = parser.parse_args()
-	_setup_logging(args.verbose, args.log_file)
+	level = logging.DEBUG if (args.verbose or args.log_file) else logging.WARNING
+	log_handlers = []
+	if args.log_file:
+		log_handlers.append(logging.FileHandler(args.log_file))
+	else:
+		log_handlers.append(logging.StreamHandler(sys.stderr))
+	logging.basicConfig(
+		level=level,
+		format="%(asctime)s %(name)s %(levelname)s %(message)s",
+		handlers=log_handlers,
+	)
 
 	if args.list:
 		for name in sorted(HANDLERS):

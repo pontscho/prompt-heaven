@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """MCP-Jenkins: Pure Python Jenkins MCP server.
 
 Single-tool dispatcher pattern: exposes one MCP tool (jenkins_call) that
@@ -1792,7 +1796,14 @@ class McpServer:
                     continue
 
                 log.debug("<- %s", json.dumps(msg)[:200])
-                response = await loop.run_in_executor(None, self._handle_message, msg)
+                try:
+                    response = await loop.run_in_executor(None, self._handle_message, msg)
+                except Exception as exc:
+                    log.exception("Unhandled exception while handling message")
+                    response = self._error(
+                        msg.get("id"), -32603,
+                        f"Internal error: {type(exc).__name__}: {exc}",
+                    )
                 if response is not None:
                     out = json.dumps(response)
                     log.debug("-> %s", out[:200])
@@ -1813,7 +1824,7 @@ class McpServer:
         if method == "initialize":
             return self._result(msg_id, {
                 "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "mcp-jenkins", "version": "0.1.0"},
+                "serverInfo": {"name": "mcp-jenkins", "version": "1.0.0"},
                 "capabilities": {"tools": {}},
             })
 
@@ -1835,7 +1846,11 @@ class McpServer:
         if tool_name != "jenkins_call":
             return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
 
-        result = handle_jenkins_call(arguments)
+        try:
+            result = handle_jenkins_call(arguments)
+        except Exception as exc:
+            log.exception("Unhandled exception in handle_jenkins_call")
+            result = {"__is_error__": True, "error": f"Internal server error: {type(exc).__name__}: {exc}"}
         is_error = bool(result.get("__is_error__"))
         text = result.get("__raw_text__") or result.get("error", "")
 

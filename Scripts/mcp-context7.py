@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """
 Context7 Documentation MCP Server — standalone, no external dependencies.
 
@@ -13,6 +17,7 @@ Usage:
 import os
 import sys
 import json
+import logging
 import asyncio
 import argparse
 import urllib.request
@@ -22,15 +27,10 @@ from typing import Any, Optional
 
 
 # ============================================================
-# Debug logging
+# Logging
 # ============================================================
 
-DEBUG = False
-
-
-def debug_log(message: str) -> None:
-    if DEBUG:
-        print(f"[DEBUG] {message}", file=sys.stderr, flush=True)
+log = logging.getLogger("mcp-context7")
 
 
 def _ensure_dict(value: Any, name: str = "params") -> dict:
@@ -75,7 +75,7 @@ def _api_get_sync(path: str, params: dict, api_key: Optional[str] = None) -> str
     query_string = urllib.parse.urlencode(params)
     url = f"{CONTEXT7_API_BASE_URL}{path}?{query_string}"
 
-    debug_log(f"GET {url}")
+    log.debug(f"GET {url}")
 
     headers = {"X-Context7-Source": "mcp-server"}
     if api_key:
@@ -295,43 +295,46 @@ ALL_HANDLERS = {
 class McpServer:
     PROTOCOL_VERSION = "2024-11-05"
 
-    def _ok(self, msg_id: Any, result: Any) -> dict:
+    @staticmethod
+    def _result(msg_id: Any, result: Any) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
-    def _err(self, msg_id: Any, code: int, message: str) -> dict:
+    @staticmethod
+    def _error(msg_id: Any, code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
-    def _tool_error(self, msg_id: Any, text: str) -> dict:
+    @staticmethod
+    def _tool_error(msg_id: Any, text: str) -> dict:
         """Return a tool-level error (visible in LLM context, per SEP-2140)."""
-        return self._ok(msg_id, {"content": [{"type": "text", "text": text}], "isError": True})
+        return McpServer._result(msg_id, {"content": [{"type": "text", "text": text}], "isError": True})
 
     async def handle_message(self, msg: dict) -> Optional[dict]:
         method = msg.get("method", "")
         msg_id = msg.get("id")
 
-        debug_log(f"← {method} (id={msg_id})")
+        log.debug(f"← {method} (id={msg_id})")
 
         # Notifications carry no id and require no response
         if msg_id is None:
             return None
 
         if method == "initialize":
-            return self._ok(msg_id, {
+            return self._result(msg_id, {
                 "protocolVersion": self.PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
                 "serverInfo": {"name": "mcp-context7", "version": "1.0.0"},
+                "capabilities": {"tools": {}},
             })
 
         if method == "ping":
-            return self._ok(msg_id, {})
+            return self._result(msg_id, {})
 
         if method == "tools/list":
-            return self._ok(msg_id, {"tools": LISTED_TOOLS})
+            return self._result(msg_id, {"tools": LISTED_TOOLS})
 
         if method == "tools/call":
             return await self._dispatch_tool(msg_id, msg.get("params", {}))
 
-        return self._err(msg_id, -32601, f"Method not found: {method}")
+        return self._error(msg_id, -32601, f"Method not found: {method}")
 
     async def _dispatch_tool(self, msg_id: Any, params: dict) -> dict:
         name = params.get("name", "")
@@ -346,19 +349,19 @@ class McpServer:
 
         try:
             result = await handler(args)
-            return self._ok(msg_id, {"content": [{"type": "text", "text": result}]})
+            return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
-            debug_log(f"Handler '{name}' error: {e}")
+            log.debug(f"Handler '{name}' error: {e}")
             return self._tool_error(msg_id, f"Error in {name}: {e}")
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        debug_log("mcp-context7 server ready (stdio)")
+        log.debug("mcp-context7 server ready (stdio)")
 
         while True:
             line = await loop.run_in_executor(None, sys.stdin.readline)
             if not line:
-                debug_log("stdin EOF — shutting down")
+                log.debug("stdin EOF — shutting down")
                 break
 
             line = line.strip()
@@ -368,17 +371,21 @@ class McpServer:
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError as e:
-                debug_log(f"JSON parse error: {e}")
+                log.debug(f"JSON parse error: {e}")
                 continue
 
             try:
                 response = await self.handle_message(msg)
-                if response is not None:
-                    debug_log(f"→ id={response.get('id')}")
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
-            except Exception as e:
-                debug_log(f"Unhandled error: {e}")
+            except Exception as exc:
+                log.exception("Unhandled exception while handling message")
+                response = self._error(
+                    msg.get("id"), -32603,
+                    f"Internal error: {type(exc).__name__}: {exc}",
+                )
+            if response is not None:
+                log.debug("→ RAW: %s", json.dumps(response))
+                sys.stdout.write(json.dumps(response) + "\n")
+                sys.stdout.flush()
 
 
 # ============================================================
@@ -391,25 +398,30 @@ def main() -> None:
     )
     parser.add_argument("--api-key", help="API key for Context7 (or set CONTEXT7_API_KEY env var)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
+    parser.add_argument("--log-file", help="Log to file (implies --debug)")
     parsed = parser.parse_args()
 
-    global DEBUG, API_KEY
-    if parsed.debug:
-        DEBUG = True
-        debug_log("Debug logging enabled")
+    global API_KEY
+    level = logging.DEBUG if (parsed.debug or parsed.log_file) else logging.WARNING
+    log_handlers = []
+    if parsed.log_file:
+        log_handlers.append(logging.FileHandler(parsed.log_file))
+    else:
+        log_handlers.append(logging.StreamHandler(sys.stderr))
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=log_handlers,
+    )
 
     # Priority: --api-key flag > CONTEXT7_API_KEY env var > anonymous
     API_KEY = parsed.api_key or os.environ.get("CONTEXT7_API_KEY")
-    if API_KEY:
-        debug_log("API key configured")
-    else:
-        debug_log("No API key — running in anonymous mode (rate limited)")
 
     server = McpServer()
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
-        debug_log("Server stopped")
+        log.debug("Server stopped")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """
 LLDB MCP Server — standalone, no external dependencies.
 
@@ -19,20 +23,12 @@ import asyncio
 import pty
 import fcntl
 import termios
+import logging
 import argparse
 from typing import Dict, List, Optional, Any
 
 
-# ============================================================
-# Debug logging
-# ============================================================
-
-DEBUG = False
-
-
-def debug_log(message: str) -> None:
-    if DEBUG:
-        print(f"[DEBUG] {message}", file=sys.stderr, flush=True)
+log = logging.getLogger("mcp-lldb")
 
 
 def _ensure_dict(value: Any, name: str = "params") -> dict:
@@ -77,7 +73,7 @@ class LldbSession:
 
     async def start(self) -> str:
         """Start the LLDB process with a PTY."""
-        debug_log(f"Starting LLDB: {self.lldb_path}")
+        log.debug(f"Starting LLDB: {self.lldb_path}")
 
         self.master_fd, self.slave_fd = pty.openpty()
 
@@ -93,7 +89,7 @@ class LldbSession:
             stderr=self.slave_fd,
             cwd=self.working_dir,
         )
-        debug_log(f"LLDB PID: {self.process.pid}")
+        log.debug(f"LLDB PID: {self.process.pid}")
 
         # Parent doesn't need the slave end
         os.close(self.slave_fd)
@@ -118,7 +114,7 @@ class LldbSession:
         if self.process.returncode is not None:
             raise RuntimeError(f"LLDB process terminated (code {self.process.returncode})")
 
-        debug_log(f"Executing: {command!r}")
+        log.debug(f"Executing: {command!r}")
         os.write(self.master_fd, f"{command}\n".encode())
         return await self.read_until_prompt(timeout=timeout)
 
@@ -136,11 +132,11 @@ class LldbSession:
         while True:
             elapsed = loop.time() - start_time
             if elapsed > timeout:
-                debug_log(f"Timeout after {elapsed:.1f}s")
+                log.debug(f"Timeout after {elapsed:.1f}s")
                 return buffer.decode("utf-8", errors="replace") + "\n[Timeout waiting for LLDB response]"
 
             if self.process and self.process.returncode is not None:
-                debug_log(f"Process exited: {self.process.returncode}")
+                log.debug(f"Process exited: {self.process.returncode}")
                 if buffer:
                     return buffer.decode("utf-8", errors="replace")
                 raise RuntimeError(f"LLDB process terminated (code {self.process.returncode})")
@@ -149,28 +145,28 @@ class LldbSession:
                 chunk = os.read(self.master_fd, 4096)
                 if chunk:
                     buffer += chunk
-                    debug_log(f"Read {len(chunk)} bytes")
+                    log.debug(f"Read {len(chunk)} bytes")
                     if prompt_pattern in buffer:
-                        debug_log("Prompt found")
+                        log.debug("Prompt found")
                         return buffer.decode("utf-8", errors="replace")
             except BlockingIOError:
                 await asyncio.sleep(0.05)
             except OSError as e:
-                debug_log(f"PTY read error: {e}")
+                log.debug(f"PTY read error: {e}")
                 if buffer:
                     return buffer.decode("utf-8", errors="replace") + f"\n[PTY error: {e}]"
                 raise RuntimeError(f"PTY read error: {e}")
 
     async def cleanup(self) -> None:
         """Terminate LLDB and release all resources."""
-        debug_log(f"Cleaning up session {self.id}")
+        log.debug(f"Cleaning up session {self.id}")
         try:
             if self.master_fd is not None:
                 try:
                     os.write(self.master_fd, b"quit\n")
                     await asyncio.sleep(0.5)
                 except Exception as e:
-                    debug_log(f"Error sending quit: {e}")
+                    log.debug(f"Error sending quit: {e}")
 
             if self.process and self.process.returncode is None:
                 self.process.terminate()
@@ -189,7 +185,7 @@ class LldbSession:
                 self.slave_fd = None
 
         except Exception as e:
-            debug_log(f"Cleanup error: {e}")
+            log.debug(f"Cleanup error: {e}")
         finally:
             self.process = None
             self.ready = False
@@ -821,43 +817,46 @@ class McpServer:
     def __init__(self):
         self.manager = SessionManager()
 
-    def _ok(self, msg_id: Any, result: Any) -> dict:
+    @staticmethod
+    def _result(msg_id: Any, result: Any) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
-    def _err(self, msg_id: Any, code: int, message: str) -> dict:
+    @staticmethod
+    def _error(msg_id: Any, code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
-    def _tool_error(self, msg_id: Any, text: str) -> dict:
+    @staticmethod
+    def _tool_error(msg_id: Any, text: str) -> dict:
         """Return a tool-level error (visible in LLM context, per SEP-2140)."""
-        return self._ok(msg_id, {"content": [{"type": "text", "text": text}], "isError": True})
+        return McpServer._result(msg_id, {"content": [{"type": "text", "text": text}], "isError": True})
 
     async def handle_message(self, msg: dict) -> Optional[dict]:
         method = msg.get("method", "")
         msg_id = msg.get("id")
 
-        debug_log(f"← {method} (id={msg_id})")
+        log.debug(f"← {method} (id={msg_id})")
 
         # Notifications carry no id and require no response
         if msg_id is None:
             return None
 
         if method == "initialize":
-            return self._ok(msg_id, {
+            return self._result(msg_id, {
                 "protocolVersion": self.PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
                 "serverInfo": {"name": "mcp-lldb", "version": "1.0.0"},
+                "capabilities": {"tools": {}},
             })
 
         if method == "ping":
-            return self._ok(msg_id, {})
+            return self._result(msg_id, {})
 
         if method == "tools/list":
-            return self._ok(msg_id, {"tools": LISTED_TOOLS})
+            return self._result(msg_id, {"tools": LISTED_TOOLS})
 
         if method == "tools/call":
             return await self._dispatch_tool(msg_id, msg.get("params", {}))
 
-        return self._err(msg_id, -32601, f"Method not found: {method}")
+        return self._error(msg_id, -32601, f"Method not found: {method}")
 
     async def _dispatch_tool(self, msg_id: Any, params: dict) -> dict:
         name = params.get("name", "")
@@ -872,20 +871,20 @@ class McpServer:
 
         try:
             result = await handler(self.manager, args)
-            return self._ok(msg_id, {"content": [{"type": "text", "text": result}]})
+            return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
-            debug_log(f"Handler '{name}' error: {e}")
+            log.debug(f"Handler '{name}' error: {e}")
             return self._tool_error(msg_id, f"Error in {name}: {e}")
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        debug_log("mcp-lldb server ready (stdio)")
+        log.debug("mcp-lldb server ready (stdio)")
 
         try:
             while True:
                 line = await loop.run_in_executor(None, sys.stdin.readline)
                 if not line:
-                    debug_log("stdin EOF — shutting down")
+                    log.debug("stdin EOF — shutting down")
                     break
 
                 line = line.strip()
@@ -895,20 +894,24 @@ class McpServer:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as e:
-                    debug_log(f"JSON parse error: {e}")
+                    log.debug(f"JSON parse error: {e}")
                     continue
 
                 try:
                     response = await self.handle_message(msg)
-                    if response is not None:
-                        debug_log(f"→ id={response.get('id')}")
-                        sys.stdout.write(json.dumps(response) + "\n")
-                        sys.stdout.flush()
-                except Exception as e:
-                    debug_log(f"Unhandled error: {e}")
+                except Exception as exc:
+                    log.exception("Unhandled exception while handling message")
+                    response = self._error(
+                        msg.get("id"), -32603,
+                        f"Internal error: {type(exc).__name__}: {exc}",
+                    )
+                if response is not None:
+                    log.debug("→ RAW: %s", json.dumps(response))
+                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.flush()
 
         finally:
-            debug_log("Cleaning up all sessions")
+            log.debug("Cleaning up all sessions")
             await self.manager.cleanup_all()
 
 
@@ -921,18 +924,26 @@ def main() -> None:
         description="LLDB MCP Server — standalone, no external dependencies"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
+    parser.add_argument("--log-file", help="Log to file (implies --debug)")
     parsed = parser.parse_args()
 
-    global DEBUG
-    if parsed.debug:
-        DEBUG = True
-        debug_log("Debug logging enabled")
+    level = logging.DEBUG if (parsed.debug or parsed.log_file) else logging.WARNING
+    log_handlers = []
+    if parsed.log_file:
+        log_handlers.append(logging.FileHandler(parsed.log_file))
+    else:
+        log_handlers.append(logging.StreamHandler(sys.stderr))
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=log_handlers,
+    )
 
     server = McpServer()
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
-        debug_log("Server stopped")
+        log.debug("Server stopped")
 
 
 if __name__ == "__main__":

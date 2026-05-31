@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Smoke-test harness for the converged MCP servers.
+
+Launches each Scripts/mcp-*.py server as a subprocess, drives a canonical
+JSON-RPC 2.0 sequence over stdin/stdout, and asserts the plumbing invariants
+that the convergence patch guarantees:
+
+  * initialize          -> result.protocolVersion == "2024-11-05"
+                           result.serverInfo.version == "1.0.0"
+  * notifications/...    -> NO response (must not error, must not reply)
+  * ping                 -> result == {}
+  * tools/list           -> exactly one tool, named <tool>
+  * unknown method       -> error.code == -32601
+  * forced handler exc   -> error.code == -32603  AND a response actually arrives
+                           (this is the FIX-1 regression gate: bare loops crash,
+                            silent-swallow loops hang -- both fail this check)
+
+Usage:
+  python3 _mcp_smoke_test.py                 # all servers
+  python3 _mcp_smoke_test.py mcp-clangd.py   # one or more specific servers
+
+Exit code 0 iff every non-skipped server passes every check.
+"""
+
+import json
+import os
+import select
+import subprocess
+import sys
+import time
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Per-server launch config: minimal args so argparse succeeds and the
+# initialize/ping/unknown path runs WITHOUT spawning heavy subprocess work.
+SERVERS = [
+    {"file": "mcp-compile.py",  "tool": "compile_call",  "args": ["--project-root", "/tmp"]},
+    {"file": "mcp-forge.py",    "tool": "forge_call",    "args": ["--project-root", "/tmp"]},
+    {"file": "mcp-git.py",      "tool": "git_call",      "args": ["--project-root", "/tmp"]},
+    {"file": "mcp-purity.py",   "tool": "purity_call",   "args": ["--project-root", "/tmp"]},
+    {"file": "mcp-jenkins.py",  "tool": "jenkins_call",  "args": ["--endpoint", "http://127.0.0.1:1", "--username", "x", "--token", "y"]},
+    {"file": "mcp-tshark.py",   "tool": "tshark_call",   "args": ["--project-root", "/tmp"]},
+    {"file": "mcp-webfetch.py", "tool": "webfetch_call", "args": []},
+    {"file": "mcp-context7.py", "tool": "context7_call", "args": []},
+    {"file": "mcp-lldb.py",     "tool": "lldb_call",     "args": []},
+    {"file": "mcp-gdc.py",      "tool": "gdc_call",      "args": []},
+    {"file": "mcp-lua-lsp.py",  "tool": "luals_call",    "args": []},
+    {"file": "mcp-clangd.py",   "tool": "clangd_call",   "args": []},
+    {"file": "mcp-cuda.py",     "tool": "cuda_call",     "args": []},
+]
+
+READ_TIMEOUT = 8.0  # seconds to wait for a single response line
+
+
+class Server:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.proc = None
+
+    def start(self):
+        path = os.path.join(SCRIPT_DIR, self.cfg["file"])
+        self.proc = subprocess.Popen(
+            [sys.executable, path] + self.cfg["args"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+
+    def send(self, obj):
+        self.proc.stdin.write(json.dumps(obj) + "\n")
+        self.proc.stdin.flush()
+
+    def read(self, timeout=READ_TIMEOUT):
+        """Read one response line; return parsed dict or None on timeout/EOF."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                # process exited; try a final non-blocking drain
+                rest = self.proc.stdout.readline()
+                return json.loads(rest) if rest.strip() else None
+            r, _, _ = select.select([self.proc.stdout], [], [], 0.25)
+            if r:
+                line = self.proc.stdout.readline()
+                if not line:
+                    return None
+                line = line.strip()
+                if not line:
+                    continue
+                return json.loads(line)
+        return None
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stderr_tail(self, n=400):
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.terminate()
+            _, err = self.proc.communicate(timeout=3)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+            err = ""
+        return (err or "")[-n:]
+
+    def stop(self):
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=3)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
+def check(name, cond, detail=""):
+    return (name, bool(cond), detail)
+
+
+def run_server(cfg):
+    """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}."""
+    srv = Server(cfg)
+    srv.start()
+    checks = []
+    try:
+        # 1. initialize
+        srv.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        init = srv.read()
+        if init is None:
+            if not srv.alive():
+                tail = srv.stderr_tail()
+                return ("SKIP", [check("startup", False,
+                        "process exited before initialize; stderr tail:\n" + tail)])
+            return ("FAIL", [check("initialize", False, "no response (timeout)")])
+        res = (init or {}).get("result", {})
+        checks.append(check("initialize.protocolVersion",
+                            res.get("protocolVersion") == "2024-11-05",
+                            repr(res.get("protocolVersion"))))
+        checks.append(check("initialize.serverInfo.version",
+                            res.get("serverInfo", {}).get("version") == "1.0.0",
+                            repr(res.get("serverInfo", {}).get("version"))))
+
+        # 2. notification (no id) -> no reply ; 3. ping right after
+        srv.send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        srv.send({"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}})
+        ping = srv.read()
+        ping = ping or {}
+        checks.append(check("notification->no-extra-reply + ping.id",
+                            ping.get("id") == 2,
+                            "first reply id=%r (expected 2; a notification reply would shift this)"
+                            % ping.get("id")))
+        checks.append(check("ping.result=={}", ping.get("result") == {}, repr(ping.get("result"))))
+
+        # 4. tools/list
+        srv.send({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}})
+        tl = srv.read() or {}
+        tools = tl.get("result", {}).get("tools", [])
+        checks.append(check("tools/list count==1", len(tools) == 1, "count=%d" % len(tools)))
+        checks.append(check("tools/list name",
+                            len(tools) == 1 and tools[0].get("name") == cfg["tool"],
+                            (tools[0].get("name") if tools else None)))
+
+        # 5. unknown method -> -32601
+        srv.send({"jsonrpc": "2.0", "id": 4, "method": "foo/bar", "params": {}})
+        unk = srv.read() or {}
+        checks.append(check("unknown-method -32601",
+                            unk.get("error", {}).get("code") == -32601,
+                            repr(unk.get("error", {}).get("code"))))
+
+        # 6. forced handler exception -> -32603 AND a response arrives (FIX-1 gate)
+        #    non-dict params makes the dispatcher's params.get(...) raise before
+        #    any tool-internal try/except, so it bubbles to the run() catch-all.
+        srv.send({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": "force-error"})
+        exc = srv.read()
+        if exc is None:
+            if srv.alive():
+                checks.append(check("forced-exc -32603", False,
+                                    "NO RESPONSE (hang) -- silent-swallow bug"))
+            else:
+                checks.append(check("forced-exc -32603", False,
+                                    "process CRASHED -- bare-loop bug"))
+        else:
+            checks.append(check("forced-exc -32603",
+                                exc.get("error", {}).get("code") == -32603,
+                                repr(exc.get("error", {}).get("code"))))
+
+        status = "PASS" if all(ok for _, ok, _ in checks) else "FAIL"
+        return (status, checks)
+    finally:
+        srv.stop()
+
+
+def main():
+    selected = sys.argv[1:]
+    servers = [s for s in SERVERS if not selected or s["file"] in selected
+               or os.path.basename(s["file"]) in selected]
+    if not servers:
+        print("No matching servers for:", selected)
+        return 2
+
+    overall_ok = True
+    for cfg in servers:
+        try:
+            status, checks = run_server(cfg)
+        except Exception as exc:
+            status, checks = "ERROR", [check("harness", False, "%s: %s" % (type(exc).__name__, exc))]
+        mark = {"PASS": "✓", "FAIL": "✗", "SKIP": "—", "ERROR": "!"}[status]
+        print("%s  %-18s %s" % (mark, cfg["file"], status))
+        for cname, ok, detail in checks:
+            if not ok or status in ("FAIL", "ERROR", "SKIP"):
+                flag = "  ok " if ok else "  XX "
+                print("%s%-42s %s" % (flag, cname, detail if not ok else ""))
+        if status in ("FAIL", "ERROR"):
+            overall_ok = False
+
+    print()
+    print("RESULT:", "ALL PASS" if overall_ok else "FAILURES PRESENT")
+    return 0 if overall_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

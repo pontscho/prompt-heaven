@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """
 mcp-lua-lsp — Lua code intelligence MCP server via lua-language-server LSP.
 
@@ -12,6 +16,7 @@ Usage:
 
 import asyncio
 import json
+import logging
 import os
 import pathlib
 import re
@@ -74,24 +79,12 @@ def _resolve_aliases(params: Any) -> dict:
 
 
 # ============================================================
-# Debug logging
+# Logging
 # ============================================================
 
-DEBUG = False
 MARKDOWN_MODE = False
-_log_file: Optional[str] = None
 
-
-def debug_log(message: str) -> None:
-    if not DEBUG:
-        return
-    line = f"[DEBUG] {message}\n"
-    if _log_file:
-        with open(_log_file, "a", encoding="utf-8") as f:
-            f.write(line)
-    else:
-        sys.stderr.write(line)
-        sys.stderr.flush()
+log = logging.getLogger("mcp-lua-lsp")
 
 
 # ============================================================
@@ -245,7 +238,7 @@ class LuaLsClient:
             stderr=sys.stderr,
             cwd=self.project_root,
         )
-        debug_log(f"lua-language-server PID: {self.process.pid}")
+        log.debug(f"lua-language-server PID: {self.process.pid}")
 
         self._reader_task = asyncio.create_task(self._reader_loop())
 
@@ -312,12 +305,12 @@ class LuaLsClient:
             }
         })
 
-        debug_log("Waiting for lua-language-server background indexing...")
+        log.debug("Waiting for lua-language-server background indexing...")
         try:
             await asyncio.wait_for(self._indexing_done.wait(), timeout=60.0)
-            debug_log("Background indexing done.")
+            log.debug("Background indexing done.")
         except asyncio.TimeoutError:
-            debug_log("Indexing wait timed out — priming index by opening source files...")
+            log.debug("Indexing wait timed out — priming index by opening source files...")
 
         await self._prime_index()
 
@@ -342,7 +335,7 @@ class LuaLsClient:
                 break
 
         if source_files:
-            debug_log(f"Priming index with {len(source_files)} Lua file(s)")
+            log.debug(f"Priming index with {len(source_files)} Lua file(s)")
             for path in source_files:
                 await self.open_document(path)
                 await asyncio.sleep(0.1)
@@ -385,7 +378,7 @@ class LuaLsClient:
         while True:
             msg = await read_lsp_message(reader)
             if msg is None:
-                debug_log("lua-language-server stdout EOF")
+                log.debug("lua-language-server stdout EOF")
                 break
 
             msg_id = msg.get("id")
@@ -413,7 +406,7 @@ class LuaLsClient:
                 elif kind == "end":
                     self._active_progress.discard(token)
                     if not self._active_progress:
-                        debug_log("All progress tokens finished — indexing done")
+                        log.debug("All progress tokens finished — indexing done")
                         self._indexing_done.set()
 
             # Diagnostics push
@@ -425,7 +418,7 @@ class LuaLsClient:
                 ev = self._diag_events.get(uri)
                 if ev:
                     ev.set()
-                debug_log(f"Diagnostics for {uri}: {len(diags)} items")
+                log.debug(f"Diagnostics for {uri}: {len(diags)} items")
 
             # luals requests configuration — respond with empty settings per item
             elif method == "workspace/configuration":
@@ -438,7 +431,7 @@ class LuaLsClient:
                 pass
 
             else:
-                debug_log(f"Unhandled notification: {method}")
+                log.debug(f"Unhandled notification: {method}")
 
     async def _send(self, body: dict) -> None:
         assert self.process and self.process.stdin
@@ -475,7 +468,7 @@ class LuaLsClient:
         try:
             content = abs_path.read_text(encoding="utf-8")
         except Exception as e:
-            debug_log(f"Cannot read {abs_path}: {e}")
+            log.debug(f"Cannot read {abs_path}: {e}")
             return
         self._opened_files.add(uri)
         await self._notify("textDocument/didOpen", {
@@ -818,7 +811,7 @@ async def _symbol_to_location(client: LuaLsClient, symbol_name: str,
             return best
 
         if attempt < max_retries - 1:
-            debug_log(f"workspace/symbol retry {attempt + 1} for '{symbol_name}'")
+            log.debug(f"workspace/symbol retry {attempt + 1} for '{symbol_name}'")
             await asyncio.sleep(1.0)
 
     return None
@@ -1469,11 +1462,11 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
     if (function != "luals_init"
             and server and server._init_task and not server._init_task.done()
             and (_client is None or _client.process is None)):
-        debug_log(f"Waiting for auto-init to complete before {function}...")
+        log.debug(f"Waiting for auto-init to complete before {function}...")
         try:
             await asyncio.wait_for(asyncio.shield(server._init_task), timeout=90.0)
         except (asyncio.TimeoutError, Exception) as e:
-            debug_log(f"Auto-init wait failed: {e}")
+            log.debug(f"Auto-init wait failed: {e}")
 
     handler = ALL_HANDLERS.get(function)
     if handler is None:
@@ -1487,7 +1480,7 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
     except RuntimeError as e:
         result = {"error": str(e)}
     except Exception as e:
-        debug_log(f"Unhandled exception in handler '{function}': {e}")
+        log.debug(f"Unhandled exception in handler '{function}': {e}")
         result = {"error": f"Internal error in '{function}': {type(e).__name__}: {e}"}
     return _serialize(function, result)
 
@@ -1742,41 +1735,44 @@ class McpServer:
         self.auto_config_path = auto_config_path
         self._init_task: Optional[asyncio.Task] = None
 
-    def _ok(self, msg_id: Any, result: Any) -> dict:
+    @staticmethod
+    def _result(msg_id: Any, result: Any) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
-    def _err(self, msg_id: Any, code: int, message: str) -> dict:
+    @staticmethod
+    def _error(msg_id: Any, code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
-    def _tool_error(self, msg_id: Any, text: str) -> dict:
-        return self._ok(msg_id, {"content": [{"type": "text", "text": text}], "isError": True})
+    @staticmethod
+    def _tool_error(msg_id: Any, text: str) -> dict:
+        return McpServer._result(msg_id, {"content": [{"type": "text", "text": text}], "isError": True})
 
     async def handle_message(self, msg: dict) -> Optional[dict]:
         method = msg.get("method", "")
         msg_id = msg.get("id")
 
-        debug_log(f"← {method} (id={msg_id})")
+        log.debug(f"← {method} (id={msg_id})")
 
         if msg_id is None:
             return None
 
         if method == "initialize":
-            return self._ok(msg_id, {
+            return self._result(msg_id, {
                 "protocolVersion": self.PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
                 "serverInfo": {"name": "mcp-lua-lsp", "version": "1.0.0"},
+                "capabilities": {"tools": {}},
             })
 
         if method == "ping":
-            return self._ok(msg_id, {})
+            return self._result(msg_id, {})
 
         if method == "tools/list":
-            return self._ok(msg_id, {"tools": LISTED_TOOLS})
+            return self._result(msg_id, {"tools": LISTED_TOOLS})
 
         if method == "tools/call":
             return await self._dispatch_tool(msg_id, msg.get("params", {}))
 
-        return self._err(msg_id, -32601, f"Method not found: {method}")
+        return self._error(msg_id, -32601, f"Method not found: {method}")
 
     async def _dispatch_tool(self, msg_id: Any, params: dict) -> dict:
         name = params.get("name", "")
@@ -1785,9 +1781,9 @@ class McpServer:
         if name == "luals_call":
             try:
                 result = await handle_luals_call(tool_args, server=self)
-                return self._ok(msg_id, {"content": [{"type": "text", "text": result}]})
+                return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
             except Exception as e:
-                debug_log(f"luals_call error: {e}")
+                log.debug(f"luals_call error: {e}")
                 return self._tool_error(msg_id, f"Error: {e}")
 
         return self._tool_error(
@@ -1797,10 +1793,10 @@ class McpServer:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        debug_log("mcp-lua-lsp server ready (stdio)")
+        log.debug("mcp-lua-lsp server ready (stdio)")
 
         if self.auto_project_root:
-            debug_log(f"Auto-init: {self.auto_project_root}")
+            log.debug(f"Auto-init: {self.auto_project_root}")
             self._init_task = asyncio.create_task(
                 self._auto_init()
             )
@@ -1817,7 +1813,7 @@ class McpServer:
             sys.stderr.write(f"mcp-lua-lsp auto-init FAILED: {result['error']}\n")
             sys.stderr.flush()
         else:
-            debug_log(f"Auto-init OK: {result}")
+            log.debug(f"Auto-init OK: {result}")
 
     async def _read_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -1825,7 +1821,7 @@ class McpServer:
             while True:
                 line = await loop.run_in_executor(None, sys.stdin.readline)
                 if not line:
-                    debug_log("stdin EOF — shutting down")
+                    log.debug("stdin EOF — shutting down")
                     break
 
                 line = line.strip()
@@ -1835,22 +1831,26 @@ class McpServer:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as e:
-                    debug_log(f"JSON parse error: {e}")
+                    log.debug(f"JSON parse error: {e}")
                     continue
 
-                debug_log(f"← RAW: {line}")
+                log.debug(f"← RAW: {line}")
 
                 try:
                     response = await self.handle_message(msg)
-                    if response is not None:
-                        debug_log(f"→ RAW: {json.dumps(response)}")
-                        sys.stdout.write(json.dumps(response) + "\n")
-                        sys.stdout.flush()
-                except Exception as e:
-                    debug_log(f"Unhandled error: {e}")
+                except Exception as exc:
+                    log.exception("Unhandled exception while handling message")
+                    response = self._error(
+                        msg.get("id"), -32603,
+                        f"Internal error: {type(exc).__name__}: {exc}",
+                    )
+                if response is not None:
+                    log.debug("→ RAW: %s", json.dumps(response))
+                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.flush()
 
         finally:
-            debug_log("Shutting down lua-language-server...")
+            log.debug("Shutting down lua-language-server...")
             if _client is not None:
                 await _client.stop()
 
@@ -1872,14 +1872,18 @@ def main() -> None:
                         help="Path to lua-language-server binary (default: lua-language-server)")
     parsed = parser.parse_args()
 
-    global DEBUG, MARKDOWN_MODE, _log_file
+    global MARKDOWN_MODE
+    level = logging.DEBUG if (parsed.debug or parsed.log_file) else logging.WARNING
+    log_handlers = []
     if parsed.log_file:
-        _log_file = parsed.log_file
-        DEBUG = True
-    if parsed.debug:
-        DEBUG = True
-    if DEBUG:
-        debug_log("Debug logging enabled")
+        log_handlers.append(logging.FileHandler(parsed.log_file))
+    else:
+        log_handlers.append(logging.StreamHandler(sys.stderr))
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=log_handlers,
+    )
     if parsed.markdown:
         MARKDOWN_MODE = True
 
@@ -1897,7 +1901,7 @@ def main() -> None:
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
-        debug_log("Server stopped")
+        log.debug("Server stopped")
 
 
 if __name__ == "__main__":

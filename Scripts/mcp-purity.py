@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """MCP-Purity: Pure Python file operations MCP server.
 
 Single-tool dispatcher pattern: exposes one MCP tool (purity_call) that routes
@@ -977,7 +981,14 @@ class McpServer:
                     continue
 
                 log.debug("← %s", json.dumps(msg)[:200])
-                response = self._handle_message(msg)
+                try:
+                    response = self._handle_message(msg)
+                except Exception as exc:
+                    log.exception("Unhandled exception while handling message")
+                    response = self._error(
+                        msg.get("id"), -32603,
+                        f"Internal error: {type(exc).__name__}: {exc}",
+                    )
                 if response is not None:
                     out = json.dumps(response)
                     log.debug("→ %s", out[:200])
@@ -999,7 +1010,7 @@ class McpServer:
         if method == "initialize":
             return self._result(msg_id, {
                 "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "mcp-purity", "version": "0.1.0"},
+                "serverInfo": {"name": "mcp-purity", "version": "1.0.0"},
                 "capabilities": {"tools": {}},
             })
 

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """
 Chrome DevTools Protocol MCP Server — standalone, no external dependencies.
 
@@ -19,21 +23,13 @@ import hashlib
 import struct
 import asyncio
 import argparse
+import logging
 import urllib.request
 import urllib.parse
 from typing import Dict, List, Optional, Any, Callable
 
 
-# ============================================================
-# Debug logging
-# ============================================================
-
-DEBUG = False
-
-
-def debug_log(message: str) -> None:
-    if DEBUG:
-        print(f"[DEBUG] {message}", file=sys.stderr, flush=True)
+log = logging.getLogger("mcp-gdc")
 
 
 def _ensure_dict(value: Any, name: str = "params") -> dict:
@@ -115,7 +111,7 @@ async def _ws_connect(host: str, port: int, path: str):
     if expected not in response.decode(errors="ignore"):
         raise ConnectionError("WebSocket handshake failed: invalid accept key")
 
-    debug_log(f"WebSocket connected: {host}:{port}{path}")
+    log.debug(f"WebSocket connected: {host}:{port}{path}")
     return reader, writer
 
 
@@ -273,7 +269,7 @@ class CdpSession:
             })
         )
 
-        debug_log(f"CDP session ready: {self.target_id}")
+        log.debug(f"CDP session ready: {self.target_id}")
 
     async def send(self, method: str, params: dict, timeout: float = 30.0) -> dict:
         """Send a CDP command and await the response."""
@@ -308,7 +304,7 @@ class CdpSession:
             while self._connected:
                 text = await _ws_recv(self.reader)
                 if text is None:
-                    debug_log(f"CDP connection closed: {self.target_id}")
+                    log.debug(f"CDP connection closed: {self.target_id}")
                     break
 
                 try:
@@ -327,12 +323,12 @@ class CdpSession:
                         try:
                             listener(params)
                         except Exception as e:
-                            debug_log(f"Listener error [{method}]: {e}")
+                            log.debug(f"Listener error [{method}]: {e}")
 
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            debug_log(f"Recv loop error [{self.target_id}]: {e}")
+            log.debug(f"Recv loop error [{self.target_id}]: {e}")
         finally:
             for fut in self._pending.values():
                 if not fut.done():
@@ -1480,41 +1476,44 @@ class McpServer:
     def __init__(self, browser_url: str):
         self.manager = GdcManager(browser_url)
 
-    def _ok(self, msg_id: Any, result: Any) -> dict:
+    @staticmethod
+    def _result(msg_id: Any, result: Any) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
-    def _err(self, msg_id: Any, code: int, message: str) -> dict:
+    @staticmethod
+    def _error(msg_id: Any, code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
-    def _tool_error(self, msg_id: Any, text: str) -> dict:
-        return self._ok(msg_id, {"content": [{"type": "text", "text": text}], "isError": True})
+    @staticmethod
+    def _tool_error(msg_id: Any, text: str) -> dict:
+        return McpServer._result(msg_id, {"content": [{"type": "text", "text": text}], "isError": True})
 
     async def handle_message(self, msg: dict) -> Optional[dict]:
         method = msg.get("method", "")
         msg_id = msg.get("id")
 
-        debug_log(f"<- {method} (id={msg_id})")
+        log.debug(f"<- {method} (id={msg_id})")
 
         if msg_id is None:
             return None
 
         if method == "initialize":
-            return self._ok(msg_id, {
+            return self._result(msg_id, {
                 "protocolVersion": self.PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
                 "serverInfo": {"name": "mcp-gdc", "version": "1.0.0"},
+                "capabilities": {"tools": {}},
             })
 
         if method == "ping":
-            return self._ok(msg_id, {})
+            return self._result(msg_id, {})
 
         if method == "tools/list":
-            return self._ok(msg_id, {"tools": LISTED_TOOLS})
+            return self._result(msg_id, {"tools": LISTED_TOOLS})
 
         if method == "tools/call":
             return await self._dispatch_tool(msg_id, msg.get("params", {}))
 
-        return self._err(msg_id, -32601, f"Method not found: {method}")
+        return self._error(msg_id, -32601, f"Method not found: {method}")
 
     async def _dispatch_tool(self, msg_id: Any, params: dict) -> dict:
         name = params.get("name", "")
@@ -1529,20 +1528,20 @@ class McpServer:
 
         try:
             result = await handler(self.manager, args)
-            return self._ok(msg_id, {"content": [{"type": "text", "text": result}]})
+            return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
-            debug_log(f"Handler '{name}' error: {e}")
+            log.debug(f"Handler '{name}' error: {e}")
             return self._tool_error(msg_id, f"Error in {name}: {e}")
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        debug_log("mcp-gdc server ready (stdio)")
+        log.debug("mcp-gdc server ready (stdio)")
 
         try:
             while True:
                 line = await loop.run_in_executor(None, sys.stdin.readline)
                 if not line:
-                    debug_log("stdin EOF — shutting down")
+                    log.debug("stdin EOF — shutting down")
                     break
 
                 line = line.strip()
@@ -1552,20 +1551,24 @@ class McpServer:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as e:
-                    debug_log(f"JSON parse error: {e}")
+                    log.debug(f"JSON parse error: {e}")
                     continue
 
                 try:
                     response = await self.handle_message(msg)
-                    if response is not None:
-                        debug_log(f"-> id={response.get('id')}")
-                        sys.stdout.write(json.dumps(response) + "\n")
-                        sys.stdout.flush()
-                except Exception as e:
-                    debug_log(f"Unhandled error: {e}")
+                except Exception as exc:
+                    log.exception("Unhandled exception while handling message")
+                    response = self._error(
+                        msg.get("id"), -32603,
+                        f"Internal error: {type(exc).__name__}: {exc}",
+                    )
+                if response is not None:
+                    log.debug("→ RAW: %s", json.dumps(response))
+                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.flush()
 
         finally:
-            debug_log("Cleaning up all sessions")
+            log.debug("Cleaning up all sessions")
             await self.manager.cleanup_all()
 
 
@@ -1583,6 +1586,7 @@ def main() -> None:
         help="Chrome remote debugging URL (default: http://127.0.0.1:9222)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
+    parser.add_argument("--log-file", help="Log to file (implies --debug)")
     parser.add_argument("--list", action="store_true", help="List all supported tool calls and exit")
     parsed = parser.parse_args()
 
@@ -1595,16 +1599,23 @@ def main() -> None:
             print(f"  {name:<{width}}  {desc}" if desc else f"  {name}")
         return
 
-    global DEBUG
-    if parsed.debug:
-        DEBUG = True
-        debug_log("Debug logging enabled")
+    level = logging.DEBUG if (parsed.debug or parsed.log_file) else logging.WARNING
+    log_handlers = []
+    if parsed.log_file:
+        log_handlers.append(logging.FileHandler(parsed.log_file))
+    else:
+        log_handlers.append(logging.StreamHandler(sys.stderr))
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=log_handlers,
+    )
 
     server = McpServer(parsed.browser_url)
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
-        debug_log("Server stopped")
+        pass
 
 
 if __name__ == "__main__":

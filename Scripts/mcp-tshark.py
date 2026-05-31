@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """mcp-tshark — MCP server for tshark (Wireshark CLI) network capture & analysis.
 
 Usage:
@@ -985,7 +989,14 @@ class McpServer:
                     log.warning("Invalid JSON: %s", exc)
                     continue
                 log.debug("← %s", json.dumps(msg)[:200])
-                response = self._handle_message(msg)
+                try:
+                    response = self._handle_message(msg)
+                except Exception as exc:
+                    log.exception("Unhandled exception while handling message")
+                    response = self._error(
+                        msg.get("id"), -32603,
+                        f"Internal error: {type(exc).__name__}: {exc}",
+                    )
                 if response is not None:
                     out = json.dumps(response)
                     log.debug("→ %s", out[:200])
@@ -1007,7 +1018,7 @@ class McpServer:
         if method == "initialize":
             return self._result(msg_id, {
                 "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "mcp-tshark", "version": "0.1.0"},
+                "serverInfo": {"name": "mcp-tshark", "version": "1.0.0"},
                 "capabilities": {"tools": {}},
             })
         if method == "ping":

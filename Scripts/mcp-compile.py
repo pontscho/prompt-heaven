@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """MCP-Compile: Build command runner MCP server with output filtering.
 
 Single-tool dispatcher pattern: exposes one MCP tool (compile_call) that routes
@@ -484,7 +488,7 @@ class McpServer:
 		if method == "initialize":
 			return self._result(msg_id, {
 				"protocolVersion": "2024-11-05",
-				"serverInfo": {"name": "mcp-compile", "version": "0.1.0"},
+				"serverInfo": {"name": "mcp-compile", "version": "1.0.0"},
 				"capabilities": {"tools": {}},
 			})
 
