@@ -31,12 +31,12 @@ Returns server status and list of available functions.
 |Param|Type|Required|Default|Description|
 |-|-|-|-|-|
 |`relative_path`|string|yes|—|Relative path to file|
-|`start_line`|int|no|0|0-based first line index|
-|`end_line`|int|no|null|0-based last line (inclusive); null = read to end|
+|`start_line`|int|no|1|1-based first line index|
+|`end_line`|int|no|null|1-based last line (inclusive); null = read to end|
 |`max_answer_chars`|int|no|-1|Character limit; -1 = unlimited|
 
 ```json
-{"f":"read_file","p":{"relative_path":"src/main.py","start_line":0,"end_line":49}}
+{"f":"read_file","p":{"relative_path":"src/main.py","start_line":1,"end_line":50}}
 ```
 
 ### 2. `create_text_file` — Create or overwrite a file
@@ -97,8 +97,8 @@ Regex mode uses standard Python `re.sub()` backreferences: `\1`, `\2`, `\g<name>
 |Param|Type|Required|Description|
 |-|-|-|-|
 |`relative_path`|string|yes|File to modify|
-|`start_line`|int|yes|0-based first line to delete|
-|`end_line`|int|yes|0-based last line to delete (inclusive)|
+|`start_line`|int|yes|1-based first line to delete|
+|`end_line`|int|yes|1-based last line to delete (inclusive)|
 
 ```json
 {"f":"delete_lines","p":{"relative_path":"src/app.py","start_line":10,"end_line":15}}
@@ -109,8 +109,8 @@ Regex mode uses standard Python `re.sub()` backreferences: `\1`, `\2`, `\g<name>
 |Param|Type|Required|Description|
 |-|-|-|-|
 |`relative_path`|string|yes|File to modify|
-|`start_line`|int|yes|0-based first line to replace|
-|`end_line`|int|yes|0-based last line to replace (inclusive)|
+|`start_line`|int|yes|1-based first line to replace|
+|`end_line`|int|yes|1-based last line to replace (inclusive)|
 |`content`|string|yes|New content to insert|
 
 ```json
@@ -122,13 +122,13 @@ Regex mode uses standard Python `re.sub()` backreferences: `\1`, `\2`, `\g<name>
 |Param|Type|Required|Description|
 |-|-|-|-|
 |`relative_path`|string|yes|File to modify|
-|`line`|int|yes|0-based line index to insert at|
+|`line`|int|yes|1-based line index; new content is inserted before this line|
 |`content`|string|yes|Content to insert|
 
 Existing content at `line` shifts down. Does not replace.
 
 ```json
-{"f":"insert_at_line","p":{"relative_path":"src/main.py","line":0,"content":"# Auto-generated\n"}}
+{"f":"insert_at_line","p":{"relative_path":"src/main.py","line":1,"content":"# Auto-generated\n"}}
 ```
 
 ### 9. `search_for_pattern` — Regex search across files
@@ -146,6 +146,57 @@ Existing content at `line` shifts down. Does not replace.
 ```json
 {"f":"search_for_pattern","p":{"substring_pattern":"TODO|FIXME","context_lines_after":1,"paths_include_glob":"**/*.py"}}
 ```
+
+## Parameter aliases
+
+All handlers accept the aliases below as a convenience — callers can use
+the shorter / more familiar form and the server folds them onto the
+canonical names from the tables above before the handler runs. The
+canonical name is what error messages reference.
+
+### Global aliases (apply to every function)
+
+| Alias | Canonical |
+|-|-|
+| `path`, `file_path`, `file`, `root` | `relative_path` |
+| `pattern` | `substring_pattern` |
+| `search`, `find`, `old_string`, `old` | `needle` |
+| `replacement`, `replace`, `replace_with`, `new_string`, `new` | `repl` |
+| `line_start`, `start` | `start_line` |
+| `line_end`, `end` | `end_line` |
+| `include` | `paths_include_glob` |
+| `exclude` | `paths_exclude_glob` |
+| `glob` | `paths_include_glob` *(except in `list_dir`, where `glob` is also accepted natively as a synonym)* |
+
+### Function-specific aliases (override globals for the named function)
+
+| Function | Alias | Canonical |
+|-|-|-|
+| `replace_content`   | `old_content` | `needle`  |
+| `replace_content`   | `new_content` | `repl`    |
+| `create_text_file`  | `new_content` | `content` |
+| `replace_lines`     | `new_content` | `content` |
+| `insert_at_line`    | `new_content` | `content` |
+
+### Function-name aliases
+
+| Alias | Canonical |
+|-|-|
+| `ls`             | `list_dir`           |
+| `glob`           | `find_file`          |
+| `grep`, `search` | `search_for_pattern` |
+
+### Unknown-parameter hint
+
+When a handler raises an error (e.g. a missing required parameter), the
+error message is augmented with a list of any caller-supplied keys that
+are not known to the canonical function. Example:
+
+```
+Missing required parameter: needle | Unknown params for 'replace_content': foo_bar. Accepted: allow_multiple_occurrences, mode, needle, relative_path, repl.
+```
+
+Use the hint to spot typos or wrong-alias choices in the next call.
 
 ## Error Handling
 
