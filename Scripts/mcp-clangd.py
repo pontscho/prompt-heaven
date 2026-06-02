@@ -854,6 +854,35 @@ async def _symbol_to_location(client: ClangdClient, symbol_name: str,
             log.debug(f"workspace/symbol retry {attempt + 1} for '{symbol_name}'")
             await asyncio.sleep(1.0)
 
+    # Fallback 1: document_symbol on the preferred file
+    if abs_preferred:
+        log.debug(f"workspace/symbol miss — falling back to document_symbol on {abs_preferred}")
+        try:
+            doc_syms = await client.document_symbol(abs_preferred)
+            file_uri = pathlib.Path(abs_preferred).as_uri()
+            for sym in _outline_flatten(doc_syms):
+                if sym.get("name") == symbol_name:
+                    sel = sym.get("selectionRange") or sym.get("range") or {}
+                    return _make_entry(file_uri, sel.get("start", {}))
+        except Exception:
+            pass
+
+    # Fallback 2: grep project tree then document_symbol on each candidate
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol_name):
+        candidates = _find_files_with_word(client.project_root, symbol_name, limit=10)
+        if abs_preferred:
+            candidates = [c for c in candidates if c != abs_preferred]
+        for fpath in candidates:
+            try:
+                doc_syms = await client.document_symbol(fpath)
+            except Exception:
+                continue
+            file_uri = pathlib.Path(fpath).as_uri()
+            for sym in _outline_flatten(doc_syms):
+                if sym.get("name") == symbol_name and symbol_kind_name(sym.get("kind", 0)) in DEFINITION_KINDS:
+                    sel = sym.get("selectionRange") or sym.get("range") or {}
+                    return _make_entry(file_uri, sel.get("start", {}))
+
     return None
 
 
