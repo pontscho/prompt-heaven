@@ -1236,8 +1236,11 @@ def _execute_target(cfg: Dict[str, Any], kind: str, target: str,
 	full_env = os.environ.copy()
 	full_env.update(env_vars)
 
-	merged_filter = _merge_filter(tdef.get("filter"),
-	                               params.get("filter"))
+	if "filter" in params and not params["filter"]:
+		merged_filter = None
+	else:
+		merged_filter = _merge_filter(tdef.get("filter"),
+		                               params.get("filter"))
 
 	sections: List[str] = [f"### {kind}.{target}"]
 	for warn in env_warnings:
