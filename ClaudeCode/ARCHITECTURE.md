@@ -1,0 +1,107 @@
+# ClaudeCode Architecture — Layer Contract
+
+This document is the **canonical rulebook** for how skills, agents, and fragments fit together. If you are about to add, rename, or refactor anything in `ClaudeCode/`, read this first. If you find yourself in conflict with it, fix the contract or fix your change — do not silently violate it.
+
+## Three layers, no overlap
+
+| Layer | Filesystem location | Runtime role | Tools it can have | How it gets invoked |
+|---|---|---|---|---|
+| **Skill** (= command) | `skills/p:<name>/SKILL.md` | Active orchestrator. Runs in the **main conversation context** (or in whatever context invoked it via the `Skill` tool). Can call sub-agents via the `Agent` tool. | All tools the host context has (incl. `Agent`, `Skill`, `Edit`, `Write`, MCPs). | User typed `/p:<name>` in the CLI, **or** another skill called `Skill(p:<name>, args=...)`. |
+| **Agent** (minion) | `agents/p/minion-<name>.md` | Worker. Runs in an **isolated sub-agent context**. Single-purpose. **Does NOT call further sub-agents** — sub-agent nesting is unsupported by the harness. | Only what the worker needs (`Read`, MCPs, etc.). NEVER `Agent` or `Skill`. | Only via `Agent(p:minion-<name>, ...)` from a skill or the main context. |
+| **Fragment** (`_lib`) | `skills/_lib/<topic>.md` | Passive knowledge snippet. Not user-callable. | n/a | Other skills reference it textually: *"follow the pattern in `_lib/<topic>.md`"*. Loaded into context only when the skill that points to it is loaded. |
+
+**Why no nesting:** Anthropic's `subagents.md` only documents one-level delegation. Cost/context for grandchild calls is not transparent. The harness may technically allow it, but it's unsupported territory. **All orchestration happens in main context (or skill body).** Workers stay workers.
+
+## Skill vs Agent — when to pick which
+
+- Pick **Skill** when the task is a *workflow* (multiple steps, possibly calling several different agents, possibly interactive).
+- Pick **Agent** when the task is a *single worker job* (run a build, audit a plan against the codebase, perform one OWASP pass) that benefits from running in isolated context.
+- Pick **Fragment** when the same prose would be repeated across two or more skills (validation loop pattern, handoff contract, output template).
+
+## Filesystem conventions
+
+- Skills: `ClaudeCode/skills/p:<name>/SKILL.md` (e.g. `skills/p:feature-plan/SKILL.md`). The `p:` prefix is part of the directory name and the `name:` in the frontmatter.
+- Agents: `ClaudeCode/agents/p/minion-<name>.md` (e.g. `agents/p/minion-explorer.md`). The `minion-` prefix marks workers.
+- Fragments: `ClaudeCode/skills/_lib/<topic>.md`. The `_lib/` directory is reserved and must NOT contain user-callable SKILL.md files.
+- The legacy `ClaudeCode/commands/` directory is **deprecated and will be removed** — all entries have been migrated to `skills/p:*/SKILL.md`.
+
+## Skill frontmatter (required)
+
+```yaml
+---
+name: p:<name>
+description: <one-paragraph description — what the skill does, how it's invoked, key args. The Skill router reads this to decide when to load the body. Be specific.>
+---
+```
+
+No other frontmatter keys are required. The `name:` field MUST match the directory name (without `p:` prefix in the directory? No — directory IS `p:<name>/` and `name:` IS `p:<name>`. They match exactly.)
+
+## Agent frontmatter (required)
+
+```yaml
+---
+name: p:minion-<name>
+description: <when to use this minion, what it returns, what it does NOT do>
+model: opus | sonnet | haiku
+color: <visual hint>
+tools: <comma-separated tool list — only what the worker needs>
+mcpServers: [<list of required MCPs>]
+---
+```
+
+Agents MUST NOT list `Agent` in their `tools:` — see the no-nesting rule above. `Skill` is permitted because the `Skill` tool only loads instructions into the *current* context (no new sub-agent is spawned), so it does not breach the nesting rule — a minion may legitimately invoke a passive instruction skill to specialize its own behavior. Use sparingly.
+
+## Phase / Step nomenclature — stop the overloading
+
+| Term | Meaning | Where it appears |
+|---|---|---|
+| **Step N** | A *linear* step inside a skill. No iteration, no loop. | `/p:security-review`: Step 1 Triage, Step 2 Find, Step 3 Verify, Step 4 Assemble. |
+| **Phase A / B / C** | A *validation loop* — iterative minion invocation up to 5 iterations, with a 5-iteration escape hatch. **Reserved exclusively for validation loops.** | `/p:feature-plan` Phase A (plan-inspector loop), Phase B (security-review loop), Phase C (refinement menu — only "Phase" because it follows Phase A+B; it is itself non-iterative). Same for `/p:implement`. |
+| **Validation Loop** | The canonical pattern Phase A/B/C follow. Defined once in `skills/_lib/validation-loop.md`. | Referenced by every Phase A/B/C section. |
+| **`PHASE: <triage\|find\|verify>` directive** | An *in-band routing token* sent to `p:minion-security-officer` to select which workflow it runs. **This is internal to the security minion**, not a general project term. | Only inside `p:minion-security-officer`'s prompt. |
+
+If you find yourself writing "Phase 2" inside a skill that has no validation loop, you mean **Step 2**. If you find yourself adding new in-band routing tokens to a minion, stop and ask whether the minion is doing too much.
+
+## Handoff contracts between skills
+
+When one skill's output is another skill's input, the file path and format MUST be documented in `skills/_lib/handoff-contracts.md`. Examples today:
+
+- `/p:feature-plan` output → `docs/feature-implementation-plan.md` (markdown, English, fixed structure)
+- `/p:task-plan` input ← above; output → `requirements.yaml` (defined schema)
+- `/p:implement` input ← `requirements.yaml`
+- `/p:security-review` output → console + optional `docs/reviews/security-review-<ts>.md`
+- Intra-pipeline (security review): `.claude/tmp/security-findings-<ts>.md` and `.claude/tmp/security-verified-<ts>.md`
+
+Changing any of these without updating `handoff-contracts.md` is a violation.
+
+## Temporary files
+
+Per the global `~/.claude/CLAUDE.md` rule: temp files go to `.claude/tmp/` only. Never to `/tmp`, never to project subdirs. Skills create the directory if missing.
+
+## Minion routing (recap of the global rule)
+
+Skills MUST delegate iterative or scope-broad work to the appropriate minion instead of running it inline:
+
+| Work | Minion |
+|---|---|
+| Multi-file codebase exploration | `p:minion-explorer` |
+| Build / test cycles | `p:minion-builder` |
+| Script run-fix-retry | `p:minion-runner` |
+| Bug investigation | `p:minion-watson` |
+| Plan validation | `p:minion-plan-inspector` |
+| Implementation validation | `p:minion-impl-inspector` |
+| Security review | `p:minion-security-officer` (or, preferably, via the `p:security-review` skill which orchestrates the 3-phase pipeline) |
+| Quick external lookup | `p:minion-web-explorer` |
+| Deep web research | `p:minion-deep-researcher` |
+
+Never run-fix-retry, explore-explore-explore, or self-validate inline in a skill body.
+
+## Anti-patterns — do not introduce
+
+- **Sub-agent → sub-agent calls.** Forbidden by the harness contract. Orchestrate from main / skill context.
+- **Two skills doing the same thing.** Pick one canonical skill, have the other invoke it via `Skill(...)`. The security review is the canonical example: one implementation, three entry points.
+- **Mixing "Phase" semantics.** If your file uses "Phase" for both linear steps and validation loops, rename the linear ones to "Step".
+- **Inline duplication of the validation loop.** If you find yourself writing "iterate up to 5 times, escape hatch, fix and re-run", reference `_lib/validation-loop.md` instead.
+- **Legacy modes preserved indefinitely.** Backwards-compat is fine during a refactor; once the new code path is the only one used, delete the legacy path. Dead code is debt.
+- **Cross-skill writes without a documented contract.** If skill A produces a file that skill B consumes, document it in `_lib/handoff-contracts.md` first.
+- **In-band routing tokens inside minions, ad-hoc.** The security minion's `PHASE:` directive is an exception we accepted; new ones require an explicit decision (and ideally a generic Layer Contract upgrade rather than a per-minion hack).
