@@ -188,8 +188,8 @@ Both are stdlib-only, Python 3.9+, and never call an LLM or modify pages
 do not normally run them yourself, but they live here for reference:
 
 ```bash
-python scripts/freshness.py --root docs [--head <ref>] [--quiet]
-python scripts/reindex.py   --root docs [--check]
+python ~/.claude/skills/p:wiki/scripts/freshness.py --root docs [--head <ref>] [--quiet]
+python ~/.claude/skills/p:wiki/scripts/reindex.py   --root docs [--check]
 ```
 
 - `freshness.py` exits non-zero if any page is stale — usable as a pre-PR CI gate.

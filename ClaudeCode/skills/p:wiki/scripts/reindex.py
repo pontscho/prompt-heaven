@@ -25,7 +25,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _wikilib as w  # noqa: E402
 
-TYPE_ORDER = ["overview", "subsystem", "component", "reference",
+TYPE_ORDER = ["overview", "subsystem", "component", "reference", "analysis",
 	"concept", "runbook", "adr", "glossary"]
 
 
