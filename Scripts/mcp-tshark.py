@@ -13,7 +13,7 @@ Single-tool dispatcher: tshark_call(function, params)
 
 Functions:
     start_capture    Start background packet capture
-    stop_capture     Stop capture and analyze results
+    stop_capture     Stop capture, return metadata (use analyze separately)
     analyze          Analyze a PCAP file
     list_sessions    List capture sessions
     list_interfaces  List network interfaces
@@ -410,6 +410,21 @@ def handle_start_capture(params: dict, project_root: str) -> dict:
 
 # ---- 2. stop_capture -----------------------------------------------------
 
+def _packet_count(pcap_path: str) -> int:
+    """Quick packet count via tshark — no full dissection."""
+    try:
+        tshark = _get_tshark()
+        r = subprocess.run(
+            [tshark, "-r", pcap_path, "-T", "fields", "-e", "frame.number"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return len(r.stdout.strip().split("\n"))
+    except Exception:
+        pass
+    return -1
+
+
 def handle_stop_capture(params: dict, project_root: str) -> dict:
     sid = params.get("session_id", "")
     if not sid:
@@ -441,23 +456,31 @@ def handle_stop_capture(params: dict, project_root: str) -> dict:
             )
         }
 
-    analyze_params = dict(params)
-    analyze_params["file"] = pcap_path
-    analyze_params.pop("session_id", None)
-    body = _run_analyze(analyze_params, project_root)
+    file_size = os.path.getsize(pcap_path)
+    packets = _packet_count(pcap_path)
 
     keep = _bool_param(params, "keep_file", True)
+    pcap_deleted = False
     if not keep and os.path.isfile(pcap_path):
         os.unlink(pcap_path)
-        body += "\n\n*PCAP file deleted.*"
+        pcap_deleted = True
 
-    header = (
-        f"## Capture Stopped\n"
-        f"**Session:** `{sid}` | **Duration:** {duration:.1f}s\n"
-    )
+    rel_path = f"{CAPTURES_DIR}/{os.path.basename(pcap_path)}"
+    parts = [
+        f"## Capture Stopped",
+        f"**Session:** `{sid}` | **Duration:** {duration:.1f}s",
+        f"**Packets:** {packets}" if packets >= 0 else "**Packets:** unknown",
+        f"**PCAP:** `{rel_path}` ({_format_size(file_size)})",
+    ]
+
+    if pcap_deleted:
+        parts.append("*PCAP file deleted.*")
+    else:
+        parts.append(f"\nUse `analyze`, `statistics`, or `follow_stream` with "
+                      f"`file: \"{rel_path}\"` to inspect the capture.")
 
     SESSIONS.pop(sid, None)
-    return {"__raw_text__": header + "\n" + body}
+    return {"__raw_text__": "\n".join(parts)}
 
 
 def _bool_param(params: dict, key: str, default: bool) -> bool:
@@ -923,7 +946,7 @@ TSHARK_CALL_TOOL = {
         "Network packet capture and analysis via tshark (Wireshark CLI).\n\n"
         "Single dispatcher — set `function` to route:\n\n"
         "  start_capture    Start background packet capture\n"
-        "  stop_capture     Stop capture and analyze results\n"
+        "  stop_capture     Stop capture, return metadata (use analyze separately)\n"
         "  analyze          Analyze a PCAP file\n"
         "  list_sessions    List capture sessions\n"
         "  list_interfaces  List network interfaces\n"
@@ -1066,7 +1089,7 @@ class McpServer:
 # ---------------------------------------------------------------------------
 HANDLER_DESCRIPTIONS: Dict[str, str] = {
     "start_capture":   "Start background packet capture on an interface",
-    "stop_capture":    "Stop a running capture and analyze results",
+    "stop_capture":    "Stop a running capture, return metadata (use analyze separately)",
     "analyze":         "Analyze a PCAP file (table or text output)",
     "list_sessions":   "List active and stopped capture sessions",
     "list_interfaces": "List available network interfaces",
