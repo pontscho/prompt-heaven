@@ -123,6 +123,21 @@ FUNCTION_ALIASES = {
 }
 
 
+def _bool_param(value, default=False):
+    """Coerce a possibly-stringy value to bool.
+
+    The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+    naive bool("false") would wrongly yield True.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+    return bool(value)
+
+
 def _canonical_function(function: str) -> str:
     return FUNCTION_ALIASES.get(function, function)
 
@@ -262,10 +277,10 @@ def _format_mtime(mtime: float) -> str:
 
 def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path", ".")
-    recursive = params.get("recursive", False)
-    skip_ignored = params.get("skip_ignored_files", False)
-    long_format = bool(params.get("long", False))
-    show_hidden = bool(params.get("show_hidden", False) or params.get("all", False) or params.get("hidden", False))
+    recursive = _bool_param(params.get("recursive", False))
+    skip_ignored = _bool_param(params.get("skip_ignored_files", False))
+    long_format = _bool_param(params.get("long", False))
+    show_hidden = _bool_param(params.get("show_hidden", False)) or _bool_param(params.get("all", False)) or _bool_param(params.get("hidden", False))
     glob_pattern = params.get("glob", None) or params.get("paths_include_glob", None) or params.get("filter", None)
     grep_pattern = params.get("grep", None) or params.get("grep_pattern", None)
     head_limit = params.get("head_limit", 0)
@@ -415,7 +430,7 @@ def handle_replace_content(params: dict, project_root: str, strict: bool = False
     mode = params.get("mode", "literal")
     if mode not in ("literal", "regex"):
         raise ValueError("Parameter 'mode' must be 'literal' or 'regex'")
-    allow_multiple = params.get("allow_multiple_occurrences", False)
+    allow_multiple = _bool_param(params.get("allow_multiple_occurrences", False))
 
     path = safe_path(project_root, rel, strict)
     if not os.path.isfile(path):
@@ -595,7 +610,7 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
         raise ValueError("Parameter 'output_mode' must be 'files_with_matches', 'content', or 'count'")
 
     max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
-    skip_ignored = params.get("skip_ignored_files", True)
+    skip_ignored = _bool_param(params.get("skip_ignored_files", True))
 
     # LLMs frequently escape | as \| which turns alternation into a literal pipe
     pattern_str = pattern_str.replace(r"\|", "|")

@@ -487,8 +487,10 @@ def _bool_param(params: dict, key: str, default: bool) -> bool:
     val = params.get(key, default)
     if isinstance(val, bool):
         return val
+    if val is None:
+        return default
     if isinstance(val, str):
-        return val.lower() not in ("false", "0", "no")
+        return val.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(val)
 
 
@@ -1057,6 +1059,11 @@ class McpServer:
         arguments = params.get("arguments") or {}
         if tool_name != "tshark_call":
             return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                pass
         if not isinstance(arguments, dict):
             return self._result(msg_id, {
                 "content": [{"type": "text", "text":

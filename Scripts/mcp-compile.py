@@ -59,6 +59,21 @@ FILTER_ALIASES = {
 }
 
 
+def _bool_param(value, default=False):
+	"""Coerce a possibly-stringy value to bool.
+
+	The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+	naive bool("false") would wrongly yield True.
+	"""
+	if isinstance(value, bool):
+		return value
+	if value is None:
+		return default
+	if isinstance(value, str):
+		return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+	return bool(value)
+
+
 def _resolve_aliases(params: dict, aliases: dict) -> dict:
 	"""Return a new dict with aliased parameter names resolved to canonical names."""
 	resolved = {}
@@ -144,7 +159,7 @@ def filter_output(raw_lines: List[str], filter_cfg: Optional[dict]) -> List[str]
 	grep_pattern = cfg.get("grep")
 	if grep_pattern:
 		grep_ctx = cfg.get("grep_context", 0)
-		invert = cfg.get("invert_grep", False)
+		invert = _bool_param(cfg.get("invert_grep", False))
 		lines = _apply_grep(lines, grep_pattern, grep_ctx, invert)
 
 	# Step 2: head/tail
@@ -223,7 +238,7 @@ def handle_build(params: dict, project_root: str, default_command: Optional[str]
 	cwd = os.path.realpath(cwd)
 
 	timeout = params.get("timeout", default_timeout)
-	merge_stderr = params.get("merge_stderr", True)
+	merge_stderr = _bool_param(params.get("merge_stderr", True))
 	filter_cfg = _ensure_dict(params.get("filter"), "filter")
 
 	log.info("Running: %s (cwd=%s, timeout=%ds)", command, cwd, timeout)
@@ -510,6 +525,11 @@ class McpServer:
 		if tool_name != "compile_call":
 			return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
 
+		if isinstance(arguments, str):
+			try:
+				arguments = json.loads(arguments)
+			except json.JSONDecodeError:
+				pass
 		if not isinstance(arguments, dict):
 			return self._result(msg_id, {
 				"content": [{"type": "text", "text":

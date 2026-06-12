@@ -76,6 +76,21 @@ def _resolve_aliases(params: Any) -> dict:
     return resolved
 
 
+def _bool_param(value, default=False):
+    """Coerce a possibly-stringy value to bool.
+
+    The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+    naive bool("false") would wrongly yield True.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+    return bool(value)
+
+
 # ============================================================
 # Logging
 # ============================================================
@@ -1144,7 +1159,7 @@ async def handle_workspace_symbols(args: dict) -> Any:
     client = _require_client()
     query = args.get("query", "")
     limit = int(args.get("limit", 50))
-    strict = bool(args.get("strict", False))
+    strict = _bool_param(args.get("strict"), default=False)
     if not query:
         return {"error": "query is required"}
 
@@ -1893,6 +1908,11 @@ class McpServer:
     async def _dispatch_tool(self, msg_id: Any, params: dict) -> dict:
         name = params.get("name", "")
         tool_args = params.get("arguments") or {}
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except json.JSONDecodeError as exc:
+                return self._tool_error(msg_id, f"'arguments' was a string but not valid JSON: {exc}")
 
         if name == "clangd_call":
             if not isinstance(tool_args, dict):

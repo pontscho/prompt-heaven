@@ -580,6 +580,11 @@ class McpServer:
         arguments = params.get("arguments") or {}
         if tool_name != "git_call":
             return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                pass
         if not isinstance(arguments, dict):
             return self._result(msg_id, {
                 "content": [{"type": "text", "text":

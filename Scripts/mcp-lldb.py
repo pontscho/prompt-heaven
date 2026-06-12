@@ -56,6 +56,21 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
     return value
 
 
+def _bool_param(value, default=False):
+    """Coerce a possibly-stringy value to bool.
+
+    The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+    naive bool("false") would wrongly yield True.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+    return bool(value)
+
+
 # ============================================================
 # LLDB Session
 # ============================================================
@@ -396,7 +411,7 @@ async def handle_lldb_continue(mgr: SessionManager, args: dict) -> str:
 
 async def handle_lldb_step(mgr: SessionManager, args: dict) -> str:
     session_id = args.get("session_id", "")
-    instructions = args.get("instructions", False)
+    instructions = _bool_param(args.get("instructions"), default=False)
 
     try:
         session = mgr.get(session_id)
@@ -412,7 +427,7 @@ async def handle_lldb_step(mgr: SessionManager, args: dict) -> str:
 
 async def handle_lldb_next(mgr: SessionManager, args: dict) -> str:
     session_id = args.get("session_id", "")
-    instructions = args.get("instructions", False)
+    instructions = _bool_param(args.get("instructions"), default=False)
 
     try:
         session = mgr.get(session_id)
@@ -441,7 +456,7 @@ async def handle_lldb_finish(mgr: SessionManager, args: dict) -> str:
 
 async def handle_lldb_backtrace(mgr: SessionManager, args: dict) -> str:
     session_id = args.get("session_id", "")
-    full = args.get("full", False)
+    full = _bool_param(args.get("full"), default=False)
     limit = args.get("limit")
 
     try:
@@ -861,6 +876,13 @@ class McpServer:
     async def _dispatch_tool(self, msg_id: Any, params: dict) -> dict:
         name = params.get("name", "")
         args = params.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError as exc:
+                return self._tool_error(msg_id, f"'arguments' was a string but not valid JSON: {exc}")
+        if not isinstance(args, dict):
+            return self._tool_error(msg_id, f"'arguments' must be an object; got {type(args).__name__}.")
 
         handler = ALL_HANDLERS.get(name)
         if handler is None:

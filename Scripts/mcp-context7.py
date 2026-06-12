@@ -339,6 +339,13 @@ class McpServer:
     async def _dispatch_tool(self, msg_id: Any, params: dict) -> dict:
         name = params.get("name", "")
         args = params.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError as exc:
+                return self._tool_error(msg_id, f"'arguments' was a string but not valid JSON: {exc}")
+        if not isinstance(args, dict):
+            return self._tool_error(msg_id, f"'arguments' must be an object; got {type(args).__name__}.")
 
         handler = ALL_HANDLERS.get(name)
         if handler is None:

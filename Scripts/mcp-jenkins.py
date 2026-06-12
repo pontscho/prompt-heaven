@@ -169,14 +169,42 @@ PARAM_ALIASES = {
 }
 
 
-def _resolve_aliases(params: dict) -> dict:
-    """Return a new dict with aliased parameter names resolved to canonical."""
+def _resolve_aliases(params: Any) -> dict:
+    """Return a new dict with aliased parameter names resolved to canonical.
+
+    Accepts a dict or a JSON-encoded object string (the wire sometimes sends
+    params as a serialised string).
+    """
+    if params is None:
+        return {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"'params' was a string but not valid JSON: {exc}.")
+    if not isinstance(params, dict):
+        raise ValueError("'params' must be an object or JSON-encoded object string.")
     resolved: dict = {}
     for key, value in params.items():
         canonical = PARAM_ALIASES.get(key, key)
         if canonical not in resolved:
             resolved[canonical] = value
     return resolved
+
+
+def _bool_param(value: Any, default: bool = False) -> bool:
+    """Coerce a possibly-stringy value to bool.
+
+    The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+    naive bool("false") would wrongly yield True.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+    return bool(value)
 
 
 def _normalize_project(raw: Optional[str]) -> Optional[str]:
@@ -930,7 +958,7 @@ def handle_get_queue_item(params: dict) -> dict:
     queue_url = params.get("queue_url")
     if not queue_url:
         raise ValueError("Missing required parameter: queue_url")
-    wait = bool(params.get("wait", False))
+    wait = _bool_param(params.get("wait", False))
     timeout_sec = int(params.get("timeout_sec", 60))
     if timeout_sec < 1:
         timeout_sec = 1
@@ -1087,7 +1115,7 @@ def handle_list_jobs(params: dict) -> dict:
         return missing
 
     job_path = params.get("job_path") or ""
-    recursive = bool(params.get("recursive", False))
+    recursive = _bool_param(params.get("recursive", False))
     name_filter = params.get("filter") or params.get("name_filter")
     max_depth = int(params.get("max_depth", 3))
 
@@ -1215,9 +1243,9 @@ def handle_get_test_report(params: dict) -> dict:
     if not job_path:
         raise ValueError("Missing required parameter: job_path")
     build_number = str(params.get("build_number") or "lastBuild")
-    only_failed = bool(params.get("only_failed", False))
+    only_failed = _bool_param(params.get("only_failed", False))
     max_cases = int(params.get("max_cases", 100))
-    include_stack = bool(params.get("include_stack", False))
+    include_stack = _bool_param(params.get("include_stack", False))
 
     api_path = _format_job_path(job_path)
     url = f"{JenkinsConfig.endpoint}/{api_path}/{build_number}/testReport/api/json"
@@ -1663,9 +1691,10 @@ _ALIAS_TARGETS = set(HANDLERS.keys()) - _CANONICAL_FUNCTIONS
 def handle_jenkins_call(arguments: dict) -> dict:
     function = (arguments.get("function") or arguments.get("f") or "").strip()
     params_in = arguments.get("params") or arguments.get("p") or {}
-    if not isinstance(params_in, dict):
-        return _err(f"'params' must be an object, got {type(params_in).__name__}")
-    params = _resolve_aliases(params_in)
+    try:
+        params = _resolve_aliases(params_in)
+    except ValueError as exc:
+        return _err(str(exc))
     params = _apply_project_scope(params)
 
     if not function:
@@ -1849,6 +1878,22 @@ class McpServer:
 
         if tool_name != "jenkins_call":
             return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
+
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError as exc:
+                return self._result(msg_id, {
+                    "content": [{"type": "text", "text":
+                        f"'arguments' was a string but not valid JSON: {exc}."}],
+                    "isError": True,
+                })
+        if not isinstance(arguments, dict):
+            return self._result(msg_id, {
+                "content": [{"type": "text", "text":
+                    f"'arguments' must be an object; got {type(arguments).__name__}."}],
+                "isError": True,
+            })
 
         try:
             result = handle_jenkins_call(arguments)

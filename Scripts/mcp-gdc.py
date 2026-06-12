@@ -57,6 +57,21 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
     return value
 
 
+def _bool_param(value, default=False):
+    """Coerce a possibly-stringy value to bool.
+
+    The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+    naive bool("false") would wrongly yield True.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+    return bool(value)
+
+
 # ============================================================
 # Log helpers (FIX-4: bounded log growth)
 # ============================================================
@@ -714,7 +729,7 @@ async def handle_press_key(mgr: GdcManager, args: dict) -> str:
 
 async def handle_handle_dialog(mgr: GdcManager, args: dict) -> str:
     session = await mgr.get_selected()
-    accept = args.get("accept", True)
+    accept = _bool_param(args.get("accept"), default=True)
     prompt_text = args.get("prompt_text", "")
 
     params: dict = {"accept": accept}
@@ -761,7 +776,7 @@ async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
     session = await mgr.get_selected()
     fmt = args.get("format", "png")
     quality = args.get("quality", 80)
-    full_page = args.get("full_page", False)
+    full_page = _bool_param(args.get("full_page"), default=False)
 
     params: dict = {"format": fmt}
     if fmt == "jpeg":
@@ -1073,7 +1088,7 @@ async def handle_wait_for_selector(mgr: GdcManager, args: dict) -> str:
     session = await mgr.get_selected()
     selector = args.get("selector", "")
     timeout = float(args.get("timeout", 10.0))
-    visible = args.get("visible", False)
+    visible = _bool_param(args.get("visible"), default=False)
 
     if not selector:
         return "Error: selector required"
@@ -1518,6 +1533,13 @@ class McpServer:
     async def _dispatch_tool(self, msg_id: Any, params: dict) -> dict:
         name = params.get("name", "")
         args = params.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError as exc:
+                return self._tool_error(msg_id, f"'arguments' was a string but not valid JSON: {exc}")
+        if not isinstance(args, dict):
+            return self._tool_error(msg_id, f"'arguments' must be an object; got {type(args).__name__}.")
 
         handler = ALL_HANDLERS.get(name)
         if handler is None:

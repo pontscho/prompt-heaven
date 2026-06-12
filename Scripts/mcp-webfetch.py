@@ -560,6 +560,15 @@ class McpServer:
 	def _handle_tool_call(self, msg_id: Any, params: dict) -> dict:
 		tool_name = params.get("name", "")
 		arguments = params.get("arguments") or {}
+		if isinstance(arguments, str):
+			try:
+				arguments = json.loads(arguments)
+			except json.JSONDecodeError as exc:
+				return self._result(msg_id, {
+					"content": [{"type": "text", "text":
+						f"'arguments' was a string but not valid JSON: {exc}"}],
+					"isError": True,
+				})
 		if tool_name != "webfetch_call":
 			return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
 		if not isinstance(arguments, dict):

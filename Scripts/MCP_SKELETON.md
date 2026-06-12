@@ -321,7 +321,85 @@ Every server (including the former "lite trio" lldb/gdc/context7) exposes BOTH
 
 ---
 
-## 7. Convergence checklist (per file)
+## 7. Argument & parameter hygiene (dual-level JSON decode + bool coercion)
+
+Two wire realities every server must tolerate, because clients (and LLMs) are
+inconsistent about how they serialize tool input.
+
+### 7a. Dual-level JSON-string decode
+
+The `tools/call` payload can arrive JSON-**encoded as a string** at *two* levels:
+the whole `arguments` object, and the inner `params` object. Both must be
+decoded defensively — a server that only accepts a native dict rejects
+otherwise-valid calls.
+
+**Level 1 — `arguments`, in `_handle_tool_call`** (decode, then the existing
+dict guard catches anything still not an object):
+
+```python
+if isinstance(arguments, str):
+    try:
+        arguments = json.loads(arguments)
+    except json.JSONDecodeError:
+        pass
+if not isinstance(arguments, dict):
+    return self._result(msg_id, {
+        "content": [{"type": "text", "text":
+            f"'arguments' must be an object; got {type(arguments).__name__}."}],
+        "isError": True,
+    })
+```
+
+**Level 2 — `params`, in the param normalizer** (`_resolve_aliases` /
+`_ensure_dict`), raising a clean `ValueError` the dispatcher turns into an error
+result:
+
+```python
+if isinstance(params, str):
+    try:
+        params = json.loads(params)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"'params' was a string but not valid JSON: {exc}. "
+            "Pass params as an object, not a JSON-encoded string."
+        )
+if not isinstance(params, dict):
+    raise ValueError(f"'params' must be an object or JSON-encoded object string; "
+                     f"got {type(params).__name__}.")
+```
+
+> The `force-error` smoke check still passes: it sends a non-dict at the JSON-RPC
+> `params` level (not `arguments`/inner-`params`), so `params.get(...)` in the
+> dispatcher raises and bubbles to the `-32603` catch-all unchanged.
+
+### 7b. Boolean coercion — `_bool_param`
+
+The wire frequently carries booleans as strings (`"false"`, `"0"`, `"no"`),
+where a naive `bool("false")` is `True` — the opposite of intent. Every server
+that reads a boolean flag routes it through one canonical helper:
+
+```python
+def _bool_param(value, default=False):
+    """Coerce a possibly-stringy value to bool."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+    return bool(value)
+```
+
+Read **every** boolean flag through it —
+`analyze = _bool_param(params.get("analyze", False))` — never
+`bool(params.get(...))` or a bare truthy test. Servers with no boolean parameter
+omit the helper (no dead code). One server (`mcp-tshark`) keeps an older
+`(params, key, default)` signature; behavior is identical, only the call shape
+differs.
+
+---
+
+## 8. Convergence checklist (per file)
 
 - [ ] shebang + PEP-723 block (`dependencies = []` if stdlib-only; exact list otherwise)
 - [ ] `import logging`; module-level `log = logging.getLogger("SERVER_NAME")`; no `debug_log`, no `DEBUG`/`_log_file` globals
@@ -330,4 +408,6 @@ Every server (including the former "lite trio" lldb/gdc/context7) exposes BOTH
 - [ ] `ping` → `_result(msg_id, {})`; notifications → `None`; unknown → `-32601`
 - [ ] run() loop wraps the handler in try/except and **writes** a `-32603` reply
 - [ ] `main()` canonical logging block; `--debug` + `--log-file` present
+- [ ] `_handle_tool_call` decodes a string `arguments` (JSON) before the dict guard (§7a)
+- [ ] param normalizer decodes a string `params` (JSON); every bool flag read via `_bool_param` (§7a/§7b)
 - [ ] `MARKDOWN_MODE` / subprocess `finally` cleanup left intact where present

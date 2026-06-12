@@ -841,12 +841,27 @@ def filter_output(raw_lines: List[str], filter_cfg: Optional[dict]) -> Tuple[Lis
 	if grep_pattern:
 		lines = _apply_grep(lines, grep_pattern,
 		                    cfg.get("grep_context", 0),
-		                    cfg.get("invert_grep", False))
+		                    _bool_param(cfg.get("invert_grep", False)))
 	head = cfg.get("head")
 	tail = cfg.get("tail")
 	if head or tail:
 		lines = _apply_head_tail(lines, head, tail)
 	return lines, total
+
+
+def _bool_param(value, default=False):
+	"""Coerce a possibly-stringy value to bool.
+
+	The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+	naive bool("false") would wrongly yield True.
+	"""
+	if isinstance(value, bool):
+		return value
+	if value is None:
+		return default
+	if isinstance(value, str):
+		return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+	return bool(value)
 
 
 def _resolve_aliases(params: dict, aliases: dict) -> dict:
@@ -1299,7 +1314,7 @@ def handle_test(cfg: Dict[str, Any], params: dict, project_root: str) -> dict:
 		return {"error": str(exc)}
 	if not targets:
 		return {"error": "missing 'targets' parameter"}
-	auto_build = params.get("auto_build", True)
+	auto_build = _bool_param(params.get("auto_build", True))
 	header = (f"# forge test ({len(targets)} target(s))" if len(targets) > 1
 	          else f"# forge test {targets[0]}")
 	sections = [header]
@@ -1657,6 +1672,11 @@ class McpServer:
 		arguments = params.get("arguments") or {}
 		if tool_name != "forge_call":
 			return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
+		if isinstance(arguments, str):
+			try:
+				arguments = json.loads(arguments)
+			except json.JSONDecodeError:
+				pass
 		if not isinstance(arguments, dict):
 			return self._result(msg_id, {
 				"content": [{"type": "text", "text":
