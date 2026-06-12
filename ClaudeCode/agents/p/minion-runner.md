@@ -1,7 +1,7 @@
 ---
 name: p:minion-runner
 description: `Iterative script executor. Runs a Python/bash script or command, analyzes failures, fixes the script, and retries until success or max iterations reached. Use for scripts that need trial-and-error to work. Returns final result or a clear failure report. Keeps the main context clean of iteration noise. IMPORTANT: Use this INSTEAD OF running scripts or commands inline when retries or fixes may be needed. Never run-fix-retry loops directly in the main context — always delegate to this agent.`
-tools: Bash, Read, Write, Edit
+tools: Bash, Read, Write, Edit, mcp__mcp-gdc__gdc_call
 model: sonnet
 color: red
 ---
