@@ -47,6 +47,7 @@ SERVERS = [
     {"file": "mcp-lua-lsp.py",  "tool": "luals_call",    "args": []},
     {"file": "mcp-clangd.py",   "tool": "clangd_call",   "args": []},
     {"file": "mcp-cuda.py",     "tool": "cuda_call",     "args": []},
+    {"file": "mcp-postgres.py", "tool": "postgres_call", "args": ["--host", "127.0.0.1:1", "--dbname", "x"]},
 ]
 
 READ_TIMEOUT = 8.0  # seconds to wait for a single response line
