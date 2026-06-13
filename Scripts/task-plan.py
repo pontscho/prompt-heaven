@@ -73,6 +73,26 @@ class Task:
 		}
 
 
+def extract_description(block: str) -> str:
+	"""Extract a task description, supporting inline and YAML block scalar (|, >) forms."""
+	# Block scalar: `description: |` / `>` (optional chomp/indent indicators),
+	# content lives on the following more-indented lines.
+	block_match = re.search(
+		r'^(?P<indent>[ \t]*)description:[ \t]*[|>][+\-0-9]*[ \t]*\n'
+		r'(?P<body>(?:(?P=indent)[ \t]+.*\n?|[ \t]*\n)*)',
+		block, re.MULTILINE)
+	if block_match:
+		lines = [ln.strip() for ln in block_match.group('body').splitlines()]
+		return ' '.join(ln for ln in lines if ln).strip()
+
+	# Inline form: `description: text` or `description: "text"`
+	inline_match = re.search(r'description:[ \t]*["\']?([^"\'\n]+?)["\']?[ \t]*$', block, re.MULTILINE)
+	if inline_match:
+		return inline_match.group(1).strip()
+
+	return ""
+
+
 def parse_requirements_yaml(yaml_file: str) -> Dict[str, Task]:
 	"""Parse tasks from requirements.yaml using regex (no yaml library dependency)."""
 	with open(yaml_file, 'r') as f:
@@ -105,10 +125,8 @@ def parse_requirements_yaml(yaml_file: str) -> Dict[str, Task]:
 
 		task = Task(task_id_match.group(1))
 
-		# Extract description
-		desc_match = re.search(r'description:\s*["\']?([^"\'\n]+)["\']?', block)
-		if desc_match:
-			task.description = desc_match.group(1).strip()
+		# Extract description (handles inline and block scalar |/> forms)
+		task.description = extract_description(block)
 
 		# Extract file_path
 		file_match = re.search(r'file_path:\s*(\S+)', block)
@@ -285,8 +303,7 @@ def print_task_status(tasks: Dict[str, Task]):
 	for task in sorted_tasks:
 		icon = STATUS_ICONS.get(task.status, "⏳")
 		status_str = f"{icon} {task.status}"
-		desc = task.description[:desc_width-3] + "..." if len(task.description) > desc_width-3 else task.description
-		print(f"  {task.task_id:<{max_id_width}} | {status_str:<{max_status_width}} | {task.size:<4} | {desc:<{desc_width}}")
+		print(f"  {task.task_id:<{max_id_width}} | {status_str:<{max_status_width}} | {task.size:<4} | {task.description}")
 
 	return total_width
 
