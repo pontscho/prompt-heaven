@@ -34,8 +34,10 @@ def update_task_status(yaml_file, status, task_ids):
             if re.match(rf'^\s*-?\s*task_id:\s*{re.escape(task_id)}\s*$', lines[i]):
                 task_found = True
 
-                # Find the status line within the next 10 lines
-                for j in range(i + 1, min(i + 11, len(lines))):
+                # Find the status line, scanning to the next task / top-level key.
+                # (A fixed N-line window misses status: when a long `description: |`
+                #  block scalar precedes it; the break conditions below bound the scan.)
+                for j in range(i + 1, len(lines)):
                     # Check if we've hit the next task or end of tasks section
                     if re.match(r'^\s*-?\s*task_id:', lines[j]) or re.match(r'^\w+:', lines[j]):
                         break
