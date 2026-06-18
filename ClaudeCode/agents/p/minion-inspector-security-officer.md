@@ -54,7 +54,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 
 | Domain | Tool |
 |---|---|
-| C / C++ / Objective-C symbol analysis (buffer overflows, format strings, UAF, integer overflow) | `clangd_call` (clangd MCP) — `symbol_context`, `find_references`, `hover`, `diagnostics`, `document_outline` |
+| C / C++ / Objective-C symbol analysis (buffer overflows, format strings, UAF, integer overflow) | `purity_call` (purity MCP, clangd-backed) — `symbol_context`, `find_references`, `type_at`, `diagnostics`, `outline` |
 | Lua symbol analysis (sandbox escape, FFI misuse, metatable poisoning) | `luals_call` (luals MCP) — same set, type-aware |
 | Secrets scan, vulnerability pattern grep, file discovery, non-code file reads (CMakeLists, package.json, requirements.txt, .env) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Git operations (branch diff, log, status, show, blame) | `git_call` (git MCP) — **never** `Bash("git ...")` for read-only ops |
@@ -63,7 +63,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 
 **Batching is mandatory.** Independent secrets-scan patterns, file outlines, and symbol contexts go in a single parallel message.
 
-**LSP-misses-are-findings rule:** if `clangd`/`luals` returns nothing for a sensitive function the plan/code claims to call (e.g., `validate_token`, `escape_html`, `parameterize_query`), that itself is a HIGH or CRITICAL finding — don't paper over it with a text search.
+**LSP-misses-are-findings rule:** if purity's clangd-backed functions / `luals` return nothing for a sensitive function the plan/code claims to call (e.g., `validate_token`, `escape_html`, `parameterize_query`), that itself is a HIGH or CRITICAL finding — don't paper over it with a text search.
 
 ## CRITICAL CONSTRAINTS
 
@@ -197,7 +197,7 @@ For every sink (SQL exec, command exec, deserializer, HTML insertion, file open 
 
 1. **Sink** — record `file:line` of the dangerous call and the exact argument that carries untrusted data.
 2. **Propagators** — walk upstream from the sink to find the function(s) that pass the data through:
-   - C/C++: `clangd_find_references` on the variable / function param + `clangd_symbol_context` on the enclosing function
+   - C/C++: `find_references` on the variable / function param + `symbol_context` on the enclosing function
    - Lua: `luals_find_references` + `luals_symbol_context`
    - Other languages: `purity_call.search_for_pattern` on the variable/param name, then read the surrounding context
    - Record each propagator as `file:line` with a one-line note on what it does to the data (passthrough, concat, encode, strip, validate, …)
@@ -216,7 +216,7 @@ For every sink (SQL exec, command exec, deserializer, HTML insertion, file open 
 
 The trace goes into the finding's `Data-flow trace:` block in the findings file. PARTIAL and UNABLE_TO_TRACE findings are NOT dropped — flag them anyway with the trace status, so the Verifier can attempt closure or escalate.
 
-**MCP-routing reminder for FIND:** for every sink in a `.c`/`.cpp`/`.h` file you MUST use `clangd_call` for the trace (not grep). For every sink in a `.lua` file you MUST use `luals_call`. Falling back to text search for sinks in LSP-supported languages is a violation — see the MCP TOOL ROUTING section at the top.
+**MCP-routing reminder for FIND:** for every sink in a `.c`/`.cpp`/`.h` file you MUST use `purity_call`'s clangd-backed semantic functions for the trace (not grep). For every sink in a `.lua` file you MUST use `luals_call`. Falling back to text search for sinks in LSP-supported languages is a violation — see the MCP TOOL ROUTING section at the top.
 
 ---
 
@@ -239,7 +239,7 @@ You are the PARANOID VERIFIER. You have NO memory of how the Finder reasoned abo
 
 - Read the data-flow trace from the finding.
 - If `Trace status = TRACED` and the source is a real untrusted input (HTTP body, query param, header, file read, env var, IPC msg, external API response) → reachability HOLDS. Continue to (2).
-- If `Trace status = PARTIAL` or `UNABLE_TO_TRACE`, attempt ONE more closure pass with `clangd_find_references` / `luals_find_references` / `purity_call.search_for_pattern` to identify the source. If you close the gap → reachability HOLDS. If you cannot → reachability FAILS → **SUPPRESSED** with reason `unreachable-from-untrusted-input — <one-line evidence>`.
+- If `Trace status = PARTIAL` or `UNABLE_TO_TRACE`, attempt ONE more closure pass with `find_references` / `luals_find_references` / `purity_call.search_for_pattern` to identify the source. If you close the gap → reachability HOLDS. If you cannot → reachability FAILS → **SUPPRESSED** with reason `unreachable-from-untrusted-input — <one-line evidence>`.
 - If the source bottoms out at a compile-time constant, an internal enum, a value already validated upstream, or code-controlled state with no user influence → reachability FAILS → **SUPPRESSED** with reason `source-is-trusted — <one-line evidence>`.
 
 **(2) FRAMEWORK-DEFAULT SUPPRESSION check.**
@@ -342,7 +342,7 @@ For each category in scope (i.e. each domain TRIAGE flagged), walk the questions
 ### Language-specific patterns
 
 **C / C++:**
-- Banned functions: `strcpy`, `strcat`, `sprintf`, `gets`, `scanf("%s", …)` without length — use `clangd_find_references` to enumerate sites
+- Banned functions: `strcpy`, `strcat`, `sprintf`, `gets`, `scanf("%s", …)` without length — use `find_references` to enumerate sites
 - Format-string vulns: `printf(user_input)` instead of `printf("%s", user_input)`
 - Use-after-free, double-free, missing NULL check after `malloc`
 - Integer overflow in size calculations leading to undersized buffer alloc
@@ -721,7 +721,7 @@ The checklist applies per phase. Skip items that don't apply to your phase.
 ### Universal (all phases)
 - [ ] PHASE directive resolved correctly (legacy / triage / find / verify) and the matching workflow was the only one executed
 - [ ] Output format matches the phase variant (no legacy report in triage/find/verify; no stray triage/find/verify blocks in legacy)
-- [ ] For C/C++ symbols: used clangd MCP, NOT text search
+- [ ] For C/C++ symbols: used purity_call (clangd-backed), NOT text search
 - [ ] For Lua symbols: used luals MCP, NOT text search
 - [ ] For git operations: used `mcp-git`, NOT `Bash("git ...")`
 - [ ] Independent tool calls were batched in parallel

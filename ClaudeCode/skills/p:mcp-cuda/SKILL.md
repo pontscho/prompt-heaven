@@ -2,31 +2,30 @@
 name: p:mcp-cuda
 description: >
   NEVER use the built-in `Grep`, `Glob`, or `Read`-and-search tools for CUDA symbol
-  navigation. They are deprecated for CUDA (`.cu`, `.cuh`) work. ALWAYS use
-  `cuda_call` ONLY. If you attempt to use a built-in tool to find a CUDA definition,
-  reference, type, or diagnostic, I will consider it a failure.
+  navigation. They are deprecated for CUDA (`.cu`, `.cuh`) work. Use `purity_call`'s
+  semantic functions (compiler-accurate, clangd-backed, CUDA SDK aware) for ALL symbol
+  navigation. If you attempt to use a built-in text-matching tool to find a CUDA
+  definition, reference, type, or diagnostic, I will consider it a failure.
 
-  MANDATORY — before you Read, Edit, or Write any `.cu` or `.cuh` file, you MUST
-  invoke this skill first and use `cuda_call` for ALL symbol navigation. Using
-  grep, find, sed, awk, ctags, cscope, or any text-matching hack for CUDA code is
-  a violation. For plain C/C++ files (`.c`/`.cpp`/`.h`/`.hpp`) use `p:mcp-clangd`
-  instead; for CUDA files use THIS skill.
+  MANDATORY — before you Read, Edit, or Write any `.cu` or `.cuh` file, use
+  `purity_call` for ALL symbol navigation: find_definition, find_references,
+  find_implementations, type_at, outline, symbol, symbol_context, symbol_change_impact,
+  inlay_hints, diagnostics. Using grep, find, sed, awk, ctags, cscope, or any
+  text-matching hack for CUDA code is a violation. The standalone `cuda_call` tool
+  still exists and works in parallel, but `purity_call` is the unified entry point —
+  see `p:mcp-purity` for the full function reference. For plain C/C++ files
+  (`.c`/`.cpp`/`.h`/`.hpp`) use `p:mcp-clangd`.
 
-  Provides compiler-accurate CUDA code intelligence via clangd LSP with CUDA SDK
-  awareness (auto-discovers `CUDA_PATH` / `nvcc` / `/usr/local/cuda-*`, detects
-  `sm_xx` arch from `compile_commands.json` or CMakeCache.txt). Functions: find
-  definitions, references, type definitions, implementations, diagnostics, hover
-  types, document outline, refactoring impact, workspace symbol search, inlay
-  hints, deduced types.
-  One tool: `cuda_call`. 14 functions. All analysis calls are freely batchable.
+  `purity_call`'s backend is CUDA SDK aware: it auto-discovers `CUDA_PATH` / `nvcc` /
+  `/usr/local/cuda-*` and detects `sm_xx` arch from `compile_commands.json` or
+  CMakeCache.txt when it spins up clangd for a CUDA project.
 
   Tool-name mapping for CUDA work — these are NOT optional substitutions:
-    - GREP for CUDA symbols    = mcp__mcp-cuda__cuda_call with function "cuda_find_references" or "cuda_workspace_symbols"
-    - GLOB for CUDA symbols    = mcp__mcp-cuda__cuda_call with function "cuda_workspace_symbols"
-    - "go to definition"       = mcp__mcp-cuda__cuda_call with function "cuda_find_definition" / "cuda_find_definition_at"
-    - "type of expression"     = mcp__mcp-cuda__cuda_call with function "cuda_hover"
-    - "deduced type (auto)"    = mcp__mcp-cuda__cuda_call with function "cuda_deduced_type_at"
-    - "compile errors"         = mcp__mcp-cuda__cuda_call with function "cuda_diagnostics"
+    - GREP for CUDA symbols    = mcp__mcp-purity__purity_call with function "find_references" or "symbol"
+    - GLOB for CUDA symbols    = mcp__mcp-purity__purity_call with function "symbol"
+    - "go to definition"       = mcp__mcp-purity__purity_call with function "find_definition"
+    - "type of expression"     = mcp__mcp-purity__purity_call with function "type_at"
+    - "compile errors"         = mcp__mcp-purity__purity_call with function "diagnostics"
 
   Trigger conditions — invoke IMMEDIATELY when ANY of these are true:
     - User asks anything about CUDA code, kernels, `__global__`, `__device__`,
@@ -63,198 +62,73 @@ triggers:
   - compile_commands.json
 ---
 
-# cuda-mcp — CUDA Code Intelligence
+# cuda — CUDA Code Intelligence (now via `purity_call`)
 
-The MCP server (`mcp-cuda.py`) exposes **one tool**: `cuda_call` — universal dispatcher for all 14 CUDA functions. Called without `function` returns server status (including detected CUDA SDK and arch). All operations go through `cuda_call(function=..., params={...})`.
+CUDA symbol navigation is provided by **`purity_call`**, the unified entry point that
+embeds clangd (CUDA SDK aware: auto-discovers `CUDA_PATH`/`nvcc`/`/usr/local/cuda-*`
+and `sm_xx` arch). The standalone `cuda_call` tool still exists and works in parallel,
+but **prefer `purity_call`**. The full function reference lives in the **`p:mcp-purity`**
+skill ("Semantic / Symbol Navigation" section); this page is the CUDA quick reference.
 
-Backed by clangd with `--cuda-path` / `--cuda-gpu-arch` flags. CUDA SDK and arch are auto-discovered on init; you only need to pass `project_root`.
-
-## How to call any function
+## How to call
 
 ```
-mcp__mcp-cuda__cuda_call(function="<function_name>", params={...parameters...})
+mcp__mcp-purity__purity_call(function="<name>", params={...})
 ```
 
 **Example — find a kernel definition:**
 ```
-mcp__mcp-cuda__cuda_call(function="cuda_find_definition", params={"symbol_name":"forward_moe"})
+mcp__mcp-purity__purity_call(function="find_definition", params={"symbol":"forward_moe"})
 ```
 
-## Tool Reference (14 functions)
+## Functions (clangd-backed, CUDA aware, via `purity_call`)
 
-### cuda_call (status check)
-Returns server status, project root, CUDA SDK path, and target arch when called without `function`.
-```json
-{}
-```
+| Function | Purpose | Key params |
+|-|-|-|
+| `find_definition` | Definition of a symbol/kernel | `symbol` **or** `relative_path`+`line`+`character` |
+| `find_references` | All references to a symbol | `symbol` **or** position; `max_results` |
+| `find_implementations` | Implementations at a position | `relative_path`+`line`+`character` |
+| `type_at` | Type / hover at a position (incl. `auto`) | `relative_path`+`line`+`character` |
+| `outline` | Structural outline of a file | `relative_path` |
+| `symbol` | Workspace symbol search (fuzzy) | `query`; `limit` |
+| `symbol_context` | Definition + references in one call (preferred) | `symbol`; `max_references` |
+| `symbol_change_impact` | Def + refs + call hierarchy (impact analysis) | `symbol`; `call_hierarchy_depth` |
+| `inlay_hints` | Inlay hints for a range | `relative_path`; `start_line`, `end_line` |
+| `diagnostics` | Compiler diagnostics for a file | `relative_path` |
 
-### cuda_init
-Initialize the clangd-CUDA session for a project. Auto-discovers CUDA SDK (CUDA_PATH → CUDA_HOME → nvcc on PATH → `/usr/local/cuda-*` → `/usr/local/cuda` → CMakeCache.txt) and auto-detects `sm_xx` arch from `compile_commands.json` or CMakeCache.txt (fallback `sm_86`).
-```json
-{
-"project_root":"/abs/path/to/project",  // required
-"cuda_path":"/usr/local/cuda-12.4",     // optional — explicit CUDA SDK
-"cuda_arch":"sm_90",                    // optional — target arch
-"compile_commands_dir":"build",         // optional — where compile_commands.json lives
-"clangd_path":"clangd"                  // optional — clangd binary
-}
-```
+- Lines/characters are **1-based**; paths resolve against `--project-root`.
+- The clangd backend inits **lazily** on the first semantic call; for a CUDA project it
+  discovers the CUDA SDK and `sm_xx` arch automatically. The first call can take tens
+  of seconds while clangd indexes.
+- Prefer `symbol_context` over separate def+refs; prefer `symbol_change_impact` before
+  refactoring.
 
-### cuda_find_definition
-Find the definition of a CUDA symbol by name.
-```json
-{
-"symbol_name":"forward_moe",
-"context_lines":5
-}
-```
+## Legacy `cuda_*` names
 
-### cuda_find_definition_at
-Find definition at a file position (1-based line/character).
-```json
-{"path":"src/kernel.cu","line":42,"character":10,"context_lines":5}
-```
+The old `cuda_*` function names still work — both through the standalone `cuda_call`
+tool and as direct aliases inside `purity_call`. Canonical mapping:
 
-### cuda_find_references
-Find all references to a symbol by name.
-```json
-{"symbol_name":"forward_moe","max_results":50,"context_lines":3}
-```
-
-### cuda_find_references_at
-Find references at a file position.
-```json
-{"path":"src/kernel.cu","line":42,"character":10,"max_results":50,"context_lines":3}
-```
-
-### cuda_find_implementations_at
-Find implementations of an interface/virtual method at a position.
-```json
-{"path":"include/iface.cuh","line":15,"character":5,"context_lines":5}
-```
-
-### cuda_workspace_symbols
-Fuzzy search for symbols across the workspace.
-```json
-{"query":"forward_","limit":50}
-```
-
-### cuda_document_outline
-Structural outline of a CUDA file.
-```json
-{"path":"src/kernel.cu"}
-```
-
-### cuda_symbol_context
-Definition + references for a symbol in one call. Preferred over separate `cuda_find_definition` + `cuda_find_references`.
-```json
-{"symbol_name":"forward_moe","max_references":20,"context_lines":5}
-```
-
-### cuda_inlay_hints
-Inlay hints (parameter names, deduced types) for a file range.
-```json
-{"path":"src/kernel.cu","start_line":1,"end_line":9999,"limit":100}
-```
-
-### cuda_symbol_change_impact
-Comprehensive impact analysis before changing a symbol: definition + references + call hierarchy.
-```json
-{"symbol_name":"forward_moe","max_references":50,"call_hierarchy_depth":1}
-```
-
-### cuda_hover
-Hover info (type, documentation) at a position.
-```json
-{"path":"src/kernel.cu","line":10,"character":5}
-```
-
-### cuda_diagnostics
-Compiler diagnostics (errors, warnings) for a file. Opens the file and waits for clangd's `publishDiagnostics` push.
-```json
-{"path":"src/kernel.cu","timeout":10.0}
-```
-
-### cuda_deduced_type_at
-Deduced type at a position (useful for `auto`, `decltype`, lambda return types in device code).
-```json
-{"path":"src/kernel.cu","line":20,"character":8}
-```
-
-## Location object format
-
-All location objects returned by this server follow this structure:
-```json
-{
-"path":"src/kernel.cu",          // relative to project_root
-"uri":"file:///abs/path/...",
-"range":{                        // 0-based LSP
-"start":{"line":9,"character":4},
-"end":{"line":9,"character":15}
-},
-"range_human":{                  // 1-based human-readable
-"start":{"line":10,"character":5},
-"end":{"line":10,"character":16}
-},
-"line_text":"forward_moe<<<grid,block>>>(args);"
-}
-```
-
-## Parallel call strategy
-
-**Send multiple independent `cuda_call`s in a single response.** Server serializes execution, but only ONE model API round-trip is needed.
-
-### Safe to batch (read-only)
-
-|Function|Batch notes|
+| Old `cuda_*` | `purity_call` |
 |-|-|
-|`cuda_find_definition`|multiple symbols|
-|`cuda_find_definition_at`|multiple positions|
-|`cuda_find_references`|multiple symbols|
-|`cuda_find_references_at`|multiple positions|
-|`cuda_find_implementations_at`||
-|`cuda_workspace_symbols`||
-|`cuda_document_outline`|multiple files|
-|`cuda_hover`|multiple positions|
-|`cuda_inlay_hints`||
-|`cuda_diagnostics`|multiple files|
-|`cuda_deduced_type_at`|multiple positions|
+| `cuda_find_definition`, `cuda_find_definition_at` | `find_definition` |
+| `cuda_find_references`, `cuda_find_references_at` | `find_references` |
+| `cuda_find_implementations_at` | `find_implementations` |
+| `cuda_hover`, `cuda_deduced_type_at` | `type_at` |
+| `cuda_document_outline` | `outline` |
+| `cuda_workspace_symbols` | `symbol` |
+| `cuda_symbol_context` | `symbol_context` |
+| `cuda_symbol_change_impact` | `symbol_change_impact` |
+| `cuda_inlay_hints` | `inlay_hints` |
+| `cuda_diagnostics` | `diagnostics` |
+| `cuda_init` | (no-op — backend inits lazily) |
 
-- `cuda_symbol_context` batches def + refs internally — prefer it.
-- `cuda_symbol_change_impact` batches def + refs + call hierarchy — prefer it for impact analysis.
-
-## Common workflows
-
-### Understand an unknown kernel
-```
-[BATCH] cuda_symbol_context {symbol_name:"forward_moe"}
- + cuda_document_outline {path:"src/kernel.cu"}
- + cuda_diagnostics {path:"src/kernel.cu"}
-```
-
-### Refactoring impact check
-```
-cuda_symbol_change_impact {symbol_name:"forward_moe", max_references:50}
-```
-
-### Multiple kernel definitions
-```
-[BATCH] cuda_find_definition {symbol_name:"forward_moe"}
- + cuda_find_definition {symbol_name:"backward_moe"}
- + cuda_find_definition {symbol_name:"top_k_router"}
-```
-
-### Diagnostics across CUDA translation units
-```
-[BATCH] cuda_diagnostics {path:"src/kernel.cu"}
- + cuda_diagnostics {path:"src/launcher.cu"}
- + cuda_diagnostics {path:"src/router.cu"}
-```
+The `_at` variants fold onto their non-`_at` counterpart; position vs name is detected
+from the params. Param aliases: `symbol`→`symbol_name`, `col`/`column`/`char`→`character`,
+`max`/`count`→`max_results`, `depth`→`call_hierarchy_depth`; the path key is `relative_path`.
 
 ## Notes
 
-- **Lines and characters** in `params` are **1-based** (human-readable). Server converts to 0-based LSP internally.
-- **`cuda_path` / `cuda_arch`**: auto-discovered on init from environment, `nvcc`, `compile_commands.json`, or CMakeCache.txt. Override only if detection picks wrong values.
-- **`compile_commands_dir`**: pass this if `compile_commands.json` lives in a build subdirectory (e.g. `build/`).
-- **Path resolution**: relative paths are resolved against `project_root`.
-- **Plain C/C++ files (`.c`/`.cpp`/`.h`/`.hpp`)** are handled by `p:mcp-clangd`, NOT this skill.
+- A CUDA-mode backend uses a `.cu`-only compile DB; in a mixed C/C++ + CUDA project the
+  C/C++ coverage may be reduced (a known Phase-0 limitation).
+- `compile_commands.json` in a build subdir is auto-discovered.
+- For plain C/C++ files (`.c`/`.cpp`/`.h`/`.hpp`), see `p:mcp-clangd`.

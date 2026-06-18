@@ -51,14 +51,14 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for verifying sy
 
 | Domain | Tool |
 |---|---|
-| C / C++ / Objective-C symbol verification | `clangd_call` (clangd MCP) — `symbol_context`, `find_definition`, `find_references`, `document_outline`, `hover`, `diagnostics` |
+| C / C++ / Objective-C symbol verification | `purity_call` (purity MCP, clangd-backed) — `symbol_context`, `find_definition`, `find_references`, `outline`, `type_at`, `diagnostics` |
 | Lua symbol verification | `luals_call` (luals MCP) — same set, type-aware |
 | File existence checks, content search, non-code file reads (yaml/json/md/CMakeLists) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Build system / build target validation | `forge_call` (forge MCP) — function `"list"` / `"describe"` / `"validate"` when `project-forge.yaml` exists |
 
 **Batching is mandatory.** File lookups + symbol checks for multiple plan items go in a single parallel message.
 
-**LSP-misses-are-findings rule:** if `clangd` / `luals` returns nothing for a symbol the plan references, that itself is a finding (CRITICAL or HIGH depending on context) — don't paper over it with a text search.
+**LSP-misses-are-findings rule:** if purity's clangd-backed functions / `luals` return nothing for a symbol the plan references, that itself is a finding (CRITICAL or HIGH depending on context) — don't paper over it with a text search.
 
 ## CRITICAL CONSTRAINTS
 
@@ -118,8 +118,8 @@ Batch ALL file lookups in a single message.
 
 For C/C++ symbols referenced in the plan:
 ```
-clangd_symbol_context(symbol) — definition + references
-clangd_document_outline(file) — verify file structure matches plan's assumptions
+symbol_context(symbol) — definition + references
+outline(file) — verify file structure matches plan's assumptions
 ```
 
 For Lua symbols referenced in the plan:
@@ -262,7 +262,7 @@ If no findings at a severity level, omit that subsection entirely.
 **Plan says:** "Modify `parse_auth_token()` in `src/auth.c` to accept a new parameter"
 
 **Approach:**
-1. `clangd_symbol_context { symbol_name: "parse_auth_token" }`
+1. `symbol_context { symbol_name: "parse_auth_token" }`
 2. Symbol not found → search with purity as fallback
 3. Finding: **[C1] Referenced function does not exist** — `parse_auth_token` not found in codebase. Nearest match: `auth_parse_token()` at `src/auth/token.c:87`
 
@@ -271,7 +271,7 @@ If no findings at a severity level, omit that subsection entirely.
 **Plan says:** "Add new field `expires_at` to `struct Session`"
 
 **Approach:**
-1. `clangd_symbol_context { symbol_name: "Session" }` — find definition and all references
+1. `symbol_context { symbol_name: "Session" }` — find definition and all references
 2. Found 23 reference sites across 8 files
 3. Plan only mentions modifying 2 files
 4. Finding: **[H1] Incomplete change propagation** — `struct Session` is referenced in 8 files, plan only covers 2. Missing: `session_serialize()` at `src/session.c:142`, `session_log()` at `src/debug.c:67`, ...
@@ -292,7 +292,7 @@ If no findings at a severity level, omit that subsection entirely.
 - [ ] Every plan reference was verified against the live codebase
 - [ ] Every finding includes `file:line` evidence
 - [ ] Every finding has a severity rating
-- [ ] Findings that reference symbols used clangd/luals, NOT text search
+- [ ] Findings that reference symbols used purity (clangd-backed) / luals, NOT text search
 - [ ] Independent tool calls were batched in parallel
 - [ ] Missing items are based on codebase evidence, not speculation
 - [ ] Verdict matches the actual severity distribution

@@ -52,7 +52,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 
 | Domain | Tool |
 |---|---|
-| C / C++ / Objective-C symbol verification | `clangd_call` (clangd MCP) — `symbol_context`, `find_definition`, `find_references`, `document_outline`, `hover`, `diagnostics` |
+| C / C++ / Objective-C symbol verification | `purity_call` (purity MCP, clangd-backed) — `symbol_context`, `find_definition`, `find_references`, `outline`, `type_at`, `diagnostics` |
 | Lua symbol verification | `luals_call` (luals MCP) — same set, type-aware |
 | File existence, content search, non-code file reads | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Git operations (diff / log / status / show / blame / branch list / merge-base) | `git_call` (git MCP) — **never** `Bash("git ...")` for read-only ops. The change-detection step (`git diff HEAD~N --name-only`, `git status`, `git log --oneline`) goes through `git_call`. |
@@ -60,7 +60,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 
 **Batching is mandatory.** Independent file outlines, diagnostics, and symbol contexts go in a single parallel message.
 
-**LSP-misses-are-findings rule:** if `clangd` / `luals` returns nothing for a symbol the plan/yaml says was implemented, that's a strong signal — the item is MISSING. Don't paper over it with a text search.
+**LSP-misses-are-findings rule:** if purity's clangd-backed functions / `luals` return nothing for a symbol the plan/yaml says was implemented, that's a strong signal — the item is MISSING. Don't paper over it with a text search.
 
 ## CRITICAL CONSTRAINTS
 
@@ -133,8 +133,8 @@ For each changed file, batch reads to understand what was actually implemented:
 
 For C/C++ files:
 ```
-clangd_document_outline(file) — what symbols exist now
-clangd_diagnostics(file) — any compile errors
+outline(file) — what symbols exist now
+diagnostics(file) — any compile errors
 ```
 
 For Lua files:
@@ -156,8 +156,8 @@ For symbols the plan specifically mentions should be created or modified:
 
 C/C++:
 ```
-clangd_symbol_context(symbol) — verify definition exists and is wired up
-clangd_hover(file, line, col) — verify signatures match plan
+symbol_context(symbol) — verify definition exists and is wired up
+type_at(file, line, col) — verify signatures match plan
 ```
 
 Lua:
@@ -296,7 +296,7 @@ Synthesize all findings into the output format below.
 **Plan says:** "Add `validate_token()` function to `src/auth.c`"
 
 **Approach:**
-1. `clangd_symbol_context { symbol_name: "validate_token" }` — found at `src/auth.c:142`
+1. `symbol_context { symbol_name: "validate_token" }` — found at `src/auth.c:142`
 2. Read the function body — matches planned signature and behavior
 3. Check references — called from `src/middleware.c:67` as planned
 4. Status: **DONE**
@@ -306,7 +306,7 @@ Synthesize all findings into the output format below.
 **Plan says:** "Add session expiry with configurable timeout and cleanup"
 
 **Approach:**
-1. `clangd_symbol_context { symbol_name: "session_expire" }` — found at `src/session.c:89`
+1. `symbol_context { symbol_name: "session_expire" }` — found at `src/session.c:89`
 2. Read implementation — timeout is hardcoded (not configurable), cleanup function exists but is never called
 3. Status: **PARTIAL** — expiry logic exists but timeout not configurable, cleanup not wired up
 
@@ -339,7 +339,7 @@ Synthesize all findings into the output format below.
 - [ ] Readiness verdict matches the actual status distribution
 - [ ] Completion percentage is accurate
 - [ ] Checklist items are actionable and specific
-- [ ] For C/C++ symbols: used clangd MCP, NOT text search
+- [ ] For C/C++ symbols: used purity_call (clangd-backed), NOT text search
 - [ ] For Lua symbols: used luals MCP, NOT text search
 - [ ] Independent tool calls were batched in parallel
 - [ ] No files were modified

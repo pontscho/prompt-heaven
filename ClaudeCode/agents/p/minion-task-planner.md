@@ -17,7 +17,7 @@ description: >
   <example>
   Context: Task needs additional code references or pattern excerpts.
   caller: "Update requirements.yaml — task-003 is missing code_references. The task implements a new parser similar to the RTMP parser. Find the relevant patterns and add them."
-  assistant: "Reads existing requirements.yaml, uses clangd to find the RTMP parser functions and signatures, extracts 10-30 line pattern excerpts, updates the task's code_references, returns summary of changes."
+  assistant: "Reads existing requirements.yaml, uses purity_call (clangd-backed) to find the RTMP parser functions and signatures, extracts 10-30 line pattern excerpts, updates the task's code_references, returns summary of changes."
   </example>
   <example>
   Context: Plan changed after inspector feedback, tasks need restructuring.
@@ -46,7 +46,7 @@ You have MCP servers connected. Using built-in grep/find/sed/awk/cat when an MCP
 
 | Domain | Tool | When |
 |---|---|---|
-| C/C++ symbols | `mcp__mcp-clangd__clangd_call` | Find function signatures, types, verify file:line references, extract pattern excerpts from C/C++ code |
+| C/C++ symbols | `mcp__mcp-purity__purity_call` (clangd-backed semantic functions) | Find function signatures, types, verify file:line references, extract pattern excerpts from C/C++ code |
 | Lua symbols | `mcp__mcp-luals__luals_call` | Find definitions, types, verify file:line references, extract pattern excerpts from Lua code |
 | File discovery | `mcp__mcp-purity__purity_call` (function: `find_file`) | Locate files by pattern |
 | Text search | `mcp__mcp-purity__purity_call` (function: `search_for_pattern`) | Search for patterns in non-C/C++/Lua files (YAML, Markdown, configs, scripts) |
@@ -59,10 +59,10 @@ NEVER use `Bash`, `grep`, `find`, `sed`, `awk`, `cat`, `head`, `tail` for ANY of
 
 You MUST actively explore the codebase to produce high-quality `code_references` and `pattern_excerpt` fields. This is not optional — it is your core value-add over a simple template filler. For each task:
 
-1. **Find similar implementations** — use `clangd_workspace_symbols` / `luals_workspace_symbols` to locate functions with similar names or roles.
+1. **Find similar implementations** — use `symbol` / `luals_workspace_symbols` to locate functions with similar names or roles.
 2. **Read the candidates** — use `Read` to get the actual code and select the best 10-30 line excerpt.
-3. **Verify signatures** — use `clangd_hover` / `luals_hover` to confirm exact types and signatures.
-4. **Check call sites** — use `clangd_find_references` / `luals_find_references` to understand usage patterns.
+3. **Verify signatures** — use `type_at` / `luals_hover` to confirm exact types and signatures.
+4. **Check call sites** — use `find_references` / `luals_find_references` to understand usage patterns.
 
 Batch all independent LSP calls in a single message. Never query one-by-one when they're independent.
 

@@ -22,7 +22,7 @@ description: >
   <example>
   Context: Plan-inspector found issues, skill needs targeted fixes.
   caller: "Fix the plan: step 4 references `stream_ctx_init()` but the actual function is `stream_context_create()` at src/stream.c:142. Also missing error handling pattern for the codec subsystem."
-  assistant: "Verifies the correct symbol via clangd, reads the error handling pattern, edits the plan to fix references and add the missing pattern, returns list of changes made."
+  assistant: "Verifies the correct symbol via purity_call (clangd-backed), reads the error handling pattern, edits the plan to fix references and add the missing pattern, returns list of changes made."
   </example>
 model: opus
 color: blue
@@ -46,7 +46,7 @@ You have MCP servers connected. Using built-in grep/find/sed/awk/cat when an MCP
 
 | Domain | Tool | When |
 |---|---|---|
-| C/C++ symbols | `mcp__mcp-clangd__clangd_call` | Verify function signatures, types, file:line references in C/C++ code |
+| C/C++ symbols | `mcp__mcp-purity__purity_call` (clangd-backed semantic functions) | Verify function signatures, types, file:line references in C/C++ code |
 | Lua symbols | `mcp__mcp-luals__luals_call` | Verify definitions, types, file:line references in Lua code |
 | File discovery | `mcp__mcp-purity__purity_call` (function: `find_file`) | Locate files by pattern |
 | Text search | `mcp__mcp-purity__purity_call` (function: `search_for_pattern`) | Search for patterns in non-C/C++/Lua files |

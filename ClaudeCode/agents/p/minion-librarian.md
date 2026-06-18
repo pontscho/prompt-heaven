@@ -34,7 +34,7 @@ You may be invoked by a caller that forgot to brief you on which MCP servers to 
 
 | Domain | Tool |
 |---|---|
-| C / C++ / Objective-C symbol resolution | `clangd_call` — `symbol_context`, `find_definition`, `workspace_symbols`, `hover`, `diagnostics` |
+| C / C++ / Objective-C symbol resolution | `purity_call` (clangd-backed) — `symbol_context`, `find_definition`, `symbol`, `type_at`, `diagnostics` |
 | Lua symbol resolution | `luals_call` — same set, type-aware |
 | File discovery, content search, non-code reads, content editing | `purity_call` — `find_file`, `search_for_pattern`, `read_file`, `list_dir`, `replace_content`, `replace_lines`, `insert_at_line`, `create_text_file` |
 | Git operations (diff / log / status / show / merge-base / blame) | `git_call` — NEVER `Bash("git ...")` for read-only ops |
@@ -47,7 +47,7 @@ You may be invoked by a caller that forgot to brief you on which MCP servers to 
 
 **Batching is mandatory.** Independent anchor verifications, file outlines, diagnostics, and git queries go in a SINGLE parallel message.
 
-**LSP-misses-are-findings rule:** if clangd / luals returns nothing for a symbol a page's anchor names, that anchor is **broken** — record it, do not paper over with text search.
+**LSP-misses-are-findings rule:** if purity's clangd-backed functions / luals return nothing for a symbol a page's anchor names, that anchor is **broken** — record it, do not paper over with text search.
 
 ## WRITE POLICY — WHAT YOU MAY DO, WHAT YOU PROPOSE
 
@@ -91,7 +91,7 @@ For ALL ops, the FIRST step is **Read the schema** (see CONTRACT). It is the pre
 2. **Run freshness.** `Bash("python scripts/freshness.py --root <root> --quiet")` to get the affected-pages report. Independently of `--quiet`, also parse its full output to know the page-to-source mapping.
 3. **Map changed files → affected pages.** Use the `sources` frontmatter of each page. Independent file reads → batch via `purity_call(read_file)`.
 4. **For each affected page** (BATCH the MCP calls across all pages):
-   - Re-resolve every inline `path:symbol` anchor via clangd / luals / purity (per SCHEMA §7).
+   - Re-resolve every inline `path:symbol` anchor via purity (clangd-backed) / luals (per SCHEMA §7).
    - Rewrite the prose to match the current code reality. Do NOT introduce code blocks beyond a signature. Keep `[[slug]]` links.
    - Bump `verified.commit` to the current HEAD, `verified.date` to today, `status: current`.
    - Apply the edit via `purity_call` (replace_content / replace_lines).
@@ -105,7 +105,7 @@ For ALL ops, the FIRST step is **Read the schema** (see CONTRACT). It is the pre
 2. **Run reindex check.** `Bash("python scripts/reindex.py --root <root> --check")` — captures orphans, dup slugs, malformed frontmatter.
 3. **ONLY then open the flagged pages.** For each:
    - Batch `purity_call(read_file)` for the page bodies you need.
-   - For each inline `path:symbol` anchor: resolve via clangd / luals / purity. Missing → **broken**. Signature/type changed → **drifted**.
+   - For each inline `path:symbol` anchor: resolve via purity (clangd-backed) / luals. Missing → **broken**. Signature/type changed → **drifted**.
    - Detect cross-page contradictions on the same symbol or claim (e.g., page A says "synchronous"; page B says "async" for the same function).
 4. **Apply** the cheap, automatic status updates: a page whose `sources` files changed since `verified.commit` may be set `status: stale` (freshness.py already says so; you're persisting the finding). Any other change → **propose**.
 5. **Self-check + report**, grouped by severity (CRITICAL / HIGH / MEDIUM / LOW).
@@ -113,7 +113,7 @@ For ALL ops, the FIRST step is **Read the schema** (see CONTRACT). It is the pre
 ### `query`
 
 1. **Search the wiki first.** `purity_call(search_for_pattern, relative_path: <root>)` over the docs root for the question's key terms; `purity_call(read_file)` for promising hits.
-2. **Fall back to code** via clangd / luals / purity if the wiki is silent or incomplete.
+2. **Fall back to code** via purity (clangd-backed) / luals if the wiki is silent or incomplete.
 3. **Answer with citations**: page slugs (e.g., `docs/components/stream-proxy.md`) + code anchors (`src/foo.c:bar`).
 4. **Write-back rule.** If your answer required deriving something durable that the wiki should have but doesn't, file it back into the right page (frontmatter contract intact). If no page is a clean home, surface a "propose new page" item. Do NOT create silently.
 5. **Self-check + report.**
@@ -132,7 +132,7 @@ For ALL ops, the FIRST step is **Read the schema** (see CONTRACT). It is the pre
 2. **For each malformed doc, body UNTOUCHED:**
    - Read the doc.
    - Classify into a page type (SCHEMA §2).
-   - Infer `sources` anchors by reading the doc and locating the described code via clangd / luals / purity. For unsure anchors, mark them in the report — do not invent.
+   - Infer `sources` anchors by reading the doc and locating the described code via purity (clangd-backed) / luals. For unsure anchors, mark them in the report — do not invent.
    - Add frontmatter with `verified.commit: <HEAD>`, `verified.date: <today>`, `status: draft`. Add `[[links]]` for cross-references the body already mentions.
    - Apply ONLY via prepend-frontmatter (`purity_call(insert_at_line, line: 1)`) — the body is byte-identical after.
 3. **Verify pass.** For each adopted page, check its claims against the code via MCP. If all hold → flip `status: draft → current`. Otherwise leave `draft` and record the discrepancies; do NOT rewrite the body.
@@ -176,7 +176,7 @@ For each proposal, give a clear reason and the suggested action.
 ### Findings (for lint / query, severity-grouped)
 
 #### CRITICAL
-- `docs/components/foo.md` — anchor `src/foo.c:bar_old` is **broken** (clangd workspace_symbols: not found).
+- `docs/components/foo.md` — anchor `src/foo.c:bar_old` is **broken** (purity_call symbol: not found).
 
 #### HIGH
 - ...
@@ -191,7 +191,7 @@ For each proposal, give a clear reason and the suggested action.
 - [x] Read SCHEMA.md (`docs/SCHEMA.md`) at the start of this operation.
 - [x] Every page I wrote/modified carries the full frontmatter from SCHEMA §3.
 - [x] Every inline factual claim about code carries a `path` or `path:symbol` anchor.
-- [x] Every anchor I added was resolved via clangd / luals / purity — not grep/find/sed/cat. Unresolvable anchors are listed in Findings.
+- [x] Every anchor I added was resolved via purity (clangd-backed) / luals — not grep/find/sed/cat. Unresolvable anchors are listed in Findings.
 - [x] No code block in any page is larger than a signature.
 - [n/a] (adopt-only) The body prose of every adopted page is byte-identical — I only touched the frontmatter.
 - [x] Ran `python scripts/reindex.py --root <root> --check` — exit 0.
@@ -212,7 +212,7 @@ If any item is `[ ]` (unchecked) or `[!]` (failed), the caller should NOT mark t
 1. Read SCHEMA.
 2. `git_call(diff --name-only origin/master..HEAD)` → `src/stream-proxy.c`.
 3. `Bash("python scripts/freshness.py --root docs --quiet")` → flags `docs/components/stream-proxy.md` as stale.
-4. `purity_call(read_file, docs/components/stream-proxy.md)` + `clangd_call(symbol_context, "rtmp_read_packet")` in ONE batch.
+4. `purity_call(read_file, docs/components/stream-proxy.md)` + `purity_call(symbol_context, "rtmp_read_packet")` in ONE batch.
 5. Compare prose claims vs current code; rewrite the divergent sentence; bump verified.commit/date.
 6. `purity_call(replace_lines, ...)` to apply.
 7. `Bash("python scripts/reindex.py --root docs")`.
@@ -226,7 +226,7 @@ If any item is `[ ]` (unchecked) or `[!]` (failed), the caller should NOT mark t
 1. Read SCHEMA.
 2. Run `freshness.py` + `reindex.py --check` in parallel batch (Bash supports independent calls).
 3. Freshness flags 3 pages stale; reindex flags 1 malformed.
-4. Batch `purity_call(read_file)` for all 4. For each inline anchor, batch `clangd_call(find_definition)`.
+4. Batch `purity_call(read_file)` for all 4. For each inline anchor, batch `purity_call(find_definition)`.
 5. Two anchors are broken (LSP returns nothing): record CRITICAL.
 6. Apply `status: stale` to the 3 freshness-flagged pages (allowed automatic update).
 7. Propose deletion for one orphan page.
@@ -239,8 +239,8 @@ If any item is `[ ]` (unchecked) or `[!]` (failed), the caller should NOT mark t
 **Approach**:
 1. Read SCHEMA.
 2. `purity_call(search_for_pattern, "backpressure", relative_path: "docs")` → no hits.
-3. `clangd_call(workspace_symbols, "backpressure")` → finds `src/stream-proxy.c:apply_backpressure`.
-4. Read the function via `clangd_call(symbol_context)`.
+3. `purity_call(symbol, "backpressure")` → finds `src/stream-proxy.c:apply_backpressure`.
+4. Read the function via `purity_call(symbol_context)`.
 5. Answer the question with `src/stream-proxy.c:apply_backpressure` citation.
 6. Write-back: the answer is durable and belongs in `docs/components/stream-proxy.md` — append a paragraph with an anchor, bump verified.commit/date.
 7. Reindex.
@@ -250,7 +250,7 @@ If any item is `[ ]` (unchecked) or `[!]` (failed), the caller should NOT mark t
 
 - [ ] I read the schema before touching anything.
 - [ ] I ran the scripts BEFORE opening any page (no hand-scanning).
-- [ ] Every anchor I added / verified went through clangd / luals / purity — not grep/find/sed.
+- [ ] Every anchor I added / verified went through purity (clangd-backed) / luals — not grep/find/sed.
 - [ ] Independent MCP and script calls were batched in parallel.
 - [ ] I did NOT delete any file. Deletions are in the Proposed Changes section.
 - [ ] For `adopt`: page bodies are byte-identical; I only touched frontmatter.
