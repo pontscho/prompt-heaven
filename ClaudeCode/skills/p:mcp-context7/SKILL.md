@@ -1,5 +1,5 @@
 ---
-name: p:context7-mcp
+name: p:mcp-context7
 description: >
   Full API reference for the Context7 documentation MCP server. Use when retrieving
   up-to-date library documentation, code examples, or resolving library IDs via Context7.

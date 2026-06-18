@@ -24,7 +24,7 @@ which defines an explicitly-invoked workflow — see [[overview]].
 
 ## Structure
 
-- **Minimal skill**: a single `SKILL.md` — e.g. `ClaudeCode/skills/p:clangd-mcp/SKILL.md`.
+- **Minimal skill**: a single `SKILL.md` — e.g. `ClaudeCode/skills/p:mcp-clangd/SKILL.md`.
 - **Extended skill**: `SKILL.md` + scripts + reference — e.g.
   `ClaudeCode/skills/p:static-linking/` ships `SKILL.md`, `README.md`,
   `build-static.py`, `verify-static-linking.py`, `example-CMakeLists.txt`.
@@ -37,12 +37,12 @@ description is what Claude matches against to auto-activate the skill.
 
 | Skill | Purpose |
 |-------|---------|
-| `p:clangd-mcp` / `p:lua-lsp-mcp` / `p:cuda-mcp` | LSP code-intelligence routing for C/C++, Lua, CUDA |
-| `p:purity-mcp` | File ops (search/glob/edit) routing |
-| `p:forge` | `project-forge.yaml` build orchestration |
-| `p:skill-writer` / `p:agent-writer` | Authoring new skills and agents |
+| `p:mcp-clangd` / `p:mcp-luals` / `p:mcp-cuda` | LSP code-intelligence routing for C/C++, Lua, CUDA |
+| `p:mcp-purity` | File ops (search/glob/edit) routing |
+| `p:mcp-forge` | `project-forge.yaml` build orchestration |
+| `p:writer-skill` / `p:writer-agent` | Authoring new skills and agents |
 | `p:wiki` | This documentation-wiki engine |
 | `p:recap` | Session recap into the AI Soul memory system |
 
-The MCP-routing skills (`p:*-mcp`) all forbid built-in tool fallback, mirroring
+The MCP-routing skills (`p:mcp-*`) all forbid built-in tool fallback, mirroring
 the mandate documented in [[overview]].

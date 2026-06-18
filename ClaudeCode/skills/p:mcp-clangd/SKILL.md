@@ -1,5 +1,5 @@
 ---
-name: p:clangd-mcp
+name: p:mcp-clangd
 description: >
   NEVER use the built-in `Grep`, `Glob`, or `Read`-and-search tools for C/C++ symbol
   navigation. They are deprecated for C, C++, and Objective-C work. ALWAYS use
@@ -10,7 +10,7 @@ description: >
   `.hpp`, `.hh`, `.hxx`, `.m`, or `.mm` file, you MUST invoke this skill first and
   use `clangd_call` for ALL symbol navigation. Using grep, find, sed, awk, ctags,
   cscope, or any text-matching hack for C/C++ code is a violation. CUDA files
-  (`.cu`/`.cuh`) are handled by `p:cuda-mcp` — NOT this skill.
+  (`.cu`/`.cuh`) are handled by `p:mcp-cuda` — NOT this skill.
 
   Provides compiler-accurate code intelligence via clangd LSP: find definitions,
   references, type definitions, implementations, diagnostics, hover types, document

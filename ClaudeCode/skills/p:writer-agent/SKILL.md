@@ -1,5 +1,5 @@
 ---
-name: p:agent-writer
+name: p:writer-agent
 description: Expert guide for writing effective ClaudeCode agent and skill prompts following 2026 best practices. Use when creating or improving subagents (.claude/agents/*.md) or skills (SKILL.md files). Provides templates, patterns, and quality guidelines.
 tools: Read, Write, Edit, Glob, Grep
 ---

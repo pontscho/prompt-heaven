@@ -590,7 +590,7 @@ python3 ~/.claude/scripts/task-update.py completed task-001
 
 ---
 
-### p:agent-writer
+### p:writer-agent
 
 **Purpose:** Claude Code agent prompt writing best practices.
 
@@ -609,7 +609,7 @@ python3 ~/.claude/scripts/task-update.py completed task-001
 
 ---
 
-### p:skill-writer
+### p:writer-skill
 
 **Purpose:** Creating and improving Claude Code skills.
 
@@ -791,8 +791,8 @@ OpenCode/
     ├── p:code-analysis/       # Analysis commands guide
     ├── p:requirements/        # Requirements management
     ├── p:project-docs/        # Documentation standards
-    ├── p:agent-writer/        # Agent writing guide
-    ├── p:skill-writer/        # Skill writing guide
+    ├── p:writer-agent/        # Agent writing guide
+    ├── p:writer-skill/        # Skill writing guide
     └── p:ctest.h/             # C testing framework
 ```
 

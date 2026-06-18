@@ -1,5 +1,5 @@
 ---
-name: p:minion-wiki-janitor
+name: p:minion-librarian
 description: `Executor for the p:wiki skill — performs ingest/lint/query/init/adopt against a docs/ wiki in its own sandbox so the main context never sees page reads, MCP anchor checks, or freshness/reindex script output. Reads docs/SCHEMA.md (or the skill's default) before any op. Applies non-destructive updates directly (frontmatter bumps, INDEX regen, anchor re-verification, ingest prose rewrites); surfaces destructive proposals (file deletion, page splits, unrelated status downgrades, new pages) in a structured report for the caller to approve and execute. Forbidden from deleting files. Returns a self-check section mirroring the p:wiki contract.`
 model: opus
 color: green

@@ -1,5 +1,5 @@
 ---
-name: p:article-writer
+name: p:writer-article
 description: `Collaborative writing partner for turning ideas into polished blog posts and articles. Helps with outlining, structuring, drafting section-by-section, improving hooks, giving feedback, and final polish. Use when user wants to write a blog post, article, or essay from an idea or rough outline.`
 tools: Read, Write, Edit
 ---

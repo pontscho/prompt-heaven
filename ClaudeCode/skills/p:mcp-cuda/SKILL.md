@@ -1,5 +1,5 @@
 ---
-name: p:cuda-mcp
+name: p:mcp-cuda
 description: >
   NEVER use the built-in `Grep`, `Glob`, or `Read`-and-search tools for CUDA symbol
   navigation. They are deprecated for CUDA (`.cu`, `.cuh`) work. ALWAYS use
@@ -9,7 +9,7 @@ description: >
   MANDATORY — before you Read, Edit, or Write any `.cu` or `.cuh` file, you MUST
   invoke this skill first and use `cuda_call` for ALL symbol navigation. Using
   grep, find, sed, awk, ctags, cscope, or any text-matching hack for CUDA code is
-  a violation. For plain C/C++ files (`.c`/`.cpp`/`.h`/`.hpp`) use `p:clangd-mcp`
+  a violation. For plain C/C++ files (`.c`/`.cpp`/`.h`/`.hpp`) use `p:mcp-clangd`
   instead; for CUDA files use THIS skill.
 
   Provides compiler-accurate CUDA code intelligence via clangd LSP with CUDA SDK
@@ -257,4 +257,4 @@ cuda_symbol_change_impact {symbol_name:"forward_moe", max_references:50}
 - **`cuda_path` / `cuda_arch`**: auto-discovered on init from environment, `nvcc`, `compile_commands.json`, or CMakeCache.txt. Override only if detection picks wrong values.
 - **`compile_commands_dir`**: pass this if `compile_commands.json` lives in a build subdirectory (e.g. `build/`).
 - **Path resolution**: relative paths are resolved against `project_root`.
-- **Plain C/C++ files (`.c`/`.cpp`/`.h`/`.hpp`)** are handled by `p:clangd-mcp`, NOT this skill.
+- **Plain C/C++ files (`.c`/`.cpp`/`.h`/`.hpp`)** are handled by `p:mcp-clangd`, NOT this skill.

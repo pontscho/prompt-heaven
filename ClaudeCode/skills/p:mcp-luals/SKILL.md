@@ -1,5 +1,5 @@
 ---
-name: p:lua-lsp-mcp
+name: p:mcp-luals
 description: >
   NEVER use the built-in `Grep`, `Glob`, or `Read`-and-search tools for Lua symbol
   navigation. They are deprecated for Lua work. ALWAYS use `luals_call` ONLY. If you

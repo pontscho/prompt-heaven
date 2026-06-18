@@ -1,5 +1,5 @@
 ---
-name: p:forge
+name: p:mcp-forge
 description: >
   MANDATORY when `project-forge.yaml` exists in the project root. ALL build,
   test, and clean operations MUST go through the `forge_call` MCP tool

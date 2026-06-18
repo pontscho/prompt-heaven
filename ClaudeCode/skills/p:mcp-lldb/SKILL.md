@@ -1,5 +1,5 @@
 ---
-name: p:lldb-mcp
+name: p:mcp-lldb
 description: >
   Full API reference for the LLDB MCP server. Use when debugging with LLDB via MCP:
   crash analysis, core dumps, live debugging, breakpoints, stepping, memory inspection.

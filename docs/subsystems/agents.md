@@ -44,4 +44,4 @@ The delegation heuristic lives in `ClaudeCode/CLAUDE.md`: build/test ->
 non-obvious failure -> `minion-watson`; plan written -> `minion-plan-inspector`
 then `minion-security-officer`; implementation finished ->
 `minion-impl-inspector` then `minion-security-officer`. Skills that author these
-files are covered in [[skills]] (`p:agent-writer`).
+files are covered in [[skills]] (`p:writer-agent`).

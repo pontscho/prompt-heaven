@@ -1714,7 +1714,7 @@ LISTED_TOOLS = [
             "NEVER use grep, awk, sed, python scripts, or any ad-hoc text-matching hack "
             "for Lua code navigation. This tool exists to replace them all "
             "with type-aware, LSP-accurate results.\n\n"
-            "IMPORTANT: Before first use, load the p:lua-lsp-mcp skill for full API reference "
+            "IMPORTANT: Before first use, load the p:mcp-luals skill for full API reference "
             "and parameter schemas."
         ),
         "inputSchema": {

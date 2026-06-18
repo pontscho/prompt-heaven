@@ -2075,7 +2075,7 @@ LISTED_TOOLS = [
             "NEVER use grep, awk, sed, python scripts, ctags, cscope, or any ad-hoc "
             "text-matching hack for CUDA code navigation. This tool exists to replace them all "
             "with compiler-accurate results.\n\n"
-            "IMPORTANT: Before first use, load the p:cuda-mcp skill for full API reference "
+            "IMPORTANT: Before first use, load the p:mcp-cuda skill for full API reference "
             "and parameter schemas."
         ),
         "inputSchema": {

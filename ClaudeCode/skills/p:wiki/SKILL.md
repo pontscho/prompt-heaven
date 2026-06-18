@@ -11,7 +11,7 @@ page, run an operation, or answer a query without satisfying them, you have
 violated this skill.
 
 - You MUST delegate the body of every operation (`ingest`, `lint`, `query`,
-  `init`, `adopt`) to the `p:minion-wiki-janitor` agent. Executing the steps
+  `init`, `adopt`) to the `p:minion-librarian` agent. Executing the steps
   inline in the main context — opening pages, running scripts, verifying
   anchors, rewriting prose — wastes the main context for work the minion was
   built to do. The skill is the **contract**; the janitor is the **executor**.
@@ -49,7 +49,7 @@ it with its own `docs/SCHEMA.md`; if that exists, it wins.
 
 ## Golden rules (violations are failures, not preferences)
 
-1. **DELEGATE TO `p:minion-wiki-janitor`.** Every operation runs in the janitor's
+1. **DELEGATE TO `p:minion-librarian`.** Every operation runs in the janitor's
    sandbox, not the main context. The janitor reads pages, verifies anchors,
    runs scripts, and applies non-destructive changes. The main context only
    sees the result. Executing the work inline is a violation.
@@ -77,7 +77,7 @@ it with its own `docs/SCHEMA.md`; if that exists, it wins.
 
 ## Delegation (MANDATORY)
 
-Every operation delegates execution to **`p:minion-wiki-janitor`** via the Task
+Every operation delegates execution to **`p:minion-librarian`** via the Task
 tool. Pass:
 
 - `op` — one of `ingest`, `lint`, `query`, `init`, `adopt`.
@@ -109,7 +109,7 @@ human prefers — but only with approval).
 Dispatch on the argument: `ingest`, `lint`, `query`, `init`, `adopt`. With no
 argument, ask which operation, or infer from the request.
 
-For each operation: (1) read SCHEMA.md, (2) invoke `p:minion-wiki-janitor` with
+For each operation: (1) read SCHEMA.md, (2) invoke `p:minion-librarian` with
 the params below, (3) review the report and surface it to the human, (4)
 execute any approved destructive proposals yourself.
 
@@ -215,7 +215,7 @@ NO, fix it or surface it explicitly — do NOT silently ship.
 
 **You (main agent):**
 
-- [ ] I delegated the operation to `p:minion-wiki-janitor` (or used the narrow
+- [ ] I delegated the operation to `p:minion-librarian` (or used the narrow
       inline-query exception and stated so explicitly).
 - [ ] I read SCHEMA.md (or `docs/SCHEMA.md` if present) before validating the
       janitor's report.
@@ -259,7 +259,7 @@ explicitly. Silence is a violation.
 
 - [SCHEMA.md](SCHEMA.md) — layout, page types, frontmatter anatomy, anchors,
   freshness model, lint rules, verification routing, anti-scope.
-- `p:minion-wiki-janitor` (`ClaudeCode/agents/p/minion-wiki-janitor.md`) — the
+- `p:minion-librarian` (`ClaudeCode/agents/p/minion-librarian.md`) — the
   executor agent. Reads the schema, runs the scripts, opens pages, verifies
   anchors via MCP, applies non-destructive updates, surfaces destructive
   proposals. Forbidden from deleting files — that stays with the main agent

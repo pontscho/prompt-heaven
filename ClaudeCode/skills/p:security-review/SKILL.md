@@ -583,7 +583,7 @@ When `--output` is `markdown` or `both`, write `docs/reviews/security-review-<ts
 ### Pure-markdown skill — fast-path
 
 ```
-/p:security-review ClaudeCode/skills/p:purity-mcp/SKILL.md
+/p:security-review ClaudeCode/skills/p:mcp-purity/SKILL.md
 ```
 
 → Triage returns NO_THREAT_SURFACE (markdown documentation, no code). Verdict APPROVE (fast-path).

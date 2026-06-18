@@ -768,7 +768,7 @@ LISTED_TOOLS = [
             "  - Ad-hoc shell → Bash. Build → mcp-compile. Code navigation → mcp-clangd.\n\n"
             "Prefer this OVER Bash(\"lldb ...\") — interactive LLDB in Bash doesn't work; "
             "this gives structured, scriptable access to all LLDB operations.\n\n"
-            "IMPORTANT: Before first use, load the p:lldb-mcp skill for full API reference "
+            "IMPORTANT: Before first use, load the p:mcp-lldb skill for full API reference "
             "and parameter schemas."
         ),
         "inputSchema": {

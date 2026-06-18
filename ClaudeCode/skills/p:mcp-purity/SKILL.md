@@ -1,5 +1,5 @@
 ---
-name: p:purity-mcp
+name: p:mcp-purity
 description: >
   NEVER use the built-in `Search`, `Grep`, or `Edit` tools. They are deprecated for this project.
   ALWAYS use `purity_call` ONLY. If you attempt to use a built-in tool, I will consider it a failure.

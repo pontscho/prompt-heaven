@@ -6,7 +6,7 @@
   "permissions": {
     "allow": [
       "Skill(p:requirements)",
-      "Skill(p:skill-writer)",
+      "Skill(p:writer-skill)",
       "Skill(p:implementation-plan)",
       "Skill(p:c)",
 

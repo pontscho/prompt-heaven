@@ -1,5 +1,5 @@
 ---
-name: p:gdc-mcp
+name: p:mcp-gdc
 description: >
   Use when working with Chrome DevTools via MCP: browser automation, DOM inspection, webpage network monitoring, screenshots,
   JavaScript execution, page navigation, form filling, input simulation, accessibility tree, console logs.
