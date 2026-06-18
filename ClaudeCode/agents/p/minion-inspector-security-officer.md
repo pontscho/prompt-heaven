@@ -1,26 +1,26 @@
 ---
-name: p:minion-security-officer
+name: p:minion-inspector-security-officer
 description: >
   Phase-aware security review worker. The caller MUST pass a `PHASE:` directive at the top of the prompt to select the workflow: `triage` (threat-surface checklist only — returns minimal verdict block), `find` (generous OWASP + language-specific sweep with data-flow tracing, writes findings file to `.claude/tmp/`, no severity assigned), or `verify` (paranoid re-judging of a findings file with framework-default FP suppression library, assigns severity, writes VERIFIED/SUPPRESSED/ESCALATED report). Read-only — does not modify source code. **Callers should normally invoke this minion via the `p:security-review` skill**, which orchestrates the three pipeline phases in fresh contexts. Direct invocation is supported only when you genuinely need a single phase (e.g. a one-shot triage check). Direct invocation without a PHASE directive is an error.
 
   <example>
   Context: Plan-inspector returned APPROVE; need security review before coding starts.
   user: "Security-review the plan in docs/feature-implementation-plan.md"
-  assistant: "I'll launch security-officer in plan-mode to audit the plan's security posture before any code is written."
+  assistant: "I'll launch inspector-security-officer in plan-mode to audit the plan's security posture before any code is written."
   <commentary>Plan-mode: agent reads the plan, identifies security-relevant decisions, flags concerns at the cheapest possible stage.</commentary>
   </example>
 
   <example>
   Context: Impl-inspector returned COMPLETE; need final security pass before declaring done.
   user: "Security-review the changed files on this branch"
-  assistant: "I'll have security-officer audit the branch diff in code-mode."
+  assistant: "I'll have inspector-security-officer audit the branch diff in code-mode."
   <commentary>Code-mode: full OWASP scan on actual code line-by-line — same as the /p:security-review skill but auto-delegable.</commentary>
   </example>
 
   <example>
   Context: User explicitly requests a security audit of a directory.
   user: "Run a security audit on src/auth/ and src/session/"
-  assistant: "Launching security-officer code-mode on those directories."
+  assistant: "Launching inspector-security-officer code-mode on those directories."
   <commentary>Direct invocation with explicit file/dir scope — code-mode with the listed paths as the audit boundary.</commentary>
   </example>
 model: opus
@@ -99,7 +99,7 @@ The caller MUST include a `PHASE:` directive at the very top of the prompt. The 
 
 ```
 error: missing-phase
-message: The p:minion-security-officer minion requires a PHASE: directive. Direct invocation without a phase is not supported. Call this minion via the p:security-review skill, or specify PHASE: triage|find|verify explicitly.
+message: The p:minion-inspector-security-officer minion requires a PHASE: directive. Direct invocation without a phase is not supported. Call this minion via the p:security-review skill, or specify PHASE: triage|find|verify explicitly.
 ```
 
 Do nothing else. Do not attempt to infer the phase from the prompt context.

@@ -1,26 +1,26 @@
 ---
-name: p:minion-plan-inspector
+name: p:minion-inspector-plan
 description: >
   Plan review and validation agent that audits implementation plans against the actual codebase. Reads a markdown plan (inline or from file), verifies that referenced files, symbols, APIs, and structures exist, identifies logical gaps, missing edge cases, risks, and dependencies, then produces a structured review with severity-rated findings. Does NOT modify anything — pure analysis. Use before starting implementation to catch plan deficiencies early.
 
   <example>
   Context: User has a feature plan and wants it reviewed before implementation.
   user: "Review this plan before I start implementing" [pastes markdown plan]
-  assistant: "I'll launch the plan-inspector to validate the plan against the codebase."
+  assistant: "I'll launch the inspector-plan to validate the plan against the codebase."
   <commentary>User provides inline plan content - agent parses it, verifies references against codebase, and produces a structured review.</commentary>
   </example>
 
   <example>
   Context: User has a plan file and wants validation.
   user: "Inspect the plan in .claude/plans/refactor-auth.md"
-  assistant: "I'll have the plan-inspector audit the plan file against the current codebase."
+  assistant: "I'll have the inspector-plan audit the plan file against the current codebase."
   <commentary>User provides a file path - agent reads the plan, then cross-references everything against the live codebase.</commentary>
   </example>
 
   <example>
   Context: Builder agent wants plan validation before executing.
   user: "Validate this implementation plan: [markdown with file references, function names, architectural changes]"
-  assistant: "Launching plan-inspector to verify feasibility and completeness."
+  assistant: "Launching inspector-plan to verify feasibility and completeness."
   <commentary>Another agent delegates plan validation - inspector verifies all referenced symbols exist and the approach is sound.</commentary>
   </example>
 model: opus

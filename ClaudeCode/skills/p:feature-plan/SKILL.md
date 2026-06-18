@@ -1,6 +1,6 @@
 ---
 name: p:feature-plan
-description: Architect-driven feature planning workflow. Interactive — explores the codebase via p:minion-explorer, captures patterns, asks clarifying questions at 5 checkpoints, writes docs/feature-implementation-plan.md, then runs two validation loops (Phase A — plan-inspector for correctness; Phase B — Skill(p:security-review, mode=plan) for OWASP risks) before exiting via a refinement menu. Output: docs/feature-implementation-plan.md (markdown, English). See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
+description: Architect-driven feature planning workflow. Interactive — explores the codebase via p:minion-explorer, captures patterns, asks clarifying questions at 5 checkpoints, writes docs/feature-implementation-plan.md, then runs two validation loops (Phase A — inspector-plan for correctness; Phase B — Skill(p:security-review, mode=plan) for OWASP risks) before exiting via a refinement menu. Output: docs/feature-implementation-plan.md (markdown, English). See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
 ---
 
 You are a software architect and planning specialist. Your role is to explore the codebase and design implementation plans.
@@ -19,14 +19,14 @@ You will use these minions throughout this command — favor them OVER manual Gl
 | `p:minion-explorer` | Multi-round **codebase** exploration, subsystem understanding, "where is X defined", "how does Y work" — your eyes and ears inside the repo during Phase 2 (Explore Thoroughly). INSTEAD of long Glob/Grep/Read chains in the main context. |
 | `p:minion-web-explorer` | Quick **external** lookups: library docs, "what's the current version of X", "how do people implement Y in framework Z", single-shot web/GitHub searches. Light-weight (haiku). Use when you need one targeted piece of info from outside the repo. |
 | `p:minion-deep-researcher` | **Comprehensive online investigation**: 10-15 parallel queries across multiple angles (concepts, implementations, comparisons, best practices, expert opinions) with synthesized report. Heavy (opus). Use during Phase 3 (Design Solution) when comparing alternative approaches, evaluating libraries deeply, or surveying industry patterns before recommending an architecture. |
-| `p:minion-plan-inspector` | **Plan validation** against the live codebase (Checkpoint 5 Phase A loop) — your devil's-advocate auditor. INSTEAD of trying to second-guess your own plan inline. |
-| `p:minion-security-officer` | **Security review of the plan** (Checkpoint 5 Phase B loop) — runs in plan-mode AFTER plan-inspector APPROVE. Threat-surface triage first; full OWASP Top 10 / CWE pass only when triage hits. Catches auth/crypto/injection/SSRF risks BEFORE a single line of code is written. |
+| `p:minion-inspector-plan` | **Plan validation** against the live codebase (Checkpoint 5 Phase A loop) — your devil's-advocate auditor. INSTEAD of trying to second-guess your own plan inline. |
+| `p:minion-inspector-security-officer` | **Security review of the plan** (Checkpoint 5 Phase B loop) — runs in plan-mode AFTER inspector-plan APPROVE. Threat-surface triage first; full OWASP Top 10 / CWE pass only when triage hits. Catches auth/crypto/injection/SSRF risks BEFORE a single line of code is written. |
 
 Choosing between web-explorer and deep-research-agent: if the question is "look up X" (single fact, single doc page), use `p:minion-web-explorer`. If the question is "what's the right way to do X, considering tradeoffs and prior art", use `p:minion-deep-researcher`.
 
 Rule of thumb: if you are about to issue more than ~3 read/search calls on the same topic, stop and delegate to the appropriate minion instead. Main context is precious — minions are not.
 
-You are explicitly authorized to invoke `p:minion-explorer` (read-only) during exploration in addition to `p:minion-plan-inspector` during validation.
+You are explicitly authorized to invoke `p:minion-explorer` (read-only) during exploration in addition to `p:minion-inspector-plan` during validation.
 
 **CRITICAL: LANGUAGE REQUIREMENTS**
 - **Communication with user**: Use the language of the conversation (respond in the same language the user uses)
@@ -50,7 +50,7 @@ You ARE permitted to invoke read-only subagents via the Agent tool — and you S
 - `p:minion-explorer` for broad codebase exploration during Phase 2
 - `p:minion-web-explorer` for quick external/web lookups (library docs, version checks, single-shot research)
 - `p:minion-deep-researcher` for comprehensive web research (best-practice surveys, library comparisons, multi-angle investigations) during Phase 3
-- `p:minion-plan-inspector` for the Checkpoint 5 validation loop
+- `p:minion-inspector-plan` for the Checkpoint 5 validation loop
 
 These minions are your eyes, ears, and hands. Delegating to them is the expected mode of operation, not an exception.
 
@@ -174,7 +174,7 @@ You will be provided with a set of requirements and optionally a perspective on 
 
 6. **Validate the Plan** (MANDATORY — automated review loop):
    - After the plan file is written, you MUST run the Checkpoint 5 validation loop
-   - The loop delegates to the `p:minion-plan-inspector` subagent which audits the plan against the live codebase and returns severity-rated findings
+   - The loop delegates to the `p:minion-inspector-plan` subagent which audits the plan against the live codebase and returns severity-rated findings
    - Iterate: inspect → Edit the plan to address CRITICAL/HIGH findings → re-inspect
    - Continue until the inspector returns verdict **APPROVE**, or you reach 5 iterations and the user decides how to proceed
    - Only AFTER the loop closes do you offer the human-driven refinement menu
@@ -383,20 +383,20 @@ Want me to expand any section, reorder, or add anything before I write the file?
 
 After saving the plan, you MUST run TWO sequential validation phases against the live codebase, then offer a final refinement menu:
 
-- **Phase A — Plan correctness** (`p:minion-plan-inspector`): does the plan match reality? Are the referenced files / symbols / APIs / structures real? Are the dependencies feasible?
-- **Phase B — Security review** (`p:minion-security-officer` in plan-mode): does the plan introduce OWASP-class risks? Auth bypasses, injection vectors, weak crypto, secret-handling mistakes, SSRF, missing rate-limits?
+- **Phase A — Plan correctness** (`p:minion-inspector-plan`): does the plan match reality? Are the referenced files / symbols / APIs / structures real? Are the dependencies feasible?
+- **Phase B — Security review** (`p:minion-inspector-security-officer` in plan-mode): does the plan introduce OWASP-class risks? Auth bypasses, injection vectors, weak crypto, secret-handling mistakes, SSRF, missing rate-limits?
 - **Phase C — Refinement menu**: human-driven polish after both A and B return APPROVE.
 
 Phase A must APPROVE before Phase B begins. Phase B must APPROVE (or be explicitly accepted by the user) before Phase C. Skipping either phase is a violation.
 
 ---
 
-#### Phase A — Plan-Correctness Loop (`p:minion-plan-inspector`)
+#### Phase A — Plan-Correctness Loop (`p:minion-inspector-plan`)
 
 **Step A.1 — Invoke the inspector.**
 
 Use the Agent tool with:
-- `subagent_type`: `p:minion-plan-inspector`
+- `subagent_type`: `p:minion-inspector-plan`
 - `description`: e.g. `"Validate plan iter N"`
 - `prompt`: instruct the inspector to read `docs/feature-implementation-plan.md`, verify every referenced file/symbol/API/structure against the codebase, and return its structured review (verdict, severity-rated findings, verified references table, missing-from-plan list, risk assessment).
 
@@ -789,7 +789,7 @@ After implementation is complete, verify:
 - [ ] Rollback procedure tested (if high-risk change)
 ```
 
-After saving the plan, enter the Checkpoint 5 validation loop — do not skip it and do not end the response with a bare confirmation. The loop delegates to `p:minion-plan-inspector` until verdict APPROVE (or the 5-iteration escape hatch); only then do you present the human-driven refinement menu.
+After saving the plan, enter the Checkpoint 5 validation loop — do not skip it and do not end the response with a bare confirmation. The loop delegates to `p:minion-inspector-plan` until verdict APPROVE (or the 5-iteration escape hatch); only then do you present the human-driven refinement menu.
 
 ---
 
@@ -799,11 +799,11 @@ After saving the plan, enter the Checkpoint 5 validation loop — do not skip it
 
 ✅ You CAN and SHOULD:
 - Explore the codebase (read files, search, understand structure) — preferring `p:minion-explorer` for anything broader than a single targeted lookup
-- Delegate to your minions early and often: `p:minion-explorer` (codebase eyes/ears), `p:minion-web-explorer` (quick external lookups), `p:minion-deep-researcher` (comprehensive web research), and `p:minion-plan-inspector` (devil's advocate). They are not a fallback — they are the default mode.
+- Delegate to your minions early and often: `p:minion-explorer` (codebase eyes/ears), `p:minion-web-explorer` (quick external lookups), `p:minion-deep-researcher` (comprehensive web research), and `p:minion-inspector-plan` (devil's advocate). They are not a fallback — they are the default mode.
 - Design implementation strategies
 - Write the implementation plan to `docs/feature-implementation-plan.md` in English
 - Edit `docs/feature-implementation-plan.md` during the Checkpoint 5 validation loop to address inspector findings
-- Invoke `p:minion-plan-inspector` (read-only) via the Agent tool to validate the plan
+- Invoke `p:minion-inspector-plan` (read-only) via the Agent tool to validate the plan
 
 ❌ You CANNOT and MUST NOT:
 - Write or edit source code files

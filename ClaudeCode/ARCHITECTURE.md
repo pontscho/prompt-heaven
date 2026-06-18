@@ -56,9 +56,9 @@ Agents MUST NOT list `Agent` in their `tools:` — see the no-nesting rule above
 | Term | Meaning | Where it appears |
 |---|---|---|
 | **Step N** | A *linear* step inside a skill. No iteration, no loop. | `/p:security-review`: Step 1 Triage, Step 2 Find, Step 3 Verify, Step 4 Assemble. |
-| **Phase A / B / C** | A *validation loop* — iterative minion invocation up to 5 iterations, with a 5-iteration escape hatch. **Reserved exclusively for validation loops.** | `/p:feature-plan` Phase A (plan-inspector loop), Phase B (security-review loop), Phase C (refinement menu — only "Phase" because it follows Phase A+B; it is itself non-iterative). Same for `/p:implement`. |
+| **Phase A / B / C** | A *validation loop* — iterative minion invocation up to 5 iterations, with a 5-iteration escape hatch. **Reserved exclusively for validation loops.** | `/p:feature-plan` Phase A (inspector-plan loop), Phase B (security-review loop), Phase C (refinement menu — only "Phase" because it follows Phase A+B; it is itself non-iterative). Same for `/p:implement`. |
 | **Validation Loop** | The canonical pattern Phase A/B/C follow. Defined once in `skills/_lib/validation-loop.md`. | Referenced by every Phase A/B/C section. |
-| **`PHASE: <triage\|find\|verify>` directive** | An *in-band routing token* sent to `p:minion-security-officer` to select which workflow it runs. **This is internal to the security minion**, not a general project term. | Only inside `p:minion-security-officer`'s prompt. |
+| **`PHASE: <triage\|find\|verify>` directive** | An *in-band routing token* sent to `p:minion-inspector-security-officer` to select which workflow it runs. **This is internal to the security minion**, not a general project term. | Only inside `p:minion-inspector-security-officer`'s prompt. |
 
 If you find yourself writing "Phase 2" inside a skill that has no validation loop, you mean **Step 2**. If you find yourself adding new in-band routing tokens to a minion, stop and ask whether the minion is doing too much.
 
@@ -88,9 +88,9 @@ Skills MUST delegate iterative or scope-broad work to the appropriate minion ins
 | Build / test cycles | `p:minion-builder` |
 | Script run-fix-retry | `p:minion-runner` |
 | Bug investigation | `p:minion-watson` |
-| Plan validation | `p:minion-plan-inspector` |
-| Implementation validation | `p:minion-impl-inspector` |
-| Security review | `p:minion-security-officer` (or, preferably, via the `p:security-review` skill which orchestrates the 3-phase pipeline) |
+| Plan validation | `p:minion-inspector-plan` |
+| Implementation validation | `p:minion-inspector-implementation` |
+| Security review | `p:minion-inspector-security-officer` (or, preferably, via the `p:security-review` skill which orchestrates the 3-phase pipeline) |
 | Quick external lookup | `p:minion-web-explorer` |
 | Deep web research | `p:minion-deep-researcher` |
 

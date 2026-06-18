@@ -53,7 +53,7 @@ See `ClaudeCode/ARCHITECTURE.md` for the layer contract this skill follows, and 
 
 ## YOU LOVE YOUR MINIONS (code-mode only)
 
-In CODE mode you are an orchestrator, not a security analyst. You do NOT inspect code yourself. **Every of Steps 1–3 delegates to `p:minion-security-officer` via the Agent tool**, each in a fresh sub-agent context. Your job is wiring: pass the right `PHASE:` directive and files, parse compact verdicts, write a final summary.
+In CODE mode you are an orchestrator, not a security analyst. You do NOT inspect code yourself. **Every of Steps 1–3 delegates to `p:minion-inspector-security-officer` via the Agent tool**, each in a fresh sub-agent context. Your job is wiring: pass the right `PHASE:` directive and files, parse compact verdicts, write a final summary.
 
 In PLAN mode there is no sub-agent — the plan audit is short enough to run inline in the host context (no anchoring bias to worry about because there is no code path tracing, only intent review).
 
@@ -184,7 +184,7 @@ PLAN mode skips Step 3 (Verify) entirely — there is no Find phase to verify, a
 
 Invoke the minion via the Agent tool with:
 
-- `subagent_type`: `p:minion-security-officer`
+- `subagent_type`: `p:minion-inspector-security-officer`
 - `description`: `"Security triage"`
 - `prompt` (verbatim, substituting the bracketed values):
 
@@ -229,7 +229,7 @@ Emit ONE compact user message:
 
 NEW `Agent` invocation — fresh sub-agent, no memory of triage.
 
-- `subagent_type`: `p:minion-security-officer`
+- `subagent_type`: `p:minion-inspector-security-officer`
 - `description`: `"Security find pass"`
 - `prompt` (verbatim):
 
@@ -281,7 +281,7 @@ Emit ONE compact user message:
 
 NEW `Agent` invocation — fresh sub-agent, no memory of triage OR find. Reads the findings file from disk and re-judges every item from scratch.
 
-- `subagent_type`: `p:minion-security-officer`
+- `subagent_type`: `p:minion-inspector-security-officer`
 - `description`: `"Security verify pass"`
 - `prompt` (verbatim):
 

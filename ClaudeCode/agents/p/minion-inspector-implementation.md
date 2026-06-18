@@ -1,5 +1,5 @@
 ---
-name: p:minion-impl-inspector
+name: p:minion-inspector-implementation
 description: >
   Post-implementation inspector that performs bidirectional comparison between an implementation plan (or requirements.yaml) and the actual code. Verifies plan completion, identifies what's missing from the implementation, discovers what the implementation added that wasn't in the plan, and flags deviations. Produces a structured compliance report with readiness assessment. Does NOT modify anything — pure analysis. Use after implementation to verify completeness before marking work as done.
 

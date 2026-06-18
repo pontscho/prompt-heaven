@@ -1,6 +1,6 @@
 ---
 name: p:implement
-description: Execute a task-planned implementation. Reads requirements.yaml (produced by /p:task-plan), runs tasks in dependency order, delegates builds/tests to p:minion-builder and failure investigation to p:minion-watson, then runs two validation loops (Phase A — impl-inspector for completeness; Phase B — Skill(p:security-review, mode=code) for OWASP risks) before marking implementation_complete: true. Output: implemented code + updated requirements.yaml. See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
+description: Execute a task-planned implementation. Reads requirements.yaml (produced by /p:task-plan), runs tasks in dependency order, delegates builds/tests to p:minion-builder and failure investigation to p:minion-watson, then runs two validation loops (Phase A — inspector-implementation for completeness; Phase B — Skill(p:security-review, mode=code) for OWASP risks) before marking implementation_complete: true. Output: implemented code + updated requirements.yaml. See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
 ---
 
 # Implement
@@ -39,8 +39,8 @@ You are an implementer, not a one-person band. You do NOT run build+fix loops in
 | `p:minion-runner` | Script and command execution with retry/fix cycles. For scripts that need trial-and-error to work. INSTEAD of running scripts inline and patching them in the main context. |
 | `p:minion-explorer` | When `context_summary` is missing, `pattern_excerpt` is absent, or a task touches code you don't yet understand. Your eyes into the codebase. INSTEAD of long Read/Grep chains in the main context. |
 | `p:minion-watson` | Investigate non-trivial test/build failures. Your brilliant sidekick for bug investigation — give it the failing log and it traces root cause through source with `file:line` precision. INSTEAD of trying to debug inline. |
-| `p:minion-impl-inspector` | Post-implementation audit (Section 4 Phase A validation loop). Verifies plan → code completion AND code → plan coverage. Catches gaps that per-task verification missed (cross-task dependencies, scope creep, plan items mapped to no task). |
-| `p:minion-security-officer` | **Security review of the implementation** (Section 4 Phase B validation loop) — runs in code-mode AFTER impl-inspector returns COMPLETE. Threat-surface triage first; full OWASP Top 10 / CWE pass on changed files only when triage hits. Catches vulns introduced during coding (the plan didn't say `sprintf` but it ended up there). Required PASS before YAML can be marked `implementation_complete: true`. |
+| `p:minion-inspector-implementation` | Post-implementation audit (Section 4 Phase A validation loop). Verifies plan → code completion AND code → plan coverage. Catches gaps that per-task verification missed (cross-task dependencies, scope creep, plan items mapped to no task). |
+| `p:minion-inspector-security-officer` | **Security review of the implementation** (Section 4 Phase B validation loop) — runs in code-mode AFTER inspector-implementation returns COMPLETE. Threat-surface triage first; full OWASP Top 10 / CWE pass on changed files only when triage hits. Catches vulns introduced during coding (the plan didn't say `sprintf` but it ended up there). Required PASS before YAML can be marked `implementation_complete: true`. |
 | `p:minion-web-explorer` | Quick external lookups: library docs, version checks, "how does this API behave with X" — single-shot web/GitHub searches. Light-weight. |
 | `p:minion-deep-researcher` | Comprehensive web research when implementation hits an unfamiliar library/API/framework and needs multi-angle investigation before proceeding. Heavy. |
 
@@ -293,24 +293,24 @@ If the builder returns FAIL or any verification step fails:
 
 After all per-task work is finished, you MUST run TWO sequential validation phases, then write the completion record:
 
-- **Phase A — Implementation completeness** (`p:minion-impl-inspector`): does the code match the plan? Are there PARTIAL items, MISSING items, plan gaps, or scope creep?
-- **Phase B — Security audit** (`p:minion-security-officer` in code-mode): does the implemented code introduce OWASP-class vulns? Buffer overflows, SQL injection, secret leaks, weak crypto, SSRF? The plan didn't say `sprintf`, but did `sprintf` end up there?
+- **Phase A — Implementation completeness** (`p:minion-inspector-implementation`): does the code match the plan? Are there PARTIAL items, MISSING items, plan gaps, or scope creep?
+- **Phase B — Security audit** (`p:minion-inspector-security-officer` in code-mode): does the implemented code introduce OWASP-class vulns? Buffer overflows, SQL injection, secret leaks, weak crypto, SSRF? The plan didn't say `sprintf`, but did `sprintf` end up there?
 - **Phase C — Summary & YAML update**: only after BOTH A and B return clean verdicts.
 
 Per-task verification only confirms each task individually; Phase A catches cross-task issues; Phase B catches security issues that often appear during the act of building (the plan said "use parameterized queries" but the implementer concatenated a string at 2am). Skipping either phase is a violation.
 
 ---
 
-### Phase A — Implementation Completeness Loop (`p:minion-impl-inspector`)
+### Phase A — Implementation Completeness Loop (`p:minion-inspector-implementation`)
 
 **Step A.1 — Full test suite via `p:minion-builder`.**
 
 Invoke `p:minion-builder` with the full test target (e.g., `ctest --test-dir build` or `forge_call test all` if forge is configured). Confirm PASS before invoking the inspector — a failing test suite means there's no point auditing yet, fix the failures first (use `p:minion-watson` if non-obvious).
 
-**Step A.2 — Invoke `p:minion-impl-inspector`.**
+**Step A.2 — Invoke `p:minion-inspector-implementation`.**
 
 Use the Agent tool with:
-- `subagent_type`: `p:minion-impl-inspector`
+- `subagent_type`: `p:minion-inspector-implementation`
 - `description`: e.g. `"Post-impl audit iter N"`
 - `prompt`: instruct the inspector to (a) read the plan from `docs/feature-implementation-plan.md` AND/OR `requirements.yaml` (pass both paths if both exist), (b) detect changed files via git (or pass an explicit list if you've been tracking), (c) return its bidirectional report (Readiness verdict, plan→code completion table, code→plan coverage, plan gaps, deviations, quality observations, checklist to complete). Include the iteration number so the inspector can scope the audit appropriately.
 
@@ -451,8 +451,8 @@ Before marking implementation complete (i.e., before Phase C's YAML update):
 - Build succeeds without errors — verified via `p:minion-builder`
 - Success criteria from the YAML are met
 - Code follows project style guidelines (CLAUDE.md and language-specific instructions)
-- **`p:minion-impl-inspector` returned Readiness: COMPLETE** (or the user explicitly accepted current state at Step A.8)
-- **`p:minion-security-officer` returned Verdict: APPROVE** (or the user explicitly accepted residual security risks at Step B.4 / B.8)
+- **`p:minion-inspector-implementation` returned Readiness: COMPLETE** (or the user explicitly accepted current state at Step A.8)
+- **`p:minion-inspector-security-officer` returned Verdict: APPROVE** (or the user explicitly accepted residual security risks at Step B.4 / B.8)
 - No unresolved CRITICAL plan gaps and no unresolved CRITICAL security findings; remaining items are either authorized by the user or documented as known limitations in the YAML (`implementation_open_items` and/or `implementation_security_open_items`)
 
 # Error Recovery
@@ -471,7 +471,7 @@ If implementation is interrupted:
 
 - **Autonomous execution**: This command should work without user intervention for well-defined tasks
 - **Delegate iterative work — MANDATORY**: Build/test/fix cycles go through `p:minion-builder`. Bug investigation goes through `p:minion-watson`. Codebase exploration when context is missing goes through `p:minion-explorer`. External research goes through `p:minion-web-explorer` or `p:minion-deep-researcher`. **Never run iterative loops inline in the main context** — this is the global CLAUDE.md rule and it is enforced here.
-- **Validate completeness via inspector**: Section 4's validation loop with `p:minion-impl-inspector` is mandatory before declaring implementation complete. Per-task verification alone is not enough — it doesn't catch cross-task gaps, scope creep, or plan deficiencies.
+- **Validate completeness via inspector**: Section 4's validation loop with `p:minion-inspector-implementation` is mandatory before declaring implementation complete. Per-task verification alone is not enough — it doesn't catch cross-task gaps, scope creep, or plan deficiencies.
 - **Scope discipline**: Plan gaps and unplanned changes surfaced by the inspector go to the user for decision, NOT silently into the code. Never expand scope without explicit authorization.
 - **Automatic task status tracking**: Each task is automatically marked as:
   - `in_progress` when starting (before implementation)
@@ -541,11 +541,11 @@ File: /path/to/file/test-websocket-ping-pong.c
 
 Phase A — Implementation completeness:
 ✓ Full test suite passed (via p:minion-builder)
-→ Invoking p:minion-impl-inspector (iter 1/5)
+→ Invoking p:minion-inspector-implementation (iter 1/5)
 ✓ Inspector verdict: COMPLETE (12/12 plan items DONE)
 
 Phase B — Security audit:
-→ Invoking p:minion-security-officer code-mode (iter 1/5)
+→ Invoking p:minion-inspector-security-officer code-mode (iter 1/5)
 ✓ Threat surface: user-input, network (websocket ping handler)
 ✓ OWASP coverage: A03 PASS, A04 PASS, A07 PASS, A09 PASS
 ✓ Security verdict: APPROVE (no CRITICAL/HIGH findings, 0 secrets detected)

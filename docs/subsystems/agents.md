@@ -30,9 +30,9 @@ core principle stated in `ClaudeCode/CLAUDE.md`.
 | `minion-builder.md` | Build + test + fix cycles (cmake/make/forge) |
 | `minion-runner.md` | Script/command run-fix-retry loops |
 | `minion-watson.md` | Non-obvious bug/failure investigation via clangd/luals |
-| `minion-plan-inspector.md` | Validate a plan against the live codebase before coding |
-| `minion-impl-inspector.md` | Audit a completed implementation against the plan |
-| `minion-security-officer.md` | OWASP/CWE security review (plan- and code-mode) |
+| `minion-inspector-plan.md` | Validate a plan against the live codebase before coding |
+| `minion-inspector-implementation.md` | Audit a completed implementation against the plan |
+| `minion-inspector-security-officer.md` | OWASP/CWE security review (plan- and code-mode) |
 | `minion-web-explorer.md` | Single-shot external/web lookups |
 | `minion-deep-researcher.md` | Comprehensive web research (10-15 parallel queries) |
 | `implement-agent.md` | Autonomous task execution — the engine behind `/p:implement` |
@@ -41,7 +41,7 @@ core principle stated in `ClaudeCode/CLAUDE.md`.
 
 The delegation heuristic lives in `ClaudeCode/CLAUDE.md`: build/test ->
 `minion-builder`; >~3 read/search calls on one topic -> `minion-explorer`;
-non-obvious failure -> `minion-watson`; plan written -> `minion-plan-inspector`
-then `minion-security-officer`; implementation finished ->
-`minion-impl-inspector` then `minion-security-officer`. Skills that author these
+non-obvious failure -> `minion-watson`; plan written -> `minion-inspector-plan`
+then `minion-inspector-security-officer`; implementation finished ->
+`minion-inspector-implementation` then `minion-inspector-security-officer`. Skills that author these
 files are covered in [[skills]] (`p:writer-agent`).

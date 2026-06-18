@@ -6,8 +6,8 @@
 
 Use this pattern for any iterative reviewer-driven loop inside a skill:
 
-- `/p:feature-plan` Phase A (plan-inspector loop) and Phase B (security-review loop)
-- `/p:implement` Phase A (impl-inspector loop) and Phase B (security-review loop)
+- `/p:feature-plan` Phase A (inspector-plan loop) and Phase B (security-review loop)
+- `/p:implement` Phase A (inspector-implementation loop) and Phase B (security-review loop)
 - Any future validator-driven iteration
 
 DO NOT inline the loop logic into your skill body. Reference this file and specify only the per-loop variables.
@@ -22,10 +22,10 @@ When a skill references this pattern, it MUST declare these specifics:
 
 1. **Reviewer**: which minion (or sub-skill via `Skill(...)`) is invoked each iteration.
 2. **Target artifact**: which file gets validated and fixed (`docs/feature-implementation-plan.md`, branch diff, `requirements.yaml`, etc.).
-3. **Verdict vocabulary**: what verdict values the reviewer returns (e.g. `APPROVE / REVISE / REJECT` for plan-inspector; `COMPLETE / INCOMPLETE` for impl-inspector; `APPROVE / REVISE / REJECT` for security-review).
+3. **Verdict vocabulary**: what verdict values the reviewer returns (e.g. `APPROVE / REVISE / REJECT` for inspector-plan; `COMPLETE / INCOMPLETE` for inspector-implementation; `APPROVE / REVISE / REJECT` for security-review).
 4. **Fix-mode**: how this loop applies fixes between iterations. Options:
    - **`edit-and-retry`** — caller directly `Edit`s the target artifact based on findings, then re-invokes reviewer. (Used by feature-plan: edit the plan markdown to address inspector findings.)
-   - **`delegate-fix`** — caller delegates a fix to another minion (e.g. `p:minion-builder` to apply a code change), then re-invokes reviewer. (Used by implement: re-build / re-implement based on impl-inspector gaps.)
+   - **`delegate-fix`** — caller delegates a fix to another minion (e.g. `p:minion-builder` to apply a code change), then re-invokes reviewer. (Used by implement: re-build / re-implement based on inspector-implementation gaps.)
    - **`escalate-immediately`** — certain verdict values (e.g. `REJECT` with CRITICAL severity) must NOT be auto-fixed; surface to user immediately.
 5. **Loop name**: human label for per-iteration user messages (e.g. "Plan correctness", "Plan security review", "Implementation completeness", "Implementation security audit").
 
@@ -104,7 +104,7 @@ When you reference this pattern in a skill, write something like:
 
 Follow the validation loop pattern in `skills/_lib/validation-loop.md`, with these specifics:
 
-- **Reviewer**: `Agent(p:minion-plan-inspector, prompt: "audit docs/feature-implementation-plan.md, iteration N")`
+- **Reviewer**: `Agent(p:minion-inspector-plan, prompt: "audit docs/feature-implementation-plan.md, iteration N")`
 - **Target artifact**: `docs/feature-implementation-plan.md`
 - **Verdict vocabulary**: `APPROVE / REVISE / REJECT`
 - **Fix-mode**: `edit-and-retry` — directly `Edit` the plan file to address CRITICAL and HIGH findings; anchor every fix to the inspector's `file:line` evidence

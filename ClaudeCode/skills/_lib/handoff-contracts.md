@@ -44,7 +44,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 - Writes `.claude/tmp/` files only during interactive exploration (cleaned up by the temp-file rule)
 - Does NOT write code, does NOT modify other files
 
-**Validation:** runs Phase A (plan-inspector loop) and Phase B (security-review skill in `mode=plan`) before declaring done.
+**Validation:** runs Phase A (inspector-plan loop) and Phase B (security-review skill in `mode=plan`) before declaring done.
 
 ---
 
@@ -87,7 +87,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 - Test execution via `p:minion-builder`
 - Failure investigation via `p:minion-watson`
 
-**Validation:** runs Phase A (impl-inspector loop) and Phase B (security-review skill in `mode=code`) before setting `implementation_complete: true`.
+**Validation:** runs Phase A (inspector-implementation loop) and Phase B (security-review skill in `mode=code`) before setting `implementation_complete: true`.
 
 ---
 
@@ -121,8 +121,8 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 |---|---|---|---|
 | `docs/feature-implementation-plan.md` | `/p:feature-plan` | `/p:task-plan`, `/p:implement` (reads for context), `/p:security-review mode=plan` | markdown, structured |
 | `requirements.yaml` | `/p:task-plan` | `/p:implement` | YAML, schema in `~/.claude/scripts/task-plan.py` |
-| `.claude/tmp/security-findings-<ts>.md` | `p:minion-security-officer PHASE: find` | `p:minion-security-officer PHASE: verify` | markdown, `[Fn]` ID format |
-| `.claude/tmp/security-verified-<ts>.md` | `p:minion-security-officer PHASE: verify` | `/p:security-review` Step 4 (Assemble) | markdown, VERIFIED/SUPPRESSED/ESCALATED sections |
+| `.claude/tmp/security-findings-<ts>.md` | `p:minion-inspector-security-officer PHASE: find` | `p:minion-inspector-security-officer PHASE: verify` | markdown, `[Fn]` ID format |
+| `.claude/tmp/security-verified-<ts>.md` | `p:minion-inspector-security-officer PHASE: verify` | `/p:security-review` Step 4 (Assemble) | markdown, VERIFIED/SUPPRESSED/ESCALATED sections |
 | `docs/reviews/security-review-<ts>.md` | `/p:security-review` Step 4 | end-user (audit trail) | markdown, full report |
 
 ## Rules

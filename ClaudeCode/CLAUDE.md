@@ -15,9 +15,9 @@
 | `p:minion-runner` | Script/command run-fix-retry loops — INSTEAD of inline script iteration |
 | `p:minion-builder` | Build + test + fix cycles (cmake, make, ctest, npm test, cargo, forge) — INSTEAD of inline compile/test iteration |
 | `p:minion-watson` | Non-obvious bug/failure investigation — brilliant sidekick that traces root cause through source with clangd/luals MCPs |
-| `p:minion-plan-inspector` | Validate an implementation plan against the live codebase BEFORE coding (used by the `/p:feature-plan` validation loop) |
-| `p:minion-impl-inspector` | Audit a completed implementation against the plan AFTER coding (used by the `/p:implement` validation loop) |
-| `p:minion-security-officer` | Security review (OWASP Top 10, CWE-mapped) — plan-mode BEFORE coding (after plan-inspector APPROVE) and code-mode AFTER coding (after impl-inspector COMPLETE). Threat-surface triage first; full audit only when triage hits. |
+| `p:minion-inspector-plan` | Validate an implementation plan against the live codebase BEFORE coding (used by the `/p:feature-plan` validation loop) |
+| `p:minion-inspector-implementation` | Audit a completed implementation against the plan AFTER coding (used by the `/p:implement` validation loop) |
+| `p:minion-inspector-security-officer` | Security review (OWASP Top 10, CWE-mapped) — plan-mode BEFORE coding (after inspector-plan APPROVE) and code-mode AFTER coding (after inspector-implementation COMPLETE). Threat-surface triage first; full audit only when triage hits. |
 | `p:minion-web-explorer` | Single-shot external lookups: library docs, version checks, "how do people do X" |
 | `p:minion-deep-researcher` | Comprehensive web research with 10-15 parallel queries — multi-angle investigation for architectural decisions |
 
@@ -25,8 +25,8 @@
 - About to run a build/test command → `p:minion-builder`'s job
 - About to issue more than ~3 read/search calls on the same topic → `p:minion-explorer`
 - A failure's root cause isn't obvious from the error → `p:minion-watson`
-- You wrote an implementation plan → validate via `p:minion-plan-inspector` then `p:minion-security-officer` (plan-mode)
-- You finished implementing → audit via `p:minion-impl-inspector` then `p:minion-security-officer` (code-mode)
+- You wrote an implementation plan → validate via `p:minion-inspector-plan` then `p:minion-inspector-security-officer` (plan-mode)
+- You finished implementing → audit via `p:minion-inspector-implementation` then `p:minion-inspector-security-officer` (code-mode)
 - You need external/web info → `p:minion-web-explorer` (quick) or `p:minion-deep-researcher` (deep)
 
 **Never run-fix-retry, explore-explore-explore, or self-validate directly here.**
