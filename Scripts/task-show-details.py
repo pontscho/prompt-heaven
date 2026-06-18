@@ -11,8 +11,8 @@ import os
 def find_task_yaml_block(content, task_id):
     """Find and extract the raw YAML block for a specific task"""
 
-    # Find the task block
-    pattern = rf'    - task_id:\s*{re.escape(task_id)}\b'
+    # Find the task block (task_id value may be quoted: task_id: "task-003")
+    pattern = rf'''    - task_id:\s*["']?{re.escape(task_id)}\b'''
     match = re.search(pattern, content)
 
     if not match:

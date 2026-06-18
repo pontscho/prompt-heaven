@@ -14,7 +14,8 @@ def extract_single_task(tasks_content, task_id):
     """Extract a single task by task_id from the tasks section"""
     # Match task block starting with the specified task_id
     # Pattern: from "- task_id: TASK_ID" to next "- task_id:" or end
-    pattern = rf'(    - task_id: {re.escape(task_id)}.*?)(?=\n    - task_id:|\Z)'
+    # (task_id value may be quoted: task_id: "task-003")
+    pattern = rf'''(    - task_id:\s*["']?{re.escape(task_id)}\b.*?)(?=\n    - task_id:|\Z)'''
     task_match = re.search(pattern, tasks_content, re.DOTALL)
 
     if task_match:

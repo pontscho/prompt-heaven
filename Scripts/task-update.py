@@ -30,8 +30,8 @@ def update_task_status(yaml_file, status, task_ids):
 
         # Find the task and update its status line
         for i in range(len(lines)):
-            # Look for task_id line
-            if re.match(rf'^\s*-?\s*task_id:\s*{re.escape(task_id)}\s*$', lines[i]):
+            # Look for task_id line (value may be quoted: task_id: "task-003")
+            if re.match(rf'''^\s*-?\s*task_id:\s*["']?{re.escape(task_id)}["']?\s*$''', lines[i]):
                 task_found = True
 
                 # Find the status line, scanning to the next task / top-level key.

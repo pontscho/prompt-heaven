@@ -48,7 +48,7 @@ def show_tasks(yaml_file):
         elif '    - task_id:' in line:
             task_id_match = re.search(r'task_id:\s*(\S+)', line)
             if task_id_match:
-                task_id = task_id_match.group(1)
+                task_id = task_id_match.group(1).strip('\'"')
 
                 # Look ahead for description, status, and size
                 description = None

@@ -131,7 +131,7 @@ def parse_requirements_yaml(yaml_file: str) -> Dict[str, Task]:
 		if not task_id_match:
 			continue
 
-		task = Task(task_id_match.group(1))
+		task = Task(task_id_match.group(1).strip('\'"'))
 
 		# Extract description (handles inline and block scalar |/> forms)
 		task.description = extract_description(block)
@@ -165,12 +165,12 @@ def parse_requirements_yaml(yaml_file: str) -> Dict[str, Task]:
 		inline_deps_match = re.search(r'dependencies:\s*\[([^\]]*)\]', block)
 		if inline_deps_match:
 			deps_str = inline_deps_match.group(1).strip()
-			task.dependencies = [d.strip() for d in deps_str.split(',') if d.strip()]
+			task.dependencies = [d.strip().strip('\'"') for d in deps_str.split(',') if d.strip()]
 		else:
 			multiline_deps_match = re.search(r'dependencies:\s*\n((?:\s+-\s+\S+\n?)+)', block)
 			if multiline_deps_match:
 				deps_text = multiline_deps_match.group(1)
-				task.dependencies = re.findall(r'-\s+(\S+)', deps_text)
+				task.dependencies = [d.strip('\'"') for d in re.findall(r'-\s+(\S+)', deps_text)]
 
 		# Extract code_references files
 		refs_match = re.search(r'code_references:\s*\n((?:.*\n)*?)(?=\s+(?:api_references|test_requirements|dependencies):|\s+-\s+task_id:|\Z)', block)

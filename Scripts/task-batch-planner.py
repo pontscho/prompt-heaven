@@ -99,7 +99,7 @@ def parse_requirements_yaml(yaml_file: str) -> Dict[str, Task]:
 		if not task_id_match:
 			continue
 
-		task = Task(task_id_match.group(1))
+		task = Task(task_id_match.group(1).strip('\'"'))
 
 		# Extract description
 		desc_match = re.search(r'description:\s*["\']?([^"\'\n]+)["\']?', block)
@@ -135,7 +135,7 @@ def parse_requirements_yaml(yaml_file: str) -> Dict[str, Task]:
 		deps_match = re.search(r'dependencies:\s*\n((?:\s+-\s+\S+\n?)+)', block)
 		if deps_match:
 			deps_text = deps_match.group(1)
-			task.dependencies = re.findall(r'-\s+(\S+)', deps_text)
+			task.dependencies = [d.strip('\'"') for d in re.findall(r'-\s+(\S+)', deps_text)]
 		elif 'dependencies: []' in block:
 			task.dependencies = []
 
