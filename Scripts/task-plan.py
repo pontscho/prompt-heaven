@@ -85,10 +85,18 @@ def extract_description(block: str) -> str:
 		lines = [ln.strip() for ln in block_match.group('body').splitlines()]
 		return ' '.join(ln for ln in lines if ln).strip()
 
-	# Inline form: `description: text` or `description: "text"`
-	inline_match = re.search(r'description:[ \t]*["\']?([^"\'\n]+?)["\']?[ \t]*$', block, re.MULTILINE)
-	if inline_match:
-		return inline_match.group(1).strip()
+	# Inline double-quoted: capture to the LAST quote, then unescape \" and \\
+	m = re.search(r'description:[ \t]*"(.*)"[ \t]*$', block, re.MULTILINE)
+	if m:
+		return m.group(1).replace('\\"', '"').replace('\\\\', '\\').strip()
+	# Inline single-quoted (YAML '' escape)
+	m = re.search(r"description:[ \t]*'(.*)'[ \t]*$", block, re.MULTILINE)
+	if m:
+		return m.group(1).replace("''", "'").strip()
+	# Bare inline (no quotes)
+	m = re.search(r'description:[ \t]*(.+?)[ \t]*$', block, re.MULTILINE)
+	if m:
+		return m.group(1).strip()
 
 	return ""
 
