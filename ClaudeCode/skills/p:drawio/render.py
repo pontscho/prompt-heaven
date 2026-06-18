@@ -3,7 +3,8 @@
 
 Renders the shape vocabulary used by the p:drawio skill:
   - Vertices: rounded rect, ellipse, rhombus, swimlane (horizontal=0/1),
-    group, shape=mxgraph.flowchart.document, shape=cylinder3
+    group, text (transparent/borderless label), shape=mxgraph.flowchart.document,
+    shape=cylinder3
   - Edges: orthogonal Manhattan routing, arrow heads, optional label background
   - Labels: <b>, <i>, <font color="">, <br>, &#xa; — rendered as native SVG <text>
     (markdown-safe; no <foreignObject>)
@@ -307,6 +308,25 @@ def render_vertex(c: Cell) -> str:
     s = c.style
     if 'group' in s:
         return ''  # invisible container
+
+    if 'text' in s:
+        # drawio 'text' shape is transparent + borderless by default. Without
+        # this branch it falls through to the generic rect renderer below,
+        # which paints a white box with a black border (the _fill_stroke
+        # defaults). Only emit a rect when the author set an explicit fill or
+        # stroke; otherwise the label is rendered on its own (render_vertex_label).
+        fill = s.get('fillColor', 'none')
+        stroke = s.get('strokeColor', 'none')
+        if fill.lower() == 'none' and stroke.lower() == 'none':
+            return ''
+        rounded = s.get('rounded') == '1'
+        rx = ' rx="6" ry="6"' if rounded else ''
+        fill_attr = 'fill="none"' if fill.lower() == 'none' else f'fill="{fill}"'
+        stroke_attr = 'stroke="none"' if stroke.lower() == 'none' else f'stroke="{stroke}"'
+        sw = s.get('strokeWidth', '1')
+        return (f'<rect x="{c.left}" y="{c.top}" width="{c.width}" '
+                f'height="{c.height}"{rx} {fill_attr} {stroke_attr} '
+                f'stroke-width="{sw}"{_dash_attr(s)}/>')
 
     if 'ellipse' in s:
         return f'<ellipse cx="{c.cx}" cy="{c.cy}" rx="{c.width/2}" ry="{c.height/2}" {_fill_stroke(s)}{_dash_attr(s)}/>'
