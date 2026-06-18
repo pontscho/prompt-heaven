@@ -127,6 +127,80 @@ def check(name, cond, detail=""):
     return (name, bool(cond), detail)
 
 
+def _purity_call(srv, call_id, function, params=None):
+    """Send a purity_call tools/call and return (text, raw_response)."""
+    srv.send({"jsonrpc": "2.0", "id": call_id, "method": "tools/call",
+              "params": {"name": "purity_call",
+                         "arguments": {"function": function, "params": params or {}}}})
+    resp = srv.read() or {}
+    content = resp.get("result", {}).get("content", [])
+    text = content[0].get("text", "") if content else ""
+    return text, resp
+
+
+# Canonical semantic functions the Phase-0 fold registers in purity_call.
+PURITY_SEMANTIC = [
+    "find_definition", "find_references", "find_implementations", "type_at",
+    "diagnostics", "outline", "symbol", "symbol_context", "inlay_hints",
+    "symbol_change_impact",
+]
+
+
+def purity_semantic_checks(srv, checks):
+    """Phase-0 smoke checks for mcp-purity's folded-in semantic layer (Decision
+    D2: all coverage driven over JSON-RPC; no in-process unit file). Every
+    semantic call here is made with NO params, so each handler returns a fast
+    validation error BEFORE any clangd subprocess is spawned -- the assertion is
+    that the function DISPATCHES (registered + routed), not that an LSP runs.
+    """
+    cid = 100
+
+    # (a) all 10 canonical semantic names dispatch (no "Unknown function")
+    undispatched = []
+    for fn in PURITY_SEMANTIC:
+        text, _ = _purity_call(srv, cid, fn)
+        cid += 1
+        if "Unknown function" in text:
+            undispatched.append(fn)
+    checks.append(check("purity: 10 semantic names dispatch",
+                        not undispatched, "undispatched=%r" % undispatched))
+
+    # (b) legacy clangd_*/cuda_* names dispatch (direct HANDLERS keys [C1])
+    legacy = ["clangd_find_definition", "cuda_find_definition",
+              "clangd_workspace_symbols", "cuda_document_outline", "clangd_init"]
+    undispatched_legacy = []
+    for fn in legacy:
+        text, _ = _purity_call(srv, cid, fn)
+        cid += 1
+        if "Unknown function" in text:
+            undispatched_legacy.append(fn)
+    checks.append(check("purity: legacy clangd_/cuda_ names dispatch",
+                        not undispatched_legacy, "undispatched=%r" % undispatched_legacy))
+
+    # (c) negative control: a bogus name IS reported unknown
+    text, _ = _purity_call(srv, cid, "totally_bogus_fn")
+    cid += 1
+    checks.append(check("purity: bogus name -> Unknown function",
+                        "Unknown function" in text, text[:80]))
+
+    # (d) find_definition with neither 'symbol' nor 'at' -> validation error
+    text, _ = _purity_call(srv, cid, "find_definition")
+    cid += 1
+    checks.append(check("purity: find_definition no-args -> validation error",
+                        ("requires either" in text) and ("Unknown function" not in text),
+                        text[:100]))
+
+    # (e) _resolve_aliases last-wins (bug #3) observable: 'path' and
+    #     'relative_path' both canonicalize to relative_path; the LAST key wins,
+    #     so the not-found error must name the canonical (last) value.
+    text, _ = _purity_call(srv, cid, "read_file",
+                           {"path": "alias_first.txt", "relative_path": "canonical_last.txt"})
+    cid += 1
+    checks.append(check("purity: _resolve_aliases last-wins",
+                        ("canonical_last.txt" in text) and ("alias_first.txt" not in text),
+                        text[:120]))
+
+
 def run_server(cfg):
     """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}."""
     srv = Server(cfg)
@@ -193,6 +267,10 @@ def run_server(cfg):
             checks.append(check("forced-exc -32603",
                                 exc.get("error", {}).get("code") == -32603,
                                 repr(exc.get("error", {}).get("code"))))
+
+        # 7. purity-only: semantic dispatch + alias-routing checks (Phase 0, D2)
+        if cfg["tool"] == "purity_call":
+            purity_semantic_checks(srv, checks)
 
         status = "PASS" if all(ok for _, ok, _ in checks) else "FAIL"
         return (status, checks)

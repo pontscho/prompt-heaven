@@ -1,0 +1,1261 @@
+original_request: |
+  Write the function-level requirements.yaml for Phase 0 of the mcp-purity
+  unification: merge the semantic code-navigation capabilities of the
+  mcp-clangd and mcp-cuda MCP servers into the existing mcp-purity server,
+  behind the unchanged purity_call entry point. The server grows inward — it
+  gains a layered backend architecture (sync file layer + async LSP backend
+  layer + filetype routing) while its tool name, dispatcher tool, and the
+  project-wide purity_call convention stay exactly as they are. Phase 0 is the
+  skeleton: establish the abstract backend interface, fold clangd+cuda into a
+  single clangd-family backend, add the 10 semantic functions to the
+  purity_call dispatcher, unify the duplicated grep core, fix the truncated
+  CUDA fallback bug, and keep every legacy name working via aliases.
+
+goal: |
+  Phase 0 (skeleton) of unifying mcp-clangd + mcp-cuda into mcp-purity: fold the
+  common LSP core into Scripts/mcp-purity.py behind an abstract backend
+  interface, add a clangd-family backend (C/C++/CUDA in one backend, language as
+  config), wire 10 semantic functions into the purity_call dispatcher with
+  symbol/at routing, DRY up the grep fallback core, extend the alias layer onto
+  last-wins precedence, fix 3 bugs (CUDA _symbol_to_location truncation,
+  clangd-crash future leak, _resolve_aliases precedence divergence), add lazy LSP
+  init, flip the tools/call dispatch path to async, rewrite the purity_call tool
+  description, and confine semantic path params to --project-root. Out of scope:
+  luals backend (Phase 1); retiring clangd_call/cuda_call tools and the skill /
+  minion rewrites (Phase 2).
+
+complete: true
+
+implementation_complete: true
+implementation_date: 2026-06-18
+inspector_verdict: COMPLETE
+inspector_iterations: 1
+security_verdict: APPROVE
+security_iterations: 1
+implementation_notes: |
+  Phase 0 of the mcp-purity unification: folded the clangd + cuda semantic
+  code-navigation layer into Scripts/mcp-purity.py behind the unchanged purity_call
+  entry point (layered backend: sync file layer + async LSP backend + filetype routing).
+  All 10 tasks completed; builder smoke test PASS (mcp-purity + full suite, zero
+  regression); inspector-implementation COMPLETE (10/10 tasks, 13/13 success criteria);
+  security-review code-mode APPROVE (0 verified findings, 11 suppressed, 1 escalated).
+  Deviation (correct-by-design): the canonical path param is `relative_path` (purity's
+  pre-existing key) rather than clangd's `path`, unifying the path namespace across the
+  file and semantic layers (inspector M2 satisfied). Also extended: the global
+  task-update.py status script had a 10-line-window bug that silently skipped tasks with
+  long block-scalar descriptions; fixed to scan to the next task boundary.
+implementation_open_items:
+  - "[G1, LOW] Mixed C/C++ + CUDA project: when .cu/.cuh sources exist the backend starts
+     in CUDA mode with a .cu-only translated compile DB, reducing plain C/C++ coverage.
+     Documented in-code (mcp-purity.py CUDA-mode comment); deferred past the skeleton phase."
+  - "[G2, LOW] _ensure_backend has no 'project has clangd-family sources' precondition, so
+     name-path/symbol calls spawn clangd even when the tree has no .c/.cpp/.cu (A-class
+     handlers degrade to grep fallback, so no crash). Optional Phase-1+ gate."
+implementation_security_open_items:
+  - owasp: A09
+    cwe: CWE-532
+    file: Scripts/mcp-purity.py
+    line: "2936,2947,3068"
+    severity: INFO
+    description: "[F12, ESCALATED by security-review] Debug logging (--debug/--log-file)
+      persists the first 200 chars of wire/LSP message bodies, which may include absolute
+      paths or file-content snippets. Operator-gated and largely pre-existing (the debug
+      lines + --log-file predate this change). Policy decision, not a confirmed vuln: ensure
+      --log-file targets an operator-protected path, or redact content/path fields before the
+      log.debug truncation if the wire is not fully trusted."
+  - owasp: A03
+    cwe: CWE-1333
+    file: Scripts/mcp-purity.py
+    line: "search_for_pattern/list_dir/replace_content"
+    severity: LOW
+    description: "[P2, residual] ReDoS via user-supplied regex (Python re has no timeout).
+      Pre-existing; explicitly accepted out-of-scope for Phase 0. Runs in a thread executor
+      so at worst pins one worker thread in a local single-user dev tool."
+
+requirements:
+  - category: architecture
+    question: How is the LSP core unified across clangd and cuda?
+    answer: |
+      Fold the byte-for-byte-duplicated common LSP core (framing, path/uri
+      helpers, SYMBOL_KIND_MAP/DEFINITION_KINDS, extract_*, the full
+      ClangdClient body, and the grep fallback) once into mcp-purity.py behind an
+      abstract backend interface. CUDA becomes the language-config of the same
+      clangd-family backend (one ClangdClient, language as config), selected via
+      filetype routing. The backend map is keyed by LSP-backend type ("clangd"
+      now; "luals" later) so it is single-entry in Phase 0 but luals-ready.
+    details:
+      - "Common core is identical in mcp-clangd.py and mcp-cuda.py today (copy-paste)."
+      - "CUDA's only functional divergence is the truncated _symbol_to_location."
+      - "Backend map: _backends: Dict[str, ClangdClient], not a single _client singleton."
+    options: []
+    status: answered
+  - category: interface
+    question: How are the 10 semantic functions exposed and how do legacy names route?
+    answer: |
+      All 10 canonical semantic names AND every legacy clangd_*/cuda_* name
+      (including *_at variants and clangd_init/cuda_init) become DIRECT HANDLERS
+      keys mapping to the unified canonical handlers. Decision D1/[inspector C1]:
+      the dispatcher uses HANDLERS.get(function) with the RAW name (mcp-purity.py
+      line 858, kept unchanged) — FUNCTION_ALIASES does NOT route, it is consulted
+      only for param-alias resolution and error hints. This matches the existing
+      load-bearing redundancy where glob/grep/search/ls are already direct
+      HANDLERS keys.
+    details:
+      - "10 canonical: find_definition, find_references, find_implementations, type_at, diagnostics, outline, symbol, symbol_context, inlay_hints, symbol_change_impact."
+      - "find_definition/find_references accept either symbol or at (path,line,character)."
+      - "glob becomes canonical for file-glob search; find_file kept as alias (already both direct HANDLERS keys today)."
+      - "clangd_init/cuda_init become no-op/deprecation-notice handlers under lazy init, NOT errors."
+    options:
+      - "Direct HANDLERS keys (CHOSEN — keeps line 858 unchanged, matches existing redundancy)."
+      - "Change line 858 to look up canonical_func and consolidate into FUNCTION_ALIASES (rejected — do not split)."
+    status: answered
+  - category: implementation
+    question: How does symbol/at parameter routing work?
+    answer: |
+      The canonical find_definition / find_references handlers inspect the
+      POST-alias resolved params: if line/character present, take the position
+      path (former *_definition_at); else if symbol_name present, take the name
+      path (_symbol_to_location). [inspector M2] the merged alias layer renames
+      symbol -> symbol_name, so the router MUST check the post-alias key
+      symbol_name, not symbol. Keep the two internal handlers; only the dispatch
+      entry is unified.
+    details:
+      - "glob as a FUNCTION name (file-search) is a different namespace from glob as a PARAM alias -> paths_include_glob (mcp-purity.py:86); document the distinction."
+      - "Neither symbol nor at -> validation error."
+    options: []
+    status: answered
+  - category: architecture
+    question: How is lazy LSP init triggered and coordinated?
+    answer: |
+      [inspector H2 — NEW logic, not reuse] On the first semantic call for a
+      filetype, if _backends[type] is absent, START init (guarded by whether the
+      project has sources of that type, _has_cuda_sources-style), then reuse ONLY
+      the shielded 90s WAIT: asyncio.wait_for(asyncio.shield(init_task),
+      timeout=90). The existing clangd gate (mcp-clangd.py:1584-1591) only WAITS;
+      it does not start init (clangd starts eagerly at run(),
+      mcp-clangd.py:1940-1948). The file layer never triggers init.
+    details:
+      - "Once-only init guard per backend type."
+      - "Concurrent first-calls coalesce into a single in-flight init task per type (no two clangd processes)."
+      - "Init-failure caching / backoff: do not re-spawn a crashing clangd on every call."
+      - "Per-backend init state stored in the _backends map."
+      - "Site the project-root mismatch warning here (no handle_init anymore) — [inspector M3]."
+    options: []
+    status: answered
+  - category: implementation
+    question: How does the dispatch path become async?
+    answer: |
+      Promote _handle_tool_call / the tools/call path to async. Semantic handlers
+      are async and awaited directly. Sync file handlers run via
+      loop.run_in_executor(None, lambda: sync_handler(params, project_root,
+      strict)). The MCP loop is already async (mcp-purity.py:980) and the executor
+      pattern already exists for stdin (mcp-purity.py:985).
+    details:
+      - "Long file-layer operations (search_for_pattern, os.walk) run in the executor so they never freeze the event loop."
+      - "_handle_message must await the now-async _handle_tool_call."
+    options:
+      - "Executor-wrapped sync file layer (CHOSEN — zero regression surface)."
+      - "Full async rewrite of every file handler (rejected — needless regression surface)."
+    status: answered
+  - category: dependencies
+    question: What imports may be added and what must stay out?
+    answer: |
+      stdlib-only, zero external deps. New allowed imports: pathlib, glob as
+      glob_mod (aliased to avoid colliding with the glob FUNCTION name), shutil.
+      Do NOT carry over tempfile from mcp-cuda.py:36 (imported but unused —
+      [inspector L1]). The # dependencies = [] header (mcp-purity.py:4) must stay
+      accurate.
+    details:
+      - "Current mcp-purity imports (mcp-purity.py:25-33): argparse, asyncio, fnmatch, json, logging, os, re, sys; typing Any/Callable/Dict/List/Optional."
+      - "asyncio already imported; subprocess via asyncio.create_subprocess_exec."
+    options: []
+    status: answered
+  - category: implementation
+    question: How is the _resolve_aliases precedence and param-alias merge handled (bug #3)?
+    answer: |
+      Unify mcp-purity's _resolve_aliases (mcp-purity.py:145-177) onto last-wins:
+      change the `if canonical not in resolved` guard (line 175, first-wins) to an
+      unconditional overwrite (clangd-style, mcp-clangd.py:74). KEEP purity's
+      (params, function) signature and its two-tier
+      PARAM_ALIASES_BY_FUNC + PARAM_ALIASES. [inspector M1] merge clangd's flat
+      PARAM_ALIASES that the semantic handlers depend on (symbol->symbol_name,
+      col/column/char->character, max->max_results, depth->call_hierarchy_depth)
+      into purity's PARAM_ALIASES (or a semantic PARAM_ALIASES_BY_FUNC block).
+      DROP the CUDA-only init param aliases (arch/gpu_arch/cuda_sdk/sdk_path,
+      mcp-cuda.py:59-62) — lazy init removes init params [inspector L-new-1].
+    details:
+      - "purity is first-wins today (mcp-purity.py:175); clangd/cuda are last-wins (mcp-clangd.py:74, mcp-cuda.py:85)."
+      - "Without merging clangd's param aliases the semantic handlers' param contract breaks."
+    options: []
+    status: answered
+  - category: security
+    question: How are semantic path params confined to the sandbox?
+    answer: |
+      [security P1, OWASP A01 / CWE-22] Semantic path params (find_definition
+      at=, type_at/diagnostics/outline file=) MUST resolve within --project-root,
+      reusing the same confinement check the file-IO layer already uses
+      (safe_path, mcp-purity.py:46-56). The LSP layer must not be coaxed into
+      reading a file outside the sandbox via an absolute or `..` path.
+    details:
+      - "Apply safe_path before passing any path to the LSP backend's _abs_path/open_document."
+      - "This needs its own task — do not bury it in the handler-wiring task."
+    options: []
+    status: answered
+
+constraints:
+  - type: technical
+    description: |
+      Python 3.9+, standard library ONLY, zero external dependencies (hard
+      constraint). The `# dependencies = []` header in mcp-purity.py:4 must stay
+      accurate. New imports allowed: pathlib, glob as glob_mod (aliased), shutil.
+      Do NOT carry over tempfile (mcp-cuda.py:36 — imported but unused,
+      [inspector L1]).
+    impact: |
+      LSP communication uses only stdlib: asyncio.create_subprocess_exec, json,
+      byte-level Content-Length framing — already true of clangd/cuda. Any
+      external-dep introduction is a hard failure of the unification.
+  - type: technical
+    description: |
+      Server name "mcp-purity" and entry point "purity_call" are FROZEN. The
+      tools/list must keep advertising exactly one tool (purity_call). The server
+      only grows inward.
+    impact: |
+      The project-wide purity_call convention (global CLAUDE.md, skills, minion
+      tool-lists) depends on these names — changing them breaks every caller.
+  - type: technical
+    description: |
+      The file-IO / search functions (read_file, create_text_file,
+      replace_content, replace_lines, insert_at_line, delete_lines,
+      search_for_pattern, list_dir, glob/find_file) must NOT regress — identical
+      output to today.
+    impact: |
+      The file layer is battle-tested; the only change is the one-line
+      executor-wrap of the sync handlers in the now-async dispatch path.
+  - type: technical
+    description: |
+      The unified server stays a SINGLE file (Scripts/mcp-purity.py, ~3000
+      lines), matching the project's one-file-per-server convention and the
+      single-script MCP registration. No new file, no new registration entry.
+    impact: |
+      Keep clear section banners (FILE LAYER / LSP CORE / CUDA CONFIG / DISPATCH)
+      to stay navigable.
+  - type: security
+    description: |
+      [security P1, OWASP A01 / CWE-22] Semantic path params must resolve within
+      --project-root, reusing the file-IO confinement check (safe_path,
+      mcp-purity.py:46-56).
+    impact: |
+      Without this, the LSP layer could be coaxed into reading a file outside the
+      sandbox via an absolute or `..` path.
+  - type: security
+    description: |
+      [security P2, OWASP A03 / CWE-1333 — ReDoS, LOW] search_for_pattern
+      compiles a user-supplied regex; a pathological pattern can cause
+      catastrophic backtracking. Pre-existing, NOT introduced by this change.
+    impact: |
+      The async flip (step 10) runs it in the executor so it no longer freezes the
+      event loop, but it still ties up one worker thread. Full mitigation is OUT
+      of scope for Phase 0; documented for awareness.
+  - type: business
+    description: |
+      OUT of scope for Phase 0: luals backend (Phase 1); retiring
+      clangd_call/cuda_call tools; rewriting p:mcp-clangd / p:mcp-cuda /
+      p:mcp-purity skills or minion tool-lists; any change to the global
+      purity_call convention in CLAUDE.md (Phase 2).
+    impact: |
+      clangd_call / cuda_call standalone tools keep running in PARALLEL during
+      Phase 0; their retirement is Phase 2. Do not create tasks for deferred work.
+
+success_criteria:
+  - "purity_call accepts the 10 new semantic functions: find_definition, find_references, find_implementations, type_at, diagnostics, outline, symbol, symbol_context, inlay_hints, symbol_change_impact."
+  - "find_definition / find_references accept either symbol or at (path,line,character) and route to the correct internal handler by post-alias parameter shape."
+  - "All legacy names resolve: clangd_find_definition, clangd_find_definition_at, cuda_find_definition, ... all reach the unified canonical handler as DIRECT HANDLERS keys (do not return 'unknown function')."
+  - "File-IO and search functions behave identically to today (zero regression)."
+  - "glob is canonical for file-glob search; find_file remains an alias."
+  - "CUDA symbol-by-name lookup finds static / __device__ symbols via the filesystem-grep fallback (the truncation bug is gone)."
+  - "C/C++ and CUDA share one ClangdClient implementation (no byte-for-byte duplication)."
+  - "The server is stdlib-only (Python 3.9+, zero external deps) — verified by inspecting the final import block; tempfile is NOT carried over."
+  - "The file layer answers immediately with no LSP init; the LSP backend lazily spins up only on a semantic call for a filetype with sources in the project."
+  - "A clangd subprocess crash no longer leaves request futures hanging until timeout — pending futures are failed promptly on reader EOF."
+  - "tools/list still advertises exactly one tool (purity_call); the rewritten description documents the semantic functions and steers symbol intent, WITHOUT declaring clangd_call/cuda_call retired."
+  - "Semantic path params (find_definition at=, type_at/diagnostics/outline file=) are confined to --project-root."
+  - "_resolve_aliases is unified onto last-wins, observable via JSON-RPC dispatch."
+
+context_summary:
+  error_handling: |
+    purity dispatcher (mcp-purity.py:863-878) returns {"error": str(exc)} for
+    ValueError/FileNotFoundError/OSError, and {"error": "Internal error in
+    '<fn>': <Type>: <msg>"} for anything else; success returns
+    {"__raw_text__": "..."}. Semantic B-class functions (type_at, diagnostics,
+    outline, find_implementations) return an honest error when the LSP yields
+    nothing / has no index — NOT a grep fallback. A-class functions
+    (find_definition, find_references, symbol, symbol_context) fall back to the
+    grep net on empty/error/no-index.
+  memory_management: |
+    Not applicable (Python, GC-managed). Subprocess lifecycle: clangd is spawned
+    via asyncio.create_subprocess_exec; pending request futures live in
+    ClangdClient._pending and must be drained (set_exception) on reader EOF to
+    avoid leaking awaiters (bug #2).
+  logging_pattern: |
+    Python logging module to stderr (logging.getLogger("mcp-purity"); clangd's
+    own stderr is passed through to sys.stderr). Log backend lazy-init (start,
+    index-ready, prime), fallback tier transitions (workspace_symbol ->
+    document_symbol -> grep) at debug level, and clangd-crash detection.
+  naming_conventions: |
+    snake_case for functions and variables; leading-underscore for module-private
+    helpers (e.g. _resolve_aliases, _symbol_to_location, _find_files_with_word,
+    _require_backend). Canonical handler functions are handle_<name>; the
+    HANDLERS dict maps function-name strings to handler callables.
+  key_patterns:
+    - "Dict-table dispatch: HANDLERS = {name: handler} looked up by RAW function name (HANDLERS.get(function), line 858) — NOT an if/elif chain; FUNCTION_ALIASES does not route."
+    - "Two-tier param aliasing: PARAM_ALIASES_BY_FUNC (per-function) takes precedence over PARAM_ALIASES (global), resolved by _resolve_aliases(params, function)."
+    - "Async MCP loop with executor-wrapped blocking stdin (loop.run_in_executor(None, sys.stdin.readline)); tools/call path to be promoted async with executor-wrapped sync file handlers."
+    - "LSP request/response correlation: integer id + loop.create_future() stored in _pending, awaited via asyncio.wait_for(fut, timeout) (mcp-clangd.py:455-466)."
+    - "3-tier _symbol_to_location cascade: workspace_symbol (with retries) -> document_symbol on preferred file -> grep tree + document_symbol on candidates (mcp-clangd.py:808-901)."
+    - "Sandbox confinement via safe_path(project_root, rel, strict) (mcp-purity.py:46-56)."
+    - "Subprocess JSON-RPC smoke test harness (_mcp_smoke_test.py): Server(Popen) wrapper, check(name, cond, detail), run_server(cfg) conversation driver, SERVERS list; invariants protocolVersion '2024-11-05', serverInfo.version '1.0.0', error codes -32601/-32603."
+
+implementation_plan:
+  total_effort: xl
+  effort_breakdown:
+    ss: 0
+    s: 2
+    m: 2
+    l: 5
+    xl: 1
+    xxl: 0
+  affected_files:
+    - /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/_mcp_smoke_test.py
+  new_files: []
+  reference_files:
+    - /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-cuda.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/_mcp_smoke_test.py
+  tasks:
+    - task_id: task-001
+      description: |
+        Fold the common LSP core into mcp-purity.py: add `import pathlib`,
+        `import glob as glob_mod`, `import shutil` (NOT tempfile); add LSP framing
+        (encode_lsp_message / read_lsp_message), path/uri helpers (uri_to_path,
+        path_to_uri, _relative_path), SYMBOL_KIND_MAP, DEFINITION_KINDS,
+        symbol_kind_name, extract_code_range / extract_surrounding_code, and the
+        full ClangdClient class body (the byte-for-byte-identical core from
+        mcp-clangd.py). Keep section banners. This task brings in the core
+        UNCHANGED except the bug-#2 EOF fix is applied in task-009.
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: ClangdClient
+      type: modify
+      status: completed
+      size: l
+      size_rationale: |
+        ClangdClient body + framing + helpers is ~200-220 lines folded in;
+        mechanical copy but must preserve every method. L (100-300).
+      implementation_details: |
+        Extend the import block (mcp-purity.py:25-33) with `import pathlib`,
+        `import glob as glob_mod` (aliased to avoid colliding with the `glob`
+        HANDLERS key / `glob`->paths_include_glob param alias), and
+        `import shutil`. DO NOT add tempfile (mcp-cuda.py:36 imports it but it is
+        unused — [inspector L1]). Keep `# dependencies = []` (line 4) accurate.
+        Fold the common LSP core from mcp-clangd.py: framing
+        encode_lsp_message/read_lsp_message (mcp-clangd.py:107-148), path/uri
+        helpers + _relative_path (mcp-clangd.py:227-244), SYMBOL_KIND_MAP /
+        DEFINITION_KINDS / symbol_kind_name, extract_* helpers, and the entire
+        ClangdClient class (mcp-clangd.py:247-466 and its remaining methods:
+        __init__, start, _reader_loop, _send, _request, _notify, open_document,
+        workspace_symbol, document_symbol, definition, references, implementation,
+        hover, inlay_hints, prepare_call_hierarchy, call_hierarchy_incoming/
+        outgoing, get_diagnostics, _abs_uri, _abs_path). _request default timeout
+        is 10.0 (mcp-clangd.py:455), NOT 15.0 [inspector I1]. Add a
+        FILE LAYER / LSP CORE section banner.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+          function: "<imports>"
+          note: "Current import block to extend (verified at lines 25-33)."
+          pattern_excerpt: |
+            import argparse
+            import asyncio
+            import fnmatch
+            import json
+            import logging
+            import os
+            import re
+            import sys
+            from typing import Any, Callable, Dict, List, Optional
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: ClangdClient.__init__
+          note: "Verified mcp-clangd.py:247-262 — the client state to fold in verbatim."
+          pattern_excerpt: |
+            class ClangdClient:
+                """Async LSP client for clangd with background reader and push-notification support."""
+
+                def __init__(self) -> None:
+                    self.project_root: str = ""
+                    self.process: Optional[asyncio.subprocess.Process] = None
+                    self._next_id: int = 1
+                    self._pending: Dict[int, asyncio.Future] = {}
+                    self._diagnostics: Dict[str, List] = {}       # uri -> list[diagnostic]
+                    self._diag_events: Dict[str, asyncio.Event] = {}
+                    self._opened_files: set = set()
+                    self._reader_task: Optional[asyncio.Task] = None
+                    self._indexing_done: asyncio.Event = asyncio.Event()
+                    self._active_progress: set = set()   # tokens with begin but no end yet
+                    self._send_lock = asyncio.Lock()
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: ClangdClient._request
+          note: "Verified mcp-clangd.py:455-466 — the request/response correlation primitive; default timeout 10.0."
+          pattern_excerpt: |
+            async def _request(self, method: str, params: Any, timeout: float = 10.0) -> dict:
+                req_id = self._next_id
+                self._next_id += 1
+                loop = asyncio.get_running_loop()
+                fut: asyncio.Future = loop.create_future()
+                self._pending[req_id] = fut
+                await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+                try:
+                    return await asyncio.wait_for(fut, timeout=timeout)
+                except asyncio.TimeoutError:
+                    self._pending.pop(req_id, None)
+                    return {"error": {"message": f"timeout waiting for {method}"}}
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-cuda.py
+          function: "<imports>"
+          note: "Verified mcp-cuda.py:26-37 — note tempfile at line 36 (unused; DO NOT carry over)."
+          pattern_excerpt: |
+            import asyncio
+            import glob as glob_mod
+            import json
+            import logging
+            import os
+            import pathlib
+            import re
+            import shutil
+            import sys
+            import argparse
+            import tempfile
+            from typing import Any, Dict, List, Optional
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        Indirectly verified by task-010 (smoke test) — after folding, the server
+        must still import and pass the existing _mcp_smoke_test.py purity
+        conversation (initialize/ping/tools/list). No direct unit test (D2). Final
+        import block must be confirmed stdlib-only with no tempfile.
+      dependencies: []
+    - task_id: task-002
+      description: |
+        Define the abstract LSP-backend interface that the dispatcher uses
+        (start, definition, references, implementation, hover, document_symbol,
+        inlay_hints, get_diagnostics, prepare_call_hierarchy +
+        call_hierarchy_incoming/outgoing, plus project_root / process attributes).
+        ClangdClient (from task-001) is its first implementation. Also fold the
+        DRY grep-fallback core helpers (_FALLBACK_EXTS, _FALLBACK_SKIP_DIRS,
+        _find_files_with_word, _outline_flatten, _fallback_workspace_symbols) and
+        the 3-tier _symbol_to_location cascade.
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: _symbol_to_location
+      type: modify
+      status: completed
+      size: l
+      size_rationale: |
+        Abstract interface declaration + fallback helpers + the full 3-tier
+        _symbol_to_location (~95 lines) is ~150-200 lines total. L (100-300).
+      implementation_details: |
+        Declare the abstract backend interface (a typing.Protocol or an ABC with
+        the methods the semantic handlers call). The interface lists the methods
+        the dispatcher needs (start, definition, references, implementation,
+        hover, document_symbol, inlay_hints, get_diagnostics, call-hierarchy
+        trio) and the attributes project_root / process. ClangdClient is its
+        first implementation. Fold the SINGLE DRY grep core: _find_files_with_word
+        (mcp-clangd.py:726-748) feeding _fallback_workspace_symbols
+        (mcp-clangd.py:762+) and the full 3-tier _symbol_to_location cascade
+        (mcp-clangd.py:808-901) — tier 1 workspace_symbol with retries, tier 2
+        document_symbol on the preferred file, tier 3 grep tree + document_symbol
+        on candidates. Leave the full-featured search_for_pattern handler separate
+        (its document_symbol post-processing is LSP-specific and does not fold
+        into the file grep). The unified server has ONE _symbol_to_location — so
+        bug #1 (CUDA truncation) is fixed by construction (verified explicitly in
+        task-004).
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: _symbol_to_location
+          note: "Verified mcp-clangd.py:808-901 — full 3-tier cascade; this is the canonical version that must be the single one in the unified server."
+          pattern_excerpt: |
+            for attempt in range(max_retries):
+                symbols = await client.workspace_symbol(symbol_name)
+                # First pass: exact name match with definition kind
+                # ... (retries, then:)
+            # Fallback 1: document_symbol on the preferred file
+            if abs_preferred:
+                try:
+                    doc_syms = await client.document_symbol(abs_preferred)
+                    file_uri = pathlib.Path(abs_preferred).as_uri()
+                    for sym in _outline_flatten(doc_syms):
+                        if sym.get("name") == symbol_name:
+                            sel = sym.get("selectionRange") or sym.get("range") or {}
+                            return _make_entry(file_uri, sel.get("start", {}))
+                except Exception:
+                    pass
+            # Fallback 2: grep project tree then document_symbol on each candidate
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol_name):
+                candidates = _find_files_with_word(client.project_root, symbol_name, limit=10)
+                if abs_preferred:
+                    candidates = [c for c in candidates if c != abs_preferred]
+                for fpath in candidates:
+                    try:
+                        doc_syms = await client.document_symbol(fpath)
+                    except Exception:
+                        continue
+                    file_uri = pathlib.Path(fpath).as_uri()
+                    for sym in _outline_flatten(doc_syms):
+                        if sym.get("name") == symbol_name and symbol_kind_name(sym.get("kind", 0)) in DEFINITION_KINDS:
+                            sel = sym.get("selectionRange") or sym.get("range") or {}
+                            return _make_entry(file_uri, sel.get("start", {}))
+            return None
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: _find_files_with_word
+          note: "Verified mcp-clangd.py:726-748 — the DRY grep core feeding the A-class fallback (whole-identifier byte regex, skip-dirs)."
+          pattern_excerpt: |
+            def _find_files_with_word(root: str, word: str, exts=_FALLBACK_EXTS,
+                                      limit: int = 20) -> List[str]:
+                rx = re.compile(rb"\b" + re.escape(word.encode("utf-8", "ignore")) + rb"\b")
+                hits: List[str] = []
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = [d for d in dirnames if d not in _FALLBACK_SKIP_DIRS and not d.startswith(".")]
+                    for fn in filenames:
+                        if not fn.endswith(exts):
+                            continue
+                        full = os.path.join(dirpath, fn)
+                        try:
+                            with open(full, "rb") as f:
+                                if rx.search(f.read()):
+                                    hits.append(full)
+                                    if len(hits) >= limit:
+                                        return hits
+                        except (OSError, IOError):
+                            continue
+                return hits
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        Indirect via task-010: semantic dispatch on a C fixture must reach the
+        cascade. No direct unit test (D2). _route_filetype / _detect_language and
+        the cascade get observable coverage through JSON-RPC dispatch behavior.
+      dependencies:
+        - task-001
+    - task_id: task-003
+      description: |
+        Fold the CUDA language-config into the clangd-family backend:
+        _find_cuda_sdk, _detect_cuda_arch, NVCC_STRIP_FLAGS / NVCC_STRIP_PREFIXES,
+        _expand_rsp_file, _translate_compile_commands, _prepare_compile_commands,
+        _generate_minimal_compile_commands, _has_cuda_sources; merge the CUDA
+        start() extras (cuda_path/cuda_arch + _prepare_compile_commands before
+        initialize) and the CUDA _prime_index filter (.cu/.cuh); merge
+        _detect_language to cover .c/.cpp/.cu/.cuh/.h (the .cu/.cuh->"cuda"
+        branch). CUDA becomes config of the one backend, not a second copy.
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: _translate_compile_commands
+      type: modify
+      status: completed
+      size: l
+      size_rationale: |
+        Seven CUDA config functions + strip tables + start()/_prime_index/
+        _detect_language merges from mcp-cuda.py:117-450, 578-584, 608-703 — ~250
+        lines. L (100-300).
+      implementation_details: |
+        Fold the CUDA-only config (the language-config of the clangd-family
+        backend) from mcp-cuda.py: _find_cuda_sdk (117-193), _detect_cuda_arch
+        (196-226), NVCC_STRIP_FLAGS (233), NVCC_STRIP_PREFIXES (241),
+        _expand_rsp_file (254-264), _translate_compile_commands (267-346),
+        _prepare_compile_commands (349-395), _generate_minimal_compile_commands
+        (398-427), _has_cuda_sources (430-450). Merge the CUDA ClangdClient.start
+        extras (cuda_path/cuda_arch params + _prepare_compile_commands before
+        initialize) and the CUDA _prime_index filter (.cu/.cuh) into the single
+        ClangdClient as language-config branches. Merge _detect_language to the
+        CUDA-superset form (mcp-cuda.py:578-584): .cu/.cuh->"cuda", .c->"c",
+        else "cpp" (the clangd .h default is "cpp"). Add a CUDA CONFIG section
+        banner. Reuse env CUDA_PATH / PATH / /usr/local/cuda-* / CMakeCache
+        discovery and the .cache/mcp-cuda compile_commands cache dir as-is. Use
+        glob_mod / shutil (imported in task-001) — NOT tempfile.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-cuda.py
+          function: _has_cuda_sources
+          note: "Verified mcp-cuda.py:430-450 — gates whether a CUDA backend should spin up (used by lazy-init guard in task-006)."
+          pattern_excerpt: |
+            def _has_cuda_sources(project_root: str,
+                                  cc_entries: Optional[List[dict]] = None) -> bool:
+                if cc_entries:
+                    for entry in cc_entries:
+                        f = str(entry.get("file", "")).lower()
+                        if f.endswith(".cu") or f.endswith(".cuh"):
+                            return True
+                for root, dirs, files in os.walk(project_root):
+                    dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("build", "out", "dist")]
+                    for fname in files:
+                        if pathlib.Path(fname).suffix.lower() in (".cu", ".cuh"):
+                            return True
+                return False
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-cuda.py
+          function: _detect_language
+          note: "Verified mcp-cuda.py:578-584 — the CUDA-superset _detect_language that must replace the clangd .c/else form."
+          pattern_excerpt: |
+            def _detect_language(file_path: str) -> str:
+                suffix = pathlib.Path(file_path).suffix.lower()
+                if suffix in (".cu", ".cuh"):
+                    return "cuda"
+                if suffix == ".c":
+                    return "c"
+                return "cpp"
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-cuda.py
+          function: _translate_compile_commands
+          note: "Verified mcp-cuda.py:267-346 — nvcc JSON -> clang JSON (flag stripping, -x cuda injection); pure, table-driven."
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        Indirect via task-010 and (only if a CUDA SDK is present in the env) a
+        CUDA fixture: find_definition on a static __device__ symbol must succeed
+        via the fallback (the bug-#1 regression). Gate CUDA integration behind an
+        SDK presence check. No direct unit test (D2).
+      dependencies:
+        - task-002
+    - task_id: task-004
+      description: |
+        VERIFY bug #1 (CUDA _symbol_to_location truncation) is fixed by
+        construction: assert the single unified _symbol_to_location carries ALL 3
+        tiers (workspace_symbol-with-retries, document_symbol on preferred file,
+        grep tree + document_symbol on candidates). There is no CUDA-specific copy
+        to truncate. This is an explicit verification/guard task, not new logic.
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: _symbol_to_location
+      type: modify
+      status: completed
+      size: s
+      size_rationale: |
+        Verification of an existing fold (task-002) — confirm tiers 2 and 3 are
+        present (the CUDA copy at mcp-cuda.py ends at line 1187 / return None,
+        missing them). Pure check, possibly a code comment. S (5-20).
+      implementation_details: |
+        Confirm the unified _symbol_to_location (folded in task-002 from
+        mcp-clangd.py:808-901) contains all 3 tiers, since the CUDA source
+        (mcp-cuda.py:1130-1187) is truncated — it ends at `return None` (line
+        1187) right after the workspace/symbol retry loop, lacking the
+        document_symbol-on-preferred (tier 2) and grep+document_symbol (tier 3)
+        fallbacks. Because the unified server has exactly ONE _symbol_to_location
+        (the full clangd cascade), the CUDA truncation bug cannot recur. Add a
+        brief comment marking this as the single canonical cascade. The
+        regression is asserted at runtime by the CUDA fixture in task-003's test
+        requirements when an SDK is available.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-cuda.py
+          function: _symbol_to_location
+          note: "Verified mcp-cuda.py:1130-1187 — the TRUNCATED version: ends at `return None` (line 1187) right after the retry loop, missing tiers 2 and 3. This is the bug being designed out."
+          pattern_excerpt: |
+                    if attempt < max_retries - 1:
+                        log.debug(f"workspace/symbol retry {attempt + 1} for '{symbol_name}'")
+                        await asyncio.sleep(1.0)
+
+                return None
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: _symbol_to_location
+          note: "Verified mcp-clangd.py:872-901 — the two extra tiers the CUDA copy lacks; these MUST be present in the unified single handler."
+          pattern_excerpt: |
+            # Fallback 1: document_symbol on the preferred file
+            if abs_preferred:
+                log.debug(f"workspace/symbol miss — falling back to document_symbol on {abs_preferred}")
+                try:
+                    doc_syms = await client.document_symbol(abs_preferred)
+                    file_uri = pathlib.Path(abs_preferred).as_uri()
+                    for sym in _outline_flatten(doc_syms):
+                        if sym.get("name") == symbol_name:
+                            sel = sym.get("selectionRange") or sym.get("range") or {}
+                            return _make_entry(file_uri, sel.get("start", {}))
+                except Exception:
+                    pass
+            # Fallback 2: grep project tree then document_symbol on each candidate
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol_name):
+                candidates = _find_files_with_word(client.project_root, symbol_name, limit=10)
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        CUDA fixture (SDK-gated): find_definition on a `static __device__` symbol
+        resolves via the fallback. No direct unit test (D2) — covered indirectly.
+      dependencies:
+        - task-003
+    - task_id: task-005
+      description: |
+        Fix bug #2 (clangd-crash future leak): in ClangdClient._reader_loop, on
+        stdout EOF (read_lsp_message returns None, the `break` path), drain
+        self._pending and fail every outstanding future with a RuntimeError
+        before breaking, so callers get a prompt error instead of blocking until
+        the per-request timeout.
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: ClangdClient._reader_loop
+      type: modify
+      status: completed
+      size: s
+      size_rationale: |
+        ~5-line drain block at the EOF branch. Must be correct (no double-pop, no
+        set_exception on done futures). S (5-20).
+      implementation_details: |
+        In the unified ClangdClient._reader_loop (folded in task-001 from
+        mcp-clangd.py:396-446), at the EOF branch — `msg = await
+        read_lsp_message(reader); if msg is None: ... break` (mcp-clangd.py:
+        400-404) — before breaking, iterate a snapshot of self._pending and fail
+        each not-done future: for req_id, fut in list(self._pending.items()): if
+        not fut.done(): fut.set_exception(RuntimeError("clangd backend terminated
+        unexpectedly")); then self._pending.pop(req_id, None). Use list(...) to
+        avoid mutating during iteration; guard fut.done() to avoid
+        set_exception on a future already resolved by a racing response. This is
+        independent of the unification and can be paired with task-001 (step 9).
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: ClangdClient._reader_loop
+          note: "Verified mcp-clangd.py:396-404 — the EOF branch that currently just breaks, leaking pending futures."
+          pattern_excerpt: |
+            async def _reader_loop(self) -> None:
+                """Background task: read all LSP messages and route them."""
+                assert self.process and self.process.stdout
+                reader = self.process.stdout
+                while True:
+                    msg = await read_lsp_message(reader)
+                    if msg is None:
+                        log.debug("clangd stdout EOF")
+                        break
+                    msg_id = msg.get("id")
+                    method = msg.get("method", "")
+                    # --- Response to a pending request ---
+                    if msg_id is not None and ("result" in msg or "error" in msg):
+                        fut = self._pending.pop(msg_id, None)
+                        if fut and not fut.done():
+                            fut.set_result(msg)
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        Manual: kill the clangd subprocess mid-request; the caller gets a prompt
+        RuntimeError, not a ~10s timeout. (No direct in-process unit test under
+        D2; this is verified manually and by the absence of a hang.)
+      dependencies:
+        - task-001
+    - task_id: task-006
+      description: |
+        Backend map + lazy init: replace the _client singleton with
+        _backends: Dict[str, ClangdClient]; add _route_filetype (".c/.cpp/.cu/
+        .cuh/.h" -> "clangd") and _require_backend(filetype); author the NEW
+        lazy-init TRIGGER (once-only guard per backend type, concurrent-first-call
+        coalescing into a single in-flight init task, init-failure caching/
+        backoff, per-backend state in _backends), reusing ONLY the shielded 90s
+        WAIT: asyncio.wait_for(asyncio.shield(init_task), timeout=90). Site the
+        project-root mismatch warning here (no handle_init under lazy init).
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: _require_backend
+      type: modify
+      status: completed
+      size: l
+      size_rationale: |
+        NEW correctness surface (not reuse): once-only guard, concurrency
+        coalescing, failure caching, per-backend state — ~120-150 lines including
+        _route_filetype and the mismatch warning. L (100-300).
+      implementation_details: |
+        Module-level: replace the single _client singleton (clangd's `_client:
+        Optional[ClangdClient] = None`, mcp-clangd.py:611) with
+        `_backends: Dict[str, ClangdClient] = {}` keyed by backend type ("clangd"
+        in Phase 0; "luals" Phase 1). Add `_route_filetype(filetype) -> str`
+        mapping .c/.cpp/.cu/.cuh/.h -> "clangd". Add `_require_backend(filetype)`
+        returning the live client or raising RuntimeError if not initialized.
+        Author the lazy-init TRIGGER [inspector H2 — NEW logic]: on first semantic
+        call for a filetype, if _backends[type] is absent, START init — guarded by
+        whether the project has sources of that type (_has_cuda_sources-style for
+        cuda; presence of .c/.cpp for clangd). The existing clangd gate
+        (mcp-clangd.py:1584-1591) only WAITS for an already-started task; the
+        unified server must author the trigger and reuse ONLY the shielded WAIT:
+        asyncio.wait_for(asyncio.shield(init_task), timeout=90.0). Handle: (a)
+        once-only init guard per backend type; (b) concurrent first-calls racing
+        to init -> single in-flight init task per type (store the asyncio.Task in
+        _backends state and await the same task); (c) init-failure caching — record
+        the failure and a backoff window so a crashing clangd is not re-spawned on
+        every call; (d) per-backend init state in the _backends map. The file
+        layer NEVER triggers init. Site the project-root mismatch warning
+        (mcp-clangd.py:921-935) in the lazy-init path / _require_backend, since
+        there is no handle_init anymore [inspector M3]; the CUDA path never had
+        this warning (mcp-cuda.py:1205-1207).
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: handle_clangd_call
+          note: "Verified mcp-clangd.py:1582-1591 — the EXISTING shielded 90s WAIT gate; reuse ONLY this WAIT, not the eager init."
+          pattern_excerpt: |
+            # If auto-init is in progress and the requested function needs the client,
+            # wait for it to complete (up to 90s) rather than failing immediately.
+            if (function != "clangd_init"
+                    and server and server._init_task and not server._init_task.done()
+                    and (_client is None or _client.process is None)):
+                log.debug(f"Waiting for auto-init to complete before {function}...")
+                try:
+                    await asyncio.wait_for(asyncio.shield(server._init_task), timeout=90.0)
+                except (asyncio.TimeoutError, Exception) as e:
+                    log.debug(f"Auto-init wait failed: {e}")
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: handle_init
+          note: "Verified mcp-clangd.py:921-935 — the project-root mismatch warning to RE-SITE in the lazy-init path / _require_backend [inspector M3]."
+          pattern_excerpt: |
+            if _client is not None and _client.process is not None:
+                requested = str(pathlib.Path(project_root).resolve())
+                active = _client.project_root
+                if requested != active:
+                    return {
+                        "status": "already initialized",
+                        "warning": (
+                            f"clangd is already running on a different project_root. "
+                            f"Requested: {requested}, active: {active}. "
+                            f"The MCP server must be restarted to switch projects."
+                        ),
+                        "project_root": active,
+                        "requested_project_root": requested,
+                    }
+                return {"status": "already initialized", "project_root": active}
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: McpServer.run
+          note: "Verified mcp-clangd.py:1940-1948 — clangd's EAGER auto-init at run() that we are NOT reusing (lazy trigger replaces it)."
+          pattern_excerpt: |
+            # Auto-init: kick off in background so it doesn't block the MCP handshake
+            if self.auto_project_root:
+                log.debug(f"Auto-init: {self.auto_project_root}")
+                self._init_task = asyncio.create_task(
+                    handle_init({
+                        "project_root": self.auto_project_root,
+                        "clangd_path": self.auto_clangd_path,
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        Manual: file ops are instant (no init wait); a semantic call lazily spins
+        up clangd. Concurrent first calls coalesce to one clangd process; repeated
+        calls after an init failure do not re-spawn (backoff). Indirect smoke
+        coverage via task-010 (semantic dispatch). No direct unit test (D2).
+      dependencies:
+        - task-002
+        - task-003
+    - task_id: task-007
+      description: |
+        Wire the semantic handlers (canonical names) with symbol/at routing on
+        POST-alias keys [inspector M2]. Implement find_definition / find_references
+        to branch on resolved params (line/character -> position path; else
+        symbol_name -> name path); validation error if neither. Merge
+        hover+deduced_type_at into type_at. Create canonical
+        handle_find_implementations (wrap/rename handle_find_implementations_at —
+        no name-based variant exists [inspector L2]); create canonical outline /
+        symbol from source handle_document_outline / handle_workspace_symbols
+        [inspector L3]; create symbol_context, inlay_hints, symbol_change_impact,
+        diagnostics canonical handlers. Each acquires its backend via
+        _require_backend (lazy-init trigger from task-006).
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: handle_find_definition
+      type: create
+      status: completed
+      size: l
+      size_rationale: |
+        10 canonical async handlers (some wrapping existing logic, some new
+        routing/merge), each touching the backend interface — ~200-250 lines. L
+        (100-300).
+      implementation_details: |
+        Create the 10 canonical async handlers, each obtaining its backend via
+        _require_backend(_detect_language(path)) (task-006). find_definition /
+        find_references inspect the POST-alias resolved params: if line/character
+        present -> position path (former *_definition_at logic); else if
+        symbol_name present -> name path via _symbol_to_location. [inspector M2]
+        the merged alias layer renames symbol -> symbol_name (clangd PARAM_ALIASES,
+        mcp-clangd.py:36), so the router MUST check symbol_name, not symbol; if
+        neither line/character nor symbol_name -> raise ValueError (validation
+        error). Keep the two internal handlers; only the dispatch entry is unified.
+        type_at treats hover as primary and augments with the deduced type where
+        the LSP provides one (merge clangd handle_hover + handle_deduced_type_at).
+        find_implementations: create canonical handle_find_implementations by
+        wrapping/renaming the source handle_find_implementations_at
+        (mcp-clangd.py:1120) — no name-based variant exists [inspector L2].
+        outline <- source handle_document_outline (mcp-clangd.py:1189); symbol <-
+        source handle_workspace_symbols (mcp-clangd.py:1148) [inspector L3].
+        symbol_change_impact: mixed fallback — references part is A-class (grep
+        degradable), call-hierarchy part is B-class; return a partial-but-honest
+        result flagged partial if the LSP yields no call hierarchy. B-class
+        handlers (type_at, diagnostics, outline, find_implementations) return an
+        honest error on empty/no-index — NOT a grep fallback. A-class handlers
+        (find_definition, find_references, symbol, symbol_context) fall back to the
+        grep net. Note: glob as a FUNCTION name (file-search) is a different
+        namespace from glob as a PARAM alias -> paths_include_glob (mcp-purity.py:
+        86) — document so they are not conflated. Do NOT register these into
+        HANDLERS yet (that is task-008); just define the handler functions and
+        their internal routing.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: ALL_HANDLERS
+          note: "Verified mcp-clangd.py:1535-1550 — the 13 source handlers (excl. clangd_init) that become the canonical semantic set; note find_implementations only has the _at variant, hover and deduced_type_at both feed type_at."
+          pattern_excerpt: |
+            ALL_HANDLERS = {
+                "clangd_init":                    handle_init,
+                "clangd_find_definition":         handle_find_definition,
+                "clangd_find_definition_at":      handle_find_definition_at,
+                "clangd_find_references":         handle_find_references,
+                "clangd_find_references_at":      handle_find_references_at,
+                "clangd_find_implementations_at": handle_find_implementations_at,
+                "clangd_workspace_symbols":       handle_workspace_symbols,
+                "clangd_document_outline":        handle_document_outline,
+                "clangd_symbol_context":          handle_symbol_context,
+                "clangd_inlay_hints":             handle_inlay_hints,
+                "clangd_symbol_change_impact":    handle_symbol_change_impact,
+                "clangd_hover":                   handle_hover,
+                "clangd_diagnostics":             handle_diagnostics,
+                "clangd_deduced_type_at":         handle_deduced_type_at,
+            }
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: _symbol_to_location
+          note: "Verified mcp-clangd.py:808-826 — the name-path entry the find_definition name branch calls (signature + _make_entry)."
+          pattern_excerpt: |
+            async def _symbol_to_location(client: ClangdClient, symbol_name: str,
+                                           preferred_path: Optional[str] = None,
+                                           max_retries: int = 3) -> Optional[dict]:
+                if preferred_path:
+                    await client.open_document(client._abs_path(preferred_path))
+                abs_preferred = client._abs_path(preferred_path) if preferred_path else None
+                def _make_entry(uri: str, start: dict) -> dict:
+                    return {
+                        "path": uri_to_path(uri),
+                        "uri": uri,
+                        "line": start.get("line", 0),
+                        "char": start.get("character", 0),
+                    }
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        task-010 asserts: the 10 semantic names are dispatchable; find_definition
+        with neither symbol nor at returns a validation error. On a small C fixture
+        with compile_commands.json: find_definition/find_references/outline. No
+        direct unit test (D2) — symbol/at routing covered via observable dispatch.
+      dependencies:
+        - task-002
+        - task-006
+    - task_id: task-008
+      description: |
+        Extend the alias layer and register dispatch. Add all 10 canonical
+        semantic names AND every legacy clangd_*/cuda_* name (incl. *_at,
+        workspace_symbols->symbol, document_outline->outline, hover &
+        deduced_type_at->type_at) as DIRECT HANDLERS keys [inspector C1 / D1].
+        Make glob canonical with find_file as alias (already both direct keys).
+        Make clangd_init/cuda_init no-op/deprecation-notice handlers (NOT errors).
+        Extend HANDLER_ACCEPTED_PARAMS and HANDLER_DESCRIPTIONS/--list for the 10
+        functions. Fix bug #3: unify _resolve_aliases onto last-wins and merge
+        clangd's PARAM_ALIASES (symbol->symbol_name, col/column/char->character,
+        max->max_results, depth->call_hierarchy_depth); DROP CUDA-only init
+        aliases (arch/gpu_arch/cuda_sdk/sdk_path).
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: HANDLERS
+      type: modify
+      status: completed
+      size: m
+      size_rationale: |
+        Mostly dict-entry additions across HANDLERS / PARAM_ALIASES /
+        HANDLER_ACCEPTED_PARAMS / HANDLER_DESCRIPTIONS + the one-line precedence
+        flip + two no-op handlers — ~60-90 lines. M (20-100).
+      implementation_details: |
+        HANDLERS (mcp-purity.py:776-790): add the 10 canonical semantic names AND
+        every legacy clangd_*/cuda_* name as DIRECT keys mapping to the canonical
+        handlers from task-007 [inspector C1 / Decision D1] — line 858
+        (HANDLERS.get(function), RAW name) stays UNCHANGED; FUNCTION_ALIASES does
+        NOT route. Legacy->canonical map (both clangd_ and cuda_ prefixes):
+        *_find_definition / *_find_definition_at -> find_definition;
+        *_find_references / *_find_references_at -> find_references;
+        *_find_implementations_at -> find_implementations; *_workspace_symbols ->
+        symbol; *_document_outline -> outline; *_symbol_context -> symbol_context;
+        *_inlay_hints -> inlay_hints; *_symbol_change_impact ->
+        symbol_change_impact; *_hover -> type_at; *_deduced_type_at -> type_at;
+        *_diagnostics -> diagnostics. glob stays canonical for file-search with
+        find_file as alias (both already direct keys, lines 781-782). clangd_init
+        / cuda_init -> a no-op/deprecation-notice handler returning a benign
+        message (NOT an error) since lazy init removes init. Extend
+        HANDLER_ACCEPTED_PARAMS (mcp-purity.py:797-833) with the canonical param
+        sets for the 10 functions, and HANDLER_DESCRIPTIONS (mcp-purity.py:
+        1089-1099, drives --list at 1102-1108). Fix bug #3 in _resolve_aliases
+        (mcp-purity.py:145-177): change the first-wins guard `if canonical not in
+        resolved` (line 175) to an unconditional `resolved[canonical] = value`
+        (last-wins, matching mcp-clangd.py:74). KEEP purity's (params, function)
+        signature and the two-tier PARAM_ALIASES_BY_FUNC + PARAM_ALIASES. Merge
+        clangd's flat PARAM_ALIASES that the semantic handlers need
+        (symbol->symbol_name, col/column/char->character, max->max_results,
+        depth->call_hierarchy_depth) into purity's PARAM_ALIASES (or a semantic
+        PARAM_ALIASES_BY_FUNC block). DROP the CUDA-only init aliases (arch /
+        gpu_arch / cuda_sdk / sdk_path, mcp-cuda.py:59-62) — lazy init removes init
+        params [inspector L-new-1].
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+          function: HANDLERS
+          note: "Verified mcp-purity.py:776-790 — the dict to extend; note glob/find_file/grep/search/ls are ALREADY direct keys (the load-bearing redundancy [inspector C1] relies on)."
+          pattern_excerpt: |
+            HANDLERS: Dict[str, Callable[..., dict]] = {
+                "read_file": handle_read_file,
+                "create_text_file": handle_create_text_file,
+                "list_dir": handle_list_dir,
+                "ls": handle_list_dir,
+                "find_file": handle_find_file,
+                "glob": handle_find_file,
+                "replace_content": handle_replace_content,
+                "delete_lines": handle_delete_lines,
+                "replace_lines": handle_replace_lines,
+                "insert_at_line": handle_insert_at_line,
+                "search_for_pattern": handle_search_for_pattern,
+                "grep": handle_search_for_pattern,
+                "search": handle_search_for_pattern,
+            }
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+          function: _resolve_aliases
+          note: "Verified mcp-purity.py:171-177 — first-wins guard (line 175) to flip to last-wins; KEEP the (params, function) two-tier signature."
+          pattern_excerpt: |
+            func_aliases = PARAM_ALIASES_BY_FUNC.get(function or "", {})
+            resolved: dict = {}
+            for key, value in params.items():
+                canonical = func_aliases.get(key) or PARAM_ALIASES.get(key, key)
+                if canonical not in resolved:
+                    resolved[canonical] = value
+            return resolved
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-clangd.py
+          function: PARAM_ALIASES
+          note: "Verified mcp-clangd.py:32-53 — the semantic param aliases to MERGE (symbol->symbol_name, col/column/char->character, max->max_results, depth->call_hierarchy_depth); the project_root family is moot under lazy init."
+          pattern_excerpt: |
+            PARAM_ALIASES = {
+                "file": "path",
+                "file_path": "path",
+                "filepath": "path",
+                "symbol": "symbol_name",
+                "name": "symbol_name",
+                "col": "character",
+                "column": "character",
+                "char": "character",
+                "ctx_lines": "context_lines",
+                "context": "context_lines",
+                "max": "max_results",
+                "count": "max_results",
+                "max_refs": "max_references",
+                "depth": "call_hierarchy_depth",
+            }
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-cuda.py
+          function: PARAM_ALIASES
+          note: "Verified mcp-cuda.py:59-62 — the CUDA-only init aliases to DROP (arch/gpu_arch/cuda_sdk/sdk_path) [inspector L-new-1]."
+          pattern_excerpt: |
+                "arch": "cuda_arch",
+                "gpu_arch": "cuda_arch",
+                "cuda_sdk": "cuda_path",
+                "sdk_path": "cuda_path",
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        task-010 asserts: purity_call function="clangd_find_definition" and
+        "cuda_find_definition" actually dispatch (do not return "unknown
+        function"); the 10 semantic names dispatch; _resolve_aliases last-wins is
+        observable (a later explicit canonical key overrides an earlier alias). No
+        direct unit test (D2).
+      dependencies:
+        - task-007
+    - task_id: task-009
+      description: |
+        Confine semantic path params to --project-root [security P1, CWE-22].
+        Before any semantic handler passes a path to the LSP backend
+        (find_definition at=, find_references at=, type_at/diagnostics/outline
+        file=, inlay_hints, symbol_context, symbol_change_impact), resolve it
+        through the existing safe_path(project_root, rel, strict) confinement
+        check the file-IO layer already uses, so an absolute or `..` path cannot
+        coax the LSP into reading outside the sandbox.
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: safe_path
+      type: modify
+      status: completed
+      size: m
+      size_rationale: |
+        Thread project_root/strict into the semantic handlers and apply safe_path
+        at each path-accepting entry — touches several handlers but each change is
+        a few lines. M (20-100).
+      implementation_details: |
+        Apply the existing safe_path (mcp-purity.py:46-56) to every path param a
+        semantic handler receives BEFORE handing it to the LSP backend's
+        _abs_path / open_document. The semantic handlers must receive project_root
+        and strict (threaded from the dispatcher, same as file handlers) and call
+        safe_path(project_root, path, strict) on: find_definition/find_references
+        `at` path, type_at/diagnostics/outline/inlay_hints/symbol_context/
+        symbol_change_impact `file`/`path`. This must be its OWN task (not buried
+        in task-007) per the security note. safe_path returns os.path.realpath for
+        absolute paths when not strict and raises ValueError ("Path escapes
+        project root") when a resolved path leaves the root — reuse it verbatim so
+        the confinement matches the file-IO layer exactly.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+          function: safe_path
+          note: "Verified mcp-purity.py:46-56 — the existing file-IO confinement check to reuse for semantic path params."
+          pattern_excerpt: |
+            def safe_path(project_root: str, relative_path: str, strict: bool = False) -> str:
+                """Resolve *relative_path* under *project_root* and verify it stays inside.
+
+                When *strict* is False (default), absolute paths are allowed as-is.
+                """
+                if os.path.isabs(relative_path) and not strict:
+                    return os.path.realpath(relative_path)
+                resolved = os.path.realpath(os.path.join(project_root, relative_path))
+                if not resolved.startswith(project_root + os.sep) and resolved != project_root:
+                    raise ValueError(f"Path escapes project root: {relative_path}")
+                return resolved
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        Security: a semantic call with a path that escapes --project-root (absolute
+        outside root under --strict, or `..` traversal) is rejected with the same
+        "Path escapes project root" ValueError the file-IO layer raises. No new
+        shell/network surface. Verified manually / via the security checklist; no
+        direct unit test under D2.
+      dependencies:
+        - task-007
+    - task_id: task-010
+      description: |
+        Flip the dispatch to async and rewrite the purity_call tool description.
+        Make _handle_tool_call / the tools/call path async; await semantic
+        handlers directly; executor-wrap sync file handlers
+        (loop.run_in_executor). Update _handle_message to await the now-async
+        _handle_tool_call. Rewrite the PURITY_CALL_TOOL description [inspector H1
+        — a full REVERSAL]: it currently declares "purity is NOT for symbol
+        navigation / WRONG tool / VIOLATION" and routes symbol work to
+        clangd_call/cuda_call/luals_call as MANDATORY. Rewrite to advertise the
+        semantic functions WITHOUT declaring clangd_call/cuda_call retired (they
+        run in parallel in Phase 0), and keep the search_for_pattern steering
+        sentence. Also extend the smoke test (_mcp_smoke_test.py) per Decision D2.
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+      function_name: McpServer._handle_tool_call
+      type: modify
+      status: completed
+      size: xl
+      size_rationale: |
+        Async flip of the dispatch path (handle_purity_call must become async or
+        the sync/async split handled in the dispatcher) + executor wrapping + the
+        ~70-line tool-description REVERSAL + smoke-test additions. Touches the
+        dispatch path everything else registers into; highest-blast-radius task.
+        XL (300-500).
+      implementation_details: |
+        Promote _handle_tool_call (mcp-purity.py:1043-1074) and the tools/call
+        path to async; _handle_message (mcp-purity.py:1015-1041) must `await
+        self._handle_tool_call(...)`, and McpServer.run (980) already runs the
+        async loop. In the dispatcher, semantic (async) handlers are awaited
+        directly; sync file handlers run via `result = await
+        loop.run_in_executor(None, lambda: sync_handler(params, project_root,
+        strict))` so long file ops (search_for_pattern, os.walk) never freeze the
+        event loop. Keep purity's error-handling contract (mcp-purity.py:863-878):
+        {"error": str(exc)} for ValueError/FileNotFoundError/OSError, {"error":
+        "Internal error in '<fn>': <Type>: <msg>"} otherwise, success {"__raw_text__":
+        ...}. Rewrite PURITY_CALL_TOOL["description"] (mcp-purity.py:885-956) —
+        [inspector H1, REVERSAL, NOT a one-line addition]: the live ~40-line block
+        currently says "purity is NOT for symbol navigation," "purity is the WRONG
+        tool," marks symbol use a "VIOLATION," and routes C/C++/CUDA/Lua to
+        clangd_call/cuda_call/luals_call as "MANDATORY." Rewrite so it advertises
+        the new semantic functions ("purity_call now ALSO does symbol navigation
+        via find_definition/find_references/type_at/...") WITHOUT self-contradiction
+        and WITHOUT declaring clangd_call/cuda_call retired (they run in PARALLEL in
+        Phase 0): "clangd_call/cuda_call still exist (parallel, Phase 0)." Keep the
+        search_for_pattern steering sentence ("search_for_pattern remains free-text
+        search over any filetype"). tools/list must STILL advertise exactly one
+        tool (PURITY_CALL_TOOL). Then extend _mcp_smoke_test.py per Decision D2:
+        add a purity_call dispatch conversation to run_server (or a purity-specific
+        block) asserting — tools/list advertises exactly purity_call (already
+        checked generically); the 10 semantic names are dispatchable; legacy
+        clangd_find_definition / cuda_find_definition dispatch (no "unknown
+        function" error); _resolve_aliases last-wins is observable; find_definition
+        with neither symbol nor at returns a validation error. Reuse the existing
+        Server Popen wrapper, check(name, cond, detail), and JSON-RPC invariants
+        (protocolVersion "2024-11-05", serverInfo.version "1.0.0", error codes
+        -32601/-32603).
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+          function: McpServer._handle_tool_call
+          note: "Verified mcp-purity.py:1043-1074 — the sync tools/call path to promote async + executor-wrap; called from _handle_message at line 1039."
+          pattern_excerpt: |
+            def _handle_tool_call(self, msg_id: Any, params: dict) -> dict:
+                tool_name = params.get("name", "")
+                arguments = params.get("arguments") or {}
+                if tool_name != "purity_call":
+                    return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        pass
+                if not isinstance(arguments, dict):
+                    return self._result(msg_id, {
+                        "content": [{"type": "text", "text":
+                            f"'arguments' must be an object; got {type(arguments).__name__}."}],
+                        "isError": True,
+                    })
+                try:
+                    result = handle_purity_call(arguments, self.project_root, self.strict)
+                except Exception as exc:
+                    log.exception("Unhandled exception in handle_purity_call")
+                    result = {"error": f"Internal server error: {type(exc).__name__}: {exc}"}
+                is_error = "error" in result
+                text = result.get("__raw_text__") or result.get("error", "")
+                return self._result(msg_id, {
+                    "content": [{"type": "text", "text": text}],
+                    "isError": is_error,
+                })
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py
+          function: PURITY_CALL_TOOL
+          note: "Verified mcp-purity.py:905-915 — the REVERSAL target: the 'purity is NOT for symbol navigation / WRONG tool / VIOLATION' + MANDATORY clangd_call/cuda_call/luals_call block to rewrite [inspector H1]."
+          pattern_excerpt: |
+            "LANGUAGE-SPECIFIC ROUTING — purity is NOT for symbol navigation\n"
+            "═══════════════════════════════════════════════════════════════════════\n"
+            "For source-code symbol work (definitions, references, types, callers,\n"
+            "diagnostics, hover, document outline) purity is the WRONG tool. You\n"
+            "MUST route to the language-specific LSP-backed MCP server:\n\n"
+            "  • C / C++ / Objective-C (.c .cpp .cc .cxx .h .hpp .hh .hxx .m .mm)\n"
+            "        → mcp-clangd  (clangd_call)   — MANDATORY, no substitutes\n"
+            "  • CUDA (.cu .cuh)\n"
+            "        → mcp-cuda    (cuda_call)     — MANDATORY, no substitutes\n"
+            "  • Lua (.lua)\n"
+            "        → mcp-luals   (luals_call)    — MANDATORY, no substitutes\n\n"
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/_mcp_smoke_test.py
+          function: run_server
+          note: "Verified _mcp_smoke_test.py:130-200 — the conversation driver to extend with a purity_call dispatch block; reuse Server.send/read + check()."
+          pattern_excerpt: |
+            # 4. tools/list
+            srv.send({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}})
+            tl = srv.read() or {}
+            tools = tl.get("result", {}).get("tools", [])
+            checks.append(check("tools/list count==1", len(tools) == 1, "count=%d" % len(tools)))
+            checks.append(check("tools/list name",
+                                len(tools) == 1 and tools[0].get("name") == cfg["tool"],
+                                (tools[0].get("name") if tools else None)))
+            # 5. unknown method -> -32601
+            srv.send({"jsonrpc": "2.0", "id": 4, "method": "foo/bar", "params": {}})
+            unk = srv.read() or {}
+            checks.append(check("unknown-method -32601",
+                                unk.get("error", {}).get("code") == -32601,
+                                repr(unk.get("error", {}).get("code"))))
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/_mcp_smoke_test.py
+          function: Server
+          note: "Verified _mcp_smoke_test.py:56-90 — the Popen wrapper (send/read) the new purity_call dispatch assertions use; SERVERS already lists mcp-purity.py at line 40."
+          pattern_excerpt: |
+            class Server:
+                def __init__(self, cfg):
+                    self.cfg = cfg
+                    self.proc = None
+                def start(self):
+                    path = os.path.join(SCRIPT_DIR, self.cfg["file"])
+                    self.proc = subprocess.Popen(
+                        [sys.executable, path] + self.cfg["args"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, bufsize=1,
+                    )
+                def send(self, obj):
+                    self.proc.stdin.write(json.dumps(obj) + "\n")
+                    self.proc.stdin.flush()
+      api_references:
+        - docs/feature-implementation-plan.md
+      test_requirements: |
+        The smoke-test additions ARE the test deliverable for this phase (D2):
+        run `python3 Scripts/_mcp_smoke_test.py mcp-purity.py`. Asserts: tools/list
+        advertises exactly purity_call; the 10 semantic names dispatch; legacy
+        clangd_find_definition / cuda_find_definition dispatch (no "unknown
+        function"); _resolve_aliases last-wins observable; find_definition with
+        neither symbol nor at -> validation error. Plus the existing invariants
+        (protocolVersion 2024-11-05, serverInfo.version 1.0.0, -32601/-32603,
+        notification-no-reply). File-layer no-regression on a fixture tree.
+      dependencies:
+        - task-008
+        - task-009
