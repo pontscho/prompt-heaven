@@ -665,8 +665,16 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     if not pattern_str:
         raise ValueError("Missing required parameter: substring_pattern")
 
-    ctx_before = params.get("context_lines_before", 0) or 0
-    ctx_after = params.get("context_lines_after", 0) or 0
+    # `context_lines` (ripgrep -C) seeds both directions; explicit before/after win.
+    ctx_both = params.get("context_lines")
+    ctx_before = params.get("context_lines_before")
+    ctx_after = params.get("context_lines_after")
+    if ctx_before is None:
+        ctx_before = ctx_both
+    if ctx_after is None:
+        ctx_after = ctx_both
+    ctx_before = int(ctx_before) if ctx_before else 0
+    ctx_after = int(ctx_after) if ctx_after else 0
     include_glob = params.get("paths_include_glob", "")
     exclude_glob = params.get("paths_exclude_glob", "")
     search_rel = params.get("relative_path", "")
@@ -685,6 +693,9 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     if explicit_mode:
         output_mode = explicit_mode
     else:
+        output_mode = "content"
+    if output_mode == "context":
+        # tolerate ripgrep/Grep-style "context" -> content with surrounding lines
         output_mode = "content"
     if output_mode not in ("files_with_matches", "content", "count"):
         raise ValueError("Parameter 'output_mode' must be 'files_with_matches', 'content', or 'count'")
@@ -3579,7 +3590,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         "relative_path", "line", "content",
     },
     "search_for_pattern": {
-        "substring_pattern", "context_lines_before", "context_lines_after",
+        "substring_pattern", "context_lines", "context_lines_before", "context_lines_after",
         "paths_include_glob", "paths_exclude_glob", "relative_path",
         "max_answer_chars", "head_limit", "offset", "output_mode",
         "max_file_size", "skip_ignored_files",

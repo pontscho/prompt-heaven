@@ -219,6 +219,50 @@ def purity_semantic_checks(srv, checks):
     checks.append(check("purity: luals_bogus -> Unknown function",
                         "Unknown function" in text, text[:80]))
 
+    # (h) search_for_pattern tolerates Grep-style output_mode="context" and
+    #     context_lines=2 -- must NOT error, must return content-style matches.
+    #     We write a tiny fixture under /tmp (the server's project-root) so the
+    #     relative_path lookup works without touching the live repo.
+    import tempfile, os as _os
+    _fixture_dir = tempfile.mkdtemp(prefix="purity_smoke_", dir="/tmp")
+    _fixture_rel = _os.path.relpath(
+        _os.path.join(_fixture_dir, "fixture.txt"), "/tmp"
+    )
+    with open(_os.path.join(_fixture_dir, "fixture.txt"), "w") as _fh:
+        _fh.write("line_before_1\nline_before_2\nTOKEN_CANARY\nline_after_1\nline_after_2\n")
+
+    text_ctx2, _ = _purity_call(srv, cid, "search_for_pattern", {
+        "substring_pattern": "TOKEN_CANARY",
+        "relative_path": _fixture_rel,
+        "output_mode": "context",
+        "context_lines": 2,
+    })
+    cid += 1
+    checks.append(check(
+        "purity: search_for_pattern output_mode=context tolerated",
+        "Unknown params" not in text_ctx2
+        and "must be 'files_with_matches'" not in text_ctx2
+        and "TOKEN_CANARY" in text_ctx2,
+        text_ctx2[:120],
+    ))
+
+    # (i) context_lines=2 yields more lines than context_lines omitted (context actually works).
+    text_ctx0, _ = _purity_call(srv, cid, "search_for_pattern", {
+        "substring_pattern": "TOKEN_CANARY",
+        "relative_path": _fixture_rel,
+        "output_mode": "content",
+    })
+    cid += 1
+    checks.append(check(
+        "purity: search_for_pattern context_lines=2 expands output",
+        len(text_ctx2) > len(text_ctx0),
+        "ctx2_len=%d ctx0_len=%d" % (len(text_ctx2), len(text_ctx0)),
+    ))
+
+    # cleanup fixture
+    import shutil as _shutil
+    _shutil.rmtree(_fixture_dir, ignore_errors=True)
+
 
 def run_server(cfg):
     """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}."""
