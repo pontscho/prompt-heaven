@@ -33,6 +33,7 @@ import pathlib
 import re
 import shutil
 import sys
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
@@ -43,19 +44,46 @@ log = logging.getLogger("mcp-purity")
 
 
 # ---------------------------------------------------------------------------
+# ReDoS guard (F4 / CWE-1333)
+# ---------------------------------------------------------------------------
+
+_MAX_REGEX_LEN = 1000          # caller-supplied pattern length ceiling
+_SEARCH_DEADLINE_SECS = 5.0    # wall-clock budget for multi-file scan loops
+
+
+def _check_regex_len(pattern: str, param_name: str = "pattern") -> None:
+    """Raise ValueError if *pattern* exceeds the length ceiling."""
+    if len(pattern) > _MAX_REGEX_LEN:
+        raise ValueError(
+            f"Regex pattern too long ({len(pattern)} chars); "
+            f"maximum allowed is {_MAX_REGEX_LEN} chars (parameter: {param_name})"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Sandbox utility
 # ---------------------------------------------------------------------------
+
+def _sanitize_log(s: str) -> str:
+    """Strip CR/LF and other control chars from caller-controlled strings before
+    interpolating them into log or error messages (CWE-117 / F10)."""
+    return s.replace("\r", " ").replace("\n", " ")
+
 
 def safe_path(project_root: str, relative_path: str, strict: bool = False) -> str:
     """Resolve *relative_path* under *project_root* and verify it stays inside.
 
-    When *strict* is False (default), absolute paths are allowed as-is.
+    Absolute paths are always containment-checked against *project_root*
+    regardless of *strict* (F1 / CWE-22).  *strict* only controls whether an
+    absolute path that resolves INSIDE the root is accepted (always yes) vs
+    whether a purely-relative path is required (strict=True enforces that).
     """
-    if os.path.isabs(relative_path) and not strict:
-        return os.path.realpath(relative_path)
+    if os.path.isabs(relative_path) and strict:
+        raise ValueError(_sanitize_log(f"Path escapes project root: {relative_path}"))
     resolved = os.path.realpath(os.path.join(project_root, relative_path))
-    if not resolved.startswith(project_root + os.sep) and resolved != project_root:
-        raise ValueError(f"Path escapes project root: {relative_path}")
+    root = os.path.realpath(project_root)
+    if not resolved.startswith(root + os.sep) and resolved != root:
+        raise ValueError(_sanitize_log(f"Path escapes project root: {relative_path}"))
     return resolved
 
 
@@ -236,7 +264,7 @@ def handle_read_file(params: dict, project_root: str, strict: bool = False) -> d
         raise ValueError("Missing required parameter: relative_path")
     path = safe_path(project_root, rel, strict)
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"File not found: {rel}")
+        raise FileNotFoundError(f"File not found: {_sanitize_log(rel)}")
 
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         lines = fh.readlines()
@@ -310,9 +338,10 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
 
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
-        return {"text": f"(directory does not exist: {rel})", "count": 0}
+        return {"text": f"(directory does not exist: {_sanitize_log(rel)})", "count": 0}
 
     if grep_pattern:
+        _check_regex_len(grep_pattern, "grep_pattern")
         grep_re = re.compile(grep_pattern, re.IGNORECASE)
     else:
         grep_re = None
@@ -381,7 +410,21 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
         lines = [entry_rel + ("/" if is_dir else "") for entry_rel, is_dir, _ in raw]
 
     if grep_re:
-        lines = [l for l in lines if grep_re.search(l)]
+        # F3/CWE-1333: aggregate deadline guards the per-name filter loop.
+        # Residual: a single catastrophic re.search() call on a long name cannot
+        # be preempted in pure-stdlib re — length cap + deadline are the
+        # proportionate mitigation for a local single-user tool.
+        _grep_deadline = time.monotonic() + _SEARCH_DEADLINE_SECS
+        filtered: List[str] = []
+        for _l in lines:
+            if time.monotonic() > _grep_deadline:
+                raise ValueError(
+                    f"list_dir grep exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
+                    "use a more specific grep pattern"
+                )
+            if grep_re.search(_l):
+                filtered.append(_l)
+        lines = filtered
 
     total = len(lines)
     if offset:
@@ -433,7 +476,7 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
         matches = matches[:head_limit]
         truncated = True
 
-    header = f"Found {total} file(s) matching '{file_mask}'"
+    header = f"Found {total} file(s) matching '{_sanitize_log(file_mask)}'"
     if truncated or offset:
         header += f" (showing {offset+1}-{offset+len(matches)} of {total})"
     return {"__raw_text__": f"{header}\n" + "\n".join(matches) if matches else header}
@@ -461,24 +504,39 @@ def handle_replace_content(params: dict, project_root: str, strict: bool = False
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         content = fh.read()
 
+    _rel = _sanitize_log(rel)
     if mode == "literal":
         count = content.count(needle)
         if count == 0:
-            raise ValueError(f"Needle not found in {rel}")
+            raise ValueError(f"Needle not found in {_rel}")
         if count > 1 and not allow_multiple:
             raise ValueError(
-                f"Multiple occurrences ({count}) found in {rel}. "
+                f"Multiple occurrences ({count}) found in {_rel}. "
                 "Set allow_multiple_occurrences=true to replace all."
             )
         new_content = content.replace(needle, repl)
     else:
+        _check_regex_len(needle, "needle")
         needle = needle.replace("\\|", "|")
+        # F3/CWE-1333: bound content size before running the regex to limit
+        # backtracking exposure.  The 10 MB cap matches search_for_pattern's
+        # max_file_size default.
+        # Residual: a single catastrophic re.finditer/re.sub call on a large
+        # input cannot be preempted in pure-stdlib re — the length cap on the
+        # pattern + this content-size ceiling are the proportionate mitigation
+        # for a local single-user tool running in a thread-pool executor.
+        _RC_MAX_CONTENT = 10 * 1024 * 1024  # 10 MB
+        if len(content) > _RC_MAX_CONTENT:
+            raise ValueError(
+                f"File content ({len(content)} bytes) exceeds the {_RC_MAX_CONTENT // (1024*1024)} MB "
+                "limit for regex replace; use literal mode or a smaller file"
+            )
         matches = list(re.finditer(needle, content))
         if not matches:
-            raise ValueError(f"Pattern not found in {rel}")
+            raise ValueError(f"Pattern not found in {_rel}")
         if len(matches) > 1 and not allow_multiple:
             raise ValueError(
-                f"Multiple matches ({len(matches)}) found in {rel}. "
+                f"Multiple matches ({len(matches)}) found in {_rel}. "
                 "Set allow_multiple_occurrences=true to replace all."
             )
         new_content = re.sub(needle, repl, content)
@@ -634,6 +692,8 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
     skip_ignored = _bool_param(params.get("skip_ignored_files", True))
 
+    _check_regex_len(pattern_str, "substring_pattern")
+
     # LLMs frequently escape | as \| which turns alternation into a literal pipe
     pattern_str = pattern_str.replace(r"\|", "|")
 
@@ -653,6 +713,11 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     total_chars = 0
     truncated = False
 
+    # Wall-clock deadline: abort if the aggregate scan exceeds the budget.
+    # Checked between files and every 256 lines within a file so a runaway
+    # multi-file scan is bounded even when no per-line match fires.
+    _deadline = time.monotonic() + _SEARCH_DEADLINE_SECS
+
     if search_single_file:
         file_iter = [(os.path.dirname(search_root), [], [os.path.basename(search_root)])]
     else:
@@ -669,6 +734,21 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
 
             full = os.path.join(dirpath, name)
             file_rel = os.path.relpath(full, project_root)
+
+            # Deadline check between files
+            if time.monotonic() > _deadline:
+                raise ValueError(
+                    f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
+                    "use a more specific path or pattern"
+                )
+
+            # F6 fix / CWE-22: re-contain walked path via realpath so a regular-
+            # file symlink inside the repo that resolves outside project_root is
+            # NOT opened/read.  In-root files and in-root-resolving symlinks
+            # pass the check (realpath is contained under project_root).
+            if not _path_within_root(pathlib.Path(full), project_root):
+                log.debug("Skipping out-of-root symlink in search walk: %s", full)
+                continue
 
             if include_glob and not fnmatch.fnmatch(file_rel, include_glob):
                 continue
@@ -706,6 +786,11 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                 finally:
                     fh.close()
                 for i, line in enumerate(lines):
+                    if i % 256 == 0 and time.monotonic() > _deadline:
+                        raise ValueError(
+                            f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
+                            "use a more specific path or pattern"
+                        )
                     if pattern.search(line):
                         file_hit_count += 1
                         total_match_count += 1
@@ -726,6 +811,11 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                 # Stream line-by-line — no need to hold entire file in memory
                 try:
                     for i, line in enumerate(fh):
+                        if i % 256 == 0 and time.monotonic() > _deadline:
+                            raise ValueError(
+                                f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
+                                "use a more specific path or pattern"
+                            )
                         if pattern.search(line):
                             file_hit_count += 1
                             total_match_count += 1
@@ -835,6 +925,14 @@ async def read_lsp_message(reader: "asyncio.StreamReader") -> Optional[dict]:
                 content_length = int(line.split(":", 1)[1].strip())
             except ValueError:
                 pass
+            else:
+                # F9 / CWE-789: reject absurdly large Content-Length before
+                # readexactly to prevent OOM from a buggy/malicious LSP child.
+                _LSP_MAX_MESSAGE = 64 * 1024 * 1024  # 64 MB
+                if content_length > _LSP_MAX_MESSAGE:
+                    log.warning("LSP Content-Length %d exceeds 64 MB ceiling; aborting read",
+                                content_length)
+                    return None
 
     if content_length == 0:
         return None
@@ -940,6 +1038,8 @@ def _detect_language(file_path: str) -> str:
         return "cuda"
     if suffix == ".c":
         return "c"
+    if suffix == ".lua":
+        return "lua"
     return "cpp"
 
 
@@ -1006,9 +1106,26 @@ def _find_cuda_sdk(explicit_path: Optional[str] = None,
                 if m:
                     nvcc_path = pathlib.Path(m.group(1).strip())
                     sdk_root = nvcc_path.parent.parent
-                    if (sdk_root / "bin" / "nvcc").exists():
-                        log.debug(f"CUDA SDK (CMakeCache): {sdk_root}")
-                        return str(sdk_root)
+                    # F7 / CWE-20, CWE-22: reject a CMakeCache-derived SDK path
+                    # that resolves INSIDE the reviewed project root — that is a
+                    # poisoned-header-tree attack (repo-internal "SDK" directory).
+                    # Also require the path to actually exist on the host.
+                    resolved_sdk = pathlib.Path(os.path.realpath(str(sdk_root)))
+                    if _path_within_root(resolved_sdk, project_root):
+                        log.warning(
+                            "CMakeCache CUDA SDK path resolves inside project "
+                            "root — rejecting (poisoned-header-tree attack): %s",
+                            resolved_sdk,
+                        )
+                    elif not resolved_sdk.exists():
+                        log.warning(
+                            "CMakeCache CUDA SDK path does not exist on host "
+                            "— rejecting: %s", resolved_sdk,
+                        )
+                    elif (resolved_sdk / "bin" / "nvcc").exists():
+                        log.debug("CUDA SDK (CMakeCache, validated outside root): %s",
+                                  resolved_sdk)
+                        return str(resolved_sdk)
             except Exception:
                 pass
 
@@ -1056,7 +1173,11 @@ NVCC_STRIP_FLAGS = {
 NVCC_STRIP_PREFIXES = (
     "--generate-code=",
     "-diag-suppress=",
-    "--options-file",
+    # NOTE: "--options-file" intentionally NOT listed here — the space-form
+    # "--options-file <path>" is handled by a dedicated expansion+filter branch
+    # inside _translate_compile_commands (F2 fix: previously this entry shadowed
+    # that branch, making it dead code).  The "=" prefix form
+    # "--options-file=<path>" does not appear in nvcc output.
     "-gencode",
     "--gpu-code=",
     "--gpu-architecture=",
@@ -1065,23 +1186,139 @@ NVCC_STRIP_PREFIXES = (
     "--device-link",
 )
 
+# Flags that enable clangd to load arbitrary shared objects (plugin load) or
+# execute external programs — forwarding them from repo build metadata into the
+# generated compile_commands.json would give a malicious repo a code-execution
+# primitive via the clangd indexing path (F6b / CWE-94, CWE-829).
+# KEEP THIS LIST TIGHT: only drop flags with proven code-execution / arbitrary-
+# file-read capability.  All other flags (includes, defines, std, warnings,
+# optimisation, sanitizers, etc.) must pass through so legitimate indexing works.
+CLANGD_EXEC_DENYLIST_EXACT = frozenset({
+    "-fplugin",   # bare form (unusual but possible)
+    "-load",      # LLVM plugin load; also used in -Xclang -load <so> pair
+})
 
-def _expand_rsp_file(rsp_path: str, base_dir: str) -> List[str]:
-    """Expand an nvcc response file (--options-file or @file) into flags."""
+CLANGD_EXEC_DENYLIST_PREFIXES = (
+    "-fplugin=",        # -fplugin=<path.so>
+    "-fplugin-arg-",    # -fplugin-arg-<plugin>-<key>=<val>
+)
+
+
+def _path_within_root(path: pathlib.Path, project_root: str) -> bool:
+    """Return True iff *path* (after realpath) is contained under *project_root*.
+
+    Uses the same canonical containment idiom as safe_path / _lsp_path_in_root
+    (F1 / CWE-22): realpath both sides, then require equality or a strict
+    startswith(root + sep) so sibling-prefix attacks (/rootX) are blocked.
+    """
+    try:
+        resolved = os.path.realpath(str(path))
+        root = os.path.realpath(project_root)
+        return resolved == root or resolved.startswith(root + os.sep)
+    except Exception:
+        return False
+
+
+def _expand_rsp_file(rsp_path: str, base_dir: str,
+                     project_root: Optional[str] = None,
+                     _depth: int = 0) -> List[str]:
+    """Expand an nvcc response file (--options-file or @file) into flags.
+
+    F6a / CWE-22: if *project_root* is supplied the resolved RSP path MUST be
+    contained under it; an out-of-root path (absolute or via ..) is rejected —
+    the token is silently dropped and a warning is logged rather than reading
+    an arbitrary file on the repo's behalf.
+
+    F1 nesting guard: nested @file tokens inside an RSP file are stripped
+    (depth > 0) to prevent a re-expansion bypass of the denylist filter.
+    The denylist filtering itself is performed by the caller (_filter_exec_flags)
+    on the tokens returned here.
+    """
     p = pathlib.Path(rsp_path)
     if not p.is_absolute():
         p = pathlib.Path(base_dir) / p
+    if project_root is not None and not _path_within_root(p, project_root):
+        log.warning("RSP/options-file path outside project root — skipping: %s", p)
+        return []
     try:
         text = p.read_text(encoding="utf-8")
-        return text.split()
+        tokens = text.split()
+        if _depth > 0:
+            # Nested @file tokens cannot be safely re-expanded without re-running
+            # the full denylist; strip them to prevent bypass via nesting.
+            nested = [t for t in tokens if t.startswith("@")]
+            if nested:
+                log.warning(
+                    "Dropping %d nested @file token(s) inside RSP '%s' "
+                    "to prevent denylist bypass: %s",
+                    len(nested), p, nested,
+                )
+            tokens = [t for t in tokens if not t.startswith("@")]
+        return tokens
     except Exception:
-        log.debug(f"Cannot read RSP file: {p}")
+        log.debug("Cannot read RSP file: %s", p)
         return []
 
 
+def _filter_exec_flags(tokens: List[str]) -> List[str]:
+    """Apply the CLANGD_EXEC_DENYLIST to a list of flag tokens and return
+    a cleaned list with all code-execution / plugin-load flags removed.
+
+    F1 / CWE-94, CWE-829: identical filter logic to the inline loop inside
+    _translate_compile_commands, factored into a helper so it can be applied
+    to both the top-level arg stream AND to RSP/options-file expanded tokens
+    (which arrive AFTER the top-level loop has already run, bypassing the
+    per-iteration denylist check).
+
+    Handles:
+      - Exact-match flags in CLANGD_EXEC_DENYLIST_EXACT  (e.g. -load)
+      - Prefix-match flags in CLANGD_EXEC_DENYLIST_PREFIXES  (e.g. -fplugin=)
+      - -Xclang <dangerous-payload> pairs
+    Each dropped flag is logged at WARNING level.
+    """
+    out: List[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "-Xclang" and i + 1 < len(tokens):
+            nxt = tokens[i + 1]
+            if (nxt in CLANGD_EXEC_DENYLIST_EXACT or
+                    any(nxt.startswith(px) for px in CLANGD_EXEC_DENYLIST_PREFIXES)):
+                log.warning(
+                    "Dropping dangerous -Xclang pair from expanded RSP tokens: %s %s",
+                    tok, nxt,
+                )
+                i += 2  # drop both the sentinel and its payload
+                continue
+        if tok in CLANGD_EXEC_DENYLIST_EXACT:
+            log.warning(
+                "Dropping dangerous flag from expanded RSP tokens: %s", tok
+            )
+            i += 1
+            continue
+        if any(tok.startswith(px) for px in CLANGD_EXEC_DENYLIST_PREFIXES):
+            log.warning(
+                "Dropping dangerous flag from expanded RSP tokens: %s", tok
+            )
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
 def _translate_compile_commands(entries: List[dict], cuda_path: str,
-                                cuda_arch: str, base_dir: str) -> List[dict]:
-    """Translate nvcc compile_commands.json entries to clangd-compatible ones."""
+                                cuda_arch: str, base_dir: str,
+                                project_root: Optional[str] = None) -> List[dict]:
+    """Translate nvcc compile_commands.json entries to clangd-compatible ones.
+
+    F6b / CWE-94, CWE-829: drops CLANGD_EXEC_DENYLIST flags before forwarding
+    so a malicious repo cannot load arbitrary shared objects via clangd.
+    All other flags (includes, defines, std, warnings, etc.) are kept so
+    legitimate indexing is not broken.
+    F6a: RSP/options-file paths are constrained to project_root via
+    _expand_rsp_file (which calls _path_within_root).
+    """
     cuda_extensions = {".cu", ".cuh"}
     cuda_include = os.path.join(cuda_path, "targets", "x86_64-linux", "include")
     if not os.path.isdir(cuda_include):
@@ -1102,8 +1339,10 @@ def _translate_compile_commands(entries: List[dict], cuda_path: str,
         else:
             continue
 
+        entry_dir = entry.get("directory", base_dir)
         new_args = ["clang++"]
         skip_next = False
+        xclang_load_pending = False  # tracks -Xclang seen before -load/-fplugin
         for i, arg in enumerate(args[1:], 1):
             if skip_next:
                 skip_next = False
@@ -1114,15 +1353,47 @@ def _translate_compile_commands(entries: List[dict], cuda_path: str,
             if any(arg.startswith(p) for p in NVCC_STRIP_PREFIXES):
                 continue
 
+            # F6b: drop code-execution / plugin-load flags (denylist).
+            # -Xclang passes a single argument to the clang cc1 layer; when
+            # the argument is -load or -fplugin it triggers shared-object load.
+            # Drop both the -Xclang sentinel and its dangerous payload.
+            if arg == "-Xclang" and i + 1 < len(args):
+                next_arg = args[i + 1]
+                if (next_arg in CLANGD_EXEC_DENYLIST_EXACT or
+                        any(next_arg.startswith(px)
+                            for px in CLANGD_EXEC_DENYLIST_PREFIXES)):
+                    log.warning("Dropping dangerous -Xclang pair from "
+                                "compile_commands: %s %s", arg, next_arg)
+                    skip_next = True
+                    continue
+
+            if arg in CLANGD_EXEC_DENYLIST_EXACT:
+                log.warning("Dropping dangerous flag from compile_commands: %s", arg)
+                continue
+
+            if any(arg.startswith(px) for px in CLANGD_EXEC_DENYLIST_PREFIXES):
+                log.warning("Dropping dangerous flag from compile_commands: %s", arg)
+                continue
+
+            # F6a: RSP / options-file expansion — path contained under project_root.
+            # F1 fix: apply _filter_exec_flags to ALL expanded tokens so flags
+            # smuggled inside an in-root RSP file cannot bypass the denylist
+            # (the top-level loop only filtered `arg`; expanded tokens arrived
+            # post-filter via new_args.extend).  _expand_rsp_file's nesting guard
+            # strips nested @file tokens to prevent re-bypass via nesting.
             if arg == "--options-file" and i + 1 < len(args):
-                expanded = _expand_rsp_file(args[i + 1], entry.get("directory", base_dir))
-                new_args.extend(expanded)
+                expanded = _expand_rsp_file(args[i + 1], entry_dir,
+                                            project_root=project_root,
+                                            _depth=1)
+                new_args.extend(_filter_exec_flags(expanded))
                 skip_next = True
                 continue
 
             if arg.startswith("@"):
-                expanded = _expand_rsp_file(arg[1:], entry.get("directory", base_dir))
-                new_args.extend(expanded)
+                expanded = _expand_rsp_file(arg[1:], entry_dir,
+                                            project_root=project_root,
+                                            _depth=1)
+                new_args.extend(_filter_exec_flags(expanded))
                 continue
 
             if arg == "-x" and i + 1 < len(args) and args[i + 1] == "cu":
@@ -1145,7 +1416,7 @@ def _translate_compile_commands(entries: List[dict], cuda_path: str,
         ])
 
         translated.append({
-            "directory": entry.get("directory", base_dir),
+            "directory": entry_dir,
             "file": file_path,
             "arguments": new_args,
         })
@@ -1159,6 +1430,17 @@ def _prepare_compile_commands(project_root: str, cuda_path: str,
     """Translate CUDA compile_commands into a cache dir; return the cache dir."""
     cache_dir = os.path.join(project_root, ".cache", "mcp-cuda")
     os.makedirs(cache_dir, exist_ok=True)
+
+    # Fix 4 / cache-dir symlink write guard: after makedirs (which follows
+    # existing symlinks), verify the resolved cache dir is actually inside
+    # project_root so a repo-controlled .cache symlink cannot redirect the
+    # compile_commands.json write to an out-of-root location (CWE-22 write sink).
+    if not _path_within_root(pathlib.Path(cache_dir), project_root):
+        log.warning(
+            "Cache dir '%s' resolves outside project root — skipping "
+            "compile_commands.json write (possible symlink escape).", cache_dir
+        )
+        return cache_dir
 
     search_dirs = []
     if compile_commands_dir:
@@ -1185,7 +1467,8 @@ def _prepare_compile_commands(project_root: str, cuda_path: str,
     if original:
         translated = _translate_compile_commands(
             original_entries, cuda_path, cuda_arch,
-            os.path.dirname(original)
+            os.path.dirname(original),
+            project_root=project_root,
         )
     else:
         log.debug("No compile_commands.json found - generating minimal entries from .cu files")
@@ -1200,7 +1483,12 @@ def _prepare_compile_commands(project_root: str, cuda_path: str,
 
 def _generate_minimal_compile_commands(project_root: str, cuda_path: str,
                                        cuda_arch: str) -> List[dict]:
-    """Generate compile_commands.json entries for .cu files when none exists."""
+    """Generate compile_commands.json entries for .cu files when none exists.
+
+    F11 / CWE-22: each walked .cu path is realpath-contained under project_root
+    before being emitted.  Symlinks that resolve outside the root are skipped
+    so a malicious repo cannot coerce clangd into indexing an out-of-root file.
+    """
     cuda_include = os.path.join(cuda_path, "targets", "x86_64-linux", "include")
     if not os.path.isdir(cuda_include):
         cuda_include = os.path.join(cuda_path, "include")
@@ -1211,6 +1499,14 @@ def _generate_minimal_compile_commands(project_root: str, cuda_path: str,
         for fname in files:
             if pathlib.Path(fname).suffix.lower() == ".cu":
                 full_path = os.path.join(root, fname)
+                # F11: realpath containment — symlinked .cu files that resolve
+                # outside project_root are dropped to prevent out-of-root reads.
+                if not _path_within_root(pathlib.Path(full_path), project_root):
+                    log.warning(
+                        "Skipping .cu file outside project root "
+                        "(possible symlink escape): %s", full_path,
+                    )
+                    continue
                 entries.append({
                     "directory": project_root,
                     "file": full_path,
@@ -1310,19 +1606,71 @@ class LspBackend:
 
 
 # ===========================================================================
-# ClangdClient  (C/C++/CUDA in one backend; language is config)
+# Shared fallback constants (consumed by BaseLspClient.fallback_extensions and
+# the filesystem grep helpers _find_files_with_word / _fallback_workspace_symbols
+# defined below; kept here so the class default can reference them).
 # ===========================================================================
 
-class ClangdClient(LspBackend):
-    """Async LSP client for clangd with background reader and push-notification
-    support. CUDA-aware: when cuda_path is supplied to start(), compile_commands
-    are translated for clangd via the CUDA CONFIG helpers above.
+_FALLBACK_EXTS = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".m", ".mm", ".cu", ".cuh")
+_FALLBACK_SKIP_DIRS = {
+    "build", "vendor", "third_party", "third-party", "node_modules",
+    ".git", ".cache", ".clangd", ".ccache", "_deps",
+}
+
+
+# ===========================================================================
+# BaseLspClient  (shared concrete LSP machinery + per-language hooks)
+# ===========================================================================
+
+class BaseLspClient(LspBackend):
+    """Concrete shared LSP client: transport, request/response correlation,
+    background reader loop, document priming and the standard textDocument/*
+    wrappers. ClangdClient and LuaLsClient inherit this and override only the
+    handshake (start) plus a small per-language divergence layer.
+
+    Divergence layer - hooks/attributes consulted by the module-level semantic
+    helpers (NOT by the handlers directly), so the handlers stay
+    backend-agnostic:
+
+    * ``supports_call_hierarchy`` - prepare/incoming/outgoing call hierarchy is
+      available (clangd: True, luals: False).
+    * ``fallback_extensions`` - extensions the grep-based symbol fallback walks
+      (C/C++/ObjC set for clangd, (".lua",) for luals).
+    * ``prime_extensions`` - extensions _prime_index opens to seed the index.
+    * ``_language_id(path)`` - the LSP languageId for textDocument/didOpen.
+    * ``infer_type(text)`` - turn a hover payload into a type string.
+    * ``supplemental_references(...)`` - extra (non-LSP) references merged into
+      a name-based references query; no-op here.
+
+    The reader loop handles the shared cases ($/progress, publishDiagnostics,
+    request/response correlation) inline and routes backend-specific
+    server->client requests and unhandled notifications to the protected
+    ``_handle_server_request`` / ``_handle_unknown_notification`` hooks.
     """
 
+    # --- per-language divergence layer (overridden by subclasses) ---------
+    supports_call_hierarchy: bool = True
+    fallback_extensions: tuple = _FALLBACK_EXTS
+    prime_extensions: tuple = (".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".cu", ".cuh")
+
+    def _language_id(self, path: str) -> str:
+        """LSP languageId for a path; default is clangd's CUDA-aware detector."""
+        return _detect_language(path)
+
+    def infer_type(self, text: str) -> str:
+        """Derive a type string from a hover payload (C++-aware by default)."""
+        return _infer_type(text)
+
+    async def supplemental_references(self, symbol_name: str, seen: set,
+                                      remaining: int,
+                                      preferred_path: Optional[str] = None) -> List[dict]:
+        """Extra (non-LSP) references merged into a name-based query. No-op base
+        (clangd); LuaLsClient folds the Lua dynamic-dispatch text-grep here."""
+        return []
+
+    # --- shared state -----------------------------------------------------
     def __init__(self) -> None:
         self.project_root: str = ""
-        self.cuda_path: str = ""
-        self.cuda_arch: str = ""
         self.process: Optional[asyncio.subprocess.Process] = None
         self._next_id: int = 1
         self._pending: Dict[int, asyncio.Future] = {}
@@ -1333,6 +1681,299 @@ class ClangdClient(LspBackend):
         self._indexing_done: asyncio.Event = asyncio.Event()
         self._active_progress: set = set()   # tokens with begin but no end yet
         self._send_lock = asyncio.Lock()
+
+    async def stop(self) -> None:
+        if self._reader_task:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+            self._reader_task = None
+
+        if self.process:
+            try:
+                await self._notify("exit", {})
+            except Exception:
+                pass
+            try:
+                self.process.terminate()
+                await asyncio.wait_for(self.process.wait(), timeout=3.0)
+            except Exception:
+                try:
+                    self.process.kill()
+                    await self.process.wait()
+                except Exception:
+                    pass
+            self.process = None
+
+        self._pending.clear()
+        self._opened_files.clear()
+        self._diagnostics.clear()
+
+    async def _prime_index(self) -> None:
+        """Open a sample of source files so the workspace index is populated.
+        Globs self.prime_extensions (clangd's 8-ext set by default, (".lua",)
+        for luals) - distinct from fallback_extensions."""
+        prime_exts = set(self.prime_extensions)
+        source_files = []
+        for root, _, files in os.walk(self.project_root):
+            if any(part.startswith(".") or part in ("build", "out", "dist", ".git")
+                   for part in pathlib.Path(root).parts):
+                continue
+            for fname in files:
+                if pathlib.Path(fname).suffix.lower() in prime_exts:
+                    # CWE-22/CWE-59: re-contain via realpath before queuing for
+                    # open_document, which resolves symlinks and reads content.
+                    # In-root files and in-root-resolving symlinks pass; only
+                    # out-of-root symlink escapes are skipped.
+                    candidate = pathlib.Path(os.path.join(root, fname))
+                    if not _path_within_root(candidate, self.project_root):
+                        log.debug("Skipping out-of-root symlink in prime walk: %s", candidate)
+                        continue
+                    source_files.append(str(candidate))
+                    if len(source_files) >= 10:
+                        break
+            if len(source_files) >= 10:
+                break
+
+        if source_files:
+            log.debug(f"Priming index with {len(source_files)} file(s)")
+            for path in source_files:
+                await self.open_document(path)
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(1.0)
+
+    async def _reader_loop(self) -> None:
+        """Background task: read all LSP messages and route them. Shared cases
+        ($/progress, publishDiagnostics, request/response correlation) are
+        handled here; backend-specific server->client requests and unknown
+        notifications dispatch to the protected hooks."""
+        assert self.process and self.process.stdout
+        reader = self.process.stdout
+        while True:
+            msg = await read_lsp_message(reader)
+            if msg is None:
+                log.debug("LSP backend stdout EOF")
+                # Fail every outstanding request so callers get a prompt error
+                # instead of blocking until their per-request timeout when the
+                # backend dies mid-flight.
+                for req_id, fut in list(self._pending.items()):
+                    if not fut.done():
+                        fut.set_exception(RuntimeError("LSP backend terminated unexpectedly"))
+                    self._pending.pop(req_id, None)
+                break
+
+            msg_id = msg.get("id")
+            method = msg.get("method", "")
+
+            if msg_id is not None and ("result" in msg or "error" in msg):
+                fut = self._pending.pop(msg_id, None)
+                if fut and not fut.done():
+                    fut.set_result(msg)
+
+            elif method == "$/progress":
+                token = msg.get("params", {}).get("token", "")
+                kind = msg.get("params", {}).get("value", {}).get("kind", "")
+                if kind == "begin":
+                    self._active_progress.add(token)
+                elif kind == "end":
+                    self._active_progress.discard(token)
+                    if not self._active_progress:
+                        log.debug("All progress tokens finished - indexing done")
+                        self._indexing_done.set()
+
+            elif method == "textDocument/publishDiagnostics":
+                params = msg.get("params", {})
+                uri = params.get("uri", "")
+                diags = params.get("diagnostics", [])
+                self._diagnostics[uri] = diags
+                ev = self._diag_events.get(uri)
+                if ev:
+                    ev.set()
+                log.debug(f"Diagnostics for {uri}: {len(diags)} items")
+
+            elif msg_id is not None and method:
+                # Server -> client REQUEST (needs a reply); backend-specific.
+                await self._handle_server_request(msg)
+
+            elif method:
+                self._handle_unknown_notification(msg)
+
+    async def _handle_server_request(self, msg: dict) -> None:
+        """Reply to a server->client request. No-op base (logs only); subclasses
+        answer backend-specific requests (clangd's
+        window/workDoneProgress/create, luals's workspace/configuration)."""
+        log.debug(f"Unhandled server request: {msg.get('method')}")
+
+    def _handle_unknown_notification(self, msg: dict) -> None:
+        """Handle a notification the base loop does not recognise. No-op base;
+        subclasses drop backend-specific chatter (luals's $/status/*)."""
+        log.debug(f"Unhandled notification: {msg.get('method')}")
+
+    async def _send(self, body: dict) -> None:
+        assert self.process and self.process.stdin
+        data = encode_lsp_message(body)
+        async with self._send_lock:
+            self.process.stdin.write(data)
+            await self.process.stdin.drain()
+
+    async def _request(self, method: str, params: Any, timeout: float = 10.0) -> dict:
+        req_id = self._next_id
+        self._next_id += 1
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending[req_id] = fut
+        await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": {"message": f"timeout waiting for {method}"}}
+
+    async def _notify(self, method: str, params: Any) -> None:
+        await self._send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    async def open_document(self, path: str) -> None:
+        """Send textDocument/didOpen if not already open."""
+        abs_path = pathlib.Path(path)
+        if not abs_path.is_absolute():
+            abs_path = pathlib.Path(self.project_root) / abs_path
+        abs_path = abs_path.resolve()
+        # Containment gate: skip any path that resolves outside project_root.
+        # This closes the open_document re-feed sites (definition/references/
+        # call-hierarchy) so an LSP-returned out-of-root URI never reaches
+        # read_text, mirroring the _lsp_path_in_root / _prime_index guards.
+        # Fail-safe when project_root is not yet set (empty string).
+        if not self.project_root or not _path_within_root(abs_path, self.project_root):
+            log.debug("open_document: skipping out-of-root path %s", abs_path)
+            return
+        uri = abs_path.as_uri()
+        if uri in self._opened_files:
+            return
+        try:
+            content = abs_path.read_text(encoding="utf-8")
+        except Exception as e:
+            log.debug(f"Cannot read {abs_path}: {e}")
+            return
+        self._opened_files.add(uri)
+        await self._notify("textDocument/didOpen", {
+            "textDocument": {
+                "uri": uri,
+                "languageId": self._language_id(str(abs_path)),
+                "version": 1,
+                "text": content,
+            }
+        })
+
+    async def workspace_symbol(self, query: str) -> List[dict]:
+        resp = await self._request("workspace/symbol", {"query": query}, timeout=15.0)
+        return resp.get("result") or []
+
+    async def document_symbol(self, path: str) -> List[dict]:
+        await self.open_document(path)
+        abs_uri = pathlib.Path(path) if pathlib.Path(path).is_absolute() \
+            else pathlib.Path(self.project_root) / path
+        resp = await self._request("textDocument/documentSymbol", {
+            "textDocument": {"uri": abs_uri.resolve().as_uri()}
+        }, timeout=15.0)
+        return resp.get("result") or []
+
+    async def definition(self, path: str, line: int, char: int) -> Any:
+        await self.open_document(path)
+        uri = self._abs_uri(path)
+        resp = await self._request("textDocument/definition", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": char},
+        }, timeout=15.0)
+        return resp.get("result")
+
+    async def references(self, path: str, line: int, char: int) -> List[dict]:
+        await self.open_document(path)
+        uri = self._abs_uri(path)
+        resp = await self._request("textDocument/references", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": char},
+            "context": {"includeDeclaration": True},
+        }, timeout=15.0)
+        return resp.get("result") or []
+
+    async def implementation(self, path: str, line: int, char: int) -> List[dict]:
+        await self.open_document(path)
+        uri = self._abs_uri(path)
+        resp = await self._request("textDocument/implementation", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": char},
+        }, timeout=15.0)
+        result = resp.get("result")
+        if result is None:
+            return []
+        return result if isinstance(result, list) else [result]
+
+    async def hover(self, path: str, line: int, char: int) -> Optional[dict]:
+        await self.open_document(path)
+        uri = self._abs_uri(path)
+        resp = await self._request("textDocument/hover", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": char},
+        }, timeout=10.0)
+        return resp.get("result")
+
+    async def inlay_hints(self, path: str, start_line: int, end_line: int) -> List[dict]:
+        await self.open_document(path)
+        uri = self._abs_uri(path)
+        resp = await self._request("textDocument/inlayHint", {
+            "textDocument": {"uri": uri},
+            "range": {
+                "start": {"line": start_line, "character": 0},
+                "end": {"line": end_line, "character": 0},
+            },
+        }, timeout=15.0)
+        return resp.get("result") or []
+
+    async def get_diagnostics(self, path: str, timeout: float = 10.0) -> List[dict]:
+        """Open document, wait for publishDiagnostics push, return diagnostics."""
+        uri = self._abs_uri(path)
+        ev = self._diag_events.setdefault(uri, asyncio.Event())
+        ev.clear()
+        await self.open_document(path)
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+        return self._diagnostics.get(uri, [])
+
+    def _abs_uri(self, path: str) -> str:
+        p = pathlib.Path(path)
+        if not p.is_absolute():
+            p = pathlib.Path(self.project_root) / p
+        return p.resolve().as_uri()
+
+    def _abs_path(self, path: str) -> str:
+        p = pathlib.Path(path)
+        if not p.is_absolute():
+            p = pathlib.Path(self.project_root) / p
+        return str(p.resolve())
+
+
+# ===========================================================================
+# ClangdClient  (C/C++/CUDA in one backend; language is config)
+# ===========================================================================
+
+class ClangdClient(BaseLspClient):
+    """Async LSP client for clangd with background reader and push-notification
+    support. CUDA-aware: when cuda_path is supplied to start(), compile_commands
+    are translated for clangd via the CUDA CONFIG helpers above. Inherits the
+    shared transport / reader / textDocument wrappers and the C++ hook defaults
+    (supports_call_hierarchy=True, the C/C++/ObjC fallback_extensions, the 8-ext
+    prime set, _detect_language / _infer_type) from BaseLspClient; adds only the
+    clangd handshake, the workDoneProgress/create reply, and call hierarchy.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cuda_path: str = ""
+        self.cuda_arch: str = ""
 
     async def start(self, project_root: str, clangd_path: str = "clangd",
                     compile_commands_dir: Optional[str] = None,
@@ -1427,224 +2068,17 @@ class ClangdClient(LspBackend):
         mode = "CUDA" if cuda_mode else "C/C++"
         return f"clangd initialized ({mode}) at {self.project_root} - {version}"
 
-    async def _prime_index(self) -> None:
-        """Open a sample of source files so the workspace index is populated."""
-        prime_exts = {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".cu", ".cuh"}
-        source_files = []
-        for root, _, files in os.walk(self.project_root):
-            if any(part.startswith(".") or part in ("build", "out", "dist", ".git")
-                   for part in pathlib.Path(root).parts):
-                continue
-            for fname in files:
-                if pathlib.Path(fname).suffix.lower() in prime_exts:
-                    source_files.append(os.path.join(root, fname))
-                    if len(source_files) >= 10:
-                        break
-            if len(source_files) >= 10:
-                break
-
-        if source_files:
-            log.debug(f"Priming index with {len(source_files)} file(s)")
-            for path in source_files:
-                await self.open_document(path)
-                await asyncio.sleep(0.1)
-            await asyncio.sleep(1.0)
-
-    async def stop(self) -> None:
-        if self._reader_task:
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
-            self._reader_task = None
-
-        if self.process:
-            try:
-                await self._notify("exit", {})
-            except Exception:
-                pass
-            try:
-                self.process.terminate()
-                await asyncio.wait_for(self.process.wait(), timeout=3.0)
-            except Exception:
-                try:
-                    self.process.kill()
-                    await self.process.wait()
-                except Exception:
-                    pass
-            self.process = None
-
-        self._pending.clear()
-        self._opened_files.clear()
-        self._diagnostics.clear()
-
-    async def _reader_loop(self) -> None:
-        """Background task: read all LSP messages and route them."""
-        assert self.process and self.process.stdout
-        reader = self.process.stdout
-        while True:
-            msg = await read_lsp_message(reader)
-            if msg is None:
-                log.debug("clangd stdout EOF")
-                # Bug #2 fix: fail every outstanding request so callers get a
-                # prompt error instead of blocking until their per-request
-                # timeout when clangd dies mid-flight.
-                for req_id, fut in list(self._pending.items()):
-                    if not fut.done():
-                        fut.set_exception(RuntimeError("clangd backend terminated unexpectedly"))
-                    self._pending.pop(req_id, None)
-                break
-
-            msg_id = msg.get("id")
-            method = msg.get("method", "")
-
-            if msg_id is not None and ("result" in msg or "error" in msg):
-                fut = self._pending.pop(msg_id, None)
-                if fut and not fut.done():
-                    fut.set_result(msg)
-
-            elif method == "window/workDoneProgress/create":
-                token = msg.get("params", {}).get("token", "")
-                if token:
-                    self._active_progress.add(token)
-                await self._send({"jsonrpc": "2.0", "id": msg_id, "result": None})
-
-            elif method == "$/progress":
-                token = msg.get("params", {}).get("token", "")
-                kind = msg.get("params", {}).get("value", {}).get("kind", "")
-                if kind == "begin":
-                    self._active_progress.add(token)
-                elif kind == "end":
-                    self._active_progress.discard(token)
-                    if not self._active_progress:
-                        log.debug("All progress tokens finished - indexing done")
-                        self._indexing_done.set()
-
-            elif method == "textDocument/publishDiagnostics":
-                params = msg.get("params", {})
-                uri = params.get("uri", "")
-                diags = params.get("diagnostics", [])
-                self._diagnostics[uri] = diags
-                ev = self._diag_events.get(uri)
-                if ev:
-                    ev.set()
-                log.debug(f"Diagnostics for {uri}: {len(diags)} items")
-
-            else:
-                log.debug(f"Unhandled notification: {method}")
-
-    async def _send(self, body: dict) -> None:
-        assert self.process and self.process.stdin
-        data = encode_lsp_message(body)
-        async with self._send_lock:
-            self.process.stdin.write(data)
-            await self.process.stdin.drain()
-
-    async def _request(self, method: str, params: Any, timeout: float = 10.0) -> dict:
-        req_id = self._next_id
-        self._next_id += 1
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-        self._pending[req_id] = fut
-        await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
-        try:
-            return await asyncio.wait_for(fut, timeout=timeout)
-        except asyncio.TimeoutError:
-            self._pending.pop(req_id, None)
-            return {"error": {"message": f"timeout waiting for {method}"}}
-
-    async def _notify(self, method: str, params: Any) -> None:
-        await self._send({"jsonrpc": "2.0", "method": method, "params": params})
-
-    async def open_document(self, path: str) -> None:
-        """Send textDocument/didOpen if not already open."""
-        abs_path = pathlib.Path(path)
-        if not abs_path.is_absolute():
-            abs_path = pathlib.Path(self.project_root) / abs_path
-        abs_path = abs_path.resolve()
-        uri = abs_path.as_uri()
-        if uri in self._opened_files:
-            return
-        try:
-            content = abs_path.read_text(encoding="utf-8")
-        except Exception as e:
-            log.debug(f"Cannot read {abs_path}: {e}")
-            return
-        self._opened_files.add(uri)
-        await self._notify("textDocument/didOpen", {
-            "textDocument": {
-                "uri": uri,
-                "languageId": _detect_language(str(abs_path)),
-                "version": 1,
-                "text": content,
-            }
-        })
-
-    async def workspace_symbol(self, query: str) -> List[dict]:
-        resp = await self._request("workspace/symbol", {"query": query}, timeout=15.0)
-        return resp.get("result") or []
-
-    async def document_symbol(self, path: str) -> List[dict]:
-        await self.open_document(path)
-        abs_uri = pathlib.Path(path) if pathlib.Path(path).is_absolute() \
-            else pathlib.Path(self.project_root) / path
-        resp = await self._request("textDocument/documentSymbol", {
-            "textDocument": {"uri": abs_uri.resolve().as_uri()}
-        }, timeout=15.0)
-        return resp.get("result") or []
-
-    async def definition(self, path: str, line: int, char: int) -> Any:
-        await self.open_document(path)
-        uri = self._abs_uri(path)
-        resp = await self._request("textDocument/definition", {
-            "textDocument": {"uri": uri},
-            "position": {"line": line, "character": char},
-        }, timeout=15.0)
-        return resp.get("result")
-
-    async def references(self, path: str, line: int, char: int) -> List[dict]:
-        await self.open_document(path)
-        uri = self._abs_uri(path)
-        resp = await self._request("textDocument/references", {
-            "textDocument": {"uri": uri},
-            "position": {"line": line, "character": char},
-            "context": {"includeDeclaration": True},
-        }, timeout=15.0)
-        return resp.get("result") or []
-
-    async def implementation(self, path: str, line: int, char: int) -> List[dict]:
-        await self.open_document(path)
-        uri = self._abs_uri(path)
-        resp = await self._request("textDocument/implementation", {
-            "textDocument": {"uri": uri},
-            "position": {"line": line, "character": char},
-        }, timeout=15.0)
-        result = resp.get("result")
-        if result is None:
-            return []
-        return result if isinstance(result, list) else [result]
-
-    async def hover(self, path: str, line: int, char: int) -> Optional[dict]:
-        await self.open_document(path)
-        uri = self._abs_uri(path)
-        resp = await self._request("textDocument/hover", {
-            "textDocument": {"uri": uri},
-            "position": {"line": line, "character": char},
-        }, timeout=10.0)
-        return resp.get("result")
-
-    async def inlay_hints(self, path: str, start_line: int, end_line: int) -> List[dict]:
-        await self.open_document(path)
-        uri = self._abs_uri(path)
-        resp = await self._request("textDocument/inlayHint", {
-            "textDocument": {"uri": uri},
-            "range": {
-                "start": {"line": start_line, "character": 0},
-                "end": {"line": end_line, "character": 0},
-            },
-        }, timeout=15.0)
-        return resp.get("result") or []
+    async def _handle_server_request(self, msg: dict) -> None:
+        """clangd's window/workDoneProgress/create: register the progress token
+        (so a $/progress 'end' can flip _indexing_done) and acknowledge the
+        request. Any other server->client request falls through to a debug log."""
+        if msg.get("method") == "window/workDoneProgress/create":
+            token = msg.get("params", {}).get("token", "")
+            if token:
+                self._active_progress.add(token)
+            await self._send({"jsonrpc": "2.0", "id": msg.get("id"), "result": None})
+        else:
+            log.debug(f"Unhandled server request: {msg.get('method')}")
 
     async def prepare_call_hierarchy(self, path: str, line: int, char: int) -> List[dict]:
         await self.open_document(path)
@@ -1666,39 +2100,317 @@ class ClangdClient(LspBackend):
         resp = await self._request("callHierarchy/outgoingCalls", {"item": item}, timeout=10.0)
         return resp.get("result") or []
 
-    async def get_diagnostics(self, path: str, timeout: float = 10.0) -> List[dict]:
-        """Open document, wait for publishDiagnostics push, return diagnostics."""
-        uri = self._abs_uri(path)
-        ev = self._diag_events.setdefault(uri, asyncio.Event())
-        ev.clear()
-        await self.open_document(path)
+
+# ===========================================================================
+# LuaLsClient  (Lua via lua-language-server)
+# ===========================================================================
+
+class LuaLsClient(BaseLspClient):
+    """Async LSP client for lua-language-server. Folded from mcp-lua-lsp.py.
+
+    Divergence from BaseLspClient / ClangdClient:
+    * supports_call_hierarchy = False  — luals does not implement call hierarchy.
+    * fallback_extensions / prime_extensions = ('.lua',)
+    * _language_id always returns 'lua'.
+    * infer_type returns raw hover text (luals hover is already human-readable).
+    * supplemental_references calls _lua_text_references (grep supplement) to
+      cover dynamic-dispatch patterns that LSP can miss.
+    * start() sends BOTH the initializationOptions.Lua config block AND a
+      post-init workspace/didChangeConfiguration re-push — dropping either
+      stalls luals up to the 90-second timeout.
+    * _handle_server_request answers luals's workspace/configuration requests
+      with [None]*len(items) (required; without it luals blocks).
+    * _handle_unknown_notification silently drops $/status/report|refresh|click.
+
+    NOTE: the shutil.which missing-binary guard lives in _init_backend
+    (task-008), not here.
+    """
+
+    # --- per-language divergence layer ------------------------------------
+    supports_call_hierarchy: bool = False
+    fallback_extensions: tuple = (".lua",)
+    prime_extensions: tuple = (".lua",)
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def _language_id(self, path: str) -> str:  # noqa: ARG002
+        """luals only handles Lua; languageId is always 'lua'."""
+        return "lua"
+
+    def infer_type(self, text: str) -> str:
+        """luals hover payloads are already human-readable; return raw text."""
+        return text.strip()
+
+    async def supplemental_references(
+        self, symbol_name: str, seen: set, remaining: int,
+        preferred_path: Optional[str] = None,  # noqa: ARG002
+    ) -> List[dict]:
+        """Lua dynamic-dispatch grep supplement merged into name-based queries."""
+        return await self._lua_text_references(symbol_name, seen, remaining)
+
+    # --- handshake --------------------------------------------------------
+    async def start(self, project_root: str,
+                    luals_path: str = "lua-language-server",
+                    config_path: Optional[str] = None) -> str:
+        """Launch lua-language-server, perform LSP handshake, wait for indexing.
+
+        Two config pushes are intentional and REQUIRED:
+        1. initializationOptions.Lua — picked up before the server reads the
+           workspace; some versions honour only this path.
+        2. workspace/didChangeConfiguration re-push after 'initialized' —
+           required by servers that ignored initializationOptions (e.g. when
+           the client negotiates workspace/configuration capability). Dropping
+           either push silently stalls luals for up to 90 seconds.
+        """
+        if self.process is not None:
+            return "already initialized"
+
+        self.project_root = str(pathlib.Path(project_root).resolve())
+        self._indexing_done.clear()
+
+        args = [luals_path]
+        if config_path:
+            args.extend(["--configpath", str(pathlib.Path(config_path).resolve())])
+
+        self.process = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=sys.stderr,
+            cwd=self.project_root,
+        )
+        log.debug(f"lua-language-server PID: {self.process.pid}")
+
+        self._reader_task = asyncio.create_task(self._reader_loop())
+
+        init_params = {
+            "processId": os.getpid(),
+            "rootUri": path_to_uri(self.project_root),
+            "workspaceFolders": [{"uri": path_to_uri(self.project_root), "name": "workspace"}],
+            # Config push #1: initializationOptions — honoured before the
+            # server reads workspace files in some luals versions.
+            "initializationOptions": {
+                "Lua": {
+                    "hint": {
+                        "enable": True,
+                        "paramName": "All",
+                        "paramType": True,
+                        "setType": True,
+                        "arrayIndex": "Auto",
+                        "await": True,
+                    },
+                    "diagnostics": {"enable": True},
+                    "workspace": {"checkThirdParty": False},
+                }
+            },
+            "capabilities": {
+                "general": {"positionEncodings": ["utf-8", "utf-16"]},
+                "textDocument": {
+                    "hover": {"contentFormat": ["markdown", "plaintext"]},
+                    "definition": {"linkSupport": True},
+                    "typeDefinition": {"linkSupport": True},
+                    "implementation": {"linkSupport": True},
+                    "references": {},
+                    "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                    "publishDiagnostics": {"relatedInformation": True},
+                    "inlayHint": {"dynamicRegistration": True},
+                },
+                "workspace": {
+                    "workspaceFolders": True,
+                    "configuration": True,
+                    "symbol": {"symbolKind": {"valueSet": list(range(1, 27))}},
+                },
+                "window": {"workDoneProgress": True},
+            },
+        }
+
+        response = await self._request("initialize", init_params, timeout=30.0)
+        if "error" in response:
+            raise RuntimeError(f"lua-language-server initialize failed: {response['error']}")
+
+        await self._notify("initialized", {})
+
+        # Config push #2: workspace/didChangeConfiguration re-push — required
+        # by luals versions that ignored initializationOptions (e.g. when the
+        # client negotiates the workspace/configuration capability). Dropping
+        # this push stalls luals for up to 90 seconds.
+        await self._notify("workspace/didChangeConfiguration", {
+            "settings": {
+                "Lua": {
+                    "hint": {
+                        "enable": True,
+                        "paramName": "All",
+                        "paramType": True,
+                        "setType": True,
+                        "arrayIndex": "Auto",
+                        "await": True,
+                    },
+                    "diagnostics": {"enable": True},
+                    "workspace": {"checkThirdParty": False},
+                }
+            }
+        })
+
+        log.debug("Waiting for lua-language-server background indexing...")
         try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
+            await asyncio.wait_for(self._indexing_done.wait(), timeout=60.0)
+            log.debug("Background indexing done.")
         except asyncio.TimeoutError:
-            pass
-        return self._diagnostics.get(uri, [])
+            log.debug("Indexing wait timed out - priming index by opening source files...")
 
-    def _abs_uri(self, path: str) -> str:
-        p = pathlib.Path(path)
-        if not p.is_absolute():
-            p = pathlib.Path(self.project_root) / p
-        return p.resolve().as_uri()
+        await self._prime_index()
 
-    def _abs_path(self, path: str) -> str:
-        p = pathlib.Path(path)
-        if not p.is_absolute():
-            p = pathlib.Path(self.project_root) / p
-        return str(p.resolve())
+        version = response.get("result", {}).get("serverInfo", {})
+        return f"lua-language-server initialized at {self.project_root} - {version}"
+
+    # --- reader-loop hooks ------------------------------------------------
+    async def _handle_server_request(self, msg: dict) -> None:
+        """Answer luals's workspace/configuration requests and the shared
+        window/workDoneProgress/create request.
+
+        workspace/configuration: luals sends this during and after init to
+        collect per-folder settings.  We reply with [None]*len(items) (one null
+        per requested item) — the equivalent of 'no override, use defaults'.
+        Without this reply luals blocks waiting for an answer.
+        """
+        method = msg.get("method", "")
+        if method == "workspace/configuration":
+            req_id = msg.get("id")
+            items = msg.get("params", {}).get("items", [])
+            await self._send({"jsonrpc": "2.0", "id": req_id, "result": [None] * len(items)})
+        elif method == "window/workDoneProgress/create":
+            token = msg.get("params", {}).get("token", "")
+            if token:
+                self._active_progress.add(token)
+            await self._send({"jsonrpc": "2.0", "id": msg.get("id"), "result": None})
+        else:
+            log.debug(f"Unhandled server request: {method}")
+
+    def _handle_unknown_notification(self, msg: dict) -> None:
+        """Drop luals's status-bar chatter; log everything else.
+
+        luals emits $/status/report, $/status/refresh and $/status/click as
+        UI-only progress signals.  They carry no actionable information for a
+        headless client, so we silently discard them.
+        """
+        method = msg.get("method", "")
+        if method in ("$/status/report", "$/status/refresh", "$/status/click"):
+            return  # status-bar noise — discard silently
+        log.debug(f"Unhandled notification: {method}")
+
+    # --- Lua text-grep supplement -----------------------------------------
+    async def _lua_text_references(
+        self, symbol_name: str, seen: set, remaining: int
+    ) -> List[dict]:
+        """Fallback text scan over .lua files for word-boundary occurrences.
+
+        Supplements LSP textDocument/references results to cover dynamic-
+        dispatch patterns that a static server may miss (e.g. method calls
+        through a table stored in a variable whose type luals cannot resolve).
+
+        Parameters
+        ----------
+        symbol_name:
+            The bare symbol name to search for (word-boundary match).
+        seen:
+            Set of already-collected reference keys (``uri:line`` strings).
+            Entries in *seen* are skipped to avoid duplication.
+        remaining:
+            Maximum number of NEW references to return (0 = unlimited).
+
+        Returns a list of {uri, range} dicts in LSP shape so the caller can
+        format them identically to LSP-sourced references.
+        """
+        loop = asyncio.get_running_loop()
+        # Run the synchronous walk in the default thread executor so we don't
+        # block the event loop on large Lua workspaces.
+        return await loop.run_in_executor(
+            None,
+            self._lua_text_references_sync,
+            symbol_name, seen, remaining,
+        )
+
+    def _lua_text_references_sync(
+        self, symbol_name: str, existing_keys: set, max_remaining: int
+    ) -> List[dict]:
+        """Synchronous inner worker called from _lua_text_references."""
+        pattern = re.compile(rf"\b{re.escape(symbol_name)}\b")
+        results: List[dict] = []
+        skip_dirs = {"build", "out", "dist", ".git", "node_modules", "vendor"}
+
+        for root, dirs, files in os.walk(self.project_root):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in skip_dirs]
+            for fname in files:
+                if not fname.endswith(".lua"):
+                    continue
+                abs_path = os.path.join(root, fname)
+                # F6 fix / CWE-22: re-contain walked path so a regular-file
+                # symlink inside the repo resolving outside project_root is not
+                # opened/read.  In-root files and in-root-resolving symlinks pass.
+                if not _path_within_root(pathlib.Path(abs_path), self.project_root):
+                    log.debug(
+                        "Skipping out-of-root symlink in lua-text-refs walk: %s",
+                        abs_path,
+                    )
+                    continue
+                try:
+                    with open(abs_path, "r", encoding="utf-8") as fh:
+                        content = fh.read()
+                except Exception:
+                    continue
+
+                uri = pathlib.Path(abs_path).as_uri()
+                for lineno, line_text in enumerate(content.splitlines()):
+                    match = pattern.search(line_text)
+                    if not match:
+                        continue
+                    stripped = line_text.lstrip()
+                    if stripped.startswith("--") and not stripped.startswith("---"):
+                        # Pure line comment — skip; but keep luadoc lines '---'.
+                        continue
+                    key = f"{uri}:{lineno}"
+                    if key in existing_keys:
+                        continue
+                    col = match.start()
+                    results.append({
+                        "uri": uri,
+                        "range": {
+                            "start": {"line": lineno, "character": col},
+                            "end": {"line": lineno, "character": col + len(symbol_name)},
+                        },
+                    })
+                    if max_remaining > 0 and len(results) >= max_remaining:
+                        return results
+
+        return results
 
 
 # ===========================================================================
 # Location formatting helpers
 # ===========================================================================
 
+def _lsp_path_in_root(uri: str, project_root: str) -> Optional[str]:
+    """Return the absolute path for *uri* only if it resolves inside
+    *project_root*; return None otherwise (F6 / CWE-22).
+
+    Used to re-contain LSP-returned URIs before opening them so that a
+    malicious indexed repo cannot coerce the server into reading files
+    outside the project root.
+    """
+    abs_path = os.path.realpath(uri_to_path(uri))
+    root = os.path.realpath(project_root)
+    if abs_path == root or abs_path.startswith(root + os.sep):
+        return abs_path
+    return None
+
+
 def _format_location(uri: str, lsp_range: dict, project_root: str) -> dict:
     rel = _relative_path(uri, project_root)
     start = lsp_range.get("start", {})
     end = lsp_range.get("end", {})
+    # F6: only read line_text for paths that resolve inside the project root.
+    _safe_abs = _lsp_path_in_root(uri, project_root)
     return {
         "path": rel,
         "uri": uri,
@@ -1707,7 +2419,7 @@ def _format_location(uri: str, lsp_range: dict, project_root: str) -> dict:
             "start": {"line": start.get("line", 0) + 1, "character": start.get("character", 0) + 1},
             "end": {"line": end.get("line", 0) + 1, "character": end.get("character", 0) + 1},
         },
-        "line_text": _get_line(uri_to_path(uri), start.get("line", 0)),
+        "line_text": _get_line(_safe_abs, start.get("line", 0)) if _safe_abs else None,
     }
 
 
@@ -1789,12 +2501,8 @@ def _iter_document_symbols(symbols: List[dict]):
 # ===========================================================================
 # Filesystem fallback for workspace symbols (static-inline in headers)
 # ===========================================================================
-
-_FALLBACK_EXTS = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".m", ".mm", ".cu", ".cuh")
-_FALLBACK_SKIP_DIRS = {
-    "build", "vendor", "third_party", "third-party", "node_modules",
-    ".git", ".cache", ".clangd", ".ccache", "_deps",
-}
+# (_FALLBACK_EXTS / _FALLBACK_SKIP_DIRS are defined above next to BaseLspClient,
+#  whose fallback_extensions default references _FALLBACK_EXTS.)
 
 
 def _find_files_with_word(root: str, word: str, exts=_FALLBACK_EXTS,
@@ -1812,6 +2520,12 @@ def _find_files_with_word(root: str, word: str, exts=_FALLBACK_EXTS,
             if not fn.endswith(exts):
                 continue
             full = os.path.join(dirpath, fn)
+            # F6 fix / CWE-22: re-contain walked path so a regular-file symlink
+            # inside the repo that resolves outside root is not read.  In-root
+            # files and in-root-resolving symlinks pass (realpath stays in root).
+            if not _path_within_root(pathlib.Path(full), root):
+                log.debug("Skipping out-of-root symlink in word-search walk: %s", full)
+                continue
             try:
                 with open(full, "rb") as f:
                     if rx.search(f.read()):
@@ -1834,13 +2548,13 @@ def _outline_flatten(symbols: List[dict]) -> List[dict]:
     return out
 
 
-async def _fallback_workspace_symbols(client: ClangdClient, query: str,
+async def _fallback_workspace_symbols(client: LspBackend, query: str,
                                       limit: int = 50) -> List[dict]:
     """Locate symbols clangd's global index drops (notably static-inline in
     headers) by grepping the project for the identifier, then asking clangd for
     the real DocumentSymbol of each candidate file and filtering by name.
     """
-    candidates = _find_files_with_word(client.project_root, query, limit=20)
+    candidates = _find_files_with_word(client.project_root, query, exts=client.fallback_extensions, limit=20)
     results: List[dict] = []
     seen: set = set()
     for path in candidates:
@@ -1878,7 +2592,7 @@ async def _fallback_workspace_symbols(client: ClangdClient, query: str,
 # Symbol lookup: name -> position (single 3-tier cascade; fixes CUDA bug #1)
 # ===========================================================================
 
-async def _symbol_to_location(client: ClangdClient, symbol_name: str,
+async def _symbol_to_location(client: LspBackend, symbol_name: str,
                               preferred_path: Optional[str] = None,
                               max_retries: int = 3) -> Optional[dict]:
     """Find the first workspace symbol matching symbol_name with a definition
@@ -1956,7 +2670,7 @@ async def _symbol_to_location(client: ClangdClient, symbol_name: str,
 
     # Tier 3: grep project tree then document_symbol on each candidate
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol_name):
-        candidates = _find_files_with_word(client.project_root, symbol_name, limit=10)
+        candidates = _find_files_with_word(client.project_root, symbol_name, exts=client.fallback_extensions, limit=10)
         if abs_preferred:
             candidates = [c for c in candidates if c != abs_preferred]
         for fpath in candidates:
@@ -1977,7 +2691,7 @@ async def _symbol_to_location(client: ClangdClient, symbol_name: str,
 # Call hierarchy helpers
 # ===========================================================================
 
-async def _collect_call_hierarchy(client: ClangdClient, path: str, line: int,
+async def _collect_call_hierarchy(client: LspBackend, path: str, line: int,
                                   char: int, depth: int) -> Optional[dict]:
     if depth < 0:
         return None
@@ -1996,7 +2710,7 @@ async def _collect_call_hierarchy(client: ClangdClient, path: str, line: int,
     return formatted[0] if len(formatted) == 1 else {"roots": formatted}
 
 
-async def _expand_hierarchy_item(client: ClangdClient, item: dict, depth: int,
+async def _expand_hierarchy_item(client: LspBackend, item: dict, depth: int,
                                  seen: set) -> Optional[dict]:
     uri = item.get("uri", "")
     sel_range = item.get("selectionRange") or item.get("range", {})
@@ -2063,21 +2777,67 @@ async def _expand_hierarchy_item(client: ClangdClient, item: dict, depth: int,
 # task; an init failure is cached for a backoff window so a crashing clangd is
 # not re-spawned on every call. The file layer NEVER triggers init.
 
-_backends: Dict[str, ClangdClient] = {}
+_backends: Dict[str, LspBackend] = {}
 _backend_init_tasks: Dict[str, "asyncio.Task"] = {}
 _backend_init_failed: Dict[str, float] = {}     # backend_type -> loop.time() of last failure
 _INIT_FAILURE_BACKOFF = 30.0                    # seconds
 _CLANGD_FILETYPES = {"c", "cpp", "cuda"}
+_LUALS_FILETYPES = {"lua"}
+# CWE-426 mitigation: resolved absolute paths for LSP binaries.  Set by main()
+# from --clangd-path / --luals-path CLI overrides before the server starts.
+# None means "use shutil.which at init time" (PATH-ordering fallback; still
+# pinned to the absolute path that shutil.which returns).
+_clangd_binary_override: Optional[str] = None
+_luals_binary_override: Optional[str] = None
 
 
 def _route_filetype(filetype: str) -> Optional[str]:
     """Map a languageId (_detect_language output) to a backend TYPE, or None."""
     if filetype in _CLANGD_FILETYPES:
         return "clangd"
+    if filetype in _LUALS_FILETYPES:
+        return "luals"
     return None
 
 
-def _require_backend(filetype: str) -> ClangdClient:
+# ---------------------------------------------------------------------------
+# Dispatcher backend-hint helpers (task-009)
+# ---------------------------------------------------------------------------
+
+# Maps a called function-name prefix to the filetype that selects the right
+# backend.  luals_* legacy names (registered as direct HANDLERS entries in
+# task-010) carry this hint so path-less calls reach luals instead of "cpp".
+_PREFIX_BACKEND: Dict[str, str] = {
+    "luals_": "lua",
+}
+
+
+def _backend_hint(function: str) -> Optional[str]:
+    """Return the filetype hint for *function* based on its name prefix, or None."""
+    for prefix, filetype in _PREFIX_BACKEND.items():
+        if function.startswith(prefix):
+            return filetype
+    return None
+
+
+def _select_filetype(params: dict, abs_path: str) -> str:
+    """Choose the filetype for backend selection.
+
+    Priority order:
+    1. Explicit ``_backend`` hint injected by the dispatcher (luals_* prefix).
+    2. Language detected from *abs_path* when a path is available.
+    3. Fall back to "cpp" (preserves existing clangd behaviour for callers
+       that provide no path and no prefix hint).
+    """
+    hint = params.get("_backend")
+    if hint:
+        return hint
+    if abs_path:
+        return _detect_language(abs_path)
+    return "cpp"
+
+
+def _require_backend(filetype: str) -> LspBackend:
     """Return the live backend for *filetype* or raise if not initialized.
 
     Sync accessor for callers that must NOT trigger init (status, no-op handlers).
@@ -2092,27 +2852,72 @@ def _require_backend(filetype: str) -> ClangdClient:
     return client
 
 
-async def _init_backend(backend_type: str, project_root: str) -> Optional[ClangdClient]:
+def _resolve_lsp_binary(override: Optional[str], default_name: str) -> str:
+    """CWE-426 helper: return a validated absolute path for an LSP binary.
+
+    Resolution order:
+    1. If *override* is set (from --clangd-path / --luals-path): validate that
+       the path is a regular file and is executable; raise RuntimeError if not
+       (feeds the 30s init-failure backoff, honest error, no silent hang).
+    2. Otherwise: shutil.which(default_name) for a PATH lookup and return the
+       absolute path it found; raise RuntimeError if not found.
+
+    NOTE: the shutil.which fallback still consults PATH ordering; the
+    --clangd-path / --luals-path CLI overrides are the hard mitigation for
+    untrusted-PATH environments (CWE-426).
+    """
+    if override is not None:
+        if not os.path.isfile(override):
+            raise RuntimeError(
+                f"LSP binary override path does not exist or is not a file: {override!r}"
+            )
+        if not os.access(override, os.X_OK):
+            raise RuntimeError(
+                f"LSP binary override path is not executable: {override!r}"
+            )
+        return override
+    resolved = shutil.which(default_name)
+    if resolved is None:
+        raise RuntimeError(f"{default_name!r} binary not found on PATH")
+    return resolved  # shutil.which already returns an absolute path
+
+
+async def _init_backend(backend_type: str, project_root: str) -> Optional[LspBackend]:
     """Spawn and initialize one backend. Returns the live client, or None on
     failure (failure is cached by the caller via _backend_init_failed).
     """
-    client = ClangdClient()
-    cuda_path = None
-    cuda_arch = None
-    # CUDA mode only when the project actually has .cu/.cuh sources AND an SDK
-    # exists - a bare SDK is not enough (matches _has_cuda_sources contract).
-    if _has_cuda_sources(project_root):
-        cuda_path = _find_cuda_sdk(project_root=project_root)
-        if cuda_path:
-            cuda_arch = _detect_cuda_arch(project_root=project_root) or "sm_86"
-        else:
-            log.debug("CUDA sources present but no SDK found - starting clangd in plain mode")
-    msg = await client.start(project_root, cuda_path=cuda_path, cuda_arch=cuda_arch)
-    log.debug("Backend '%s' init: %s", backend_type, msg)
-    return client
+    if backend_type == "clangd":
+        # CWE-426: resolve to an absolute, validated path before spawning.
+        clangd_abs = _resolve_lsp_binary(_clangd_binary_override, "clangd")
+        log.debug("clangd binary resolved to: %s", clangd_abs)
+        client = ClangdClient()
+        cuda_path = None
+        cuda_arch = None
+        # CUDA mode only when the project actually has .cu/.cuh sources AND an SDK
+        # exists - a bare SDK is not enough (matches _has_cuda_sources contract).
+        if _has_cuda_sources(project_root):
+            cuda_path = _find_cuda_sdk(project_root=project_root)
+            if cuda_path:
+                cuda_arch = _detect_cuda_arch(project_root=project_root) or "sm_86"
+            else:
+                log.debug("CUDA sources present but no SDK found - starting clangd in plain mode")
+        msg = await client.start(project_root, clangd_path=clangd_abs,
+                                 cuda_path=cuda_path, cuda_arch=cuda_arch)
+        log.debug("Backend '%s' init: %s", backend_type, msg)
+        return client
+    elif backend_type == "luals":
+        # CWE-426: resolve to an absolute, validated path before spawning.
+        luals_abs = _resolve_lsp_binary(_luals_binary_override, "lua-language-server")
+        log.debug("lua-language-server binary resolved to: %s", luals_abs)
+        client = LuaLsClient()
+        msg = await client.start(project_root, luals_path=luals_abs)
+        log.debug("Backend '%s' init: %s", backend_type, msg)
+        return client
+    else:
+        raise RuntimeError(f"Unknown backend type: '{backend_type}'")
 
 
-async def _ensure_backend(filetype: str, project_root: str) -> ClangdClient:
+async def _ensure_backend(filetype: str, project_root: str) -> LspBackend:
     """Lazy-init trigger: return a live backend for *filetype*, starting it on
     first use. Coalesces concurrent first-calls onto a single in-flight init
     task and honours an init-failure backoff window.
@@ -2175,21 +2980,22 @@ async def _ensure_backend(filetype: str, project_root: str) -> ClangdClient:
 # Semantic data helpers (return plain Python objects, or {"error": ...})
 # ===========================================================================
 
-async def _def_by_name(client: ClangdClient, symbol_name: str,
+async def _def_by_name(client: LspBackend, symbol_name: str,
                        preferred_path: Optional[str], context_lines: int) -> Any:
     loc = await _symbol_to_location(client, symbol_name, preferred_path=preferred_path or None)
     if not loc:
-        return {"error": f"Symbol '{symbol_name}' not found in workspace"}
+        return {"error": f"Symbol '{_sanitize_log(symbol_name)}' not found in workspace"}
     def_result = await client.definition(loc["path"], loc["line"], loc["char"])
     if not def_result:
-        return {"error": f"No definition found for '{symbol_name}'"}
+        return {"error": f"No definition found for '{_sanitize_log(symbol_name)}'"}
     locations = def_result if isinstance(def_result, list) else [def_result]
     results = []
     for payload in locations:
         location = _location_from_payload(payload, client.project_root)
         if not location:
             continue
-        abs_path = uri_to_path(location["uri"])
+        # F6: only open paths that resolve inside the project root.
+        abs_path = _lsp_path_in_root(location["uri"], client.project_root)
         def_line = location["range"]["start"]["line"]
         results.append({
             "symbol": symbol_name,
@@ -2199,7 +3005,7 @@ async def _def_by_name(client: ClangdClient, symbol_name: str,
     return results
 
 
-async def _def_at(client: ClangdClient, abs_path: str, line: int, char: int,
+async def _def_at(client: LspBackend, abs_path: str, line: int, char: int,
                   context_lines: int) -> Any:
     def_result = await client.definition(abs_path, line, char)
     if not def_result:
@@ -2210,7 +3016,8 @@ async def _def_at(client: ClangdClient, abs_path: str, line: int, char: int,
         location = _location_from_payload(payload, client.project_root)
         if not location:
             continue
-        ap = uri_to_path(location["uri"])
+        # F6: only open paths that resolve inside the project root.
+        ap = _lsp_path_in_root(location["uri"], client.project_root)
         dl = location["range"]["start"]["line"]
         results.append({
             "location": location,
@@ -2219,7 +3026,7 @@ async def _def_at(client: ClangdClient, abs_path: str, line: int, char: int,
     return results
 
 
-async def _refs_by_name(client: ClangdClient, symbol_name: str,
+async def _refs_by_name(client: LspBackend, symbol_name: str,
                         preferred_path: Optional[str], max_results: int,
                         context_lines: int) -> dict:
     if preferred_path:
@@ -2248,7 +3055,8 @@ async def _refs_by_name(client: ClangdClient, symbol_name: str,
             location = _location_from_payload(ref, client.project_root)
             if not location:
                 continue
-            ap = uri_to_path(location["uri"])
+            # F6: only open paths that resolve inside the project root.
+            ap = _lsp_path_in_root(location["uri"], client.project_root)
             rl = location["range"]["start"]["line"]
             all_refs.append({
                 "symbol": symbol_name,
@@ -2257,10 +3065,40 @@ async def _refs_by_name(client: ClangdClient, symbol_name: str,
             })
         if max_results > 0 and len(all_refs) >= max_results:
             break
+    # Cross-source merge: supplement LSP hits with backend-specific text refs
+    # (e.g. Lua dynamic-dispatch grep via LuaLsClient.supplemental_references).
+    # BaseLspClient returns [] so clangd/CUDA behavior is unchanged.
+    line_seen = {
+        f"{r['location']['uri']}:{r['location']['range']['start']['line']}"
+        for r in all_refs
+    }
+    remaining = (max_results - len(all_refs)) if max_results > 0 else 0
+    extra = await client.supplemental_references(symbol_name, line_seen, remaining,
+                                                 preferred_path)
+    for hit in extra:
+        hit_uri = hit.get("uri", "")
+        hit_line = hit.get("range", {}).get("start", {}).get("line", 0)
+        hit_key = f"{hit_uri}:{hit_line}"
+        if hit_key in line_seen:
+            continue
+        line_seen.add(hit_key)
+        location = _location_from_payload(hit, client.project_root)
+        if not location:
+            continue
+        # F6: only open paths that resolve inside the project root.
+        ap = _lsp_path_in_root(location["uri"], client.project_root)
+        rl = location["range"]["start"]["line"]
+        all_refs.append({
+            "symbol": symbol_name,
+            "location": location,
+            "context": extract_surrounding_code(ap, rl, context_lines) if context_lines > 0 else None,
+        })
+        if max_results > 0 and len(all_refs) >= max_results:
+            break
     return {"symbol": symbol_name, "count": len(all_refs), "references": all_refs}
 
 
-async def _refs_at(client: ClangdClient, abs_path: str, line: int, char: int,
+async def _refs_at(client: LspBackend, abs_path: str, line: int, char: int,
                    max_results: int, context_lines: int) -> dict:
     refs = await client.references(abs_path, line, char)
     all_refs = []
@@ -2277,7 +3115,8 @@ async def _refs_at(client: ClangdClient, abs_path: str, line: int, char: int,
         location = _location_from_payload(ref, client.project_root)
         if not location:
             continue
-        ap = uri_to_path(location["uri"])
+        # F6: only open paths that resolve inside the project root.
+        ap = _lsp_path_in_root(location["uri"], client.project_root)
         rl = location["range"]["start"]["line"]
         all_refs.append({
             "location": location,
@@ -2320,7 +3159,7 @@ async def handle_find_definition(params: dict, project_root: str, strict: bool =
         data = await _def_at(client, client._abs_path(abs_path), l, c, context_lines)
     elif symbol_name:
         abs_path = safe_path(project_root, path, strict) if path else None
-        ft = _detect_language(abs_path) if abs_path else "cpp"
+        ft = _select_filetype(params, abs_path or "")
         client = await _ensure_backend(ft, project_root)
         data = await _def_by_name(client, symbol_name, abs_path, context_lines)
     else:
@@ -2350,7 +3189,7 @@ async def handle_find_references(params: dict, project_root: str, strict: bool =
         data = await _refs_at(client, client._abs_path(abs_path), l, c, max_results, context_lines)
     elif symbol_name:
         abs_path = safe_path(project_root, path, strict) if path else None
-        ft = _detect_language(abs_path) if abs_path else "cpp"
+        ft = _select_filetype(params, abs_path or "")
         client = await _ensure_backend(ft, project_root)
         data = await _refs_by_name(client, symbol_name, abs_path, max_results, context_lines)
     else:
@@ -2374,7 +3213,8 @@ async def handle_find_implementations(params: dict, project_root: str, strict: b
         location = _location_from_payload(payload, client.project_root)
         if not location:
             continue
-        ap = uri_to_path(location["uri"])
+        # F6: only open paths that resolve inside the project root.
+        ap = _lsp_path_in_root(location["uri"], client.project_root)
         il = location["range"]["start"]["line"]
         results.append({
             "location": location,
@@ -2399,7 +3239,7 @@ async def handle_type_at(params: dict, project_root: str, strict: bool = False) 
         return {"error": "No hover/type information at this position"}
     contents = result.get("contents")
     raw_text = _flatten_hover(contents).strip()
-    deduced = _infer_type(raw_text)
+    deduced = client.infer_type(raw_text)
     hover_range = result.get("range")
     location = None
     if hover_range:
@@ -2484,7 +3324,7 @@ async def handle_symbol(params: dict, project_root: str, strict: bool = False) -
     # 'strict' here disables the filesystem fallback (clangd API); it is a params
     # key, distinct from the server-level sandbox 'strict' arg used by safe_path.
     disable_fallback = _bool_param(params.get("strict"), default=False)
-    client = await _ensure_backend("cpp", project_root)
+    client = await _ensure_backend(_select_filetype(params, ""), project_root)
 
     symbols = await client.workspace_symbol(query)
     fallback_used = False
@@ -2518,7 +3358,7 @@ async def handle_symbol_context(params: dict, project_root: str, strict: bool = 
     max_references = int(params.get("max_references", 20))
     context_lines = int(params.get("context_lines", 5))
     abs_path = safe_path(project_root, path, strict) if path else None
-    ft = _detect_language(abs_path) if abs_path else "cpp"
+    ft = _select_filetype(params, abs_path or "")
     client = await _ensure_backend(ft, project_root)
     definition = await _def_by_name(client, symbol_name, abs_path, context_lines)
     references = await _refs_by_name(client, symbol_name, abs_path, max_references, 2)
@@ -2573,14 +3413,14 @@ async def handle_symbol_change_impact(params: dict, project_root: str, strict: b
     max_references = int(params.get("max_references", 50))
     depth = int(params.get("call_hierarchy_depth", 1))
     abs_path = safe_path(project_root, path, strict) if path else None
-    ft = _detect_language(abs_path) if abs_path else "cpp"
+    ft = _select_filetype(params, abs_path or "")
     client = await _ensure_backend(ft, project_root)
 
     definition = await _def_by_name(client, symbol_name, abs_path, 3)
     references = await _refs_by_name(client, symbol_name, abs_path, max_references, 2)
 
     call_hierarchies = []
-    if isinstance(definition, list):
+    if isinstance(definition, list) and client.supports_call_hierarchy:
         seen_roots = set()
         for defn in definition:
             loc = defn.get("location", {})
@@ -2687,6 +3527,20 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "cuda_diagnostics": handle_diagnostics,
     "cuda_deduced_type_at": handle_type_at,
     "cuda_init": handle_lsp_init_noop,
+    # --- legacy luals_* names as DIRECT keys ---
+    "luals_find_definition": handle_find_definition,
+    "luals_find_definition_at": handle_find_definition,
+    "luals_find_references": handle_find_references,
+    "luals_find_references_at": handle_find_references,
+    "luals_find_implementations_at": handle_find_implementations,
+    "luals_workspace_symbols": handle_symbol,
+    "luals_document_outline": handle_outline,
+    "luals_symbol_context": handle_symbol_context,
+    "luals_symbol_change_impact": handle_symbol_change_impact,
+    "luals_inlay_hints": handle_inlay_hints,
+    "luals_hover": handle_type_at,
+    "luals_diagnostics": handle_diagnostics,
+    "luals_init": handle_lsp_init_noop,
 }
 
 # Per-handler accepted (canonical) parameter names. Used only to augment
@@ -2785,6 +3639,16 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     except ValueError as exc:
         return {"error": str(exc)}
 
+    # Inject the backend hint so path-less luals_* calls reach the luals backend
+    # instead of defaulting to "cpp".  The hint is resolved from the function's
+    # name prefix and stored as a reserved key that handlers read via
+    # _select_filetype(params, abs_path).  It must be injected BEFORE the
+    # handler is called and AFTER alias resolution (so it won't be aliased away).
+    params.pop("_backend", None)          # reserved: only the dispatcher may set this
+    hint = _backend_hint(function)
+    if hint:
+        params["_backend"] = hint
+
     if not function:
         func_list = "\n".join(f"  {name}" for name in sorted(HANDLERS.keys()))
         return {"__raw_text__": f"mcp-purity OK — project: {project_root}\nAvailable functions:\n{func_list}"}
@@ -2792,7 +3656,7 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     handler = HANDLERS.get(function)
     if not handler:
         func_list = ", ".join(sorted(HANDLERS.keys()))
-        return {"error": f"Unknown function: {function}. Available: {func_list}"}
+        return {"error": f"Unknown function: {_sanitize_log(function)}. Available: {func_list}"}
 
     try:
         if asyncio.iscoroutinefunction(handler):
@@ -2803,7 +3667,7 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
         err = str(exc)
         accepted = HANDLER_ACCEPTED_PARAMS.get(canonical_func)
         if accepted:
-            unknown = sorted(set(params.keys()) - accepted)
+            unknown = sorted(set(params.keys()) - accepted - {"_backend"})
             if unknown:
                 err += (
                     f" | Unknown params for '{canonical_func}': {', '.join(unknown)}."
@@ -2842,7 +3706,8 @@ PURITY_CALL_TOOL = {
         "SEMANTIC CODE NAVIGATION — purity_call now ALSO does symbol work\n"
         "═══════════════════════════════════════════════════════════════════════\n"
         "purity_call now provides compiler-accurate (clangd-backed) symbol\n"
-        "navigation for C / C++ / CUDA, alongside the file ops above:\n\n"
+        "navigation for C / C++ / CUDA and type-aware (luals-backed) symbol\n"
+        "navigation for Lua (.lua paths, luals_* functions), alongside the file ops above:\n\n"
         "  find_definition       - by symbol name OR file position (symbol/at)\n"
         "  find_references        - by symbol name OR file position\n"
         "  find_implementations   - at a file position\n"
@@ -2853,16 +3718,16 @@ PURITY_CALL_TOOL = {
         "  symbol_context         - definition + references in one call\n"
         "  inlay_hints            - parameter/type hints for a range\n"
         "  symbol_change_impact   - definition + references + call hierarchy\n\n"
-        "The clangd LSP spins up lazily on first use. For symbol work PREFER these\n"
+        "The clangd and luals LSPs spin up lazily on first use. For symbol work PREFER these\n"
         "over grepping source - text matching misses overloads, macros, and\n"
         "indirect references. search_for_pattern remains free-text (literal/regex)\n"
         "search over ANY filetype (comments, log strings, build text) - use it when\n"
-        "you want text, not a symbol. The standalone clangd_call / cuda_call tools\n"
-        "still exist and run in parallel; the legacy clangd_*/cuda_* function names\n"
-        "are accepted here as aliases.\n\n"
+        "you want text, not a symbol. The standalone clangd_call / cuda_call / luals_call\n"
+        "tools still exist and run in parallel; the legacy clangd_*/cuda_*/luals_*\n"
+        "function names are accepted here as aliases.\n\n"
         "When NOT to use purity:\n"
         "  - Plain reading        -> built-in Read (less MCP overhead).\n"
-        "  - Lua symbols          -> mcp-luals (luals_call).\n"
+        "  - Lua symbols          -> purity_call (in-process luals); luals_call also works standalone.\n"
         "  - Git                  -> mcp-git.\n"
         "  - Build / test / clean -> mcp-forge / mcp-compile.\n\n"
         "═══════════════════════════════════════════════════════════════════════\n"
@@ -3060,6 +3925,20 @@ def main() -> None:
     parser.add_argument("--strict", action="store_true", help="Reject paths outside project root")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
     parser.add_argument("--log-file", help="Log to file (implies --debug)")
+    # CWE-426 (untrusted-PATH hijack): explicit absolute-path overrides for LSP
+    # binaries.  When supplied, _resolve_lsp_binary() validates and pins the
+    # binary before the first spawn.  When omitted, shutil.which() is used at
+    # init time — still pinned to its absolute result, but PATH-order dependent.
+    parser.add_argument(
+        "--clangd-path",
+        default=None,
+        help="Absolute path to the clangd binary (overrides PATH lookup; hard mitigation for CWE-426)",
+    )
+    parser.add_argument(
+        "--luals-path",
+        default=None,
+        help="Absolute path to the lua-language-server binary (overrides PATH lookup; hard mitigation for CWE-426)",
+    )
     args = parser.parse_args()
 
     level = logging.DEBUG if (args.debug or args.log_file) else logging.WARNING
@@ -3078,6 +3957,12 @@ def main() -> None:
     if not os.path.isdir(args.project_root):
         print(f"Error: project root is not a directory: {args.project_root}", file=sys.stderr)
         sys.exit(1)
+
+    # Store CWE-426 binary overrides in module-level vars so _init_backend can
+    # read them without threading them through every call site.
+    global _clangd_binary_override, _luals_binary_override
+    _clangd_binary_override = args.clangd_path
+    _luals_binary_override = args.luals_path
 
     server = McpServer(args.project_root, strict=args.strict)
     asyncio.run(server.run())

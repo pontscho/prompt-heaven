@@ -200,6 +200,25 @@ def purity_semantic_checks(srv, checks):
                         ("canonical_last.txt" in text) and ("alias_first.txt" not in text),
                         text[:120]))
 
+    # (f) legacy luals_* names dispatch (direct HANDLERS keys [C1, Phase 1])
+    luals = ["luals_find_definition", "luals_find_references",
+             "luals_workspace_symbols", "luals_document_outline",
+             "luals_symbol_change_impact", "luals_init"]
+    undispatched_luals = []
+    for fn in luals:
+        text, _ = _purity_call(srv, cid, fn)
+        cid += 1
+        if "Unknown function" in text:
+            undispatched_luals.append(fn)
+    checks.append(check("purity: legacy luals_* names dispatch",
+                        not undispatched_luals, "undispatched=%r" % undispatched_luals))
+
+    # (g) negative control: a luals bogus name IS reported unknown
+    text, _ = _purity_call(srv, cid, "luals_bogus")
+    cid += 1
+    checks.append(check("purity: luals_bogus -> Unknown function",
+                        "Unknown function" in text, text[:80]))
+
 
 def run_server(cfg):
     """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}."""
