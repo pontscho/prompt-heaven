@@ -229,6 +229,14 @@ dereferencing `cfg->handler`" is useful.>
 a fresh session to resume. Keep it short — the new session will Read the full
 checkpoint file. Same language as the rest of the file.>
 
+**NO EMOJIS — STRICT.** The activation prompt is pasted directly into a terminal,
+where emojis (and other non-ASCII pictographs) can corrupt the input line and break
+the terminal. Compose this block as PLAIN TEXT ONLY: strip every emoji from the
+mission / status / next-step sentences before placing them here. This rule applies to
+the activation prompt SPECIFICALLY (Section 11 and its verbatim echo in Step 6) — the
+rest of the checkpoint file is read by the tooling, not pasted into a terminal, so it
+is unaffected and may keep its status emojis.
+
 > Folytatjuk a `<branch>` ágon megkezdett munkát. A teljes session-kontextus
 > a `.claude/tmp/checkpoint.md` fájlban van — olvasd el TELJESEN, mielőtt
 > bármihez hozzányúlnál. Röviden: <one-sentence mission>. Az utolsó állapot:
@@ -281,3 +289,4 @@ copy-paste trivial in the terminal.
 5. **Activation prompt too long** → keep Section 11 to 4–6 lines. The new session will read the full file; the activation prompt is a pointer, not a re-summary.
 6. **Forgetting to increment session count** on merge.
 7. **Using Bash for git** when `mcp-git` is connected. Same for `mcp-purity` vs built-in Read/Write.
+8. **Emojis in the activation prompt** → the Section 11 block is pasted straight into a terminal; emojis can corrupt the input line and break it. The activation prompt MUST be plain text — strip every emoji before composing it (see the NO EMOJIS rule under Section 11).
