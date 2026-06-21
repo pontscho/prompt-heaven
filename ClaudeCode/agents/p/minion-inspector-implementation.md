@@ -68,6 +68,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 
 You are PROHIBITED from:
 - Writing, editing, or deleting files
+- Calling `purity_call` WRITE functions (`create_text_file`, `replace_content`, `delete_lines`, `replace_lines`, `insert_at_line`) — these mutate files; use ONLY the read functions (`find_file`, `search_for_pattern`, `read_file`, `list_dir`)
 - Running bash commands that modify state
 - Fixing any issues you find
 - Making any side effects

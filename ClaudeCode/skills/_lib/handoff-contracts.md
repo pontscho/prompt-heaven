@@ -30,7 +30,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 - Optionally: an existing `docs/feature-implementation-plan.md` to refine
 
 **Outputs:**
-- `docs/feature-implementation-plan.md` — markdown, English only, structured per the template in the skill body. MUST contain at minimum:
+- `docs/feature-implementation-plan.md` — markdown, English only. **Written by `p:minion-feature-planner`** (the skill orchestrates; it never hand-writes or hand-edits the plan). Structured per the planner's 8-mandatory-section contract / the template in the skill body. MUST contain at minimum:
   - `## Requirements Summary` (with success criteria, scope, assumptions, constraints, NFRs)
   - `## Architecture Analysis`
   - `## Captured Information (for implementation phase)` (file locations, imports, types, signatures, patterns, error handling, tests)
@@ -40,11 +40,15 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
   - `## Critical Files for Implementation`
   - `## Post-Implementation Checklist`
 
-**Side effects:**
-- Writes `.claude/tmp/` files only during interactive exploration (cleaned up by the temp-file rule)
-- Does NOT write code, does NOT modify other files
+**Plan authoring (delegated):**
+- The skill does NOT write the plan itself. It runs a **round-0 multi-perspective fan-out**: N parallel `Agent(p:minion-feature-planner, …)` calls (default `mvp-first` / `risk-first` / `maintainability-first`), each writing a draft to its own `.claude/tmp/plan-perspective-<slug>.md`. The skill judges the drafts, then invokes the planner ONCE more in canonical mode to synthesize the single `docs/feature-implementation-plan.md`, and finally deletes the perspective drafts.
+- Validation fixes are delegated too: each round's CRITICAL/HIGH findings are addressed by ONE `Agent(p:minion-feature-planner, …)` refinement (`delegate-fix`) — never a hand-edit, never a perspective re-fan-out.
 
-**Validation:** runs Phase A (inspector-plan loop) and Phase B (security-review skill in `mode=plan`) before declaring done.
+**Side effects:**
+- Writes / reads / deletes `.claude/tmp/plan-perspective-*.md` (round-0 drafts; deleted after synthesis) and other `.claude/tmp/` files during interactive exploration (cleaned up by the temp-file rule)
+- Does NOT write code, does NOT modify other files; `docs/feature-implementation-plan.md` is written EXCLUSIVELY by `p:minion-feature-planner`
+
+**Validation:** runs a parallel validation fan-out before declaring done — correctness lane (`p:minion-inspector-plan`) + security lane (`p:minion-inspector-security-officer` `PHASE: triage`, gated to `Skill(p:security-review, mode=plan)` on a hit); CRITICAL/HIGH findings fixed via a single delegated `p:minion-feature-planner` refinement per round (`delegate-fix`). See `_lib/validation-loop.md` § Parallel fan-out variant.
 
 ---
 
@@ -87,7 +91,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 - Test execution via `p:minion-builder`
 - Failure investigation via `p:minion-watson`
 
-**Validation:** runs Phase A (inspector-implementation loop) and Phase B (security-review skill in `mode=code`) before setting `implementation_complete: true`.
+**Validation:** runs a parallel validation fan-out before setting `implementation_complete: true` — completeness lane (`p:minion-inspector-implementation`) + security lane (`p:minion-inspector-security-officer` `PHASE: triage`, gated to `Skill(p:security-review, mode=code)` on a hit). See `_lib/validation-loop.md` § Parallel fan-out variant.
 
 ---
 
@@ -119,7 +123,8 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 
 | File | Producer | Consumer | Format |
 |---|---|---|---|
-| `docs/feature-implementation-plan.md` | `/p:feature-plan` | `/p:task-plan`, `/p:implement` (reads for context), `/p:security-review mode=plan` | markdown, structured |
+| `.claude/tmp/plan-perspective-<slug>.md` | `/p:feature-plan` round-0 fan-out (`p:minion-feature-planner`, perspective mode) | `/p:feature-plan` (judge + synthesis), then deleted after synthesis | markdown, per the planner's plan structure |
+| `docs/feature-implementation-plan.md` | `/p:feature-plan` → `p:minion-feature-planner` (canonical mode) | `/p:task-plan`, `/p:implement` (reads for context), `/p:security-review mode=plan` | markdown, structured |
 | `requirements.yaml` | `/p:task-plan` | `/p:implement` | YAML, schema in `~/.claude/scripts/task-plan.py` |
 | `.claude/tmp/security-findings-<ts>.md` | `p:minion-inspector-security-officer PHASE: find` | `p:minion-inspector-security-officer PHASE: verify` | markdown, `[Fn]` ID format |
 | `.claude/tmp/security-verified-<ts>.md` | `p:minion-inspector-security-officer PHASE: verify` | `/p:security-review` Step 4 (Assemble) | markdown, VERIFIED/SUPPRESSED/ESCALATED sections |

@@ -56,9 +56,9 @@ Agents MUST NOT list `Agent` in their `tools:` — see the no-nesting rule above
 | Term | Meaning | Where it appears |
 |---|---|---|
 | **Step N** | A *linear* step inside a skill. No iteration, no loop. | `/p:security-review`: Step 1 Triage, Step 2 Find, Step 3 Verify, Step 4 Assemble. |
-| **Phase A / B / C** | A *validation loop* — iterative minion invocation up to 5 iterations, with a 5-iteration escape hatch. **Reserved exclusively for validation loops.** | `/p:feature-plan` Phase A (inspector-plan loop), Phase B (security-review loop), Phase C (refinement menu — only "Phase" because it follows Phase A+B; it is itself non-iterative). Same for `/p:implement`. |
-| **Validation Loop** | The canonical pattern Phase A/B/C follow. Defined once in `skills/_lib/validation-loop.md`. | Referenced by every Phase A/B/C section. |
-| **`PHASE: <triage\|find\|verify>` directive** | An *in-band routing token* sent to `p:minion-inspector-security-officer` to select which workflow it runs. **This is internal to the security minion**, not a general project term. | Only inside `p:minion-inspector-security-officer`'s prompt. |
+| **Phase A / B / C** | A *validation loop* — iterative reviewer invocation up to 5 rounds, with a 5-round escape hatch. In `/p:feature-plan` and `/p:implement`, Phase A (correctness/completeness) and Phase B (security) run as **parallel lanes of a single fan-out loop** (see `_lib/validation-loop.md` § Parallel fan-out variant), NOT two sequential loops; Phase C (refinement / summary) follows and is itself non-iterative. **Reserved exclusively for validation loops.** | `/p:feature-plan` & `/p:implement`: Phase A ∥ Phase B fan-out, then Phase C. |
+| **Validation Loop** | The canonical pattern Phase A/B/C follow — sequential single-reviewer by default, plus a parallel fan-out variant. Defined once in `skills/_lib/validation-loop.md`. | Referenced by every Phase A/B/C section. |
+| **`PHASE: <triage\|find\|verify>` directive** | An *in-band routing token* sent to `p:minion-inspector-security-officer` to select which workflow it runs. Internal to the security minion, not a general project term. | Set by the `p:security-review` skill (full pipeline), or by the feature-plan/implement validation fan-out (the parallel `PHASE: triage` security-lane probe). No new token was added for the fan-out — it reuses `triage`. |
 
 If you find yourself writing "Phase 2" inside a skill that has no validation loop, you mean **Step 2**. If you find yourself adding new in-band routing tokens to a minion, stop and ask whether the minion is doing too much.
 
@@ -66,13 +66,23 @@ If you find yourself writing "Phase 2" inside a skill that has no validation loo
 
 When one skill's output is another skill's input, the file path and format MUST be documented in `skills/_lib/handoff-contracts.md`. Examples today:
 
-- `/p:feature-plan` output → `docs/feature-implementation-plan.md` (markdown, English, fixed structure)
+- `/p:feature-plan` output → `docs/feature-implementation-plan.md` (markdown, English, fixed structure) — written by `p:minion-feature-planner` via a round-0 multi-perspective fan-out (`.claude/tmp/plan-perspective-*.md` drafts) + canonical synthesis; the skill orchestrates but never hand-writes the plan
 - `/p:task-plan` input ← above; output → `requirements.yaml` (defined schema)
 - `/p:implement` input ← `requirements.yaml`
 - `/p:security-review` output → console + optional `docs/reviews/security-review-<ts>.md`
 - Intra-pipeline (security review): `.claude/tmp/security-findings-<ts>.md` and `.claude/tmp/security-verified-<ts>.md`
 
 Changing any of these without updating `handoff-contracts.md` is a violation.
+
+### Round-0 perspective fan-out (feature-plan)
+
+`/p:feature-plan` authors its plan through a **judge-panel** pattern, fully within the no-nesting contract (all fan-out happens in the skill body; workers stay leaf workers):
+
+1. The skill fans out N parallel `Agent(p:minion-feature-planner, …)` calls (default `mvp-first` / `risk-first` / `maintainability-first`), each in *perspective mode* with a distinct `assigned_perspective` and `output_path` → one `.claude/tmp/plan-perspective-<slug>.md` draft per lens.
+2. The skill judges the drafts in main context, picks the strongest base, and invokes the planner ONCE more in *canonical mode* to synthesize the single `docs/feature-implementation-plan.md`. The planner is the SOLE writer — no other actor writes or edits the plan.
+3. The skill deletes the perspective drafts. The downstream Checkpoint-5 validation loop refines the plan via `delegate-fix` (one `p:minion-feature-planner` refinement per round), never by re-running the perspective lenses.
+
+This is a pre-validation step and is NOT counted against the 5-round validation cap. It is the canonical example of a skill→Agent fan-out + synthesis: a skill may launch many `Agent` lanes, but each lane is a leaf minion that never spawns further sub-agents.
 
 ## Temporary files
 
@@ -88,6 +98,7 @@ Skills MUST delegate iterative or scope-broad work to the appropriate minion ins
 | Build / test cycles | `p:minion-builder` |
 | Script run-fix-retry | `p:minion-runner` |
 | Bug investigation | `p:minion-watson` |
+| Feature-plan writing (round-0 perspective drafts, canonical synthesis, refinement fixes) | `p:minion-feature-planner` |
 | Plan validation | `p:minion-inspector-plan` |
 | Implementation validation | `p:minion-inspector-implementation` |
 | Security review | `p:minion-inspector-security-officer` (or, preferably, via the `p:security-review` skill which orchestrates the 3-phase pipeline) |

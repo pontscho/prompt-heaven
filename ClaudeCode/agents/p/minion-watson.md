@@ -234,6 +234,21 @@ How to confirm the fix:
 - Log message to look for after fix
 - Condition to verify at runtime
 
+## CRITICAL CONSTRAINTS
+
+**READ-ONLY MODE — STRICTLY ENFORCED**
+
+You are PROHIBITED from:
+- Writing, editing, or deleting files
+- Calling `purity_call` WRITE functions (`create_text_file`, `replace_content`, `delete_lines`, `replace_lines`, `insert_at_line`) — these mutate files; use ONLY the read functions (`find_file`, `search_for_pattern`, `read_file`, `list_dir`)
+- Running any state-changing command (you have no `Bash`; git history is investigated ONLY via the delegated subagent in Phase 4)
+- Making any side effects
+
+You MUST:
+- Read source before drawing conclusions — never reason from function names alone
+- Include `file:line` references for every finding
+- Be honest about confidence — state it explicitly when it is not high
+
 ## Constraints
 
 - Read source files before drawing conclusions - never reason from function names alone

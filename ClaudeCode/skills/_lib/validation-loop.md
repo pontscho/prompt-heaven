@@ -6,8 +6,8 @@
 
 Use this pattern for any iterative reviewer-driven loop inside a skill:
 
-- `/p:feature-plan` Phase A (inspector-plan loop) and Phase B (security-review loop)
-- `/p:implement` Phase A (inspector-implementation loop) and Phase B (security-review loop)
+- `/p:feature-plan` Phase A (correctness) + Phase B (security) — run as **parallel lanes of one fan-out loop** (see "Parallel fan-out variant")
+- `/p:implement` Phase A (completeness) + Phase B (security) — run as **parallel lanes of one fan-out loop** (see "Parallel fan-out variant")
 - Any future validator-driven iteration
 
 DO NOT inline the loop logic into your skill body. Reference this file and specify only the per-loop variables.
@@ -24,8 +24,8 @@ When a skill references this pattern, it MUST declare these specifics:
 2. **Target artifact**: which file gets validated and fixed (`docs/feature-implementation-plan.md`, branch diff, `requirements.yaml`, etc.).
 3. **Verdict vocabulary**: what verdict values the reviewer returns (e.g. `APPROVE / REVISE / REJECT` for inspector-plan; `COMPLETE / INCOMPLETE` for inspector-implementation; `APPROVE / REVISE / REJECT` for security-review).
 4. **Fix-mode**: how this loop applies fixes between iterations. Options:
-   - **`edit-and-retry`** — caller directly `Edit`s the target artifact based on findings, then re-invokes reviewer. (Used by feature-plan: edit the plan markdown to address inspector findings.)
-   - **`delegate-fix`** — caller delegates a fix to another minion (e.g. `p:minion-builder` to apply a code change), then re-invokes reviewer. (Used by implement: re-build / re-implement based on inspector-implementation gaps.)
+   - **`edit-and-retry`** — caller directly `Edit`s the target artifact based on findings, then re-invokes reviewer. (Generic in-place mode for text/markdown artifacts. The feature/task pipelines no longer use it — they delegate all plan writing to a dedicated writer minion; see `delegate-fix`.)
+   - **`delegate-fix`** — caller delegates a fix to another minion, then re-invokes reviewer. (Used by implement: `p:minion-builder` re-builds / re-implements based on inspector-implementation gaps. Used by feature-plan: a single `p:minion-feature-planner` refinement per round addresses the inspector + security findings — the planner is the SOLE writer of `docs/feature-implementation-plan.md`, so even markdown fixes are delegated, never hand-edited.)
    - **`escalate-immediately`** — certain verdict values (e.g. `REJECT` with CRITICAL severity) must NOT be auto-fixed; surface to user immediately.
 5. **Loop name**: human label for per-iteration user messages (e.g. "Plan correctness", "Plan security review", "Implementation completeness", "Implementation security audit").
 
@@ -95,6 +95,68 @@ On user choice:
 - **Compact user message per round.** Do not dump full reviewer reports. The user sees verdict + counts + top issue + action.
 - **No scope creep.** If a finding suggests work beyond the originally-requested change, document it under "Out of Scope" (for plans) or "Open items" (for implementations) — do not silently expand the target artifact.
 
+## Parallel fan-out variant
+
+The base pattern runs ONE reviewer per loop and chains loops sequentially (Phase A fully approves before Phase B starts). When two reviewers audit the **same artifact along independent dimensions** (correctness AND security), run them as **parallel lanes of a single fan-out loop** instead of two sequential loops. This trades a little redundant review for wall-clock latency — both lanes see the artifact at once instead of security waiting for correctness.
+
+Use the fan-out variant ONLY when all of these hold:
+
+- The reviewers are mutually independent — neither's findings gate the other's.
+- They audit the same target artifact.
+- Each parallelized reviewer is a sub-agent. The harness parallelizes `Agent` calls issued in one message; `Skill(...)` calls run in the main context and CANNOT be parallelized this way.
+
+### Extra variables the caller must specify
+
+In addition to the base variables:
+
+1. **Reviewer lanes** — the reviewers fanned out each round (e.g. `p:minion-inspector-plan` + `p:minion-inspector-security-officer PHASE: triage`).
+2. **Aggregate exit condition** — the loop exits only when EVERY lane returns its approving verdict. Any lane in `REVISE` / `INCOMPLETE` / `hit` keeps the loop open.
+3. **Gated deep-review lane** (optional) — a lane that is a cheap parallel probe which, on a hit, triggers an expensive sequential follow-up. See "Gated lanes" below.
+
+### Step sequence (fan-out)
+
+**Step PL.1 — Fan out (one message, parallel `Agent` calls).** Launch ALL reviewer lanes in a single message so the harness runs them concurrently. Each lane is a fresh sub-agent and receives the CURRENT state of the target artifact plus the round number. NEVER put a `Skill(...)` call in the fan-out — it serializes the whole round.
+
+**Step PL.2 — Collect & merge.** Gather every lane's verdict + findings. Merge across lanes; de-duplicate where two lanes flag the same `file:line` from different angles. Keep each finding's originating lane so fixes anchor to lane-specific evidence.
+
+**Step PL.3 — Report (ONE compact message per round).**
+```
+**<Loop name> — round N/5**
+
+- Lanes: <lane1>=<verdict>, <lane2>=<verdict>, …
+- Findings: <merged severity / category counts>
+- Top issue: <one-liner from the highest-severity finding across all lanes>
+- Action: <unified fix this round, OR "all lanes approve — exiting">
+```
+
+**Step PL.4 — Branch on the aggregate verdict.**
+
+| Aggregate state | Action |
+|---|---|
+| EVERY lane `APPROVE` / `COMPLETE` (or only INFO/LOW) | Exit loop. Proceed to the next phase. |
+| Any lane `REVISE` / `INCOMPLETE`, round < 5 | Apply ONE unified fix pass (each finding per its own fix-mode), then re-fan-out (PL.1). |
+| Any lane `REJECT` (CRITICAL) | Escalate immediately — same as base Step L.4. |
+| Any lane still open, round == 5 | Escape hatch (PL.5). |
+
+**Step PL.5 — Escape hatch.** Same as base Step L.5, but list remaining findings grouped by lane.
+
+### Gated lanes (cheap parallel probe → expensive sequential follow-up)
+
+A lane whose full audit CANNOT run as a single sub-agent — because it would need to spawn its own sub-agents, forbidden by the no-nesting rule in `ARCHITECTURE.md` — runs as a **gated lane**:
+
+1. In the fan-out (PL.1) the lane runs only its cheap single-context probe (e.g. `p:minion-inspector-security-officer PHASE: triage` — a threat-surface checklist).
+2. Probe reports **no hit** → the lane counts as APPROVE for this round; the expensive audit is skipped.
+3. Probe **hits** → AFTER the fan-out round closes, run the full multi-phase reviewer **sequentially in the main context** via its canonical skill (e.g. `Skill(p:security-review, mode=code)`), which is then free to spawn its own fresh-context phase sub-agents. Its verdict feeds the next round's aggregate.
+
+This preserves the canonical skill's pipeline quality (the fresh-context anchoring-bias break) while still parallelizing the cheap probe with the other lanes. It introduces NO new in-band routing token — the probe reuses the reviewer's existing `PHASE: triage`.
+
+### Fan-out invariants (in addition to the base invariants)
+
+- **Every lane re-runs on the CURRENT artifact each round.** This is what makes parallel review safe when fixes mutate the artifact (markdown edits, or code edits via `delegate-fix`): a lane never audits a stale version, because it re-runs after every fix pass.
+- **One unified fix pass per round.** Address all lanes' CRITICAL/HIGH findings together, then re-fan-out — do not fix-and-re-run one lane at a time.
+- **No `Skill(...)` inside the fan-out.** Skills run in main context and serialize the round. Only `Agent` lanes parallelize; gated deep-reviews run AFTER the fan-out, sequentially.
+- **One shared round counter** for the whole fan-out (not per-lane), capped at 5.
+
 ## Skill-side reference template
 
 When you reference this pattern in a skill, write something like:
@@ -107,10 +169,27 @@ Follow the validation loop pattern in `skills/_lib/validation-loop.md`, with the
 - **Reviewer**: `Agent(p:minion-inspector-plan, prompt: "audit docs/feature-implementation-plan.md, iteration N")`
 - **Target artifact**: `docs/feature-implementation-plan.md`
 - **Verdict vocabulary**: `APPROVE / REVISE / REJECT`
-- **Fix-mode**: `edit-and-retry` — directly `Edit` the plan file to address CRITICAL and HIGH findings; anchor every fix to the inspector's `file:line` evidence
+- **Fix-mode**: `delegate-fix` — delegate a single `Agent(p:minion-feature-planner, …)` refinement to address CRITICAL and HIGH findings; anchor every fix to the inspector's `file:line` evidence. The planner is the SOLE writer of the plan file — never hand-edit it.
 - **Loop name**: "Plan correctness"
 
 Exit condition: `APPROVE` → proceed to Phase B.
+```
+
+For the **parallel fan-out variant**, declare the lanes instead of a single reviewer:
+
+```markdown
+### Validation fan-out (Phase A correctness + Phase B security, in parallel)
+
+Follow the parallel fan-out variant in `skills/_lib/validation-loop.md`, with these specifics:
+
+- **Reviewer lanes** (fanned out each round, one message, parallel `Agent` calls):
+  - correctness: `Agent(p:minion-inspector-plan, prompt: "audit docs/feature-implementation-plan.md, round N")`
+  - security (gated): `Agent(p:minion-inspector-security-officer, prompt: "PHASE: triage … plan-mode, round N")`
+- **Target artifact**: `docs/feature-implementation-plan.md`
+- **Aggregate exit**: both lanes APPROVE (security triage = no hit counts as APPROVE).
+- **Fix-modes**: both lanes → `delegate-fix` — one `Agent(p:minion-feature-planner, …)` refinement per round addresses the merged correctness + security findings (security fixes fold in after the gated deep-review resolves). The planner is the SOLE writer; the skill never hand-edits the plan, and the round-0 perspective lenses do NOT re-run during validation.
+- **Gated deep-review**: on a triage hit, after the round closes run `Skill(p:security-review, mode=plan)` sequentially, then feed its verdict into the next round.
+- **Loop name**: "Plan validation fan-out"
 ```
 
 That's it. The rest is in the fragment — do not re-explain the loop mechanics inline.

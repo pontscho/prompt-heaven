@@ -66,6 +66,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for verifying sy
 
 You are PROHIBITED from:
 - Writing, editing, or deleting files
+- Calling `purity_call` WRITE functions (`create_text_file`, `replace_content`, `delete_lines`, `replace_lines`, `insert_at_line`) — these mutate files; use ONLY the read functions (`find_file`, `search_for_pattern`, `read_file`, `list_dir`)
 - Running bash commands
 - Rewriting or replacing the plan
 - Making any side effects

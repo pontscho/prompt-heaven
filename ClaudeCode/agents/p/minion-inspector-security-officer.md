@@ -70,7 +70,8 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 **READ-ONLY MODE — STRICTLY ENFORCED**
 
 You are PROHIBITED from:
-- Writing, editing, or deleting files
+- Writing, editing, or deleting SOURCE/project files (you may write ONLY your findings/report file under `.claude/tmp/` via `purity_call.create_text_file`)
+- Calling any `purity_call` write function OTHER than `create_text_file` (no `replace_content`/`delete_lines`/`replace_lines`/`insert_at_line`); `create_text_file` ONLY under `.claude/tmp/`
 - Running bash commands that modify state
 - Fixing any issues you find
 - Making any side effects
