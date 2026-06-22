@@ -16,9 +16,9 @@ You will use these minions throughout this command — favor them OVER manual Gl
 
 | Minion | When you use it |
 |---|---|
-| `p:minion-explorer` | Multi-round **codebase** exploration, subsystem understanding, "where is X defined", "how does Y work" — your eyes and ears inside the repo during Phase 2 (Explore Thoroughly). INSTEAD of long Glob/Grep/Read chains in the main context. |
+| `p:minion-explorer` | Multi-round **codebase** exploration, subsystem understanding, "where is X defined", "how does Y work" — your eyes and ears inside the repo during Step 2 (Explore Thoroughly). INSTEAD of long Glob/Grep/Read chains in the main context. |
 | `p:minion-web-explorer` | Quick **external** lookups: library docs, "what's the current version of X", "how do people implement Y in framework Z", single-shot web/GitHub searches. Light-weight (haiku). Use when you need one targeted piece of info from outside the repo. |
-| `p:minion-deep-researcher` | **Comprehensive online investigation**: 10-15 parallel queries across multiple angles (concepts, implementations, comparisons, best practices, expert opinions) with synthesized report. Heavy (opus). Use during Phase 3 (Design Solution) when comparing alternative approaches, evaluating libraries deeply, or surveying industry patterns before recommending an architecture. |
+| `p:minion-deep-researcher` | **Comprehensive online investigation**: 10-15 parallel queries across multiple angles (concepts, implementations, comparisons, best practices, expert opinions) with synthesized report. Heavy (opus). Use during Step 3 (Design Solution) when comparing alternative approaches, evaluating libraries deeply, or surveying industry patterns before recommending an architecture. |
 | `p:minion-feature-planner` | **The plan writer** — the SOLE author of `docs/feature-implementation-plan.md`. You delegate ALL plan writing to it: round-0 perspective drafts (fan-out mode, one per lens), the canonical synthesis (canonical mode), and every validation fix (refinement mode). You NEVER hand-write or hand-edit the plan body yourself. |
 | `p:minion-inspector-plan` | **Plan correctness** against the live codebase (Checkpoint 5 fan-out — correctness lane) — your devil's-advocate auditor. INSTEAD of trying to second-guess your own plan inline. |
 | `p:minion-inspector-security-officer` | **Security review of the plan** (Checkpoint 5 fan-out — security lane) — runs in PARALLEL with the correctness lane as a `PHASE: triage` plan-mode probe; on a hit, gated to the full `Skill(p:security-review, mode=plan)` pass. Catches auth/crypto/injection/SSRF risks BEFORE a single line of code is written. |
@@ -49,9 +49,9 @@ You are STRICTLY PROHIBITED from:
 - Running ANY commands that change system state (no npm install, git commit, etc.) — the ONLY permitted state-changing command is the scoped `rm .claude/tmp/plan-perspective-*.md` cleanup
 
 You ARE permitted to invoke subagents via the Agent tool — and you SHOULD, eagerly:
-- `p:minion-explorer` for broad codebase exploration during Phase 2
+- `p:minion-explorer` for broad codebase exploration during Step 2
 - `p:minion-web-explorer` for quick external/web lookups (library docs, version checks, single-shot research)
-- `p:minion-deep-researcher` for comprehensive web research (best-practice surveys, library comparisons, multi-angle investigations) during Phase 3
+- `p:minion-deep-researcher` for comprehensive web research (best-practice surveys, library comparisons, multi-angle investigations) during Step 3
 - `p:minion-feature-planner` for ALL plan writing — round-0 perspective drafts (fan-out mode, distinct `output_path` per lane), canonical synthesis (canonical mode), and every validation fix (refinement mode). This minion is the SOLE writer of the plan file.
 - `p:minion-inspector-plan` (correctness lane) and `p:minion-inspector-security-officer` (security lane, `PHASE: triage`) for the Checkpoint 5 validation fan-out
 
