@@ -2863,6 +2863,17 @@ def _require_backend(filetype: str) -> LspBackend:
     return client
 
 
+# CWE-426 hardening: operator-trusted install locations, scanned BEFORE the
+# PATH lookup so a hostile earlier-PATH entry cannot hijack the spawn when the
+# binary exists in a standard system location.  Order = most-specific first.
+_TRUSTED_LSP_BIN_DIRS = (
+    "/opt/homebrew/bin",   # Homebrew (Apple Silicon)
+    "/usr/local/bin",      # Homebrew (Intel) / common local installs
+    "/usr/bin",            # system package manager
+    "/opt/local/bin",      # MacPorts
+)
+
+
 def _resolve_lsp_binary(override: Optional[str], default_name: str) -> str:
     """CWE-426 helper: return a validated absolute path for an LSP binary.
 
@@ -2870,12 +2881,16 @@ def _resolve_lsp_binary(override: Optional[str], default_name: str) -> str:
     1. If *override* is set (from --clangd-path / --luals-path): validate that
        the path is a regular file and is executable; raise RuntimeError if not
        (feeds the 30s init-failure backoff, honest error, no silent hang).
-    2. Otherwise: shutil.which(default_name) for a PATH lookup and return the
-       absolute path it found; raise RuntimeError if not found.
+    2. Otherwise: scan _TRUSTED_LSP_BIN_DIRS and return the first regular,
+       executable match.  These pinned system locations take precedence over
+       PATH so a hostile earlier-PATH entry cannot win when the binary exists
+       in a standard install dir.
+    3. Last resort: shutil.which(default_name) for a PATH lookup, returning its
+       absolute result with a WARNING (unpinned, PATH-order dependent); raise
+       RuntimeError if not found.
 
-    NOTE: the shutil.which fallback still consults PATH ordering; the
-    --clangd-path / --luals-path CLI overrides are the hard mitigation for
-    untrusted-PATH environments (CWE-426).
+    The --clangd-path / --luals-path CLI overrides remain the hard mitigation
+    for fully untrusted-PATH environments (CWE-426).
     """
     if override is not None:
         if not os.path.isfile(override):
@@ -2887,9 +2902,19 @@ def _resolve_lsp_binary(override: Optional[str], default_name: str) -> str:
                 f"LSP binary override path is not executable: {override!r}"
             )
         return override
+    for trusted_dir in _TRUSTED_LSP_BIN_DIRS:
+        candidate = os.path.join(trusted_dir, default_name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     resolved = shutil.which(default_name)
     if resolved is None:
         raise RuntimeError(f"{default_name!r} binary not found on PATH")
+    log.warning(
+        "LSP binary %r resolved via unpinned PATH lookup: %s "
+        "(not found in a trusted install dir; pass --clangd-path/--luals-path "
+        "to pin the binary in untrusted-PATH environments)",
+        default_name, resolved,
+    )
     return resolved  # shutil.which already returns an absolute path
 
 
@@ -3809,7 +3834,20 @@ class McpServer:
                     log.warning("Invalid JSON: %s", exc)
                     continue
 
-                log.debug("← %s", json.dumps(msg)[:200])
+                # F12/CWE-532: log protocol structure only, never payload
+                # values (params.content / result text can carry file contents).
+                # Defensive: params/arguments may be a non-dict on a malformed
+                # message; this is a debug log and must never crash the loop.
+                if isinstance(msg, dict):
+                    _p = msg.get("params")
+                    _p = _p if isinstance(_p, dict) else {}
+                    _args = _p.get("arguments")
+                    _args = _args if isinstance(_args, dict) else {}
+                    log.debug(
+                        "← method=%s id=%s fn=%s keys=%s",
+                        msg.get("method"), msg.get("id"), _p.get("name"),
+                        list(_args.keys()),
+                    )
                 try:
                     response = await self._handle_message(msg)
                 except Exception as exc:
@@ -3820,7 +3858,11 @@ class McpServer:
                     )
                 if response is not None:
                     out = json.dumps(response)
-                    log.debug("→ %s", out[:200])
+                    # F12/CWE-532: structure only (id + outcome), no body.
+                    log.debug(
+                        "→ id=%s %s", response.get("id"),
+                        "error" if "error" in response else "ok",
+                    )
                     sys.stdout.write(out + "\n")
                     sys.stdout.flush()
         finally:
