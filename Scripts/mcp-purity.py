@@ -1700,7 +1700,11 @@ class BaseLspClient(LspBackend):
         self._pending: Dict[int, asyncio.Future] = {}
         self._diagnostics: Dict[str, List] = {}       # uri -> list[diagnostic]
         self._diag_events: Dict[str, asyncio.Event] = {}
-        self._opened_files: set = set()
+        # _doc_state: resolved-abs-path STRING -> {"uri": str, "mtime_ns": int,
+        # "version": int}. Path key (not URI) so revalidation can stat() the
+        # stored paths without hitting the as_uri()/uri_to_path percent-encode
+        # asymmetry; the uri is kept in the value for notifications.
+        self._doc_state: Dict[str, dict] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._indexing_done: asyncio.Event = asyncio.Event()
         self._active_progress: set = set()   # tokens with begin but no end yet
@@ -1732,7 +1736,7 @@ class BaseLspClient(LspBackend):
             self.process = None
 
         self._pending.clear()
-        self._opened_files.clear()
+        self._doc_state.clear()
         self._diagnostics.clear()
 
     async def _prime_index(self) -> None:
@@ -1859,7 +1863,9 @@ class BaseLspClient(LspBackend):
         await self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     async def open_document(self, path: str) -> None:
-        """Send textDocument/didOpen if not already open."""
+        """Open a document (first sight) or refresh it if it changed on disk,
+        and revalidate every other already-open document so a sibling file's
+        edit can't leave the index stale."""
         abs_path = pathlib.Path(path)
         if not abs_path.is_absolute():
             abs_path = pathlib.Path(self.project_root) / abs_path
@@ -1873,22 +1879,79 @@ class BaseLspClient(LspBackend):
             log.debug("open_document: skipping out-of-root path %s", abs_path)
             return
         uri = abs_path.as_uri()
-        if uri in self._opened_files:
+        # 1) cross-file freshness: revalidate the OTHER already-open documents so
+        #    a sibling file's on-disk change can't stay stale in the index.
+        await self._refresh_stale_documents(exclude=str(abs_path))
+        # 2) open / refresh the requested document itself.
+        await self._sync_document(abs_path, uri)
+
+    async def _sync_document(self, abs_path: pathlib.Path, uri: str) -> None:
+        """Open a doc on first sight, or push a full-text didChange (+ watched-
+        files event) if its on-disk mtime changed. No-op when unchanged.
+
+        NOTE: _doc_state is mutated and notifications are sent without an
+        enclosing lock. This is safe ONLY because the MCP main dispatch loop
+        (run()) processes stdin messages strictly serially - no per-query task
+        is spawned, so two queries never touch the same client concurrently. If
+        dispatch is ever made concurrent, this becomes a TOCTOU/double-didChange
+        race and needs a lock.
+        """
+        try:
+            mtime_ns = abs_path.stat().st_mtime_ns
+        except OSError:
             return
+        # SECURITY: re-check containment on EVERY read path. open_document gates
+        # new paths, but _refresh_stale_documents re-reads stored paths directly
+        # - guard against a stored path being swapped for an out-of-root symlink
+        # (TOCTOU), mirroring the _path_within_root / _lsp_path_in_root family.
+        if not self.project_root or not _path_within_root(abs_path, self.project_root):
+            log.debug("_sync_document: skipping out-of-root path %s", abs_path)
+            return
+        key = str(abs_path)
+        state = self._doc_state.get(key)
+
+        if state is not None and state["mtime_ns"] == mtime_ns:
+            return  # unchanged -> no-op (replaces the old _opened_files early-return)
+
         try:
             content = abs_path.read_text(encoding="utf-8")
         except Exception as e:
             log.debug(f"Cannot read {abs_path}: {e}")
             return
-        self._opened_files.add(uri)
-        await self._notify("textDocument/didOpen", {
-            "textDocument": {
-                "uri": uri,
-                "languageId": self._language_id(str(abs_path)),
-                "version": 1,
-                "text": content,
-            }
-        })
+
+        if state is None:
+            # first open
+            self._doc_state[key] = {"uri": uri, "mtime_ns": mtime_ns, "version": 1}
+            await self._notify("textDocument/didOpen", {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": self._language_id(str(abs_path)),
+                    "version": 1,
+                    "text": content,
+                }
+            })
+        else:
+            # changed on disk -> full-text didChange + watched-files event
+            version = state["version"] + 1
+            state.update(mtime_ns=mtime_ns, version=version)
+            await self._notify("textDocument/didChange", {
+                "textDocument": {"uri": uri, "version": version},
+                "contentChanges": [{"text": content}],   # full-sync (no range)
+            })
+            await self._notify("workspace/didChangeWatchedFiles", {
+                "changes": [{"uri": uri, "type": 2}],     # FileChangeType.Changed
+            })
+
+    async def _refresh_stale_documents(self, exclude: Optional[str] = None) -> None:
+        """Re-stat every already-open document; push didChange+watched-files for
+        any that changed on disk. Cheap (stat per open doc); notifications only
+        on change. Calls _sync_document directly (NOT open_document) so it never
+        recurses back into the refresh fan-out."""
+        for key in list(self._doc_state.keys()):
+            if key == exclude:
+                continue
+            p = pathlib.Path(key)
+            await self._sync_document(p, self._doc_state[key]["uri"])
 
     async def workspace_symbol(self, query: str) -> List[dict]:
         resp = await self._request("workspace/symbol", {"query": query}, timeout=15.0)
@@ -2067,6 +2130,23 @@ class ClangdClient(BaseLspClient):
                     "definition": {"linkSupport": True},
                     "publishDiagnostics": {},
                     "inlayHint": {"dynamicRegistration": True},
+                    # Explicit didOpen/didChange signalling so full-text syncs
+                    # are protocol-correct; willSave/didSave unused (we never
+                    # mutate buffers, only mirror on-disk content).
+                    "synchronization": {
+                        "dynamicRegistration": False,
+                        "didSave": False,
+                        "willSave": False,
+                        "willSaveWaitUntil": False,
+                    },
+                },
+                # We statically send workspace/didChangeWatchedFiles ourselves;
+                # dynamicRegistration: False keeps the server from issuing a
+                # client/registerCapability (which _handle_server_request does
+                # NOT ack - it would hang). clangd processes the event either
+                # way (preamble invalidation + background-index rebuild).
+                "workspace": {
+                    "didChangeWatchedFiles": {"dynamicRegistration": False},
                 },
                 "window": {
                     "workDoneProgress": True,
@@ -2239,11 +2319,24 @@ class LuaLsClient(BaseLspClient):
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
                     "publishDiagnostics": {"relatedInformation": True},
                     "inlayHint": {"dynamicRegistration": True},
+                    # Explicit didOpen/didChange signalling so full-text syncs
+                    # are protocol-correct; willSave/didSave unused (we never
+                    # mutate buffers, only mirror on-disk content).
+                    "synchronization": {
+                        "dynamicRegistration": False,
+                        "didSave": False,
+                        "willSave": False,
+                        "willSaveWaitUntil": False,
+                    },
                 },
                 "workspace": {
                     "workspaceFolders": True,
                     "configuration": True,
                     "symbol": {"symbolKind": {"valueSet": list(range(1, 27))}},
+                    # Statically-sent watched-files notifications (see clangd
+                    # note); dynamicRegistration: False avoids an unacked
+                    # client/registerCapability round-trip.
+                    "didChangeWatchedFiles": {"dynamicRegistration": False},
                 },
                 "window": {"workDoneProgress": True},
             },
