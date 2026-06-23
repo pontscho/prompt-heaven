@@ -3779,6 +3779,45 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
 }
 
 
+# Short canonical name -> handler, restricted to names that carry an
+# accepted-param set. Lets a prefixed legacy name resolve its accepted-set by
+# matching on the shared handler object.
+_CANONICAL_HANDLERS: Dict[str, Callable[..., dict]] = {
+    name: HANDLERS[name]
+    for name in HANDLER_ACCEPTED_PARAMS
+    if name in HANDLERS
+}
+
+# Reserved keys the dispatcher injects into `params` AFTER alias resolution.
+# They are not caller-supplied and must be excluded from unknown-param checks.
+_RESERVED_PARAM_KEYS = frozenset({"_backend"})
+
+
+def _accepted_params_for(function: str, canonical_func: str) -> Optional[set]:
+    """Resolve the accepted-param set for a (possibly prefixed) function name.
+
+    Short/aliased names hit HANDLER_ACCEPTED_PARAMS directly via canonical_func.
+    Prefixed legacy names (clangd_*/cuda_*/luals_*) are NOT in that map, so we
+    map them through their registered handler to the short canonical handler
+    whose accepted-set we DO know. Names whose handler has no accepted-set
+    (e.g. the *_init no-ops) return None, which callers treat as "skip check".
+    """
+    accepted = HANDLER_ACCEPTED_PARAMS.get(canonical_func)
+    if accepted is not None:
+        return accepted
+    handler = HANDLERS.get(function)
+    if handler is not None:
+        for short_name, short_handler in _CANONICAL_HANDLERS.items():
+            if short_handler is handler:
+                return HANDLER_ACCEPTED_PARAMS.get(short_name)
+    return None
+
+
+def _unknown_params(params: dict, accepted: set) -> list:
+    """Sorted list of caller params not in `accepted` (reserved keys excluded)."""
+    return sorted(set(params.keys()) - accepted - _RESERVED_PARAM_KEYS)
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -3823,9 +3862,9 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     # surprising defaults — the failure that turned a single-file search into a
     # tree-wide dump. params are post-alias here, so the check is on canonical
     # names.
-    accepted = HANDLER_ACCEPTED_PARAMS.get(canonical_func)
-    if accepted:
-        unknown = sorted(set(params.keys()) - accepted)
+    accepted = _accepted_params_for(function, canonical_func)
+    if accepted is not None:
+        unknown = _unknown_params(params, accepted)
         if unknown:
             return {"error": (
                 f"Unknown params for '{canonical_func}': {', '.join(unknown)}."
@@ -3839,9 +3878,9 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
         return await loop.run_in_executor(None, lambda: handler(params, project_root, strict))
     except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
         err = str(exc)
-        accepted = HANDLER_ACCEPTED_PARAMS.get(canonical_func)
-        if accepted:
-            unknown = sorted(set(params.keys()) - accepted - {"_backend"})
+        accepted = _accepted_params_for(function, canonical_func)
+        if accepted is not None:
+            unknown = _unknown_params(params, accepted)
             if unknown:
                 err += (
                     f" | Unknown params for '{canonical_func}': {', '.join(unknown)}."

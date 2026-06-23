@@ -259,6 +259,43 @@ def purity_semantic_checks(srv, checks):
         "ctx2_len=%d ctx0_len=%d" % (len(text_ctx2), len(text_ctx0)),
     ))
 
+    # (j) prefixed-name unknown-param guard: luals_find_definition with bogus key
+    #     -> guard now fires for prefixed names (previously INERT)
+    text, _ = _purity_call(srv, cid, "luals_find_definition", {"bogus_key": 1})
+    cid += 1
+    checks.append(check(
+        "purity: luals_find_definition bogus_key -> Unknown params",
+        "Unknown params" in text,
+        text[:120],
+    ))
+
+    # (k) valid call to luals_find_definition -> injected _backend not flagged up-front
+    text, _ = _purity_call(srv, cid, "luals_find_definition", {"symbol_name": "x"})
+    cid += 1
+    checks.append(check(
+        "purity: luals_find_definition valid param -> no Unknown params",
+        "Unknown params" not in text,
+        text[:120],
+    ))
+
+    # (l) clangd_find_definition_at resolves to find_definition's accepted-set
+    text, _ = _purity_call(srv, cid, "clangd_find_definition_at", {"line": 1, "character": 1})
+    cid += 1
+    checks.append(check(
+        "purity: clangd_find_definition_at valid params -> no Unknown params",
+        "Unknown params" not in text,
+        text[:120],
+    ))
+
+    # (m) clangd_init (no-op) stays lenient regardless of params
+    text, _ = _purity_call(srv, cid, "clangd_init", {"anything": 1})
+    cid += 1
+    checks.append(check(
+        "purity: clangd_init bogus param -> no Unknown params (no-op lenient)",
+        "Unknown params" not in text,
+        text[:120],
+    ))
+
     # cleanup fixture
     import shutil as _shutil
     _shutil.rmtree(_fixture_dir, ignore_errors=True)
