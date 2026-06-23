@@ -101,6 +101,7 @@ def safe_path(project_root: str, relative_path: str, strict: bool = False) -> st
 PARAM_ALIASES = {
     "path": "relative_path",
     "file_path": "relative_path",
+    "paths": "relative_path",
     "root": "relative_path",
     "pattern": "substring_pattern",
     "line_start": "start_line",
@@ -226,6 +227,23 @@ def _resolve_aliases(params: Any, function: Optional[str] = None) -> dict:
         # A later explicit key overrides an earlier alias that targets the same
         # canonical name.
         resolved[canonical] = value
+
+    # `paths`/`path` are occasionally sent as a list (grep-style multi-root).
+    # purity searches a single root, so normalize: a 1-element list collapses to
+    # its element, an empty list is dropped (downstream applies the default /
+    # required-param rule), and a multi-element list is a hard error since
+    # multi-root search is unsupported.
+    rp = resolved.get("relative_path")
+    if isinstance(rp, list):
+        if len(rp) == 1:
+            resolved["relative_path"] = rp[0]
+        elif not rp:
+            resolved.pop("relative_path")
+        else:
+            raise ValueError(
+                "relative_path/paths received a multi-element list; purity "
+                "searches a single root. Pass one path or issue separate calls."
+            )
     return resolved
 
 
@@ -3799,6 +3817,20 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     if not handler:
         func_list = ", ".join(sorted(HANDLERS.keys()))
         return {"error": f"Unknown function: {_sanitize_log(function)}. Available: {func_list}"}
+
+    # Reject unknown params up-front. Without this, an unrecognized key (a
+    # grep-style `paths`/`-n`/`-i`) is silently dropped and the handler runs with
+    # surprising defaults — the failure that turned a single-file search into a
+    # tree-wide dump. params are post-alias here, so the check is on canonical
+    # names.
+    accepted = HANDLER_ACCEPTED_PARAMS.get(canonical_func)
+    if accepted:
+        unknown = sorted(set(params.keys()) - accepted)
+        if unknown:
+            return {"error": (
+                f"Unknown params for '{canonical_func}': {', '.join(unknown)}."
+                f" Accepted: {', '.join(sorted(accepted))}."
+            )}
 
     try:
         if asyncio.iscoroutinefunction(handler):
