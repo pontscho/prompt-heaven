@@ -119,6 +119,44 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 
 ---
 
+### `/p:code-review`
+
+**Inputs:**
+- A file or directory `target` (REQUIRED)
+- Flags: `--output console|markdown|both`, `--severity high|medium|low` (aliases `critical→high`, `warning→medium`, `info→low`), `--depth <n>`
+
+**Outputs:**
+- Console block (always): 5-dimension ASCII-bar scoring (Correctness / Consistency / Reuse/DRY / Simplicity/Altitude / Conventions) + ranked findings by severity + `EXCELLENT/ACCEPTABLE/NEEDS IMPROVEMENT/POOR` verdict
+- `docs/reviews/code-review-<name>-<date>.md` (when `--output` is `markdown` or `both`): full markdown report, including a "Refuted" transparency section listing verifier-rejected candidates
+
+**Pipeline:** linear 4-Step fan-out (Scope → Find → Verify → Synthesize) orchestrated from the skill body. Step 2 fans out the 8 shared lenses from `_lib/code-review-lenses.md` to `p:minion-code-reviewer` (one per lens, parallel); Step 3 fans out `p:minion-code-verifier` (one per surviving candidate, parallel, `VERIFY_BUDGET=24`); Step 4 ranks/caps/scores in the skill body.
+
+**Side effects:**
+- Read-only. Writes ONLY the optional `docs/reviews/` report. **No intra-pipeline `.claude/tmp/` files** — finder/verifier handoff is via `Agent` return values (contrast `p:security-review`, which uses disk handoff). Never modifies source code.
+
+**Verdict semantics:** from the half-up aggregate of the 5 dimension scores — 7–8 EXCELLENT · 5–6 ACCEPTABLE · 3–4 NEEDS IMPROVEMENT · 1–2 POOR.
+
+---
+
+### `/p:branch-review`
+
+**Inputs:**
+- `base` branch (optional; auto-detected `master` > `main` > `trunk`)
+- Flags: `--output console|markdown|both`, `--severity high|medium|low` (same aliases as `/p:code-review`)
+
+**Outputs:**
+- Console block (always): 5-dimension ASCII-bar scoring + ranked findings by severity + `APPROVED/CHANGES REQUESTED/REJECTED` verdict
+- `docs/reviews/branch-review-<timestamp>.md` (when `--output` is `markdown` or `both`): full markdown report
+
+**Pipeline:** same linear 4-Step fan-out as `/p:code-review`, scoped to the `<base>...HEAD` git diff (resolved via `mcp-git` `git_call`, never `Bash`+`sed`). Step 2 fans out **10** lenses = the 8 shared lenses from `_lib/code-review-lenses.md` PLUS 2 git lenses (`git-commit-hygiene`, `git-breaking-change-api`) defined in the branch-review skill body (not in `_lib`).
+
+**Side effects:**
+- Read-only. Writes ONLY the optional `docs/reviews/` report. **No intra-pipeline `.claude/tmp/` files** (handoff via `Agent` return values). Never modifies source code.
+
+**Verdict semantics:** severity-driven (NOT score-driven) — any HIGH ⇒ REJECTED; else any MEDIUM ⇒ CHANGES REQUESTED; else APPROVED.
+
+---
+
 ## Per-pipeline intermediate files
 
 | File | Producer | Consumer | Format |
@@ -129,6 +167,10 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 | `.claude/tmp/security-findings-<ts>.md` | `p:minion-inspector-security-officer PHASE: find` | `p:minion-inspector-security-officer PHASE: verify` | markdown, `[Fn]` ID format |
 | `.claude/tmp/security-verified-<ts>.md` | `p:minion-inspector-security-officer PHASE: verify` | `/p:security-review` Step 4 (Assemble) | markdown, VERIFIED/SUPPRESSED/ESCALATED sections |
 | `docs/reviews/security-review-<ts>.md` | `/p:security-review` Step 4 | end-user (audit trail) | markdown, full report |
+| `docs/reviews/code-review-<name>-<date>.md` | `/p:code-review` Step 4 (Synthesize) | end-user (audit trail) | markdown, full report — only when `--output` includes markdown |
+| `docs/reviews/branch-review-<ts>.md` | `/p:branch-review` Step 4 (Synthesize) | end-user (audit trail) | markdown, full report — only when `--output` includes markdown |
+
+> **Note:** `/p:code-review` and `/p:branch-review` are standalone (not part of the feature-lifecycle pipeline) and produce **no `.claude/tmp/` intermediate files** — their finder→verifier→synthesize handoff is entirely via `Agent` return values held in the skill body, so the only files they emit are the optional `docs/reviews/` reports above.
 
 ## Rules
 
