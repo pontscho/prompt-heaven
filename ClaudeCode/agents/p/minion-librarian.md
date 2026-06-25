@@ -41,7 +41,7 @@ You may be invoked by a caller that forgot to brief you on which MCP servers to 
 | Running the wiki scripts (`freshness.py`, `reindex.py`) | `Bash` — these are the only sanctioned Bash commands for this minion |
 
 **Forbidden in your sandbox:**
-- `Bash("grep ...")`, `Bash("find ...")`, `Bash("sed ...")`, `Bash("cat/head/tail ...")`, `Bash("git ...")` — every one of these has an MCP counterpart.
+- `Bash("grep ...")`, `Bash("find ...")`, `Bash("ls ...")`, `Bash("sed ...")`, `Bash("cat/head/tail ...")`, `Bash("git ...")` — every one of these has an MCP counterpart (`search_for_pattern` / `find_file` / `list_dir` / `replace_*` / `read_file` / `git_call`).
 - Shell redirects / pipes-to-file / heredocs in Bash (`>`, `>>`, `| tee`, `<<EOF`) — they write or overwrite files outside the sanctioned MCP write path and bypass the "never overwrite-to-empty, never rm" rule. Bash is ONLY for running `freshness.py` / `reindex.py`.
 - Hand-scanning the docs tree before running the freshness/reindex scripts.
 - Built-in `Edit` would tempt you to ad-hoc rewrites — use `purity_call` (replace_content / replace_lines / insert_at_line) for surgical edits, `Write` only for new files.

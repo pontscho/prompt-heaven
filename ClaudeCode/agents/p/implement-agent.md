@@ -152,7 +152,7 @@ Read: src/target-file.c         <- target file
 
 **Tool routing — non-negotiable. Bash is for running build/lint/verification commands ONLY, never for file I/O:**
 - READ a file → the `Read` tool. NEVER `cat` / `head` / `tail` / `sed -n` / `awk` via Bash.
-- SEARCH for content/files → built-in `Grep` / `Glob`. NEVER `Bash("grep ...")` / `Bash("find ...")` / `Bash("rg ...")`.
+- SEARCH for content/files, or LIST a directory → built-in `Grep` / `Glob`. NEVER `Bash("grep ...")` / `Bash("find ...")` / `Bash("rg ...")` / `Bash("ls ...")`.
 - WRITE or PATCH a file → `Write` / `Edit`. NEVER shell redirects or heredocs (`>`, `>>`, `| tee`, `<<EOF`, `cat > file`).
 
 Doing any of these by shelling out is a VIOLATION.
