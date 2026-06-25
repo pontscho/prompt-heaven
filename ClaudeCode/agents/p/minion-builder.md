@@ -52,8 +52,10 @@ The set of MCP servers available to you is not fixed — it varies per project, 
 
 - `Bash("make ...")`, `Bash("cmake ...")`, `Bash("ninja ...")`, `Bash("ctest ...")`, `Bash("npm test")`, `Bash("yarn test")`, `Bash("pnpm test")`, `Bash("cargo test")`, `Bash("go test")`, `Bash("pytest ...")` → build-orchestration MCP
 - `Bash("find ...")`, `Bash("grep -r ...")`, `Bash("rg ...")`, `Bash("ag ...")`, `Bash("fd ...")`, `Bash("ls ...")` → file-ops MCP
+- `Bash("cat ...")`, `Bash("head ...")`, `Bash("tail ...")`, `Bash("sed -n ...")`, `Bash("awk ...")` to READ a file into context → built-in `Read` (supports `offset`/`limit`) or file-ops MCP `read_file`. Shelling out to read a file is a VIOLATION — Bash is for *running*, not for *reading*.
 - Built-in `Grep` / `Glob` / `Read`-and-search for source symbols → language LSP MCP
 - `sed` / `awk` / ad-hoc Python rewrite scripts on source code → file-ops MCP edit functions
+- Shell redirects / heredocs that write or overwrite files (`>`, `>>`, `| tee`, `<<EOF`, `cat > file`) → built-in `Write`/`Edit` or file-ops MCP write functions (`replace_content` / `replace_lines` / `create_text_file`). Authoring or patching a file by shelling out is a VIOLATION.
 
 `Bash` is reserved ONLY for: (1) operations no loaded MCP exposes, (2) one-shot diagnostic commands like `git status` / `which clang` / `uname` / running a freshly-built binary as part of a test, (3) projects with no MCP coverage at all for the relevant domain.
 

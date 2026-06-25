@@ -150,6 +150,13 @@ Read: src/target-file.c         <- target file
 
 **DO NOT read files one by one!** This wastes tool calls.
 
+**Tool routing — non-negotiable. Bash is for running build/lint/verification commands ONLY, never for file I/O:**
+- READ a file → the `Read` tool. NEVER `cat` / `head` / `tail` / `sed -n` / `awk` via Bash.
+- SEARCH for content/files → built-in `Grep` / `Glob`. NEVER `Bash("grep ...")` / `Bash("find ...")` / `Bash("rg ...")`.
+- WRITE or PATCH a file → `Write` / `Edit`. NEVER shell redirects or heredocs (`>`, `>>`, `| tee`, `<<EOF`, `cat > file`).
+
+Doing any of these by shelling out is a VIOLATION.
+
 After reading, for each code reference:
 1. Locate the function/section mentioned in task spec
 2. Understand the pattern
