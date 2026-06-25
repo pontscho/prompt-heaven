@@ -469,6 +469,36 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     return {"__raw_text__": f"{header}\n{listing}"}
 
 
+def _compile_path_glob(mask: str) -> "re.Pattern[str]":
+    """Translate a path-style glob to a regex, mirroring Glob semantics.
+
+    ``**`` matches across directory separators (a leading ``**/`` also matches
+    zero directories), ``*`` matches within a single path segment, and ``?``
+    matches one non-separator character. Used by find_file so callers can pass
+    patterns like ``**/*.md`` or ``docs/*.md`` instead of getting no matches.
+    """
+    i, n = 0, len(mask)
+    out: List[str] = []
+    while i < n:
+        c = mask[i]
+        if c == "*":
+            if mask[i : i + 2] == "**":
+                i += 2
+                if mask[i : i + 1] == "/":
+                    i += 1
+                    out.append("(?:.*/)?")
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
 def handle_find_file(params: dict, project_root: str, strict: bool = False) -> dict:
     file_mask = params.get("file_mask") or params.get("pattern") or params.get("substring_pattern")
     if not file_mask:
@@ -480,13 +510,25 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
     if not os.path.isdir(path):
         return {"text": f"(directory does not exist: {rel})", "count": 0}
 
+    # A mask containing a separator or a recursive ** is matched against each
+    # file's path relative to the search root (Glob semantics); a bare mask
+    # matches the basename. Without this, fnmatch on a basename silently
+    # returns nothing for path-style patterns like "**/*.md" or "docs/*.md".
+    path_style = ("/" in file_mask) or ("**" in file_mask)
+    path_re = _compile_path_glob(file_mask) if path_style else None
+
     matches: List[str] = []
     for dirpath, dirnames, filenames in os.walk(path):
         dirnames[:] = [d for d in dirnames if d != ".git"]
         for name in filenames:
-            if fnmatch.fnmatch(name, file_mask):
-                match_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
-                matches.append(match_rel)
+            full = os.path.join(dirpath, name)
+            if path_style:
+                cand = os.path.relpath(full, path).replace(os.sep, "/")
+                hit = path_re.match(cand) is not None
+            else:
+                hit = fnmatch.fnmatch(name, file_mask)
+            if hit:
+                matches.append(os.path.relpath(full, project_root))
 
     total = len(matches)
     if offset:
