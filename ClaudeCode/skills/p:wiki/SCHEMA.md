@@ -68,6 +68,7 @@ assume they exist in the project's `scripts/` directory.
 | `reference` | API / symbol reference                           | specific symbols (verifiable)   | living      |
 | `analysis`  | Performance, network, or behavioral investigation| capture data, measurements      | living      |
 | `concept`   | A cross-cutting idea spanning subsystems         | multiple anchors                | living      |
+| `spec`      | Forward/living design for a planned or freshly built feature | intended modules (`targets`) → real anchors (`sources`) | living |
 | `runbook`   | Operational how-to (run X, debug Y, release Z)   | commands, scripts, config       | living      |
 | `adr`       | A decision: what, why, alternatives, consequences| frozen at decision time         | append-only |
 | `glossary`  | Domain terms                                     | none required                   | living      |
@@ -106,6 +107,7 @@ Frontmatter fields:
 | `title`       | yes      | Human title for INDEX.md.                                      |
 | `description` | yes      | One-line summary for INDEX.md.                                 |
 | `sources`     | type-dep | Code anchors the page derives from (paths or `path:symbol`).   |
+| `targets`     | type-dep | Intended code anchors for not-yet-built code (`path` or `path:symbol`). The forward pair of `sources`. **NOT** freshness-verified. Promotes to `sources` once the code exists. |
 | `verified`    | type-dep | `commit` + `date` of last successful verification.             |
 | `links`       | no       | Related page slugs; also rendered inline as `[[slug]]`.        |
 
@@ -113,6 +115,18 @@ Frontmatter fields:
 `concept`, `runbook`. They are optional for `overview`, `analysis`, `adr`,
 `glossary`. Analysis pages are investigative captures (network traces,
 performance measurements) typically not tied to specific source files.
+
+A `spec` page is the same genre as a `subsystem`/`component` design, but it may
+exist *before* its code does. Its anchor requirements depend on `status`
+(documentation-only — no script enforces these; they are a curation rule):
+
+- `status: draft` → `targets:` required; `sources:`/`verified:` absent or optional.
+- `status: current` → `sources:` + `verified:` required (like a subsystem/component);
+  `targets:` only for the parts not yet built.
+- **Invariant**: any `spec` that carries `sources:` MUST also carry `verified:`
+  (otherwise `freshness.py` gates it as `unverified`).
+- An anchor MUST NOT appear in both `targets:` and `sources:` at once
+  (documentation-only, not machine-checked — future lint work).
 
 Body rules:
 
@@ -146,6 +160,32 @@ detected cheaply by `~/.claude/skills/p:wiki/scripts/freshness.py` with git only
 (`broken`, `drifted`) require the language MCP servers and happen during the
 LLM lint pass — never with grep/find.
 
+### Forward anchors (`targets`)
+
+A `targets:` anchor names code that is *intended* but does **not exist yet**, so
+it is the forward pair of `sources:` and is **not freshness-tracked**: it never
+produces `orphaned-source` (the code is deliberately absent), and `_evaluate()`
+never inspects it. It lets a forward `spec` carry a module signal before the
+code lands, so a code-scoped search can find the design via its target path.
+
+When a `targets:` path **materializes** (the file appears in the tree),
+`freshness.py` reports the page as `promotable`. Promotion is then a manual
+curation step: move the anchor `targets:` → `sources:`, set
+`verified.commit`/`verified.date`, and flip `draft → current`.
+
+`freshness.py` adds two non-gating statuses for forward specs:
+
+- **`planned`** — the page has `targets:` but no `sources:`, and no target has
+  materialized yet (forward spec, code still absent).
+- **`promotable`** — at least one `targets:` path now exists; the page is ready
+  to promote. Listed page-by-page (actionable); `planned` is summarized as a count.
+
+**Status precedence**: a gating status (`stale` / `orphaned-source` /
+`unverified`) > `promotable` > `current`. `promotable` only surfaces when the
+`sources:` side is otherwise `current` — so a materialized target can never mask
+a real gating condition on a page's sources. Neither `planned` nor `promotable`
+gates CI.
+
 ## 5. Frontmatter format (stdlib-parseable subset)
 
 The scripts use a minimal hand-written parser, not a full YAML engine. Pages
@@ -158,7 +198,7 @@ MUST keep frontmatter within this subset:
     commit: 0f7ddf7
     date: 2026-05-27
   ```
-- Block lists for `sources:` and `links:`:
+- Block lists for `sources:`, `targets:`, and `links:`:
   ```
   sources:
     - src/a.c
@@ -228,4 +268,7 @@ Anchor resolution and code reading use the MCP servers, never grep / find / sed:
 - Anything already in CLAUDE.md (link to it instead).
 - Git history / who-changed-what (git is authoritative).
 - Step-by-step fix recipes for one-off bugs (those belong in commit messages).
-- Speculative future plans (use an `adr` with `status: draft`, or an issue).
+- Speculative future plans. A concrete forward **design** → a `spec` page with
+  `targets:` and `status: draft`; a contested **decision** with alternatives and
+  consequences → an `adr` (ADR = frozen WHY; spec = living WHAT/HOW). A vague
+  someday-maybe → an issue, not a page.

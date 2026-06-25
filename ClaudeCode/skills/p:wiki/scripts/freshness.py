@@ -10,10 +10,17 @@ pages to look at. Symbol-level checks (broken/drifted anchors) are NOT done here
 Usage:
     python scripts/freshness.py --root docs [--head HEAD] [--quiet]
 
-Prints a compact prose report on stdout: only the actionable pages (stale /
-orphaned-source / unverified) are listed in detail; clean pages are summarized
-as counts. Exits non-zero if any page is stale, orphaned-source, or unverified
-(usable as a pre-PR CI gate).
+Prints a compact prose report on stdout: actionable pages (stale /
+orphaned-source / unverified / promotable) are listed in detail; everything else
+is summarized as counts. Exits non-zero if any page is stale, orphaned-source,
+or unverified (usable as a pre-PR CI gate).
+
+Forward `spec` pages carry `targets:` (intended-but-unbuilt code anchors, the
+forward pair of `sources:`). Two non-gating statuses describe them:
+  * `planned`     -- has `targets:`, no `sources:`, no target materialized yet.
+  * `promotable`  -- a `targets:` path now exists on disk; promote it to
+                     `sources:`. Precedence: gating > promotable > current, so a
+                     materialized target never masks stale/unverified sources.
 """
 from __future__ import annotations
 
@@ -28,7 +35,9 @@ import _wikilib as w  # noqa: E402
 UNTRACKED_TYPES = {"overview", "adr", "glossary"}
 
 # Statuses that are listed page-by-page; everything else is summarized as a count.
-DETAIL_STATUSES = ["stale", "orphaned-source", "unverified"]
+# `promotable` is actionable (a forward target materialized) so it is detailed;
+# `planned` stays a summarized count.
+DETAIL_STATUSES = ["stale", "orphaned-source", "unverified", "promotable"]
 
 _INVALID = "<invalid-commit>"
 
@@ -84,12 +93,25 @@ def analyze(root: str, head: str):
 		name = fm.get("name") or relpath
 		typ = fm.get("type") or ""
 		sources = w.as_list(fm.get("sources"))
+		targets = w.as_list(fm.get("targets"))
+		materialized = [t for t in targets
+			if os.path.exists(os.path.join(repo, _source_path(t)))]
 		verified = fm.get("verified") if isinstance(fm.get("verified"), dict) else {}
 		commit = (verified or {}).get("commit")
 
 		if not sources:
-			status = "untracked" if typ in UNTRACKED_TYPES else "no-sources"
-			pages.append({"name": name, "path": relpath, "type": typ, "status": status})
+			# Forward / sourceless branch: promotable/planned dominates here --
+			# with no sources there is nothing to gate on, so a materialized
+			# target is the most actionable signal we can give.
+			if materialized:
+				pages.append({"name": name, "path": relpath, "type": typ,
+					"status": "promotable", "materialized": materialized})
+			elif targets:
+				pages.append({"name": name, "path": relpath, "type": typ,
+					"status": "planned"})
+			else:
+				status = "untracked" if typ in UNTRACKED_TYPES else "no-sources"
+				pages.append({"name": name, "path": relpath, "type": typ, "status": status})
 			continue
 		if not commit:
 			pages.append({"name": name, "path": relpath, "type": typ,
@@ -110,6 +132,13 @@ def analyze(root: str, head: str):
 			pages.append({"name": name, "path": relpath, "type": typ,
 				"status": "stale", "changed_sources": changed_sources,
 				"verified_at": commit})
+		elif materialized:
+			# Sources are current AND a target has materialized -> promotable.
+			# Reached only after the gating checks above, so gating always wins
+			# (H1 precedence): a materialized target never masks stale sources.
+			pages.append({"name": name, "path": relpath, "type": typ,
+				"status": "promotable", "materialized": materialized,
+				"verified_at": commit})
 		else:
 			pages.append({"name": name, "path": relpath, "type": typ,
 				"status": "current", "verified_at": commit})
@@ -129,6 +158,9 @@ def _detail(page) -> str:
 		return " — missing: %s" % ", ".join(page.get("missing", []))
 	if status == "unverified":
 		return " — %s" % page.get("reason", "")
+	if status == "promotable":
+		return " — materialized: %s (promote targets→sources)" % ", ".join(
+			page.get("materialized", []))
 	return ""
 
 
