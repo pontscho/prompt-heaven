@@ -69,6 +69,8 @@ implementation_plan:
       dependencies: [string]        # task_ids that must complete first
 ```
 
+> Validate the produced YAML against this schema with `Scripts/task-validator.py` (see [Validation](#validation)) before declaring the plan complete.
+
 ## Field Descriptions
 
 - `original_request`: The original input from the User, without any changes
@@ -275,6 +277,11 @@ The final output of the plan command is a YAML document that serves as input for
       - Testing strategy
       - References to requirements.yaml
    c. Verify the implementation_plan is complete and unambiguous
+   d. **Validate the finished YAML**: run `python3 Scripts/task-validator.py requirements.yaml`.
+      Only declare the plan complete when it returns **0 ERRORs** (exit code 0). Fix every
+      ERROR; weigh each WARNING (e.g. an `xxl` task that should be broken down, an
+      `effort_breakdown` that drifted from the actual task counts) and resolve it unless
+      it is intentional. See [Validation](#validation).
 
 ## Example Implementation Plan
 
@@ -411,3 +418,29 @@ implementation_plan:
       test_requirements: All test cases must pass
       dependencies: [task-003]
 ```
+
+# Validation
+
+`requirements.yaml` is the **sole input** for `p:implement` / `p:requirements`. A
+schema-invalid or inconsistent plan (dangling dependency, dependency cycle, wrong
+`effort_breakdown`, bad enum) is otherwise only discovered mid-implementation, expensively.
+`Scripts/task-validator.py` catches these deterministically — it is the gate before
+`complete: true`.
+
+```
+python3 Scripts/task-validator.py [requirements.yaml] [--strict] [--quiet] [--json]
+```
+
+- **Phase-aware**: with `complete: false` only `requirements` / `constraints` /
+  `success_criteria` are required; with `complete: true` the full `implementation_plan`
+  and `context_summary` are validated too.
+- **Checks**: schema/enum/type for every field, plus semantic graph checks over the task
+  set — `task_id` uniqueness, dangling/self/cancelled-target dependencies, dependency
+  cycles (Kahn topological sort), and `effort_breakdown` / `total_effort` plausibility.
+- **Output**: grouped human-readable `❌ ERRORS` / `⚠️  WARNINGS` sections (use `--json`
+  for `{phase, errors, warnings}` machine output, `--quiet` for just the summary).
+- **Exit codes**: `0` = no ERROR (and no WARNING under `--strict`); `1` = ERROR present
+  (or WARNING under `--strict`); `2` = unreadable file / YAML parse error / PyYAML missing.
+
+**Gate**: before setting `complete: true`, the plan must validate with exit code 0
+(0 ERRORs). Fix every ERROR; weigh each WARNING and resolve unless intentional.
