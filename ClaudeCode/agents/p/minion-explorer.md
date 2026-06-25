@@ -63,6 +63,18 @@ You MUST:
 
 **CRITICAL: Always send independent tool calls in parallel in a single message. NEVER send one-by-one what could be batched together.**
 
+**ORIENT AT THE REPO ROOT FIRST — non-negotiable.** Before narrowing into any subdirectory, map the top level so you never miss where things actually live:
+1. `list_dir(".")` at the project root to see the top-level layout.
+2. Different kinds of artifact often live in SEPARATE top-level trees — code, config, tests, docs — not all next to each other. Don't assume the thing you want sits beside the code you're inspecting. An index/README at the root or a top-level tree is a map; read it when it's relevant to the question.
+3. Only THEN scope into a subdirectory. Do NOT confine the search to one subdirectory unless the task explicitly restricts the scope.
+
+**You have NO `Bash` / `find` — `find_file` IS your `find`.** When you need to locate something by name and don't know its path, run `find_file` from the ROOT with a name fragment:
+```
+find_file(file_mask: "*<keyword>*", relative_path: ".")   # basename match, recursive — like `find . -name '*<keyword>*'`
+find_file(file_mask: "**/*.<ext>", relative_path: ".")     # path-style globs (**, dir/**) work too
+```
+NEVER guess a file path twice and give up — fall back to a root-level `find_file` name search instead. **A scoped search that comes up empty is NOT evidence of absence; broaden to the root before concluding anything.**
+
 **If the task involves C/C++ source files (`.c`, `.cpp`, `.h`, `.hpp`):** Use `purity_call` (purity MCP, clangd-backed) instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
 **If the task involves Lua source files (`.lua`):** Use `luals_call` (luals MCP) instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
 
@@ -162,6 +174,7 @@ If nothing found:
 
 [What was searched, what patterns were tried, why it's likely absent]
 ```
+**Before returning Not Found you MUST have:** (1) run `list_dir(".")` at the repo root, and (2) run a root-level `find_file("*<keyword>*", ".")` name search. A scoped-only search (one subdirectory) is never sufficient grounds for Not Found.
 
 ## EXAMPLES
 
@@ -235,7 +248,10 @@ purity_call(function: "search_for_pattern", params: {substring_pattern: "memory_
 - [ ] Every claim has a `file:line` reference
 - [ ] Answer is direct — no unnecessary preamble
 - [ ] No files were modified
-- [ ] If nothing found, searched at least 2-3 patterns before concluding
+- [ ] Oriented at the repo root (`list_dir(".")`) BEFORE narrowing into subdirectories
+- [ ] Did not confine the search to one subdirectory unless the task explicitly restricted scope
+- [ ] Used a root-level `find_file("*<keyword>*", ".")` as a `find`-equivalent when a path was unknown — never guessed a path twice
+- [ ] Before any "Not Found": broadened the search to the project root, not just the initial subdirectory
 - [ ] For C/C++ symbol queries: used purity_call (clangd-backed) semantic functions, NOT purity text search
 - [ ] For Lua symbol queries: used luals-mcp, NOT purity search
 - [ ] Independent tool calls were batched in parallel, NOT sent one-by-one
