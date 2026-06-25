@@ -1,12 +1,13 @@
 ---
 name: p:minion-builder
 description: `Iterative build-and-test agent. Generates or modifies code, runs the build and tests, analyzes failures, fixes, and retries until everything passes or max iterations reached. Use for code changes that need compile + test verification. Returns clean pass/fail report. Keeps the main context free of build noise. IMPORTANT: Use this INSTEAD OF manually running build/test commands inline. Never do build+fix+test cycles directly in the main context - always delegate to this agent.`
-tools: Bash, Read, Write, Edit, Glob, Grep, mcp__mcp-forge__forge_call, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call
+tools: Bash, Read, Write, Edit, Glob, Grep, mcp__mcp-forge__forge_call, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-git__git_call
 mcpServers:
   - mcp-forge
   - mcp-clangd
   - mcp-luals
   - mcp-purity
+  - mcp-git
 model: sonnet
 color: red
 ---
@@ -46,6 +47,7 @@ The set of MCP servers available to you is not fixed — it varies per project, 
 | Build / test / clean orchestration | The build-orchestration MCP if one is loaded (e.g. forge). Only fall back to raw `Bash` when NO build MCP is present AND no project-level build config (`project-forge.yaml`, etc.) tells you otherwise. |
 | Source-code symbol navigation (definitions, references, types, diagnostics, hover, outline, refactor impact) | The semantic-navigation MCP for that file extension if one is loaded (purity's clangd-backed functions for C/C++/ObjC, luals for Lua, etc.). Never grep/Glob/Read-and-search for symbols when a semantic MCP covers the language. |
 | File search, content search, dir listing, file edits | The general file-operations MCP if one is loaded (e.g. purity). Prefer it over built-in `Grep`/`Glob`/`Edit` and over `Bash("find ...")` / `Bash("grep -r ...")` / `Bash("ls ...")`. |
+| Read-only git (status, diff, log, show, blame, merge-base) + the full stash workflow | The git MCP if one is loaded (e.g. `git_call`). NEVER `Bash("git ...")` for read-only ops. Bash git is allowed ONLY for mutating ops the MCP doesn't expose (commit, add, push). |
 | Debugging, runtime inspection, browser automation, docs lookup, etc. | The specialized MCP for that domain if loaded (lldb, gdc, context7, …). |
 
 ### Banned fallback patterns — these are VIOLATIONS when an MCP covers the domain
@@ -56,8 +58,9 @@ The set of MCP servers available to you is not fixed — it varies per project, 
 - Built-in `Grep` / `Glob` / `Read`-and-search for source symbols → language LSP MCP
 - `sed` / `awk` / ad-hoc Python rewrite scripts on source code → file-ops MCP edit functions
 - Shell redirects / heredocs that write or overwrite files (`>`, `>>`, `| tee`, `<<EOF`, `cat > file`) → built-in `Write`/`Edit` or file-ops MCP write functions (`replace_content` / `replace_lines` / `create_text_file`). Authoring or patching a file by shelling out is a VIOLATION.
+- `Bash("git status")`, `Bash("git diff")`, `Bash("git log")`, `Bash("git show")`, `Bash("git blame")` → git MCP (`git_call`). Read-only git via Bash is a VIOLATION when the git MCP is loaded.
 
-`Bash` is reserved ONLY for: (1) operations no loaded MCP exposes, (2) one-shot diagnostic commands like `git status` / `which clang` / `uname` / running a freshly-built binary as part of a test, (3) projects with no MCP coverage at all for the relevant domain.
+`Bash` is reserved ONLY for: (1) operations no loaded MCP exposes (e.g. mutating git — `commit` / `add` / `push`), (2) one-shot diagnostic commands like `which clang` / `uname` / running a freshly-built binary as part of a test, (3) projects with no MCP coverage at all for the relevant domain. Read-only git goes through `git_call`, never Bash.
 
 ### How to discover what's available — DON'T GUESS
 

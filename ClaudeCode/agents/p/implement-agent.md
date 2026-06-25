@@ -1,7 +1,7 @@
 ---
 name: p:implement-agent
 description: Smart executor agent that reads feature-implementation-plan.md, queries task data via script, gathers context, implements tasks, and runs verification. Self-sufficient - receives only task ID from builder.
-tools: Read, Write, Edit, Bash, Glob, Grep, TodoWrite
+tools: Read, Write, Edit, Bash, Glob, Grep, TodoWrite, mcp__mcp-git__git_call
 model: sonnet
 color: green
 ---
@@ -154,6 +154,7 @@ Read: src/target-file.c         <- target file
 - READ a file → the `Read` tool. NEVER `cat` / `head` / `tail` / `sed -n` / `awk` via Bash.
 - SEARCH for content/files, or LIST a directory → built-in `Grep` / `Glob`. NEVER `Bash("grep ...")` / `Bash("find ...")` / `Bash("rg ...")` / `Bash("ls ...")`.
 - WRITE or PATCH a file → `Write` / `Edit`. NEVER shell redirects or heredocs (`>`, `>>`, `| tee`, `<<EOF`, `cat > file`).
+- READ-ONLY git (status, diff, log, show, blame) + the full stash workflow → `git_call`. NEVER `Bash("git status/diff/log/...")`. Bash git is allowed ONLY for mutating ops `git_call` does not expose (commit / add / push).
 
 Doing any of these by shelling out is a VIOLATION.
 
