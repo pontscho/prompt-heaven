@@ -1629,6 +1629,26 @@ def _md_location_block(loc: dict, context: Any = None) -> str:
     return out
 
 
+def _md_call_hierarchy(ch: Any) -> list:
+    """Render call-hierarchy nodes as an indented incoming(←)/outgoing(→) tree."""
+    out: list = []
+
+    def node(n: dict, depth: int, arrow: str = "") -> None:
+        out.append(f"{'  ' * depth}- {arrow}{n.get('kind', '')} **{n.get('symbol', '')}** {_md_loc(n.get('location', {}))}")
+        for c in (n.get("incoming") or []):
+            node(c, depth + 1, "← ")
+        for c in (n.get("outgoing") or []):
+            node(c, depth + 1, "→ ")
+
+    for item in (ch if isinstance(ch, list) else [ch]):
+        if isinstance(item, dict) and "roots" in item:
+            for root in item["roots"]:
+                node(root, 0)
+        elif isinstance(item, dict):
+            node(item, 0)
+    return out
+
+
 def _result_to_markdown(function: str, result: Any) -> str:
     sep = "\n"
 
@@ -1755,15 +1775,21 @@ def _result_to_markdown(function: str, result: Any) -> str:
                 parts.append(_md_location_block(d.get("location", {}), d.get("context")))
         refs_data = result.get("references", {})
         refs = refs_data.get("references", []) if isinstance(refs_data, dict) else []
+        summary = result.get("reference_summary", {})
+        count = summary.get("count", len(refs))
+        files = summary.get("files", [])
         if refs:
-            parts.append(f"### References ({len(refs)})")
+            parts.append(f"### References ({count})")
             for r in refs:
                 parts.append("- " + _md_location_block(r.get("location", {})))
-        callers = result.get("callers", [])
-        if callers:
-            parts.append(f"### Callers ({len(callers)})")
-            for c in callers:
-                parts.append("- " + _md_location_block(c.get("location", {})))
+        if files:
+            parts.append(f"### Affected Files ({len(files)})")
+            for f in files:
+                parts.append(f"- {f}")
+        ch = result.get("call_hierarchy", [])
+        if ch:
+            parts.append("### Call Hierarchy")
+            parts.extend(_md_call_hierarchy(ch))
         return sep.join(parts)
 
     if function == "clangd_inlay_hints":
@@ -1772,10 +1798,12 @@ def _result_to_markdown(function: str, result: Any) -> str:
             return "No inlay hints"
         lines = [f"## Inlay Hints ({len(hints)})"]
         for h in hints:
-            loc = _md_loc(h.get("location", {}))
+            pos = h.get("position", {}).get("human", {})
+            line = pos.get("line", "?")
+            char = pos.get("character", "?")
             label = h.get("label", "")
             kind = h.get("kind", "")
-            lines.append(f"- {loc} `{label}` ({kind})")
+            lines.append(f"- {line}:{char} `{label}` ({kind})")
         return sep.join(lines)
 
     if function == "clangd_hover":
