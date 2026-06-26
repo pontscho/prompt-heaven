@@ -188,8 +188,8 @@ Both are stdlib-only, Python 3.9+, and never call an LLM or modify pages
 do not normally run them yourself, but they live here for reference:
 
 ```bash
-python ~/.claude/skills/p:wiki/scripts/freshness.py --root docs [--head <ref>] [--quiet]
-python ~/.claude/skills/p:wiki/scripts/reindex.py   --root docs [--check]
+~/.claude/skills/p:wiki/scripts/freshness.py --root docs [--head <ref>] [--quiet]
+~/.claude/skills/p:wiki/scripts/reindex.py   --root docs [--check]
 ```
 
 - `freshness.py` exits non-zero if any page is stale — usable as a pre-PR CI gate.
@@ -242,8 +242,8 @@ NO, fix it or surface it explicitly — do NOT silently ship.
       lines.
 - [ ] For `adopt`: the body prose of every adopted page is byte-identical to
       what was there before. The janitor only touched the frontmatter.
-- [ ] `python scripts/reindex.py --root <docs> --check` exited 0.
-- [ ] `python scripts/freshness.py --root <docs>` exited 0, or every remaining
+- [ ] `~/.claude/skills/p:wiki/scripts/reindex.py --root <docs> --check` exited 0.
+- [ ] `~/.claude/skills/p:wiki/scripts/freshness.py --root <docs>` exited 0, or every remaining
       stale / unverified / orphaned-source page is reported.
 - [ ] The janitor proposed (did not silently apply) every destructive change:
       deletions, splits, body rewrites, status downgrades unrelated to

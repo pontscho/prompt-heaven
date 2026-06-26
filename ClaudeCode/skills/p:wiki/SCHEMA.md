@@ -55,7 +55,7 @@ docs/
 
 **Script location:** The wiki scripts (`freshness.py`, `reindex.py`) live in the
 skill directory at `~/.claude/skills/p:wiki/scripts/`. All invocations MUST use
-the absolute path: `python ~/.claude/skills/p:wiki/scripts/<script>.py`. Never
+the absolute path: `~/.claude/skills/p:wiki/scripts/<script>.py`. Never
 assume they exist in the project's `scripts/` directory.
 
 ## 2. Page types
