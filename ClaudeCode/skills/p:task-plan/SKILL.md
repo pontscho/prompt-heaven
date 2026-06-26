@@ -277,7 +277,7 @@ The final output of the plan command is a YAML document that serves as input for
       - Testing strategy
       - References to requirements.yaml
    c. Verify the implementation_plan is complete and unambiguous
-   d. **Validate the finished YAML**: run `python3 Scripts/task-validator.py requirements.yaml`.
+   d. **Validate the finished YAML**: run `~/.claude/scripts/task-validator.py requirements.yaml`.
       Only declare the plan complete when it returns **0 ERRORs** (exit code 0). Fix every
       ERROR; weigh each WARNING (e.g. an `xxl` task that should be broken down, an
       `effort_breakdown` that drifted from the actual task counts) and resolve it unless
@@ -428,7 +428,7 @@ schema-invalid or inconsistent plan (dangling dependency, dependency cycle, wron
 `complete: true`.
 
 ```
-python3 Scripts/task-validator.py [requirements.yaml] [--strict] [--quiet] [--json]
+~/.claude/scripts/task-validator.py [requirements.yaml] [--strict] [--quiet] [--json]
 ```
 
 - **Phase-aware**: with `complete: false` only `requirements` / `constraints` /
