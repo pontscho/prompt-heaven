@@ -3333,9 +3333,232 @@ async def _refs_at(client: LspBackend, abs_path: str, line: int, char: int,
     return {"count": len(all_refs), "references": all_refs}
 
 
-def _ok(data: Any) -> dict:
-    """Wrap a semantic result object as a purity __raw_text__ payload."""
-    return {"__raw_text__": json.dumps(data, ensure_ascii=False, indent=2)}
+def _md(text: str) -> dict:
+    """Wrap a pre-rendered markdown string as a purity __raw_text__ payload.
+
+    Semantic handlers emit markdown (not JSON) to keep the token cost low: the
+    same `path:line:col` refs and code-context blocks that JSON would nest in
+    `range`/`range_human`/`uri` keys collapse to a single compact line. The wire
+    convention is identical to the file-op handlers (envelope at the dispatch
+    layer unwraps `__raw_text__` into the MCP `content:[{type:text}]` block).
+    """
+    return {"__raw_text__": text}
+
+
+# ---------------------------------------------------------------------------
+# Markdown render atoms (shared by the per-handler renderers below)
+# ---------------------------------------------------------------------------
+
+def _md_loc(location: Optional[dict], *, line_text: bool = True) -> str:
+    """Render a location dict as a compact `path:line:col` reference.
+
+    Consumes the `_format_location` shape (path + range_human + line_text);
+    appends the source line when *line_text* is set and the text is present.
+    """
+    if not location:
+        return "_(no location)_"
+    start = location.get("range_human", {}).get("start", {})
+    ref = f"`{location.get('path', '?')}:{start.get('line', '?')}:{start.get('character', '?')}`"
+    if line_text:
+        lt = (location.get("line_text") or "").strip()
+        if lt:
+            ref += f" — `{lt}`"
+    return ref
+
+
+def _md_ctx(context: Optional[str]) -> str:
+    """Render a `>>>`-marked surrounding-code string as a fenced code block."""
+    return f"```\n{context}\n```" if context else ""
+
+
+def _md_def_blocks(items: list, heading: str = "##") -> list:
+    """Render a list of {location, context} items as heading + code-fence blocks."""
+    out: list = []
+    for d in items:
+        out.append(f"{heading} {_md_loc(d.get('location'), line_text=False)}")
+        ctx = _md_ctx(d.get("context"))
+        if ctx:
+            out.append(ctx)
+    return out
+
+
+def _md_ref_bullets(data: dict) -> list:
+    """Render a references payload's sites as a compact `path:line:col` bullet list."""
+    return [f"- {_md_loc(r.get('location'))}" for r in data.get("references", [])]
+
+
+def _md_call_hierarchy(ch: Any) -> list:
+    """Render call-hierarchy nodes as an indented incoming(←)/outgoing(→) tree."""
+    out: list = []
+
+    def label(n: dict) -> str:
+        return f"**{n.get('kind', '?')}** `{n.get('symbol', '')}` — {_md_loc(n.get('location'), line_text=False)}"
+
+    def walk(node: dict, depth: int, arrow: str = "") -> None:
+        out.append(f"{'  ' * depth}- {arrow}{label(node)}")
+        for c in (node.get("incoming") or []):
+            walk(c, depth + 1, "← ")
+        for c in (node.get("outgoing") or []):
+            walk(c, depth + 1, "→ ")
+
+    for item in (ch if isinstance(ch, list) else [ch]):
+        if isinstance(item, dict) and "roots" in item:
+            for root in item["roots"]:
+                walk(root, 0)
+        elif isinstance(item, dict):
+            walk(item, 0)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Per-handler markdown renderers (one per semantic handler family)
+# ---------------------------------------------------------------------------
+
+def _md_definition(data: list) -> str:
+    if not data:
+        return "_(no definition found)_"
+    sym = data[0].get("symbol")
+    head = f"# Definition: `{sym}` ({len(data)})" if sym else f"# Definition ({len(data)})"
+    return "\n".join([head, "", *_md_def_blocks(data)])
+
+
+def _md_implementations(data: list) -> str:
+    if not data:
+        return "_(no implementations found)_"
+    return "\n".join([f"# Implementations ({len(data)})", "", *_md_def_blocks(data)])
+
+
+def _md_references(data: dict) -> str:
+    sym = data.get("symbol")
+    count = data.get("count", 0)
+    head = f"# References: `{sym}` — {count} found" if sym else f"# References — {count} found"
+    if count == 0:
+        return f"{head}\n\n_(none)_"
+    return "\n".join([head, "", *_md_ref_bullets(data)])
+
+
+def _md_type_at(data: dict) -> str:
+    out = ["# Type"]
+    if data.get("location"):
+        out.append(f"\nAt {_md_loc(data['location'], line_text=False)}")
+    if data.get("deduced_type"):
+        out.append(f"\n**Deduced type**: `{data['deduced_type']}`")
+    text = (data.get("text") or "").strip()
+    if text:
+        out.append(f"\n```\n{text}\n```")
+    return "\n".join(out)
+
+
+def _md_diagnostics(data: dict) -> str:
+    path = data.get("path", "?")
+    count = data.get("count", 0)
+    head = f"# Diagnostics: `{path}` — {count}"
+    if count == 0:
+        return f"{head}\n\n_(no diagnostics)_"
+    out = [head, ""]
+    for d in data.get("diagnostics", []):
+        extra = []
+        if d.get("code") is not None:
+            extra.append(str(d["code"]))
+        if d.get("source"):
+            extra.append(str(d["source"]))
+        suffix = f" ({', '.join(extra)})" if extra else ""
+        msg = (d.get("message") or "").strip()
+        out.append(f"- **{d.get('severity', '?')}** {_md_loc(d.get('location'), line_text=False)}{suffix}: {msg}")
+    return "\n".join(out)
+
+
+def _md_outline(nodes: list) -> str:
+    if not nodes:
+        return "_(no symbols)_"
+    first = nodes[0].get("selection") or nodes[0].get("location") or {}
+    path = first.get("path", "")
+    out = [f"# Outline: `{path}`" if path else "# Outline", ""]
+
+    def line_of(loc: Optional[dict]) -> Any:
+        return loc.get("range_human", {}).get("start", {}).get("line", "?") if loc else "?"
+
+    def walk(node: dict, depth: int) -> None:
+        loc = node.get("selection") or node.get("location")
+        s = f"{'  ' * depth}- **{node.get('kind', '?')}** `{node.get('symbol', '')}` (L{line_of(loc)})"
+        if node.get("detail"):
+            s += f" — {node['detail']}"
+        out.append(s)
+        for c in (node.get("children") or []):
+            walk(c, depth + 1)
+
+    for n in nodes:
+        walk(n, 0)
+    return "\n".join(out)
+
+
+def _md_symbols(data: dict) -> str:
+    query = data.get("query", "")
+    count = data.get("count", 0)
+    out = [f"# Symbols: `{query}` — {count}"]
+    if data.get("source"):
+        out.append(f"_source: {data['source']}_")
+    out.append("")
+    if count == 0:
+        out.append("_(none)_")
+        return "\n".join(out)
+    for s in data.get("symbols", []):
+        cont = f" _{s['container']}_" if s.get("container") else ""
+        out.append(f"- **{s.get('kind', '?')}** `{s.get('symbol', '')}`{cont} — {_md_loc(s.get('location'), line_text=False)}")
+    return "\n".join(out)
+
+
+def _md_symbol_context(data: dict) -> str:
+    out = [f"# Symbol context: `{data.get('symbol', '')}`", "", "## Definition", ""]
+    definition = data.get("definition")
+    if isinstance(definition, list) and definition:
+        out += _md_def_blocks(definition, heading="###")
+    elif isinstance(definition, dict) and definition.get("error"):
+        out.append(f"_{definition['error']}_")
+    else:
+        out.append("_(not found)_")
+    references = data.get("references") if isinstance(data.get("references"), dict) else {}
+    rcount = references.get("count", 0)
+    out += ["", f"## References ({rcount})", ""]
+    out += _md_ref_bullets(references) if rcount else ["_(none)_"]
+    return "\n".join(out)
+
+
+def _md_change_impact(data: dict) -> str:
+    out = [f"# Change impact: `{data.get('symbol', '')}`", "", "## Definition", ""]
+    definition = data.get("definition")
+    if isinstance(definition, list) and definition:
+        out += _md_def_blocks(definition, heading="###")
+    elif isinstance(definition, dict) and definition.get("error"):
+        out.append(f"_{definition['error']}_")
+    else:
+        out.append("_(not found)_")
+
+    rs = data.get("reference_summary", {})
+    files = rs.get("files", [])
+    out += ["", f"## References — {rs.get('count', 0)} in {len(files)} file(s)", ""]
+    out += [f"- `{f}`" for f in files] or ["_(none)_"]
+
+    references = data.get("references") if isinstance(data.get("references"), dict) else {}
+    if references.get("references"):
+        out += ["", "### Reference sites", "", *_md_ref_bullets(references)]
+
+    ch = data.get("call_hierarchy", [])
+    suffix = " _(partial: none found)_" if data.get("partial") else ""
+    out += ["", f"## Call hierarchy{suffix}", ""]
+    out += _md_call_hierarchy(ch) if ch else ["_(none)_"]
+    return "\n".join(out)
+
+
+def _md_inlay_hints(results: list) -> str:
+    if not results:
+        return "_(no inlay hints)_"
+    out = [f"# Inlay hints ({len(results)})", ""]
+    for h in results:
+        hum = h.get("position", {}).get("human", {})
+        kind = f"[{h['kind']}] " if h.get("kind") else ""
+        out.append(f"- `L{hum.get('line', '?')}:{hum.get('character', '?')}` {kind}`{h.get('label', '')}`")
+    return "\n".join(out)
 
 
 # ===========================================================================
@@ -3375,7 +3598,7 @@ async def handle_find_definition(params: dict, project_root: str, strict: bool =
 
     if isinstance(data, dict) and "error" in data:
         return data
-    return _ok(data)
+    return _md(_md_definition(data))
 
 
 async def handle_find_references(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3403,7 +3626,7 @@ async def handle_find_references(params: dict, project_root: str, strict: bool =
     else:
         return {"error": "find_references requires either 'symbol' (name) or 'at' (path + line + character)"}
 
-    return _ok(data)
+    return _md(_md_references(data))
 
 
 async def handle_find_implementations(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3430,7 +3653,7 @@ async def handle_find_implementations(params: dict, project_root: str, strict: b
         })
     if not results:
         return {"error": "No implementations found at this position"}
-    return _ok(results)
+    return _md(_md_implementations(results))
 
 
 async def handle_type_at(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3453,7 +3676,7 @@ async def handle_type_at(params: dict, project_root: str, strict: bool = False) 
     if hover_range:
         uri = pathlib.Path(client._abs_path(abs_path)).as_uri()
         location = _format_location(uri, hover_range, client.project_root)
-    return _ok({"text": raw_text, "deduced_type": deduced, "location": location})
+    return _md(_md_type_at({"text": raw_text, "deduced_type": deduced, "location": location}))
 
 
 async def handle_diagnostics(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3478,11 +3701,11 @@ async def handle_diagnostics(params: dict, project_root: str, strict: bool = Fal
             "source": d.get("source"),
             "location": _format_location(uri, lsp_range, client.project_root),
         })
-    return _ok({
+    return _md(_md_diagnostics({
         "path": _relative_path(pathlib.Path(cpath).as_uri(), client.project_root),
         "count": len(results),
         "diagnostics": results,
-    })
+    }))
 
 
 async def handle_outline(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3520,7 +3743,7 @@ async def handle_outline(params: dict, project_root: str, strict: bool = False) 
             }
         return node
 
-    return _ok([fmt(s) for s in symbols])
+    return _md(_md_outline([fmt(s) for s in symbols]))
 
 
 async def handle_symbol(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3554,7 +3777,7 @@ async def handle_symbol(params: dict, project_root: str, strict: bool = False) -
     out = {"query": query, "count": len(results), "symbols": results}
     if fallback_used:
         out["source"] = "fallback:document_symbol"
-    return _ok(out)
+    return _md(_md_symbols(out))
 
 
 async def handle_symbol_context(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3570,7 +3793,7 @@ async def handle_symbol_context(params: dict, project_root: str, strict: bool = 
     client = await _ensure_backend(ft, project_root)
     definition = await _def_by_name(client, symbol_name, abs_path, context_lines)
     references = await _refs_by_name(client, symbol_name, abs_path, max_references, 2)
-    return _ok({"symbol": symbol_name, "definition": definition, "references": references})
+    return _md(_md_symbol_context({"symbol": symbol_name, "definition": definition, "references": references}))
 
 
 async def handle_inlay_hints(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3604,7 +3827,7 @@ async def handle_inlay_hints(params: dict, project_root: str, strict: bool = Fal
             },
             "tooltip": hint.get("tooltip"),
         })
-    return _ok(results)
+    return _md(_md_inlay_hints(results))
 
 
 async def handle_symbol_change_impact(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -3650,7 +3873,7 @@ async def handle_symbol_change_impact(params: dict, project_root: str, strict: b
         if r.get("location", {}).get("path")
     })
 
-    return _ok({
+    return _md(_md_change_impact({
         "symbol": symbol_name,
         "definition": definition,
         "references": references,
@@ -3660,7 +3883,7 @@ async def handle_symbol_change_impact(params: dict, project_root: str, strict: b
         },
         "call_hierarchy": call_hierarchies,
         "partial": not call_hierarchies,
-    })
+    }))
 
 
 def handle_lsp_init_noop(params: dict, project_root: str, strict: bool = False) -> dict:
