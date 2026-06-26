@@ -23,7 +23,7 @@ description: >
   assistant: "Let me launch the bug-investigator to trace this codec initialization failure."
   <commentary>Short inline log snippet with clear symbol references - agent finds the code path and diagnoses the problem.</commentary>
   </example>
-model: opus
+model: inherit
 color: orange
 tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, WebSearch, WebFetch
 mcpServers:

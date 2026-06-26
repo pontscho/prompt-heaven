@@ -10,7 +10,7 @@ description: >
   Read-only. Normally invoked in parallel (one per surviving candidate) from the `p:code-review`
   or `p:branch-review` skill body; the verdict ladder is supplied by the orchestrator from
   `ClaudeCode/skills/_lib/code-review-lenses.md`.
-model: opus
+model: inherit
 color: magenta
 tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
 mcpServers:

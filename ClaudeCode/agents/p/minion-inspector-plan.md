@@ -23,7 +23,7 @@ description: >
   assistant: "Launching inspector-plan to verify feasibility and completeness."
   <commentary>Another agent delegates plan validation - inspector verifies all referenced symbols exist and the approach is sound.</commentary>
   </example>
-model: opus
+model: inherit
 color: blue
 tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:

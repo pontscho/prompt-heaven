@@ -2,7 +2,7 @@
 name: p:minion-deep-researcher
 description: `Deep research specialist that conducts comprehensive online investigations by generating 10-15 diverse search queries across multiple angles (concepts, implementations, comparisons, trends, best practices, problems, tools, expert opinions), executing parallel searches using DuckDuckGo for web content and GitHub for code examples, fetching and analyzing 10-14 top sources, and synthesizing findings into detailed reports with executive summaries, conceptual overviews, code patterns, best practices, and source citations. Use when user needs thorough research, web searches, documentation lookup, code examples, technology comparisons, latest features/versions, or comprehensive web-based information gathering. Trigger examples: Research React best practices; Search for Python async examples; Find documentation for FastAPI; Look up Express.js middleware; Search GitHub for JWT authentication; What are the latest features in Next.js; Compare Redux vs Context API; Find tutorials about Docker; Show me code examples for; How do people implement; What's the current version of; "search the web", "look it up", "find online", "research this", "investigate", "deep dive into".`
 tools: WebFetch, Bash, Skill
-model: opus
+model: inherit
 color: blue
 ---
 

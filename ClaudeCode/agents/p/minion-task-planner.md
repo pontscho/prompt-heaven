@@ -24,7 +24,7 @@ description: >
   caller: "Restructure requirements.yaml — step 3 in the feature plan was split into two steps. Update tasks, dependencies, and re-calculate sizing. Current requirements.yaml: [attached]. Updated plan sections: [attached]."
   assistant: "Reads existing YAML, splits the affected task, reassigns dependencies, recalculates effort breakdown and total_effort, writes updated requirements.yaml, returns diff summary."
   </example>
-model: opus
+model: inherit
 color: blue
 tools: Read, Write, Edit, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:

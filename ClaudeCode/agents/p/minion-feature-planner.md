@@ -26,7 +26,7 @@ description: >
   caller: "Fix the plan: step 4 references `stream_ctx_init()` but the actual function is `stream_context_create()` at src/stream.c:142. Also missing error handling pattern for the codec subsystem."
   assistant: "Verifies the correct symbol via purity_call (clangd-backed), reads the error handling pattern, edits the plan to fix references and add the missing pattern, returns list of changes made."
   </example>
-model: opus
+model: inherit
 color: blue
 tools: Read, Write, Edit, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:

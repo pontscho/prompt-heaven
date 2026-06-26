@@ -23,7 +23,7 @@ description: >
   assistant: "Launching inspector-security-officer code-mode on those directories."
   <commentary>Direct invocation with explicit file/dir scope — code-mode with the listed paths as the audit boundary.</commentary>
   </example>
-model: opus
+model: inherit
 color: red
 tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, WebFetch
 mcpServers:

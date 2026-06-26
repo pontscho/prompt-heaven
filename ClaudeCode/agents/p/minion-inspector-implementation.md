@@ -23,7 +23,7 @@ description: >
   assistant: "Launching implementation-inspector to verify all plan items are covered."
   <commentary>Another agent provides both plan and changed file list - inspector does a thorough bidirectional comparison.</commentary>
   </example>
-model: opus
+model: inherit
 color: blue
 tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
 mcpServers:

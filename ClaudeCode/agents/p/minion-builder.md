@@ -8,7 +8,7 @@ mcpServers:
   - mcp-luals
   - mcp-purity
   - mcp-git
-model: sonnet
+model: inherit
 color: red
 ---
 

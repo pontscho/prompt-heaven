@@ -2,7 +2,7 @@
 name: p:implement-agent
 description: Smart executor agent that reads feature-implementation-plan.md, queries task data via script, gathers context, implements tasks, and runs verification. Self-sufficient - receives only task ID from builder.
 tools: Read, Write, Edit, Bash, Glob, Grep, TodoWrite, mcp__mcp-git__git_call
-model: sonnet
+model: inherit
 color: green
 ---
 
