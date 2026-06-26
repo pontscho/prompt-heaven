@@ -154,6 +154,7 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     },
     "create_text_file": {
         "new_content": "content",
+        "force": "overwrite",
     },
     "replace_lines": {
         "new_content": "content",
@@ -319,8 +320,13 @@ def handle_create_text_file(params: dict, project_root: str, strict: bool = Fals
     content = params.get("content")
     if content is None:
         raise ValueError("Missing required parameter: content")
+    overwrite = _bool_param(params.get("overwrite", True))
 
     path = safe_path(project_root, rel, strict)
+    if not overwrite and os.path.exists(path):
+        raise ValueError(
+            f"File already exists: {rel}. Pass overwrite=true (or force=true) to replace it."
+        )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
@@ -3755,7 +3761,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         "relative_path", "start_line", "end_line", "max_answer_chars",
     },
     "create_text_file": {
-        "relative_path", "content",
+        "relative_path", "content", "overwrite",
     },
     "list_dir": {
         "relative_path", "recursive", "skip_ignored_files",
