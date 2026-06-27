@@ -277,7 +277,9 @@ The final output of the plan command is a YAML document that serves as input for
       - Testing strategy
       - References to requirements.yaml
    c. Verify the implementation_plan is complete and unambiguous
-   d. **Validate the finished YAML**: run `~/.claude/scripts/task-validator.py requirements.yaml`.
+   d. **Validate the finished YAML**: run `~/.claude/scripts/task-validator.py requirements.yaml`
+      directly as an executable — it is `+x` with a `#!/usr/bin/env python3` shebang, so do
+      NOT prefix it with `python3`.
       Only declare the plan complete when it returns **0 ERRORs** (exit code 0). Fix every
       ERROR; weigh each WARNING (e.g. an `xxl` task that should be broken down, an
       `effort_breakdown` that drifted from the actual task counts) and resolve it unless

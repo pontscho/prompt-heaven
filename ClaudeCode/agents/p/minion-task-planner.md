@@ -26,7 +26,7 @@ description: >
   </example>
 model: inherit
 color: blue
-tools: Read, Write, Edit, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
+tools: Read, Write, Edit, Bash, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:
   - mcp-clangd
   - mcp-luals
@@ -217,6 +217,15 @@ implementation_plan:
 - Verify all task statuses are `pending`.
 - Verify effort_breakdown counts match actual task sizes.
 - Verify total_effort follows the aggregation rules.
+- **Run the validator** (the authoritative gate): execute the script directly as
+  an executable — it is `+x` with a `#!/usr/bin/env python3` shebang, so do NOT
+  prefix it with `python3`:
+  ```
+  ~/.claude/scripts/task-validator.py requirements.yaml
+  ```
+  Only finish when it returns **0 ERRORs** (exit code 0). Fix every ERROR and
+  re-run; weigh each WARNING and resolve it unless intentional. Report the final
+  validator result in the Verification Notes.
 
 ### Mode B: Update
 
@@ -272,6 +281,7 @@ Your return message to the orchestrator (NOT the YAML file itself) must follow t
 - Unverified references: [count] (list if any)
 - Pattern excerpts included: [count] / [total code_references]
 - Dependency graph: valid DAG | CYCLE DETECTED (details)
+- Validator: PASS (0 ERRORs) | [N] ERRORs, [M] WARNINGs (list unresolved)
 ```
 
 If in update mode, replace Task Summary with:
