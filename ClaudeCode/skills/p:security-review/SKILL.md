@@ -1,13 +1,13 @@
 ---
 name: p:security-review
-description: Multi-mode security audit. CODE mode runs a 3-phase pipeline (triage → find → verify → assemble) with each phase in a fresh sub-agent context to break single-pass anchoring bias (OWASP Top 10, secrets, language-specific patterns, framework-aware FP suppression). PLAN mode runs a single-pass plan-audit inline (no sub-agents — markdown intent review). Mode is auto-inferred from target shape and overridable via `--mode plan|code`. Invoke as `/p:security-review <target> [--mode plan|code] [--branch] [--output console|markdown|both] [--severity high|medium|low] [--include-deps]`, or call from other skills (feature-plan Phase B, implement Phase B) via the Skill tool.
+description: Multi-mode security audit. CODE mode runs a parallel fan-out pipeline (triage → parallel per-lane find → parallel per-finding verify → assemble), every phase in fresh sub-agent contexts to break single-pass anchoring bias (OWASP Top 10, secrets, language-specific patterns, framework-aware FP suppression). Parallelism uses multiple Agent tool-uses per message — no Workflow tool. PLAN mode runs a single-pass plan-audit inline (no sub-agents — markdown intent review). Mode is auto-inferred from target shape and overridable via `--mode plan|code`. Invoke as `/p:security-review <target> [--mode plan|code] [--branch] [--output console|markdown|both] [--severity high|medium|low] [--include-deps]`, or call from other skills (feature-plan Phase B, implement Phase B) via the Skill tool.
 ---
 
 # Security Review — Multi-Mode
 
 This skill performs security audits in one of two modes:
 
-- **CODE mode** — audits source code (file / directory / branch diff) via a **3-phase pipeline** (triage → find → verify → assemble). Each phase runs in a fresh sub-agent context to break the anchoring bias of single-pass review. This is the 2025-2026 industry pattern (Sentry, Trail of Bits, Anthropic).
+- **CODE mode** — audits source code (file / directory / branch diff) via a **parallel fan-out pipeline** (triage → parallel per-lane find → parallel per-finding verify → assemble), every sub-agent in a fresh context to break the anchoring bias of single-pass review. This is the 2025-2026 industry pattern (Sentry, Trail of Bits, Anthropic).
 - **PLAN mode** — audits a markdown implementation plan via a **single-pass inline pass** (triage + plan-audit + assemble). No sub-agents — markdown intent review is fast enough to run in the host context. Used by `/p:feature-plan` Phase B before any code exists.
 
 Mode is auto-inferred from the target shape (see Step 0); explicit `--mode` overrides.
@@ -33,17 +33,17 @@ See `ClaudeCode/ARCHITECTURE.md` for the layer contract this skill follows, and 
                               ┌──────────┴──────────┐
                               ▼                     ▼
                          PLAN mode              CODE mode
-                         (inline)               (3-phase pipeline)
+                         (inline)               (parallel fan-out, no Workflow)
                               │                     │
                               ▼                     ▼
                 Step 1: Triage (inline)      Step 1: Triage  ─→ Agent(minion, PHASE: triage)
                               │                     │  (fresh context)
                               ▼                     ▼
-                Step 2: Plan-Audit (inline)  Step 2: Find    ─→ Agent(minion, PHASE: find)
-                              │                     │  (fresh context, writes findings tmp)
+                Step 2: Plan-Audit (inline)  Step 2: Find    ─→ K PARALLEL Agents (PHASE: find)
+                              │                     │  (one per lane, one message; per-lane tmp)
                               │                     ▼
-                              │             Step 3: Verify  ─→ Agent(minion, PHASE: verify)
-                              │                     │  (fresh context, writes verified tmp)
+                              │             Step 3: Verify  ─→ N PARALLEL Agents (PHASE: verify)
+                              │                     │  (one per finding, one message; batch if N>8)
                               ▼                     ▼
                 Step 4: Assemble (inline) ←─┴─→ Step 4: Assemble (inline)
                               │
@@ -53,7 +53,7 @@ See `ClaudeCode/ARCHITECTURE.md` for the layer contract this skill follows, and 
 
 ## YOU LOVE YOUR MINIONS (code-mode only)
 
-In CODE mode you are an orchestrator, not a security analyst. You do NOT inspect code yourself. **Every of Steps 1–3 delegates to `p:minion-inspector-security-officer` via the Agent tool**, each in a fresh sub-agent context. Your job is wiring: pass the right `PHASE:` directive and files, parse compact verdicts, write a final summary.
+In CODE mode you are an orchestrator, not a security analyst. You do NOT inspect code yourself. **Every sub-agent across Steps 1–3 is a `p:minion-inspector-security-officer` invoked via the Agent tool**, each in a fresh context. Step 1 = one triage officer; Step 2 = **K find officers emitted as parallel Agent tool-uses in ONE message** (one per lane); Step 3 = **N verify officers emitted as parallel Agent tool-uses in ONE message** (one per finding, batched if large). Parallelism comes from multiple Agent calls per message — **never use the Workflow tool**. Your job is wiring: pass the right `PHASE:` directive + scope, parse compact return blocks, merge/dedup at the Find barrier, calibrate + assemble.
 
 In PLAN mode there is no sub-agent — the plan audit is short enough to run inline in the host context (no anchoring bias to worry about because there is no code path tracing, only intent review).
 
@@ -178,9 +178,31 @@ PLAN mode skips Step 3 (Verify) entirely — there is no Find phase to verify, a
 
 ---
 
-## CODE MODE WORKFLOW (3-phase pipeline, fresh sub-agent per phase)
+## CODE MODE WORKFLOW (parallel fan-out, fresh sub-agent per lane and per finding)
 
-### Step 1 — Triage (code, Agent invocation, fresh context)
+CODE mode runs a **parallel** pipeline. All sub-agents are `p:minion-inspector-security-officer`. **No Workflow tool** — parallelism = multiple `Agent` tool-uses emitted in a SINGLE assistant message; the harness runs them concurrently and you receive every result before composing the next message (an implicit phase barrier). Inter-phase data uses the disk-handoff contract (`.claude/tmp/...`) plus compact return blocks — only now per-lane (Find) and per-finding (Verify).
+
+This is a **strict superset** of single-pass-per-phase review: a tiny target triages to one lane and a handful of findings, degenerating to ~1 finder + a few verifiers. Scale the lane count to the scope — do NOT spawn 8 lanes for a 50-line diff; collapse to the 2-3 dominant lanes.
+
+### Lane catalog (Find-phase partition)
+
+Triage maps the touched threat domains onto this catalog; each selected lane becomes one parallel find-officer in Step 2.
+
+| Triage domain(s) | Lane key | Focus (CWE / OWASP) |
+|---|---|---|
+| memory-safety | `oob` | CWE-787/125/119/129 — out-of-bounds R/W, improper array index |
+| memory-safety | `intovf` | CWE-190/191/194/369 — integer overflow / signedness, divide-by-zero |
+| memory-safety | `memlife` | CWE-457/908/416/401/476/690 — uninit/stale read, UAF, leak, NULL deref, unchecked alloc |
+| user-input, serialization | `parseval` | CWE-20/1284 — improper validation of untrusted parsed input |
+| user-input | `injection` | A03 — SQL / command / template / header injection, eval-class sinks |
+| authentication, authorization | `access-control` | A01/A04/A07 — broken access control, insecure design, auth failures |
+| cryptography, secret storage | `crypto` | A02/A08 — weak crypto, key handling, insecure deserialization, integrity |
+| network I/O | `ssrf-net` | A10 — SSRF, unvalidated outbound fetch |
+| external dependencies, security misconfiguration, logging/telemetry | `config-deps` | A05/A06/A09 — misconfig, vulnerable/outdated deps, logging/PII |
+
+The `oob` / `intovf` / `memlife` / `parseval` lanes are the C/C++ memory-safety specialization; the OWASP-grouped lanes cover managed/web targets. Activate only the lanes whose domains triage actually flagged. Lanes with no live domain are simply not spawned.
+
+### Step 1 — Triage (code, 1 Agent invocation, fresh context)
 
 Invoke the minion via the Agent tool with:
 
@@ -197,6 +219,8 @@ TIMESTAMP: [<ts>]
 
 Operate ONLY in triage mode. Run the 12-domain threat-surface checklist (auth, authz, crypto, network I/O, user input, file-system / path handling, IPC / concurrency, secret storage, external dependencies, logging / telemetry, serialization, memory safety). Do NOT run the full OWASP pass. Do NOT score severities. Do NOT write any files.
 
+Then map the touched domains onto the orchestrator's LANE CATALOG and recommend the live lane partition — the subset of lane keys whose domains you flagged: oob, intovf, memlife (memory-safety); parseval (user-input / serialization); injection (user-input); access-control (authn / authz); crypto (crypto / secret storage); ssrf-net (network I/O); config-deps (external deps / misconfig / logging). Scale to scope — for a small target collapse to the 2-3 dominant lanes; do NOT recommend a lane whose domain you did not flag.
+
 Return ONLY one of these two blocks:
 
   triage-verdict: NO_THREAT_SURFACE
@@ -206,13 +230,14 @@ Return ONLY one of these two blocks:
 
   triage-verdict: THREAT_DOMAINS
   domains: [<comma-separated subset of the 12-domain list>]
+  lanes: [<comma-separated subset of lane keys from the catalog>]
   scope-files: [<comma-separated list of files in scope>]
 ```
 
 Parse the block:
 
 - **`NO_THREAT_SURFACE`** → skip Step 2 and Step 3. Proceed to ASSEMBLE with the fast-path APPROVE template.
-- **`THREAT_DOMAINS`** → capture `domains` and `scope-files`, continue to Step 2.
+- **`THREAT_DOMAINS`** → capture `domains`, `lanes`, and `scope-files`, continue to Step 2 (one parallel find-officer per lane).
 
 Emit ONE compact user message:
 
@@ -221,17 +246,20 @@ Emit ONE compact user message:
 
 - Verdict: NO_THREAT_SURFACE / THREAT_DOMAINS
 - Domains: [list, or "none"]
+- Lanes: [lane keys, or "none"]
 - Scope files: N
-- Next: [fast-path APPROVE → done | proceed to FIND]
+- Next: [fast-path APPROVE → done | proceed to FIND (K parallel lanes)]
 ```
 
-### Step 2 — Find (code, fresh Agent invocation)
+### Step 2 — Find (code, K PARALLEL Agents in ONE message)
 
-NEW `Agent` invocation — fresh sub-agent, no memory of triage.
+Emit **K `Agent` tool-uses in a SINGLE assistant message** — one per lane in triage's `lanes` list. They run concurrently; you receive all K results before composing the next message. Each is a fresh sub-agent with no memory of triage.
+
+Per lane:
 
 - `subagent_type`: `p:minion-inspector-security-officer`
-- `description`: `"Security find pass"`
-- `prompt` (verbatim):
+- `description`: `"Security find — <lane>"`
+- `prompt` (verbatim, substituting the lane's focus from the Lane Catalog):
 
 ```
 PHASE: find
@@ -239,95 +267,97 @@ PHASE: find
 TARGET: [target description string]
 SCOPE: [paths or --branch]
 TIMESTAMP: [<ts>]
-TRIAGE_DOMAINS: [<comma-separated domain list from triage>]
-SCOPE_FILES: [<comma-separated file list from triage>]
+LANE: <lane key> — focus EXCLUSIVELY on <lane focus + CWE/OWASP list from the catalog>.
+TRIAGE_DOMAINS: [<domain list from triage>]
+SCOPE_FILES: [<file list from triage>]
 INCLUDE_DEPS: [true | false]
 
-You are the GENEROUS FINDER. Run the OWASP Top 10 pass and language-specific patterns scoped to the triage domains. For EVERY plausible sink:
+You are the GENEROUS FINDER for THIS ONE lane. Maximize recall WITHIN your lane only; the other lanes are covered by sibling officers running in parallel right now. For EVERY plausible sink in your lane:
 
 1. Identify the sink (file:line via clangd/luals/purity — never text search where an LSP applies).
 2. Trace UPSTREAM: source → propagator(s) → sink. Use clangd_find_references / luals_find_references / purity search_for_pattern. Record the trace.
 3. Flag the finding if it is even PLAUSIBLY exploitable — the Verifier filters false positives, not you.
 
-DO NOT assign severities. DO NOT suppress based on framework defaults — the Verifier handles both.
+DO NOT assign severities. DO NOT suppress based on framework defaults / existing guards — the Verifier handles both. Stay strictly in your lane.
 
-Write the findings to:
-  .claude/tmp/security-findings-[<ts>].md
+Write your lane's findings to:
+  .claude/tmp/security-findings-[<ts>]-<lane>.md
 
 (See your prompt body for the exact FIND OUTPUT format.)
 
 After writing the file, return ONLY this block:
 
   find-result: COMPLETE
-  findings-file: .claude/tmp/security-findings-[<ts>].md
+  lane: <lane>
+  findings-file: .claude/tmp/security-findings-[<ts>]-<lane>.md
   count: <integer>
-  domains-covered: [<list>]
 ```
 
-Capture `findings_file` and `count`. If `count == 0` → skip Step 3 → ASSEMBLE with clean APPROVE.
+**Merge + dedup barrier.** After all K results arrive, read the K lane files, MERGE into one candidate list, and DEDUP by `(file, line, root-cause)` — a single bug surfaced by two lanes must collapse to ONE candidate. Assign stable IDs `F1..FN`. This barrier is mandatory: Verify must see the merged, deduped set.
+
+If the merged total `count == 0` → skip Step 3 → ASSEMBLE with clean APPROVE.
 
 Emit ONE compact user message:
 
 ```
-**Security review (code-mode) — Step 2: FIND**
+**Security review (code-mode) — Step 2: FIND (K parallel lanes)**
 
-- Findings file: `.claude/tmp/security-findings-<ts>.md`
-- Raw findings: N
+- Per-lane: <lane1> N1, <lane2> N2, ...
+- Merged + deduped: N candidate(s)  (D duplicates collapsed)
 - Top hypothesis: [one-liner from [F1], or "none — clean find pass"]
-- Next: [proceed to VERIFY | skip to ASSEMBLE]
+- Next: [proceed to VERIFY (N parallel) | skip to ASSEMBLE]
 ```
 
-### Step 3 — Verify (code, fresh Agent invocation)
+### Step 3 — Verify (code, N PARALLEL Agents in ONE message, one per finding)
 
-NEW `Agent` invocation — fresh sub-agent, no memory of triage OR find. Reads the findings file from disk and re-judges every item from scratch.
+Emit **N `Agent` tool-uses in a SINGLE assistant message** — one per deduped candidate `F1..FN`. If N > 8, split into sequential batches of ≤8 (one message per batch). Each verifier is a fresh sub-agent with NO memory of triage, find, or its siblings, and re-judges its ONE finding from scratch.
+
+Per finding:
 
 - `subagent_type`: `p:minion-inspector-security-officer`
-- `description`: `"Security verify pass"`
-- `prompt` (verbatim):
+- `description`: `"Security verify — F<k>"`
+- `prompt` (verbatim, embedding the ONE finding inline):
 
 ```
 PHASE: verify
 
 TIMESTAMP: [<ts>]
-FINDINGS_FILE: .claude/tmp/security-findings-[<ts>].md
 TARGET: [target description string]
 
-You are the PARANOID VERIFIER. You have NO memory of how the Finder reasoned. Read the findings file with `read_file`, then for EACH finding [Fn], run:
+You are the PARANOID VERIFIER. You have NO memory of how the Finder reasoned. Re-judge this ONE finding from scratch by reading the cited code FRESH this invocation.
 
+FINDING [F<k>] (lane <lane>):
+  title: <title>
+  file: <file>   line: <line>
+  cwe (claimed): <cwe>
+  sink: <sink>
+  claimed trace: <source → propagator(s) → sink>
+  finder hypothesis: <why_plausible>
+
+Run, against the ACTUAL current code (Read + clangd/luals/purity — do not trust the finder's quote):
 1. REACHABILITY check — does the trace bottom out at real untrusted input?
-2. FRAMEWORK-DEFAULT SUPPRESSION check — consult the FP-SUPPRESSION LIBRARY in your prompt body.
+2. FRAMEWORK-DEFAULT / EXISTING-GUARD SUPPRESSION check — consult the FP-SUPPRESSION LIBRARY in your prompt body; cite the concrete guard (file:line) when you suppress.
 3. CONFIDENCE score (HIGH / MEDIUM / LOW).
 4. SEVERITY assignment (only here, using CVSS bands).
 
-Verdict per finding: VERIFIED | SUPPRESSED | ESCALATED.
+Do NOT write any files. Return ONLY this block:
 
-Write the verified report to:
-  .claude/tmp/security-verified-[<ts>].md
-
-(See your prompt body for the exact VERIFY OUTPUT format with VERIFIED / SUPPRESSED / ESCALATED sections, preserving original [Fn] IDs.)
-
-After writing the file, return ONLY this block:
-
-  verify-result: COMPLETE
-  verified-file: .claude/tmp/security-verified-[<ts>].md
-  verified: N_v
-  suppressed: N_s
-  escalated: N_e
-  critical: N_c
-  high: N_h
-  medium: N_m
-  low: N_l
-  info: N_i
+  verify-result: <VERIFIED | SUPPRESSED | ESCALATED>
+  id: F<k>
+  severity: <CRITICAL | HIGH | MEDIUM | LOW | INFO>
+  confidence: <HIGH | MEDIUM | LOW>
+  cwe: <CWE-xxx>   owasp: <A0x or "N/A">
+  evidence: <one actual line you read this invocation, with its line number>
+  reason: <one-line justification>
 ```
 
-Capture the counts and `verified_file`.
+Collect the N verdict blocks (one per finding). They are the verified result set — no separate `security-verified` file is written; the consolidated `docs/reviews/...` report (Step 4) is the audit trail.
 
 Emit ONE compact user message:
 
 ```
-**Security review (code-mode) — Step 3: VERIFY**
+**Security review (code-mode) — Step 3: VERIFY (N parallel, one per finding)**
 
-- Verified file: `.claude/tmp/security-verified-<ts>.md`
 - Verified: <N_v>   Suppressed: <N_s>   Escalated: <N_e>
 - Severity mix: C=<n_c> H=<n_h> M=<n_m> L=<n_l> I=<n_i>
 - Next: assemble final report
@@ -339,16 +369,17 @@ Emit ONE compact user message:
 
 The only step that runs in the host context regardless of mode. Pure formatting — no analysis.
 
-1. **Read the source of findings:**
+1. **Collect the source of findings:**
    - PLAN mode → use the findings recorded inline during Step 2 Plan-Audit
-   - CODE mode → Read `.claude/tmp/security-verified-<ts>.md`
-2. **Compute the overall verdict:**
+   - CODE mode → the N compact verdict blocks returned by the parallel verifiers in Step 3 (already deduped at the Find barrier)
+2. **Calibrate severity (CODE mode only).** The N verifiers scored independently — reconcile CVSS bands so near-identical findings (same CWE + adjacent location) don't diverge; on a tie take the higher band and note the reconciliation. Do NOT re-judge the VERIFIED / SUPPRESSED / ESCALATED verdicts themselves.
+3. **Compute the overall verdict:**
    - **REJECT** if any VERIFIED CRITICAL finding
    - **REVISE** if any VERIFIED HIGH finding, OR ≥2 VERIFIED MEDIUM findings in the same OWASP category
    - **APPROVE** otherwise
-3. **Apply the `--severity` filter** to the displayed-findings list. Always report counts in full.
-4. **Emit the console block** (template below).
-5. **If `--output` is `markdown` or `both`** → write `docs/reviews/security-review-<ts>.md` (template below). Create the directory if it doesn't exist.
+4. **Apply the `--severity` filter** to the displayed-findings list. Always report counts in full.
+5. **Emit the console block** (template below).
+6. **If `--output` is `markdown` or `both`** → write `docs/reviews/security-review-<ts>.md` (template below). Create the directory if it doesn't exist.
 
 ### Fast-path output (Triage NO_THREAT_SURFACE)
 
@@ -433,8 +464,7 @@ ESCALATED [<count>]  (REQUIRES HUMAN TRIAGE)
 
 Verdict: <APPROVE | REVISE | REJECT>
 <code-mode artifacts:>
-Reports: .claude/tmp/security-findings-<ts>.md
-         .claude/tmp/security-verified-<ts>.md
+Reports: .claude/tmp/security-findings-<ts>-<lane>.md (one per lane)
 <if --output includes markdown:>
 Full report: docs/reviews/security-review-<ts>.md
 ```
@@ -454,7 +484,7 @@ When `--output` is `markdown` or `both`, write `docs/reviews/security-review-<ts
 | Languages | <list> |
 | Framework(s) | <list, if detected> |
 | Date | <YYYY-MM-DD HH:MM:SS> |
-| Pipeline | <plan single-pass | code: triage → find → verify → assemble (3-phase)> |
+| Pipeline | <plan single-pass | code: triage → parallel per-lane find → parallel per-finding verify → assemble> |
 
 ## Verdict: <APPROVE | REVISE | REJECT>
 
@@ -526,8 +556,8 @@ When `--output` is `markdown` or `both`, write `docs/reviews/security-review-<ts
 
 ## Pipeline Artifacts (code-mode only)
 
-- Phase 2 (Find) raw findings: `.claude/tmp/security-findings-<ts>.md`
-- Phase 3 (Verify) report: `.claude/tmp/security-verified-<ts>.md`
+- Find phase raw findings, one per lane: `.claude/tmp/security-findings-<ts>-<lane>.md`
+- Verify phase verdicts: returned inline as compact blocks (no separate verified file); consolidated into this report
 
 ## Checklist
 
@@ -604,11 +634,13 @@ When `--output` is `markdown` or `both`, write `docs/reviews/security-review-<ts
 
 ## Invariants
 
-- **Three Agent invocations, three fresh contexts (CODE mode only).** Never collapse phases. Never run the audit inline in CODE mode.
+- **Parallel fan-out, fresh context per sub-agent (CODE mode only).** 1 triage officer + **K** parallel find officers (one per lane, one message) + **N** parallel verify officers (one per finding, one message; batch if N>8). Never collapse a phase; never run the audit inline in CODE mode.
+- **No Workflow tool.** Parallelism = multiple `Agent` tool-uses in one assistant message; the harness runs them concurrently and the next message composes only after all results return (implicit phase barrier).
+- **Merge + dedup barrier between Find and Verify.** Collapse `(file, line, root-cause)` duplicates across lanes before verifying; assign stable `F1..FN` IDs.
 - **PLAN mode is inline, no Agent invocations.** A markdown intent audit doesn't benefit from sub-agent isolation.
-- **Disk handoff between phases (CODE mode only).** Inter-phase data lives in `.claude/tmp/security-{findings,verified}-<ts>.md`.
+- **Disk handoff at the Find phase (CODE mode only).** Each lane writes `.claude/tmp/security-findings-<ts>-<lane>.md`. Verify returns compact verdict blocks INLINE (no per-finding files); the consolidated `docs/reviews/security-review-<ts>.md` is the verified audit trail.
 - **Compact per-step user message.** One short status block per step — never dump full reports.
-- **Severity is assigned in VERIFY (code) or in Plan-Audit (plan).** The Finder must not score (code). The orchestrator must not re-score.
+- **Severity is assigned in VERIFY (code) or in Plan-Audit (plan).** Finders must not score; each verifier scores its own finding; the orchestrator **calibrates** bands across verifiers in Assemble but does not re-judge.
 - **Verdict math is consistent.** REJECT on any VERIFIED CRITICAL; REVISE on HIGH or duplicated MEDIUM; otherwise APPROVE.
 - **ESCALATED findings (code-mode) always surfaced.** They don't affect verdict counts, but the user must see them.
 - **Tmp files survive the run.** Do not delete `.claude/tmp/security-*` — they are the audit trail.
