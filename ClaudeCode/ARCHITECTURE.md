@@ -34,7 +34,7 @@ description: <one-paragraph description — what the skill does, how it's invoke
 ---
 ```
 
-No other frontmatter keys are required. The `name:` field MUST match the directory name (without `p:` prefix in the directory? No — directory IS `p:<name>/` and `name:` IS `p:<name>`. They match exactly.)
+No other frontmatter keys are required. The `name:` field MUST match the skill's directory name exactly: the directory is `p:<name>/` and `name:` is `p:<name>`.
 
 ## Agent frontmatter (required)
 
