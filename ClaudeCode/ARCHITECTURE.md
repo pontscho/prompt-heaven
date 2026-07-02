@@ -70,7 +70,7 @@ When one skill's output is another skill's input, the file path and format MUST 
 - `/p:task-plan` input ← above; output → `requirements.yaml` (defined schema)
 - `/p:implement` input ← `requirements.yaml`
 - `/p:security-review` output → console + optional `docs/reviews/security-review-<ts>.md`
-- Intra-pipeline (security review): `.claude/tmp/security-findings-<ts>.md` and `.claude/tmp/security-verified-<ts>.md`
+- Intra-pipeline (security review, code-mode): per-lane `.claude/tmp/security-findings-<ts>-<lane>.md` (one per FIND lane, parallel); VERIFY returns per-finding verdicts inline (no file)
 
 Changing any of these without updating `handoff-contracts.md` is a violation.
 

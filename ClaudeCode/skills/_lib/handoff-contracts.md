@@ -105,9 +105,9 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 **Outputs:**
 - Console block (always): verdict + severity counts + top findings + escalations
 - `docs/reviews/security-review-<ts>.md` (when `--output` is `markdown` or `both`): full markdown report
-- Intra-pipeline (code-mode only — written by the 3-phase pipeline workers):
-  - `.claude/tmp/security-findings-<ts>.md` — produced by FIND phase, consumed by VERIFY phase
-  - `.claude/tmp/security-verified-<ts>.md` — produced by VERIFY phase, consumed by ASSEMBLE step
+- Intra-pipeline (code-mode only):
+  - `.claude/tmp/security-findings-<ts>-<lane>.md` — one per lane, produced by each parallel FIND officer, consumed by the skill's merge/dedup barrier (Step 2). The deduped findings are then passed INLINE to the per-finding VERIFY officers.
+  - VERIFY writes NO file — each verifier returns a compact per-finding verdict block inline; Step 4 (Assemble) aggregates them into the report.
 
 **Side effects:**
 - Only writes files in `.claude/tmp/` and (optionally) `docs/reviews/`. Never modifies source code.
@@ -164,8 +164,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 | `.claude/tmp/plan-perspective-<slug>.md` | `/p:feature-plan` round-0 fan-out (`p:minion-feature-planner`, perspective mode) | `/p:feature-plan` (judge + synthesis), then deleted after synthesis | markdown, per the planner's plan structure |
 | `docs/feature-implementation-plan.md` | `/p:feature-plan` → `p:minion-feature-planner` (canonical mode) | `/p:task-plan`, `/p:implement` (reads for context), `/p:security-review mode=plan` | markdown, structured |
 | `requirements.yaml` | `/p:task-plan` | `/p:implement` | YAML, schema in `~/.claude/scripts/task-plan.py` |
-| `.claude/tmp/security-findings-<ts>.md` | `p:minion-inspector-security-officer PHASE: find` | `p:minion-inspector-security-officer PHASE: verify` | markdown, `[Fn]` ID format |
-| `.claude/tmp/security-verified-<ts>.md` | `p:minion-inspector-security-officer PHASE: verify` | `/p:security-review` Step 4 (Assemble) | markdown, VERIFIED/SUPPRESSED/ESCALATED sections |
+| `.claude/tmp/security-findings-<ts>-<lane>.md` | `p:minion-inspector-security-officer PHASE: find` (one per lane, parallel) | `/p:security-review` Step 2 merge/dedup barrier → deduped findings then passed INLINE to `PHASE: verify` | markdown, `[Fn]` ID format |
 | `docs/reviews/security-review-<ts>.md` | `/p:security-review` Step 4 | end-user (audit trail) | markdown, full report |
 | `docs/reviews/code-review-<name>-<date>.md` | `/p:code-review` Step 4 (Synthesize) | end-user (audit trail) | markdown, full report — only when `--output` includes markdown |
 | `docs/reviews/branch-review-<ts>.md` | `/p:branch-review` Step 4 (Synthesize) | end-user (audit trail) | markdown, full report — only when `--output` includes markdown |
