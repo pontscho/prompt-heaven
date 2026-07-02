@@ -13,7 +13,7 @@ USER → /p:feature-plan → docs/feature-implementation-plan.md
 USER → /p:task-plan    → requirements.yaml
         │
         ▼
-USER → /p:implement    → implemented code + requirements.yaml (status updates)
+USER → /p:implement    → implemented code + requirements.yaml (status updates) + refreshed docs/ wiki
         │
         ▼  (optional, standalone)
 USER → /p:security-review → console + optional docs/reviews/security-review-<ts>.md
@@ -85,13 +85,16 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
   - Per-task `status` transitions: `pending` → `in_progress` → `completed`
   - On full completion: `implementation_complete: true`
   - On open items at escape hatch: `implementation_open_items: [...]` and/or `implementation_security_open_items: [...]`
+  - Documentation record (final step): `documentation_updated: true|false` (+ `documentation_skipped_reason` when false), `documentation_pages_touched: [...]`, `documentation_open_items: [...]`
+- Refreshed `docs/` wiki — pages updated (and, on user approval, created) to match the shipped code, via `Skill(p:wiki, ingest)` (→ `p:minion-librarian`) as the final step
 
 **Side effects:**
 - Source code modifications — delegated to `p:minion-mason` (per task; the orchestrator never edits code inline)
 - Per-task build + test via `p:minion-mason` (forge); full-suite green-build gate via `p:minion-builder`
 - Failure investigation via `p:minion-watson` — invoked by the mason per-task (bounded escape hatch), and by the orchestrator for green-build-gate failures
+- Documentation sync (Section 6) via `Skill(p:wiki, args="ingest <base>")` → `p:minion-librarian`: updates `docs/` page prose + frontmatter + `INDEX.md`. New-page / delete / split proposals surface to the user; the orchestrator executes only the approved ones via `purity_call`. If no wiki exists (or docs are un-onboarded), the orchestrator surfaces `/p:wiki init` / `/p:wiki adopt` instead of ingesting.
 
-**Validation:** runs a parallel validation fan-out before setting `implementation_complete: true` — completeness lane (`p:minion-inspector-implementation`) + security lane (`p:minion-inspector-security-officer` `PHASE: triage`, gated to `Skill(p:security-review, mode=code)` on a hit). See `_lib/validation-loop.md` § Parallel fan-out variant.
+**Validation:** runs a parallel validation fan-out before setting `implementation_complete: true` — completeness lane (`p:minion-inspector-implementation`) + security lane (`p:minion-inspector-security-officer` `PHASE: triage`, gated to `Skill(p:security-review, mode=code)` on a hit). See `_lib/validation-loop.md` § Parallel fan-out variant. After completion, Section 6 syncs the `docs/` wiki via `Skill(p:wiki, ingest)`.
 
 ---
 

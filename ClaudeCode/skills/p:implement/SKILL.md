@@ -1,6 +1,6 @@
 ---
 name: p:implement
-description: Execute a task-planned implementation. Reads requirements.yaml (produced by /p:task-plan), runs tasks in dependency order by delegating each task/batch to p:minion-mason (self-sufficient per-task executor — LSP context-gathering + forge build/test), with p:minion-watson for failure investigation and p:minion-builder for the green-build gate, then runs a parallel validation fan-out (completeness lane via p:minion-inspector-implementation + security lane via p:minion-inspector-security-officer PHASE: triage, gated to Skill(p:security-review, mode=code) on a hit) before marking implementation_complete: true. Output: implemented code + updated requirements.yaml. See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
+description: Execute a task-planned implementation. Reads requirements.yaml (produced by /p:task-plan), runs tasks in dependency order by delegating each task/batch to p:minion-mason (self-sufficient per-task executor — LSP context-gathering + forge build/test), with p:minion-watson for failure investigation and p:minion-builder for the green-build gate, then runs a parallel validation fan-out (completeness lane via p:minion-inspector-implementation + security lane via p:minion-inspector-security-officer PHASE: triage, gated to Skill(p:security-review, mode=code) on a hit) before marking implementation_complete: true, then syncs the docs/ wiki with the shipped code via Skill(p:wiki, ingest) (→ p:minion-librarian) as the final step. Output: implemented code + updated requirements.yaml + refreshed docs/ wiki. See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
 ---
 
 # Implement
@@ -23,6 +23,7 @@ This command takes a completed implementation plan (from `/p:task-plan`) and exe
 - Executes tasks in dependency order by delegating each task/batch to `p:minion-mason`
 - The mason implements + builds + tests each task in its own sandbox (LSP for context, forge for build/test)
 - Audits completeness and security post-implementation via the validation fan-out (Section 4)
+- Syncs the project documentation wiki (`docs/`) with the shipped code as the final step, via `Skill(p:wiki, ingest)` → `p:minion-librarian` (Section 6)
 - Reports progress and handles errors
 
 # Minion Mindset — Your Eyes, Ears, and Hands
@@ -44,8 +45,9 @@ You are an orchestrator, not a one-person band. You do NOT implement tasks inlin
 | `p:minion-inspector-security-officer` | **Security review of the implementation** (Section 4 fan-out — security lane) — runs in PARALLEL with the completeness lane as a `PHASE: triage` probe over changed files; on a hit, gated to the full `Skill(p:security-review, mode=code)` 3-phase pipeline. Catches vulns introduced during coding (the plan didn't say `sprintf` but it ended up there). Required clean before YAML can be marked `implementation_complete: true`. |
 | `p:minion-web-explorer` | Quick external lookups: library docs, version checks, "how does this API behave with X" — single-shot web/GitHub searches. Light-weight. |
 | `p:minion-deep-researcher` | Comprehensive web research when implementation hits an unfamiliar library/API/framework and needs multi-angle investigation before proceeding. Heavy. |
+| `p:minion-librarian` (via `Skill(p:wiki)`) | **Documentation & wiki maintenance** (Section 6 — the final step). You never invoke the librarian directly: you call `Skill(p:wiki, args="ingest <base>")`, which delegates to the librarian to re-sync `docs/` with the shipped code (update affected pages, re-verify anchors via MCP, propose new pages for new subsystems). **NEVER write or edit docs inline.** |
 
-Rule of thumb: if you are about to implement a task, STOP — that's `p:minion-mason`'s job. If you are about to run the full test suite for the green-build gate, STOP — that's `p:minion-builder`'s job. If a build/test fails and the cause isn't obvious, STOP — that's `p:minion-watson`'s job. If you don't know how a piece of existing code works, STOP — that's `p:minion-explorer`'s job. Main context is precious, minions are not.
+Rule of thumb: if you are about to implement a task, STOP — that's `p:minion-mason`'s job. If you are about to run the full test suite for the green-build gate, STOP — that's `p:minion-builder`'s job. If a build/test fails and the cause isn't obvious, STOP — that's `p:minion-watson`'s job. If you don't know how a piece of existing code works, STOP — that's `p:minion-explorer`'s job. If you are about to write or update documentation, STOP — that's `Skill(p:wiki)`'s job (it delegates to `p:minion-librarian`). Main context is precious, minions are not.
 
 # Prerequisites
 
@@ -274,6 +276,8 @@ Update the YAML file:
 - If the fan-out escape hatch left completeness gaps: `implementation_open_items: [...]`
 - If the fan-out escape hatch left security findings, or a REJECT was accepted: `implementation_security_open_items: [{owasp, cwe, file, line, description, severity}, ...]`
 
+After writing the completion record, proceed to **Section 6 (Documentation & Wiki Maintenance)** — the final step of the orchestrator. Phase C records that the *code* is complete and validated; Section 6 brings the `docs/` wiki back in sync with it and appends the documentation record to the same YAML.
+
 ## 5. Quality Checks
 
 Before marking implementation complete (i.e., before Phase C's YAML update):
@@ -287,6 +291,54 @@ Before marking implementation complete (i.e., before Phase C's YAML update):
 - **`p:minion-inspector-implementation` returned Readiness: COMPLETE** (or the user explicitly accepted current state at the fan-out escape hatch)
 - **`p:minion-inspector-security-officer` returned Verdict: APPROVE / no-hit** (or the user explicitly accepted residual security risks at the escape hatch)
 - No unresolved CRITICAL plan gaps and no unresolved CRITICAL security findings; remaining items are either authorized by the user or documented as known limitations in the YAML (`implementation_open_items` and/or `implementation_security_open_items`)
+
+## 6. Documentation & Wiki Maintenance (MANDATORY)
+
+After the validation fan-out converges and Phase C has recorded implementation completion, you MUST bring the project's documentation wiki (`docs/`) back in sync with the code you just shipped. **Undocumented work is unfinished work**: the code is green and validated, but the knowledge base still describes the old world. This is the final act of the orchestrator.
+
+**Delegate — never document inline.** Documentation is the `p:wiki` skill's job, and `p:wiki` in turn delegates every operation to `p:minion-librarian`. You (the orchestrator) invoke `Skill(p:wiki, ...)` SEQUENTIALLY in the main context — exactly like the gated security deep-review in Section 4 (`Skill(p:security-review, ...)`). A `Skill(...)` call loads the wiki engine's instructions into the current context (it spawns no sub-agent itself); the wiki skill then fans out to the librarian. This respects the bounded-nesting contract (see `ARCHITECTURE.md`). NEVER open pages, rewrite prose, or verify anchors inline — that is the librarian's sandbox.
+
+### a. Determine the wiki state
+
+Detect which case applies before acting (if unsure, ask — do not guess and clobber):
+- **Live wiki** — `docs/` with an `INDEX.md` and pages carrying the schema frontmatter → run `ingest`.
+- **Un-onboarded docs** — `docs/` exists but is hand-written / not under the wiki schema → surface `/p:wiki adopt` to the user; do NOT silently `ingest` un-onboarded prose.
+- **No wiki** — no `docs/` wiki at all → surface `/p:wiki init` to the user; if they decline, record `documentation_updated: false` with a reason and stop.
+
+### b. Ingest the changes (live wiki)
+
+Invoke:
+
+```
+Skill(p:wiki, args="ingest <base-ref>")
+```
+
+- `<base-ref>` is the **SAME base** you used to scope the Section-4 fan-out target — the merge-base / branch base this implementation's diff is measured against (resolve via `git_call`). This tells the librarian exactly which changed files to map onto pages.
+- The librarian will: diff against the base, map changed files → pages via each page's `sources` frontmatter, rewrite affected prose, re-verify inline `path:symbol` anchors via the language MCP, bump `verified.commit` / `verified.date`, set `status: current`, and reindex — all in its own sandbox.
+
+### c. Handle the librarian's proposals
+
+The wiki skill returns the librarian's structured report; handle it exactly as `p:wiki` mandates:
+- **Applied Changes** (frontmatter bumps, prose updates, INDEX regen) — already done; relay the list, no action.
+- **Proposed Changes** — the librarian NEVER auto-creates or deletes pages. Significant changed files that map to NO page come back as `[PROPOSE-NEW-PAGE]`; destructive items as `[PROPOSE-DELETE]` / `[PROPOSE-SPLIT]` / `[PROPOSE-STATUS-DOWNGRADE]`. **Surface every proposal to the user and get explicit approval** before you (the main agent) execute a page creation or deletion via `purity_call`. This is the *documentation-creation* half of the request: new subsystems shipped by this implementation get new pages — but only with the user's sign-off, never silently.
+- **Findings / Self-check** — verify the librarian's self-check is honestly complete (per the `p:wiki` contract: anchors MCP-resolved, `reindex.py --check` and `freshness.py` clean, no silent body rewrites). Re-invoke with a follow-up if any item is unjustifiably unticked.
+
+### d. Record the outcome
+
+Append the documentation result to the same YAML completion record Phase C wrote (top-level metadata only — you never touch page bodies or task-status fields):
+- `documentation_updated: true` — or `false` with a `documentation_skipped_reason` (user deferred / no wiki / un-onboarded docs)
+- `documentation_pages_touched: [<slugs>]`
+- `documentation_open_items: [...]` — any `[PROPOSE-NEW-PAGE]` the user deferred, or anchors the librarian could not resolve
+
+Page prose is owned by the librarian; task status stays owned by the mason / `task-update.py` (Section 3.d). You only append the top-level documentation metadata, exactly as Phase C appends completion metadata.
+
+### e. Self-check (before declaring the implementation truly done)
+
+- [ ] I delegated documentation to `Skill(p:wiki, ...)` (→ `p:minion-librarian`) — I did NOT open or rewrite pages inline.
+- [ ] I passed the correct `<base-ref>` so the ingest was scoped to this implementation's diff.
+- [ ] I surfaced every `[PROPOSE-*]` item to the user and executed only the approved ones (via `purity_call`).
+- [ ] I verified the librarian's self-check (anchors MCP-resolved, reindex + freshness clean, no silent body rewrites).
+- [ ] The YAML carries `documentation_updated` (true, or false with a reason).
 
 # Error Recovery
 
@@ -305,6 +357,7 @@ If implementation is interrupted:
 - **Autonomous execution**: This command should work without user intervention for well-defined tasks
 - **Delegate iterative work — MANDATORY**: Task implementation goes through `p:minion-mason` (LSP context + forge build/test). The full-suite green-build gate goes through `p:minion-builder`. Bug investigation goes through `p:minion-watson`. Codebase understanding goes through `p:minion-explorer`. External research goes through `p:minion-web-explorer` or `p:minion-deep-researcher`. **Never write task code or run iterative loops inline in the main context** — this is the global CLAUDE.md rule and it is enforced here.
 - **Validate via the fan-out**: Section 4's validation fan-out (`p:minion-inspector-implementation` completeness lane + `p:minion-inspector-security-officer` security lane) is mandatory before declaring implementation complete. Per-task verification alone is not enough — it doesn't catch cross-task gaps, scope creep, plan deficiencies, or vulns introduced during coding.
+- **Document what you shipped (MANDATORY)**: Section 6 re-syncs the `docs/` wiki via `Skill(p:wiki, args="ingest <base>")` (→ `p:minion-librarian`) as the final step. Undocumented work is unfinished. New subsystems get new pages only with explicit user approval; NEVER write or edit page prose inline — that is the librarian's job.
 - **Scope discipline**: Plan gaps and unplanned changes surfaced by the inspector go to the user for decision, NOT silently into the code. Never expand scope without explicit authorization.
 - **Automatic task status tracking**: Each task is automatically marked as:
   - `in_progress` when the mason starts it (before implementation)
@@ -365,12 +418,19 @@ Phase C — Summary & YAML:
 ✓ All success criteria met
 ✓ requirements.yaml updated: implementation_complete=true, inspector_verdict=COMPLETE, security_verdict=APPROVE, validation_fan_out_rounds=1
 
+[Documentation & Wiki — Section 6]
+→ Skill(p:wiki, args="ingest master") → p:minion-librarian
+✓ 3 changed files mapped to 2 pages (websocket-protocol.md, api-reference.md); prose + anchors updated, INDEX reindexed
+⚠ [PROPOSE-NEW-PAGE] ping-pong-keepalive → surfaced to user → approved → page created
+✓ requirements.yaml: documentation_updated=true, documentation_pages_touched=[websocket-protocol, api-reference, ping-pong-keepalive]
+
 Implementation complete!
 Modified files: 2
 New files: 1
 Total tasks: 4
 Inspector iterations: 1
 Security iterations: 1
+Documentation: 2 pages updated, 1 created
 ```
 
 # Command Parameters

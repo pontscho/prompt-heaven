@@ -6,7 +6,7 @@ This document describes the complete workflow for implementing features using Cl
 
 1. **/p:feature-plan** → Discuss requirements interactively with ClaudeCode and save the plan to a markdown file
 2. **`/p:task-plan`** → Generates `requirements.yaml` (REQUIRED - this is the input for implementation)
-3. **`/p:implement`** → Executes tasks autonomously from `requirements.yaml`
+3. **`/p:implement`** → Executes tasks autonomously from `requirements.yaml`, then syncs the `docs/` wiki with the shipped code (via `/p:wiki ingest`) as its final step
 4. **Token exhausted?** → `/p:implement --continue` to resume
 
 **Key:** `/p:task-plan` creates the structured task list that `/p:implement` needs. You MUST run it between planning and implementation.
@@ -17,7 +17,7 @@ The workflow consists of four main phases:
 
 1. **Planning Phase** - `/p:feature-plan` interactive requirement gathering and implementation planning agent creates a detailed plan
 2. **Task Generation** - `/p:task-plan` creates `requirements.yaml` with structured task list (REQUIRED)
-3. **Implementation Phase** - `/p:implement` executes tasks autonomously using `requirements.yaml`
+3. **Implementation Phase** - `/p:implement` executes tasks autonomously using `requirements.yaml`, then documents the result by re-syncing the `docs/` wiki (`/p:wiki ingest`)
 4. **Resume on Interruption** - Continue from where you left off if token budget runs out
 
 ## Quick Start
@@ -227,6 +227,11 @@ Description: Create integration tests
 ✓ Tests passed (3/3)
 
 ✓ All success criteria met
+
+[Documentation & Wiki]
+✓ docs/ wiki synced (/p:wiki ingest): 2 pages updated
+⚠ new subsystem → [PROPOSE-NEW-PAGE] surfaced for approval
+
 Implementation complete!
 ```
 
