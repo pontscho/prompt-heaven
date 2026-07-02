@@ -35,7 +35,7 @@ core principle stated in `ClaudeCode/CLAUDE.md`.
 | `minion-inspector-security-officer.md` | OWASP/CWE security review (plan- and code-mode) |
 | `minion-web-explorer.md` | Single-shot external/web lookups |
 | `minion-deep-researcher.md` | Comprehensive web research (10-15 parallel queries) |
-| `implement-agent.md` | Autonomous task execution — the engine behind `/p:implement` |
+| `minion-mason.md` | Per-task build executor (LSP + forge) — the engine behind `/p:implement` |
 
 ## When each is used
 

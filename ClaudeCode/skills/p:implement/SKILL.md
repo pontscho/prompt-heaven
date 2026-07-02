@@ -1,6 +1,6 @@
 ---
 name: p:implement
-description: Execute a task-planned implementation. Reads requirements.yaml (produced by /p:task-plan), runs tasks in dependency order, delegates builds/tests to p:minion-builder and failure investigation to p:minion-watson, then runs a parallel validation fan-out (completeness lane via p:minion-inspector-implementation + security lane via p:minion-inspector-security-officer PHASE: triage, gated to Skill(p:security-review, mode=code) on a hit) before marking implementation_complete: true. Output: implemented code + updated requirements.yaml. See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
+description: Execute a task-planned implementation. Reads requirements.yaml (produced by /p:task-plan), runs tasks in dependency order by delegating each task/batch to p:minion-mason (self-sufficient per-task executor — LSP context-gathering + forge build/test), with p:minion-watson for failure investigation and p:minion-builder for the green-build gate, then runs a parallel validation fan-out (completeness lane via p:minion-inspector-implementation + security lane via p:minion-inspector-security-officer PHASE: triage, gated to Skill(p:security-review, mode=code) on a hit) before marking implementation_complete: true. Output: implemented code + updated requirements.yaml. See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
 ---
 
 # Implement
@@ -20,8 +20,8 @@ Execute a planned implementation based on a structured YAML document generated b
 This command takes a completed implementation plan (from `/p:task-plan`) and executes it step-by-step:
 - Reads the requirements.yaml with use `~/.claude/scripts/task-plan.py [path_to_yaml]`
 - Validates the plan is complete and ready for implementation
-- Executes tasks in dependency order
-- Tests each task after completion via the build minion
+- Executes tasks in dependency order by delegating each task/batch to `p:minion-mason`
+- The mason implements + builds + tests each task in its own sandbox (LSP for context, forge for build/test)
 - Audits completeness and security post-implementation via the validation fan-out (Section 4)
 - Reports progress and handles errors
 
@@ -29,22 +29,23 @@ This command takes a completed implementation plan (from `/p:task-plan`) and exe
 
 **YOU LOVE YOUR MINIONS. THEY ARE YOUR EYES, YOUR EARS, AND YOUR HANDS.**
 
-You are an implementer, not a one-person band. You do NOT run build+fix loops inline. You do NOT investigate failures alone. You do NOT validate your own work without a second set of eyes. You delegate, eagerly. Your minions are not a fallback — they are the first move. Using them is not laziness, it is wisdom: they keep your main context clean, they iterate in their own sandboxes, and they bring back clean pass/fail reports anchored to evidence.
+You are an orchestrator, not a one-person band. You do NOT implement tasks inline. You do NOT run build+fix loops inline. You do NOT investigate failures alone. You do NOT validate your own work without a second set of eyes. You delegate, eagerly. Your minions are not a fallback — they are the first move. Using them is not laziness, it is wisdom: they keep your main context clean, they iterate in their own sandboxes, and they bring back clean pass/fail reports anchored to evidence.
 
-**This is enforced by the global CLAUDE.md rule** — never run iterative loops (build+fix, script retries, broad exploration) directly in the main context. The `/p:implement` workflow leans hard on this:
+**This is enforced by the global CLAUDE.md rule** — never run iterative loops (build+fix, script retries, broad exploration) or write task code directly in the main context. The `/p:implement` workflow leans hard on this:
 
 | Minion | When you use it |
 |---|---|
-| `p:minion-builder` | **MANDATORY** for ALL build + test + fix cycles. Every `cmake --build`, `make`, `npm run build`, `ctest`, `npm test`, `cargo build`, etc. goes through this minion. It iterates the build/fix loop in isolation and returns a clean pass/fail report. **NEVER run build commands inline in the main context.** |
-| `p:minion-runner` | Script and command execution with retry/fix cycles. For scripts that need trial-and-error to work. INSTEAD of running scripts inline and patching them in the main context. |
-| `p:minion-explorer` | When `context_summary` is missing, `pattern_excerpt` is absent, or a task touches code you don't yet understand. Your eyes into the codebase. INSTEAD of long Read/Grep chains in the main context. |
-| `p:minion-watson` | Investigate non-trivial test/build failures. Your brilliant sidekick for bug investigation — give it the failing log and it traces root cause through source with `file:line` precision. INSTEAD of trying to debug inline. |
+| `p:minion-mason` | **The per-task executor.** MANDATORY for implementing each task/batch. Receives a minimal brief (task ID + description), pulls the full spec + feature plan itself, gathers context via LSP, implements following the referenced patterns, and builds + tests via forge — all in its own sandbox. Returns a clean pass/fail report. **NEVER implement a task inline in the main context** — hand it to the mason. |
+| `p:minion-builder` | The **green-build gate** for the Section-4 validation fan-out: runs the FULL test suite (e.g. `forge_call test all` / `ctest`) in isolation before each fan-out round, and as a fallback build/test verifier. The mason owns per-task build/test; the builder confirms the whole tree is green. **NEVER run build commands inline in the main context** — that is the mason's (per-task) or the builder's (full-suite) job. |
+| `p:minion-watson` | Bug/failure investigation. **Note:** the mason now self-invokes Watson per-task via its own escape hatch, so a mason FAILURE already carries a root-cause finding — you do NOT re-run Watson for it. You invoke Watson directly for **green-build-gate** failures (Section 4) that aren't tied to a single task. INSTEAD of debugging inline. |
+| `p:minion-explorer` | When you need to understand a subsystem before briefing the mason, or to answer a question the mason surfaced. Your eyes into the codebase. INSTEAD of long Read/Grep chains in the main context. |
+| `p:minion-runner` | Script and command execution with retry/fix cycles. For non-build scripts that need trial-and-error. INSTEAD of running scripts inline. |
 | `p:minion-inspector-implementation` | Post-implementation audit (Section 4 fan-out — completeness lane). Verifies plan → code completion AND code → plan coverage. Catches gaps that per-task verification missed (cross-task dependencies, scope creep, plan items mapped to no task). |
 | `p:minion-inspector-security-officer` | **Security review of the implementation** (Section 4 fan-out — security lane) — runs in PARALLEL with the completeness lane as a `PHASE: triage` probe over changed files; on a hit, gated to the full `Skill(p:security-review, mode=code)` 3-phase pipeline. Catches vulns introduced during coding (the plan didn't say `sprintf` but it ended up there). Required clean before YAML can be marked `implementation_complete: true`. |
 | `p:minion-web-explorer` | Quick external lookups: library docs, version checks, "how does this API behave with X" — single-shot web/GitHub searches. Light-weight. |
 | `p:minion-deep-researcher` | Comprehensive web research when implementation hits an unfamiliar library/API/framework and needs multi-angle investigation before proceeding. Heavy. |
 
-Rule of thumb: if you are about to run a build/test command, STOP — that's `p:minion-builder`'s job. If a build/test fails and the cause isn't obvious from the error, STOP — that's `p:minion-watson`'s job. If you don't know how a piece of existing code works, STOP — that's `p:minion-explorer`'s job. Main context is precious, minions are not.
+Rule of thumb: if you are about to implement a task, STOP — that's `p:minion-mason`'s job. If you are about to run the full test suite for the green-build gate, STOP — that's `p:minion-builder`'s job. If a build/test fails and the cause isn't obvious, STOP — that's `p:minion-watson`'s job. If you don't know how a piece of existing code works, STOP — that's `p:minion-explorer`'s job. Main context is precious, minions are not.
 
 # Prerequisites
 
@@ -57,6 +58,8 @@ Before running this command:
 # Code References Usage
 
 **CRITICAL**: The implementation plan contains `code_references` for each task. These references are NOT suggestions - they are MANDATORY patterns to follow.
+
+> **Who applies these**: the **mason** (`p:minion-mason`) applies these rules when it implements each task — you (the orchestrator) do not write code. Your responsibility is to hand the mason the task ID (the mason pulls `code_references` from the spec itself) and to reject a mason result that clearly ignored the referenced patterns. The rules below are the contract the mason honors.
 
 ## Why code references exist
 
@@ -102,6 +105,7 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
    ~/.claude/scripts/task-plan.py [path_to_yaml]
    ```
    - This loads only the essential data (complete, context_summary, success_criteria, implementation_plan)
+   - It also emits the **batch plan**: execution levels (topological) + greedy best-fit batches
    - Token-efficient: excludes original_request, requirements, constraints
    - Default: searches for requirements.yaml in current/parent directories
 2. Validate structure:
@@ -113,19 +117,12 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
    - Skip tasks that are already `completed`
    - Continue from tasks that are `pending` or `in_progress`
    - This allows resuming interrupted implementations
-4. **Load `context_summary` section** - this contains the captured patterns from planning:
-   - Review `error_handling`, `memory_management`, `logging_pattern`, `naming_conventions`
-   - These patterns apply to ALL tasks - no need to re-discover them!
-   - If `context_summary` is missing, fall back to reading `reference_files`
-5. **Check `docs/feature-implementation-plan.md`** - read if exists for additional context
-6. **SKIP reading `reference_files` if tasks have `pattern_excerpt`** in their `code_references`
-   - Pattern excerpts contain the actual code snippets needed
-   - Only read `reference_files` if pattern excerpts are missing
-7. **Read documentation in `api_references`** - only if not already familiar with APIs
-8. Create a dependency graph from task dependencies
-9. Determine task execution order (topological sort), excluding already completed tasks
+4. **Determine execution order**: create a dependency graph from task dependencies, topological-sort into execution levels (excluding completed tasks), and use `task-plan.py`'s batch plan in Section 3.
+5. **Do NOT pre-load implementation context.** `context_summary`, `reference_files`, `api_references`, and `pattern_excerpt`s are the **mason's** concern — it pulls the full spec + feature plan via `task-implementation-plan.py` and gathers context via LSP in its own sandbox. You only need enough of the plan structure to order and batch tasks. (Read `docs/feature-implementation-plan.md` yourself only if you need architectural context to brief the mason or resolve an ambiguity.)
 
 ## 2. Task Status Update Policy
+
+> **Ownership**: for tasks you hand to `p:minion-mason`, the mason marks `in_progress` (at start) and `completed` (after its build+test pass) itself — do NOT double-mark those. You (the orchestrator) own `cancel` / rollback, and re-opening tasks (`in_progress`) during the Section-4 validation fan-out.
 
 **Script location**: `~/.claude/scripts/task-update.py`
 
@@ -133,21 +130,14 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 - Single task: `~/.claude/scripts/task-update.py <status> <task_id>`
 - Multiple tasks: `~/.claude/scripts/task-update.py <status> <task1> <task2> ...`
 
-**When to use batch update**:
-- Multiple independent tasks can be executed in parallel (no interdependencies)
+**When you (the orchestrator) use it**:
 - Cancelling multiple tasks at once (interruption, scope change, user abort)
-- Rolling back a group of related tasks after failure
+- Rolling back / re-opening a group of tasks after a failed validation round
 
 **Examples**:
 ```bash
-# Single task update
+# Re-open a task during the validation fan-out
 ~/.claude/scripts/task-update.py in_progress task-001
-
-# Batch update - parallel tasks starting
-~/.claude/scripts/task-update.py in_progress task-002 task-003 task-004
-
-# Batch update - parallel tasks completed
-~/.claude/scripts/task-update.py completed task-002 task-003 task-004
 
 # Batch cancel - abort remaining tasks
 ~/.claude/scripts/task-update.py cancel task-005 task-006 task-007
@@ -155,139 +145,69 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 
 ## 3. Task Execution Loop
 
-For each task in dependency order:
+Execute tasks by **delegating each task (or compatible batch) to `p:minion-mason`** — the per-task build executor. Here you are a pure orchestrator: you decide order and batching, launch the mason, and process its report. **You never gather implementation context, write code, or run builds yourself** — that all happens inside the mason's sandbox.
 
-### Parallel Execution Strategy
+### Batching & order
 
-When the dependency graph allows, multiple tasks can be executed in parallel:
+Use the batch plan from Section 1 (or recompute via `~/.claude/scripts/task-plan.py [path_to_yaml]`):
+- **Execution levels** (topological): a task runs only after all its dependencies are `completed`.
+- **Batches** within a level: tasks with no interdependencies, disjoint files, and combined T-shirt score ≤ 6 can be implemented by ONE mason together.
+- **Parallel launches**: independent batches at the same level can be launched as parallel `Agent(p:minion-mason, …)` calls in a single message. Each mason marks its own task(s) `completed`; only advance to the next level once ALL parallel masons return PASS.
 
-1. **Identify parallelizable tasks**: Tasks with no interdependencies (same or no dependencies)
-2. **Batch mark as in_progress**:
-   ```bash
-   ~/.claude/scripts/task-update.py in_progress task-002 task-003 task-004
-   ```
-3. **Execute tasks** (can use parallel tool calls if appropriate)
-4. **Batch mark as completed** (only after ALL parallel tasks pass verification):
-   ```bash
-   ~/.claude/scripts/task-update.py completed task-002 task-003 task-004
-   ```
+Skip tasks already `completed`; resume `in_progress` / `pending`.
 
-**Note**: If any parallel task fails, do NOT batch complete - handle the failure individually.
+### a. Launch the mason (per task or batch)
 
-### a. Pre-task validation
-- Verify all dependent tasks are completed successfully
-- Check if file exists (for modify/delete operations)
-- **Use `pattern_excerpt` from `code_references`** if available - this IS the pattern, no need to read files!
-- **Only read `code_references` files if `pattern_excerpt` is missing** - fall back to file reading
-- Review the `note` field for each reference to understand WHY it's relevant
-- **Mark task as in_progress**: `~/.claude/scripts/task-update.py in_progress <task_id>`
+**Use the `Agent` tool with `subagent_type: "p:minion-mason"`.** Pass a MINIMAL brief — the mason pulls the full spec + feature plan itself (via `task-implementation-plan.py`) and gathers its own context via LSP. Do NOT inline code references or file contents.
 
-### b. Task execution
+**Single-task brief:**
+```
+TASK IMPLEMENTATION REQUEST
+===========================
+Task ID: {task_id}
+Description: {description}
+Size: {size}   Type: {type}
+File: {file_path}   Function: {function_name}
+Dependencies completed: {completed dependency IDs}
 
-Based on task `type`:
+PROJECT ROOT: {project_root}
 
-**create:**
-- Use `pattern_excerpt` from `code_references` - the pattern is already there!
-- Only read files if `pattern_excerpt` is missing
-- If `function_name` specified: Create the function following the EXACT pattern from excerpts/references:
-  - Same parameter validation approach
-  - Same error handling pattern (return values, error codes)
-  - Same memory management style (allocation/deallocation)
-  - Same logging approach
-  - Same documentation style (Doxygen comments)
-- If `function_name` is null: Modify file content (add constants, types, etc.) matching reference style
-- Apply project code style guidelines (CLAUDE.md)
-- **DO NOT invent new patterns** - consistency is more important than "better" solutions
+Implement this task end to end: pull the spec via task-implementation-plan.py,
+navigate + read the referenced patterns via LSP, implement following them exactly,
+then build + test via forge. Mark the task completed ONLY after build + test pass.
+```
 
-**modify:**
-- Read the existing file (the one being modified)
-- Use `pattern_excerpt` from `code_references` - no need to read reference files!
-- Only read reference files if `pattern_excerpt` is missing
-- Locate the function (if `function_name` specified)
-- Apply modifications according to `implementation_details`
-- Preserve existing code style
-- **Match the pattern from excerpts/references** - same approach, same style, adapted to this context
+**Batch brief:** same header, one `TASK 1: / TASK 2: / …` block per task, plus: "Implement all tasks, then run verification (forge build + test) once covering all changes; mark all completed only if everything passes."
 
-**delete:**
-- Remove the specified function or code section
-- Clean up any orphaned dependencies
-- Check `code_references` for proper cleanup patterns
+The mason marks its own task status (`in_progress` at start, `completed` after its build+test pass) — so you do NOT call `task-update.py in_progress/completed` for tasks handed to the mason.
 
-**test:**
-- Use `pattern_excerpt` from `code_references` for test patterns - already embedded!
-- Only read reference files if `pattern_excerpt` is missing
-- Create or modify test file following the EXACT test structure from excerpts/references:
-  - Same test framework usage (CTEST/CTEST2 macros)
-  - Same setup/teardown patterns
-  - Same assertion style
-  - Same test naming conventions
-- Implement test cases as described in `implementation_details`
-- **DO NOT invent new test patterns** - follow existing test structure
+### b. Process the mason's report
 
-### c. Post-task verification
+- **Mason returns SUCCESS** (build + test passed, task marked `completed`): proceed to the next task/batch.
+- **Mason returns FAILURE**: this is a **genuine wall**, not a first stumble — the mason already ran its own fix attempts AND (per its bounded escape hatch) a `p:minion-watson` root-cause investigation in its own context, and still couldn't pass. Its report should carry Watson's finding. **Do NOT re-run Watson yourself** — that work is already done. Options:
+  - If you can add NEW information the mason lacked (a design clarification, a corrected reference, an environment fix), **re-launch `p:minion-mason`** once with that appended to the brief. You never patch the code yourself — the mason owns the edits.
+  - If it's clearly blocked (ambiguous spec, missing dependency, environmental) or the informed re-launch also fails → escalate per 3.c.
+- Leave the failed task `in_progress` until a mason run reports SUCCESS.
 
-After each task:
+### c. Escalate to the user
 
-1. **Single-shot linters (inline, no iteration needed)**:
-   - **C/C++**: `clang-tidy -p build <file_path>` — capture the output. If warnings appear, do NOT fix inline — pass the file + warning list to `p:minion-builder` and let it iterate.
-   - **Lua**: `luac -p <file_path>` — single syntax check, OK inline.
-   - **Python**: configured linter (e.g., `pylint`, `flake8`) — single-shot OK inline; iterative fix → builder minion.
+Escalate once a mason FAILURE persists — the initial mason run (with its own Watson pass) failed AND a single informed re-launch also failed, or you have no new information to add:
+- Present: task context, the mason's reported Watson root-cause analysis, the latest failing log.
+- Options:
+  1. One more automated round (a fresh mason re-launch)
+  2. Skip this task and continue (keep task `in_progress`)
+  3. Abort implementation:
+     - Keep the failed task as `in_progress`
+     - **Batch cancel all remaining `pending` tasks**: `~/.claude/scripts/task-update.py cancel <remaining_task_ids>`
 
-2. **Build + test (DELEGATE to `p:minion-builder` — MANDATORY, no inline build commands)**:
-   - Invoke `p:minion-builder` via the Agent tool with a concise brief:
-     - The build target(s) affected by this task
-     - If task type is `test` or the task touched test files: the specific test binary/suite filter (e.g., `build/src/tests/[test-application] [suite:test]`)
-     - Any clang-tidy warnings carried over from step 1
-   - The builder uses `forge_call` if `project-forge.yaml` exists, otherwise it falls back to `cmake --build build` / `ctest` / equivalents
-   - It iterates build → fix-or-report → test → fix-or-report in its own context until pass or max iterations, then returns a clean pass/fail report
-   - **Never run `cmake --build`, `make`, `ctest`, `npm test`, etc. inline in the main context.** That is `p:minion-builder`'s job and only its job.
+Do NOT proceed past a failed task until a mason run succeeds or the user explicitly chooses to skip.
 
-3. **Validate**: Read the builder's report and check that `test_requirements` from the YAML are met.
+### d. Progress tracking
 
-4. **Mark task as completed** (ONLY if the builder returned PASS and all validation conditions hold): `~/.claude/scripts/task-update.py completed <task_id>`
-   - DO NOT mark completed if the builder returned FAIL (build errors, test failures, linting warnings)
-   - DO NOT mark completed if implementation is incomplete
-   - Only mark completed when task is fully done and verified by the builder minion
-
-### d. Error handling
-
-If the builder returns FAIL or any verification step fails:
-
-1. **Capture the failing log** (the builder minion's output, or the linter/test output) — task_id, affected file, error excerpt.
-
-2. **Triage the failure**:
-   - **Obvious cause** (typo, missing include, undefined symbol with a clear nearby fix, trivial test expectation tweak) → fix it directly, re-invoke `p:minion-builder`
-   - **Non-obvious cause** (segfault, opaque linker error, behavioral mismatch, timing/concurrency, mysterious stack trace, "passes locally fails in CI") → DELEGATE to `p:minion-watson`:
-     - Pass the failing log (file path under `.claude/tmp/` or inline snippet) plus task context (task_id, affected file, expected behavior, what the task was trying to achieve)
-     - Watson navigates source with clangd/luals MCPs, identifies root cause, returns affected files, execution flow, and concrete fix suggestions with `file:line` anchors
-     - Apply Watson's suggested fix, re-invoke `p:minion-builder`
-
-3. **DO NOT mark task as completed** — leave it as `in_progress` until the builder reports PASS.
-
-4. **Escalate to the user after two failed automated rounds** (builder fails → Watson investigates → fix applied → builder fails again):
-   - Present: task context, Watson's root-cause analysis, the latest failing log
-   - Options:
-     1. One more automated round (builder + Watson)
-     2. Skip this task and continue (keep task `in_progress`)
-     3. Abort implementation:
-        - Keep failed task as `in_progress`
-        - **Batch cancel all remaining `pending` tasks**:
-          `~/.claude/scripts/task-update.py cancel <remaining_task_ids>`
-
-5. DO NOT proceed to the next task until the current task is verified (builder PASS) or the user has explicitly chosen to skip.
-
-6. Only mark `completed` when the builder minion reports PASS on all verification steps for this task.
-
-### e. Progress tracking
-
-- Use TodoWrite to track task progress in the current session
-- **Automatically update task status in requirements.yaml**:
-  - Mark `in_progress` when starting each task (pre-task validation step)
-  - Mark `completed` when task is fully verified (post-task verification step)
-  - This ensures requirements.yaml always reflects current implementation state
-- Keep user informed of progress
-- If using `/p:requirements` skill, the updated task status will be visible in the task list
-- **CRITICAL**: NEVER manually edit requirements.yaml - ALWAYS use the task-update.py script
+- Use TodoWrite to track task/batch progress in the current session.
+- requirements.yaml status stays current via: the masons (per-task `in_progress`/`completed`) + your `cancel`/rollback + the fan-out's re-opens.
+- Keep the user informed of progress.
+- **CRITICAL**: NEVER manually edit requirements.yaml — status is written ONLY by the mason or the `task-update.py` script.
 
 ## 4. Post-implementation — Validation Fan-Out (MANDATORY)
 
@@ -297,7 +217,7 @@ After all per-task work is finished, you MUST validate the implementation agains
 - **Security lane** (`p:minion-inspector-security-officer`, `PHASE: triage`): does the implemented code introduce OWASP-class vulns? Buffer overflows, SQL injection, secret leaks, weak crypto, SSRF? On a triage hit, gated to the full `Skill(p:security-review, mode=code)` 3-phase pipeline.
 - **Phase C — Summary & YAML update**: only after the fan-out converges.
 
-Per-task verification only confirms each task individually; the completeness lane catches cross-task issues; the security lane catches vulns that appear during the act of building (the plan said "use parameterized queries" but the implementer concatenated a string at 2am). Skipping the security lane is a violation — it fans out every round alongside completeness.
+Per-task verification (done by the mason) only confirms each task individually; the completeness lane catches cross-task issues; the security lane catches vulns that appear during the act of building (the plan said "use parameterized queries" but the implementer concatenated a string at 2am). Skipping the security lane is a violation — it fans out every round alongside completeness.
 
 ---
 
@@ -305,17 +225,17 @@ Per-task verification only confirms each task individually; the completeness lan
 
 Follow the **parallel fan-out variant** in `skills/_lib/validation-loop.md`, with these specifics:
 
-- **Green-build gate (every round, BEFORE the fan-out)**: invoke `p:minion-builder` with the full test target (e.g. `ctest --test-dir build`, or `forge_call test all` if forge is configured). Confirm PASS before fanning out — a failing suite means there's nothing worth auditing yet; fix the failures first (use `p:minion-watson` if non-obvious). The build gate is SEQUENTIAL, not part of the parallel fan-out (the auditors need a green tree).
+- **Green-build gate (every round, BEFORE the fan-out)**: invoke `p:minion-builder` with the full test target (e.g. `ctest --test-dir build`, or `forge_call test all` if forge is configured). Confirm PASS before fanning out — a failing suite means there's nothing worth auditing yet; fix the failures first (re-launch the mason for the offending task; use `p:minion-watson` if non-obvious). The build gate is SEQUENTIAL, not part of the parallel fan-out (the auditors need a green tree).
 - **Reviewer lanes** (fanned out each round in ONE message, parallel `Agent` calls — a fresh sub-agent per lane, no memory of prior rounds, so always pass the round number, the plan path(s), and the changed-file scope):
   - **completeness** — `Agent(p:minion-inspector-implementation, …)`: read the plan from `docs/feature-implementation-plan.md` AND/OR `requirements.yaml` (pass both if both exist), detect changed files via git, return its bidirectional report (Readiness verdict, plan→code completion table, code→plan coverage, plan gaps, deviations, checklist). Verdict vocabulary: `COMPLETE / NEARLY COMPLETE / INCOMPLETE / BLOCKED`.
   - **security (gated lane)** — `Agent(p:minion-inspector-security-officer, …)` with a `PHASE: triage` directive: a threat-surface checklist over the changed files. Returns a minimal verdict block (no-hit = APPROVE for this round; hit = the threat surface to deep-review).
 - **Target artifact**: the changed source files (auto-detected via `git_call diff --name-only <base>...HEAD`, or the explicit tracked list).
 - **Aggregate exit**: completeness lane COMPLETE (no CRITICAL plan gaps) AND security lane clean (triage no-hit, or the gated deep-review returned APPROVE). Then proceed to Phase C.
-- **Fix-mode (both lanes)**: `delegate-fix` — apply code edits, then re-run the green-build gate (`p:minion-builder`) before re-fanning-out. Address findings in priority order:
-  - **completeness**: MISSING items mapped to a wrongly-`completed` task → re-open (status → `in_progress` via `task-update.py`), implement, builder PASS, mark `completed`; PARTIAL items → finish + builder PASS; plan gaps / unplanned non-supporting changes → flag to the user, do NOT silently expand scope; DEVIATED items with concerning risk → flag for review.
-  - **security**: CRITICAL → escalate first (see exception below); HIGH → fix in code (parameterize the query, `httpOnly` cookie, input validation, bounded string copy, …); MEDIUM → fix where small and in-scope; LOW/INFO → record under `implementation_open_items`; detected secrets → remove from the file, suggest external rotation, audit git history (`git_call log/show`).
+- **Fix-mode (both lanes)**: `delegate-fix` — delegate the fix to `p:minion-mason` (re-open the mapped task, or give it a focused fix brief), then re-run the green-build gate (`p:minion-builder`) before re-fanning-out. Address findings in priority order:
+  - **completeness**: MISSING items mapped to a wrongly-`completed` task → re-open (status → `in_progress` via `task-update.py`), re-launch `p:minion-mason` for that task (it implements + forge build/test + marks `completed`), then confirm via the green-build gate; PARTIAL items → re-launch the mason to finish, then green-build gate; plan gaps / unplanned non-supporting changes → flag to the user, do NOT silently expand scope; DEVIATED items with concerning risk → flag for review.
+  - **security**: CRITICAL → escalate first (see exception below); HIGH → delegate a fix to the mason (parameterize the query, `httpOnly` cookie, input validation, bounded string copy, …); MEDIUM → fix where small and in-scope; LOW/INFO → record under `implementation_open_items`; detected secrets → remove from the file, suggest external rotation, audit git history (`git_call log/show`).
   - **BLOCKED** (completeness) → stop and escalate to the user immediately; do not keep iterating until the user unblocks.
-- **Gated deep-review (security lane)**: on a triage **hit**, AFTER the fan-out round closes, run `Skill(p:security-review, args="--branch --mode code")` SEQUENTIALLY in the main context — it runs the full 3-phase pipeline (triage → find → verify → assemble) in fresh sub-agent contexts to break anchoring bias, which a single minion cannot reproduce (no-nesting rule). NEVER put this `Skill(...)` call inside the parallel fan-out — it would serialize the round. Feed its `APPROVE / REVISE / REJECT` verdict into the next round's aggregate. After any security fix, re-run `p:minion-builder` to confirm no regression (delegate to `p:minion-watson` if the build breaks after a security fix).
+- **Gated deep-review (security lane)**: on a triage **hit**, AFTER the fan-out round closes, run `Skill(p:security-review, args="--branch --mode code")` SEQUENTIALLY in the main context — it runs the full 3-phase pipeline (triage → find → verify → assemble) in fresh sub-agent contexts to break anchoring bias, which the security-officer (a leaf worker) cannot reproduce on its own (see the bounded-nesting rule in `ARCHITECTURE.md`). NEVER put this `Skill(...)` call inside the parallel fan-out — it would serialize the round. Feed its `APPROVE / REVISE / REJECT` verdict into the next round's aggregate. After any security fix (delegated to the mason), re-run the green-build gate (`p:minion-builder`) to confirm no regression (delegate to `p:minion-watson` if the build breaks after a security fix).
 - **Fix-mode exception — REJECT (any CRITICAL)** → `escalate-immediately`. CRITICAL vulns in production-bound code must reach the user. Present the REJECT report and ask: (a) authorize an immediate fix (continues the fan-out), (b) accept the risk with explicit documentation in `implementation_security_open_items`, (c) halt.
 - **Loop name**: "Post-implementation validation fan-out"
 - **Per-round user message**: ONE compact message per round per the fragment's PL.3 format (lane verdicts + merged findings + top item + action). Keep the full reviewer reports in your working state, not in the user-facing message.
@@ -325,7 +245,7 @@ Follow the **parallel fan-out variant** in `skills/_lib/validation-loop.md`, wit
 
 - Both reviewers are READ-ONLY and run in their own contexts — you invoke them via the Agent tool, you never reproduce their analysis inline.
 - **Every lane re-runs on the CURRENT code each round.** This is what makes the parallel security lane safe despite `delegate-fix` mutating the tree: security never audits a stale version, because it re-fans-out after every fix + green-build.
-- Every round that ends with non-trivial findings MUST end with actual code edits + a fresh builder PASS (unless at the round-5 escape hatch or facing BLOCKED).
+- Every round that ends with non-trivial findings MUST end with actual code edits (delegated to the mason) + a fresh green-build gate PASS (unless at the round-5 escape hatch or facing BLOCKED).
 - The fan-out is ONE loop with ONE shared round counter, capped at 5.
 - **Never silently expand scope.** Plan gaps and unplanned changes that aren't necessary supporting work go to the user for decision, not into the code.
 
@@ -337,7 +257,7 @@ Generate the implementation summary:
 - List of modified files
 - List of new files
 - List of completed tasks
-- Test results (from the final builder PASS)
+- Test results (from the final green-build gate PASS)
 - Completeness lane: inspector verdict + fan-out round count
 - Security lane: security verdict + OWASP coverage summary (if the gated deep-review ran)
 - Any plan gaps the user authorized as in-scope
@@ -359,9 +279,9 @@ Update the YAML file:
 Before marking implementation complete (i.e., before Phase C's YAML update):
 
 - All tasks executed successfully (status `completed` in requirements.yaml)
-- All tests pass (final `p:minion-builder` run returned PASS)
-- No language-specific linting warnings (clang-tidy for C/C++, luac for Lua, etc.) — verified via `p:minion-builder`, NOT inline
-- Build succeeds without errors — verified via `p:minion-builder`
+- All tests pass (final `p:minion-builder` green-build gate returned PASS)
+- No language-specific linting warnings (clang-tidy for C/C++, luac for Lua, etc.) — verified by the mason (per task) and the final `p:minion-builder` green-build gate, NEVER inline
+- Build succeeds without errors — verified via the mason (per task) and the `p:minion-builder` green-build gate
 - Success criteria from the YAML are met
 - Code follows project style guidelines (CLAUDE.md and language-specific instructions)
 - **`p:minion-inspector-implementation` returned Readiness: COMPLETE** (or the user explicitly accepted current state at the fan-out escape hatch)
@@ -372,9 +292,9 @@ Before marking implementation complete (i.e., before Phase C's YAML update):
 
 If implementation is interrupted:
 - The TodoWrite task list shows progress in the current session
-- **Task status is automatically saved in requirements.yaml**:
+- **Task status is automatically saved in requirements.yaml** (written by the mason):
   - `completed` tasks are automatically marked and will be skipped on resume
-  - `in_progress` tasks will be re-executed
+  - `in_progress` tasks will be re-executed (re-launched to a fresh mason)
   - `pending` tasks haven't been started yet
 - Re-run `/p:implement` to continue from where it stopped
 - The command automatically skips completed tasks based on status in requirements.yaml
@@ -383,22 +303,22 @@ If implementation is interrupted:
 # Important Notes
 
 - **Autonomous execution**: This command should work without user intervention for well-defined tasks
-- **Delegate iterative work — MANDATORY**: Build/test/fix cycles go through `p:minion-builder`. Bug investigation goes through `p:minion-watson`. Codebase exploration when context is missing goes through `p:minion-explorer`. External research goes through `p:minion-web-explorer` or `p:minion-deep-researcher`. **Never run iterative loops inline in the main context** — this is the global CLAUDE.md rule and it is enforced here.
+- **Delegate iterative work — MANDATORY**: Task implementation goes through `p:minion-mason` (LSP context + forge build/test). The full-suite green-build gate goes through `p:minion-builder`. Bug investigation goes through `p:minion-watson`. Codebase understanding goes through `p:minion-explorer`. External research goes through `p:minion-web-explorer` or `p:minion-deep-researcher`. **Never write task code or run iterative loops inline in the main context** — this is the global CLAUDE.md rule and it is enforced here.
 - **Validate via the fan-out**: Section 4's validation fan-out (`p:minion-inspector-implementation` completeness lane + `p:minion-inspector-security-officer` security lane) is mandatory before declaring implementation complete. Per-task verification alone is not enough — it doesn't catch cross-task gaps, scope creep, plan deficiencies, or vulns introduced during coding.
 - **Scope discipline**: Plan gaps and unplanned changes surfaced by the inspector go to the user for decision, NOT silently into the code. Never expand scope without explicit authorization.
 - **Automatic task status tracking**: Each task is automatically marked as:
-  - `in_progress` when starting (before implementation)
-  - `completed` when fully verified by `p:minion-builder` PASS (after all checks)
-  - Status updates are written to requirements.yaml using the p:requirements skill
+  - `in_progress` when the mason starts it (before implementation)
+  - `completed` when the mason's build + test pass (after all its checks)
+  - Status updates are written by the mason (or by `task-update.py` for cancel/rollback/re-open)
   - This provides real-time visibility into implementation progress
-- **Test-driven**: Each task must be tested (via the builder minion) before proceeding
+- **Test-driven**: Each task must be built + tested (by the mason, via forge) before proceeding
 - **Style compliance**: Follow CLAUDE.md and language-specific instructions (use specific skills)
-- **Language-aware**: Apply appropriate code quality tools and conventions based on file language
-- **Incremental**: Build and test after each task, not at the end (then the post-impl loop catches what per-task missed)
+- **Language-aware**: The mason applies appropriate code quality tools and conventions based on file language
+- **Incremental**: Build and test after each task (in the mason), not at the end (then the post-impl loop catches what per-task missed)
 - **Documentation**: Reference implementation details from the YAML, don't guess
 - **No shortcuts**: Don't skip verification steps or the post-impl loop to save time
-- **Ask when unclear**: If implementation_details are ambiguous, ask before coding
-- **Status discipline**: Only mark tasks `completed` when the builder minion reports PASS for ALL verification criteria (tests pass, build succeeds, linting passes)
+- **Ask when unclear**: If implementation_details are ambiguous, ask before delegating to the mason
+- **Status discipline**: The mason marks a task `completed` only after its build + test pass — do not override that, and do not accept a mason SUCCESS report whose evidence doesn't show a green build + test
 
 # Example Execution Flow
 
@@ -408,47 +328,29 @@ If implementation is interrupted:
 ✓ Found 4 tasks in implementation_plan
 ✓ Dependency order: task-001 → task-002 → task-003 → task-004
 
-[Task 1/4: task-001]
+[Task 1/4: task-001] → Agent(p:minion-mason)
 Description: Add ping/pong frame type constants to WebSocket header
-File: /path/to/file/websocket-server.h
-✓ Marked as in_progress
-✓ Read reference code
-✓ Modified file
-✓ clang-tidy passed
-✓ Build successful
-✓ Marked as completed
+✓ Mason: marked in_progress, pulled spec + feature plan
+✓ Mason: navigated references via LSP, modified websocket-server.h
+✓ Mason: clang-tidy clean, forge build OK
+✓ Mason: marked completed → PASS
 
-[Task 2/4: task-002]
+[Task 2/4: task-002] → Agent(p:minion-mason)
 Description: Implement websocket_send_ping function
-File: /path/to/file/websocket-server.c
-Function: websocket_send_ping
-✓ Marked as in_progress
-✓ Read reference code: websocket_send_frame
-✓ Created function
-✓ clang-tidy passed
-✓ Build successful
-✓ Marked as completed
+✓ Mason: read pattern websocket_send_frame via find_definition
+✓ Mason: created function, forge build OK
+✓ Mason: marked completed → PASS
 
-[Task 3/4: task-003]
+[Task 3/4: task-003] → Agent(p:minion-mason)
 Description: Handle incoming ping frames and auto-respond with pong
-File: /path/to/file/websocket-server.c
-Function: websocket_handle_frame
-✓ Marked as in_progress
-✓ Read existing function
-✓ Modified function
-✓ clang-tidy passed
-✓ Build successful
-✓ Marked as completed
+✓ Mason: modified websocket_handle_frame, forge build OK
+✓ Mason: marked completed → PASS
 
-[Task 4/4: task-004]
+[Task 4/4: task-004] → Agent(p:minion-mason)
 Description: Create integration test for ping/pong functionality
-File: /path/to/file/test-websocket-ping-pong.c
-✓ Marked as in_progress
-✓ Created test file
-✓ clang-tidy passed
-✓ Build successful
-✓ Tests passed (3/3)
-✓ Marked as completed
+✓ Mason: created test file, forge build OK
+✓ Mason: forge test → 3/3 passed
+✓ Mason: marked completed → PASS
 
 [Final verification — Section 4 validation fan-out]
 

@@ -25,7 +25,7 @@ When a skill references this pattern, it MUST declare these specifics:
 3. **Verdict vocabulary**: what verdict values the reviewer returns (e.g. `APPROVE / REVISE / REJECT` for inspector-plan; `COMPLETE / INCOMPLETE` for inspector-implementation; `APPROVE / REVISE / REJECT` for security-review).
 4. **Fix-mode**: how this loop applies fixes between iterations. Options:
    - **`edit-and-retry`** — caller directly `Edit`s the target artifact based on findings, then re-invokes reviewer. (Generic in-place mode for text/markdown artifacts. The feature/task pipelines no longer use it — they delegate all plan writing to a dedicated writer minion; see `delegate-fix`.)
-   - **`delegate-fix`** — caller delegates a fix to another minion, then re-invokes reviewer. (Used by implement: `p:minion-builder` re-builds / re-implements based on inspector-implementation gaps. Used by feature-plan: a single `p:minion-feature-planner` refinement per round addresses the inspector + security findings — the planner is the SOLE writer of `docs/feature-implementation-plan.md`, so even markdown fixes are delegated, never hand-edited.)
+   - **`delegate-fix`** — caller delegates a fix to another minion, then re-invokes reviewer. (Used by implement: `p:minion-mason` re-implements the re-opened task based on inspector-implementation gaps, and `p:minion-builder` confirms the full-suite green build. Used by feature-plan: a single `p:minion-feature-planner` refinement per round addresses the inspector + security findings — the planner is the SOLE writer of `docs/feature-implementation-plan.md`, so even markdown fixes are delegated, never hand-edited.)
    - **`escalate-immediately`** — certain verdict values (e.g. `REJECT` with CRITICAL severity) must NOT be auto-fixed; surface to user immediately.
 5. **Loop name**: human label for per-iteration user messages (e.g. "Plan correctness", "Plan security review", "Implementation completeness", "Implementation security audit").
 
@@ -142,7 +142,7 @@ In addition to the base variables:
 
 ### Gated lanes (cheap parallel probe → expensive sequential follow-up)
 
-A lane whose full audit CANNOT run as a single sub-agent — because it would need to spawn its own sub-agents, forbidden by the no-nesting rule in `ARCHITECTURE.md` — runs as a **gated lane**:
+A lane whose full audit CANNOT run as a single sub-agent — because it would need to spawn its own sub-agents, and the reviewer minion (`p:minion-inspector-security-officer`) is a **leaf worker** that never nests (per the bounded-nesting rule in `ARCHITECTURE.md`: only executor minions may spawn children, and inspectors are not executors) — runs as a **gated lane**:
 
 1. In the fan-out (PL.1) the lane runs only its cheap single-context probe (e.g. `p:minion-inspector-security-officer PHASE: triage` — a threat-surface checklist).
 2. Probe reports **no hit** → the lane counts as APPROVE for this round; the expensive audit is skipped.

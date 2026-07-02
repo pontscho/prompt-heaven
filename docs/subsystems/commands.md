@@ -33,7 +33,6 @@ a command defines an *executable multi-step workflow*.
 | `/p:analyze-subsystem` | Architecture analysis of a multi-module component |
 | `/p:analyze-api` | Public API reference documentation |
 | `/p:project-explore` | Quick project-structure overview |
-| `/p:builder` | Build + test command workflow |
 | `/p:checkpoint` | Session checkpoint / resume |
 | `/p:deep-research` | Comprehensive multi-angle web research |
 | `/p:spec-design` | Specification / design document authoring |
@@ -41,6 +40,6 @@ a command defines an *executable multi-step workflow*.
 ## The core workflow
 
 The primary chain is `/p:feature-plan` -> `/p:task-plan` (emits
-`requirements.yaml`) -> `/p:implement`. The implement command is backed by the
-`implement-agent` minion documented in [[agents]], and the `task-*.py`
+`requirements.yaml`) -> `/p:implement`. The implement command delegates each
+task to the `minion-mason` executor documented in [[agents]], and the `task-*.py`
 utilities in [[scripts]] operate on the same `requirements.yaml`.

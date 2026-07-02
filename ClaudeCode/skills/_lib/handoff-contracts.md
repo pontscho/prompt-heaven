@@ -87,9 +87,9 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
   - On open items at escape hatch: `implementation_open_items: [...]` and/or `implementation_security_open_items: [...]`
 
 **Side effects:**
-- Source code modifications (Edit / Write tools)
-- Test execution via `p:minion-builder`
-- Failure investigation via `p:minion-watson`
+- Source code modifications — delegated to `p:minion-mason` (per task; the orchestrator never edits code inline)
+- Per-task build + test via `p:minion-mason` (forge); full-suite green-build gate via `p:minion-builder`
+- Failure investigation via `p:minion-watson` — invoked by the mason per-task (bounded escape hatch), and by the orchestrator for green-build-gate failures
 
 **Validation:** runs a parallel validation fan-out before setting `implementation_complete: true` — completeness lane (`p:minion-inspector-implementation`) + security lane (`p:minion-inspector-security-officer` `PHASE: triage`, gated to `Skill(p:security-review, mode=code)` on a hit). See `_lib/validation-loop.md` § Parallel fan-out variant.
 

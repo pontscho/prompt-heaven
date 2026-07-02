@@ -7,10 +7,10 @@ This document is the **canonical rulebook** for how skills, agents, and fragment
 | Layer | Filesystem location | Runtime role | Tools it can have | How it gets invoked |
 |---|---|---|---|---|
 | **Skill** (= command) | `skills/p:<name>/SKILL.md` | Active orchestrator. Runs in the **main conversation context** (or in whatever context invoked it via the `Skill` tool). Can call sub-agents via the `Agent` tool. | All tools the host context has (incl. `Agent`, `Skill`, `Edit`, `Write`, MCPs). | User typed `/p:<name>` in the CLI, **or** another skill called `Skill(p:<name>, args=...)`. |
-| **Agent** (minion) | `agents/p/minion-<name>.md` | Worker. Runs in an **isolated sub-agent context**. Single-purpose. **Does NOT call further sub-agents** — sub-agent nesting is unsupported by the harness. | Only what the worker needs (`Read`, MCPs, etc.). NEVER `Agent` or `Skill`. | Only via `Agent(p:minion-<name>, ...)` from a skill or the main context. |
+| **Agent** (minion) | `agents/p/minion-<name>.md` | Worker. Runs in an **isolated sub-agent context**. Single-purpose. Two tiers: a **leaf worker** NEVER spawns sub-agents; an **executor minion** MAY spawn leaf workers (bounded — see below). | Only what the worker needs (`Read`, MCPs, etc.). Leaf workers: NEVER `Agent`. Executor minions: MAY list `Agent` (children must be leaf workers). `Skill` permitted for both (loads instructions into the current context; spawns nothing). | Via `Agent(p:minion-<name>, ...)` from a skill, the main context, or (leaf children only) an executor minion. |
 | **Fragment** (`_lib`) | `skills/_lib/<topic>.md` | Passive knowledge snippet. Not user-callable. | n/a | Other skills reference it textually: *"follow the pattern in `_lib/<topic>.md`"*. Loaded into context only when the skill that points to it is loaded. |
 
-**Why no nesting:** Anthropic's `subagents.md` only documents one-level delegation. Cost/context for grandchild calls is not transparent. The harness may technically allow it, but it's unsupported territory. **All orchestration happens in main context (or skill body).** Workers stay workers.
+**Bounded nesting (depth-2 max).** Sub-agent nesting was long treated as unsupported; it is now **verified working in this harness to ≥3 levels** (verified 2026-07, incl. a custom minion with an `Agent` grant spawning a leaf child). We nonetheless cap it deliberately. An **executor minion** — a worker that carries a unit of production work end-to-end, currently ONLY `p:minion-mason` — MAY spawn **leaf workers** to offload token-heavy sub-tasks (bug investigation, codebase exploration) and keep its own context lean. Its children MUST be leaf workers, so the chain is `main/skill → executor → leaf → (stop)`: a hard **depth-2 ceiling**. This bounds exactly the cost/context-opacity the original no-nesting rule guarded against. **Everything that is not a designated executor stays a leaf** — planners, inspectors, reviewers, verifiers, builder, runner, explorer, watson, and all other minions NEVER spawn sub-agents. Orchestration of *workflows* still lives in skill/main context, never inside a minion.
 
 ## Skill vs Agent — when to pick which
 
@@ -49,7 +49,7 @@ mcpServers: [<list of required MCPs>]
 ---
 ```
 
-Agents MUST NOT list `Agent` in their `tools:` — see the no-nesting rule above. `Skill` is permitted because the `Skill` tool only loads instructions into the *current* context (no new sub-agent is spawned), so it does not breach the nesting rule — a minion may legitimately invoke a passive instruction skill to specialize its own behavior. Use sparingly.
+**Leaf-worker** agents MUST NOT list `Agent` in their `tools:`. Only a designated **executor minion** may list `Agent`, and then ONLY to spawn leaf workers from a declared allowlist (see the bounded-nesting rule above) — currently `p:minion-mason` is the sole executor (allowlist: `p:minion-watson`, `p:minion-explorer`). `Skill` is permitted for any minion because the `Skill` tool only loads instructions into the *current* context (no new sub-agent is spawned), so it does not breach the nesting rule — a minion may legitimately invoke a passive instruction skill to specialize its own behavior. Use sparingly.
 
 ## Phase / Step nomenclature — stop the overloading
 
@@ -76,7 +76,7 @@ Changing any of these without updating `handoff-contracts.md` is a violation.
 
 ### Round-0 perspective fan-out (feature-plan)
 
-`/p:feature-plan` authors its plan through a **judge-panel** pattern, fully within the no-nesting contract (all fan-out happens in the skill body; workers stay leaf workers):
+`/p:feature-plan` authors its plan through a **judge-panel** pattern, fully within the bounded-nesting contract (all fan-out happens in the skill body; the planner workers are leaves and never spawn children):
 
 1. The skill fans out N parallel `Agent(p:minion-feature-planner, …)` calls (default `mvp-first` / `risk-first` / `maintainability-first`), each in *perspective mode* with a distinct `assigned_perspective` and `output_path` → one `.claude/tmp/plan-perspective-<slug>.md` draft per lens.
 2. The skill judges the drafts in main context, picks the strongest base, and invokes the planner ONCE more in *canonical mode* to synthesize the single `docs/feature-implementation-plan.md`. The planner is the SOLE writer — no other actor writes or edits the plan.
@@ -109,7 +109,7 @@ Never run-fix-retry, explore-explore-explore, or self-validate inline in a skill
 
 ## Anti-patterns — do not introduce
 
-- **Sub-agent → sub-agent calls.** Forbidden by the harness contract. Orchestrate from main / skill context.
+- **Unbounded or lateral sub-agent nesting.** A leaf worker spawning any sub-agent; an executor spawning a non-leaf (another executor, an inspector, or a full skill pipeline); or any chain deeper than `main/skill → executor → leaf`. Bounded depth-2 executor→leaf nesting IS allowed (see the bounded-nesting rule); anything beyond it is forbidden. Orchestrate workflows from main / skill context.
 - **Two skills doing the same thing.** Pick one canonical skill, have the other invoke it via `Skill(...)`. The security review is the canonical example: one implementation, three entry points.
 - **Mixing "Phase" semantics.** If your file uses "Phase" for both linear steps and validation loops, rename the linear ones to "Step".
 - **Inline duplication of the validation loop.** If you find yourself writing "iterate up to 5 times, escape hatch, fix and re-run", reference `_lib/validation-loop.md` instead.
