@@ -728,6 +728,26 @@ def handle_insert_at_line(params: dict, project_root: str, strict: bool = False)
     return {"__raw_text__": f"Inserted at line {line_num} in {rel}"}
 
 
+# Extensions treated as "source code" by `restrict_search_to_code_files`.
+# Serena had this as a single boolean backed by the project's configured
+# language; purity is polyglot, so we approximate with a broad source-file
+# set. Docs/data/config (.md, .json, .yaml, .txt, ...) are deliberately
+# excluded — that is exactly what callers restrict AWAY from.
+CODE_FILE_EXTENSIONS = frozenset({
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".m", ".mm",
+    ".cu", ".cuh", ".py", ".pyi", ".lua", ".js", ".jsx", ".mjs", ".cjs",
+    ".ts", ".tsx", ".go", ".rs", ".java", ".kt", ".kts", ".scala", ".swift",
+    ".rb", ".php", ".pl", ".pm", ".sh", ".bash", ".zsh", ".cs", ".fs",
+    ".hs", ".ml", ".mli", ".ex", ".exs", ".erl", ".clj", ".dart", ".r",
+    ".sql", ".vim", ".el", ".tcl", ".groovy", ".gradle",
+})
+
+
+def _is_code_file(name: str) -> bool:
+    """True if `name` has a source-code extension (see CODE_FILE_EXTENSIONS)."""
+    return pathlib.Path(name).suffix.lower() in CODE_FILE_EXTENSIONS
+
+
 def handle_search_for_pattern(params: dict, project_root: str, strict: bool = False) -> dict:
     pattern_str = params.get("substring_pattern")
     if not pattern_str:
@@ -770,6 +790,10 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
 
     max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
     skip_ignored = _bool_param(params.get("skip_ignored_files", True))
+    # Serena-compat: when true, restrict the scan to source-code files
+    # (CODE_FILE_EXTENSIONS) and skip docs/data/config. Default false =
+    # search everything, matching Serena's default.
+    code_only = _bool_param(params.get("restrict_search_to_code_files", False))
 
     _check_regex_len(pattern_str, "substring_pattern")
 
@@ -832,6 +856,8 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
             if include_glob and not fnmatch.fnmatch(file_rel, include_glob):
                 continue
             if exclude_glob and fnmatch.fnmatch(file_rel, exclude_glob):
+                continue
+            if code_only and not _is_code_file(name):
                 continue
 
             # Skip files exceeding size limit
@@ -4013,7 +4039,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         "substring_pattern", "context_lines", "context_lines_before", "context_lines_after",
         "paths_include_glob", "paths_exclude_glob", "relative_path",
         "max_answer_chars", "head_limit", "offset", "output_mode",
-        "max_file_size", "skip_ignored_files",
+        "max_file_size", "skip_ignored_files", "restrict_search_to_code_files",
     },
     # --- semantic (LSP) functions: POST-alias canonical param names ---
     "find_definition": {
