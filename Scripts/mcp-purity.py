@@ -748,6 +748,42 @@ def _is_code_file(name: str) -> bool:
     return pathlib.Path(name).suffix.lower() in CODE_FILE_EXTENSIONS
 
 
+def _glob_matches(rel_path: str, glob: str) -> bool:
+    """Match a project-relative path against a caller glob with model-friendly,
+    ripgrep/git-like semantics layered over Python fnmatch.
+
+    Plain ``fnmatch(rel_path, glob)`` has two footguns that repeatedly bite
+    LLM callers of search_for_pattern:
+
+      1. A bare filename (``requirements.yaml``) only matches a root-level file,
+         because the relative path of a nested file carries directory segments
+         that the pattern lacks.
+      2. The intuitive "any depth" fix ``**/requirements.yaml`` is ALSO wrong —
+         fnmatch has no globstar, so ``**`` is just two ``*`` and the pattern
+         still requires the literal ``/``, matching nested files ONLY and
+         silently missing the root-level one.
+
+    This helper makes both do what the caller meant:
+
+      * matches if EITHER the full relative path OR the basename matches, so a
+        bare filename hits at any depth;
+      * a leading ``**/`` is treated as globstar ("zero or more directories"),
+        so ``**/x`` also matches a root-level ``x``.
+
+    Path-scoped globs (``src/*.c``) stay scoped: the basename of a nested file
+    won't spuriously match a glob that carries its own directory component.
+    """
+    candidates = [glob]
+    # globstar: "**/foo" should also match "foo" (zero intervening dirs).
+    if glob.startswith("**/"):
+        candidates.append(glob[3:])
+    base = os.path.basename(rel_path)
+    for pat in candidates:
+        if fnmatch.fnmatch(rel_path, pat) or fnmatch.fnmatch(base, pat):
+            return True
+    return False
+
+
 def handle_search_for_pattern(params: dict, project_root: str, strict: bool = False) -> dict:
     pattern_str = params.get("substring_pattern")
     if not pattern_str:
@@ -853,9 +889,9 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                 log.debug("Skipping out-of-root symlink in search walk: %s", full)
                 continue
 
-            if include_glob and not fnmatch.fnmatch(file_rel, include_glob):
+            if include_glob and not _glob_matches(file_rel, include_glob):
                 continue
-            if exclude_glob and fnmatch.fnmatch(file_rel, exclude_glob):
+            if exclude_glob and _glob_matches(file_rel, exclude_glob):
                 continue
             if code_only and not _is_code_file(name):
                 continue
