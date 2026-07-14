@@ -16,14 +16,18 @@ Usage:
                         [--debug]
                         [--log-file <path>]   # implies --debug
 
-  --project-root  Required. Sandbox root for all file operations.
-  --strict        Reject any path (search/edit/glob/ls) that escapes
-                  --project-root, even if the caller passes an absolute path.
-                  Without --strict, absolute paths outside the root are allowed.
+  --project-root  Required. Sandbox root for file operations.
+  --strict        Hard-sandbox: reject ANY path that escapes --project-root
+                  (reads included) and reject absolute paths outright.
+                  Without --strict (default): destructive ops (create/replace/
+                  delete/insert) stay sandboxed to the root, but non-destructive
+                  ops (read/search/list/glob/semantic) MAY resolve paths
+                  outside the root.
 """
 
 import argparse
 import asyncio
+import contextvars
 import fnmatch
 import glob as glob_mod
 import json
@@ -72,21 +76,39 @@ def _sanitize_log(s: str) -> str:
     return s.replace("\r", " ").replace("\n", " ")
 
 
-def safe_path(project_root: str, relative_path: str, strict: bool = False) -> str:
-    """Resolve *relative_path* under *project_root* and verify it stays inside.
+# Set by the dispatcher for the duration of a single handler call: True while a
+# NON-DESTRUCTIVE handler (read/search/list/glob/semantic) runs, False for the
+# destructive ones (create/replace/delete/insert). safe_path reads it to decide
+# whether a path resolving outside the root is tolerable. A ContextVar (not a
+# plain global) so the value is task/thread-local; the sync file handlers run in
+# an executor, so the dispatcher must propagate the context via copy_context().
+# Default False = fail-safe: anything not explicitly opted in stays sandboxed.
+_ALLOW_OUTSIDE_ROOT: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "purity_allow_outside_root", default=False
+)
 
-    Absolute paths are always containment-checked against *project_root*
-    regardless of *strict* (F1 / CWE-22).  *strict* only controls whether an
-    absolute path that resolves INSIDE the root is accepted (always yes) vs
-    whether a purely-relative path is required (strict=True enforces that).
+
+def safe_path(project_root: str, relative_path: str, strict: bool = False) -> str:
+    """Resolve *relative_path* under *project_root* and verify containment.
+
+    A path resolving INSIDE the root is always accepted. A path resolving
+    OUTSIDE the root is accepted only for non-destructive ops (the dispatcher
+    opts them in via _ALLOW_OUTSIDE_ROOT) and only when the server is not in
+    --strict mode; destructive ops always stay sandboxed. --strict is the
+    hard-sandbox: it rejects every escape and every absolute path outright
+    (F1 / CWE-22).
     """
     if os.path.isabs(relative_path) and strict:
         raise ValueError(_sanitize_log(f"Path escapes project root: {relative_path}"))
     resolved = os.path.realpath(os.path.join(project_root, relative_path))
     root = os.path.realpath(project_root)
-    if not resolved.startswith(root + os.sep) and resolved != root:
-        raise ValueError(_sanitize_log(f"Path escapes project root: {relative_path}"))
-    return resolved
+    if resolved == root or resolved.startswith(root + os.sep):
+        return resolved
+    # Path resolves OUTSIDE the root: permit only for read-only ops, and never
+    # under --strict.
+    if not strict and _ALLOW_OUTSIDE_ROOT.get():
+        return resolved
+    raise ValueError(_sanitize_log(f"Path escapes project root: {relative_path}"))
 
 
 # ---------------------------------------------------------------------------
@@ -4216,6 +4238,33 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "luals_init": handle_lsp_init_noop,
 }
 
+# Non-destructive handlers, keyed by the handler CALLABLE (not its name) so
+# every alias — short, `ls`/`glob`/`grep`, and the prefixed clangd_*/cuda_*/
+# luals_* legacy names — is covered in one place. These may resolve paths
+# outside the project root when the server is not in --strict mode; the
+# dispatcher opts them in via _ALLOW_OUTSIDE_ROOT. This is an ALLOWLIST by
+# design: the destructive handlers (create_text_file, replace_content,
+# delete_lines, replace_lines, insert_at_line) are absent, so a future handler
+# added to HANDLERS stays sandboxed until it is explicitly listed here.
+_READONLY_HANDLERS: frozenset = frozenset({
+    handle_read_file,
+    handle_list_dir,
+    handle_find_file,
+    handle_search_for_pattern,
+    handle_find_definition,
+    handle_find_references,
+    handle_find_implementations,
+    handle_type_at,
+    handle_diagnostics,
+    handle_outline,
+    handle_symbol,
+    handle_symbol_context,
+    handle_inlay_hints,
+    handle_symbol_change_impact,
+    handle_clang_tidy,
+    handle_lsp_init_noop,
+})
+
 # Per-handler accepted (canonical) parameter names. Used only to augment
 # error messages with an "Unknown params: ..." hint when a handler raises.
 # Keys here are POST-alias canonical names — by the time this set is
@@ -4388,11 +4437,20 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
                 f" Accepted: {', '.join(sorted(accepted))}."
             )}
 
+    # Non-destructive handlers may reach outside the project root; destructive
+    # ones stay sandboxed. Set the flag for this call only. The sync handlers run
+    # in an executor thread that starts with a fresh (default) context, so the
+    # value is carried across via copy_context().run() rather than relying on
+    # the ContextVar leaking into the thread (it does not).
+    outside_token = _ALLOW_OUTSIDE_ROOT.set(handler in _READONLY_HANDLERS)
     try:
         if asyncio.iscoroutinefunction(handler):
             return await handler(params, project_root, strict)
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: handler(params, project_root, strict))
+        ctx = contextvars.copy_context()
+        return await loop.run_in_executor(
+            None, lambda: ctx.run(handler, params, project_root, strict)
+        )
     except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
         err = str(exc)
         accepted = _accepted_params_for(function, canonical_func)
@@ -4407,6 +4465,8 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     except Exception as exc:
         log.exception("Unhandled exception in handler '%s'", canonical_func)
         return {"error": f"Internal error in '{canonical_func}': {type(exc).__name__}: {exc}"}
+    finally:
+        _ALLOW_OUTSIDE_ROOT.reset(outside_token)
 
 
 # ---------------------------------------------------------------------------
@@ -4418,7 +4478,7 @@ PURITY_CALL_TOOL = {
     "description": (
         "Project file operations: search, glob, list (ls), write, surgical edits.\n\n"
         "═══════════════════════════════════════════════════════════════════════\n"
-        "ABSOLUTE PROHIBITION — Bash(\"find ...\") IS FORBIDDEN, NO EXCEPTIONS\n"
+        "ABSOLUTE PROHIBITION — Bash(\"find ...\") AND Bash(\"ls ...\") ARE FORBIDDEN\n"
         "═══════════════════════════════════════════════════════════════════════\n"
         "You MUST NEVER invoke `find` through Bash. Not with `-name`, not with\n"
         "`-type f`, not with `-iname`, not piped through `xargs`, not wrapped in\n"
@@ -4432,6 +4492,14 @@ PURITY_CALL_TOOL = {
         "wildcard search, returns sandbox-scoped relative paths, skips `.git`,\n"
         "and supports pagination via `head_limit` / `offset`. If you catch\n"
         "yourself typing `find` into Bash, STOP — call `find_file` instead.\n\n"
+        "The SAME iron rule applies to `ls`: NEVER list a directory through\n"
+        "Bash — not `ls`, not `ls -la`, not `ls -R`, not globbed, not piped,\n"
+        "not via `$(ls ...)`. ANY appearance of the literal `ls` in a Bash\n"
+        "invocation is a VIOLATION. `list_dir` (alias `ls`) covers every\n"
+        "listing need — recursive, long format (size + mtime), fnmatch filter,\n"
+        "regex-on-output, hidden files, `head_limit` / `offset` pagination —\n"
+        "and stays project-root-aware. If you catch yourself typing `ls` into\n"
+        "Bash, STOP — call `list_dir` instead.\n\n"
         "═══════════════════════════════════════════════════════════════════════\n"
         "SEMANTIC CODE NAVIGATION — purity_call now ALSO does symbol work\n"
         "═══════════════════════════════════════════════════════════════════════\n"
@@ -4464,7 +4532,7 @@ PURITY_CALL_TOOL = {
         "═══════════════════════════════════════════════════════════════════════\n"
         "MANDATORY Bash → purity mappings (NEVER call these via Bash):\n"
         "═══════════════════════════════════════════════════════════════════════\n"
-        "  Bash(\"ls ...\")                   → function=\"ls\"\n"
+        "  Bash(\"ls ...\")                   → function=\"list_dir\" (alias \"ls\")  [FORBIDDEN via Bash]\n"
         "  Bash(\"find ...\")                 → function=\"find_file\" (alias \"glob\")  [FORBIDDEN via Bash]\n"
         "  Bash(\"find . -name ...\")         → function=\"find_file\", params={\"pattern\":\"...\"}\n"
         "  Bash(\"find <dir> -type f -name\") → function=\"find_file\", params={\"pattern\":\"...\",\"path\":\"<dir>\"}\n"
@@ -4671,7 +4739,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="MCP-Purity: Pure Python file operations MCP server")
     parser.add_argument("--project-root", required=True, help="Project root directory")
-    parser.add_argument("--strict", action="store_true", help="Reject paths outside project root")
+    parser.add_argument("--strict", action="store_true", help="Hard-sandbox: reject every path outside project root, reads included")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
     parser.add_argument("--log-file", help="Log to file (implies --debug)")
     # CWE-426 (untrusted-PATH hijack): explicit absolute-path overrides for LSP
