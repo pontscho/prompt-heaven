@@ -1,7 +1,7 @@
 ---
 name: p:minion-task-planner
 description: >
-  Task plan writer. Receives pre-processed context (feature implementation plan,
+  This minion's name is Gantt. Task plan writer. Receives pre-processed context (feature implementation plan,
   Q&A answers, exploration findings) from the /p:task-plan skill orchestrator and
   produces a complete requirements.yaml with function-level tasks, dependency
   graph, T-shirt sizing, code references with pattern excerpts, and context
