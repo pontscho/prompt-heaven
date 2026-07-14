@@ -184,6 +184,9 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     "insert_at_line": {
         "new_content": "content",
     },
+    "list_dir": {
+        "long_format": "long",
+    },
 }
 
 # Function-name aliases — handler registry exposes several aliases (ls, glob,
