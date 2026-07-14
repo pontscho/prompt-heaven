@@ -194,6 +194,8 @@ FUNCTION_ALIASES = {
     "glob": "find_file",
     "grep": "search_for_pattern",
     "search": "search_for_pattern",
+    "temp_dir": "create_temp_dir",
+    "mktemp": "create_temp_dir",
 }
 
 
@@ -355,6 +357,18 @@ def handle_create_text_file(params: dict, project_root: str, strict: bool = Fals
 
     nbytes = len(content.encode("utf-8"))
     return {"__raw_text__": f"Created {rel} ({nbytes} bytes)"}
+
+
+def handle_create_temp_dir(params: dict, project_root: str, strict: bool = False) -> dict:
+    """Create the project's ``.claude/tmp`` scratch directory, return its abs path.
+
+    All temporary artifacts (screenshots, debug output, scratch files) belong
+    here — never in the project root. Idempotent: creating an already-existing
+    directory is a no-op that still returns the absolute path.
+    """
+    path = safe_path(project_root, os.path.join(".claude", "tmp"), strict)
+    os.makedirs(path, exist_ok=True)
+    return {"__raw_text__": path}
 
 
 def _format_size(size: int) -> str:
@@ -4186,6 +4200,9 @@ async def handle_clang_tidy(params: dict, project_root: str, strict: bool = Fals
 HANDLERS: Dict[str, Callable[..., dict]] = {
     "read_file": handle_read_file,
     "create_text_file": handle_create_text_file,
+    "create_temp_dir": handle_create_temp_dir,
+    "temp_dir": handle_create_temp_dir,
+    "mktemp": handle_create_temp_dir,
     "list_dir": handle_list_dir,
     "ls": handle_list_dir,
     "find_file": handle_find_file,
@@ -4296,6 +4313,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "create_text_file": {
         "relative_path", "content", "overwrite",
     },
+    "create_temp_dir": set(),
     "list_dir": {
         "relative_path", "recursive", "skip_ignored_files",
         "long", "show_hidden", "all", "hidden",
@@ -4562,8 +4580,8 @@ PURITY_CALL_TOOL = {
         "  Bash(\"sed/awk\")                  → function=\"replace_content\"\n"
         "Also prefer this OVER built-in Write/Edit/Glob/Grep.\n\n"
         "File ops: search_for_pattern (grep), find_file (glob), list_dir (ls),\n"
-        "create_text_file, replace_content, replace_lines, delete_lines, insert_at_line,\n"
-        "read_file. Semantic (clangd-backed): find_definition, find_references,\n"
+        "create_text_file, create_temp_dir (mktemp), replace_content, replace_lines,\n"
+        "delete_lines, insert_at_line, read_file. Semantic (clangd-backed): find_definition, find_references,\n"
         "find_implementations, type_at, diagnostics, outline, symbol, symbol_context,\n"
         "inlay_hints, symbol_change_impact. Project-root-scoped, .gitignore-aware, binary-safe.\n"
         "`find_file` pattern is fnmatch-style (`*.cu`, `test_*.py`, etc.); search\n"
