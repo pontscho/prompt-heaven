@@ -1095,7 +1095,9 @@ def handle_list(cfg: Dict[str, Any], params: dict) -> dict:
 def handle_describe(cfg: Dict[str, Any], params: dict) -> dict:
 	target = params.get("target")
 	if not target:
-		return {"error": "missing 'target' parameter"}
+		# No target: fall back to a targets overview (name + short description),
+		# same rendering as `list`. Lets `describe` double as a discovery entry point.
+		return handle_list(cfg, params)
 	found: List[Tuple[str, dict]] = []
 	for k in TARGET_KINDS:
 		section = cfg.get(k) or {}
@@ -1561,7 +1563,8 @@ FORGE_CALL_TOOL = {
 		"Functions:\n"
 		"  (empty)   -> server status + loaded YAML summary\n"
 		"  list      -> list all build/test/clean targets ({kind?})\n"
-		"  describe  -> show one target's commands, env_schema, requires ({target})\n"
+		"  describe  -> show one target's commands, env_schema, requires ({target}); "
+		"without a target, lists all targets with their short descriptions\n"
 		"  validate  -> validate project-forge.yaml ({path?})\n"
 		"  build     -> run build target(s) ({targets, env?, filter?, ncpu?, timeout?, cwd?})\n"
 		"  test      -> run test target(s); auto_build=true by default builds requires first\n"
@@ -1594,7 +1597,7 @@ FORGE_CALL_TOOL = {
 				"description": (
 					"Function parameters -- all args go here, NOT at top level. "
 					"build/test/clean: {targets, env?, filter?, ncpu?, timeout?, cwd?, auto_build?}. "
-					"list: {kind?}. describe: {target}. validate: {path?}. "
+					"list: {kind?}. describe: {target?} (omit target to list all). validate: {path?}. "
 					"Alias: 'p'."
 				),
 			},
