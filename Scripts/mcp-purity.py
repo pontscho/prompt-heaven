@@ -4083,6 +4083,12 @@ async def handle_clang_tidy(params: dict, project_root: str, strict: bool = Fals
     <root>), clang-tidy is invoked with `-p <dir>` so it sees the project's real
     compile flags. With no database it still runs (empty flag section after a
     bare `--`) but with reduced accuracy — the report states which mode was used.
+
+    Skill-aligned defaults (see the p:clang-tidy skill): always `--quiet`; the
+    project's `<root>/.clang-tidy` is pinned via `--config-file` when present
+    (unless the caller passes explicit `checks`); and `--header-filter` defaults
+    to `<root>/src/.*` so project-header diagnostics surface. Callers can
+    override the header filter and check set through params.
     """
     rel = params.get("relative_path")
     if not rel:
@@ -4111,12 +4117,25 @@ async def handle_clang_tidy(params: dict, project_root: str, strict: bool = Fals
     cmd = [binary]
     if cc_dir:
         cmd += ["-p", cc_dir]
+    # --quiet: drop the "NNNN warnings generated." / suppression-summary noise
+    # (skill-mandated). Diagnostics themselves are unaffected.
+    cmd.append("--quiet")
     checks = params.get("checks")
     if checks:
+        # Explicit caller override; takes precedence over the project config.
         cmd.append(f"-checks={checks}")
-    header_filter = params.get("header_filter")
-    if header_filter:
-        cmd.append(f"-header-filter={header_filter}")
+    else:
+        # Pin the project's .clang-tidy when present at the root. clang-tidy's
+        # own auto-discovery walks up from each source file and would miss a
+        # config that lives outside the sources' ancestry; being explicit makes
+        # the intended check set deterministic regardless of file location.
+        cfg = os.path.join(project_root, ".clang-tidy")
+        if os.path.isfile(cfg):
+            cmd.append(f"--config-file={cfg}")
+    # Default the header filter to the project's src tree so diagnostics from
+    # project headers surface (clang-tidy's default is main-file-only).
+    header_filter = params.get("header_filter") or f"{project_root}/src/.*"
+    cmd.append(f"-header-filter={header_filter}")
     if params.get("fix"):
         cmd.append("-fix")
     cmd += abs_paths
@@ -4725,7 +4744,7 @@ HANDLER_DESCRIPTIONS = {
     "symbol_context":       "Definition + references for a symbol in one call",
     "inlay_hints":          "Inlay hints (parameter/type) for a file range",
     "symbol_change_impact": "Definition + references + call hierarchy for impact analysis",
-    "clang_tidy":           "Run clang-tidy on C/C++ file(s); auto-uses compile_commands.json from build_dir/<root>/build/<root> via -p (checks, header_filter, fix, timeout)",
+    "clang_tidy":           "Run clang-tidy on C/C++ file(s); auto-uses compile_commands.json from build_dir/<root>/build/<root> via -p; defaults --quiet, --config-file=<root>/.clang-tidy (unless checks given), --header-filter=<root>/src/.* (checks, header_filter, fix, timeout)",
 }
 
 
