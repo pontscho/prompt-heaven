@@ -3961,6 +3961,184 @@ def handle_lsp_init_noop(params: dict, project_root: str, strict: bool = False) 
 
 
 # ---------------------------------------------------------------------------
+# clang-tidy (subprocess-backed static analysis)
+# ---------------------------------------------------------------------------
+
+# CWE-426 mitigation: explicit absolute path override for the clang-tidy binary.
+# Set by main() from --clang-tidy-path. None means resolve at call time from the
+# build dir's CMakeCache CLANG_TIDY_EXE, then PATH (see _resolve_clang_tidy_binary).
+_clang_tidy_binary_override: Optional[str] = None
+
+
+def _find_compile_commands_dir(project_root: str,
+                               override: Optional[str] = None) -> Optional[str]:
+    """Return the directory holding a compile_commands.json, or None.
+
+    Search order mirrors _prepare_compile_commands: an explicit caller-supplied
+    dir first, then <root>/build, then the project root. Only dirs resolving
+    inside project_root are considered (CWE-22). The result is what feeds
+    `clang-tidy -p <dir>` so the linter sees the project's real compile flags.
+    """
+    candidates: List[str] = []
+    if override:
+        candidates.append(override)
+    candidates.append(os.path.join(project_root, "build"))
+    candidates.append(project_root)
+    root = os.path.realpath(project_root)
+    for d in candidates:
+        resolved = os.path.realpath(os.path.join(project_root, d))
+        if not (resolved == root or resolved.startswith(root + os.sep)):
+            continue
+        if os.path.isfile(os.path.join(resolved, "compile_commands.json")):
+            return resolved
+    return None
+
+
+def _read_cmake_cache_var(build_dir: str, var_name: str) -> Optional[str]:
+    """Return the value of a CMake cache variable from <build_dir>/CMakeCache.txt.
+
+    Cache lines look like `NAME:TYPE=VALUE`. Returns the raw VALUE (stripped), or
+    None if the cache or the variable is absent / unreadable. CMake's own
+    "not found" sentinel (`<VAR>-NOTFOUND`) is passed through unchanged for the
+    caller to reject.
+    """
+    cache = os.path.join(build_dir, "CMakeCache.txt")
+    if not os.path.isfile(cache):
+        return None
+    try:
+        text = pathlib.Path(cache).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.search(rf"^{re.escape(var_name)}:[^=]*=(.*)$", text, re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
+def _resolve_clang_tidy_binary(override: Optional[str],
+                               build_dirs: List[str]) -> str:
+    """Resolve the clang-tidy binary. Order: override → CMake → PATH → error.
+
+    1. `--clang-tidy-path` override (validated file + executable; CWE-426 pin).
+    2. `CLANG_TIDY_EXE` from the build dir's CMakeCache.txt — how a CMake project
+       that located clang-tidy at configure time records the binary. First build
+       dir with a usable (existing, executable) value wins.
+    3. `clang-tidy` on PATH (shutil.which).
+    4. RuntimeError with an actionable message if none of the above resolve.
+    """
+    if override is not None:
+        if not os.path.isfile(override):
+            raise RuntimeError(f"clang-tidy override path does not exist or is not a file: {override!r}")
+        if not os.access(override, os.X_OK):
+            raise RuntimeError(f"clang-tidy override path is not executable: {override!r}")
+        return override
+
+    for bd in build_dirs:
+        if not bd:
+            continue
+        exe = _read_cmake_cache_var(bd, "CLANG_TIDY_EXE")
+        if not exe or exe.endswith("-NOTFOUND"):
+            continue
+        if os.path.isfile(exe) and os.access(exe, os.X_OK):
+            log.debug("clang-tidy resolved via CLANG_TIDY_EXE in %s: %s", bd, exe)
+            return exe
+        log.warning("CLANG_TIDY_EXE in %s points to a non-executable path: %r", bd, exe)
+
+    resolved = shutil.which("clang-tidy")
+    if resolved:
+        return resolved
+
+    raise RuntimeError(
+        "clang-tidy not found: no --clang-tidy-path override, no usable "
+        "CLANG_TIDY_EXE in the build dir's CMakeCache.txt, and 'clang-tidy' is "
+        "not on PATH. Install clang-tidy or configure CMake so it locates one."
+    )
+
+
+async def handle_clang_tidy(params: dict, project_root: str, strict: bool = False) -> dict:
+    """Run clang-tidy on one or more C/C++ files.
+
+    Auto-parameterizes against a compile database: if a build dir with a
+    compile_commands.json exists (explicit `build_dir`, else <root>/build, else
+    <root>), clang-tidy is invoked with `-p <dir>` so it sees the project's real
+    compile flags. With no database it still runs (empty flag section after a
+    bare `--`) but with reduced accuracy — the report states which mode was used.
+    """
+    rel = params.get("relative_path")
+    if not rel:
+        return {"error": "clang_tidy requires 'path' (a C/C++ source file, or a list of them)"}
+    rels = rel if isinstance(rel, list) else [rel]
+    abs_paths: List[str] = []
+    for r in rels:
+        ap = safe_path(project_root, str(r), strict)
+        if not os.path.isfile(ap):
+            return {"error": f"File not found: {_sanitize_log(str(r))}"}
+        abs_paths.append(ap)
+
+    build_dir = params.get("build_dir")
+    if build_dir is not None:
+        # Containment-validate an explicit build dir before handing it to -p.
+        build_dir = safe_path(project_root, str(build_dir), strict)
+    cc_dir = _find_compile_commands_dir(project_root, build_dir)
+
+    # Resolve clang-tidy from the same build dirs we found the compile DB in:
+    # CLANG_TIDY_EXE (CMakeCache) → PATH → error.
+    binary = _resolve_clang_tidy_binary(
+        _clang_tidy_binary_override,
+        [build_dir, cc_dir, os.path.join(project_root, "build")],
+    )
+
+    cmd = [binary]
+    if cc_dir:
+        cmd += ["-p", cc_dir]
+    checks = params.get("checks")
+    if checks:
+        cmd.append(f"-checks={checks}")
+    header_filter = params.get("header_filter")
+    if header_filter:
+        cmd.append(f"-header-filter={header_filter}")
+    if params.get("fix"):
+        cmd.append("-fix")
+    cmd += abs_paths
+    if not cc_dir:
+        # No compilation database: append an empty flag section so clang-tidy
+        # doesn't abort hunting for one (it emits a warning and carries on).
+        cmd.append("--")
+
+    timeout = float(params.get("timeout", 60.0))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=project_root,
+        )
+        try:
+            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {"error": f"clang-tidy timed out after {timeout:g}s"}
+    except OSError as exc:
+        return {"error": f"Failed to run clang-tidy: {exc}"}
+
+    stdout = out_b.decode("utf-8", "replace").strip()
+    stderr = err_b.decode("utf-8", "replace").strip()
+
+    files_disp = ", ".join(os.path.relpath(p, project_root) for p in abs_paths)
+    db_note = (f"compile db: {os.path.relpath(cc_dir, project_root)}/compile_commands.json"
+               if cc_dir else "compile db: none (reduced accuracy)")
+    lines = [f"# clang-tidy — {files_disp}", db_note, f"exit code: {proc.returncode}", ""]
+
+    body = stdout or "(no diagnostics)"
+    max_chars = params.get("max_answer_chars", 40000)
+    if max_chars and max_chars > 0 and len(body) > max_chars:
+        body = body[:max_chars] + "\n... (truncated)"
+    lines.append(body)
+    if stderr:
+        lines.append(f"\n--- stderr ---\n{stderr}")
+    return _md("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
 
@@ -3989,6 +4167,8 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "symbol_context": handle_symbol_context,
     "inlay_hints": handle_inlay_hints,
     "symbol_change_impact": handle_symbol_change_impact,
+    # --- subprocess-backed static analysis ---
+    "clang_tidy": handle_clang_tidy,
     # --- legacy clangd_* names as DIRECT keys ([inspector C1]: FUNCTION_ALIASES
     #     does NOT route; the dispatcher looks up the RAW function name) ---
     "clangd_find_definition": handle_find_definition,
@@ -4108,6 +4288,10 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     },
     "symbol_change_impact": {
         "symbol_name", "relative_path", "max_references", "call_hierarchy_depth",
+    },
+    "clang_tidy": {
+        "relative_path", "build_dir", "checks", "header_filter", "fix",
+        "timeout", "max_answer_chars",
     },
 }
 
@@ -4263,7 +4447,8 @@ PURITY_CALL_TOOL = {
         "  symbol                 - workspace symbol search (index + grep fallback)\n"
         "  symbol_context         - definition + references in one call\n"
         "  inlay_hints            - parameter/type hints for a range\n"
-        "  symbol_change_impact   - definition + references + call hierarchy\n\n"
+        "  symbol_change_impact   - definition + references + call hierarchy\n"
+        "  clang_tidy             - clang-tidy static analysis; auto -p from compile_commands.json\n\n"
         "The clangd and luals LSPs spin up lazily on first use. For symbol work PREFER these\n"
         "over grepping source - text matching misses overloads, macros, and\n"
         "indirect references. search_for_pattern remains free-text (literal/regex)\n"
@@ -4472,6 +4657,7 @@ HANDLER_DESCRIPTIONS = {
     "symbol_context":       "Definition + references for a symbol in one call",
     "inlay_hints":          "Inlay hints (parameter/type) for a file range",
     "symbol_change_impact": "Definition + references + call hierarchy for impact analysis",
+    "clang_tidy":           "Run clang-tidy on C/C++ file(s); auto-uses compile_commands.json from build_dir/<root>/build/<root> via -p (checks, header_filter, fix, timeout)",
 }
 
 
@@ -4502,6 +4688,11 @@ def main() -> None:
         default=None,
         help="Absolute path to the lua-language-server binary (overrides PATH lookup; hard mitigation for CWE-426)",
     )
+    parser.add_argument(
+        "--clang-tidy-path",
+        default=None,
+        help="Absolute path to the clang-tidy binary (overrides PATH lookup; hard mitigation for CWE-426)",
+    )
     args = parser.parse_args()
 
     level = logging.DEBUG if (args.debug or args.log_file) else logging.WARNING
@@ -4523,9 +4714,10 @@ def main() -> None:
 
     # Store CWE-426 binary overrides in module-level vars so _init_backend can
     # read them without threading them through every call site.
-    global _clangd_binary_override, _luals_binary_override
+    global _clangd_binary_override, _luals_binary_override, _clang_tidy_binary_override
     _clangd_binary_override = args.clangd_path
     _luals_binary_override = args.luals_path
+    _clang_tidy_binary_override = args.clang_tidy_path
 
     server = McpServer(args.project_root, strict=args.strict)
     asyncio.run(server.run())
