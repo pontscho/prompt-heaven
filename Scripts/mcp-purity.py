@@ -1876,6 +1876,12 @@ class BaseLspClient(LspBackend):
         self._indexing_done: asyncio.Event = asyncio.Event()
         self._active_progress: set = set()   # tokens with begin but no end yet
         self._send_lock = asyncio.Lock()
+        # Crash sentinel: flipped True by _reader_loop on stdout EOF. Together
+        # with process.returncode it lets _client_is_alive evict a dead backend
+        # (a bare `process is not None` check treated the corpse as live, so the
+        # whole server wedged until a manual restart). Never reset in place - a
+        # recovered backend is always a freshly constructed client object.
+        self._backend_dead: bool = False
 
     async def stop(self) -> None:
         if self._reader_task:
@@ -1950,6 +1956,11 @@ class BaseLspClient(LspBackend):
             msg = await read_lsp_message(reader)
             if msg is None:
                 log.debug("LSP backend stdout EOF")
+                # Mark the backend dead so _client_is_alive evicts it and the
+                # next semantic call auto-restarts, even if the OS process has
+                # not been reaped yet (returncode still None) or lingers with a
+                # closed stdout.
+                self._backend_dead = True
                 # Fail every outstanding request so callers get a prompt error
                 # instead of blocking until their per-request timeout when the
                 # backend dies mid-flight.
@@ -3075,6 +3086,88 @@ _clangd_binary_override: Optional[str] = None
 _luals_binary_override: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Backend liveness & recovery (crash auto-restart + explicit restart/reindex)
+# ---------------------------------------------------------------------------
+
+# Background reaper tasks for crashed/replaced backends, referenced here so the
+# event loop does not GC them mid-terminate ("Task was destroyed but it is
+# pending").  Entries remove themselves via an add_done_callback.
+_reaper_tasks: set = set()
+
+
+def _client_is_alive(client: Optional[LspBackend]) -> bool:
+    """True only when *client* has a spawned process that has NOT exited.
+
+    Liveness used to be a bare ``client.process is not None`` check, which
+    treated a crashed clangd (process object still referenced, but exited or
+    stdout-EOF'd) as live - so every later call reused the corpse until a manual
+    MCP restart.  We now additionally require the OS process to still be running
+    (``returncode is None``, kept current by asyncio's child watcher) and the
+    reader loop not to have seen a stdout EOF (``_backend_dead``).
+    """
+    if client is None:
+        return False
+    proc = getattr(client, "process", None)
+    if proc is None or proc.returncode is not None:
+        return False
+    return not getattr(client, "_backend_dead", False)
+
+
+def _drop_backend(backend_type: str) -> Optional[LspBackend]:
+    """Synchronously unregister *backend_type* and clear its init/backoff
+    bookkeeping, returning the removed client (the caller reaps its process) or
+    None when nothing was registered.
+
+    Deliberately contains no ``await``: it keeps _ensure_backend's coalescing
+    guard race-free (that check-and-create relies on there being no await
+    between the _backends lookup and the init-task creation).  Clearing
+    _backend_init_failed here means a crash gets an immediate re-init attempt
+    instead of being masked by the init-failure backoff window - that window
+    still re-engages if the fresh init itself fails (see _ensure_backend).
+    """
+    _backend_init_tasks.pop(backend_type, None)
+    _backend_init_failed.pop(backend_type, None)
+    return _backends.pop(backend_type, None)
+
+
+async def _safe_stop(client: LspBackend) -> None:
+    """Best-effort teardown of a client's subprocess; never propagates."""
+    try:
+        await client.stop()
+    except Exception as exc:      # teardown must not surface to callers
+        log.warning("Error stopping LSP backend: %s", exc)
+
+
+def _reap_backend_process(client: LspBackend) -> None:
+    """Terminate a dead/replaced client's process in the background so the
+    auto-recovery path - which must stay non-blocking to preserve the
+    coalescing invariant - does not wait on clangd's terminate/kill."""
+    task = asyncio.ensure_future(_safe_stop(client))
+    _reaper_tasks.add(task)
+    task.add_done_callback(_reaper_tasks.discard)
+
+
+def _wipe_clangd_index_cache(project_root: str) -> bool:
+    """Delete clangd's on-disk background-index cache so the next start rebuilds
+    the index from scratch.  clangd defaults this to ``<root>/.cache/clangd``;
+    we only ever remove that exact in-root directory.  Returns True iff a cache
+    directory was actually removed.
+    """
+    cache_dir = pathlib.Path(project_root) / ".cache" / "clangd"
+    # CWE-22/CWE-59: only remove when the realpath stays inside project_root, so
+    # a symlinked .cache/clangd cannot be used to delete an out-of-root target.
+    if not _path_within_root(cache_dir, project_root):
+        log.warning("Refusing to wipe clangd cache outside project root: %s", cache_dir)
+        return False
+    real = pathlib.Path(os.path.realpath(str(cache_dir)))
+    if real.is_dir():
+        shutil.rmtree(real, ignore_errors=True)
+        log.debug("Wiped clangd index cache: %s", real)
+        return True
+    return False
+
+
 def _route_filetype(filetype: str) -> Optional[str]:
     """Map a languageId (_detect_language output) to a backend TYPE, or None."""
     if filetype in _CLANGD_FILETYPES:
@@ -3131,7 +3224,7 @@ def _require_backend(filetype: str) -> LspBackend:
     if backend_type is None:
         raise ValueError(f"No LSP backend for filetype '{filetype}'")
     client = _backends.get(backend_type)
-    if client is None or client.process is None:
+    if not _client_is_alive(client):
         raise RuntimeError(f"LSP backend '{backend_type}' not initialized for filetype '{filetype}'")
     return client
 
@@ -3239,7 +3332,7 @@ async def _ensure_backend(filetype: str, project_root: str) -> LspBackend:
     loop = asyncio.get_running_loop()
 
     client = _backends.get(backend_type)
-    if client is not None and client.process is not None:
+    if _client_is_alive(client):
         # Defensive project-root mismatch warning [inspector M3]: there is no
         # handle_init under lazy init, and one server process is pinned to one
         # --project-root, so this should not fire - but surface it if it does.
@@ -3250,6 +3343,21 @@ async def _ensure_backend(filetype: str, project_root: str) -> LspBackend:
                 backend_type, client.project_root, resolved_root,
             )
         return client
+
+    if client is not None:
+        # Registered but not alive: clangd crashed or stdout-EOF'd after a
+        # successful init.  Drop it synchronously (no await -> the coalescing
+        # guard below stays race-free) and reap its process in the background,
+        # then fall through to a fresh init on THIS call - the auto-recovery the
+        # bare process-not-None check never provided.  _drop_backend also clears
+        # the init-failure backoff so this crash recovery is immediate.
+        log.warning(
+            "LSP backend '%s' died (returncode=%s); auto-restarting on this call.",
+            backend_type,
+            getattr(getattr(client, "process", None), "returncode", None),
+        )
+        _drop_backend(backend_type)
+        _reap_backend_process(client)
 
     failed_at = _backend_init_failed.get(backend_type)
     if failed_at is not None and (loop.time() - failed_at) < _INIT_FAILURE_BACKOFF:
@@ -3999,6 +4107,67 @@ def handle_lsp_init_noop(params: dict, project_root: str, strict: bool = False) 
             "init is needed. (clangd_init/cuda_init are accepted as no-ops.)"}
 
 
+async def handle_restart_lsp(params: dict, project_root: str, strict: bool = False) -> dict:
+    """Explicitly tear down and re-initialize an LSP backend - the programmatic
+    recovery path for a wedged or stale clangd/luals, complementing the
+    automatic crash-recovery in _ensure_backend.
+
+    params:
+      backend / filetype : which backend to restart.  "clangd"/"cpp"/"c"/"cuda"
+                           (default) -> clangd; "luals"/"lua" -> luals.
+      reindex            : bool (default False).  When restarting clangd, also
+                           delete clangd's on-disk background-index cache
+                           (<root>/.cache/clangd) so the fresh start rebuilds
+                           the index from scratch.
+
+    Unlike the clangd_init/cuda_init/luals_init no-ops (which stay no-ops), this
+    forces a real restart and clears the init-failure backoff, so it recovers a
+    backend even from inside a backoff window.  Re-init is eager: any spawn or
+    handshake error surfaces here rather than on a later semantic call.
+    """
+    raw = str(params.get("backend") or params.get("filetype") or "clangd").strip().lower()
+    if raw in ("luals", "lua"):
+        backend_type, filetype = "luals", "lua"
+    else:
+        backend_type, filetype = "clangd", "cpp"
+    reindex = _bool_param(params.get("reindex"), False)
+
+    resolved_root = str(pathlib.Path(project_root).resolve())
+
+    # Cancel any in-flight init, unregister, and fully stop the running client.
+    # Capture the task ref BEFORE _drop_backend pops it from the registry.
+    task = _backend_init_tasks.get(backend_type)
+    client = _drop_backend(backend_type)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    if client is not None:
+        await _safe_stop(client)
+
+    wiped = False
+    if reindex and backend_type == "clangd":
+        wiped = _wipe_clangd_index_cache(resolved_root)
+
+    try:
+        new_client = await _ensure_backend(filetype, resolved_root)
+    except Exception as exc:
+        return {"__raw_text__":
+                f"LSP backend '{backend_type}' torn down"
+                f"{' (index cache wiped)' if wiped else ''}, but re-init failed: "
+                f"{_sanitize_log(str(exc))}. It will retry on the next semantic call."}
+
+    pid = getattr(getattr(new_client, "process", None), "pid", None)
+    return {"__raw_text__":
+            f"LSP backend '{backend_type}' restarted"
+            f"{' with reindex (index cache wiped)' if wiped else ''} at "
+            f"{resolved_root} (pid={pid})."}
+
+
 # ---------------------------------------------------------------------------
 # clang-tidy (subprocess-backed static analysis)
 # ---------------------------------------------------------------------------
@@ -4230,6 +4399,9 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "symbol_change_impact": handle_symbol_change_impact,
     # --- subprocess-backed static analysis ---
     "clang_tidy": handle_clang_tidy,
+    # --- backend lifecycle: explicit restart / reindex escape hatch. The
+    #     *_init names below stay no-ops; this is the real recovery path. ---
+    "restart_lsp": handle_restart_lsp,
     # --- legacy clangd_* names as DIRECT keys ([inspector C1]: FUNCTION_ALIASES
     #     does NOT route; the dispatcher looks up the RAW function name) ---
     "clangd_find_definition": handle_find_definition,
@@ -4317,6 +4489,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         "relative_path", "content", "overwrite",
     },
     "create_temp_dir": set(),
+    "restart_lsp": {"backend", "filetype", "reindex"},
     "list_dir": {
         "relative_path", "recursive", "skip_ignored_files",
         "long", "show_hidden", "all", "hidden",
