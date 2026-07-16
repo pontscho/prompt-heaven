@@ -7,11 +7,12 @@ description: Loadable knowledge packs activated on-demand or via Skill permissio
 sources:
   - ClaudeCode/skills
 verified:
-  commit: d6659f7
+  commit: 850c266
   date: 2026-07-16
 links:
   - overview
   - agents
+  - feature-implementation-plan
 ---
 
 # Skills
@@ -47,7 +48,7 @@ description is what Claude matches against to auto-activate the skill.
 | `p:wiki` | This documentation-wiki engine ([[wiki-engine]]) |
 | `p:recap` | Session recap into the AI Soul memory system |
 | `p:feature-plan` / `p:task-plan` / `p:implement` | Migrated `/p:` workflow chain: plan -> `requirements.yaml` -> execute |
-| `p:code-review` / `p:branch-review` | Multi-lens code review (finder/verifier minion fan-out) |
+| `p:code-review` / `p:branch-review` | Multi-lens code review (finder/verifier minion fan-out) — see [[feature-implementation-plan]] |
 
 The MCP-routing skills (`p:mcp-*`) all forbid built-in tool fallback, mirroring
 the mandate documented in [[overview]].

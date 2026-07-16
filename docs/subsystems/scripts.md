@@ -7,10 +7,11 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: d6659f7
+  commit: 850c266
   date: 2026-07-16
 links:
   - overview
+  - adr-new-purity-server
 ---
 
 # Scripts & MCP Servers
@@ -23,6 +24,8 @@ deployed to `~/.claude/scripts/` or run directly.
 Each server exposes its capability to Claude Code via a single dispatcher tool
 routing to internal handlers by a `function` parameter — the pattern is best
 seen in `Scripts/mcp-purity.py`. All use asyncio + JSON-RPC 2.0 over stdio.
+The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
+`purity_call` entry point is recorded in [[adr-new-purity-server]].
 
 | Script | Server | Domain |
 |--------|--------|--------|

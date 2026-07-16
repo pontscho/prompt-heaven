@@ -9,7 +9,7 @@ sources:
   - ClaudeCode/skills/p:wiki
   - ClaudeCode/agents/p/minion-librarian.md
 verified:
-  commit: d6659f7
+  commit: 850c266
   date: 2026-07-16
 links:
   - scripts
