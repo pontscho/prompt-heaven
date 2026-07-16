@@ -89,9 +89,17 @@ def _append_log(log: list, entry: dict) -> None:
 # WebSocket client (stdlib only, RFC 6455)
 # ============================================================
 
-async def _ws_connect(host: str, port: int, path: str):
-    """Establish a WebSocket connection. Returns (reader, writer)."""
-    reader, writer = await asyncio.open_connection(host, port)
+async def _ws_connect(host: str, port: int, path: str, timeout: float = 10.0):
+    """Establish a WebSocket connection. Returns (reader, writer).
+
+    The TCP connect and the HTTP-upgrade handshake are each bounded by *timeout*
+    so a stalled/half-open link to Chrome fails fast instead of hanging the
+    handler indefinitely (which the MCP client would eventually surface as a
+    bare "Connection closed").
+    """
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(host, port), timeout=timeout
+    )
 
     key = base64.b64encode(os.urandom(16)).decode()
 
@@ -107,13 +115,17 @@ async def _ws_connect(host: str, port: int, path: str):
     writer.write(handshake.encode())
     await writer.drain()
 
-    # Read HTTP response headers
-    response = b""
-    while b"\r\n\r\n" not in response:
-        chunk = await reader.read(4096)
-        if not chunk:
-            raise ConnectionError("WebSocket handshake failed: connection closed")
-        response += chunk
+    # Read HTTP response headers (bounded — a silent server can never make this hang)
+    async def _read_headers() -> bytes:
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = await reader.read(4096)
+            if not chunk:
+                raise ConnectionError("WebSocket handshake failed: connection closed")
+            buf += chunk
+        return buf
+
+    response = await asyncio.wait_for(_read_headers(), timeout=timeout)
 
     status_line = response.split(b"\r\n")[0].decode()
     if "101" not in status_line:
@@ -299,12 +311,32 @@ class CdpSession:
         self._pending[msg_id] = fut
 
         message = json.dumps({"id": msg_id, "method": method, "params": params})
-        await _ws_send(self.writer, message)
+        try:
+            # The write+drain is bounded: on a half-open link (flaky LAN, sleeping
+            # peer) writer.drain() can block FOREVER waiting for TCP acks. Without
+            # this cap the whole serial server wedges on one command (the observed
+            # 15-minute silent hang), because the drain sits BEFORE the response
+            # future's own timeout below.
+            await asyncio.wait_for(_ws_send(self.writer, message), timeout=10.0)
+        except asyncio.TimeoutError:
+            self._connected = False
+            self._pending.pop(msg_id, None)
+            raise TimeoutError(f"CDP send timed out (write stalled): {method}")
+        except Exception:
+            # Write failed → the socket is dead. Mark disconnected so the manager
+            # evicts + reconnects this session on the next call.
+            self._connected = False
+            self._pending.pop(msg_id, None)
+            raise
 
         try:
             result = await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(msg_id, None)
+            # No response within the budget means the WebSocket silently died
+            # (half-open TCP, Chrome/tab gone). Force eviction so we don't keep
+            # handing out a dead session that blocks every future call.
+            self._connected = False
             raise TimeoutError(f"CDP command timed out: {method}")
 
         if "error" in result:
@@ -345,6 +377,11 @@ class CdpSession:
         except Exception as e:
             log.debug(f"Recv loop error [{self.target_id}]: {e}")
         finally:
+            # The receive loop is the only thing that resolves pending futures.
+            # Once it exits, the session can never serve another command → mark
+            # it disconnected so the manager reconnects instead of re-handing out
+            # a corpse (the root cause of the silent 30s-timeout-per-call hang).
+            self._connected = False
             for fut in self._pending.values():
                 if not fut.done():
                     fut.set_exception(ConnectionError("CDP connection closed"))
@@ -394,9 +431,18 @@ class GdcManager:
             raise RuntimeError(f"Cannot reach Chrome at {self.browser_url}: {e}")
 
     async def get_session(self, target_id: str) -> CdpSession:
-        """Get or lazily create a CDP session for a target."""
-        if target_id in self.sessions:
-            return self.sessions[target_id]
+        """Get or lazily create a CDP session for a target.
+
+        A cached-but-dead session (WebSocket silently dropped) is discarded and
+        reconnected transparently, so a transient link glitch self-heals on the
+        next call instead of poisoning every subsequent command.
+        """
+        cached = self.sessions.get(target_id)
+        if cached is not None:
+            if cached._connected:
+                return cached
+            await cached.close()
+            self.sessions.pop(target_id, None)
 
         targets = self.get_targets()
         target = next((t for t in targets if t.get("id") == target_id), None)
@@ -440,6 +486,20 @@ class GdcManager:
         for session in list(self.sessions.values()):
             await session.close()
         self.sessions.clear()
+
+
+async def _resolve_session(mgr: GdcManager, args: dict) -> CdpSession:
+    """Resolve the session an action targets.
+
+    An explicit per-call ``target_id`` wins and addresses THAT tab directly
+    (without disturbing the global selection) — this is what lets independent
+    QA batches each drive their own tab. Absent a ``target_id`` we fall back to
+    the globally selected target (single-shot / manual use).
+    """
+    target_id = args.get("target_id")
+    if target_id:
+        return await mgr.get_session(target_id)
+    return await mgr.get_selected()
 
 
 # ============================================================
@@ -549,7 +609,7 @@ async def handle_close_page(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_navigate(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     url = args.get("url")
     action = args.get("action")
 
@@ -603,7 +663,7 @@ async def handle_navigate(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_wait_for(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     text = args.get("text", "")
     timeout = float(args.get("timeout", 10.0))
 
@@ -637,7 +697,7 @@ async def handle_wait_for(mgr: GdcManager, args: dict) -> str:
 # --- Input ---
 
 async def handle_click(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
     if not selector:
         return "Error: selector required"
@@ -660,7 +720,7 @@ async def handle_click(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_click_at(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     x = args.get("x", 0)
     y = args.get("y", 0)
 
@@ -676,7 +736,7 @@ async def handle_click_at(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_type_text(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     text = args.get("text", "")
     if not text:
         return "Error: text required"
@@ -686,7 +746,7 @@ async def handle_type_text(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_fill(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
     value = args.get("value", "")
 
@@ -713,7 +773,7 @@ async def handle_fill(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_press_key(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     key = args.get("key", "")
     if not key:
         return "Error: key required"
@@ -728,7 +788,7 @@ async def handle_press_key(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_handle_dialog(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     accept = _bool_param(args.get("accept"), default=True)
     prompt_text = args.get("prompt_text", "")
 
@@ -742,7 +802,7 @@ async def handle_handle_dialog(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_resize_page(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     width = args.get("width", 1280)
     height = args.get("height", 720)
 
@@ -754,7 +814,7 @@ async def handle_resize_page(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_scroll(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     x = args.get("x", 0)
     y = args.get("y", 0)
     delta_x = args.get("delta_x", 0)
@@ -773,7 +833,7 @@ async def handle_scroll(mgr: GdcManager, args: dict) -> str:
 # --- Debugging ---
 
 async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     fmt = args.get("format", "png")
     quality = args.get("quality", 80)
     full_page = _bool_param(args.get("full_page"), default=False)
@@ -810,7 +870,7 @@ async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_evaluate(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     expression = args.get("expression", "")
     if not expression:
         return "Error: expression required"
@@ -844,7 +904,7 @@ async def handle_evaluate(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_list_console_messages(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     level_filter = args.get("level")
 
     msgs = session.console_log
@@ -863,7 +923,7 @@ async def handle_list_console_messages(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_take_snapshot(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
 
     try:
         result = await session.send("Accessibility.getFullAXTree", {}, timeout=30.0)
@@ -908,7 +968,7 @@ async def handle_take_snapshot(mgr: GdcManager, args: dict) -> str:
 # --- Network ---
 
 async def handle_list_network_requests(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     type_filter = args.get("type")
     limit = int(args.get("limit", 50))
 
@@ -933,7 +993,7 @@ async def handle_list_network_requests(mgr: GdcManager, args: dict) -> str:
 
 
 async def handle_get_network_request(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     request_id = args.get("request_id", "")
     if not request_id:
         return "Error: request_id required"
@@ -965,7 +1025,7 @@ async def handle_get_network_request(mgr: GdcManager, args: dict) -> str:
 # --- Emulation ---
 
 async def handle_emulate(mgr: GdcManager, args: dict) -> str:
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     viewport = args.get("viewport")
     user_agent = args.get("user_agent")
     network = args.get("network")
@@ -1017,7 +1077,7 @@ async def handle_emulate(mgr: GdcManager, args: dict) -> str:
 
 async def handle_hover(mgr: GdcManager, args: dict) -> str:
     """EXT-1: Move mouse over element or coordinates."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     selector = args.get("selector")
     x = args.get("x")
     y = args.get("y")
@@ -1052,7 +1112,7 @@ async def handle_hover(mgr: GdcManager, args: dict) -> str:
 
 async def handle_get_cookies(mgr: GdcManager, args: dict) -> str:
     """EXT-2: Get cookies, optionally filtered by URL."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     params: dict = {}
     if "url" in args:
         params["urls"] = [args["url"]]
@@ -1071,7 +1131,7 @@ async def handle_get_cookies(mgr: GdcManager, args: dict) -> str:
 
 async def handle_set_cookie(mgr: GdcManager, args: dict) -> str:
     """EXT-2: Set a cookie."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     name = args.get("name")
     if not name:
         return "Error: name required"
@@ -1085,7 +1145,7 @@ async def handle_set_cookie(mgr: GdcManager, args: dict) -> str:
 
 async def handle_wait_for_selector(mgr: GdcManager, args: dict) -> str:
     """EXT-3: Poll until a CSS selector appears in the DOM."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
     timeout = float(args.get("timeout", 10.0))
     visible = _bool_param(args.get("visible"), default=False)
@@ -1127,7 +1187,7 @@ async def handle_wait_for_selector(mgr: GdcManager, args: dict) -> str:
 
 async def handle_get_html(mgr: GdcManager, args: dict) -> str:
     """EXT-4: Get outerHTML of a selector or the full document."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     selector = args.get("selector")
     _MAX_HTML = 50000
 
@@ -1156,7 +1216,7 @@ async def handle_get_html(mgr: GdcManager, args: dict) -> str:
 
 async def handle_select_option(mgr: GdcManager, args: dict) -> str:
     """EXT-5: Set a <select> dropdown value by value or label text."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
     value = args.get("value")
     label = args.get("label")
@@ -1198,7 +1258,7 @@ async def handle_select_option(mgr: GdcManager, args: dict) -> str:
 
 async def handle_inject_script(mgr: GdcManager, args: dict) -> str:
     """EXT-6: Inject persistent JS that runs on every new document."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     expression = args.get("expression", "")
     world = args.get("world", "main")
 
@@ -1216,7 +1276,7 @@ async def handle_inject_script(mgr: GdcManager, args: dict) -> str:
 
 async def handle_remove_injected_script(mgr: GdcManager, args: dict) -> str:
     """EXT-6: Remove a previously injected persistent script."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     identifier = args.get("identifier", "")
 
     if not identifier:
@@ -1228,7 +1288,7 @@ async def handle_remove_injected_script(mgr: GdcManager, args: dict) -> str:
 
 async def handle_clear_field(mgr: GdcManager, args: dict) -> str:
     """EXT-7: Clear an input field (works with React/Vue controlled inputs)."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
 
     if not selector:
@@ -1291,7 +1351,7 @@ async def handle_clear_field(mgr: GdcManager, args: dict) -> str:
 
 async def handle_find_element(mgr: GdcManager, args: dict) -> str:
     """EXT-8: Get position, size, text and visibility of an element."""
-    session = await mgr.get_selected()
+    session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
 
     if not selector:
@@ -1549,8 +1609,18 @@ class McpServer:
             )
 
         try:
-            result = await handler(self.manager, args)
+            # Global safety cap: no single handler may wedge the (serial) server.
+            # Even if some await slips past its own timeout, the tool call fails
+            # here and the run loop resumes reading stdin instead of going silent.
+            result = await asyncio.wait_for(handler(self.manager, args), timeout=90.0)
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
+        except asyncio.TimeoutError:
+            log.debug(f"Handler '{name}' exceeded the 90s global cap")
+            return self._tool_error(
+                msg_id,
+                f"Error in {name}: handler timed out (90s global cap). "
+                f"The server stayed responsive — retry the call.",
+            )
         except Exception as e:
             log.debug(f"Handler '{name}' error: {e}")
             return self._tool_error(msg_id, f"Error in {name}: {e}")
