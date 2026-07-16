@@ -1,3 +1,23 @@
+---
+name: adr-new-purity-server
+type: adr
+status: current
+title: Unify mcp-clangd and mcp-cuda into mcp-purity
+description: Decision to fold the clangd and cuda LSP servers into mcp-purity behind the purity_call entry point via a layered backend architecture.
+sources:
+  - Scripts/mcp-purity.py
+  - Scripts/mcp-purity.py:ClangdClient
+  - Scripts/mcp-purity.py:_resolve_aliases
+  - Scripts/mcp-purity.py:handle_find_definition
+  - Scripts/mcp-clangd.py
+  - Scripts/mcp-cuda.py
+verified:
+  commit: 2787c7f
+  date: 2026-07-16
+links:
+  - scripts
+---
+
 # Implementation Plan: Unify `mcp-clangd` + `mcp-cuda` into `mcp-purity` (Phase 0 — the skeleton)
 
 ## Requirements Summary

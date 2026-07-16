@@ -1,3 +1,24 @@
+---
+name: feature-implementation-plan
+type: spec
+status: current
+title: Find-Verify-Synthesize refactor of p:code-review and p:branch-review
+description: Multi-agent 4-Step fan-out replacing the monolithic review skills with a shared lens fragment plus two single-purpose leaf minions.
+sources:
+  - ClaudeCode/skills/_lib/code-review-lenses.md
+  - ClaudeCode/agents/p/minion-code-reviewer.md
+  - ClaudeCode/agents/p/minion-code-verifier.md
+  - ClaudeCode/skills/p:code-review/SKILL.md
+  - ClaudeCode/skills/p:branch-review/SKILL.md
+  - ClaudeCode/skills/_lib/handoff-contracts.md
+verified:
+  commit: 2787c7f
+  date: 2026-07-16
+links:
+  - skills
+  - agents
+---
+
 # Feature Implementation Plan: Find→Verify→Synthesize Multi-Agent Refactor of `p:code-review` and `p:branch-review`
 
 > **Canonical plan — synthesized from three perspective drafts (risk-first base + maintainability-first and mvp-first grafts).** This plan replaces the two monolithic single-pass review skills with a linear 4-Step fan-out (Scope → Find → Verify → Synthesize) orchestrated from each skill body, backed by a shared `_lib` single-source-of-truth fragment and two single-purpose leaf minions.
