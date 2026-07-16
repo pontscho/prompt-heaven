@@ -7,8 +7,8 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 51dd5f3
-  date: 2026-05-27
+  commit: d6659f7
+  date: 2026-07-16
 links:
   - overview
 ---
@@ -35,15 +35,18 @@ seen in `Scripts/mcp-purity.py`. All use asyncio + JSON-RPC 2.0 over stdio.
 | `Scripts/mcp-lldb.py` | mcp-lldb | LLDB debugger integration |
 | `Scripts/mcp-webfetch.py` | mcp-webfetch | Browser-emulated URL fetching |
 | `Scripts/mcp-context7.py` | mcp-context7 | Context7 documentation lookup |
+| `Scripts/mcp-wiki.py` | mcp-wiki | Wiki freshness / reindex / search / page reads over `docs/` |
 
-Other servers: `mcp-compile.py`, `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`.
+Other servers: `mcp-compile.py`, `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`,
+`mcp-postgres.py`.
 
 ## Task utilities
 
 Operate on the `requirements.yaml` workflow (see [[overview]]):
 `Scripts/task-plan.py` (status + dependency analysis), `task-update.py`,
 `task-show-all.py`, `task-show-details.py`, `task-batch-planner.py`,
-`task-implementation-plan.py` (token-efficient plan extraction).
+`task-implementation-plan.py` (token-efficient plan extraction), and
+`task-validator.py` (requirements.yaml schema validation).
 
 ## Search
 

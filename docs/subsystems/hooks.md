@@ -7,8 +7,8 @@ description: Claude Code hooks that auto-run after edits to enforce quality and 
 sources:
   - ClaudeCode/hooks
 verified:
-  commit: 51dd5f3
-  date: 2026-05-27
+  commit: d6659f7
+  date: 2026-07-16
 links:
   - overview
 ---
@@ -17,8 +17,9 @@ links:
 
 The scripts under `ClaudeCode/hooks/` are Claude Code hooks wired into a
 project's `.claude/settings.json`. Most run after a file edit to enforce code
-quality; one runs before tool use / on prompt submit to keep the session's tool
-routing on track.
+quality; others fire on tool use, prompt submit, or session start to keep the
+session's tool routing on track and inject fresh context (wall-clock time, host
+identity).
 
 ## Roster
 
@@ -31,6 +32,8 @@ routing on track.
 | `post-edit-python-lint.sh` | Bash | edit `.py` | Python linting |
 | `post-edit-vue-lint.sh` | Bash | edit `.vue/.js/.ts` | Auto-detects Biome / oxlint / ESLint |
 | `post-edit-lint.sh` | Bash | edit (generic) | Generic lint dispatch |
+| `prompt-inject-time.sh` | Bash | UserPromptSubmit | Injects fresh wall-clock time into context each prompt |
+| `session-start-host-info.sh` | Bash | SessionStart | Injects host identity (hostname, arch, distro, CPU/RAM) once per session |
 
 ## The complex one
 

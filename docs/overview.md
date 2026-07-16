@@ -8,36 +8,37 @@ sources:
   - README.md
   - ClaudeCode/CLAUDE.md
 verified:
-  commit: 51dd5f3
-  date: 2026-05-27
+  commit: d6659f7
+  date: 2026-07-16
 links:
   - skills
   - agents
   - scripts
-  - commands
   - hooks
 ---
 
 # prompt-heaven
 
-A curated library of prompts, agents, commands, hooks, skills, and MCP-server
+A curated library of prompts, agents, skills, hooks, and MCP-server
 scripts for Claude Code and OpenCode. It makes those tools more effective
 through structured workflows, enforced MCP tool routing, and reusable
 agent/skill definitions `README.md`.
 
 The two tool targets live in parallel trees: `ClaudeCode/` is the primary
 development target, `OpenCode/` mirrors a subset of it. All user-facing assets
-(skills, agents, commands) share the `p:` namespace prefix.
+(skills, agents) share the `p:` namespace prefix.
 
 ## Where things live
 
 | Area | Path | Page |
 |------|------|------|
-| Skills (loadable knowledge packs) | `ClaudeCode/skills/` | [[skills]] |
+| Skills (loadable knowledge packs + workflows) | `ClaudeCode/skills/` | [[skills]] |
 | Minion agents (delegate-able sub-agents) | `ClaudeCode/agents/p/` | [[agents]] |
 | Standalone scripts + MCP servers | `Scripts/` | [[scripts]] |
-| Slash commands (multi-step workflows) | `ClaudeCode/commands/p/` | [[commands]] |
-| Post-edit quality hooks | `ClaudeCode/hooks/` | [[hooks]] |
+| Post-edit / session hooks | `ClaudeCode/hooks/` | [[hooks]] |
+
+The former `/p:` slash-command tree (`ClaudeCode/commands/`) has been dissolved:
+each command was migrated into a skill under `ClaudeCode/skills/` — see [[skills]].
 
 ## Entry points for a newcomer
 
@@ -50,7 +51,7 @@ development target, `OpenCode/` mirrors a subset of it. All user-facing assets
 
 ## Cross-cutting conventions
 
-- **`p:` prefix** on every skill / agent / command, in both tool trees.
+- **`p:` prefix** on every skill / agent, in both tool trees.
 - **MCP-server pattern**: each server exposes one dispatcher tool (`purity_call`,
   `clangd_call`, ...) routing to handlers via a `function` parameter; Python 3.9+
   with asyncio + JSON-RPC 2.0 over stdio.
