@@ -1,9 +1,9 @@
 ---
-name: adr-new-purity-server
-type: adr
+name: spec-purity-unification
+type: spec
 status: current
-title: Unify mcp-clangd and mcp-cuda into mcp-purity
-description: Decision to fold the clangd and cuda LSP servers into mcp-purity behind the purity_call entry point via a layered backend architecture.
+title: 'Implementation Plan: Unify mcp-clangd + mcp-cuda into mcp-purity (Phase 0)'
+description: Phase 0 implementation plan for folding clangd + cuda into mcp-purity behind purity_call. Decision recorded in adr 0001.
 sources:
   - Scripts/mcp-purity.py
   - Scripts/mcp-purity.py:ClangdClient
@@ -16,9 +16,12 @@ verified:
   date: 2026-07-16
 links:
   - scripts
+  - 0001-purity-server-unification
 ---
 
 # Implementation Plan: Unify `mcp-clangd` + `mcp-cuda` into `mcp-purity` (Phase 0 — the skeleton)
+
+> The decision, alternatives, and consequences behind this plan are recorded in the ADR: [[0001-purity-server-unification]]. This page is the living WHAT/HOW.
 
 ## Requirements Summary
 
@@ -284,20 +287,9 @@ Semantic B-class functions (`type_at`, `diagnostics`, `outline`, `find_implement
 ### Build System Entry
 No build system — these are standalone scripts. MCP registration points at `Scripts/mcp-purity.py` (unchanged). No new file, no new registration entry.
 
-## Alternative Approaches Evaluated
+## Decision & Alternatives
 
-### Option 1: Thin facade over three servers
-A new server that calls the existing three as backends.
-**Pros:** existing servers untouched; lowest immediate risk.
-**Cons:** 4 processes + MCP-over-MCP; preserves the clangd↔cuda duplication and the CUDA fallback bug; doubles the init lifecycle; does not touch the fundamental problem.
-
-### Option 2: Full async rewrite of the file layer
-Rewrite every sync file handler as `async def` with `asyncio.to_thread`.
-**Pros:** uniform async code.
-**Cons:** large regression surface across a working, battle-tested file layer for no functional gain.
-
-### Recommended Approach: Layered in-place unification (executor-wrapped sync + backend-type map)
-**Rationale:** Folds clangd+cuda into one backend (eliminating the duplication and the CUDA bug as a side effect), keeps the working file layer untouched behind a one-line executor wrap, scales to luals via the backend map, and preserves the `purity_call` convention. Chosen over Option 1 (which leaves the fundamentals untouched) and Option 2 (needless regression surface).
+The decision — layered in-place unification, chosen over a thin facade (Option 1) and a full async rewrite (Option 2) — with full pros/cons and consequences is recorded in the ADR: [[0001-purity-server-unification]].
 
 ## Implementation Strategy
 

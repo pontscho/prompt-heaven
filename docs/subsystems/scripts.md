@@ -11,7 +11,7 @@ verified:
   date: 2026-07-16
 links:
   - overview
-  - adr-new-purity-server
+  - 0001-purity-server-unification
 ---
 
 # Scripts & MCP Servers
@@ -25,7 +25,7 @@ Each server exposes its capability to Claude Code via a single dispatcher tool
 routing to internal handlers by a `function` parameter — the pattern is best
 seen in `Scripts/mcp-purity.py`. All use asyncio + JSON-RPC 2.0 over stdio.
 The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
-`purity_call` entry point is recorded in [[adr-new-purity-server]].
+`purity_call` entry point is recorded in [[0001-purity-server-unification]].
 
 | Script | Server | Domain |
 |--------|--------|--------|
