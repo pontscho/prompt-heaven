@@ -23,8 +23,9 @@ violated this skill.
   at the bottom of this file. The janitor includes its own self-check in the
   report; you verify it before declaring the operation done.
 - You MUST resolve every code anchor via the language MCP (clangd / cuda /
-  luals / purity / git). Using grep / find / sed / cat / awk / head / tail to
-  locate or read code is a violation. (Enforced inside the janitor — but the
+  luals / purity / git), and do wiki search / freshness / reindex via the
+  `mcp-wiki` `wiki_call` tool. Using grep / find / sed / cat / awk / head / tail
+  to locate or read code is a violation. (Enforced inside the janitor — but the
   same rule applies to any follow-up work you do in the main context.)
 - You MUST NOT rewrite, restyle, or "improve" existing prose during `adopt`.
   The body is sacred — frontmatter only.
@@ -57,11 +58,13 @@ it with its own `docs/SCHEMA.md`; if that exists, it wins.
    schema defines layout, page types, and the exact frontmatter subset the
    scripts can parse. Obey it literally — deviation is a violation. (The
    janitor reads it too; you read it so you can sanity-check the report.)
-3. **Scripts run first, you read second.** ALWAYS run `freshness.py` /
-   `reindex.py` to find *what* to look at before opening any page. The janitor
-   enforces this — if its report skips them, reject the report.
+3. **Freshness/index checks run first, you read second.** ALWAYS run
+   `wiki_call` `freshness` / `reindex` (via the janitor) to find *what* to look
+   at before opening any page. The janitor enforces this — if its report skips
+   them, reject the report.
 4. **MCP routing is mandatory.** Resolve symbols and read code via clangd /
-   cuda / luals / purity / git MCP — NEVER grep / find / sed / cat / awk /
+   cuda / luals / purity / git MCP, and search / freshness / index the wiki via
+   the `mcp-wiki` `wiki_call` tool — NEVER grep / find / sed / cat / awk /
    head / tail. See SCHEMA §7. No exceptions, no fallbacks. Applies to the
    janitor and to any follow-up work in the main context.
 5. **NEVER auto-delete or silently rewrite.** The janitor surfaces deletions
@@ -131,8 +134,9 @@ Audit without any code change.
 
 Delegate with `op=lint`.
 
-The janitor will: run `freshness.py` (stale / unverified / orphaned-source
-report) and `reindex.py --check` (orphans, dup slugs, malformed frontmatter);
+The janitor will: run `wiki_call freshness` (stale / unverified /
+orphaned-source report) and `wiki_call reindex` with `check: true` (orphans,
+dup slugs, malformed frontmatter);
 open only flagged pages; resolve every inline anchor via MCP (missing →
 **broken**; signature changed → **drifted**); detect cross-page contradictions.
 It applies the automatic `status: stale` flip for code-drift cases, and
@@ -143,8 +147,9 @@ Answer from the wiki, fall back to code.
 
 Delegate with `op=query`, `question="<question>"`.
 
-The janitor will: search pages first; fall back to clangd / luals / purity on
-the code; answer with citations (page slugs + code anchors). If the answer
+The janitor will: search pages first via `wiki_call search` (frontmatter-aware,
+ranked) and read hits via `wiki_call get_page`; fall back to clangd / luals /
+purity on the code; answer with citations (page slugs + code anchors). If the answer
 required deriving something durable not yet captured, the janitor files it
 back into the right page (and reindexes); if no page is a clean home, a
 `[PROPOSE-NEW-PAGE]` is surfaced.
@@ -169,7 +174,7 @@ in the janitor).
 
 Delegate with `op=adopt`, `root=<dir>`, optional `batch_size=<n>`.
 
-The janitor will: run `reindex.py --check` to find malformed docs; for each
+The janitor will: run `wiki_call reindex` (`check: true`) to find malformed docs; for each
 doc, without changing its body, classify into a page type, infer `sources`
 anchors via MCP, add frontmatter with `verified.commit: <HEAD>` and
 `status: draft`. Then verify pass: where claims hold, flip `draft → current`;
@@ -181,11 +186,24 @@ For a repo with many docs, ask the human about batching: the janitor can
 adopt in batches (`batch_size=N`) and let the human review the `draft` pages
 before promoting them.
 
-## Scripts
+## Tooling: the `mcp-wiki` server (primary) + the CLI scripts (CI gate)
 
-Both are stdlib-only, Python 3.9+, and never call an LLM or modify pages
-(`reindex.py` only writes `INDEX.md`). They are invoked by the janitor — you
-do not normally run them yourself, but they live here for reference:
+The janitor drives the wiki through the **`mcp-wiki` MCP server** (one tool,
+`wiki_call`), NOT by shelling out to the scripts. Functions:
+
+| function | purpose |
+|---|---|
+| `search` | frontmatter-aware, ranked token search over pages (type/status/prefix filters); returns `path#section` anchors |
+| `source_to_pages` | reverse lookup: a changed source file → the pages whose `sources`/`targets` cover it |
+| `get_page` | read one page (whole or a single section) by slug/path |
+| `list` | list pages grouped by type, with filters |
+| `freshness` | git-only staleness report (stale / unverified / orphaned-source, with a `gating:` count) |
+| `reindex` | regenerate `INDEX.md`; `check: true` audits (dup slugs, malformed) without writing |
+| `stats` | page counts by type/status + dup/orphan/malformed audit |
+
+The underlying logic still lives in two stdlib-only, Python 3.9+ scripts that
+never call an LLM and only ever write `INDEX.md`. They remain as a **CLI CI
+gate** (exit codes drive PR checks); `wiki_call` is the interactive/agentic path:
 
 ```bash
 ~/.claude/skills/p:wiki/scripts/freshness.py --root docs [--head <ref>] [--quiet]
@@ -196,10 +214,9 @@ do not normally run them yourself, but they live here for reference:
 - `reindex.py` regenerates `INDEX.md` by default; `--check` audits without
   writing. It exits non-zero on duplicate slugs or malformed frontmatter.
 
-If you ever need to run them in the main context (e.g. a CI gate, or a quick
-sanity check after a human-applied deletion), that is fine — they are cheap
-and have no side effects beyond `INDEX.md`. Any deeper work (reading flagged
-pages, verifying anchors) goes through the janitor.
+Use the CLI scripts ONLY for a CI gate or a quick main-context sanity check.
+All interactive work (freshness, reindex, search, page reads, anchor
+verification) goes through the janitor and `wiki_call`.
 
 ## Self-check (MUST run before reporting any operation done)
 
@@ -242,8 +259,9 @@ NO, fix it or surface it explicitly — do NOT silently ship.
       lines.
 - [ ] For `adopt`: the body prose of every adopted page is byte-identical to
       what was there before. The janitor only touched the frontmatter.
-- [ ] `~/.claude/skills/p:wiki/scripts/reindex.py --root <docs> --check` exited 0.
-- [ ] `~/.claude/skills/p:wiki/scripts/freshness.py --root <docs>` exited 0, or every remaining
+- [ ] `wiki_call reindex` (`check: true`) reported no duplicate slugs / malformed
+      frontmatter (or they are surfaced in the janitor's report).
+- [ ] `wiki_call freshness` reported `gating: 0`, or every remaining
       stale / unverified / orphaned-source page is reported.
 - [ ] The janitor proposed (did not silently apply) every destructive change:
       deletions, splits, body rewrites, status downgrades unrelated to
@@ -260,7 +278,8 @@ explicitly. Silence is a violation.
 - [SCHEMA.md](SCHEMA.md) — layout, page types, frontmatter anatomy, anchors,
   freshness model, lint rules, verification routing, anti-scope.
 - `p:minion-librarian` (`ClaudeCode/agents/p/minion-librarian.md`) — the
-  executor agent. Reads the schema, runs the scripts, opens pages, verifies
-  anchors via MCP, applies non-destructive updates, surfaces destructive
+  executor agent. Reads the schema, runs `wiki_call` (freshness / reindex /
+  search), opens pages, verifies anchors via MCP, applies non-destructive
+  updates, surfaces destructive
   proposals. Forbidden from deleting files — that stays with the main agent
   under explicit human approval.

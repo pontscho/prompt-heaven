@@ -260,7 +260,8 @@ Anchor resolution and code reading use the MCP servers, never grep / find / sed:
 - CUDA symbols -> cuda MCP.
 - Lua symbols -> luals MCP.
 - File existence / text presence -> purity MCP (`find_file`, `search_for_pattern`).
-- Git freshness (did sources change since a commit) -> git MCP / `~/.claude/skills/p:wiki/scripts/freshness.py`.
+- Wiki page search / read / structure -> `mcp-wiki` `wiki_call` (`search`, `get_page`, `list`, `source_to_pages`, `stats`).
+- Git freshness / index (did sources change since a commit; regenerate INDEX) -> `mcp-wiki` `wiki_call` (`freshness`, `reindex`). The CLI `~/.claude/skills/p:wiki/scripts/freshness.py` / `reindex.py` remain as the pre-PR CI gate.
 
 ## 8. Anti-scope (do NOT document)
 
