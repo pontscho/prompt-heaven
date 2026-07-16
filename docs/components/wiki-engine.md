@@ -6,6 +6,7 @@ title: Documentation Wiki Engine
 description: The p:wiki skill, mcp-wiki server, and librarian minion that maintain the docs/ wiki.
 sources:
   - Scripts/mcp-wiki.py
+  - ClaudeCode/skills/p:wiki
   - ClaudeCode/agents/p/minion-librarian.md
 verified:
   commit: d6659f7

@@ -57,9 +57,25 @@ def _changed_files(commit: str, head: str, repo: str, cache: dict):
 	return changed
 
 
-def _source_path(source: str) -> str:
-	"""Strip an optional `:symbol` suffix, returning the path part."""
-	return source.split(":", 1)[0]
+def _source_path(source: str, repo=None) -> str:
+	"""Return the filesystem path part of an anchor (`path` or `path:symbol`).
+
+	Repo path segments can themselves contain ':' (this repo's `p:<name>` skill/
+	agent naming), which collides with the symbol separator. When `repo` is
+	given, return the LONGEST colon-prefix that exists on disk -- so both a
+	`p:<name>` dir in the path and a trailing `:symbol` are handled. Without
+	`repo`, fall back to splitting at the first ':'.
+	"""
+	if repo is None:
+		return source.split(":", 1)[0]
+	if os.path.exists(os.path.join(repo, source)):
+		return source
+	parts = source.split(":")
+	for i in range(len(parts) - 1, 0, -1):
+		candidate = ":".join(parts[:i])
+		if os.path.exists(os.path.join(repo, candidate)):
+			return candidate
+	return parts[0]
 
 
 def _evaluate(sources, changed, repo):
@@ -68,7 +84,7 @@ def _evaluate(sources, changed, repo):
 	changed_sources = []
 	missing = []
 	for src in sources:
-		path = _source_path(src)
+		path = _source_path(src, repo)
 		abs_path = os.path.join(repo, path)
 		if os.path.isdir(abs_path):
 			prefix = path.rstrip("/") + "/"
@@ -95,7 +111,7 @@ def analyze(root: str, head: str):
 		sources = w.as_list(fm.get("sources"))
 		targets = w.as_list(fm.get("targets"))
 		materialized = [t for t in targets
-			if os.path.exists(os.path.join(repo, _source_path(t)))]
+			if os.path.exists(os.path.join(repo, _source_path(t, repo)))]
 		verified = fm.get("verified") if isinstance(fm.get("verified"), dict) else {}
 		commit = (verified or {}).get("commit")
 

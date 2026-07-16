@@ -245,9 +245,26 @@ def as_list(value: Any) -> List[Any]:
 # Text / heading helpers
 # ---------------------------------------------------------------------------
 
-def _source_path(source: str) -> str:
-    """Strip an optional `:symbol` suffix, returning the path part."""
-    return str(source).split(":", 1)[0]
+def _source_path(source: str, repo: Optional[str] = None) -> str:
+    """Return the filesystem path part of an anchor (`path` or `path:symbol`).
+
+    Repo path segments can themselves contain ':' (this repo's `p:<name>` skill/
+    agent naming), which collides with the symbol separator. When `repo` is
+    given, return the LONGEST colon-prefix that exists on disk — so both a
+    `p:<name>` dir inside the path and a trailing `:symbol` are handled. Without
+    `repo`, fall back to splitting at the first ':'.
+    """
+    source = str(source)
+    if repo is None:
+        return source.split(":", 1)[0]
+    if os.path.exists(os.path.join(repo, source)):
+        return source
+    parts = source.split(":")
+    for i in range(len(parts) - 1, 0, -1):
+        candidate = ":".join(parts[:i])
+        if os.path.exists(os.path.join(repo, candidate)):
+            return candidate
+    return parts[0]
 
 
 def _tokenize(text: str) -> List[str]:
@@ -347,7 +364,7 @@ def _evaluate(sources, changed, repo):
     changed_sources = []
     missing = []
     for src in sources:
-        path = _source_path(src)
+        path = _source_path(src, repo)
         abs_path = os.path.join(repo, path)
         if os.path.isdir(abs_path):
             prefix = path.rstrip("/") + "/"
@@ -374,7 +391,7 @@ def freshness_analyze(root: str, head: str) -> dict:
         sources = as_list(fm.get("sources"))
         targets = as_list(fm.get("targets"))
         materialized = [t for t in targets
-                        if os.path.exists(os.path.join(repo, _source_path(t)))]
+                        if os.path.exists(os.path.join(repo, _source_path(t, repo)))]
         verified = fm.get("verified") if isinstance(fm.get("verified"), dict) else {}
         commit = (verified or {}).get("commit")
 
@@ -747,12 +764,12 @@ def _fn_source_to_pages(params, project_root, wiki_root, strict):
     if not source:
         raise ValueError("source_to_pages requires 'source' (a path or path:symbol)")
     abs_root, rel_root = _resolve_root(params, project_root, wiki_root, strict)
-    q_path = _source_path(source)
-    q_sym = source.split(":", 1)[1] if ":" in source else None
+    q_path = _source_path(source, project_root)
+    q_sym = source[len(q_path):].lstrip(":") or None
 
     def _matches(anchor: str) -> bool:
-        a_path = _source_path(anchor)
-        a_sym = anchor.split(":", 1)[1] if ":" in anchor else None
+        a_path = _source_path(anchor, project_root)
+        a_sym = anchor[len(a_path):].lstrip(":") or None
         path_hit = (a_path == q_path
                     or q_path.startswith(a_path.rstrip("/") + "/")
                     or a_path.startswith(q_path.rstrip("/") + "/"))
