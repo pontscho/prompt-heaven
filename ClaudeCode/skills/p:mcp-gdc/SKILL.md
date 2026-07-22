@@ -227,7 +227,7 @@ Capture screenshot and save to file. Returns file path.
 ```
 
 - `savePath` (alias: `save_path`) — optional. Full file path to save the screenshot. Parent directories are created automatically. When set, `path` is ignored.
-- `path` — optional, default `"/tmp"`. Directory where the screenshot file is saved with auto-generated name (`gdc-screenshot-<uuid>.<fmt>`). Only used when `savePath` is not set.
+- `path` — optional. Directory where the screenshot file is saved with auto-generated name (`gdc-screenshot-<uuid>.<fmt>`). Only used when `savePath` is not set. Default: if the project has a `.claude/tmp/` scratch dir (searched upward from the server's working directory), screenshots go under `.claude/tmp/gdc/`; otherwise they fall back to `/tmp`. The directory is created automatically.
 - `format` — optional, `"png"` (default) or `"jpeg"`.
 - `quality` — optional, default `80`. Only used for `"jpeg"`.
 - `full_page` — optional, default `false`. Capture entire scrollable page.

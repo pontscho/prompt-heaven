@@ -832,6 +832,25 @@ async def handle_scroll(mgr: GdcManager, args: dict) -> str:
 
 # --- Debugging ---
 
+def _default_screenshot_dir() -> str:
+    """Pick the default directory for auto-named screenshots.
+
+    Walk upward from the current working directory looking for a
+    ``.claude/tmp`` scratch dir. If one exists, screenshots go under
+    ``.claude/tmp/gdc`` there (keeping them inside the project's scratch
+    area); otherwise fall back to ``/tmp``.
+    """
+    d = os.getcwd()
+    while True:
+        candidate = os.path.join(d, ".claude", "tmp")
+        if os.path.isdir(candidate):
+            return os.path.join(candidate, "gdc")
+        parent = os.path.dirname(d)
+        if parent == d:
+            return "/tmp"
+        d = parent
+
+
 async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
     session = await _resolve_session(mgr, args)
     fmt = args.get("format", "png")
@@ -850,18 +869,20 @@ async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
         return "Screenshot failed: no data returned"
 
     save_path = args.get("savePath") or args.get("save_path")
-    raw_path = args.get("path", "/tmp")
+    raw_path = args.get("path")
     if save_path:
         # savePath is a full file path — ensure parent directory exists
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         filename = save_path
-    elif raw_path != "/tmp" and os.path.splitext(raw_path)[1]:
+    elif raw_path and os.path.splitext(raw_path)[1]:
         # path looks like a full file path (has extension) — treat as savePath
         os.makedirs(os.path.dirname(raw_path) or ".", exist_ok=True)
         filename = raw_path
     else:
-        # path is a directory — append generated filename
-        filename = f"{raw_path}/gdc-screenshot-{uuid.uuid4()}.{fmt}"
+        # path is a directory (explicit, or the default scratch dir) — append generated filename
+        directory = raw_path or _default_screenshot_dir()
+        os.makedirs(directory, exist_ok=True)
+        filename = f"{directory}/gdc-screenshot-{uuid.uuid4()}.{fmt}"
 
     with open(filename, "wb") as f:
         f.write(base64.b64decode(data))
@@ -1518,7 +1539,7 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
     "resize_page":           "Set visible viewport size",
     "scroll":                "Dispatch mouseWheel event at coordinates",
     # Debugging
-    "take_screenshot":       "Capture screenshot, save to /tmp, return file path",
+    "take_screenshot":       "Capture screenshot, save to .claude/tmp/gdc (or /tmp), return file path",
     "evaluate":              "Run JavaScript in page context and return result",
     "list_console_messages": "Return in-memory console log (last 50 of 1000)",
     "take_snapshot":         "Return accessibility tree as text (max 100 lines)",
