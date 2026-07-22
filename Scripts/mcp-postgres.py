@@ -1084,11 +1084,28 @@ def handle_connect(params: dict, mgr: ConnectionManager) -> dict:
         port = int(params["port"])
     sslmode = params.get("sslmode") or ssl_hint
 
+    # Password precedence: explicit `password` > `password_env` (name of an env
+    # var read from THIS server's own environment) > the default connection's
+    # password. `password_env` lets callers avoid putting the secret in the call.
+    pw_env = params.get("password_env")
+    if params.get("password") is not None:
+        password = params["password"]
+    elif pw_env:
+        password = os.environ.get(str(pw_env))
+        if not password:
+            raise ValueError(
+                f"password_env='{pw_env}' is unset or empty in the server's "
+                f"environment — export it where the MCP server runs, or pass "
+                f"'password' directly."
+            )
+    else:
+        password = default_cfg["password"]
+
     config = {
         "host": host,
         "port": port,
         "user": params.get("user") or default_cfg["user"],
-        "password": params.get("password") if params.get("password") is not None else default_cfg["password"],
+        "password": password,
         "dbname": params.get("dbname") or default_cfg["dbname"],
         "sslmode": sslmode,
     }
@@ -1160,7 +1177,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "call_function": {"name", "schema", "args", "connection", "max_rows", "max_answer_chars"},
     "call_procedure": {"name", "schema", "args", "connection", "max_rows", "max_answer_chars"},
     "list_connections": set(),
-    "connect": {"name", "host", "port", "user", "password", "dbname", "sslmode"},
+    "connect": {"name", "host", "port", "user", "password", "password_env", "dbname", "sslmode"},
     "disconnect": {"name"},
 }
 
@@ -1176,7 +1193,7 @@ HANDLER_DESCRIPTIONS = {
     "call_function":     "SELECT schema.name($1,…) via extended protocol with text args",
     "call_procedure":    "CALL schema.name($1,…) via extended protocol with text args",
     "list_connections":  "List configured named connections (host/db/user, never password)",
-    "connect":           "Register + open a named connection at runtime (name/host/port/user/password/dbname)",
+    "connect":           "Register + open a named connection at runtime (name/host/port/user/password|password_env/dbname)",
     "disconnect":        "Close and drop a named connection",
 }
 
