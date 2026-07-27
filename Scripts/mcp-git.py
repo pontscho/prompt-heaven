@@ -181,6 +181,37 @@ def validate_config(args: List[str]) -> None:
         )
 
 
+def validate_hash_object(args: List[str]) -> None:
+    # -w is the ONLY mutating mode: it writes the blob into .git/objects.
+    _reject_flags(args, {"-w", "--write"}, "hash-object")
+    # Short options bundle: `-wt blob` is parsed by git as `-w -t blob` and DOES
+    # write the object, so exact-match rejection of "-w" is not enough. The only
+    # short options here are -t/-w, and no object type contains a 'w', so any
+    # single-dash cluster carrying a 'w' is either -w or an invalid -t value.
+    for a in args:
+        if a == "--":
+            break                            # everything after -- is a path
+        if a.startswith("-") and not a.startswith("--") and "w" in a[1:]:
+            raise ValueError(
+                f"Forbidden git hash-object flag (would mutate repo): {a} "
+                "(bundled short options are expanded by git: -wt == -w -t)"
+            )
+        # Prefix match, not equality: git accepts unambiguous long-option
+        # abbreviations, so `--stdin-pa` still reaches --stdin-paths. Shorter
+        # forms (--stdi) are ambiguous and git rejects them itself.
+        if a.startswith("--stdin"):
+            raise ValueError(
+                "git hash-object --stdin/--stdin-paths is not available here: this "
+                "server's stdin is the MCP protocol stream, so reading it would "
+                "corrupt the session. Pass file path(s) instead."
+            )
+    if not any(not a.startswith("-") for a in args):
+        raise ValueError(
+            "git hash-object needs at least one file path "
+            "(e.g. params={\"path\":\"src/main.c\"})."
+        )
+
+
 def validate_fetch(args: List[str]) -> None:
     if "--dry-run" not in args:
         raise ValueError("git fetch is only allowed with --dry-run.")
@@ -199,6 +230,7 @@ FILTERED_SUBCOMMANDS: Dict[str, Callable[[List[str]], None]] = {
     "config": validate_config,
     "fetch":  validate_fetch,
     "apply":  validate_apply,
+    "hash-object": validate_hash_object,
 }
 
 SUBCOMMAND_DESCRIPTIONS = {
@@ -234,6 +266,7 @@ SUBCOMMAND_DESCRIPTIONS = {
     "config":         "Read config (--list / --get*)",
     "fetch":          "Network read with --dry-run only",
     "apply":          "Patch validity check with --check only",
+    "hash-object":    "Compute the git object ID of a file (-w and --stdin blocked)",
 }
 
 
@@ -394,6 +427,7 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
             capture_output=True,
             text=True,
             cwd=cwd,
+            stdin=subprocess.DEVNULL,   # git must never consume the MCP stream
             timeout=params.get("timeout", 60),
         )
     except FileNotFoundError:
@@ -470,7 +504,8 @@ GIT_CALL_TOOL = {
         "  Bash(\"git stash ...\") (ANY subcommand)           -> function=\"stash\"\n"
         "  Bash(\"git config --list/--get ...\")              -> function=\"config\"\n"
         "  Bash(\"git fetch --dry-run\")                      -> function=\"fetch\"\n"
-        "  Bash(\"git apply --check ...\")                    -> function=\"apply\"\n\n"
+        "  Bash(\"git apply --check ...\")                    -> function=\"apply\"\n"
+        "  Bash(\"git hash-object <file>\")                   -> function=\"hash-object\"\n\n"
         "Use Bash ONLY for the mutating ops this tool does NOT expose (commit, "
         "add, push, reset, checkout, merge, rebase, branch -d/-m, tag -a/-d, "
         "remote add/set-url, config <name> <value>, fetch without --dry-run, "
