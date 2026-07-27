@@ -7,15 +7,21 @@
 
 Single-tool dispatcher pattern (like mcp-git): one MCP tool (inspect_call)
 routes to internal handlers via the 'function' parameter. Every handler is
-READ-ONLY — it inspects live system state (processes, open files, sockets,
-memory, disk, host, environment) and NEVER mutates anything. There is no way
+READ-ONLY — it inspects live system state (processes, process tree, open files,
+sockets, network interfaces/routes, memory, disk, mounts, file metadata,
+services, resource limits, toolchain versions, host, environment) and NEVER
+mutates anything. There is no way
 to pass a raw shell string: each function builds a fixed argv (shell=False),
 filters are applied in Python, and numeric params (pid/port) are int-validated,
 so there is no shell-injection surface.
 
 Purpose: let the model run the common non-invasive `ps` / `lsof` / `netstat` /
-`ss` / `df` / `du` / `free` / `env` inspections through a single pre-approved
-MCP tool instead of per-call Bash prompts.
+`ss` / `df` / `du` / `free` / `env` / `stat` / `ifconfig` / `pstree` / `ulimit` /
+`launchctl` / `<tool> --version` / `shasum` / `md5sum` inspections through a
+single pre-approved MCP tool instead of per-call Bash prompts.
+
+The one execution-shaped function, `versions`, probes only an ALLOW-LISTED set of
+binary NAMES (_VERSION_TOOLS) with fixed flags; the caller can never supply argv.
 
 Cross-platform: macOS (Darwin) and Linux. Commands are selected per platform;
 missing underlying binaries degrade to a clear error, never a crash.
@@ -523,6 +529,443 @@ def h_env(p: dict) -> str:
     return "\n".join(lines)
 
 
+def _fmt_time(ts: float) -> str:
+    import datetime
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def h_stat(p: dict) -> str:
+    import stat as st_mod
+
+    raw = p.get("path") or p.get("file")
+    if not raw or not str(raw).strip():
+        raise ValueError("'stat' requires params.path.")
+    path = os.path.expanduser(str(raw).strip())
+    try:
+        st = os.lstat(path)          # lstat: describe the link itself, not its target
+    except OSError as exc:
+        raise ValueError(f"cannot stat {path}: {exc.strerror or exc}")
+
+    is_link = st_mod.S_ISLNK(st.st_mode)
+    kind = ("symlink" if is_link else
+            "directory" if st_mod.S_ISDIR(st.st_mode) else
+            "fifo" if st_mod.S_ISFIFO(st.st_mode) else
+            "socket" if st_mod.S_ISSOCK(st.st_mode) else
+            "block device" if st_mod.S_ISBLK(st.st_mode) else
+            "char device" if st_mod.S_ISCHR(st.st_mode) else "file")
+
+    def owner(uid: int, gid: int) -> str:
+        uname = gname = None
+        try:
+            import pwd
+            uname = pwd.getpwuid(uid).pw_name
+        except (ImportError, KeyError):
+            pass
+        try:
+            import grp
+            gname = grp.getgrgid(gid).gr_name
+        except (ImportError, KeyError):
+            pass
+        return f"{uname or uid}:{gname or gid}  (uid={uid}, gid={gid})"
+
+    lines = [f"## stat — `{path}`", "",
+             f"- type   : {kind}",
+             f"- mode   : `{st_mod.filemode(st.st_mode)}`  ({oct(st_mod.S_IMODE(st.st_mode))})",
+             f"- owner  : {owner(st.st_uid, st.st_gid)}",
+             f"- size   : {st.st_size} B ({_kb_human(st.st_size / 1024)})",
+             f"- links  : {st.st_nlink}",
+             f"- inode  : {st.st_ino}  (device {st.st_dev})",
+             f"- mtime  : {_fmt_time(st.st_mtime)}",
+             f"- atime  : {_fmt_time(st.st_atime)}",
+             f"- ctime  : {_fmt_time(st.st_ctime)}"]
+
+    if is_link:
+        try:
+            lines.append(f"- target : `{os.readlink(path)}`")
+        except OSError:
+            pass
+        real = os.path.realpath(path)
+        broken = "" if os.path.exists(real) else "  _(BROKEN — target missing)_"
+        lines.append(f"- resolves to: `{real}`{broken}")
+    else:
+        real = os.path.realpath(path)
+        if real != os.path.abspath(path):
+            lines.append(f"- realpath: `{real}`  _(path traverses a symlink)_")
+
+    if st_mod.S_ISDIR(st.st_mode):
+        try:
+            entries = os.listdir(path)
+            ndirs = sum(1 for e in entries
+                        if os.path.isdir(os.path.join(path, e)))
+            lines.append(f"- entries: {len(entries)} "
+                         f"({len(entries) - ndirs} files, {ndirs} dirs)")
+        except OSError as exc:
+            lines.append(f"- entries: _unreadable ({exc.strerror})_")
+
+    acc = "".join(n for n, m in (("r", os.R_OK), ("w", os.W_OK), ("x", os.X_OK))
+                  if os.access(path, m))
+    lines.append(f"- access for this server process: {acc or 'none'}")
+    return "\n".join(lines)
+
+
+def h_interfaces(p: dict) -> str:
+    filt = (p.get("filter") or p.get("name") or "").strip()
+    if IS_LINUX and _have("ip"):
+        rc, out, err = _run(["ip", "-o", "addr"], 10)
+        label, per_line = "ip -o addr", True
+    elif _have("ifconfig"):
+        rc, out, err = _run(["ifconfig", "-a"], 10)
+        label, per_line = "ifconfig -a", False
+    elif _have("ip"):
+        rc, out, err = _run(["ip", "-o", "addr"], 10)
+        label, per_line = "ip -o addr", True
+    else:
+        raise ValueError("no ip/ifconfig available to list interfaces.")
+    if rc != 0 and not out.strip():
+        raise ValueError(err.strip() or "interface listing failed")
+
+    text = out.strip()
+    if filt:
+        if per_line:
+            text = "\n".join(ln for ln in text.splitlines() if filt in ln)
+        else:
+            # ifconfig stanzas: a new interface starts at column 0
+            blocks: List[List[str]] = []
+            cur: List[str] = []
+            for ln in text.splitlines():
+                if ln and not ln[0].isspace():
+                    if cur:
+                        blocks.append(cur)
+                    cur = [ln]
+                else:
+                    cur.append(ln)
+            if cur:
+                blocks.append(cur)
+            text = "\n\n".join("\n".join(b) for b in blocks if filt in b[0])
+        if not text.strip():
+            return f"_no interface matching {filt!r}_"
+
+    head = f"## interfaces — {label}"
+    try:
+        names = ", ".join(n for _, n in socket.if_nameindex())
+        if names:
+            head += f"\n\n_present: {names}_"
+    except (OSError, AttributeError):
+        pass
+    return head + "\n\n" + _md_fence(text)
+
+
+def h_route(p: dict) -> str:
+    if IS_LINUX and _have("ip"):
+        rc, out, err = _run(["ip", "route"], 10)
+        label = "ip route"
+    elif _have("netstat"):
+        rc, out, err = _run(["netstat", "-rn"], 15)
+        label = "netstat -rn"
+    else:
+        raise ValueError("no ip/netstat available to show the routing table.")
+    if rc != 0 and not out.strip():
+        raise ValueError(err.strip() or "route listing failed")
+    return f"## routes — {label}\n\n" + (_md_fence(out.strip()) if out.strip() else "_(empty)_")
+
+
+def h_pstree(p: dict) -> str:
+    root = _int_param(p["pid"], "pid") if "pid" in p else None
+    depth = _int_param(p.get("depth", 0), "depth") if "depth" in p else 0
+    limit = _int_param(p.get("limit", 200), "limit") if "limit" in p else 200
+
+    fmt = "pid,ppid,user,comm"
+    rc, out, err = _run(["ps", "-axo", fmt] if IS_MAC else ["ps", "-eo", fmt], 15)
+    if rc != 0 and not out:
+        raise ValueError(err.strip() or "ps failed")
+    header, rows = _parse_ps(out)
+    if not header:
+        return "_(no process data)_"
+
+    idx = {h.lower(): i for i, h in enumerate(header)}
+    i_pid, i_ppid = idx.get("pid", 0), idx.get("ppid", 1)
+    i_user, i_comm = idx.get("user", 2), idx.get("comm", 3)
+
+    info: Dict[int, Tuple[str, str]] = {}
+    parent: Dict[int, int] = {}
+    kids: Dict[int, List[int]] = {}
+    for r in rows:
+        try:
+            pid, ppid = int(r[i_pid]), int(r[i_ppid])
+        except (ValueError, IndexError):
+            continue
+        info[pid] = (r[i_user], r[i_comm])
+        parent[pid] = ppid
+        kids.setdefault(ppid, []).append(pid)
+    for v in kids.values():
+        v.sort()
+
+    if root is not None and root not in info:
+        raise ValueError(f"no such process: {root}")
+    roots = [root] if root is not None else sorted(
+        pid for pid, ppid in parent.items() if ppid not in info)
+
+    lines: List[str] = []
+    state = {"truncated": False}
+    visited: set = set()
+
+    def walk(pid: int, prefix: str, is_last: bool, level: int) -> None:
+        if limit > 0 and len(lines) >= limit:
+            state["truncated"] = True
+            return
+        if depth > 0 and level > depth:
+            return
+        if pid in visited:
+            return  # a self/loop-parented ps row must not recurse forever
+        visited.add(pid)
+        user, comm = info.get(pid, ("?", "?"))
+        if level == 0:
+            lines.append(f"{pid:>7}  {user:<10} {comm}")
+            child_prefix = ""
+        else:
+            branch = "`- " if is_last else "|- "
+            lines.append(f"{pid:>7}  {user:<10} {prefix}{branch}{comm}")
+            child_prefix = prefix + ("   " if is_last else "|  ")
+        children = kids.get(pid, [])
+        for n, child in enumerate(children):
+            walk(child, child_prefix, n == len(children) - 1, level + 1)
+
+    for n, r_pid in enumerate(roots):
+        walk(r_pid, "", n == len(roots) - 1, 0)
+
+    head = "## process tree"
+    if root is not None:
+        head += f" — subtree of pid {root}"
+    if depth > 0:
+        head += f" (depth {depth})"
+    head += (f" — {len(lines)} rows (host total {len(info)} processes)"
+             if root is not None or depth > 0
+             else f" — {len(lines)} of {len(info)} processes")
+    note = f"\n\n_truncated at limit={limit}; pass a larger limit or a pid to narrow._" \
+        if state["truncated"] else ""
+    return head + "\n\n" + _md_fence("\n".join(lines)) + note
+
+
+def h_limits(p: dict) -> str:
+    import resource
+
+    parts: List[str] = []
+    if "pid" in p:
+        pid = _int_param(p["pid"], "pid")
+        if IS_LINUX:
+            try:
+                with open(f"/proc/{pid}/limits") as f:
+                    return (f"## limits — pid {pid} (/proc/{pid}/limits)\n\n"
+                            + _md_fence(f.read().strip()))
+            except OSError as exc:
+                raise ValueError(f"cannot read limits for pid {pid}: "
+                                 f"{exc.strerror or exc}")
+        parts.append(f"_macOS exposes no per-process rlimits — `pid={pid}` ignored; "
+                     "showing this server's limits and the system limits instead._\n")
+
+    rows = []
+    for name in sorted(n for n in dir(resource) if n.startswith("RLIMIT_")):
+        try:
+            soft, hard = resource.getrlimit(getattr(resource, name))
+        except (ValueError, OSError):
+            continue
+        def show(v: int) -> str:
+            return "unlimited" if v == resource.RLIM_INFINITY else str(v)
+        rows.append([name[len("RLIMIT_"):].lower(), show(soft), show(hard)])
+
+    parts += ["## limits — this MCP server process", "",
+              "_inherited from whatever launched the server; NOT the Bash tool's shell._", "",
+              _md_fence(_fmt_table(["limit", "soft", "hard"], rows))]
+
+    if IS_MAC and _have("launchctl"):
+        rc, out, _ = _run(["launchctl", "limit"], 5)
+        if rc == 0 and out.strip():
+            parts += ["", "### system (launchctl limit)", "", _md_fence(out.strip())]
+    elif IS_LINUX:
+        try:
+            with open("/proc/sys/fs/file-max") as f:
+                parts += ["", f"_system file-max: {f.read().strip()}_"]
+        except OSError:
+            pass
+    return "\n".join(parts)
+
+
+def h_services(p: dict) -> str:
+    filt = (p.get("filter") or p.get("name") or "").strip().lower()
+    user_scope = _bool_param(p.get("user", False))
+    limit = _int_param(p.get("limit", 100), "limit") if "limit" in p else 100
+
+    if IS_MAC:
+        if not _have("launchctl"):
+            raise ValueError("launchctl not available on this host.")
+        rc, out, err = _run(["launchctl", "list"], 15)
+        label = "launchctl list"
+    else:
+        if not _have("systemctl"):
+            raise ValueError("systemctl not available on this host.")
+        cmd = (["systemctl"] + (["--user"] if user_scope else [])
+               + ["list-units", "--type=service", "--all",
+                  "--no-pager", "--plain", "--no-legend"])
+        rc, out, err = _run(cmd, 20)
+        label = "systemctl" + (" --user" if user_scope else "") + " list-units --type=service"
+    if rc != 0 and not out.strip():
+        raise ValueError(err.strip() or "service listing failed")
+
+    lines = out.strip().splitlines()
+    header = lines[0] if (IS_MAC and lines and lines[0].lower().startswith("pid")) else None
+    body_lines = lines[1:] if header else lines
+    total = len(body_lines)
+    if filt:
+        body_lines = [ln for ln in body_lines if filt in ln.lower()]
+    if not body_lines:
+        return f"_no service matching {filt!r} (of {total})_"
+    shown = len(body_lines)
+    note = ""
+    if limit > 0 and shown > limit:
+        body_lines = body_lines[:limit]
+        note = f"\n\n_showing first {limit} of {shown} matches._"
+    text = "\n".join(([header] if header else []) + body_lines)
+    head = f"## services — {label} — {len(body_lines)} of {total}"
+    if filt:
+        head += f" (filter={filt!r})"
+    return head + "\n\n" + _md_fence(text) + note
+
+
+# Allow-listed version probes: tool -> argv flags (None = ["--version"]).
+# The caller may only NAME a tool from this map; it can never supply argv, so
+# there is no way to turn this into arbitrary command execution.
+_VERSION_TOOLS: Dict[str, Optional[List[str]]] = {
+    "python3": None, "python": None, "pip3": None, "uv": None,
+    "node": None, "npm": None, "pnpm": None, "yarn": None,
+    "bun": None, "deno": None, "tsc": None,
+    "git": None, "gh": None,
+    "cmake": None, "ninja": None, "make": None, "pkg-config": None,
+    "gcc": None, "g++": None, "clang": None, "clang++": None,
+    "clangd": None, "clang-tidy": None, "nvcc": None,
+    "rustc": None, "cargo": None, "go": None,
+    "lua": ["-v"], "luajit": ["-v"], "lua-language-server": None,
+    "docker": None, "psql": None, "sqlite3": None, "jq": None,
+    "ffmpeg": ["-version"], "tshark": None, "lldb": None,
+    "java": ["-version"], "ruby": None, "perl": None,
+    "bash": None, "zsh": None, "swift": None,
+}
+
+
+def h_versions(p: dict) -> str:
+    req = p.get("tools") or p.get("tool") or p.get("name")
+    explicit = bool(req)
+    if explicit:
+        names = (list(req) if isinstance(req, list)
+                 else [t for t in str(req).replace(",", " ").split() if t])
+        names = [str(n).strip() for n in names]
+        unknown = sorted({n for n in names if n not in _VERSION_TOOLS})
+        if unknown:
+            raise ValueError(
+                "not in the version-probe allow-list: " + ", ".join(unknown)
+                + ". Allowed: " + ", ".join(sorted(_VERSION_TOOLS))
+                + ". (Allow-listed by design — this function never runs an "
+                  "arbitrary binary.)"
+            )
+    else:
+        names = sorted(_VERSION_TOOLS)
+
+    rows = []
+    for name in names:
+        resolved = shutil.which(name)
+        if not resolved:
+            if explicit:
+                rows.append([name, "_not installed_", ""])
+            continue
+        rc, out, err = _run([resolved] + (_VERSION_TOOLS[name] or ["--version"]), 10)
+        text = [ln for ln in (out or err).splitlines() if ln.strip()]
+        rows.append([name,
+                     text[0].strip() if text else f"(no output, rc={rc})",
+                     resolved])
+    if not rows:
+        return "_none of the allow-listed tools are installed_"
+    head = "## versions"
+    if not explicit:
+        head += f" — {len(rows)} of {len(_VERSION_TOOLS)} allow-listed tools installed"
+    return head + "\n\n" + _md_fence(_fmt_table(["tool", "version", "path"], rows))
+
+
+# Digests are computed with hashlib, NOT by shelling out to shasum/sha256sum/
+# md5/md5sum: those differ per platform (`md5 -q` on macOS vs `md5sum` on Linux),
+# may be missing, and their output has to be re-parsed. hashlib is stdlib, needs
+# no argv, streams the file in chunks, and gives identical digests everywhere.
+_HASH_ALGOS = ("sha256", "sha512", "sha384", "sha224", "sha1", "md5",
+               "blake2b", "blake2s")
+_HASH_MAX_MB = 2048          # refuse bigger files unless max_mb is raised: the
+                             # server loop is single-threaded while hashing
+_HASH_CHUNK = 1024 * 1024
+
+
+def h_hash(p: dict, algo: str = "") -> str:
+    import hashlib
+
+    single = p.get("path") or p.get("file")
+    multi = p.get("paths")
+    if single and multi:
+        raise ValueError("pass either 'path' (one file) or 'paths' (a list) — "
+                         "not both, so nothing is silently dropped.")
+    raw = single or multi
+    if not raw:
+        raise ValueError("hashing requires params.path (one file, or a list of files).")
+    algo = (algo or str(p.get("algo") or "sha256")).strip().lower()
+    if algo not in _HASH_ALGOS:
+        raise ValueError(f"unsupported algo {algo!r}; use one of: "
+                         + ", ".join(_HASH_ALGOS))
+    max_mb = _int_param(p.get("max_mb", _HASH_MAX_MB), "max_mb") \
+        if "max_mb" in p else _HASH_MAX_MB
+    paths = list(raw) if isinstance(raw, list) else [raw]
+    expect = str(p.get("expect") or "").strip().lower()
+    if expect and len(paths) != 1:
+        raise ValueError("'expect' compares a single file — pass exactly one path.")
+
+    rows: List[List[str]] = []
+    verdict: Optional[bool] = None
+    for item in paths:
+        path = os.path.expanduser(str(item).strip())
+        if os.path.isdir(path):
+            rows.append(["_is a directory_", "", path])
+            continue
+        try:
+            size = os.path.getsize(path)
+            if max_mb > 0 and size > max_mb * 1024 * 1024:
+                rows.append([f"_skipped: {_kb_human(size / 1024)} exceeds "
+                             f"max_mb={max_mb}_", "", path])
+                continue
+            digest_obj = hashlib.new(algo)
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(_HASH_CHUNK), b""):
+                    digest_obj.update(chunk)
+        except OSError as exc:
+            rows.append([f"_error: {exc.strerror or exc}_", "", path])
+            continue
+        digest = digest_obj.hexdigest()
+        rows.append([digest,
+                     f"{size} B" if size < 1024 else _kb_human(size / 1024),
+                     path])
+        if expect:
+            verdict = digest == expect
+
+    out = f"## {algo}\n\n" + _md_fence(
+        _fmt_table([algo, "size", "path"], rows))
+    if expect:
+        out += ("\n\n**MATCH** — the digest equals the expected value."
+                if verdict else
+                f"\n\n**MISMATCH** — expected `{expect}`.")
+    return out
+
+
+def h_sha256(p: dict) -> str:
+    return h_hash(p, "sha256")
+
+
+def h_md5(p: dict) -> str:
+    return h_hash(p, "md5")
+
+
 # canonical -> (handler, one-line description)
 HANDLERS: Dict[str, Tuple[Any, str]] = {
     "processes":   (h_processes, "List processes (params: filter, user, sort=cpu|mem|pid, limit)"),
@@ -537,6 +980,16 @@ HANDLERS: Dict[str, Tuple[Any, str]] = {
     "mounts":      (h_mounts, "Mounted filesystems"),
     "which":       (h_which, "Resolve a binary in PATH (params: name)"),
     "env":         (h_env, "Environment vars, secrets redacted (params: key, filter, show_secrets)"),
+    "stat":        (h_stat, "File/dir metadata: mode, owner, inode, times, symlink target (params: path [req])"),
+    "interfaces":  (h_interfaces, "Network interfaces + addresses (params: filter)"),
+    "route":       (h_route, "Routing table"),
+    "pstree":      (h_pstree, "Process hierarchy as a tree (params: pid, depth, limit)"),
+    "limits":      (h_limits, "Resource limits / rlimits (params: pid — per-PID on Linux only)"),
+    "services":    (h_services, "launchctl/systemctl services (params: filter, user, limit)"),
+    "versions":    (h_versions, "Versions of allow-listed tools (params: tools)"),
+    "hash":        (h_hash, "File digest (params: path [req], algo=sha256|sha512|sha1|md5|blake2b, expect, max_mb)"),
+    "sha256":      (h_sha256, "SHA-256 of a file or files (params: path [req], expect)"),
+    "md5":         (h_md5, "MD5 of a file or files (params: path [req], expect)"),
 }
 
 # alias -> canonical
@@ -551,6 +1004,18 @@ ALIASES = {
     "du": "disk_usage", "usage": "disk_usage",
     "mount": "mounts",
     "environment": "env", "printenv": "env",
+    "file_info": "stat", "fileinfo": "stat", "metadata": "stat",
+    "ifconfig": "interfaces", "ip": "interfaces", "interface": "interfaces",
+    "nics": "interfaces", "addr": "interfaces",
+    "routes": "route", "routing": "route", "routetable": "route",
+    "tree": "pstree", "ptree": "pstree", "processtree": "pstree",
+    "ulimit": "limits", "rlimit": "limits", "rlimits": "limits",
+    "service": "services", "launchctl": "services", "systemctl": "services",
+    "units": "services", "daemons": "services",
+    "version": "versions", "toolchain": "versions", "tools": "versions",
+    "checksum": "hash", "digest": "hash",
+    "sha256sum": "sha256", "shasum": "sha256", "sha": "sha256",
+    "md5sum": "md5",
 }
 
 
@@ -561,7 +1026,8 @@ def _status_text(project_root: Optional[str]) -> str:
     if project_root:
         lines.append(f"Project root (du/df default base): `{project_root}`\n")
     bins = ["ps", "lsof", "ss", "netstat", "df", "du", "mount", "free",
-            "vm_stat", "sysctl", "uptime", "uname"]
+            "vm_stat", "sysctl", "uptime", "uname", "ip", "ifconfig",
+            "launchctl", "systemctl"]
     avail = ", ".join(f"{b}{'' if _have(b) else '✗'}" for b in bins)
     lines.append(f"Underlying binaries (✗ = missing): {avail}\n")
     lines.append("Functions (all READ-ONLY):\n")
@@ -618,9 +1084,11 @@ INSPECT_CALL_TOOL = {
     "name": "inspect_call",
     "description": (
         "Read-only, non-invasive system inspection: processes, open files, "
-        "sockets, memory, disk, host, environment. PREFER THIS over Bash for "
-        "`ps`, `lsof`, `netstat`, `ss`, `df`, `du`, `free`, `env` as the PRIMARY "
-        "command — it is pre-approved (no permission prompt) and returns "
+        "sockets, memory, disk, host, file metadata, file digests, network topology, "
+        "services, toolchain versions, environment. PREFER THIS over Bash for `ps`, `lsof`, "
+        "`netstat`, `ss`, `df`, `du`, `free`, `env`, `stat`, `ifconfig`/`ip addr`, "
+        "`pstree`, `ulimit`, `launchctl`/`systemctl`, `<tool> --version` as the "
+        "PRIMARY command — it is pre-approved (no permission prompt) and returns "
         "structured Markdown. (Piping a stream into grep/etc. in Bash is still "
         "fine — that is not what this replaces.)\n\n"
         "Single-tool dispatcher: pass `function` + `params` (or `f` + `p`). "
@@ -638,7 +1106,19 @@ INSPECT_CALL_TOOL = {
         "  mounts                mounted filesystems\n"
         "  which                 params: name\n"
         "  env                   params: key, filter; secret-looking values "
-        "redacted unless show_secrets=true\n\n"
+        "redacted unless show_secrets=true\n"
+        "  stat (file_info)      params: path [required] — mode/owner/inode/times/"
+        "symlink target/dir entry count\n"
+        "  interfaces (ifconfig) params: filter\n"
+        "  route (routes)        routing table\n"
+        "  pstree (tree)         params: pid, depth, limit — parent/child process tree\n"
+        "  limits (ulimit)       params: pid (per-PID on Linux only)\n"
+        "  services (launchctl)  params: filter, user, limit\n"
+        "  versions (toolchain)  params: tools — allow-listed binaries only\n"
+        "  sha256 (shasum)       params: path [required] (or a list), expect\n"
+        "  md5 (md5sum)          params: path [required] (or a list), expect\n"
+        "  hash (checksum)       params: path [required], algo=sha256|sha512|sha1|"
+        "md5|blake2b, expect, max_mb\n\n"
         "Everything is READ-ONLY (no mutation, shell=False, no injection surface). "
         "Example: function=\"processes\", params={\"filter\":\"node\",\"sort\":\"mem\"}"
     ),
