@@ -49,6 +49,7 @@ SERVERS = [
     {"file": "mcp-cuda.py",     "tool": "cuda_call",     "args": []},
     {"file": "mcp-postgres.py", "tool": "postgres_call", "args": ["--host", "127.0.0.1:1", "--dbname", "x"]},
     {"file": "mcp-wiki.py",     "tool": "wiki_call",     "args": ["--project-root", "/tmp"]},
+    {"file": "mcp-inspect.py",  "tool": "inspect_call",  "args": []},
 ]
 
 READ_TIMEOUT = 8.0  # seconds to wait for a single response line
