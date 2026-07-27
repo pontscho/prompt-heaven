@@ -37,6 +37,7 @@ import pathlib
 import re
 import shutil
 import sys
+import tempfile
 import time
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -370,10 +371,40 @@ def handle_create_temp_dir(params: dict, project_root: str, strict: bool = False
     All temporary artifacts (screenshots, debug output, scratch files) belong
     here — never in the project root. Idempotent: creating an already-existing
     directory is a no-op that still returns the absolute path.
+
+    ``subpath`` nests a scratch dir under ``.claude/tmp`` (missing parents are
+    created); ``unique=true`` appends a random suffix via mkdtemp so parallel
+    callers never collide. The resolved target is fenced under ``.claude/tmp``,
+    so a traversing or absolute subpath is rejected instead of escaping.
+
+    Note: writing a temp FILE needs no call here — create_text_file already
+    creates missing parent directories. Use this only when something else has
+    to write into a directory that must already exist.
     """
-    path = safe_path(project_root, os.path.join(".claude", "tmp"), strict)
-    os.makedirs(path, exist_ok=True)
-    return {"__raw_text__": path}
+    base = safe_path(project_root, os.path.join(".claude", "tmp"), strict)
+    sub = str(params.get("subpath") or "").strip()
+    if sub:
+        if os.path.isabs(sub):
+            raise ValueError(
+                "'subpath' must be relative to .claude/tmp, not an absolute path."
+            )
+        sub = sub.rstrip("/\\")
+    unique = _bool_param(params.get("unique", False))
+
+    target = os.path.join(base, sub) if sub else base
+    if not _path_within_root(pathlib.Path(target), base):
+        raise ValueError(_sanitize_log(
+            f"'subpath' escapes the scratch directory: {sub!r} must stay under .claude/tmp"
+        ))
+
+    if unique:
+        parent = os.path.dirname(target) if sub else base
+        os.makedirs(parent, exist_ok=True)
+        prefix = f"{os.path.basename(target)}-" if sub else "tmp-"
+        target = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    else:
+        os.makedirs(target, exist_ok=True)
+    return {"__raw_text__": target}
 
 
 def _format_size(size: int) -> str:
@@ -4490,7 +4521,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "create_text_file": {
         "relative_path", "content", "overwrite",
     },
-    "create_temp_dir": set(),
+    "create_temp_dir": {"subpath", "unique"},
     "restart_lsp": {"backend", "filetype", "reindex"},
     "list_dir": {
         "relative_path", "recursive", "skip_ignored_files",

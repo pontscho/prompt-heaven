@@ -1,7 +1,7 @@
 
 ## Temporary Files
 
-**STRICT RULE**: Temporary files MUST be placed ONLY in the `.claude/tmp/` directory. NO EXCEPTIONS. NO EXCUSES. If you create a temporary file anywhere else, you are violating this rule. Create the directory if it doesn't exist.
+**STRICT RULE**: Temporary files MUST be placed ONLY in the `.claude/tmp/` directory. NO EXCEPTIONS. NO EXCUSES. If you create a temporary file anywhere else, you are violating this rule. NEVER `mkdir` — `purity_call(create_text_file)` and `Write` already create missing parent dirs, so a temp FILE needs no directory prep at all; reach for `purity_call(create_temp_dir)` (`subpath`/`unique`) only when a directory must exist BEFOREHAND.
 
 ## Minion Mindset — Your Eyes, Ears, and Hands
 
