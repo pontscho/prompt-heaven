@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """PreToolUse(Bash) guard — enforce MCP-first routing.
 
-Denies file-search / listing / stream-edit / system-inspection binaries
-(grep, rg, find, fd, locate, ls, sed, ps, lsof, netstat, ss, df, du, free)
-when used as the PRIMARY command of a statement, steering the model to the
-purity_call / inspect_call MCP equivalents. Downstream pipe stages (e.g.
-`journalctl | grep`, `cat f | sed`) are allowed — there the binary filters a
-stream, which has no MCP equivalent.
+Denies file-search / listing / file-read / stream-edit / dir-creation /
+system-inspection binaries (grep, rg, find, fd, locate, ls, cat, head, tail,
+awk, sed, mkdir, ps, lsof, netstat, ss, df, du, free) when used as the PRIMARY
+command of a statement, steering the model to the purity_call / inspect_call
+MCP equivalents. Downstream pipe stages (e.g. `journalctl | grep`,
+`git log | awk '{print $1}'`) are allowed — there the binary filters a stream,
+which has no MCP equivalent. Individual MODES with no MCP equivalent stay
+allowed even as the primary command (see ALLOW_FLAGS: `tail -f`).
 
 Decision is emitted purely via stdout JSON; the script ALWAYS exits 0 and
 fails OPEN on any error, so it can never brick the Bash tool.
@@ -30,7 +32,20 @@ BLOCKED = {
     "mlocate": "purity_call(find_file)",
     "plocate": "purity_call(find_file)",
     "ls": "purity_call(list_dir)",
+    # file viewing -> built-in Read (it takes offset/limit, so slicing a big
+    # file needs no head/tail)
+    "cat": "Read (built-in); to feed a program stdin use `prog < file`, not `cat file | prog`",
+    "head": "Read (built-in) with limit",
+    "tail": "Read (built-in) with offset/limit (`tail -f` follow-mode stays allowed)",
+    "awk": "purity_call(search_for_pattern) to search, or Read to view — never awk to read or rewrite a file",
     "sed": "purity_call(replace_content/replace_lines/insert_at_line) to edit, or Read to view",
+    # scratch dirs -> purity. Usually you need NOTHING: create_text_file/Write
+    # already create missing parent dirs, so a temp file needs no mkdir at all.
+    "mkdir": (
+        "nothing at all if you are about to write a file — purity_call(create_text_file) "
+        "and Write create missing parent dirs; if a directory must exist up front, "
+        "purity_call(create_temp_dir) with {subpath, unique} under .claude/tmp"
+    ),
     # live system state -> mcp-inspect (read-only, pre-approved, no prompt)
     "ps": "inspect_call(function=processes)",
     "lsof": "inspect_call(function=open_files)",
@@ -43,6 +58,33 @@ BLOCKED = {
 
 # leading tokens that wrap the real command — skip them to find the true cmd
 SKIP_WRAPPERS = {"sudo", "command", "env", "nice", "nohup", "time", "builtin", "exec", "xargs"}
+
+# basename -> (short-option LETTERS, long options) selecting a mode that has NO
+# MCP equivalent at all; such a stage stays allowed even as the primary command.
+# `Read` cannot follow a growing file, so denying `tail -f` would be a dead end.
+# Letters are matched INSIDE short clusters: options bundle, so `tail -fn 100`
+# carries `-f` and an exact-token check would miss it.
+ALLOW_FLAGS = {
+    "tail": ({"f", "F"}, {"--follow", "--retry"}),
+}
+
+
+def mode_exempt(basename, stage):
+    """True if this stage selects a mode of `basename` with no MCP equivalent."""
+    spec = ALLOW_FLAGS.get(basename)
+    if not spec:
+        return False
+    letters, longs = spec
+    for tok in stage.split():
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            # getopt_long accepts unambiguous abbreviations (`--fol` == `--follow`)
+            if len(name) > 2 and any(lo.startswith(name) for lo in longs):
+                return True
+        elif tok.startswith("-") and len(tok) > 1:
+            if letters & set(tok[1:]):
+                return True
+    return False
 
 
 def split_top(s, seps):
@@ -111,7 +153,11 @@ def first_cmd_token(stage):
     return os.path.basename(toks[idx]) if idx < len(toks) else None
 
 
-HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# The lookarounds keep a HERESTRING (`cmd <<<WORD`) from being read as a
+# heredoc: without them the regex matches at the SECOND `<`, takes WORD for a
+# delimiter and swallows every following line — hiding real commands from the
+# scan.
+HEREDOC_RE = re.compile(r"(?<!<)<<-?(?!<)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
 def _strip_heredocs(cmd):
@@ -147,11 +193,12 @@ def main():
     cmd = _strip_heredocs(cmd)  # heredoc bodies are data, not commands
 
     hits = []
-    for stmt in split_top(cmd, ["&&", "||", ";", "\n"]):
+    # longest-first splitting means `&&` is consumed before the bare `&`
+    for stmt in split_top(cmd, ["&&", "||", ";", "\n", "&"]):
         stages = split_top(stmt, ["|"])  # '||' already consumed above
         if stages:
             tok = first_cmd_token(stages[0])
-            if tok in BLOCKED:
+            if tok in BLOCKED and not mode_exempt(tok, stages[0]):
                 hits.append(tok)
 
     if not hits:
@@ -162,7 +209,8 @@ def main():
     reason = (
         "MCP-first routing violation: "
         + ", ".join(f"`{h}`" for h in uniq)
-        + " is forbidden as a primary file-search / listing / inspection command via Bash. Use instead: "
+        + " is forbidden as a primary file-search / listing / read / dir-creation /"
+        " inspection command via Bash. Use instead: "
         + mapping
         + ". (Piping INTO these to filter another command's stdout is allowed; this "
         "blocks them only as the primary file operation.)"
