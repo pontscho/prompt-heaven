@@ -13,6 +13,7 @@ fails OPEN on any error, so it can never brick the Bash tool.
 """
 import json
 import os
+import re
 import sys
 
 # basename -> suggested MCP replacement
@@ -110,6 +111,32 @@ def first_cmd_token(stage):
     return os.path.basename(toks[idx]) if idx < len(toks) else None
 
 
+HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _strip_heredocs(cmd):
+    """Drop heredoc BODIES so their data lines are not mis-read as commands.
+
+    The heredoc-introducing line is kept (it holds the real command, e.g.
+    `git commit -F - <<'EOF'`); everything from the next line through the
+    closing delimiter is removed. Handles <<, <<-, and quoted/unquoted
+    delimiters. A real command AFTER the terminator is still analyzed.
+    """
+    out, active = [], None
+    for line in cmd.split("\n"):
+        if active is not None:
+            delim, strip_tabs = active
+            probe = line.lstrip("\t") if strip_tabs else line
+            if probe.strip() == delim:
+                active = None
+            continue  # drop body line (and the terminator line)
+        out.append(line)
+        m = HEREDOC_RE.search(line)
+        if m:
+            active = (m.group(2), m.group(0).startswith("<<-"))
+    return "\n".join(out)
+
+
 def main():
     data = json.loads(sys.stdin.read())
     if data.get("tool_name") != "Bash":
@@ -117,6 +144,7 @@ def main():
     cmd = (data.get("tool_input") or {}).get("command") or ""
     if not cmd.strip():
         return
+    cmd = _strip_heredocs(cmd)  # heredoc bodies are data, not commands
 
     hits = []
     for stmt in split_top(cmd, ["&&", "||", ";", "\n"]):
