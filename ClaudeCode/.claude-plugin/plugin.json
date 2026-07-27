@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "p",
+  "displayName": "Prompt Heaven",
+  "version": "1.0.0",
+  "description": "Minion fleet, skills and MCP-first tool routing conventions.",
+  "author": { "name": "pontscho" },
+  "repository": "https://github.com/pontscho/prompt-heaven",
+  "license": "MIT"
+}

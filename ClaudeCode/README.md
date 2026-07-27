@@ -2,6 +2,46 @@
 
 This document describes the complete workflow for implementing features using ClaudeCode with structured planning and autonomous execution.
 
+## Installation
+
+`ClaudeCode/` is a Claude Code **plugin** named `p`. Its manifest is `.claude-plugin/plugin.json`; everything it ships — agents, skills, hooks — is exposed under the `p:` namespace (`p:minion-explorer`, `/p:feature-plan`, `Skill(p:wiki)`). The `p:` prefix is added automatically by the namespace, so the definition files themselves carry the **bare** name.
+
+### Recommended: live-editable install (symlink)
+
+Claude Code treats any `~/.claude/skills/<name>/` that contains a `.claude-plugin/plugin.json` as a full plugin and loads it **in place** — it is NOT copied into the plugin cache, so edits in this repo take effect immediately. Link the plugin root in:
+
+```bash
+# link ~/.claude/skills/p at this repo's plugin root (use an ABSOLUTE path)
+ln -s /absolute/path/to/prompt-heaven/ClaudeCode ~/.claude/skills/p
+```
+
+Then, inside Claude Code, run `/reload-plugins` (or restart the session).
+
+> **Important:** `~/.claude/skills` must be a real directory that *contains* the `p` symlink — it must NOT itself be a symlink to this repo's `skills/` folder, or `p` would nest inside `skills/` and discovery breaks.
+
+### Alternative: per-launch flag (no symlink)
+
+```bash
+claude --plugin-dir /absolute/path/to/prompt-heaven/ClaudeCode
+```
+
+Loads the plugin for that session only. There is no `settings.json` key or env var to make `--plugin-dir` persistent — hence the symlink is preferred.
+
+### Verify
+
+```bash
+claude plugin validate ~/.claude/skills/p --strict     # manifest + every agent & skill
+```
+
+In a session the fleet appears as `p:minion-*` (Agent tool `subagent_type`) and each skill as `p:<name>` (`/p:feature-plan`, `p:wiki`, …). A lone warning about a root `CLAUDE.md` under `--strict` is benign.
+
+### Authoring rules that bite
+
+- **No colon in a `name`.** A `:` in an agent/skill frontmatter `name:` field — or in a skill directory name — breaks loading. Keep names bare; the namespace adds `p:`.
+- **Dots are sanitized.** A `.` in a skill name becomes `-`, so a directory `ctest-h/` loads as `p:ctest-h`.
+- **Frontmatter `description:` must be valid YAML.** A one-line value containing `: ` (colon-space) or wrapped in backticks breaks the parser; use a folded block scalar (`>-`).
+- **Bundled-script paths.** From a `SKILL.md` body use `${CLAUDE_PLUGIN_ROOT}/skills/<name>/…` (expanded only in SKILL.md bodies + `allowed-tools`); in support files/agent bodies use the literal install path `~/.claude/skills/p/skills/<name>/…`.
+
 ## TL;DR
 
 1. **/p:feature-plan** → Discuss requirements interactively with ClaudeCode and save the plan to a markdown file
@@ -84,7 +124,7 @@ After planning phase is complete, generate the structured implementation plan:
 
 **Output:** `requirements.yaml` with `complete: true` and fully populated `implementation_plan` section
 
-For detailed planning workflow and YAML schema, see [commands/p/task-plan.md](commands/p/task-plan.md)
+For detailed planning workflow and YAML schema, see [skills/task-plan/SKILL.md](skills/task-plan/SKILL.md)
 
 ### 3. Implementation Phase: Execute the Plan
 
@@ -127,7 +167,7 @@ For each task in dependency order:
 /p:implement --task task-003              # Execute only specific task (debugging)
 ```
 
-For detailed implementation workflow, see [commands/p/implement.md](commands/p/implement.md)
+For detailed implementation workflow, see [skills/implement/SKILL.md](skills/implement/SKILL.md)
 
 ### 4. Resume on Token Budget Exhaustion
 
@@ -279,10 +319,13 @@ project-root/
 ├── docs/
 │   └── feature-spec.md           # Technical specification (created by /p:task-plan)
 ├── ClaudeCode/
+│   ├── .claude-plugin/
+│   │   └── plugin.json           # Plugin manifest (name: p → the p: namespace)
 │   ├── README.md                 # This file
-│   ├── commands/p/
-│   │   ├── task-plan.md          # Detailed planning workflow
-│   │   └── implement.md          # Detailed implementation workflow
+│   ├── agents/                   # Minion fleet → p:minion-* (Agent tool subagent_type)
+│   ├── skills/                   # Skills → p:<name> (e.g. skills/wiki/ → p:wiki)
+│   │   ├── task-plan/SKILL.md    # Detailed planning workflow
+│   │   └── implement/SKILL.md    # Detailed implementation workflow
 │   ├── hooks/                    # Post-edit hooks for quality checks
 │   │   ├── post-edit-clang-format.sh  # C/C++ auto-formatter
 │   │   ├── post-edit-clang-tidy.sh    # C/C++ linter
@@ -592,9 +635,9 @@ EOF
 
 ## Related Documentation
 
-- [Task Planning Schema and Workflow](commands/p/task-plan.md) - Detailed planning phase guide
-- [Implementation Command Reference](commands/p/implement.md) - Detailed implementation phase guide
-- [Requirements Skill](skills/p:requirements/SKILL.md) - Task management and status updates
+- [Task Planning Schema and Workflow](skills/task-plan/SKILL.md) - Detailed planning phase guide
+- [Implementation Command Reference](skills/implement/SKILL.md) - Detailed implementation phase guide
+- [Requirements Skill](skills/requirements/SKILL.md) - Task management and status updates
 
 ## Summary
 
