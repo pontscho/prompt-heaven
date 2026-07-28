@@ -283,8 +283,79 @@ def _md_fence(content: str, lang: str = "") -> str:
     return f"{fence}{lang}\n{content}\n{fence}"
 
 
+# Characters that survive an unquoted shell word unchanged, in any position.
+_SHELL_SAFE_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    "-_./:,=+@%~"
+)
+# ... except these three, which are inert mid-word but expand when they START a
+# word. This is an EXPANSION argument, so no amount of shlex round-tripping can
+# check it; tests/test_mcp_git_params.py group F replays every echoed line under
+# /bin/bash, /bin/zsh and /bin/sh by name and asserts the words each one yields:
+#   ~   all three expand a leading `~/x` to $HOME/x, and all three leave
+#       `HEAD~7..HEAD` alone -> the carve-out is by POSITION, not by character.
+#   =   zsh specifically: a bare `=x` dies with "zsh:1: x not found", because
+#       equals-expansion looks the word up as a command. bash and sh do not.
+#   #   all three swallow the rest of the line as a comment.
+_SHELL_UNSAFE_LEADING = frozenset("~=#")
+
+
 def _quote_arg(a: str) -> str:
-    if not a or any(c in a for c in " \t\"'\\$`"):
+    """Render one argv element for the human-readable command line we echo back.
+
+    DISPLAY FIDELITY ONLY — this is NOT a security boundary. git is spawned via
+    subprocess.run() with a list argv and shell=False (see handle_git_call), so
+    no shell ever parses these strings and nothing here can affect execution:
+    every element reaches git verbatim whatever it contains. What it does affect
+    is whether the `git ...` line in our Markdown reply still means the same
+    thing when a human copy-pastes it into a shell. The old check quoted only
+    " \\t\\"'\\\\$`", which left `;` `|` `&` `<` `>` `(` `)` `*` `?` `[` `]` `{`
+    `}` `!` `#` and a leading `~` bare — so an echoed line could redirect,
+    background, glob, brace-expand or comment out part of itself and describe
+    something the server never ran.
+
+    Whitelist rather than blacklist, so a metacharacter we forgot is quoted
+    (harmless) instead of leaked (misleading).
+
+    Why not shlex.quote(): its safe set is `%+,-./0-9:=@A-Z_a-z` — no `~` — so
+    it renders the most ordinary git revisions as `'HEAD~7..HEAD'` and
+    `'HEAD~1'`, and every history line comes back in quotes. Readability of the
+    common case is the whole point of echoing the command, so the safe set here
+    keeps `~` and pays for it with a leading-character carve-out
+    (_SHELL_UNSAFE_LEADING): `HEAD~7..HEAD` stays bare, `~/x` gets quoted.
+    That carve-out also fixes one place where shlex.quote is outright wrong for
+    an interactive reader: it leaves `=x` unquoted, and zsh's equals-expansion
+    turns that into "zsh:1: x not found". The set is otherwise a subset of
+    shlex's plus `~`, so anything shlex would quote is quoted here too.
+
+    Ordinary git arguments — `--oneline`, `-20`, `master..HEAD`, `HEAD~7..HEAD`,
+    `--max-count=10`, `--pretty=format:%h`, `src/dir/file.c` — stay unquoted.
+    `^` is quoted although sh/bash/zsh in their default configuration all leave
+    it alone (measured), because `setopt extendedglob` — common in real zsh
+    setups — makes `^master` a negation pattern; over-quoting costs two
+    characters, under-quoting costs the reader's trust.
+
+    What is machine-checked, and what is not
+    (tests/test_mcp_git_params.py, groups F and I):
+      * group I asserts the property `shlex.split(_quote_arg(s)) == [s]` over a
+        hostile corpus, in plain POSIX mode and in the stricter
+        punctuation_chars mode, plus the converse — that the ordinary arguments
+        above come back UNQUOTED. shlex models QUOTING and WORD SPLITTING, and
+        that is all. The suite replays both round trips against the PRE-FIX
+        rendering to price them: of the 17 corpus values this fix re-renders,
+        plain shlex.split notices 1 (the newline) and the punctuation_chars lexer
+        notices 9 (`;` `|` `&` `<` `>` `(` `)` `#` and the newline). Both are
+        blind to the remaining 8 — globbing, brace expansion, `!`, and every
+        leading-character expansion above, i.e. blind to the reason those
+        characters are listed at all.
+      * group F therefore also replays each echoed line through real bash, zsh
+        and sh and compares the words they produce against the argv git got.
+        That is the only oracle that can see an expansion, and it is what backs
+        the `~` / `=` / `#` carve-out and the `^` decision.
+    """
+    if not a:
+        return "''"
+    if a[0] in _SHELL_UNSAFE_LEADING or any(c not in _SHELL_SAFE_CHARS for c in a):
         return "'" + a.replace("'", "'\\''") + "'"
     return a
 
@@ -313,34 +384,59 @@ _REVISION_KEYS = {
 # Keys naming file paths / pathspecs (also positional)
 _PATH_KEYS = {"pathspec", "paths", "path"}
 
+# Keys naming a repository: a remote name, a remote alias, or a URL. git takes
+# this as a POSITIONAL argument as well, and it comes BEFORE any refs:
+#     git ls-remote [<options>] [<repository> [<refs>...]]
+#     git fetch     [<options>] [<repository> [<refspec>...]]
+# so these are emitted ahead of the revision/path positionals no matter which
+# order the caller wrote the params in. Without an entry here the fall-through
+# turned {"remote": "github"} into `--remote=github` and git died with
+# "error: unknown option `remote=github'" (exit 129); the only spelling that
+# worked was smuggling the remote through `ref` — which lands positionally by
+# accident, is semantically wrong (a remote is not a revision) and is
+# undiscoverable. Claiming these three names costs nothing: no subcommand on
+# this whitelist has a real `--remote` / `--repository` / `--repo` flag. git's
+# real `--remotes` (log, branch) is a DIFFERENT key and still becomes a flag.
+_REPO_KEYS = {"remote", "repository", "repo"}
+
 # Keys that map to positional arguments (appended after flags, not as --key=val)
-_POSITIONAL_KEYS = _REVISION_KEYS | _PATH_KEYS
+_POSITIONAL_KEYS = _REVISION_KEYS | _PATH_KEYS | _REPO_KEYS
 
 
-def _check_revision(value: str, key: str) -> None:
-    """Reject a revision value that git's option parser would read as a flag.
+def _check_not_option(value: str, key: str, what: str, example: str) -> None:
+    """Reject a positional value that git's option parser would read as a flag.
 
-    Revision values reach git as separate argv elements (subprocess list form, no
-    shell), so the only smuggling vector is git's own parser — and that treats an
-    argument as an option only when it starts with '-'. Refusing a leading dash
+    Positional values reach git as separate argv elements (subprocess list form,
+    no shell), so the only smuggling vector is git's own parser — and that treats
+    an argument as an option only when it starts with '-'. Refusing a leading dash
     therefore closes the hole completely, including bundled short options
     (`-wt` == `-w -t`, the hash-object lesson) and `--long=value` forms that an
     exact-match blocklist would miss. Nothing else needs restricting: legitimate
     revisions contain spaces and colons (`HEAD@{2 days ago}`, `:/fix typo`) and
-    may start with '^' (`^master`), none of which git can read as an option.
-    A `--` separator is deliberately NOT used: git reads everything after `--`
-    as a path, which would break every revision.
+    may start with '^' (`^master`), and a repository may be a URL — none of which
+    git can read as an option. A `--` separator is deliberately NOT used: git
+    reads everything after `--` as a path, which would break every revision.
     """
     stripped = value.strip()
     if not stripped:
         raise ValueError(f"params.{key} must not be empty.")
     if stripped.startswith("-"):
         raise ValueError(
-            f"params.{key} must be a revision or range (e.g. 'master..HEAD'), "
+            f"params.{key} must be {what} (e.g. {example!r}), "
             f"not an option: {value!r}. Values starting with '-' are refused "
             "because git would parse them as flags (and short options bundle: "
             "-wt == -w -t). Pass flags as named params or via params.args."
         )
+
+
+def _check_revision(value: str, key: str) -> None:
+    _check_not_option(value, key, "a revision or range", "master..HEAD")
+
+
+def _check_repository(value: str, key: str) -> None:
+    """Same guard for the repository slot: without it `{"remote":
+    "--upload-pack=<cmd>"}` would reach git ls-remote as an option."""
+    _check_not_option(value, key, "a remote name or URL", "origin")
 
 
 def _semantic_params_to_args(params: dict) -> List[str]:
@@ -350,25 +446,40 @@ def _semantic_params_to_args(params: dict) -> List[str]:
     instead of raw args lists.  This converts them to CLI flags so both
     calling styles work.
 
-    Keys in _POSITIONAL_KEYS become positional args after the flags (revisions
-    and pathspecs); revision values are checked by _check_revision. Every other
-    key becomes a `--key[=value]` flag, so an unknown key reaches git verbatim.
+    Keys in _POSITIONAL_KEYS become positional args after the flags. Order of the
+    emitted argv is: flags, then the repository, then revisions/pathspecs — git
+    spells it `git ls-remote [<options>] [<repository> [<refs>...]]`, so the
+    repository cannot simply follow the caller's param order. Revision and
+    repository values are checked for a leading dash. Every other key becomes a
+    `--key[=value]` flag, so an unknown key reaches git verbatim.
 
-    Raises ValueError on a rejected revision value.
+    There is no per-subcommand param schema: the whole key set is accepted for
+    every function, and a key is simply meaningless where git takes no such
+    argument (`log {"remote": "origin"}` hands git a revision named "origin").
+    Narrowing a key to one subcommand would mean inventing that schema layer, and
+    these names produced a guaranteed-bogus flag before they were claimed, so
+    global scope costs no working behaviour. It is documented in GIT_CALL_TOOL
+    instead.
+
+    Raises ValueError on a rejected revision / repository value.
     """
     flags: List[str] = []
+    repos: List[str] = []
     positionals: List[str] = []
 
     for key, value in params.items():
         if key in _META_KEYS:
             continue
         if key in _POSITIONAL_KEYS:
+            target = repos if key in _REPO_KEYS else positionals
             values = value if isinstance(value, list) else [value]
             for v in values:
                 v = str(v)
                 if key in _REVISION_KEYS:
                     _check_revision(v, key)
-                positionals.append(v)
+                elif key in _REPO_KEYS:
+                    _check_repository(v, key)
+                target.append(v)
             continue
 
         cli_key = key.replace("_", "-")
@@ -386,7 +497,7 @@ def _semantic_params_to_args(params: dict) -> List[str]:
             for v in value:
                 flags.append(f"--{cli_key}={v}")
 
-    return flags + positionals
+    return flags + repos + positionals
 
 
 def _ensure_dict(value: Any, name: str = "params") -> dict:
@@ -584,21 +695,32 @@ GIT_CALL_TOOL = {
         "      unless the user explicitly requests it.\n\n"
         "Params: args (CLI args list), cwd (sub-repo, default project root), "
         "max_answer_chars (default 100000), timeout (default 60s). Markdown output.\n\n"
-        "NAMED PARAMS (alternative to args):\n"
+        "NAMED PARAMS (alternative to args). The SAME key set applies to EVERY\n"
+        "function — there is no per-subcommand schema — so a key is simply\n"
+        "meaningless where git takes no such argument (log with `remote` hands git\n"
+        "a revision named 'origin'). Use the key that matches the slot git wants:\n"
         "  - booleans -> flags: stat=true gives --stat\n"
         "  - strings/numbers -> --key=value: max_count=10 gives --max-count=10\n"
         "  - `_` becomes `-` in the flag name\n"
-        "  - A revision or revision RANGE is POSITIONAL, so it needs a dedicated\n"
-        "    key: `range` (canonical). Aliases: revision_range, rev_range, rev,\n"
-        "    revs, revision, revisions, ref, commit, commits, object, tree_ish.\n"
-        "    Values starting with '-' are refused (no flag smuggling).\n"
-        "  - File paths: `path` / `paths` / `pathspec`.\n"
+        "  - POSITIONAL slots each need a dedicated key. Emitted after the flags,\n"
+        "    repository first, then revisions/paths:\n"
+        "      revision or revision RANGE: `range` (canonical). Aliases:\n"
+        "        revision_range, rev_range, rev, revs, revision, revisions, ref,\n"
+        "        commit, commits, object, tree_ish.\n"
+        "      repository / remote name or URL: `remote` (canonical). Aliases:\n"
+        "        repository, repo. git puts it BEFORE the refs\n"
+        "        (git ls-remote [<options>] [<repository> [<refs>...]]).\n"
+        "      file paths: `path` / `paths` / `pathspec`.\n"
+        "    Revision and repository values starting with '-' are refused (no\n"
+        "    flag smuggling). Lists are allowed and checked per element.\n"
         "  - ANY OTHER key is forwarded verbatim as `--key[=value]`, so an\n"
         "    invented or misspelled param name reaches git as an unknown flag.\n\n"
         "Examples:\n"
         "  function=\"log\", params={\"args\":[\"--oneline\",\"-20\"]}\n"
         "  function=\"log\", params={\"range\":\"master..HEAD\",\"stat\":true}\n"
         "    -> git log --stat master..HEAD   (diffstat-annotated range log)\n"
+        "  function=\"ls-remote\", params={\"remote\":\"origin\",\"heads\":true}\n"
+        "    -> git ls-remote --heads origin\n"
         "Call without 'function' for full allowlist."
     ),
     "inputSchema": {
