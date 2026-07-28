@@ -1911,6 +1911,15 @@ class BaseLspClient(LspBackend):
         self._reader_task: Optional[asyncio.Task] = None
         self._indexing_done: asyncio.Event = asyncio.Event()
         self._active_progress: set = set()   # tokens with begin but no end yet
+        # Loop-clock timestamp of the most recent progress signal of ANY kind
+        # (workDoneProgress/create, $/progress begin | report | end). This is
+        # the LIVENESS input to _await_indexing's idle watchdog: a token that
+        # is open but silent means a wedged indexer, while a stream of 'report'
+        # messages means one that is genuinely working. 0.0 = nothing ever
+        # arrived. Written only from the reader task (single writer), read only
+        # by _await_indexing; loop.time() on both sides so the two clocks
+        # cannot disagree.
+        self._last_progress_at: float = 0.0
         self._send_lock = asyncio.Lock()
         # Crash sentinel: flipped True by _reader_loop on stdout EOF. Together
         # with process.returncode it lets _client_is_alive evict a dead backend
@@ -1951,7 +1960,16 @@ class BaseLspClient(LspBackend):
     async def _prime_index(self) -> None:
         """Open a sample of source files so the workspace index is populated.
         Globs self.prime_extensions (clangd's 8-ext set by default, (".lua",)
-        for luals) - distinct from fallback_extensions."""
+        for luals) - distinct from fallback_extensions.
+
+        Runs CONCURRENTLY with _await_indexing (see _warm_up_index), so its
+        cost is normally hidden underneath the announce grace rather than added
+        to it. That is also why the trailing settle sleep is KEPT: measured on
+        this repo the whole walk costs 1.54s (clangd, 5 files) / 1.33s (luals,
+        3 files) against a 2.0s grace, so the 1.0s of it contributes nothing to
+        the wall clock - while still giving the backend a moment to digest the
+        didOpen batch before the first real query. Removing it would trade a
+        real safety margin for a saving of exactly zero."""
         prime_exts = set(self.prime_extensions)
         source_files = []
         for root, _, files in os.walk(self.project_root):
@@ -1982,20 +2000,64 @@ class BaseLspClient(LspBackend):
             await asyncio.sleep(1.0)
 
     _PROGRESS_START_GRACE = 2.0      # how long to wait for indexing to ANNOUNCE itself
-    _INDEX_BARRIER_TIMEOUT = 60.0    # cap, applied only once it HAS announced itself
+    # Idle watchdog: once indexing HAS announced itself, release the barrier
+    # after this long with no progress signal of any kind. Chosen from measured
+    # cadence, not taste: on a 17-file template-heavy C++ index (clangd 19.1.7,
+    # this machine) the ~37 $/progress signals had a mean inter-signal gap of
+    # 0.15s, and across two runs the WORST gap was 2.57s and 3.07s - a single
+    # translation unit pulling in cold STL headers. 10s is >3x the worst gap
+    # actually observed, so a backend that is really working is not cut off; it
+    # is also 5x the announce grace (a short "has it started?" question vs a
+    # longer "is it still alive?" one) and 6x below the absolute ceiling, so it
+    # is the rule that normally fires.
+    #
+    # Releasing early costs COMPLETENESS of cross-file results, never protocol
+    # correctness: the handshake is already finished, the backend is live, and
+    # every semantic request carries its own timeout. Waiting too long costs a
+    # user-visible hang. That asymmetry is why the threshold is seconds, not
+    # tens of seconds.
+    _PROGRESS_IDLE_TIMEOUT = 10.0
+    # Absolute ceiling, kept from [D93] as a pure backstop: it now only binds a
+    # backend that keeps REPORTING for a full minute, because a silent one is
+    # released by the idle rule long before this.
+    _INDEX_BARRIER_TIMEOUT = 60.0
+
+    def _mark_progress(self) -> None:
+        """Record that a progress signal just arrived (indexer liveness).
+
+        Called for every workDoneProgress/create and every $/progress begin,
+        report and end. 'report' is the one that matters most: it changes no
+        set membership, so the old code ignored it entirely, yet it is the only
+        evidence that an announced index is still making headway.
+        """
+        self._last_progress_at = asyncio.get_running_loop().time()
 
     async def _await_indexing(self,
                               grace: float = _PROGRESS_START_GRACE,
+                              idle: float = _PROGRESS_IDLE_TIMEOUT,
                               timeout: float = _INDEX_BARRIER_TIMEOUT) -> None:
-        """Block only while the backend says it is indexing.
+        """Block only while the backend says it is indexing, and only while it
+        keeps SAYING so.
 
-        A server with nothing to index (clangd with no compilation database,
-        luals on a small workspace) never sends a $/progress begin/end pair, so
-        the old unconditional 60s wait could only expire. Wait a short grace
-        period for indexing to announce itself (window/workDoneProgress/create or
-        $/progress begin, both of which fill _active_progress); if nothing
-        announced, return immediately. Semantics are unchanged when indexing is
-        real: we then wait for the 'end' that empties _active_progress, capped.
+        Phase 1 - announcement. A server with nothing to index (clangd with no
+        compilation database, luals on a small workspace) never sends a
+        $/progress begin/end pair, so the original unconditional 60s wait could
+        only expire. Wait a short grace period for indexing to announce itself
+        (window/workDoneProgress/create or $/progress begin, both of which fill
+        _active_progress); if nothing announced, return immediately.
+
+        Phase 2 - idle watchdog. Once it HAS announced, wait for the 'end' that
+        empties _active_progress, but give up as soon as the backend has been
+        SILENT for *idle* seconds. A flat total deadline merely CAPPED the
+        pathological case (a begin with no matching end); an idle rule resolves
+        it, because "no signal for 10s" is exactly the shape of that failure and
+        is distinguishable from a slow-but-chatty indexer. *timeout* survives
+        only as an absolute backstop for a backend that reports forever.
+
+        Note on liveness inputs: luals's $/status/* chatter is deliberately NOT
+        counted (it is UI noise, dropped by _handle_unknown_notification). The
+        idle rule only ever engages while a $/progress token is open, so the
+        signals it listens for are exactly the ones that token emits.
         """
         loop = asyncio.get_running_loop()
         announce_deadline = loop.time() + grace
@@ -2004,11 +2066,80 @@ class BaseLspClient(LspBackend):
                 log.debug("No indexing progress announced in %.1fs - proceeding", grace)
                 return
             await asyncio.sleep(0.05)
-        try:
-            await asyncio.wait_for(self._indexing_done.wait(), timeout=timeout)
+
+        if not self._last_progress_at:
+            # Defensive: every path that fills _active_progress also calls
+            # _mark_progress, so this should be unreachable. Anchor the idle
+            # window at "now" rather than at 0.0, which would compute an
+            # enormous quiet period and release the barrier instantly.
+            self._mark_progress()
+
+        hard_deadline = loop.time() + timeout
+        while True:
+            now = loop.time()
+            if now >= hard_deadline:
+                log.debug("Indexing wait hit its %.0fs ceiling - proceeding", timeout)
+                return
+            quiet_for = now - self._last_progress_at
+            if quiet_for >= idle:
+                log.debug("No indexing progress for %.1fs (%d token(s) still "
+                          "open) - proceeding", quiet_for, len(self._active_progress))
+                return
+            # Wake on the event itself, else at whichever deadline comes first;
+            # a fresh 'report' extends the idle window, so re-evaluate on each
+            # timeout rather than committing to one sleep up front.
+            slice_ = min(hard_deadline - now,
+                         (self._last_progress_at + idle) - now)
+            try:
+                await asyncio.wait_for(self._indexing_done.wait(), timeout=slice_)
+            except asyncio.TimeoutError:
+                continue
             log.debug("Background indexing done.")
-        except asyncio.TimeoutError:
-            log.debug("Indexing wait capped at %.0fs - proceeding", timeout)
+            return
+
+    async def _warm_up_index(self) -> None:
+        """Run the indexing barrier and the index priming CONCURRENTLY.
+
+        The two used to be sequential, and in that order the sequence was
+        self-defeating: clangd loads its compilation database LAZILY, on the
+        first textDocument/didOpen, so the announcement _await_indexing waits
+        for is CAUSED by the priming that was scheduled to happen afterwards.
+        Measured on a 16-TU project with a compile_commands.json: the grace
+        expired at t=2.03s having seen nothing, priming began at t=2.15s, and
+        clangd's window/workDoneProgress/create arrived at t=2.16s - 11ms later.
+        The barrier could not engage even when there was a real index to wait
+        for, and a project with nothing to index paid grace + prime instead of
+        max(grace, prime).
+
+        Overlapping fixes both halves at once: the nothing-to-index case pays
+        only the grace (priming hides underneath it), and the something-to-index
+        case actually sees the announcement inside the grace window.
+
+        Safe against the _sync_document no-lock note: _await_indexing touches
+        only _active_progress / _indexing_done / _last_progress_at and sends
+        nothing, so priming remains the sole writer of _doc_state and the sole
+        source of didOpen/didChange traffic. There is still exactly one
+        document-mutating flow in flight.
+
+        _indexing_done is a LATCH, so priming can trigger a begin/end pair that
+        releases _await_indexing while later files are still being opened. That
+        is accepted: (1) start() awaits BOTH tasks, so priming - including its
+        settle sleep - still completes before the first query; (2) waiting for
+        every primed file was never promised, and the old order waited for none
+        of them; (3) _active_progress is a token SET whose 'end' only latches
+        when the set is EMPTY, so overlapping waves from the workspace scan and
+        from priming are already handled correctly.
+        """
+        tasks = [asyncio.ensure_future(self._await_indexing()),
+                 asyncio.ensure_future(self._prime_index())]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            # Never leave a sibling running on a client whose init failed or was
+            # cancelled: bare gather() abandons the other task on first error.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _reader_loop(self) -> None:
         """Background task: read all LSP messages and route them. Shared cases
@@ -2046,6 +2177,11 @@ class BaseLspClient(LspBackend):
             elif method == "$/progress":
                 token = msg.get("params", {}).get("token", "")
                 kind = msg.get("params", {}).get("value", {}).get("kind", "")
+                if kind in ("begin", "report", "end"):
+                    # Liveness for _await_indexing's idle watchdog. 'report'
+                    # changes no set membership but is the ONLY proof that an
+                    # announced index is still advancing.
+                    self._mark_progress()
                 if kind == "begin":
                     self._active_progress.add(token)
                 elif kind == "end":
@@ -2337,7 +2473,14 @@ class ClangdClient(BaseLspClient):
             return "already initialized"
 
         self.project_root = str(pathlib.Path(project_root).resolve())
+        # Reset the whole progress latch, not just the event: the idle watchdog
+        # infers "an index is running" from _active_progress and its liveness
+        # from _last_progress_at, so a stop()/start() cycle on a reused client
+        # must not inherit a stale open token plus an ancient timestamp - that
+        # combination would look like a wedged indexer and release instantly.
         self._indexing_done.clear()
+        self._active_progress.clear()
+        self._last_progress_at = 0.0
 
         if compile_commands_dir:
             compile_commands_dir = str(pathlib.Path(compile_commands_dir).resolve())
@@ -2419,9 +2562,10 @@ class ClangdClient(BaseLspClient):
 
         await self._notify("initialized", {})
 
-        await self._await_indexing()
-
-        await self._prime_index()
+        # Strictly after initialize + initialized - the ordering guarantee
+        # _ensure_backend exists to provide ([D93]) - and both phases complete
+        # before start() returns, so no query can reach an unhandshaken server.
+        await self._warm_up_index()
 
         version = response.get("result", {}).get("serverInfo", {})
         mode = "CUDA" if cuda_mode else "C/C++"
@@ -2432,6 +2576,7 @@ class ClangdClient(BaseLspClient):
         (so a $/progress 'end' can flip _indexing_done) and acknowledge the
         request. Any other server->client request falls through to a debug log."""
         if msg.get("method") == "window/workDoneProgress/create":
+            self._mark_progress()
             token = msg.get("params", {}).get("token", "")
             if token:
                 self._active_progress.add(token)
@@ -2526,7 +2671,14 @@ class LuaLsClient(BaseLspClient):
             return "already initialized"
 
         self.project_root = str(pathlib.Path(project_root).resolve())
+        # Reset the whole progress latch, not just the event: the idle watchdog
+        # infers "an index is running" from _active_progress and its liveness
+        # from _last_progress_at, so a stop()/start() cycle on a reused client
+        # must not inherit a stale open token plus an ancient timestamp - that
+        # combination would look like a wedged indexer and release instantly.
         self._indexing_done.clear()
+        self._active_progress.clear()
+        self._last_progress_at = 0.0
 
         args = [luals_path]
         if config_path:
@@ -2624,9 +2776,9 @@ class LuaLsClient(BaseLspClient):
             }
         })
 
-        await self._await_indexing()
-
-        await self._prime_index()
+        # Strictly after initialize + initialized (see the clangd note); both
+        # phases complete before start() returns.
+        await self._warm_up_index()
 
         version = response.get("result", {}).get("serverInfo", {})
         return f"lua-language-server initialized at {self.project_root} - {version}"
@@ -2647,6 +2799,7 @@ class LuaLsClient(BaseLspClient):
             items = msg.get("params", {}).get("items", [])
             await self._send({"jsonrpc": "2.0", "id": req_id, "result": [None] * len(items)})
         elif method == "window/workDoneProgress/create":
+            self._mark_progress()
             token = msg.get("params", {}).get("token", "")
             if token:
                 self._active_progress.add(token)

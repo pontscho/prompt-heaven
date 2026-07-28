@@ -13,7 +13,7 @@ run):
   purity_lsp         tests/test_purity_lsp.py         purity_call semantic
                                                       navigation vs the retired
                                                       mcp-clangd / mcp-luals
-                                                      servers (A-I)
+                                                      servers (A-J)
   mcp_git_params     tests/test_mcp_git_params.py     mcp-git named params ->
                                                       git argv, fully offline
                                                       (A-I)
@@ -38,9 +38,11 @@ run):
 `purity_lsp` is the slow one (~45 s): it drives live clangd /
 lua-language-server children through a real handshake.  It SKIPs cleanly when
 those binaries are absent.  (It used to take ~2.5 min because each backend's
-init blocked on an indexing-progress event that a project with no
-compile_commands.json never sends, so the 60 s deadline could only expire.
-That wait is now gated on indexing actually announcing itself.)
+init blocked on an indexing-progress event nobody was in a position to receive,
+so the 60 s deadline could only expire -- see that suite's module docstring for
+the full causal chain, which has three links, not one.  The wait is now gated on
+indexing announcing itself, the announcement-wait runs CONCURRENTLY with the
+priming that provokes it, and an idle watchdog releases a wedged indexer.)
 
 `smoke` is deliberately left standalone -- its path is referenced from ~15
 places in the repo docs, so it is invoked here as a subprocess and only its
@@ -160,7 +162,7 @@ SUITES = [
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 308),
     ("purity_lsp", run_purity_lsp,
-     "purity_call semantic navigation: clangd + luals absorption", 139),
+     "purity_call semantic navigation: clangd + luals absorption", 152),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 166),
     ("name_existence", run_name_existence,

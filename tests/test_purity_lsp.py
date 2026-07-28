@@ -38,17 +38,54 @@ Coverage by group:
      here" can be told apart from "the retired server returned nothing too"
   I  hygiene: no repo writes (including LSP index caches), no .pyc, fixtures
      byte-identical, plus the measured warm-up latencies
+  J  the indexing barrier, WHITE-BOX and offline: the grace, the idle watchdog,
+     the ceiling, the reader loop's liveness stamping, and the concurrency of
+     the warm-up -- states no live backend on this repo can reach
 
 Why the wall clock is ~45 seconds: purity's `_ensure_backend` awaits the FULL
 backend handshake before serving the first semantic call -- deliberately, so a
 query cannot reach a server that has not answered `initialize` yet. It no longer
-costs a fixed minute per backend: that handshake used to end in an unconditional
-`wait_for(self._indexing_done.wait(), timeout=60.0)`, and since this repo has no
-compile_commands.json neither backend ever emits an indexing `$/progress`, so the
-event could never be set and the 60s deadline could only EXPIRE -- twice, once
-per backend. The wait is now gated on indexing actually announcing itself, which
-took the first useful answer from ~61.6s to ~3.7s per backend. Group I records
-the measured numbers, so a regression here shows up as a timing, not a hunch.
+costs a fixed minute per backend. Three defects, fixed in two rounds:
+
+1. The handshake used to end in an unconditional
+   `wait_for(self._indexing_done.wait(), timeout=60.0)`. That event's only
+   setter is a `$/progress` `end`, so when nothing announced indexing the
+   deadline could only EXPIRE -- twice, once per backend, ~61.6s each. Fixed by
+   gating the wait on indexing actually announcing itself ([D93]).
+2. The wait for the announcement ran BEFORE the `_prime_index` that provokes it.
+   Both backends announce only in response to the priming `didOpen` traffic, so
+   the wait could observe nothing but silence -- not because of anything about
+   this repo, but because of the ordering. Measured on a synthetic 16-TU project
+   WITH a compile_commands.json: the grace expired at 2.03s having seen nothing,
+   priming began at 2.15s, and clangd's `window/workDoneProgress/create` arrived
+   11ms later at 2.16s. Fixed by running the barrier and the priming
+   CONCURRENTLY, which both removes the priming from the critical path and lets
+   the announcement land inside the grace window ([D94] fix (a)).
+3. Once indexing HAD announced, a `begin` with no matching `end` was merely
+   CAPPED at 60s. Fixed by an idle watchdog: every progress signal -- `begin`,
+   `report`, `end`, `workDoneProgress/create` -- stamps a liveness timestamp,
+   and the barrier releases after 10s of total silence, with the 60s ceiling
+   demoted to a backstop for a backend that reports forever ([D94] fix (b)).
+   Group J is what proves this, because no real backend here can produce it.
+
+What the two backends actually do on THIS repo, measured rather than assumed --
+the halves differ, and an earlier version of this note explained only the first:
+
+* clangd emits NO `$/progress` of any kind, across the full handshake and 20s
+  beyond it. It announces background indexing only for files that come from a
+  compilation database, and this repo ships no compile_commands.json (see
+  tests/files/README.md), so there is genuinely nothing to announce.
+* luals DOES announce: `window/workDoneProgress/create` plus a
+  `$/progress` begin/end pair titled 'Loading workspace', two tokens, ~0.7s
+  after the priming `didOpen`s reach it. Under the old ordering those opens
+  happened after the wait had already given up, so its announcement was not
+  absent -- it arrived with nobody listening. With the overlap it is sometimes
+  caught inside the grace (observed at t=1.07s, the barrier then resolving on
+  the real `end`) and sometimes still lands after it; both are correct.
+
+First useful answer per backend: ~61.6s -> ~3.7s (round 1) -> ~2.2s (round 2).
+Group I records the measured numbers, so a regression shows up as a timing,
+not a hunch.
 
 Skipping is graceful, never fatal: with no `clangd` on the box the C groups
 degrade to INFO, same for `lua-language-server` and the Lua groups, so
@@ -60,6 +97,7 @@ Usage:
 Exit code 0 iff every case passes.
 """
 
+import asyncio
 import os
 import re
 import shutil
@@ -1358,6 +1396,341 @@ def group_h(suite, purity, have_clangd, have_luals, timings):
 
 
 # ---------------------------------------------------------------------------
+# Group J -- the indexing barrier, WHITE-BOX
+#
+# Why this group is not black-box like the rest of the suite: the interesting
+# states of _await_indexing are UNREACHABLE from the live fixtures. clangd on
+# this repo announces no indexing at all (no compilation database), and luals
+# announces a 'Loading workspace' pair that ends within milliseconds -- so a
+# backend that announces indexing and then goes SILENT FOREVER, the exact case
+# the idle watchdog exists for, cannot be produced by either real server here.
+# Left untested it would be prose, so the barrier is driven directly instead:
+# no subprocess, no LSP, deterministic, sub-second.
+#
+# The deadlines are passed EXPLICITLY rather than by subclassing, and that is
+# load-bearing: _await_indexing's defaults are evaluated at class-definition
+# time (`grace: float = _PROGRESS_START_GRACE`), so overriding the class
+# constants in a subclass would NOT change them and a test that tried it would
+# silently measure the production 2/10/60 values instead.
+# ---------------------------------------------------------------------------
+
+# Tolerances are deliberately wide (a loaded machine must not turn these red)
+# but still narrow enough to tell the release RULES apart -- every case below
+# distinguishes an outcome from an alternative that is at least 3x away.
+J_GRACE = 0.3
+J_IDLE = 0.4
+J_CEILING = 5.0
+
+
+def _fresh_client(mod, cls_name="BaseLspClient"):
+    """A client object with no subprocess: only the progress bookkeeping is
+    exercised, so start()/stop() are never involved."""
+    return getattr(mod, cls_name)()
+
+
+class _FakeStdin:
+    """Collects what the client would have written to the backend."""
+
+    def __init__(self):
+        self.chunks = []
+
+    def write(self, data):
+        self.chunks.append(data)
+
+    async def drain(self):
+        return None
+
+
+class _FakeProc:
+    """Minimum surface _reader_loop touches: .stdout (a real StreamReader, so
+    the production framing parser runs unmodified) and .stdin for acks."""
+
+    def __init__(self, stdout):
+        self.stdout = stdout
+        self.stdin = _FakeStdin()
+        self.returncode = None
+        self.pid = -1
+
+
+def _run(coro):
+    """Drive one coroutine to completion on a private event loop."""
+    return asyncio.run(coro)
+
+
+def _elapsed(fn):
+    started = time.monotonic()
+    value = _run(fn())
+    return value, time.monotonic() - started
+
+
+def _window_case(suite, cid, secs, low, high, expect_label, detail=()):
+    problems = []
+    if not (low <= secs <= high):
+        problems.append("released after %.3fs, expected %s (%.2f..%.2fs)"
+                        % (secs, expect_label, low, high))
+    check(suite, "J", cid, problems,
+          detail=list(detail) + ["released after %.3fs (%s)" % (secs, expect_label)])
+
+
+def group_j(suite):
+    mod = H.load_module_from_path("mcp_purity_whitebox", SERVER)
+
+    # -- J1: nothing announces -> release on the grace, not the ceiling. This
+    # pins the [D93] gate that took the cold start off 60s in the first place.
+    async def no_announcement():
+        client = _fresh_client(mod)
+        await client._await_indexing(grace=J_GRACE, idle=J_IDLE,
+                                     timeout=J_CEILING)
+        return client
+
+    client, secs = _elapsed(no_announcement)
+    _window_case(suite, "barrier-silent-start-releases-on-grace", secs,
+                 J_GRACE * 0.8, J_GRACE + 1.0, "the %.1fs grace" % J_GRACE,
+                 detail=["no token was ever opened; ceiling was %.0fs"
+                         % J_CEILING])
+    check(suite, "J", "barrier-silent-start-leaves-latch-clear",
+          [] if not client._indexing_done.is_set() else
+          ["_indexing_done was set even though nothing ever announced"],
+          detail=["expiring the grace must not fake a completed index"])
+
+    # -- J2: THE [D94] FIX. A token opens and the backend then dies quiet. Old
+    # behaviour: blocked for the full total deadline. New: released by the idle
+    # rule, which must be provably well short of the ceiling.
+    async def announced_then_silent():
+        client = _fresh_client(mod)
+        client._active_progress.add("stuck-token")
+        client._mark_progress()
+        await client._await_indexing(grace=J_GRACE, idle=J_IDLE,
+                                     timeout=J_CEILING)
+        return client
+
+    client, secs = _elapsed(announced_then_silent)
+    _window_case(suite, "barrier-idle-releases-a-wedged-indexer", secs,
+                 J_IDLE * 0.8, J_IDLE + 1.0, "the %.1fs idle window" % J_IDLE,
+                 detail=["begin with no end and no report: the case a flat "
+                         "deadline could only CAP",
+                         "ceiling was %.0fs -- %.1fx the idle window"
+                         % (J_CEILING, J_CEILING / J_IDLE)])
+    check(suite, "J", "barrier-idle-release-keeps-token-open",
+          [] if client._active_progress == {"stuck-token"}
+             and not client._indexing_done.is_set() else
+          ["token set=%r done=%s; releasing must not forge an 'end'"
+           % (client._active_progress, client._indexing_done.is_set())],
+          detail=["proceeding is a timeout decision, not a completed index"])
+
+    # -- J3: a slow but CHATTY indexer must survive many idle windows. Reports
+    # arrive faster than the idle threshold for ~3x its length, then a real
+    # 'end' lands -- the release must come from the end, not from a cut-off.
+    reports = {"n": 0}
+
+    async def report_keeps_it_alive():
+        client = _fresh_client(mod)
+        client._active_progress.add("busy-token")
+        client._mark_progress()
+
+        async def indexer():
+            for _ in range(9):                      # 9 * 0.15s = 1.35s
+                await asyncio.sleep(J_IDLE * 0.375)
+                client._mark_progress()             # what a 'report' does
+                reports["n"] += 1
+            client._active_progress.discard("busy-token")
+            client._indexing_done.set()             # what the 'end' does
+
+        pump = asyncio.ensure_future(indexer())
+        await client._await_indexing(grace=J_GRACE, idle=J_IDLE,
+                                     timeout=J_CEILING)
+        await pump
+        return client
+
+    client, secs = _elapsed(report_keeps_it_alive)
+    _window_case(suite, "barrier-report-extends-the-idle-window", secs,
+                 J_IDLE * 2.5, J_CEILING * 0.8,
+                 "the real 'end' at ~%.2fs" % (J_IDLE * 0.375 * 9),
+                 detail=["%d report(s) at %.2fs spacing kept a %.1fs idle "
+                         "window from firing" % (reports["n"], J_IDLE * 0.375,
+                                                 J_IDLE),
+                         "including 'report' is the whole point: without it "
+                         "this indexer is cut off after %.1fs" % J_IDLE])
+    check(suite, "J", "barrier-chatty-indexer-resolves-on-end",
+          [] if client._indexing_done.is_set() and not client._active_progress
+          else ["done=%s token set=%r; expected a clean completion"
+                % (client._indexing_done.is_set(), client._active_progress)])
+
+    # -- J4: the ceiling still backstops a backend that reports FOREVER, so the
+    # idle rule replaced the total deadline without removing the guarantee that
+    # the barrier terminates.
+    async def chatty_forever():
+        client = _fresh_client(mod)
+        client._active_progress.add("endless-token")
+        client._mark_progress()
+
+        async def indexer():
+            while True:
+                await asyncio.sleep(J_IDLE * 0.375)
+                client._mark_progress()
+
+        pump = asyncio.ensure_future(indexer())
+        try:
+            await client._await_indexing(grace=J_GRACE, idle=J_IDLE,
+                                         timeout=J_IDLE * 3)
+        finally:
+            pump.cancel()
+        return client
+
+    _, secs = _elapsed(chatty_forever)
+    _window_case(suite, "barrier-ceiling-backstops-endless-progress", secs,
+                 J_IDLE * 3 * 0.8, J_IDLE * 3 + 1.0,
+                 "the %.1fs ceiling" % (J_IDLE * 3),
+                 detail=["never idle long enough to trip the watchdog, so the "
+                         "absolute deadline is what must terminate it"])
+
+    # -- J5/J6: the liveness signal is wired to the REAL reader loop, not to a
+    # re-implementation of it: encoded LSP frames go through read_lsp_message
+    # and _reader_loop exactly as a backend's would.
+    async def drive_reader(frames, cls_name="BaseLspClient"):
+        client = _fresh_client(mod, cls_name)
+        stream = asyncio.StreamReader()
+        client.process = _FakeProc(stream)
+        task = asyncio.ensure_future(client._reader_loop())
+        marks = []
+        for frame in frames:
+            stream.feed_data(mod.encode_lsp_message(frame))
+            await asyncio.sleep(0.05)
+            marks.append((client._last_progress_at,
+                          set(client._active_progress),
+                          client._indexing_done.is_set()))
+        stream.feed_eof()
+        await task
+        return client, marks
+
+    def progress(kind, token="t1", **extra):
+        value = {"kind": kind}
+        value.update(extra)
+        return {"jsonrpc": "2.0", "method": "$/progress",
+                "params": {"token": token, "value": value}}
+
+    client, marks = _run(drive_reader([
+        progress("begin", title="Indexing"),
+        progress("report", message="4/17", percentage=23),
+        progress("end"),
+    ]))
+    (at_begin, tok_begin, _), (at_report, tok_report, _), (_, tok_end, done_end) = marks
+    problems = []
+    if not at_begin:
+        problems.append("'begin' did not stamp _last_progress_at")
+    if at_report <= at_begin:
+        problems.append("'report' did not advance liveness (%r -> %r)"
+                        % (at_begin, at_report))
+    if tok_report != tok_begin:
+        problems.append("'report' changed the token set: %r -> %r"
+                        % (tok_begin, tok_report))
+    check(suite, "J", "reader-report-marks-liveness-only", problems,
+          detail=["a 'report' must move the clock and nothing else -- that is "
+                  "why the old set-membership-only handler ignored it"])
+    check(suite, "J", "reader-begin-end-latch-unchanged",
+          [] if (tok_begin == {"t1"} and tok_end == set() and done_end) else
+          ["begin=%r end=%r done=%s" % (tok_begin, tok_end, done_end)],
+          detail=["pre-existing latch semantics pinned: 'end' empties the set "
+                  "and sets _indexing_done"])
+
+    create = {"jsonrpc": "2.0", "id": 7, "method":
+              "window/workDoneProgress/create", "params": {"token": "srv-1"}}
+    for cls_name, cid in (("ClangdClient", "clangd"), ("LuaLsClient", "luals")):
+        client, marks = _run(drive_reader([create], cls_name=cls_name))
+        at_create, tok_create, _ = marks[0]
+        problems = []
+        if not at_create:
+            problems.append("workDoneProgress/create did not stamp liveness")
+        if tok_create != {"srv-1"}:
+            problems.append("token set=%r expected {'srv-1'}" % tok_create)
+        if not client.process.stdin.chunks:
+            problems.append("the server request was never acknowledged")
+        check(suite, "J", "reader-%s-create-acks-and-marks" % cid, problems,
+              detail=["%s registers the token, answers the request, and counts "
+                      "it as liveness" % cls_name])
+
+    # -- J7: FIX (a). The barrier and the priming must genuinely overlap, and
+    # both must still be finished before _warm_up_index returns.
+    class _Timed(mod.BaseLspClient):
+        """Records when each phase ran; neither phase does any real work."""
+
+        def __init__(self, span=0.4):
+            super().__init__()
+            self.span = span
+            self.spans = {}
+
+        async def _await_indexing(self, *a, **kw):       # noqa: ARG002
+            t0 = time.monotonic()
+            await asyncio.sleep(self.span)
+            self.spans["barrier"] = (t0, time.monotonic())
+
+        async def _prime_index(self):
+            t0 = time.monotonic()
+            await asyncio.sleep(self.span)
+            self.spans["prime"] = (t0, time.monotonic())
+
+    async def overlap():
+        client = _Timed()
+        await client._warm_up_index()
+        return client
+
+    client, secs = _elapsed(overlap)
+    span = client.span
+    barrier, prime = client.spans.get("barrier"), client.spans.get("prime")
+    problems = []
+    if barrier is None or prime is None:
+        problems.append("a phase never completed: %r" % (client.spans,))
+    else:
+        overlap_secs = min(barrier[1], prime[1]) - max(barrier[0], prime[0])
+        if overlap_secs <= span * 0.5:
+            problems.append("phases overlapped only %.3fs of %.2fs"
+                            % (overlap_secs, span))
+        if secs >= span * 1.8:
+            problems.append("took %.3fs, i.e. the SUM (%.2fs) not the MAX (%.2fs)"
+                            % (secs, span * 2, span))
+    check(suite, "J", "warmup-overlaps-barrier-and-priming", problems,
+          detail=["two %.2fs phases completed in %.3fs" % (span, secs),
+                  "sequential would have cost %.2fs" % (span * 2)])
+
+    # -- J8: overlap must not leak. gather() abandons its sibling on the first
+    # exception, which would leave a task polling a client whose init failed.
+    async def sibling_cancelled():
+        state = {"cancelled": False}
+
+        class _Failing(mod.BaseLspClient):
+            async def _await_indexing(self, *a, **kw):   # noqa: ARG002
+                try:
+                    await asyncio.sleep(30.0)
+                except asyncio.CancelledError:
+                    state["cancelled"] = True
+                    raise
+
+            async def _prime_index(self):
+                await asyncio.sleep(0.05)
+                raise RuntimeError("prime blew up")
+
+        client = _Failing()
+        raised = ""
+        try:
+            await client._warm_up_index()
+        except RuntimeError as exc:
+            raised = str(exc)
+        return state["cancelled"], raised
+
+    (cancelled, raised), secs = _elapsed(sibling_cancelled)
+    problems = []
+    if raised != "prime blew up":
+        problems.append("expected the priming error to propagate, got %r" % raised)
+    if not cancelled:
+        problems.append("the barrier task was left running (orphan)")
+    if secs > 5.0:
+        problems.append("waited %.1fs -- it blocked on the abandoned sibling" % secs)
+    check(suite, "J", "warmup-cancels-its-sibling-on-failure", problems,
+          detail=["priming raised at ~0.05s; a 30s barrier task must be "
+                  "cancelled, not orphaned (settled in %.3fs)" % secs])
+
+
+# ---------------------------------------------------------------------------
 # Group I -- hygiene and timings
 # ---------------------------------------------------------------------------
 
@@ -1450,8 +1823,9 @@ def run(opts=None):
     suite.note("      lua-language-server : %s" % (luals or "NOT FOUND -> Lua groups SKIP"))
     suite.note("      server              : %s" % SERVER)
     suite.note("      NOTE: a cold backend blocks the first semantic call for "
-               "~3-4s -- grace period + index priming (see the module "
-               "docstring; it was ~60s before the indexing wait was gated)")
+               "~2s -- max(announce grace, index priming), the two now "
+               "overlapping (see the module docstring; it was ~60s before the "
+               "indexing wait was gated, ~3.7s before they were overlapped)")
 
     before = repo_tree()
     pyc_before = H.pycache_snapshot()
@@ -1491,6 +1865,10 @@ def run(opts=None):
         group_f(suite, driver, bool(clangd), bool(luals))
         group_g(suite, driver, bool(luals))
         group_h(suite, driver, bool(clangd), bool(luals), timings)
+        # White-box, no driver needed -- but run it INSIDE the try so group I's
+        # hygiene assertions (no repo writes, no .pyc) cover the in-process
+        # import of the server module too.
+        group_j(suite)
         stderr_bytes = len(driver.stderr_text)
     finally:
         driver.close()
