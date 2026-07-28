@@ -1,0 +1,113 @@
+version: 1
+
+# Build/test/clean descriptor for prompt-heaven.
+#
+# The repo compiles nothing -- it is a fleet of stdlib-only Python MCP servers
+# plus a prompt corpus -- so "build" here means "does every Python file still
+# parse". That is a genuinely useful prerequisite: it fails in under a second,
+# before a test suite spends 45 of them starting language servers.
+#
+# Every syntax check compiles IN MEMORY from bytes and runs under `python3 -B`.
+# Never reintroduce `py_compile`: it writes __pycache__/*.pyc into the tree as a
+# side effect, two suites now assert the tree is bytecode-free, and the Bash
+# guard denies it outright.
+
+configuration:
+  settings:
+    timeout: 600
+    cwd: .
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+
+build:
+  syntax:
+    description: "Compile-check every Python file in Scripts, tests and hooks (in memory, no .pyc)"
+    commands:
+      - python3 -B -c "import pathlib; ps=[p for d in ('Scripts','tests','ClaudeCode/hooks') for p in pathlib.Path(d).rglob('*.py')]; [compile(p.read_bytes(), str(p), 'exec') for p in ps]; print('syntax OK', len(ps), 'files')"
+    filter:
+      grep: 'syntax OK|Error|error|Traceback'
+
+test:
+  all:
+    description: "Every suite via the single entry point. Pass suite names and flags through RUN_ARGS."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py ${env.RUN_ARGS}
+    env_schema:
+      RUN_ARGS:
+        description: "Extra args for tests/run.py -- suite names and/or --brief, --keep, --whitebox, --show <substr>"
+        default: ""
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|servers|ALL PASS|FAIL|INFO|SKIP|DRIFT|declared'
+
+  inspect_validate:
+    description: "mcp-inspect VALIDATION family (validate + 9 format wrappers)"
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py inspect_validate
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
+  mcp_first_guard:
+    description: "The PreToolUse Bash guard. For split_top/heredoc internals use RUN_ARGS=--whitebox on the all target."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py mcp_first_guard
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
+  purity_lsp:
+    description: "purity_call semantic navigation against live clangd + lua-language-server. The slow one, ~45s."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py purity_lsp
+    timeout: 300
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|timing'
+
+  mcp_git_params:
+    description: "mcp-git named params to git argv, fully offline (subprocess stubbed)"
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py mcp_git_params
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
+  name_existence:
+    description: "Every MCP name the corpus and server text prescribe must exist in the live inventory"
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py name_existence
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|GAP|orphan'
+
+  smoke:
+    description: "JSON-RPC plumbing invariants across the whole server fleet"
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py smoke
+    timeout: 300
+    filter:
+      grep: 'SUITE|AGGREGATE|servers|ALL|FAIL|PASS|SKIP'
+
+clean:
+  pycache:
+    description: "Remove every __pycache__ directory outside .git (the tree must stay bytecode-free)"
+    commands:
+      - python3 -B -c "import pathlib,shutil; ds=[p for p in pathlib.Path('.').rglob('__pycache__') if '.git' not in p.parts]; [shutil.rmtree(d) for d in ds]; print('removed', len(ds), 'pycache dirs')"
+    filter:
+      grep: 'removed|Error|error|Traceback'
+
+# `pycache` is the only clean target on purpose. An `all` alias would collide
+# with test.all (forge matches `describe` across sections) and would have been a
+# byte-for-byte copy of the command above -- a duplicate that rots on its own
+# schedule. If you add a second clean target, give it its own command.
+#
+# There is deliberately NO clean target that wipes .claude/tmp.
+#
+# That directory is the project's only scratch location, and it holds
+# .claude/tmp/checkpoint.md -- the session handoff document that lets a fresh
+# session resume this work. Wiping it would silently destroy the one artifact
+# that carries context across sessions, and it is gitignored, so it is not
+# recoverable from history. The suites clean up their own fixture subdirectories
+# in a `finally`, which is where that responsibility belongs.
