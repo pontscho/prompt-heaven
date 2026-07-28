@@ -25,10 +25,8 @@ description: >
   </example>
 model: inherit
 color: blue
-tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
 ---
@@ -52,7 +50,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for verifying sy
 | Domain | Tool |
 |---|---|
 | C / C++ / Objective-C symbol verification | `purity_call` (purity MCP, clangd-backed) — `symbol_context`, `find_definition`, `find_references`, `outline`, `type_at`, `diagnostics` |
-| Lua symbol verification | `luals_call` (luals MCP) — same set, type-aware |
+| Lua symbol verification | `purity_call` (purity MCP, luals-backed) — same set, type-aware |
 | File existence checks, content search, non-code file reads (yaml/json/md/CMakeLists) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Build system / build target validation | `forge_call` (forge MCP) — function `"list"` / `"describe"` / `"validate"` when `project-forge.yaml` exists |
 

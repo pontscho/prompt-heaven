@@ -14,7 +14,7 @@
 | `p:minion-explorer` | Multi-round codebase exploration, subsystem understanding, "where is X defined", "how does Y work" — INSTEAD of long Glob/Grep/Read chains |
 | `p:minion-runner` | Script/command run-fix-retry loops — INSTEAD of inline script iteration |
 | `p:minion-builder` | Build + test + fix cycles (cmake, make, ctest, npm test, cargo, forge) — INSTEAD of inline compile/test iteration |
-| `p:minion-watson` | Non-obvious bug/failure investigation — brilliant sidekick that traces root cause through source with clangd/luals MCPs |
+| `p:minion-watson` | Non-obvious bug/failure investigation — brilliant sidekick that traces root cause through source with the purity MCP (clangd/luals-backed) |
 | `p:minion-inspector-plan` | Validate an implementation plan against the live codebase BEFORE coding (used by the `/p:feature-plan` validation loop) |
 | `p:minion-inspector-implementation` | Audit a completed implementation against the plan AFTER coding (used by the `/p:implement` validation loop) |
 | `p:minion-inspector-security-officer` | Security review (OWASP Top 10, CWE-mapped) — plan-mode BEFORE coding (after inspector-plan APPROVE) and code-mode AFTER coding (after inspector-implementation COMPLETE). Threat-surface triage first; full audit only when triage hits. |

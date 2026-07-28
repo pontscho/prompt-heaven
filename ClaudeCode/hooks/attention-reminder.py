@@ -214,7 +214,7 @@ MINION_MINDSET_BLOCK = (
 	"  - `p:minion-builder`         — build + test + fix cycles (cmake/make/ctest/npm/cargo/forge)\n"
 	"  - `p:minion-runner`          — script/command run-fix-retry\n"
 	"  - `p:minion-explorer`         — multi-round codebase exploration\n"
-	"  - `p:minion-watson`          — non-obvious bug/failure investigation (clangd/luals navigation)\n"
+	"  - `p:minion-watson`          — non-obvious bug/failure investigation (purity MCP navigation)\n"
 	"  - `p:minion-inspector-plan`  — validate a plan against the codebase (used by /p:feature-plan loop)\n"
 	"  - `p:minion-inspector-implementation`   — audit implementation against the plan (used by /p:implement loop)\n"
 	"  - `p:minion-inspector-security-officer` — OWASP/CWE security review (plan-mode pre-code; code-mode post-code)\n"

@@ -2,10 +2,8 @@
 name: minion-explorer
 description: >-
   This minion's name is Scott. Read-only codebase explorer and deep code analyst. Capable of serious structural analysis: traces call chains, maps data flows, reads and interprets source code at line level, explains exactly how a function or module works internally. Suitable for planning preparation — call this before implementing a feature to understand what already exists, what the entry points are, and where changes would land. Returns precise findings with file:line references. Use INSTEAD OF inline Glob/Grep/Read loops when the task requires multi-round search, broad exploration, deep code reading, or a structured summary of a subsystem. For C/C++ uses purity_call (clangd-backed) for compiler-accurate symbol resolution. Does NOT modify anything.
-tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
 model: inherit
@@ -29,7 +27,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for symbol-aware
 | Domain | Tool |
 |---|---|
 | C / C++ / Objective-C symbols (`.c .cpp .cc .cxx .h .hpp .hh .hxx .m .mm`) | `purity_call` (purity MCP, clangd-backed) — ALWAYS for symbol queries |
-| Lua symbols (`.lua`) | `luals_call` (luals MCP) — ALWAYS for symbol queries |
+| Lua symbols (`.lua`) | `purity_call` (purity MCP, luals-backed) — ALWAYS for symbol queries |
 | File discovery, generic content search, reading non-code files (yaml/json/md/CMakeLists) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Build target inspection (read-only) | `forge_call` (forge MCP) — function `"list"` / `"describe"` when `project-forge.yaml` exists |
 
@@ -77,7 +75,7 @@ find_file(file_mask: "**/*.<ext>", relative_path: ".")     # path-style globs (*
 NEVER guess a file path twice and give up — fall back to a root-level `find_file` name search instead. **A scoped search that comes up empty is NOT evidence of absence; broaden to the root before concluding anything.**
 
 **If the task involves C/C++ source files (`.c`, `.cpp`, `.h`, `.hpp`):** Use `purity_call` (purity MCP, clangd-backed) instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
-**If the task involves Lua source files (`.lua`):** Use `luals_call` (luals MCP) instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
+**If the task involves Lua source files (`.lua`):** Use `purity_call` (purity MCP, luals-backed) instead of Grep/Read for symbol-level queries — it gives precise, compiler-accurate results.
 
 **purity_call semantic functions (C/C++, clangd-backed):**
 ```
@@ -99,7 +97,7 @@ NEVER guess a file path twice and give up — fall back to a root-level `find_fi
   - luals_symbol_context        → definition + all references in one call (preferred for unknown symbol)
   - luals_find_definition       → where a symbol is defined (by name)
   - luals_find_definition_at    → definition at exact file:line:char (when you have a position)
-  - luals_find_type_definition_at → navigate to type/class declaration from a variable
+  - (variable → its type decl)  → `luals_hover` for the annotated type name, then `luals_find_definition`/`luals_workspace_symbols` on that name
   - luals_find_implementations_at → find implementations at a position
   - luals_find_references       → all reference sites for a symbol
   - luals_workspace_symbols     → search symbols across workspace (substring match)
@@ -118,7 +116,7 @@ NEVER guess a file path twice and give up — fall back to a root-level `find_fi
 | Multiple symbol definitions | batch `find_definition` | batch `luals_find_definition` |
 | Multiple files diagnostics | batch `diagnostics` | batch `luals_diagnostics` |
 | Symbol at known file:line | `find_definition` | `luals_find_definition_at` |
-| Navigate to type declaration | — | `luals_find_type_definition_at` |
+| Navigate to type declaration | — | `luals_hover` for the type name, then `luals_find_definition`/`luals_workspace_symbols` on it |
 | File symbol overview | `outline` | `luals_document_outline` |
 
 **Tool priority for symbol-related queries (C/C++/Lua):**
@@ -254,7 +252,7 @@ purity_call(function: "search_for_pattern", params: {substring_pattern: "memory_
 - [ ] Used a root-level `find_file("*<keyword>*", ".")` as a `find`-equivalent when a path was unknown — never guessed a path twice
 - [ ] Before any "Not Found": broadened the search to the project root, not just the initial subdirectory
 - [ ] For C/C++ symbol queries: used purity_call (clangd-backed) semantic functions, NOT purity text search
-- [ ] For Lua symbol queries: used luals-mcp, NOT purity search
+- [ ] For Lua symbol queries: used purity_call (luals-backed) semantic functions, NOT purity text search
 - [ ] Independent tool calls were batched in parallel, NOT sent one-by-one
 
 ---

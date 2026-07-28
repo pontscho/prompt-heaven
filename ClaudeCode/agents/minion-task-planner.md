@@ -26,10 +26,8 @@ description: >
   </example>
 model: inherit
 color: blue
-tools: Read, Write, Edit, Bash, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
+tools: Read, Write, Edit, Bash, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
 ---
@@ -47,7 +45,7 @@ You have MCP servers connected. Using built-in grep/find/sed/awk/cat when an MCP
 | Domain | Tool | When |
 |---|---|---|
 | C/C++ symbols | `mcp__mcp-purity__purity_call` (clangd-backed semantic functions) | Find function signatures, types, verify file:line references, extract pattern excerpts from C/C++ code |
-| Lua symbols | `mcp__mcp-luals__luals_call` | Find definitions, types, verify file:line references, extract pattern excerpts from Lua code |
+| Lua symbols | `mcp__mcp-purity__purity_call` (luals-backed semantic functions) | Find definitions, types, verify file:line references, extract pattern excerpts from Lua code |
 | File discovery | `mcp__mcp-purity__purity_call` (function: `find_file`) | Locate files by pattern |
 | Text search | `mcp__mcp-purity__purity_call` (function: `search_for_pattern`) | Search for patterns in non-C/C++/Lua files (YAML, Markdown, configs, scripts) |
 | File listing | `mcp__mcp-purity__purity_call` (function: `list_dir`) | List directory contents |

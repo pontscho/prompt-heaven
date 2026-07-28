@@ -25,10 +25,8 @@ description: >
   </example>
 model: inherit
 color: blue
-tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
   - mcp-git
@@ -53,7 +51,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 | Domain | Tool |
 |---|---|
 | C / C++ / Objective-C symbol verification | `purity_call` (purity MCP, clangd-backed) — `symbol_context`, `find_definition`, `find_references`, `outline`, `type_at`, `diagnostics` |
-| Lua symbol verification | `luals_call` (luals MCP) — same set, type-aware |
+| Lua symbol verification | `purity_call` (purity MCP, luals-backed) — same set, type-aware |
 | File existence, content search, non-code file reads | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Git operations (diff / log / status / show / blame / branch list / merge-base) | `git_call` (git MCP) — **never** `Bash("git ...")` for read-only ops. The change-detection step (`git diff HEAD~N --name-only`, `git status`, `git log --oneline`) goes through `git_call`. |
 | Build system / build target validation | `forge_call` (forge MCP) — function `"list"` / `"describe"` / `"validate"` when `project-forge.yaml` exists |
@@ -341,7 +339,7 @@ Synthesize all findings into the output format below.
 - [ ] Completion percentage is accurate
 - [ ] Checklist items are actionable and specific
 - [ ] For C/C++ symbols: used purity_call (clangd-backed), NOT text search
-- [ ] For Lua symbols: used luals MCP, NOT text search
+- [ ] For Lua symbols: used purity_call (luals-backed), NOT text search
 - [ ] Independent tool calls were batched in parallel
 - [ ] No files were modified
 

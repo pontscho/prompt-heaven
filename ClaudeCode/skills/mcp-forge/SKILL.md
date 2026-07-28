@@ -62,8 +62,8 @@ operations is forbidden.
 - `project-forge.yaml` does not exist in the project → use `mcp-compile` for
   builds or Bash for one-off commands.
 - Truly ad-hoc one-off shell commands unrelated to build/test → Bash is fine.
-- File search/edit → `mcp-purity`. Git → `mcp-git`. C/C++ symbol nav →
-  `mcp-clangd`. Lua symbol nav → `mcp-luals`.
+- File search/edit → `mcp-purity`. Git → `mcp-git`. C/C++/CUDA and Lua symbol
+  nav → `mcp-purity` (clangd/luals-backed).
 
 ## Quick Start
 

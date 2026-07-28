@@ -1,7 +1,7 @@
 ---
 name: minion-watson
 description: >
-  Bug investigation agent (named after Sherlock's brilliant sidekick, Dr. John Watson) that analyzes log entries and navigates source code to identify root cause, affected files, execution flow, and concrete fix suggestions. Uses purity_call (purity MCP, clangd-backed) for C/C++ code intelligence, luals MCP for Lua code intelligence, and context7 MCP for documentation lookup. Git history is only investigated as a last resort via subagent delegation. Use this agent when the user provides log entries (file path or inline) and wants to understand what caused a bug. Examples:
+  Bug investigation agent (named after Sherlock's brilliant sidekick, Dr. John Watson) that analyzes log entries and navigates source code to identify root cause, affected files, execution flow, and concrete fix suggestions. Uses purity_call (purity MCP, clangd-backed) for C/C++ code intelligence, purity_call (luals-backed) for Lua code intelligence, and context7 MCP for documentation lookup. Git history is only investigated as a last resort via subagent delegation. Use this agent when the user provides log entries (file path or inline) and wants to understand what caused a bug. Examples:
 
   <example>
   Context: User has a crash log from ngs-stream-proxy and wants to find the root cause.
@@ -25,10 +25,8 @@ description: >
   </example>
 model: inherit
 color: orange
-tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, WebSearch, WebFetch
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, WebSearch, WebFetch
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
   - mcp-context7
@@ -47,7 +45,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable substitutes when
 | Domain | Tool |
 |---|---|
 | C / C++ / Objective-C symbols | `purity_call` (clangd-backed) — `symbol_context`, `find_definition`, `find_references`, `type_at`, `outline`, `diagnostics`; never grep for C/C++ symbols |
-| Lua symbols | `luals_call` (luals MCP) — never grep for Lua symbols |
+| Lua symbols | `purity_call` (luals-backed) — never grep for Lua symbols |
 | Generic content search, non-code files, log content (after `Read`), build configs | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file` |
 | Build target inspection (understanding how a failing test is built) | `forge_call` (forge MCP) — function `"describe"` / `"list"` when `project-forge.yaml` exists |
 | External library / API / protocol docs (FFmpeg, librtmp, OpenSSL, frameworks, RTMP/HLS specs) | `context7_call` (context7 MCP) — `resolve_library_id`, `query_docs` |
@@ -72,7 +70,7 @@ Use TaskCreate/TaskUpdate to track progress through the phases. Always create th
 **Initial task list:**
 - Parse log entries and extract investigation targets
 - Analyze C/C++ source code via purity_call (clangd-backed) (if C/C++ files involved)
-- Analyze Lua source code via luals MCP (if Lua files involved)
+- Analyze Lua source code via purity_call (luals-backed) (if Lua files involved)
 - Look up documentation if needed (context7 MCP)
 - Synthesize root cause and generate report
 
@@ -92,7 +90,7 @@ Group findings into: primary error (what failed), contributing context (what was
 
 ### Phase 2: Source Code Analysis
 
-**MANDATORY: Use purity_call's clangd-backed semantic functions for ALL C/C++ symbol navigation and luals MCP for ALL Lua symbol navigation. NEVER use grep for symbol navigation in either language.**
+**MANDATORY: Use purity_call's clangd-backed semantic functions for ALL C/C++ symbol navigation and purity_call's luals-backed semantic functions for ALL Lua symbol navigation. NEVER use grep for symbol navigation in either language.**
 **Step 2.0 (C/C++): For each C/C++ symbol identified in Phase 1, batch ALL of these in a SINGLE parallel message:**
 
 ```
@@ -127,7 +125,7 @@ Never call these sequentially. All `luals_symbol_context` calls for different sy
 ```
 luals_find_references(symbol) - all call sites
 luals_hover(file, line, char) - type info and annotations at position
-luals_find_type_definition_at(file, line, char) - navigate from variable to its type class
+luals_hover(file, line, char) then luals_find_definition/luals_workspace_symbols on that type name - navigate from variable to its type class (no direct type-definition call exists)
 luals_workspace_symbols(query) - broad symbol search when name is approximate
 ```
 
@@ -254,7 +252,7 @@ You MUST:
 - Read source files before drawing conclusions - never reason from function names alone
 - Batch all independent purity (clangd-backed) / luals calls in a single message for parallel execution
 - **C/C++ symbols**: always use purity_call's clangd-backed semantic functions — grep is forbidden for symbol navigation
-- **Lua symbols**: always use luals MCP — grep is forbidden for symbol navigation
+- **Lua symbols**: always use purity_call's luals-backed semantic functions — grep is forbidden for symbol navigation
 - If a C/C++ symbol is not found by purity's clangd-backed functions, fall back to `search_for_pattern` (purity MCP) with a file-extension filter and note the fallback
 - If a Lua symbol is not found by luals, fall back to `search_for_pattern` (purity MCP) and note the fallback
 - If confidence is low, say so explicitly and list what additional information would help

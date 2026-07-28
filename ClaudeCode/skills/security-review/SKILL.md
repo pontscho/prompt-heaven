@@ -274,8 +274,8 @@ INCLUDE_DEPS: [true | false]
 
 You are the GENEROUS FINDER for THIS ONE lane. Maximize recall WITHIN your lane only; the other lanes are covered by sibling officers running in parallel right now. For EVERY plausible sink in your lane:
 
-1. Identify the sink (file:line via clangd/luals/purity — never text search where an LSP applies).
-2. Trace UPSTREAM: source → propagator(s) → sink. Use clangd_find_references / luals_find_references / purity search_for_pattern. Record the trace.
+1. Identify the sink (file:line via purity's clangd/luals-backed functions — never text search where an LSP applies).
+2. Trace UPSTREAM: source → propagator(s) → sink. Use purity `find_references` / `luals_find_references` / `search_for_pattern`. Record the trace.
 3. Flag the finding if it is even PLAUSIBLY exploitable — the Verifier filters false positives, not you.
 
 DO NOT assign severities. DO NOT suppress based on framework defaults / existing guards — the Verifier handles both. Stay strictly in your lane.
@@ -334,7 +334,7 @@ FINDING [F<k>] (lane <lane>):
   claimed trace: <source → propagator(s) → sink>
   finder hypothesis: <why_plausible>
 
-Run, against the ACTUAL current code (Read + clangd/luals/purity — do not trust the finder's quote):
+Run, against the ACTUAL current code (Read + purity's clangd/luals-backed functions — do not trust the finder's quote):
 1. REACHABILITY check — does the trace bottom out at real untrusted input?
 2. FRAMEWORK-DEFAULT / EXISTING-GUARD SUPPRESSION check — consult the FP-SUPPRESSION LIBRARY in your prompt body; cite the concrete guard (file:line) when you suppress.
 3. CONFIDENCE score (HIGH / MEDIUM / LOW).

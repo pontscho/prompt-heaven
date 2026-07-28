@@ -12,10 +12,8 @@ description: >
   `ClaudeCode/skills/_lib/code-review-lenses.md`.
 model: inherit
 color: magenta
-tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
   - mcp-git
@@ -38,8 +36,8 @@ issue, that is grounds for REFUTED (and your evidence quotes the real line).
 
 ## MCP tool routing (own your routing)
 
-- **C / C++ / CUDA** symbols → `purity_call` (clangd-backed) or `clangd_call`.
-- **Lua** symbols → `luals_call`.
+- **C / C++ / CUDA** symbols → `purity_call` (clangd-backed).
+- **Lua** symbols → `purity_call` (luals-backed).
 - **File reads** → `Read`. **File / pattern discovery** → `purity_call`.
 - **git** (diff, log, show) → `git_call`. NEVER `Bash("git ...")`.
 - **build targets** → `forge_call`.

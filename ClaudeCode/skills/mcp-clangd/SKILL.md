@@ -12,9 +12,10 @@ description: >
   navigation: find_definition, find_references, find_implementations, type_at, outline,
   symbol, symbol_context, symbol_change_impact, inlay_hints, diagnostics. Using grep,
   find, sed, awk, ctags, cscope, or any text-matching hack for C/C++ code is a
-  violation. The standalone `clangd_call` tool still exists and works in parallel, but
-  `purity_call` is the unified entry point — see `p:mcp-purity` for the full function
-  reference. CUDA files (`.cu`/`.cuh`) are handled by `p:mcp-cuda`.
+  violation. The standalone `mcp-clangd` server is NO LONGER REGISTERED, so the
+  `clangd_call` tool does not exist; `purity_call` is the only entry point — see
+  `p:mcp-purity` for the full function reference. CUDA files (`.cu`/`.cuh`) are
+  handled by `p:mcp-cuda`.
 
   Tool-name mapping for C/C++ work — these are NOT optional substitutions:
     - GREP for C/C++ symbols   = mcp__mcp-purity__purity_call with function "find_references" or "symbol"
@@ -29,7 +30,7 @@ description: >
     - You need to find a function, struct, class, typedef, macro, or enum in a C/C++ project.
     - You need to know the type of an expression, callers of a function, or the
       compiler's diagnostics on a file.
-    - User mentions clangd, clangd_call, LSP, compile_commands.json, or "code intelligence".
+    - User mentions clangd, LSP, compile_commands.json, or "code intelligence".
 
 triggers:
   - clangd
@@ -48,7 +49,6 @@ triggers:
   - call hierarchy
   - workspace symbols
   - code intelligence
-  - clangd_call
   - compile_commands.json
   - compiler diagnostics
   - hover info
@@ -60,9 +60,10 @@ triggers:
 
 C/C++/Objective-C symbol navigation is provided by **`purity_call`**, the unified
 entry point that embeds clangd for compiler-accurate code intelligence. The
-standalone `clangd_call` tool still exists and works in parallel, but **prefer
-`purity_call`**. The full function reference lives in the **`p:mcp-purity`** skill
-("Semantic / Symbol Navigation" section); this page is the C/C++ quick reference.
+standalone `mcp-clangd` server is **no longer registered**, so there is no
+`clangd_call` tool — **`purity_call` is the only entry point**. The full function
+reference lives in the **`p:mcp-purity`** skill ("Semantic / Symbol Navigation"
+section); this page is the C/C++ quick reference.
 
 ## How to call
 
@@ -100,8 +101,9 @@ mcp__mcp-purity__purity_call(function="find_definition", params={"symbol":"my_fu
 
 ## Legacy `clangd_*` names
 
-The old `clangd_*` function names still work — both through the standalone `clangd_call`
-tool and as direct aliases inside `purity_call`. Canonical mapping:
+The old `clangd_*` function names still work as direct aliases inside `purity_call`
+(the standalone `clangd_call` tool that formerly also accepted them is gone).
+Canonical mapping:
 
 | Old `clangd_*` | `purity_call` |
 |-|-|

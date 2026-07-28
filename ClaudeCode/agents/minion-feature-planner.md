@@ -6,7 +6,7 @@ description: >
   planning here. Unlike the built-in Plan agent (which only sketches a step
   list + critical files), this minion writes a structured, LSP-verified
   docs/feature-implementation-plan.md against the LIVE codebase: verifies
-  every referenced file/symbol via clangd/luals before committing it, applies
+  every referenced file/symbol via purity_call (clangd/luals-backed) before committing it, applies
   an assigned planning perspective, and supports iterative refinement when
   re-invoked with an existing plan + targeted findings. Receives pre-processed
   context from the /p:feature-plan orchestrator. Writes ONLY its plan file —
@@ -28,10 +28,8 @@ description: >
   </example>
 model: inherit
 color: blue
-tools: Read, Write, Edit, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
+tools: Read, Write, Edit, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
 ---
@@ -49,7 +47,7 @@ You have MCP servers connected. Using built-in grep/find/sed/awk/cat when an MCP
 | Domain | Tool | When |
 |---|---|---|
 | C/C++ symbols | `mcp__mcp-purity__purity_call` (clangd-backed semantic functions) | Verify function signatures, types, file:line references in C/C++ code |
-| Lua symbols | `mcp__mcp-luals__luals_call` | Verify definitions, types, file:line references in Lua code |
+| Lua symbols | `mcp__mcp-purity__purity_call` (luals-backed semantic functions) | Verify definitions, types, file:line references in Lua code |
 | File discovery | `mcp__mcp-purity__purity_call` (function: `find_file`) | Locate files by pattern |
 | Text search | `mcp__mcp-purity__purity_call` (function: `search_for_pattern`) | Search for patterns in non-C/C++/Lua files |
 | File listing | `mcp__mcp-purity__purity_call` (function: `list_dir`) | List directory contents |

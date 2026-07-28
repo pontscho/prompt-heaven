@@ -256,9 +256,9 @@ backfills the contract; it does not rewrite content.
 
 Anchor resolution and code reading use the MCP servers, never grep / find / sed:
 
-- C / C++ / Objective-C symbols -> clangd MCP (`clangd_workspace_symbols`, `clangd_find_definition`, `clangd_hover`).
-- CUDA symbols -> cuda MCP.
-- Lua symbols -> luals MCP.
+- C / C++ / Objective-C symbols -> purity MCP (`symbol`, `find_definition`, `type_at`).
+- CUDA symbols -> purity MCP (same functions; the clangd backend is CUDA SDK aware).
+- Lua symbols -> purity MCP (`luals_workspace_symbols`, `luals_find_definition`, `luals_hover`).
 - File existence / text presence -> purity MCP (`find_file`, `search_for_pattern`).
 - Wiki page search / read / structure -> `mcp-wiki` `wiki_call` (`search`, `get_page`, `list`, `source_to_pages`, `stats`).
 - Git freshness / index (did sources change since a commit; regenerate INDEX) -> `mcp-wiki` `wiki_call` (`freshness`, `reindex`). The CLI `~/.claude/skills/p/skills/wiki/scripts/freshness.py` / `reindex.py` remain as the pre-PR CI gate.

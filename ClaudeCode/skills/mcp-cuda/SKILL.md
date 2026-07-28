@@ -11,10 +11,10 @@ description: >
   `purity_call` for ALL symbol navigation: find_definition, find_references,
   find_implementations, type_at, outline, symbol, symbol_context, symbol_change_impact,
   inlay_hints, diagnostics. Using grep, find, sed, awk, ctags, cscope, or any
-  text-matching hack for CUDA code is a violation. The standalone `cuda_call` tool
-  still exists and works in parallel, but `purity_call` is the unified entry point —
-  see `p:mcp-purity` for the full function reference. For plain C/C++ files
-  (`.c`/`.cpp`/`.h`/`.hpp`) use `p:mcp-clangd`.
+  text-matching hack for CUDA code is a violation. The standalone `mcp-cuda` server is
+  NOT REGISTERED, so the `cuda_call` tool does not exist; `purity_call` is the only
+  entry point — see `p:mcp-purity` for the full function reference. For plain C/C++
+  files (`.c`/`.cpp`/`.h`/`.hpp`) use `p:mcp-clangd`.
 
   `purity_call`'s backend is CUDA SDK aware: it auto-discovers `CUDA_PATH` / `nvcc` /
   `/usr/local/cuda-*` and detects `sm_xx` arch from `compile_commands.json` or
@@ -35,8 +35,8 @@ description: >
       CUDA project.
     - You need to know the type of an expression in a `.cu` file, callers of a
       kernel, or compiler diagnostics on a CUDA file.
-    - User mentions cuda, cuda_call, nvcc, sm_xx, CUDA_PATH, CUDA_HOME, or "CUDA
-      code intelligence".
+    - User mentions cuda, nvcc, sm_xx, CUDA_PATH, CUDA_HOME, or "CUDA code
+      intelligence".
 
 triggers:
   - cuda
@@ -54,7 +54,6 @@ triggers:
   - CUDA_HOME
   - thrust
   - cub
-  - cuda_call
   - cuda code intelligence
   - find definition
   - find references
@@ -66,9 +65,10 @@ triggers:
 
 CUDA symbol navigation is provided by **`purity_call`**, the unified entry point that
 embeds clangd (CUDA SDK aware: auto-discovers `CUDA_PATH`/`nvcc`/`/usr/local/cuda-*`
-and `sm_xx` arch). The standalone `cuda_call` tool still exists and works in parallel,
-but **prefer `purity_call`**. The full function reference lives in the **`p:mcp-purity`**
-skill ("Semantic / Symbol Navigation" section); this page is the CUDA quick reference.
+and `sm_xx` arch). The standalone `mcp-cuda` server is **not registered**, so there is
+no `cuda_call` tool — **`purity_call` is the only entry point**. The full function
+reference lives in the **`p:mcp-purity`** skill ("Semantic / Symbol Navigation"
+section); this page is the CUDA quick reference.
 
 ## How to call
 
@@ -105,8 +105,9 @@ mcp__mcp-purity__purity_call(function="find_definition", params={"symbol":"forwa
 
 ## Legacy `cuda_*` names
 
-The old `cuda_*` function names still work — both through the standalone `cuda_call`
-tool and as direct aliases inside `purity_call`. Canonical mapping:
+The old `cuda_*` function names still work as direct aliases inside `purity_call`
+(the standalone `cuda_call` tool that formerly also accepted them is not registered).
+Canonical mapping:
 
 | Old `cuda_*` | `purity_call` |
 |-|-|

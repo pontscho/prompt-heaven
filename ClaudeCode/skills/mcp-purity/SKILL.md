@@ -4,7 +4,7 @@ description: >
   NEVER use the built-in `Search`, `Grep`, or `Edit` tools. They are deprecated for this project.
   ALWAYS use `purity_call` ONLY. If you attempt to use a built-in tool, I will consider it a failure.
   MANDATORY — mcp-purity file operations: create_text_file, list_dir, find_file, replace_content, delete_lines, replace_lines, insert_at_line, search_for_pattern. Use when writing, searching, listing, or editing files.
-  ALSO — `purity_call` now provides compiler-accurate (clangd-backed) symbol navigation for C/C++/CUDA: find_definition, find_references, find_implementations, type_at, outline, symbol, symbol_context, inlay_hints, symbol_change_impact, diagnostics. Prefer these over grep for C/C++/CUDA symbol work; the standalone `clangd_call`/`cuda_call` tools still exist and run in parallel. See the "Semantic / Symbol Navigation" section below.
+  ALSO — `purity_call` now provides compiler-accurate (clangd-backed) symbol navigation for C/C++/CUDA: find_definition, find_references, find_implementations, type_at, outline, symbol, symbol_context, inlay_hints, symbol_change_impact, diagnostics. Prefer these over grep for C/C++/CUDA symbol work; the standalone `clangd_call`/`cuda_call` tools are NO LONGER REGISTERED and do not exist, so `purity_call` is the only entry point. See the "Semantic / Symbol Navigation" section below.
   Trigger:
     - Creating or editing files.
     - Listing directories, searching for files or patterns.
@@ -215,7 +215,7 @@ All paths are sandboxed under `--project-root`. Symlinks are resolved before val
 
 ## Semantic / Symbol Navigation (clangd-backed)
 
-Beyond file operations, `purity_call` also exposes **compiler-accurate symbol navigation** for C/C++/CUDA, backed by an embedded clangd LSP (folded in from the former `mcp-clangd` / `mcp-cuda` servers). Prefer these over grep for any C/C++/CUDA symbol question. The standalone `clangd_call` / `cuda_call` tools still exist and run in parallel — `purity_call` is the unified entry point.
+Beyond file operations, `purity_call` also exposes **compiler-accurate symbol navigation** for C/C++/CUDA, backed by an embedded clangd LSP (folded in from the former `mcp-clangd` / `mcp-cuda` servers). Prefer these over grep for any C/C++/CUDA symbol question. The standalone `clangd_call` / `cuda_call` tools are **no longer registered** and do not exist — `purity_call` is the only entry point.
 
 The backend spins up **lazily** on the first semantic call (clangd init + indexing can take tens of seconds the first time; subsequent calls are fast). For CUDA projects it auto-discovers the CUDA SDK and `sm_xx` arch. Paths are confined under `--project-root` like every other purity function; lines/characters are **1-based**.
 

@@ -11,10 +11,8 @@ description: >
   `ClaudeCode/skills/_lib/code-review-lenses.md`.
 model: inherit
 color: cyan
-tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
   - mcp-git
@@ -33,8 +31,8 @@ machine-consumed by the orchestrating skill, not shown to a human as prose.
 You navigate code with compiler/LSP-accurate tools, never text hacks:
 
 - **C / C++ / CUDA** symbols (definitions, references, callers, types, diagnostics) → `purity_call`
-  (clangd-backed) or `clangd_call`.
-- **Lua** symbols → `luals_call`.
+  (clangd-backed).
+- **Lua** symbols → `purity_call` (luals-backed).
 - **File reads** → `Read`. **File / pattern discovery** → `purity_call` (`find_file`,
   `search_for_pattern`, `list_dir`).
 - **git** (diff, log, show) → `git_call`. NEVER `Bash("git ...")`.

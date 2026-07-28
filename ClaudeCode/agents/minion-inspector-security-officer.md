@@ -25,10 +25,8 @@ description: >
   </example>
 model: inherit
 color: red
-tools: Read, mcp__mcp-clangd__clangd_call, mcp__mcp-luals__luals_call, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, WebFetch
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, WebFetch
 mcpServers:
-  - mcp-clangd
-  - mcp-luals
   - mcp-purity
   - mcp-forge
   - mcp-git
@@ -55,7 +53,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 | Domain | Tool |
 |---|---|
 | C / C++ / Objective-C symbol analysis (buffer overflows, format strings, UAF, integer overflow) | `purity_call` (purity MCP, clangd-backed) — `symbol_context`, `find_references`, `type_at`, `diagnostics`, `outline` |
-| Lua symbol analysis (sandbox escape, FFI misuse, metatable poisoning) | `luals_call` (luals MCP) — same set, type-aware |
+| Lua symbol analysis (sandbox escape, FFI misuse, metatable poisoning) | `purity_call` (purity MCP, luals-backed) — same set, type-aware |
 | Secrets scan, vulnerability pattern grep, file discovery, non-code file reads (CMakeLists, package.json, requirements.txt, .env) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Git operations (branch diff, log, status, show, blame) | `git_call` (git MCP) — **never** `Bash("git ...")` for read-only ops |
 | Build & dependency manifests | `forge_call` (forge MCP) — function `"describe"` / `"list"` when `project-forge.yaml` exists |
@@ -217,7 +215,7 @@ For every sink (SQL exec, command exec, deserializer, HTML insertion, file open 
 
 The trace goes into the finding's `Data-flow trace:` block in the findings file. PARTIAL and UNABLE_TO_TRACE findings are NOT dropped — flag them anyway with the trace status, so the Verifier can attempt closure or escalate.
 
-**MCP-routing reminder for FIND:** for every sink in a `.c`/`.cpp`/`.h` file you MUST use `purity_call`'s clangd-backed semantic functions for the trace (not grep). For every sink in a `.lua` file you MUST use `luals_call`. Falling back to text search for sinks in LSP-supported languages is a violation — see the MCP TOOL ROUTING section at the top.
+**MCP-routing reminder for FIND:** for every sink in a `.c`/`.cpp`/`.h` file you MUST use `purity_call`'s clangd-backed semantic functions for the trace (not grep). For every sink in a `.lua` file you MUST use `purity_call`'s luals-backed semantic functions. Falling back to text search for sinks in LSP-supported languages is a violation — see the MCP TOOL ROUTING section at the top.
 
 ---
 
@@ -688,7 +686,7 @@ The checklist applies per phase. Skip items that don't apply to your phase.
 - [ ] PHASE directive resolved correctly (legacy / triage / find / verify) and the matching workflow was the only one executed
 - [ ] Output format matches the phase variant (no legacy report in triage/find/verify; no stray triage/find/verify blocks in legacy)
 - [ ] For C/C++ symbols: used purity_call (clangd-backed), NOT text search
-- [ ] For Lua symbols: used luals MCP, NOT text search
+- [ ] For Lua symbols: used purity_call (luals-backed), NOT text search
 - [ ] For git operations: used `mcp-git`, NOT `Bash("git ...")`
 - [ ] Independent tool calls were batched in parallel
 - [ ] No source files were modified (only FIND writes — its per-lane file under `.claude/tmp/`; TRIAGE and VERIFY write nothing)
