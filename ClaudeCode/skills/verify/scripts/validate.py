@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""validate.py -- structural/format validator for structured-data files (stdlib-first).
+"""validate.py -- structural/format validator for data + Python files (stdlib-first).
 
 Answers ONE question per file: "is this *formally* well-formed for its format?"
 i.e. does it parse. This is NOT schema/semantic validation -- it does not check
@@ -18,6 +18,8 @@ path to read from stdin (then --format is required).
 
 Coverage with the Python 3.9 standard library ONLY:
     json   -> json                full parse
+    python -> compile()           syntax + symtable, IN MEMORY (never py_compile,
+                                  which would write __pycache__/*.pyc)
     xml    -> xml.parsers.expat   well-formedness (DTD/external-entity guarded)
     ini    -> configparser        full parse (INI flavour)
     csv    -> csv                 row/column-count consistency
@@ -88,9 +90,11 @@ EXT_MAP = {
 	".ini": "ini", ".cfg": "ini",
 	".csv": "csv",
 	".tsv": "tsv",
+	".py": "python", ".pyi": "python",
 }
 
-KNOWN_FORMATS = ["json", "yaml", "toml", "xml", "ini", "csv", "tsv", "plist"]
+KNOWN_FORMATS = ["json", "python", "yaml", "toml", "xml", "ini", "csv", "tsv",
+	"plist"]
 
 
 def detect_format(path: str) -> Optional[str]:
@@ -118,6 +122,37 @@ def v_json(data: bytes) -> Result:
 	except json.JSONDecodeError as e:
 		return fail(e.msg, line=e.lineno, col=e.colno)
 	return ok("valid JSON")
+
+
+def v_python(data: bytes) -> Result:
+	import warnings
+
+	try:
+		with warnings.catch_warnings(record=True) as caught:
+			# Invalid escape sequences, `assert (x, y)`, `is` with a literal:
+			# real defects that a bare parse never surfaces.
+			warnings.simplefilter("always", SyntaxWarning)
+			# compile() IN MEMORY -- deliberately not py_compile, which writes
+			# __pycache__/*.pyc as a side effect, and deliberately stronger than
+			# ast.parse: the symtable/codegen pass also rejects `break` outside a
+			# loop, `return` outside a function and module-level `nonlocal`.
+			# Compile the BYTES, never a decoded str: this way the PEP-263 coding
+			# cookie (`# -*- coding: latin-1 -*-`) and a UTF-8 BOM are honoured by
+			# the tokenizer exactly as the interpreter would -- decoding first
+			# would report a correctly-declared non-UTF-8 source as invalid.
+			compile(data, "<validate>", "exec", dont_inherit=True)
+	except SyntaxError as e:
+		return fail(e.msg or "syntax error", line=e.lineno, col=e.offset)
+	except Exception as e:  # null bytes, recursion limit, ...
+		return fail("%s: %s" % (type(e).__name__, e))
+	ver = "%d.%d" % sys.version_info[:2]
+	warned = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+	if warned:
+		first = warned[0]
+		return ok("compiles on Python %s but emits %d SyntaxWarning(s); "
+			"first: %s (line %s)"
+			% (ver, len(warned), first.message, first.lineno))
+	return ok("valid Python syntax (compiled on %s)" % ver)
 
 
 def v_xml(data: bytes) -> Result:
@@ -368,6 +403,7 @@ def _yaml_precheck(text: str) -> Result:
 
 VALIDATORS = {
 	"json": v_json,
+	"python": v_python,
 	"xml": v_xml,
 	"ini": v_ini,
 	"csv": v_csv,

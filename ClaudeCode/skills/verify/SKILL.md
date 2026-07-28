@@ -1,9 +1,9 @@
 ---
 name: verify
-description: Validate that a structured-data file is FORMALLY well-formed (parses) for its format — JSON, YAML, TOML, XML, INI/.cfg, CSV/TSV, plist. Use when asked "is this valid JSON/YAML/...", to check a config/data file before committing or deploying, to verify a file you just wrote or generated, or as a pre-commit/CI format gate. Bundles a Python 3.9 stdlib-first validator at scripts/validate.py. This is FORMAT/structural validation (does it parse), NOT schema validation (does it match an expected shape).
+description: Validate that a file is FORMALLY well-formed (parses) for its format — JSON, Python, YAML, TOML, XML, INI/.cfg, CSV/TSV, plist. Use when asked "is this valid JSON/YAML/Python", to check a config/data file or script before committing or deploying, to verify a file you just wrote or generated, or as a pre-commit/CI format gate. Bundles a Python 3.9 stdlib-first validator at scripts/validate.py for shell and CI use; inside a Claude session prefer the pre-approved MCP tool inspect_call (function validate/json/python/yaml/...), which costs no permission prompt. This is FORMAT/structural validation (does it parse), NOT schema validation (does it match an expected shape).
 ---
 
-# Verify — structural/format validation for data files
+# Verify — structural/format validation for data files and Python sources
 
 Answer one question per file: **is this formally well-formed for its format?** —
 i.e. does it parse cleanly. This is *not* schema or semantic validation: it does
@@ -15,13 +15,33 @@ format. For schema checks, see *When NOT to use* below.
 
 ```bash
 python ~/.claude/skills/p/skills/verify/scripts/validate.py path/to/file.json
-python ~/.claude/skills/p/skills/verify/scripts/validate.py a.json b.yaml c.toml   # batch
+python ~/.claude/skills/p/skills/verify/scripts/validate.py a.json b.yaml hook.py   # batch
 echo '{"a":1}' | python ~/.claude/skills/p/skills/verify/scripts/validate.py --format json -
 ```
 
 Format is auto-detected from the extension; override with `--format`. Use `-` as
 a path to read stdin (then `--format` is required). One line of output per file;
 a one-line summary goes to stderr.
+
+## Inside a Claude session, use the MCP tool instead
+
+The bundled script exists for **shell and CI** use (pre-commit hooks, `make`
+targets, a human at a terminal). When you are an agent with MCP access, the same
+nine formats are exposed by the pre-approved `mcp-inspect` server, which needs
+**no permission prompt** and returns a Markdown table:
+
+```
+inspect_call {function: "validate", params: {path: "settings.json"}}          # auto-detect
+inspect_call {function: "python",   params: {path: "hooks/guard.py"}}
+inspect_call {function: "validate", params: {paths: ["a.json", "b.yaml"]}}    # batch
+inspect_call {function: "json",     params: {content: "{\"a\":1}"}}           # inline, no file
+```
+
+Reach for Bash **only** when MCP is unavailable. In particular never validate by
+shelling out to `python3 -c "import ast; ast.parse(...)"`, `python3 -m py_compile`,
+`python3 -m json.tool`, `jq .` or `xmllint --noout` — the first two are weaker or
+dirtier than what this skill does (see the Python row below), and all of them cost
+a prompt. See the `p:mcp-inspect` skill for the full function reference.
 
 **Exit code** — `0` when nothing FAILED, `1` if any file FAILED. With `--strict`,
 LIMITED and SKIPPED also make the exit non-zero. This makes the tool usable as a
@@ -53,6 +73,7 @@ pre-commit / CI gate.
 | Format     | stdlib module        | Completeness |
 |------------|----------------------|--------------|
 | JSON       | `json`               | **Full** parse, with `line:col` on error. |
+| Python     | `compile()`          | **Syntax + symtable**, compiled **in memory**. Two deliberate choices: it is *stronger* than `ast.parse` (the codegen pass also rejects `break` outside a loop, `return` outside a function, module-level `nonlocal`), and it never writes anything — `python3 -m py_compile` would leave a `__pycache__/*.pyc` behind. `SyntaxWarning`s (invalid escape sequence, `assert (x, y)`, `is` with a literal) are reported alongside an `OK`. Grammar is that of the *running* interpreter, which the message states. |
 | XML        | `xml.parsers.expat`  | **Well-formedness**, with a DTD/entity guard (blocks billion-laughs internal-entity expansion and external-entity XXE; a plain DOCTYPE is accepted). Not DTD/XSD *schema* validation. |
 | INI / .cfg | `configparser`       | **Full** parse of the INI flavour `configparser` accepts (sections, `key = value`, duplicate-key detection). Not every `.ini` dialect. |
 | CSV / TSV  | `csv`                | **Structural**: every row has the same column count. CSV is delimiter-flexible, so "parses" mostly means consistent shape. |
@@ -86,6 +107,7 @@ the script performs — are:
 
 ```python
 import json;        json.loads(text)                       # JSON
+compile(text, "<validate>", "exec", dont_inherit=True)     # Python (NOT py_compile)
 import plistlib;     plistlib.loads(data_bytes)             # plist (bytes)
 import configparser; configparser.ConfigParser().read_string(text)   # INI
 import csv, io;      list(csv.reader(io.StringIO(text)))    # CSV (+ check col counts)
@@ -95,10 +117,13 @@ import xml.parsers.expat as x; p = x.ParserCreate(); p.Parse(data_bytes, True)  
 ```
 
 A clean call = valid; the raised exception (`json.JSONDecodeError`,
-`expat.ExpatError`, `configparser.Error`, `tomllib.TOMLDecodeError`,
-`yaml.YAMLError`, …) carries the position and message. For XML on untrusted
-input, install entity-declaration / external-entity handlers that raise, as the
-script does — bare `ET.fromstring` is vulnerable to entity-expansion attacks.
+`SyntaxError`, `expat.ExpatError`, `configparser.Error`,
+`tomllib.TOMLDecodeError`, `yaml.YAMLError`, …) carries the position and message.
+For XML on untrusted input, install entity-declaration / external-entity handlers
+that raise, as the script does — bare `ET.fromstring` is vulnerable to
+entity-expansion attacks. For Python, prefer `compile()` over
+`python3 -m py_compile`: py_compile writes a `.pyc` into `__pycache__/`, and
+`ast.parse` alone accepts code that cannot actually run.
 
 ## When NOT to use this skill
 
@@ -113,7 +138,9 @@ script does — bare `ET.fromstring` is vulnerable to entity-expansion attacks.
 ## Notes
 
 - `--list-formats` prints the supported formats.
-- The script is dependency-free on JSON/XML/INI/CSV/plist. TOML needs a parser
-  (stdlib on 3.11+); YAML is best with PyYAML.
+- The script is dependency-free on JSON/Python/XML/INI/CSV/plist. TOML needs a
+  parser (stdlib on 3.11+); YAML is best with PyYAML.
+- `.py` and `.pyi` auto-detect as Python; force it elsewhere with
+  `--format python`.
 - Tabs, not spaces, in `scripts/validate.py` (matches the repo's helper-script
   convention).
