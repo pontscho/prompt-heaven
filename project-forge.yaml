@@ -81,6 +81,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|GAP|orphan'
 
+  spawn_stdin:
+    description: "Every subprocess spawn site under Scripts/ must pass an explicit stdin= (AST-based, offline)"
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py spawn_stdin
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|EXPLICIT|MISSING|INDETERMINATE|NO-STDIN-FORM'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]

@@ -9,7 +9,7 @@ run):
                                                       family (A-N)
   mcp_first_guard    tests/test_mcp_first_guard.py    ClaudeCode/hooks/
                                                       mcp-first-guard.py PreToolUse
-                                                      Bash guard (A-J)
+                                                      Bash guard (A-M)
   purity_lsp         tests/test_purity_lsp.py         purity_call semantic
                                                       navigation vs the retired
                                                       mcp-clangd / mcp-luals
@@ -21,7 +21,16 @@ run):
                                                       corpus and the servers'
                                                       own model-facing text
                                                       prescribe must exist in
-                                                      the live inventory (A-H)
+                                                      the live inventory, and
+                                                      every tool an agent is told
+                                                      to call must be in its
+                                                      `tools:` grant (A-I)
+  spawn_stdin        tests/test_spawn_stdin.py        every subprocess spawn
+                                                      site under Scripts/ must
+                                                      pass an explicit `stdin=`,
+                                                      because an MCP server's
+                                                      stdin IS the JSON-RPC
+                                                      stream (AST-based, A-D)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -104,6 +113,10 @@ def run_name_existence(opts):
     return run_python_suite("test_name_existence", opts)
 
 
+def run_spawn_stdin(opts):
+    return run_python_suite("test_spawn_stdin", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -135,17 +148,25 @@ def run_smoke(opts):
 #   - name_existence generates one case per name found in the corpus, so it
 #     moves whenever the corpus or the server inventory moves -- which is the
 #     entire point of the suite
+#   - spawn_stdin  enumerates FILES and emits one case per spawn site found, so
+#     its count moves whenever a server gains or loses a subprocess call.  The
+#     gate there is the INVARIANT (every site passes an explicit stdin=), and a
+#     drift line reading "265 != 262" would be a strictly worse error message
+#     than "new spawn site with no explicit stdin at foo.py:120".  What is typed
+#     gets checked; what is derived gets derived.
 SUITES = [
     ("inspect_validate", run_inspect_validate,
      "mcp-inspect VALIDATION family", 94),
     ("mcp_first_guard", run_mcp_first_guard,
-     "mcp-first-guard PreToolUse Bash hook", 227),
+     "mcp-first-guard PreToolUse Bash hook", 308),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 139),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 166),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
+    ("spawn_stdin", run_spawn_stdin,
+     "explicit stdin= at every subprocess spawn site", None),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

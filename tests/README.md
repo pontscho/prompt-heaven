@@ -41,10 +41,11 @@ a plain shell and for CI.
 | name | file | what it covers | groups |
 |---|---|---|---|
 | `inspect_validate` | `test_inspect_validate.py` | the `mcp-inspect` VALIDATION family: `validate`, `python`, `json`, `yaml`, `toml`, `xml`, `ini`, `csv`, `tsv`, `plist` and every alias. Valid + invalid fixture per format, reported error **line numbers**, python-depth catches that `ast.parse` misses, PEP-263/BOM/undecodable source encoding, XML entity + XXE rejection, the parameter error matrix, `max_mb` cap semantics, `strict`, batch `paths`, real repo files, hostile-input robustness, and a read-only contract check. | A–N |
-| `mcp_first_guard` | `test_mcp_first_guard.py` | `ClaudeCode/hooks/mcp-first-guard.py`, the PreToolUse Bash guard: primary-command DENY set, the `tail` follow-mode exemption, downstream-pipe-stage ALLOW, exemption leakage, every pre-existing regression case, heredoc-body stripping, herestring (`<<<`) handling, `&` as a statement separator, hit dedup/sorting, and the plumbing contract (always `exit 0`, ALLOW means empty stdout, malformed input fails open). | A–J |
+| `mcp_first_guard` | `test_mcp_first_guard.py` | `ClaudeCode/hooks/mcp-first-guard.py`, the PreToolUse Bash guard: primary-command DENY set, the `tail` follow-mode exemption, downstream-pipe-stage ALLOW, exemption leakage, every pre-existing regression case, heredoc-body stripping, herestring (`<<<`) handling, `&` as a statement separator, hit dedup/sorting, the wrapper-peeling forms (subshell, brace group, command substitution, `bash -c`), the ALL-CAPS fold for blocked names, python interpreters **and** shells (`BASH -c 'cat f'`), `python3 -m py_compile` / `-m compileall` including bundled short-option clusters, and the plumbing contract (always `exit 0`, ALLOW means empty stdout, malformed input fails open). | A–M |
 | `purity_lsp` | `test_purity_lsp.py` | `purity_call`'s semantic navigation, i.e. whether absorbing `mcp-clangd` / `mcp-luals` into `mcp-purity` actually preserved their capability: definitions, references asserted to the exact site set, hover, outline, diagnostics on a clean **and** a deliberately broken fixture, every prefixed alias, type-definition navigation, and A/B comparison against the still-on-disk retired servers so "purity returns nothing" can be told apart from "there was nothing to return". Also the hygiene group: no repo writes, no bytecode, fixtures byte-identical, plus measured warm-up latencies. | A–I |
 | `mcp_git_params` | `test_mcp_git_params.py` | `mcp-git`'s named-param → `git` argv conversion, fully offline (the module's `subprocess` is stubbed, so nothing is spawned): the revision/pathspec/repository positional slots and their aliases, leading-dash rejection per list element, flag-vs-positional ordering, the deliberate `--key=value` fall-through pinned as a trap, and display fidelity of the echoed command line — checked three ways, by exact rendering, by a `shlex` round-trip, and by replaying the line under real `bash`/`zsh`/`sh`. | A–I |
-| `name_existence` | `test_name_existence.py` | the bidirectional name check: every MCP server and function name that the prompt corpus (`ClaudeCode/**`) **or** a server's own model-facing tool description prescribes must exist in the live inventory and name a *registered* server — and every server function nobody references anywhere is reported as an orphan. Includes a negative control with planted defects, because a detector that never fires is worthless. | A–H |
+| `name_existence` | `test_name_existence.py` | the three-way name check: every MCP server and function name that the prompt corpus (`ClaudeCode/**`) **or** a server's own model-facing tool description prescribes must exist in the live inventory and name a *registered* server; every server function nobody references anywhere is reported as an orphan; and every tool an agent's own body tells it to call must appear in that agent's frontmatter `tools:` grant (with the mirror check — a granted tool that does not exist — and the orphan-capability check, a registered dispatcher no agent may call at all). Includes a negative control with planted defects, because a detector that never fires is worthless. | A–I |
+| `spawn_stdin` | `test_spawn_stdin.py` | every subprocess spawn site under `Scripts/` must pass an explicit `stdin=`. An MCP server's stdin **is** the JSON-RPC stream, so a child that inherits it eats protocol messages — one such site swallowed a `ping` and the reply never came, another desynced the stream mid-message. **AST-based, never regex** (this repo really contains both regex false positives: a `subprocess.Popen` type annotation and a docstring naming `subprocess.run()`), and the assertion is *explicitness*, not a particular value — `DEVNULL`, `PIPE`, a variable or a raw fd all pass, a missing keyword fails. Also fails outright on the forms that cannot take `stdin=` at all (`os.system`, `os.popen`, `subprocess.getoutput`, `subprocess.getstatusoutput`; currently zero, now checked rather than assumed). `ClaudeCode/**` and `tests/**` are surveyed as INFO rather than gated — see the suite docstring for why. Carries a negative control with planted defects, including a multi-line call a regex would miss and an unparseable file that must be reported rather than skipped. | A–D |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | JSON-RPC 2.0 plumbing invariants for every MCP server: `initialize` protocol/version, notifications get no reply, `ping` → `{}`, exactly one tool with the right name, unknown method → `-32601`, forced handler exception → `-32603` with a response actually arriving, plus the `mcp-purity` semantic-dispatch checks. Reports *servers*, not cases; the fleet size is derived from its own launch table. | — |
 
 ## Commands
@@ -66,6 +67,7 @@ python3 tests/test_mcp_first_guard.py
 python3 tests/test_purity_lsp.py
 python3 tests/test_mcp_git_params.py
 python3 tests/test_name_existence.py
+python3 tests/test_spawn_stdin.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 
@@ -93,7 +95,13 @@ cases and never fail — but an `INFO` case that breaks a hard invariant
 **Read the `INFO` lines.** They are the most interesting output in the suite,
 and a green summary hides them: the guard suite's group H pins wrapper bypasses
 that are knowingly left open, `purity_lsp` group G records capability gaps, and
-`name_existence` reports orphaned functions nobody documents. To see them:
+`name_existence` reports orphaned functions nobody documents, orphaned
+*capabilities* (registered dispatchers no agent's `tools:` grants — that row is
+what surfaced `inspect_call`), and the missing grants it deliberately declines to
+fail on. `spawn_stdin`'s group B is INFO-only by design: it is the measured list
+of spawn sites outside the gated tree that still inherit stdin, kept visible so
+widening the gate later is a decision on printed data rather than a fresh audit.
+To see them:
 
 ```bash
 python3 tests/run.py <suite> | grep -iE "INFO|SKIP"
@@ -132,10 +140,11 @@ tests/
   run.py                     single entry point / aggregator + the SUITES table
   _harness.py                shared plumbing, used by every suite
   test_inspect_validate.py   groups A-N
-  test_mcp_first_guard.py    groups A-J
+  test_mcp_first_guard.py    groups A-M
   test_purity_lsp.py         groups A-I   (live clangd + lua-language-server)
   test_mcp_git_params.py     groups A-I   (offline, subprocess stubbed)
-  test_name_existence.py     groups A-H
+  test_name_existence.py     groups A-I
+  test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
   files/                     tf_-prefixed C and Lua fixtures for purity_lsp
   README.md
 ```
@@ -175,8 +184,12 @@ Three lines, once the suite file exists:
 
 Declare the case count so drift fails loudly. Pass `None` instead **only** when
 the count is data-derived rather than a fixed case table — `name_existence`
-generates one case per name found in the corpus, so pinning its total would
-fail on every legitimate change to the very thing it measures.
+generates one case per name found in the corpus, and `spawn_stdin` one case per
+spawn site found under `Scripts/`, so pinning either total would fail on every
+legitimate change to the very thing it measures. What is typed gets checked; what
+is derived gets derived. For those suites the gate is the *invariant*, not the
+count: "new spawn site with no explicit stdin at `foo.py:120`" is a far better
+error message than "265 != 262".
 
 `run.py` picks up the name, the subset selection, and the aggregation
 automatically.

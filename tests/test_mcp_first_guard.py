@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Suite for ClaudeCode/hooks/mcp-first-guard.py, the PreToolUse Bash guard
-(groups A-K).
+(groups A-M).
 
 The case COUNT is deliberately absent from this docstring: it is written down
 once, in the SUITES table in tests/run.py, which checks it against the run. A
@@ -32,6 +32,15 @@ Coverage by group:
   K  wrapper unwrapping in depth (nesting, quoting, exemptions and
      false-positive probes) + the `python3 -m py_compile` steer and the scope
      limit that keeps `python3 -c` / `-m json.tool` allowed
+  L  `python3 -m compileall` (every spelling and wrapper form that reaches the
+     module, plus its false-positive probes) and the bundled short-option
+     CLUSTER (`-Bm`, `-BEsm`, `-BEsmMOD`) for BOTH blocked modules
+  M  the ALL-CAPS SHELL fold: `BASH -c 'cat f'` and every other SHELL_C member,
+     which used to ALLOW because the fold covered only BLOCKED + the python
+     interpreters, so an ALL-CAPS shell's payload was never extracted at all.
+     Also the MAX_DEPTH budget the fold spends, the invariants that must survive
+     inside a folded payload, and the false-positive probes (mixed case, a file
+     literally named BASH, `VAR=val` prefixes, `$BASH`)
 
 The hook is never imported in the default run -- only `--whitebox` imports it,
 and then only via a loader that cannot write __pycache__ into the repo.
@@ -501,6 +510,285 @@ CASES += [
          note="malformed nesting must not crash, hang or block"),
 ]
 
+# ---------------------------------------------------------------------------
+# `python3 -m compileall`, plus the short-option CLUSTER for both modules.
+#
+# compileall is py_compile's argument only broader: it writes __pycache__/*.pyc
+# across an entire directory tree.  Both go through the same BLOCKED_MODULES ->
+# python_module() path, so the cluster spellings below are asserted for BOTH --
+# that is the point of having one extractor rather than two.
+#
+# The cluster half answers a specific question: CPython accepts bundled short
+# options, so `python3 -Bm py_compile x.py` IS `python3 -B -m py_compile x.py`.
+# Measured against the hook as a subprocess BEFORE any change here: every
+# cluster form was already DENIED, because python_module() walks the LETTERS of
+# the token (`for at, letter in enumerate(tok[1:], start=1)`) instead of
+# exact-matching `-m`.  K already pinned `-Bm`; these pin the siblings, so the
+# rule that cost this repo two bugs (`git hash-object -wt blob`, `tail -fn 100`)
+# cannot be optimised back into an exact-token test unnoticed.
+# ---------------------------------------------------------------------------
+
+L_GROUP = "L. `python3 -m compileall` + bundled short-option clusters"
+CA = "python3 -m compileall"
+PC = "python3 -m py_compile"
+CASES += [
+    # -- compileall: the spellings that reach the module ---------------------
+    case(L_GROUP, "python3 -m compileall .", "python3 -m compileall .", DENY,
+         must=[only(CA), "inspect_call(function=python)",
+               'forge_call(function=build, targets=["syntax"])', "__pycache__"],
+         note="the steer must name the in-memory replacement AND the forge "
+              "target that is this exact check for the whole repo"),
+    case(L_GROUP, "python -m compileall (unversioned)", "python -m compileall .", DENY,
+         must=[only(CA)]),
+    case(L_GROUP, "python3.12 -m compileall (versioned)", "python3.12 -m compileall Scripts",
+         DENY, must=[only(CA)]),
+    case(L_GROUP, "glued `-mcompileall`", "python3 -mcompileall .", DENY, must=[only(CA)]),
+    case(L_GROUP, "subshell `(python3 -m compileall .)`", "(python3 -m compileall .)",
+         DENY, must=[only(CA)]),
+    case(L_GROUP, "brace group `{ python3 -m compileall .; }`",
+         "{ python3 -m compileall .; }", DENY, must=[only(CA)]),
+    case(L_GROUP, "substitution `$(python3 -m compileall .)`", "$(python3 -m compileall .)",
+         DENY, must=[only(CA)]),
+    case(L_GROUP, "payload `bash -c 'python3 -m compileall .'`",
+         "bash -c 'python3 -m compileall .'", DENY, must=[only(CA)],
+         must_not=["`bash`"]),
+    case(L_GROUP, "ALL-CAPS `PYTHON3 -m compileall .`", "PYTHON3 -m compileall .", DENY,
+         must=[only(CA)], must_not=["`PYTHON3`"],
+         note="the fold now covers the python interpreters too: /usr/bin/PYTHON3 "
+              "resolves on a case-insensitive filesystem, so this really does run "
+              "compileall. Its only consequence is that the -m check runs"),
+    case(L_GROUP, "compileall plus a blocked sibling", "python3 -m compileall . && ls",
+         DENY, must=[only("ls", CA)]),
+    case(L_GROUP, "dedup: two compileall runs named once",
+         "python3 -m compileall a; python -m compileall b", DENY, must=[only(CA)]),
+    case(L_GROUP, "both modules in one command -> both labels, both steers",
+         "python3 -m compileall . && python3 -m py_compile x.py", DENY,
+         must=[only(CA, PC), "inspect_call(function=python)"],
+         note="two BLOCKED_FORMS labels coexist in one reason, sorted"),
+    case(L_GROUP, "compileall with a blocked downstream stage",
+         "python3 -m compileall . | tail -5", DENY, must=[only(CA)],
+         must_not=["`tail`"]),
+    case(L_GROUP, "downstream compileall stage not inspected",
+         "foo | python3 -m compileall .", ALLOW,
+         note="same asymmetry as py_compile: only stage 0 is the primary command"),
+    # -- compileall: false-positive probes ----------------------------------
+    case(L_GROUP, "`python3 -c 'import compileall'` stays ALLOW",
+         "python3 -c 'import compileall'", ALLOW,
+         note="scope limit D98: `-c` is read-only and far too common to block"),
+    case(L_GROUP, "`python3 -m json.tool` stays ALLOW (compileall-named arg)",
+         "python3 -m json.tool compileall.json", ALLOW, note="scope limit D98"),
+    case(L_GROUP, "a FILE merely named compileall", "python3 compileall.py", ALLOW,
+         note="an operand, not `-m`: the module is never named"),
+    case(L_GROUP, "`-m compileall` after the script is the SCRIPT's",
+         "python3 tool.py -m compileall", ALLOW,
+         note="python's option region ends at the script operand"),
+    case(L_GROUP, "compileall merely MENTIONED as an argument",
+         "echo 'python3 -m compileall'", ALLOW,
+         note="a quoted argument is not a command — `echo` is the primary"),
+    # -- bundled short-option clusters: py_compile --------------------------
+    case(L_GROUP, "cluster `-Em py_compile`", "python3 -Em py_compile x.py", DENY,
+         must=[only(PC)]),
+    case(L_GROUP, "cluster `-sm py_compile`", "python3 -sm py_compile x.py", DENY,
+         must=[only(PC)]),
+    case(L_GROUP, "cluster `-BEm py_compile`", "python3 -BEm py_compile x.py", DENY,
+         must=[only(PC)]),
+    case(L_GROUP, "cluster AND glued `-Bmpy_compile`", "python3 -Bmpy_compile x.py",
+         DENY, must=[only(PC)],
+         note="`m` trailing a cluster with its module glued on: one token, "
+              "`-B -m py_compile`"),
+    # -- bundled short-option clusters: compileall --------------------------
+    case(L_GROUP, "cluster `-Bm compileall`", "python3 -Bm compileall .", DENY,
+         must=[only(CA)], note="the fix for one module is the fix for both"),
+    case(L_GROUP, "cluster `-BEsm compileall`", "python3 -BEsm compileall .", DENY,
+         must=[only(CA)]),
+    case(L_GROUP, "cluster AND glued `-BEsmcompileall`", "python3 -BEsmcompileall .",
+         DENY, must=[only(CA)]),
+    case(L_GROUP, "cluster inside a payload", "bash -c 'python3 -Bm compileall .'",
+         DENY, must=[only(CA)]),
+    case(L_GROUP, "arg-taking letter ends the cluster, next token still read",
+         "python3 -Ximporttime -Bm compileall .", DENY, must=[only(CA)],
+         note="`-Ximporttime` consumes its own argument; the `-Bm` after it is "
+              "still a cluster carrying -m"),
+    # -- cluster false-positive probes --------------------------------------
+    case(L_GROUP, "`-Bcm py_compile` is `-B -c m` -> ALLOW", "python3 -Bcm py_compile",
+         ALLOW,
+         note="`c` takes an argument, so it ends the cluster: python runs the "
+              "one-letter PROGRAM `m` and `py_compile` is argv[1]. Denying this "
+              "would be reading letters past the point where they are options"),
+    case(L_GROUP, "`-Bc 'print(1)'` stays ALLOW", "python3 -Bc 'print(1)'", ALLOW,
+         note="the cluster letters must not turn `-c` into `-m`"),
+]
+
+# ---------------------------------------------------------------------------
+# The ALL-CAPS SHELL fold.
+#
+# The fold that makes `CAT f` deny (decision D97) was restricted to two sets:
+# names in BLOCKED, and the python interpreters.  SHELL_C was NOT in it, so an
+# ALL-CAPS shell's `-c STRING` payload was never extracted and EVERYTHING inside
+# it escaped the guard entirely -- a strictly worse leak than the `CAT` case,
+# because one bypass token covered every rule at once.  Measured against the
+# hook as a subprocess BEFORE the change: `BASH -c 'cat f'` was ALLOW, and so
+# were SH/ZSH/DASH/KSH/MKSH/ASH, `BASH -lc`, and `BASH -c 'python3 -m
+# compileall .'`.
+#
+# The fix is not a third special case: primary() now gates the fold on
+# has_opinion(), the one predicate naming everything the guard acts on at all
+# (BLOCKED + SHELL_C + PY_INTERP_RE).  That is what keeps the safety argument to
+# one sentence -- folding can only ever reach a name the guard was already going
+# to act on.
+#
+# ALL-CAPS resolution was measured per name on this host, to the D97 standard
+# (all 15 PATH dirs enumerated, 3 of them non-existent):
+#   BASH -> /usr/local/bin/BASH,  SH -> /bin/SH,  ZSH -> /bin/ZSH,
+#   DASH -> /bin/DASH,  KSH -> /bin/KSH   -- each the SAME inode as its
+#                                            lower-case spelling, so the
+#                                            ALL-CAPS form really runs the shell
+#   MKSH, ASH                             -- NOT INSTALLED (neither spelling
+#                                            resolves).  Folding them is inert
+#                                            today and correct the day one is
+#                                            installed; they are asserted here so
+#                                            the set stays complete rather than
+#                                            "complete on this laptop".
+# No PATH dir ships a file whose name is the ALL-CAPS spelling of ANY name in
+# the three sets, so the fold shadows no real program.
+# ---------------------------------------------------------------------------
+
+M_GROUP = "M. ALL-CAPS shell fold (`BASH -c 'cat f'`)"
+CASES += [
+    # -- every SHELL_C member, ALL-CAPS ------------------------------------
+    case(M_GROUP, "BASH -c 'cat f'", "BASH -c 'cat f'", DENY, must=[only("cat")],
+         must_not=["`bash`", "`BASH`"],
+         note="was ALLOW before the fold covered SHELL_C: the payload was never "
+              "extracted, so the INNER command escaped. The reason must name the "
+              "inner `cat`, never the shell"),
+    case(M_GROUP, "SH -c 'cat f'", "SH -c 'cat f'", DENY, must=[only("cat")],
+         must_not=["`sh`"]),
+    case(M_GROUP, "ZSH -c 'ls'", "ZSH -c 'ls'", DENY, must=[only("ls")],
+         must_not=["`zsh`"]),
+    case(M_GROUP, "DASH -c 'cat f'", "DASH -c 'cat f'", DENY, must=[only("cat")]),
+    case(M_GROUP, "KSH -c 'grep x .'", "KSH -c 'grep x .'", DENY, must=[only("grep")]),
+    case(M_GROUP, "MKSH -c 'ls'", "MKSH -c 'ls'", DENY, must=[only("ls")],
+         note="`mksh` is NOT INSTALLED on this host (neither spelling resolves), "
+              "so this fold is inert here — asserted anyway so the set stays "
+              "complete rather than complete-on-this-laptop"),
+    case(M_GROUP, "ASH -c 'ls'", "ASH -c 'ls'", DENY, must=[only("ls")],
+         note="`ash` is NOT INSTALLED on this host either; same reasoning"),
+    # -- spelling / option variants of the folded shell ---------------------
+    case(M_GROUP, "short cluster `BASH -lc`", "BASH -lc 'cat f'", DENY,
+         must=[only("cat")],
+         note="dash_c_payload reads `c` letterwise, and it runs on the FOLDED "
+              "name — both halves have to work or the payload is lost"),
+    case(M_GROUP, "long option before -c", "BASH --login -c 'cat f'", DENY,
+         must=[only("cat")]),
+    case(M_GROUP, "./BASH -c 'cat f'", "./BASH -c 'cat f'", DENY, must=[only("cat")],
+         note="basename() runs before the fold, so a path prefix is no dodge"),
+    case(M_GROUP, "/bin/BASH -c 'cat f'", "/bin/BASH -c 'cat f'", DENY,
+         must=[only("cat")]),
+    case(M_GROUP, "sudo BASH -c 'cat f'", "sudo BASH -c 'cat f'", DENY,
+         must=[only("cat")]),
+    case(M_GROUP, "VAR=1 BASH -c 'cat f'", "VAR=1 BASH -c 'cat f'", DENY,
+         must=[only("cat")]),
+    # -- composes with every other wrapper form ----------------------------
+    case(M_GROUP, "subshell `(BASH -c 'cat f')`", "(BASH -c 'cat f')", DENY,
+         must=[only("cat")]),
+    case(M_GROUP, "brace group `{ BASH -c 'cat f'; }`", "{ BASH -c 'cat f'; }", DENY,
+         must=[only("cat")]),
+    case(M_GROUP, "substitution `$(BASH -c 'ls')`", "$(BASH -c 'ls')", DENY,
+         must=[only("ls")]),
+    case(M_GROUP, "xargs plus folded payload", "xargs BASH -c 'cat \"$1\"' _", DENY,
+         must=[only("cat")]),
+    case(M_GROUP, "the two folds compose: `DASH -c 'python3 -m py_compile x.py'`",
+         "DASH -c 'python3 -m py_compile x.py'", DENY, must=[only(PC)],
+         note="folded SHELL unwraps the payload, then the interpreter check runs "
+              "inside it — one predicate now gates both"),
+    case(M_GROUP, "folded shell hiding compileall",
+         "BASH -c 'python3 -m compileall .'", DENY, must=[only(CA)],
+         note="was ALLOW: the broadest single bypass the hole offered"),
+    case(M_GROUP, "folded shell hiding mkdir", "BASH -c 'mkdir /x'", DENY,
+         must=[only("mkdir")]),
+    # -- MAX_DEPTH interaction ---------------------------------------------
+    case(M_GROUP, "folded shell wrapping a lower-case shell",
+         "BASH -c 'bash -c \"cat f\"'", DENY, must=[only("cat")],
+         note="2 unwrap layers, mixed spellings"),
+    case(M_GROUP, "folded shell wrapping a FOLDED shell",
+         "BASH -c 'BASH -c \"cat f\"'", DENY, must=[only("cat")],
+         note="the fold has to apply at every depth, not just at depth 0"),
+    case(M_GROUP, "SH wrapping SH", "SH -c 'SH -c \"cat f\"'", DENY,
+         must=[only("cat")]),
+    case(M_GROUP, "nested folded shells plus a blocked sibling",
+         "BASH -c 'BASH -c \"ls\"' && cat y", DENY, must=[only("cat", "ls")],
+         note="statement splitting is unaffected by the fold; both hits, sorted"),
+    case(M_GROUP, "2 substitutions then a folded shell -> depth 3 payload",
+         "echo $(echo $(BASH -c 'cat f'))", DENY, must=[only("cat")],
+         note="the shell is found AT depth 2, so its payload is scanned at depth "
+              "3 — the last layer MAX_DEPTH allows"),
+    case(M_GROUP, "3 substitutions then a folded shell -> MAX_DEPTH cap",
+         "echo $(echo $(echo $(BASH -c 'cat f')))", ALLOW,
+         note="documented cap: the shell is found AT depth 3, where `depth < "
+              "MAX_DEPTH` is false, so its payload is never unwrapped. Same cap "
+              "the lower-case spelling hits, and the miss is ALLOW-wards"),
+    case(M_GROUP, "folded shell then 3 substitutions -> MAX_DEPTH cap",
+         "BASH -c 'echo $(echo $(echo $(cat f)))'", ALLOW,
+         note="the fold spends one of the three layers, so the innermost "
+              "substitution falls off the cap — pinned so the budget is visible"),
+    case(M_GROUP, "folded shell then 2 substitutions -> still caught",
+         "BASH -c 'echo $(echo $(cat f))'", DENY, must=[only("cat")]),
+    # -- invariants that must hold INSIDE a folded payload ------------------
+    case(M_GROUP, "follow-mode exemption holds in a folded payload",
+         "BASH -c 'tail -f /var/log/x'", ALLOW),
+    case(M_GROUP, "non-follow tail in a folded payload still denies",
+         "BASH -c 'tail -20 f'", DENY, must=[only("tail")]),
+    case(M_GROUP, "downstream rule holds in a folded payload",
+         "BASH -c 'ps aux | head -5'", DENY, must=[only("ps")],
+         must_not=["`head`"]),
+    case(M_GROUP, "innocent folded payload", "BASH -c 'git status'", ALLOW),
+    case(M_GROUP, "folded shell as a DOWNSTREAM stage not inspected",
+         "git log | BASH -c 'cat f'", ALLOW,
+         note="same asymmetry as every other binary: only stage 0 is the primary "
+              "command. Asserted so it is visible, not accidental"),
+    # -- false-positive probes: mixed case ---------------------------------
+    case(M_GROUP, "Mixed case `Bash -c 'cat f'` stays ALLOW", "Bash -c 'cat f'",
+         ALLOW,
+         note="POLICY, asserted rather than left INFO: only an ALL-CAPS spelling "
+              "folds, because a mixed-case name is likelier to be a DIFFERENT "
+              "program. The reasoning is stated once, on group K's `Cat f` row; "
+              "this pins the SHELL half of the same policy without restating it"),
+    case(M_GROUP, "Mixed case `bAsH -c 'cat f'` stays ALLOW", "bAsH -c 'cat f'",
+         ALLOW, note="not merely a leading-capital check — `.isupper()`, nothing else"),
+    case(M_GROUP, "Mixed case `Zsh -c 'ls'` stays ALLOW", "Zsh -c 'ls'", ALLOW),
+    case(M_GROUP, "Mixed case `Sh -c 'cat f'` stays ALLOW", "Sh -c 'cat f'", ALLOW),
+    # -- false-positive probes: BASH as DATA -------------------------------
+    case(M_GROUP, "a file literally named BASH as an argument", "git show BASH",
+         ALLOW, note="an operand is not a command name"),
+    case(M_GROUP, "`cat BASH` names ONLY cat", "cat BASH", DENY, must=[only("cat")],
+         must_not=["`bash`", "`BASH`"],
+         note="the fold reads argv[0], never the arguments"),
+    case(M_GROUP, "`head BASH` names ONLY head", "head BASH", DENY,
+         must=[only("head")]),
+    case(M_GROUP, "assignment `BASH=/bin/bash echo hi`", "BASH=/bin/bash echo hi",
+         ALLOW, note="VAR=val is peeled BEFORE the fold — the D97 probe, for shells"),
+    case(M_GROUP, "assignment VALUE spelled BASH", "SHELL=BASH echo hi", ALLOW),
+    case(M_GROUP, "assignment then a real blocked command",
+         "BASH=/bin/bash cat f", DENY, must=[only("cat")],
+         note="peeling the assignment must not also swallow the command"),
+    case(M_GROUP, "variable `$BASH -c 'cat f'`", "$BASH -c 'cat f'", ALLOW,
+         note="`$BASH` is not the NAME `BASH`; the guard does no expansion"),
+    case(M_GROUP, "BASH running a script file", "BASH script.sh", ALLOW,
+         note="no `-c`, so there is no payload to scan — the shell itself is not "
+              "blocked, only its payload is inspected"),
+    case(M_GROUP, "BASH -c with no payload", "BASH -c", ALLOW),
+    case(M_GROUP, "BASH -c with an EMPTY payload", "BASH -c ''", ALLOW),
+    case(M_GROUP, "BASH alone", "BASH", ALLOW),
+    case(M_GROUP, "BASH merely echoed", "echo BASH", ALLOW),
+    case(M_GROUP, "a folded shell command MENTIONED as a quoted argument",
+         "echo 'BASH -c cat f'", ALLOW,
+         note="a quoted argument is not a command — `echo` is the primary"),
+    case(M_GROUP, "folded shell inside a heredoc BODY stays data",
+         "git commit -F - <<'EOF'\nBASH -c 'cat f'\nEOF", ALLOW,
+         note="heredoc bodies are DATA; a commit message may describe the bypass "
+              "this group closes without being blocked by it"),
+]
+
 
 # ---------------------------------------------------------------------------
 # execution
@@ -558,6 +846,37 @@ def whitebox():
               "CAT f", "$CAT f", "bash -c 'bash -c \"cat f\"'",
               "python3 -m py_compile x.py", "python3 tool.py -m py_compile"]:
         print(f"  {s!r:38s} -> subs={g.substitutions(s)} primary={g.primary(s)}")
+    # The cluster question the L group answers: a DENY reason is identical
+    # whether `-Bm` was read letterwise or the module came from somewhere else,
+    # so only python_module()'s own return value proves the bundling is handled.
+    print("--- white-box: python_module() on bundled short-option clusters ---")
+    for s in ["python3 -m py_compile x.py", "python3 -Bm py_compile x.py",
+              "python3 -BEsm py_compile x.py", "python3 -Bmpy_compile x.py",
+              "python3 -m compileall .", "python3 -Bm compileall .",
+              "python3 -BEsmcompileall .", "python3 -Ximporttime -Bm compileall .",
+              "python3 -Bcm py_compile", "python3 -Bc 'print(1)'",
+              "PYTHON3 -m compileall .", "python3 compileall.py"]:
+        name, argv = g.primary(s)
+        print(f"  {s!r:42s} -> name={name!r} module={g.python_module(argv)!r} "
+              f"label={g.BLOCKED_MODULES.get(g.python_module(argv))!r}")
+    # The ALL-CAPS shell fold: a DENY reason names only the INNER command, so it
+    # cannot distinguish "the shell was folded and its payload extracted" from
+    # some other route to the same hit.  has_opinion() + primary() + the payload
+    # are the three values that actually prove it, and the last column shows the
+    # fold's whole domain in one place.
+    print("--- white-box: has_opinion() / the ALL-CAPS shell fold ---")
+    for s in ["BASH -c 'cat f'", "SH -c 'cat f'", "ZSH -c 'ls'",
+              "DASH -c 'cat f'", "KSH -c 'grep x .'", "MKSH -c 'ls'",
+              "ASH -c 'ls'", "BASH -lc 'cat f'", "/bin/BASH -c 'cat f'",
+              "Bash -c 'cat f'", "bAsH -c 'cat f'", "BASH=/bin/bash echo hi",
+              "$BASH -c 'cat f'", "BASH script.sh", "cat BASH", "CAT f",
+              "PYTHON3 -m compileall ."]:
+        name, argv = g.primary(s)
+        print(f"  {s!r:30s} -> name={name!r} opinion={g.has_opinion(name or '')} "
+              f"payload={g.dash_c_payload(argv)!r}")
+    print("  fold domain: %d BLOCKED + %d SHELL_C + PY_INTERP_RE"
+          % (len(g.BLOCKED), len(g.SHELL_C)))
+    print("  SHELL_C = %r" % sorted(g.SHELL_C))
 
 
 def run(opts=None):

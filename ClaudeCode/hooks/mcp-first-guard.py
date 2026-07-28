@@ -12,7 +12,8 @@ allowed even as the primary command (see ALLOW_FLAGS: `tail -f`).
 
 Specific INVOCATIONS are denied too, even when the binary itself is innocent:
 `python3 -m py_compile` writes __pycache__/*.pyc into the tree as a side effect
-of a mere syntax check (see BLOCKED_FORMS).  Deliberately NOT generalised to
+of a mere syntax check, and `python3 -m compileall` does exactly that across a
+whole directory tree (see BLOCKED_FORMS).  Deliberately NOT generalised to
 `python3 -c` or `python3 -m json.tool`: those are read-only and have far too
 much legitimate use to pay the false-positive price.
 
@@ -27,7 +28,11 @@ layer down:
     CAT f            ALL-CAPS spelling    -> folded to `cat`: on a
                                              case-insensitive filesystem
                                              (macOS default) /bin/CAT resolves,
-                                             so `CAT f` really does run cat
+                                             so `CAT f` really does run cat.
+                                             The fold covers EVERY name this
+                                             guard has an opinion about, so
+                                             `PYTHON3 -m compileall` is seen and
+                                             `BASH -c 'cat f'` is unwrapped too
 
 Unwrapping recurses at most MAX_DEPTH layers (`bash -c 'bash -c "cat f"'`).
 Heredoc bodies are NOT unwrapped: they are DATA (a commit message may mention
@@ -91,10 +96,25 @@ BLOCKED_FORMS = {
         "py_compile WRITES __pycache__/*.pyc into the tree as a side effect of "
         "a mere syntax check"
     ),
+    "python3 -m compileall": (
+        "an in-memory compile() on the raw bytes: inspect_call(function=python) "
+        "for one file, or forge_call(function=build, targets=[\"syntax\"]), which "
+        "IS this check for the whole repo; outside a session `python3 -B -c "
+        "\"import pathlib, sys; [compile(p.read_bytes(), str(p), 'exec') for p in "
+        "map(pathlib.Path, sys.argv[1:])]\" <files>`. compileall WRITES "
+        "__pycache__/*.pyc across an ENTIRE directory tree — the py_compile side "
+        "effect, only broader"
+    ),
 }
 
-# `python -m MODULE` values that map onto a BLOCKED_FORMS label
-BLOCKED_MODULES = {"py_compile": "python3 -m py_compile"}
+# `python -m MODULE` values that map onto a BLOCKED_FORMS label. Every entry
+# gets the short-option-cluster handling for free, because python_module() is
+# the ONE place that reads python's argv: no module can be denied in its `-m
+# mod` spelling but slip through as `-Bm mod`.
+BLOCKED_MODULES = {
+    "py_compile": "python3 -m py_compile",
+    "compileall": "python3 -m compileall",
+}
 
 # every label the deny reason can name -> its steer
 STEERS = dict(BLOCKED, **BLOCKED_FORMS)
@@ -213,6 +233,34 @@ def _tokens(stage):
     return toks
 
 
+def has_opinion(name):
+    """True if this guard treats the lower-case `name` specially AT ALL.
+
+    The one place the guard's whole vocabulary is stated, and the sole gate on
+    the ALL-CAPS fold in primary(). Three sets, one per thing the guard does
+    with a command name:
+
+        BLOCKED       the name is denied outright as a primary command
+        SHELL_C       the name's `-c STRING` payload is unwrapped and re-scanned
+        PY_INTERP_RE  the name's `-m MODULE` is checked against BLOCKED_MODULES
+
+    Written as a predicate over all three rather than as a chain of special
+    cases, because that is what makes the fold's safety argument a single
+    sentence: folding can only ever reach a name the guard was already going to
+    act on, so it cannot change the meaning of anything else. Measured on this
+    host (macOS, 15 PATH dirs, 3 of them non-existent): every PATH dir was
+    enumerated and NOT ONE ships a file whose name is the ALL-CAPS spelling of
+    any name in these three sets, so nothing real is shadowed. Of the shells,
+    BASH/SH/ZSH/DASH/KSH each resolve to the SAME inode as their lower-case
+    spelling (`which("BASH") -> /usr/local/bin/BASH`), while `mksh` and `ash`
+    are not installed at all -- folding those two is inert today and correct the
+    day someone installs them.
+    """
+    return (name in BLOCKED
+            or name in SHELL_C
+            or bool(PY_INTERP_RE.match(name)))
+
+
 def primary(stage):
     """(name, argv) of the primary command of a pipe stage; (None, []) if none.
 
@@ -248,11 +296,15 @@ def primary(stage):
         return None, []
     name = os.path.basename(toks[idx])
     # An ALL-CAPS spelling reaches the real binary on a case-insensitive
-    # filesystem — /bin/CAT resolves on macOS, so `CAT f` IS `cat f`. Folding
-    # is restricted to names that are blocked anyway, so it can never change
-    # the meaning of anything else (and no PATH dir here ships an ALL-CAPS
-    # binary, so nothing real is shadowed). Mixed case (`Cat`) is left alone.
-    if name.isupper() and name.lower() in BLOCKED:
+    # filesystem — /bin/CAT resolves on macOS, so `CAT f` IS `cat f`. Folding is
+    # restricted to names this guard already has an opinion about, which is
+    # exactly has_opinion(): a blocked binary, a shell whose `-c STRING` is
+    # unwrapped, or a python interpreter whose `-m MODULE` is inspected. It can
+    # therefore never change the meaning of anything else — and no PATH dir here
+    # ships an ALL-CAPS binary, so nothing real is shadowed. Mixed case (`Cat`)
+    # is left alone: it would resolve too, but a mixed-case name is likelier to
+    # be a DIFFERENT program, and that broadening was never asked for.
+    if name.isupper() and has_opinion(name.lower()):
         name = name.lower()
     return name, toks[idx + 1:]
 
@@ -283,10 +335,17 @@ def dash_c_payload(argv):
 def python_module(argv):
     """The MODULE of `python -m MODULE`, or None.
 
-    Accepts `-m mod`, the cluster `-Bm mod` and the glued `-mmod`. Clusters are
-    read LETTERWISE, left to right, because the first argument-taking letter
-    ends the cluster: a bare `in tok` test would read the `m` of
-    `-Ximporttime` as an option. Scanning stops at the first operand, because
+    Accepts `-m mod`, the cluster `-Bm mod` and the glued `-mmod` (and both at
+    once, `-Bmmod`). Reading the LETTERS of a single-dash token instead of
+    matching the whole token is this repo's standing rule for every flag
+    decision on shell argv, in either direction — it is what `git hash-object
+    -wt blob` and `tail -fn 100` each cost us once. CPython bundles too:
+    `python3 -Bm py_compile` IS `python3 -B -m py_compile`.
+
+    Clusters are read letterwise LEFT TO RIGHT, because the first
+    argument-taking letter ends the cluster: a bare `in tok` test would read
+    the `m` of `-Ximporttime` as an option, and `-Bcm py_compile` is really
+    `-B -c m`, which names no module. Scanning stops at the first operand, because
     past the script name a `-m` belongs to the SCRIPT, not to python
     (`python3 tool.py -m py_compile` is not a py_compile run).
     """
