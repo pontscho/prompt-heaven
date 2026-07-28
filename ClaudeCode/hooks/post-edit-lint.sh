@@ -4,7 +4,7 @@
 # Dispatches to appropriate linter based on file extension:
 #   C/C++        - clang-tidy
 #   JSON/JSONC   - jq
-#   Python       - py_compile + ruff (optional)
+#   Python       - in-memory compile() (no .pyc) + ruff (optional)
 #   Vue/JS/TS    - biome / oxlint / eslint (auto-detected)
 
 INPUT_JSON=$(cat)
@@ -149,8 +149,21 @@ lint_python() {
 	echo "- [lint] python: $FILE_PATH..."
 
 	# Step 1: syntax check (always, no external deps)
+	# compile() IN MEMORY, never `python3 -m py_compile`: py_compile writes a
+	# __pycache__/*.pyc next to every file this hook touches, i.e. the linter
+	# would litter the tree on every edit. Compiling the raw BYTES also makes
+	# the tokenizer honour a PEP-263 coding cookie and a UTF-8 BOM the way the
+	# interpreter itself does, so a valid non-UTF-8 source is not flagged.
 	local PY_OUTPUT
-	if ! PY_OUTPUT=$(python3 -m py_compile "$FILE_PATH" 2>&1); then
+	if ! PY_OUTPUT=$(python3 -c 'import sys
+p = sys.argv[1]
+try:
+    compile(open(p, "rb").read(), p, "exec", dont_inherit=True)
+except SyntaxError as e:
+    sys.exit("%s:%s:%s: %s" % (p, e.lineno, e.offset, e.msg))
+except Exception as e:
+    sys.exit("%s: %s: %s" % (p, type(e).__name__, e))
+' "$FILE_PATH" 2>&1); then
 		echo "[lint] python: syntax error:" >&2
 		echo "$PY_OUTPUT" >&2
 		return 2
