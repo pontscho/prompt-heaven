@@ -1804,6 +1804,9 @@ class LspBackend:
     async def definition(self, path: str, line: int, char: int) -> Any:
         raise NotImplementedError
 
+    async def type_definition(self, path: str, line: int, char: int) -> Any:
+        raise NotImplementedError
+
     async def references(self, path: str, line: int, char: int) -> List[dict]:
         raise NotImplementedError
 
@@ -1977,6 +1980,35 @@ class BaseLspClient(LspBackend):
                 await self.open_document(path)
                 await asyncio.sleep(0.1)
             await asyncio.sleep(1.0)
+
+    _PROGRESS_START_GRACE = 2.0      # how long to wait for indexing to ANNOUNCE itself
+    _INDEX_BARRIER_TIMEOUT = 60.0    # cap, applied only once it HAS announced itself
+
+    async def _await_indexing(self,
+                              grace: float = _PROGRESS_START_GRACE,
+                              timeout: float = _INDEX_BARRIER_TIMEOUT) -> None:
+        """Block only while the backend says it is indexing.
+
+        A server with nothing to index (clangd with no compilation database,
+        luals on a small workspace) never sends a $/progress begin/end pair, so
+        the old unconditional 60s wait could only expire. Wait a short grace
+        period for indexing to announce itself (window/workDoneProgress/create or
+        $/progress begin, both of which fill _active_progress); if nothing
+        announced, return immediately. Semantics are unchanged when indexing is
+        real: we then wait for the 'end' that empties _active_progress, capped.
+        """
+        loop = asyncio.get_running_loop()
+        announce_deadline = loop.time() + grace
+        while not self._active_progress and not self._indexing_done.is_set():
+            if loop.time() >= announce_deadline:
+                log.debug("No indexing progress announced in %.1fs - proceeding", grace)
+                return
+            await asyncio.sleep(0.05)
+        try:
+            await asyncio.wait_for(self._indexing_done.wait(), timeout=timeout)
+            log.debug("Background indexing done.")
+        except asyncio.TimeoutError:
+            log.debug("Indexing wait capped at %.0fs - proceeding", timeout)
 
     async def _reader_loop(self) -> None:
         """Background task: read all LSP messages and route them. Shared cases
@@ -2186,6 +2218,23 @@ class BaseLspClient(LspBackend):
         }, timeout=15.0)
         return resp.get("result")
 
+    async def type_definition(self, path: str, line: int, char: int) -> Any:
+        """Go to the definition of the TYPE of the symbol under the cursor.
+
+        Shared by both backends: clangd answers it for C/C++/ObjC/CUDA (variable
+        -> its struct/class/enum/typedef), lua-language-server for Lua (value ->
+        its ``@class`` / annotated declaration). Same Location | Location[] |
+        LocationLink[] payload shape as textDocument/definition, so the caller
+        normalizes it with the same helper.
+        """
+        await self.open_document(path)
+        uri = self._abs_uri(path)
+        resp = await self._request("textDocument/typeDefinition", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": char},
+        }, timeout=15.0)
+        return resp.get("result")
+
     async def references(self, path: str, line: int, char: int) -> List[dict]:
         await self.open_document(path)
         uri = self._abs_uri(path)
@@ -2370,12 +2419,7 @@ class ClangdClient(BaseLspClient):
 
         await self._notify("initialized", {})
 
-        log.debug("Waiting for clangd background indexing...")
-        try:
-            await asyncio.wait_for(self._indexing_done.wait(), timeout=60.0)
-            log.debug("Background indexing done.")
-        except asyncio.TimeoutError:
-            log.debug("Indexing wait timed out - priming index by opening source files...")
+        await self._await_indexing()
 
         await self._prime_index()
 
@@ -2580,12 +2624,7 @@ class LuaLsClient(BaseLspClient):
             }
         })
 
-        log.debug("Waiting for lua-language-server background indexing...")
-        try:
-            await asyncio.wait_for(self._indexing_done.wait(), timeout=60.0)
-            log.debug("Background indexing done.")
-        except asyncio.TimeoutError:
-            log.debug("Indexing wait timed out - priming index by opening source files...")
+        await self._await_indexing()
 
         await self._prime_index()
 
@@ -3476,6 +3515,28 @@ async def _def_at(client: LspBackend, abs_path: str, line: int, char: int,
     return results
 
 
+async def _type_def_at(client: LspBackend, abs_path: str, line: int, char: int,
+                       context_lines: int) -> Any:
+    """textDocument/typeDefinition at a position, in _def_at's result shape."""
+    td_result = await client.type_definition(abs_path, line, char)
+    if not td_result:
+        return {"error": "No type definition found at this position"}
+    locations = td_result if isinstance(td_result, list) else [td_result]
+    results = []
+    for payload in locations:
+        location = _location_from_payload(payload, client.project_root)
+        if not location:
+            continue
+        # F6: only open paths that resolve inside the project root.
+        ap = _lsp_path_in_root(location["uri"], client.project_root)
+        tl = location["range"]["start"]["line"]
+        results.append({
+            "location": location,
+            "context": extract_surrounding_code(ap, tl, context_lines),
+        })
+    return results
+
+
 async def _refs_by_name(client: LspBackend, symbol_name: str,
                         preferred_path: Optional[str], max_results: int,
                         context_lines: int) -> dict:
@@ -3664,6 +3725,12 @@ def _md_definition(data: list) -> str:
     return "\n".join([head, "", *_md_def_blocks(data)])
 
 
+def _md_type_definition(data: list) -> str:
+    if not data:
+        return "_(no type definition found)_"
+    return "\n".join([f"# Type definition ({len(data)})", "", *_md_def_blocks(data)])
+
+
 def _md_implementations(data: list) -> str:
     if not data:
         return "_(no implementations found)_"
@@ -3804,13 +3871,14 @@ def _md_inlay_hints(results: list) -> str:
 
 
 # ===========================================================================
-# Semantic handlers (10 canonical; async; signature (params, project_root, strict))
+# Semantic handlers (11 canonical; async; signature (params, project_root, strict))
 # ===========================================================================
 #
 # A-class (grep-degradable): find_definition, find_references, symbol,
 #   symbol_context fall back to the grep net on empty/no-index.
-# B-class (honest error): type_at, diagnostics, outline, find_implementations
-#   return an explicit error when the LSP yields nothing - never a grep guess.
+# B-class (honest error): type_at, diagnostics, outline, find_implementations,
+#   find_type_definition return an explicit error when the LSP yields nothing -
+#   never a grep guess.
 # All semantic path params are confined to --project-root via safe_path
 # [security P1, CWE-22] before any path reaches the LSP backend.
 
@@ -3841,6 +3909,30 @@ async def handle_find_definition(params: dict, project_root: str, strict: bool =
     if isinstance(data, dict) and "error" in data:
         return data
     return _md(_md_definition(data))
+
+
+async def handle_find_type_definition(params: dict, project_root: str,
+                                      strict: bool = False) -> dict:
+    """Find the TYPE definition at a file position (B-class; positional only).
+
+    One hop past find_definition: from a variable / expression to where its type
+    is declared. clangd serves C/C++/ObjC/CUDA, luals serves Lua, so the single
+    handler covers every language purity supports.
+    """
+    path = params.get("relative_path", "")
+    if not path:
+        return {"error": "find_type_definition requires 'path' with 'line'/'character'"}
+    abs_path = safe_path(project_root, path, strict)
+    client = await _ensure_backend(_detect_language(abs_path), project_root)
+    line = int(params.get("line", 1)) - 1
+    char = int(params.get("character", 1)) - 1
+    data = await _type_def_at(client, client._abs_path(abs_path), line, char,
+                              int(params.get("context_lines", 5)))
+    if isinstance(data, dict) and "error" in data:
+        return data
+    if not data:
+        return {"error": "No type definition found at this position"}
+    return _md(_md_type_definition(data))
 
 
 async def handle_find_references(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4421,6 +4513,7 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "search": handle_search_for_pattern,
     # --- semantic (LSP) functions: canonical names ---
     "find_definition": handle_find_definition,
+    "find_type_definition": handle_find_type_definition,
     "find_references": handle_find_references,
     "find_implementations": handle_find_implementations,
     "type_at": handle_type_at,
@@ -4439,6 +4532,7 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     #     does NOT route; the dispatcher looks up the RAW function name) ---
     "clangd_find_definition": handle_find_definition,
     "clangd_find_definition_at": handle_find_definition,
+    "clangd_find_type_definition_at": handle_find_type_definition,
     "clangd_find_references": handle_find_references,
     "clangd_find_references_at": handle_find_references,
     "clangd_find_implementations_at": handle_find_implementations,
@@ -4454,6 +4548,7 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     # --- legacy cuda_* names as DIRECT keys ---
     "cuda_find_definition": handle_find_definition,
     "cuda_find_definition_at": handle_find_definition,
+    "cuda_find_type_definition_at": handle_find_type_definition,
     "cuda_find_references": handle_find_references,
     "cuda_find_references_at": handle_find_references,
     "cuda_find_implementations_at": handle_find_implementations,
@@ -4469,6 +4564,7 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     # --- legacy luals_* names as DIRECT keys ---
     "luals_find_definition": handle_find_definition,
     "luals_find_definition_at": handle_find_definition,
+    "luals_find_type_definition_at": handle_find_type_definition,
     "luals_find_references": handle_find_references,
     "luals_find_references_at": handle_find_references,
     "luals_find_implementations_at": handle_find_implementations,
@@ -4496,6 +4592,7 @@ _READONLY_HANDLERS: frozenset = frozenset({
     handle_find_file,
     handle_search_for_pattern,
     handle_find_definition,
+    handle_find_type_definition,
     handle_find_references,
     handle_find_implementations,
     handle_type_at,
@@ -4555,6 +4652,9 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     # --- semantic (LSP) functions: POST-alias canonical param names ---
     "find_definition": {
         "relative_path", "line", "character", "symbol_name", "context_lines",
+    },
+    "find_type_definition": {
+        "relative_path", "line", "character", "context_lines",
     },
     "find_references": {
         "relative_path", "line", "character", "symbol_name", "max_results",
@@ -4753,6 +4853,7 @@ PURITY_CALL_TOOL = {
         "navigation for C / C++ / CUDA and type-aware (luals-backed) symbol\n"
         "navigation for Lua (.lua paths, luals_* functions), alongside the file ops above:\n\n"
         "  find_definition       - by symbol name OR file position (symbol/at)\n"
+        "  find_type_definition   - at a file position: where the TYPE is defined\n"
         "  find_references        - by symbol name OR file position\n"
         "  find_implementations   - at a file position\n"
         "  type_at                - hover + deduced (auto/template) type\n"
@@ -4767,14 +4868,15 @@ PURITY_CALL_TOOL = {
         "over grepping source - text matching misses overloads, macros, and\n"
         "indirect references. search_for_pattern remains free-text (literal/regex)\n"
         "search over ANY filetype (comments, log strings, build text) - use it when\n"
-        "you want text, not a symbol. The standalone clangd_call / cuda_call / luals_call\n"
-        "tools still exist and run in parallel; the legacy clangd_*/cuda_*/luals_*\n"
-        "function names are accepted here as aliases.\n\n"
+        "you want text, not a symbol. The former standalone clangd_call / cuda_call /\n"
+        "luals_call TOOLS are retired and unregistered - they do not exist in any\n"
+        "session, and purity_call is the only entry point. Their legacy\n"
+        "clangd_*/cuda_*/luals_* FUNCTION names do still resolve, as aliases here.\n\n"
         "When NOT to use purity:\n"
         "  - Plain reading        -> built-in Read (less MCP overhead).\n"
-        "  - Lua symbols          -> purity_call (in-process luals); luals_call also works standalone.\n"
+        "  - Lua symbols          -> purity_call itself (in-process luals, luals_* aliases).\n"
         "  - Git                  -> mcp-git.\n"
-        "  - Build / test / clean -> mcp-forge / mcp-compile.\n\n"
+        "  - Build / test / clean -> mcp-forge.\n\n"
         "═══════════════════════════════════════════════════════════════════════\n"
         "MANDATORY Bash → purity mappings (NEVER call these via Bash):\n"
         "═══════════════════════════════════════════════════════════════════════\n"
@@ -4790,7 +4892,8 @@ PURITY_CALL_TOOL = {
         "Also prefer this OVER built-in Write/Edit/Glob/Grep.\n\n"
         "File ops: search_for_pattern (grep), find_file (glob), list_dir (ls),\n"
         "create_text_file, create_temp_dir (mktemp), replace_content, replace_lines,\n"
-        "delete_lines, insert_at_line, read_file. Semantic (clangd-backed): find_definition, find_references,\n"
+        "delete_lines, insert_at_line, read_file. Semantic (clangd-backed): find_definition,\n"
+        "find_type_definition, find_references,\n"
         "find_implementations, type_at, diagnostics, outline, symbol, symbol_context,\n"
         "inlay_hints, symbol_change_impact. Project-root-scoped, .gitignore-aware, binary-safe.\n"
         "`find_file` pattern is fnmatch-style (`*.cu`, `test_*.py`, etc.); search\n"
@@ -4962,6 +5065,7 @@ HANDLER_DESCRIPTIONS = {
     "insert_at_line":      "Insert content before a given line",
     "search_for_pattern":  "Regex search across project files (output_mode: files_with_matches|content|count, head_limit, offset)",
     "find_definition":     "Find a symbol's definition by name OR file position (symbol/at)",
+    "find_type_definition": "Find where the TYPE at a file position is defined (textDocument/typeDefinition)",
     "find_references":      "Find references to a symbol by name OR file position",
     "find_implementations": "Find implementations at a file position",
     "type_at":              "Type/hover at a position (incl. deduced auto/template type)",

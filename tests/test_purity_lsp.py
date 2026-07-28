@@ -9,32 +9,46 @@ It drives the REAL server -- one long-lived `python3 Scripts/mcp-purity.py
 --project-root <repo>` child over line-delimited JSON-RPC 2.0 -- against the
 committed fixtures in tests/files/, and asserts on the rendered Markdown.
 
+The one capability that HAD gone missing -- `textDocument/typeDefinition`, which
+only the retired mcp-lua-lsp ever wrapped -- has since been ported into purity
+as `find_type_definition` and is now available for EVERY backend, clangd
+included. Groups B/D assert it on the C and Lua fixtures, group G pins the gap
+as CLOSED, and group H proves parity with the retired implementation.
+
 Coverage by group:
   A  dispatcher surface: the function inventory lists every legacy prefixed
-     name; an unknown name is rejected
+     name (including all four find_type_definition spellings); an unknown name
+     is rejected
   B  C via the clangd backend: go-to-definition (by name AND cross-file by
-     position), reference COUNT + exact site set, type_at, outline, workspace
-     symbol, inlay hints, symbol_context, change impact, honest-error class
+     position), go-to-TYPE-definition, reference COUNT + exact site set,
+     type_at, outline, workspace symbol, inlay hints, symbol_context, change
+     impact, honest-error class
   C  C diagnostics: tf_broken.c reports EXACTLY the expected diagnostic set,
      covering BOTH planted defects at their planted LINES; three healthy C
      files report clean (the primary one twice-sampled)
   D  Lua via the luals backend: same shape as B
   E  Lua diagnostics: tf_broken.lua reports the planted defects; healthy Lua
      files report clean
-  F  legacy alias routing matrix: all 14 clangd_*, 14 cuda_* and 13 luals_*
-     names the retired skills advertised resolve to a real handler
-  G  GAPS: names the retired servers had that purity does NOT resolve
+  F  legacy alias routing matrix: all 14 clangd_*, 14 cuda_* and 14 luals_*
+     names the retired skills advertised resolve to a real handler, plus the
+     two prefixed type-definition spellings the retired clangd never had
+  G  GAPS: names the retired servers had that purity does NOT resolve -- and
+     the one that has since CLOSED, asserted as a real answer
   H  A/B against the still-on-disk retired servers, so "purity returns nothing
      here" can be told apart from "the retired server returned nothing too"
   I  hygiene: no repo writes (including LSP index caches), no .pyc, fixtures
      byte-identical, plus the measured warm-up latencies
 
-Why the wall clock is ~2.5 minutes: purity's `_ensure_backend` awaits the FULL
-backend handshake before serving the first semantic call, and that handshake
-ends with `await asyncio.wait_for(self._indexing_done.wait(), timeout=60.0)`.
-This repo has no compile_commands.json, so clangd never emits an indexing
-`$/progress` and the 60s wait is burned in full -- once for clangd, once for
-lua-language-server. Group I records the measured numbers.
+Why the wall clock is ~45 seconds: purity's `_ensure_backend` awaits the FULL
+backend handshake before serving the first semantic call -- deliberately, so a
+query cannot reach a server that has not answered `initialize` yet. It no longer
+costs a fixed minute per backend: that handshake used to end in an unconditional
+`wait_for(self._indexing_done.wait(), timeout=60.0)`, and since this repo has no
+compile_commands.json neither backend ever emits an indexing `$/progress`, so the
+event could never be set and the 60s deadline could only EXPIRE -- twice, once
+per backend. The wait is now gated on indexing actually announcing itself, which
+took the first useful answer from ~61.6s to ~3.7s per backend. Group I records
+the measured numbers, so a regression here shows up as a timing, not a hunch.
 
 Skipping is graceful, never fatal: with no `clangd` on the box the C groups
 degrade to INFO, same for `lua-language-server` and the Lua groups, so
@@ -138,21 +152,34 @@ RETIRED_CUDA_NAMES = tuple(n.replace("clangd_", "cuda_", 1)
 
 RETIRED_LUALS_NAMES = (
     "luals_init", "luals_find_definition", "luals_find_definition_at",
+    # Once the suite's headline GAP, now a direct HANDLERS key: purity ported
+    # textDocument/typeDefinition (see CLOSED_CAPABILITY below).
+    "luals_find_type_definition_at",
     "luals_find_references", "luals_find_implementations_at",
     "luals_workspace_symbols", "luals_document_outline",
     "luals_symbol_context", "luals_inlay_hints",
     "luals_symbol_change_impact", "luals_hover", "luals_diagnostics",
 )
 
-# Retired luals names that purity does NOT register. Group G pins each one so
-# the gap cannot silently change shape; the report calls them out.
-#   luals_find_type_definition_at -- a real CAPABILITY loss: it wrapped
-#       textDocument/typeDefinition and purity has no equivalent for any
-#       language. Documented as unavailable in the mcp-luals skill.
-#   the five singular spellings -- FUNCTION_ALIASES entries in
-#       Scripts/mcp-lua-lsp.py:1442-1446; purity registers only the plural
-#       forms, and no skill documents the loss.
-GAP_CAPABILITY = ("luals_find_type_definition_at",)
+# The capability gap that CLOSED. `luals_find_type_definition_at` was the ONE
+# thing the retired mcp-lua-lsp could do that purity could not; it is now
+# handle_find_type_definition, registered under the canonical short name plus
+# all three legacy prefixes -- so clangd (C/C++/ObjC/CUDA) gained a capability
+# the retired mcp-clangd never had. Group G asserts every spelling ANSWERS,
+# group H asserts parity with the retired implementation.
+CLOSED_CAPABILITY = ("luals_find_type_definition_at",)
+
+# All four registered spellings of the ported handler. Group A asserts the
+# dispatcher inventory lists every one of them.
+TYPEDEF_SPELLINGS = ("find_type_definition", "clangd_find_type_definition_at",
+                     "cuda_find_type_definition_at",
+                     "luals_find_type_definition_at")
+
+# Retired luals names that purity still does NOT register. Group G pins each one
+# so the gap cannot silently change shape; the report calls them out. These are
+# the five singular spellings -- FUNCTION_ALIASES entries in
+# Scripts/mcp-lua-lsp.py:1442-1446; purity registers only the plural forms, and
+# no skill documents the loss.
 GAP_SINGULAR_ALIASES = ("luals_workspace_symbol", "luals_find_reference",
                         "luals_find_implementation_at", "luals_inlay_hint",
                         "luals_diagnostic")
@@ -187,6 +214,26 @@ C_REFS_ADD_AT = {
     "tests/files/c/tf_main.c:19:19",
     "tests/files/c/tf_math.c:12:10",
 }
+
+# textDocument/typeDefinition through clangd. NOTE the two DIFFERENT answers,
+# which is exactly why this is not the same query as find_definition:
+#   * from a VARIABLE (or a call's return value) -> the typedef NAME,
+#     `} tf_vec_t;` at tf_math.h:27:3;
+#   * from the typedef name ITSELF -> one hop further, to the underlying struct
+#     TAG, `typedef struct tf_vec {` at tf_math.h:22:16.
+# The enum behaves the same way: the `tf_unit` FIELD resolves to `} tf_unit_t;`.
+C_TYPEDEF_VEC = "tests/files/c/tf_math.h:27:3"      # } tf_vec_t;
+C_TYPEDEF_VEC_TAG = "tests/files/c/tf_math.h:22:16"  # struct tf_vec tag
+C_TYPEDEF_UNIT = "tests/files/c/tf_math.h:19:3"     # } tf_unit_t;
+
+# textDocument/typeDefinition through lua-language-server. Column 1, not the
+# name column find_definition reports (tf_mathlib.lua:24:20): luals points at
+# the whole `function ...` declaration that carries the annotated type, not at
+# the identifier.
+L_TYPEDEF_ADD = "tests/files/lua/tf_mathlib.lua:24:1"
+L_TYPEDEF_SCALE = "tests/files/lua/tf_mathlib.lua:31:1"
+L_TYPEDEF_NEWVEC = "tests/files/lua/tf_mathlib.lua:17:1"
+L_TYPEDEF_LENGTH = "tests/files/lua/tf_mathlib.lua:37:1"
 
 # tfAdd: two call sites in tf_consumer.lua plus the definition -- and a FOURTH
 # hit at tf_consumer.lua:4:48, which is inside a doc COMMENT. That comes from
@@ -269,6 +316,7 @@ RX_REF_COUNT = re.compile(r"^# References.*?— (\d+) found", re.M)
 RX_DIAG_COUNT = re.compile(r"^# Diagnostics: `[^`]+` — (\d+)", re.M)
 RX_SYM_COUNT = re.compile(r"^# Symbols: `[^`]+` — (\d+)", re.M)
 RX_DEF_COUNT = re.compile(r"^# Definition(?:: `[^`]+`)? \((\d+)\)", re.M)
+RX_TYPEDEF_COUNT = re.compile(r"^# Type definition \((\d+)\)", re.M)
 RX_IMPL_COUNT = re.compile(r"^# Implementations \((\d+)\)", re.M)
 RX_HINT_COUNT = re.compile(r"^# Inlay hints \((\d+)\)", re.M)
 RX_BULLET_LOC = re.compile(r"^- (?:\*\*\w+\*\* )?`([^`]+:\d+:\d+)`", re.M)
@@ -438,7 +486,8 @@ def nonempty(text):
         return False
     low = text.lower()
     for marker in ("not found in workspace", "_(none)_", "_(no ",
-                   "no hover/type information", "no implementations found"):
+                   "no hover/type information", "no implementations found",
+                   "no type definition found"):
         if marker in low:
             return False
     return True
@@ -597,6 +646,15 @@ def group_a(suite, driver):
               detail=["%d/%d retired %s_* name(s) present"
                       % (len(expected) - len(absent), len(expected), label)])
 
+    # The ported capability: every spelling must be in the inventory, including
+    # the two clangd/cuda prefixes the retired mcp-clangd never had.
+    absent = sorted(set(TYPEDEF_SPELLINGS) - names)
+    check(suite, "A", "inventory-lists-type-definition",
+          [] if not absent else ["not listed: %s" % absent],
+          detail=["%d/%d find_type_definition spelling(s) present: %s"
+                  % (len(TYPEDEF_SPELLINGS) - len(absent),
+                     len(TYPEDEF_SPELLINGS), ", ".join(TYPEDEF_SPELLINGS))])
+
     _, text = driver.call("tf_no_such_function", {})
     check(suite, "A", "unknown-function-rejected",
           [] if unknown_function(text) else ["did not report an unknown function"],
@@ -643,6 +701,45 @@ def group_b(suite, driver, timings):
                 {"relative_path": C_MAIN, "line": 18, "character": 24},
                 {"tests/files/c/tf_math.c:12:10"}, extract=head_locs,
                 detail=["tf_main.c:18 call site -> tf_math.c definition"])
+
+    # textDocument/typeDefinition -- the capability ported into purity after the
+    # merge. The retired mcp-clangd never had it, so these are NEW for C: one
+    # hop past find_definition, from a value to where its TYPE is declared.
+    expect_locs(suite, driver, "B", "typedef-at-variable", "find_type_definition",
+                {"relative_path": C_MAIN, "line": 16, "character": 11},
+                {C_TYPEDEF_VEC}, extract=head_locs,
+                detail=["local `a` -> `} tf_vec_t;`, cross-file into the header"])
+    expect_locs(suite, driver, "B", "typedef-at-call-return",
+                "find_type_definition",
+                {"relative_path": C_MAIN, "line": 18, "character": 17},
+                {C_TYPEDEF_VEC}, extract=head_locs,
+                detail=["tf_vec_add call -> the RETURN type's declaration; "
+                        "find_definition at the same spot answers tf_math.c:12"])
+    expect_locs(suite, driver, "B", "typedef-at-typedef-name",
+                "find_type_definition",
+                {"relative_path": C_MAIN, "line": 16, "character": 4},
+                {C_TYPEDEF_VEC_TAG}, extract=head_locs,
+                detail=["on `tf_vec_t` itself -> one hop further, the struct tag"])
+    expect_locs(suite, driver, "B", "typedef-at-enum-field",
+                "find_type_definition",
+                {"relative_path": C_HDR, "line": 26, "character": 12},
+                {C_TYPEDEF_UNIT}, extract=head_locs,
+                detail=["struct field `tf_unit` -> the enum typedef"])
+    text = expect(suite, driver, "B", "typedef-at-variable-prefixed",
+                  "clangd_find_type_definition_at",
+                  {"relative_path": C_MAIN, "line": 16, "character": 11},
+                  must=["# Type definition", C_TYPEDEF_VEC],
+                  detail=["clangd_ spelling of a name the retired clangd server "
+                          "never registered"])
+    check(suite, "B", "typedef-single-result",
+          [] if num(RX_TYPEDEF_COUNT, text) == 1
+          else ["count=%r expected 1" % num(RX_TYPEDEF_COUNT, text)], text=text)
+    expect(suite, driver, "B", "typedef-honest-error", "find_type_definition",
+           {"relative_path": C_MAIN, "line": 3, "character": 3},
+           ready=lambda t: "No type definition" in t, want_error=True,
+           must=["No type definition found at this position"],
+           detail=["B-class: inside a comment there is no type, and the server "
+                   "says so rather than guessing"])
 
     # References: exact COUNT and exact site set, per tests/files/README.md.
     expect_locs(suite, driver, "B", "refs-add-4", "find_references",
@@ -800,6 +897,41 @@ def group_d(suite, driver, timings):
                 {"tests/files/lua/tf_mathlib.lua:31:20"}, extract=head_locs,
                 detail=["retired server's _at spelling, tfScale call site"])
 
+    # textDocument/typeDefinition -- the ONE capability the merge had dropped,
+    # now back. Both the canonical short name and the retired _at spelling must
+    # answer, and they must land on the annotated declaration (column 1), NOT on
+    # the identifier column find_definition reports.
+    expect_locs(suite, driver, "D", "typedef-at-crossfile",
+                "find_type_definition",
+                {"relative_path": L_CONS, "line": 12, "character": 26},
+                {L_TYPEDEF_ADD}, extract=head_locs,
+                detail=["canonical name routes to luals by .lua extension"])
+    text = expect_locs(suite, driver, "D", "typedef-at-crossfile-prefixed",
+                       "luals_find_type_definition_at",
+                       {"relative_path": L_CONS, "line": 14, "character": 26},
+                       {L_TYPEDEF_SCALE}, extract=head_locs,
+                       detail=["the retired server's exact spelling, tfScale "
+                               "call site"])
+    check(suite, "D", "typedef-single-result",
+          [] if num(RX_TYPEDEF_COUNT, text) == 1
+          else ["count=%r expected 1" % num(RX_TYPEDEF_COUNT, text)], text=text)
+    expect_locs(suite, driver, "D", "typedef-at-newvec",
+                "luals_find_type_definition_at",
+                {"relative_path": L_CONS, "line": 10, "character": 22},
+                {L_TYPEDEF_NEWVEC}, extract=head_locs,
+                detail=["tfNewVec call site -> its annotated declaration"])
+    expect_locs(suite, driver, "D", "typedef-at-length",
+                "luals_find_type_definition_at",
+                {"relative_path": L_CONS, "line": 16, "character": 19},
+                {L_TYPEDEF_LENGTH}, extract=head_locs,
+                detail=["tfLength, reached from inside a return expression"])
+    expect(suite, driver, "D", "typedef-honest-error",
+           "luals_find_type_definition_at",
+           {"relative_path": L_CONS, "line": 2, "character": 5},
+           ready=lambda t: "No type definition" in t, want_error=True,
+           must=["No type definition found at this position"],
+           detail=["B-class: a doc comment has no type"])
+
     expect_locs(suite, driver, "D", "refs-tfAdd-4", "luals_find_references",
                 {"symbol_name": "tfAdd"}, L_REFS_ADD,
                 detail=["3 LSP refs + 1 doc-comment hit from purity's Lua "
@@ -921,6 +1053,11 @@ def alias_matrix(have_clangd, have_luals):
              "tests/files/c/tf_math.h:43:10", True),
             (prefix + "find_definition_at", c_at,
              "tests/files/c/tf_math.c:23:10", True),
+            # Not a retired name -- the ported capability, newly available to
+            # the clangd backend under both legacy prefixes.
+            (prefix + "find_type_definition_at",
+             {"relative_path": C_MAIN, "line": 16, "character": 11},
+             C_TYPEDEF_VEC, True),
             (prefix + "find_references", {"symbol_name": "tf_vec_scale"},
              "— 3 found", True),
             (prefix + "find_references_at", c_at, "# References", True),
@@ -948,6 +1085,7 @@ def alias_matrix(have_clangd, have_luals):
          "tests/files/lua/tf_mathlib.lua:31:20", True),
         ("luals_find_definition_at", l_at,
          "tests/files/lua/tf_mathlib.lua:31:20", True),
+        ("luals_find_type_definition_at", l_at, L_TYPEDEF_SCALE, True),
         ("luals_find_references", {"symbol_name": "tfScale"},
          "— 2 found", True),
         ("luals_find_references_at", l_at, "# References", True),
@@ -1014,42 +1152,62 @@ def group_f(suite, driver, have_clangd, have_luals):
 
 
 # ---------------------------------------------------------------------------
-# Group G -- the gaps
+# Group G -- the gaps, and the one that closed
 # ---------------------------------------------------------------------------
 
-def group_g(suite, driver):
-    """Pin every retired name purity does NOT resolve.
+def group_g(suite, driver, have_luals):
+    """Pin every retired name purity does NOT resolve, plus the one it now does.
 
-    These are recorded as INFO with the exact name in the detail line: they are
-    real losses, but they are losses in the SERVER, and this suite must not be
-    the thing that decides to fail the repo over them. The report shouts.
-    A case only carries a problem when the gap is UNDOCUMENTED-and-unpinned in
-    a way this suite can check, or when a gap silently closes/changes shape.
+    The remaining gaps are recorded as INFO with the exact name in the detail
+    line: they are real losses, but they are losses in the SERVER, and this suite
+    must not be the thing that decides to fail the repo over them. The report
+    shouts. A case only carries a problem when the gap is UNDOCUMENTED-and-
+    unpinned in a way this suite can check, or when a gap silently changes shape.
+
+    CLOSED_CAPABILITY is the opposite: a hard PASS assertion. It used to be an
+    INFO recording that `luals_find_type_definition_at` had no purity
+    equivalent for ANY language. purity now ports textDocument/typeDefinition, so
+    the name must RESOLVE and must answer the right location -- a reopened gap is
+    a FAILURE here, not a note.
     """
     skill = ""
     if os.path.exists(SKILL_LUALS):
         with open(SKILL_LUALS, encoding="utf-8") as fh:
             skill = fh.read()
 
-    for name in GAP_CAPABILITY:
-        _, text = driver.call(name, {"relative_path": L_CONS, "line": 12,
-                                     "character": 26})
+    for name in CLOSED_CAPABILITY:
+        if not have_luals:
+            skip(suite, "G", "closed-gap-" + name,
+                 "lua-language-server not installed")
+            continue
+        _, text, secs, tries = poll(driver, name,
+                                    {"relative_path": L_CONS, "line": 12,
+                                     "character": 26},
+                                    lambda t: L_TYPEDEF_ADD in t)
         problems = []
-        if not unknown_function(text):
-            problems.append("gap changed shape: name now resolves -- update "
-                            "GAP_CAPABILITY and the mcp-luals skill")
-        documented = name in skill and "no `purity_call` equivalent" in skill
-        detail = ["CAPABILITY GAP: %s (textDocument/typeDefinition) has no "
-                  "purity equivalent for ANY language" % name,
-                  "documented in ClaudeCode/skills/mcp-luals/SKILL.md: %s"
-                  % ("yes" if documented else "NO")]
-        if not documented and skill:
-            problems.append("gap is not documented in the mcp-luals skill")
-        suite.record("G", "gap-" + name, problems,
-                     status=H.INFO if not problems else H.FAIL,
-                     detail=detail, text=text)
-        suite.note("      GAP (capability) %-32s not registered; skill "
-                   "documents it: %s" % (name, "yes" if documented else "NO"))
+        if unknown_function(text):
+            problems.append("GAP REOPENED: dispatcher no longer registers %s"
+                            % name)
+        elif L_TYPEDEF_ADD not in text:
+            problems.append("resolved but did not answer %s; got %r"
+                            % (L_TYPEDEF_ADD, " ".join(text.split())[:80]))
+        check(suite, "G", "closed-gap-" + name, problems,
+              detail=["CLOSED: %s (textDocument/typeDefinition) is ported and "
+                      "answers for clangd AND luals" % name,
+                      "%.2fs, %d attempt(s)" % (secs, tries)], text=text)
+        suite.note("      CLOSED (capability) %-29s resolves -> %s"
+                   % (name, L_TYPEDEF_ADD))
+
+        # The skill text is NOT this suite's to fix (ClaudeCode/** is owned
+        # elsewhere), so a stale "no purity_call equivalent" note is reported as
+        # INFO -- a sweep signal, never a failure.
+        stale = name in skill and "no `purity_call` equivalent" in skill
+        suite.record("G", "closed-gap-doc-sweep-" + name, (), status=H.INFO,
+                     detail=["ClaudeCode/skills/mcp-luals/SKILL.md still calls "
+                             "it unavailable: %s" % ("YES -- needs a sweep"
+                                                     if stale else "no")])
+        suite.note("      CLOSED (docs)       %-29s SKILL.md still says "
+                   "unavailable: %s" % (name, "YES" if stale else "no"))
 
     for name in GAP_SINGULAR_ALIASES:
         _, text = driver.call(name, {})
@@ -1099,27 +1257,34 @@ def group_h(suite, purity, have_clangd, have_luals, timings):
                           "%.2fs to first answer, %d attempt(s)" % (secs, tries)],
                   text=text)
 
-            # The capability purity dropped -- proven to have WORKED here.
+            # The capability purity had dropped and has since regained. This was
+            # a CONFIRMED REGRESSION recorded as INFO; it is now a hard parity
+            # assertion -- BOTH implementations must land on tf_mathlib.lua:24.
             _, old_td = old.call("luals_find_type_definition_at",
                                  {"path": L_CONS, "line": 12, "character": 26})
-            _, new_td = purity.call("luals_find_type_definition_at",
-                                    {"relative_path": L_CONS, "line": 12,
-                                     "character": 26})
+            _, new_td, secs, tries = poll(
+                purity, "luals_find_type_definition_at",
+                {"relative_path": L_CONS, "line": 12, "character": 26},
+                lambda t: L_TYPEDEF_ADD in t)
             problems = []
             if "tf_mathlib.lua:24" not in old_td:
-                problems.append("retired server did not answer either; the gap "
-                                "may be environmental, not a regression")
-            if not unknown_function(new_td):
-                problems.append("purity now resolves it -- update GAP_CAPABILITY")
-            suite.record("H", "ab-type-definition-REGRESSION", problems,
-                         status=H.INFO if not problems else H.FAIL,
-                         detail=["retired: %s" % " ".join(old_td.split())[:70],
-                                 "purity : %s" % " ".join(new_td.split())[:70],
-                                 "CONFIRMED REGRESSION: worked before, gone now"],
-                         text=old_td + "\n---\n" + new_td)
+                problems.append("retired server did not answer; parity cannot be "
+                                "judged -- the reference may be environmental")
+            if unknown_function(new_td):
+                problems.append("GAP REOPENED: purity no longer registers "
+                                "luals_find_type_definition_at")
+            elif L_TYPEDEF_ADD not in new_td:
+                problems.append("purity answered %r, expected %s"
+                                % (" ".join(new_td.split())[:70], L_TYPEDEF_ADD))
+            check(suite, "H", "ab-type-definition-parity", problems,
+                  detail=["retired: %s" % " ".join(old_td.split())[:70],
+                          "purity : %s" % " ".join(new_td.split())[:70],
+                          "REGRESSION REPAIRED: both answer tf_mathlib.lua:24",
+                          "%.2fs, %d attempt(s)" % (secs, tries)],
+                  text=old_td + "\n---\n" + new_td)
             suite.note("      A/B typeDefinition -> retired: %s | purity: %s"
                        % (" ".join(old_td.split())[:44],
-                          " ".join(new_td.split())[:32]))
+                          " ".join(new_td.split())[:44]))
 
             # Lua inlay hints come back empty from purity. Is that a regression?
             _, old_ih = old.call("luals_inlay_hints",
@@ -1159,7 +1324,7 @@ def group_h(suite, purity, have_clangd, have_luals, timings):
     else:
         reason = ("lua-language-server missing" if not have_luals
                   else "Scripts/mcp-lua-lsp.py absent")
-        for cid in ("retired-luals-answers", "ab-type-definition-REGRESSION",
+        for cid in ("retired-luals-answers", "ab-type-definition-parity",
                     "ab-lua-inlay-hints-parity", "ab-missing-file-wart-parity"):
             skip(suite, "H", cid, reason)
 
@@ -1196,6 +1361,29 @@ def group_h(suite, purity, have_clangd, have_luals, timings):
 # Group I -- hygiene and timings
 # ---------------------------------------------------------------------------
 
+def _pyc_problems(pyc_after, new_pyc, touched):
+    """Reasons the tree is not bytecode-clean, or [] if it is.
+
+    Assert ZERO .pyc, not "the count did not change".  A file that already
+    existed when the run started reads as "1 before, 1 after" and sails through
+    a pure delta check -- which is precisely how one hid in Scripts/__pycache__
+    until it was spotted by hand.  The repo's rule is no bytecode in the tree at
+    all (23 stale ones were deleted and two post-edit hooks were rewritten to
+    stop producing them), so anything present is a finding regardless of when it
+    appeared.  Pre-existing files are reported separately from ones this run
+    created, because the fix differs: delete the litter vs. stop writing it.
+    """
+    problems = []
+    if new_pyc or touched:
+        problems.append("this run wrote bytecode: new=%s touched=%s"
+                        % (new_pyc[:6], touched[:6]))
+    pre_existing = sorted(set(pyc_after) - set(new_pyc))
+    if pre_existing:
+        problems.append("pre-existing .pyc a delta check would miss: %s"
+                        % pre_existing[:6])
+    return problems
+
+
 def group_i(suite, before, digests_before, pyc_before, timings, stderr_bytes):
     after = repo_tree()
     new = sorted(p for p in after - before
@@ -1217,8 +1405,7 @@ def group_i(suite, before, digests_before, pyc_before, timings, stderr_bytes):
     touched = sorted(k for k in set(pyc_after) & set(pyc_before)
                      if pyc_after[k] != pyc_before[k])
     check(suite, "I", "pycache-clean",
-          [] if not (new_pyc or touched)
-          else ["new=%s touched=%s" % (new_pyc[:6], touched[:6])],
+          _pyc_problems(pyc_after, new_pyc, touched),
           detail=["%d .pyc before, %d after" % (len(pyc_before), len(pyc_after))])
 
     for label, dirpath in (("c", FIXTURE_C), ("lua", FIXTURE_LUA)):
@@ -1263,7 +1450,8 @@ def run(opts=None):
     suite.note("      lua-language-server : %s" % (luals or "NOT FOUND -> Lua groups SKIP"))
     suite.note("      server              : %s" % SERVER)
     suite.note("      NOTE: a cold backend blocks the first semantic call for "
-               "~60s (see the module docstring)")
+               "~3-4s -- grace period + index priming (see the module "
+               "docstring; it was ~60s before the indexing wait was gated)")
 
     before = repo_tree()
     pyc_before = H.pycache_snapshot()
@@ -1283,7 +1471,8 @@ def run(opts=None):
         else:
             for cid in ("warmup-def-by-name", "def-at-crossfile", "refs-add-4",
                         "type-at-function", "outline-header", "symbol-func-2",
-                        "inlay-hints-13"):
+                        "inlay-hints-13", "typedef-at-variable",
+                        "typedef-at-typedef-name", "typedef-at-enum-field"):
                 skip(suite, "B", cid, "clangd not installed")
             for cid in ("broken-diag-set", "clean-tf_math_c"):
                 skip(suite, "C", cid, "clangd not installed")
@@ -1293,13 +1482,14 @@ def run(opts=None):
             group_e(suite, driver)
         else:
             for cid in ("warmup-def-by-name", "def-at-crossfile", "refs-tfAdd-4",
-                        "hover-function", "outline-module", "workspace-symbol"):
+                        "hover-function", "outline-module", "workspace-symbol",
+                        "typedef-at-crossfile", "typedef-at-crossfile-prefixed"):
                 skip(suite, "D", cid, "lua-language-server not installed")
             for cid in ("broken-diag-set", "clean-tf_mathlib"):
                 skip(suite, "E", cid, "lua-language-server not installed")
 
         group_f(suite, driver, bool(clangd), bool(luals))
-        group_g(suite, driver)
+        group_g(suite, driver, bool(luals))
         group_h(suite, driver, bool(clangd), bool(luals), timings)
         stderr_bytes = len(driver.stderr_text)
     finally:
