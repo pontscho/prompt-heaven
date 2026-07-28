@@ -94,10 +94,18 @@ def safe_path(project_root: str, relative_path: str, strict: bool = False) -> st
 # ---------------------------------------------------------------------------
 
 def git(args: List[str], cwd: str) -> Tuple[int, str, str]:
-    """Run a git command; return (returncode, stdout, stderr)."""
+    """Run a git command; return (returncode, stdout, stderr).
+
+    stdin=DEVNULL is load-bearing: the call below redirects only stdout/stderr,
+    so stdin would be inherited -- and this server's stdin is the JSON-RPC stream.
+    A git subcommand that reads stdin (hash-object --stdin, cat-file --batch,
+    apply, or any credential/editor prompt) would consume protocol messages and
+    desync the session. Same fix as mcp-git.py. No caller here needs stdin.
+    """
     try:
         proc = subprocess.run(
             ["git"] + args, cwd=cwd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
         )
         return proc.returncode, proc.stdout, proc.stderr

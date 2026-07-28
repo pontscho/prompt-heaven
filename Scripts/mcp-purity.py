@@ -4457,8 +4457,14 @@ async def handle_clang_tidy(params: dict, project_root: str, strict: bool = Fals
 
     timeout = float(params.get("timeout", 60.0))
     try:
+        # stdin=DEVNULL: clang-tidy is handed file paths and never wants input,
+        # but omitting stdin here INHERITS ours -- and ours is the JSON-RPC
+        # stream. Unlike the clangd/luals spawns above (whose stdin=PIPE *is*
+        # the LSP transport), this child has no protocol of its own, so closing
+        # it off keeps a stray reader from ever eating a client message.
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=project_root,

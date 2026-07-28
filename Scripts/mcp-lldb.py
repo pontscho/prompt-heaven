@@ -236,8 +236,14 @@ async def handle_lldb_start(mgr: SessionManager, args: dict) -> str:
 
     # Verify LLDB binary is executable
     try:
+        # stdin=DEVNULL: this is only a version probe, but lldb_path comes from
+        # the caller, so an arbitrary binary gets spawned here. Without this it
+        # would inherit our stdin -- which is the JSON-RPC stream -- and any
+        # child that reads input would swallow protocol messages. The real
+        # session below deliberately keeps its own PTY stdin; this probe must not.
         proc = await asyncio.create_subprocess_exec(
             lldb_path, "--version",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

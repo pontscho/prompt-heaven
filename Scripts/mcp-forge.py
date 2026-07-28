@@ -909,11 +909,17 @@ def run_command(command: str, cwd: str, env: Dict[str, str],
 	start = time.monotonic()
 	timed_out = False
 	exit_code = -1
+	# stdin=DEVNULL is not optional. Popen inherits the parent's stdin, and this
+	# server's stdin IS the JSON-RPC stream, so any build command that reads
+	# stdin (an interactive prompt, a stray `cat`, a test runner in watch mode)
+	# eats protocol messages out from under the client and the session desyncs.
+	# It looks like a hang, not like a bug. Build commands never need stdin.
 	proc = subprocess.Popen(
 		command,
 		shell=True,
 		cwd=cwd,
 		env=env,
+		stdin=subprocess.DEVNULL,
 		stdout=subprocess.PIPE,
 		stderr=stderr_target,
 		preexec_fn=os.setsid,

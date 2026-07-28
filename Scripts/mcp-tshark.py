@@ -375,8 +375,14 @@ def handle_start_capture(params: dict, project_root: str) -> dict:
 
     log.info("Starting capture: %s", " ".join(args))
     try:
+        # stdin=DEVNULL on every tshark spawn in this file: stdin is NOT covered
+        # by capture_output/stdout redirection, so it is inherited -- and this
+        # server's stdin is the JSON-RPC stream. tshark reads stdin whenever the
+        # capture source resolves to it (`-r -`, or `-i -`), which would make it
+        # devour protocol messages. No spawn here ever wants stdin.
         proc = subprocess.Popen(
             args,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             preexec_fn=os.setsid,
@@ -417,6 +423,7 @@ def _packet_count(pcap_path: str) -> int:
         r = subprocess.run(
             [tshark, "-r", pcap_path, "-T", "fields", "-e", "frame.number"],
             capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL,   # never let tshark reach the MCP stream
         )
         if r.returncode == 0 and r.stdout.strip():
             return len(r.stdout.strip().split("\n"))
@@ -561,7 +568,8 @@ def _run_analyze(params: dict, project_root: str) -> str:
 
     log.info("Analyzing: %s", " ".join(args))
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout_sec)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout_sec,
+                                stdin=subprocess.DEVNULL)   # never reach the MCP stream
     except subprocess.TimeoutExpired:
         return f"**Error:** Analysis timed out after {timeout_sec}s"
 
@@ -673,6 +681,7 @@ def handle_list_interfaces(params: dict, project_root: str) -> dict:
     try:
         result = subprocess.run(
             [tshark, "-D"], capture_output=True, text=True, timeout=10,
+            stdin=subprocess.DEVNULL,   # never let tshark reach the MCP stream
         )
     except subprocess.TimeoutExpired:
         return {"error": "tshark -D timed out"}
@@ -750,7 +759,8 @@ def handle_statistics(params: dict, project_root: str) -> dict:
 
     log.info("Statistics: %s", " ".join(args))
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=120,
+                                stdin=subprocess.DEVNULL)   # never reach the MCP stream
     except subprocess.TimeoutExpired:
         return {"error": "Statistics timed out after 120s"}
 
@@ -794,7 +804,8 @@ def handle_follow_stream(params: dict, project_root: str) -> dict:
 
     log.info("Follow stream: %s", " ".join(args))
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=120,
+                                stdin=subprocess.DEVNULL)   # never reach the MCP stream
     except subprocess.TimeoutExpired:
         return {"error": "Follow stream timed out after 120s"}
 

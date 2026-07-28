@@ -120,9 +120,17 @@ def _md_fence(content: str, lang: str = "") -> str:
 
 
 def _run(cmd: List[str], timeout: int = 15) -> Tuple[int, str, str]:
-    """Run an argv (shell=False) read-only. Never raises; returns (rc, out, err)."""
+    """Run an argv (shell=False) read-only. Never raises; returns (rc, out, err).
+
+    stdin=DEVNULL, always: this server's stdin is the JSON-RPC stream, and
+    capture_output only redirects stdout/stderr -- stdin would be INHERITED.
+    A child that reads it (any of these tools when a flag makes it wait on
+    input) would silently swallow protocol messages. Every probe below is
+    read-only and takes no input, so DEVNULL costs nothing here.
+    """
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL)
         return r.returncode, r.stdout or "", r.stderr or ""
     except FileNotFoundError:
         return 127, "", f"{cmd[0]}: not found in PATH"
