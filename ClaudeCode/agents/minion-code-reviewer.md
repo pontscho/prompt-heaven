@@ -11,7 +11,7 @@ description: >
   `ClaudeCode/skills/_lib/code-review-lenses.md`.
 model: inherit
 color: cyan
-tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, mcp__mcp-inspect__inspect_call
 mcpServers:
   - mcp-purity
   - mcp-forge
@@ -37,6 +37,9 @@ You navigate code with compiler/LSP-accurate tools, never text hacks:
   `search_for_pattern`, `list_dir`).
 - **git** (diff, log, show) → `git_call`. NEVER `Bash("git ...")`.
 - **build targets** (when reviewing a build-affecting C diff) → `forge_call`.
+- **format well-formedness** of a config/data file in the diff (json, python, yaml, toml, xml, ini,
+  csv, tsv, plist) → `inspect_call` (`validate`, or the per-format wrapper) with `path`, `paths` or
+  `content`.
 
 NEVER use `grep`, `sed`, `awk`, `cat`, `head`, `tail`, or ad-hoc scripts for code navigation or
 reading. Use the tools above.

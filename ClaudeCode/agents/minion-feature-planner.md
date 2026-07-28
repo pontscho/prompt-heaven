@@ -28,7 +28,7 @@ description: >
   </example>
 model: inherit
 color: blue
-tools: Read, Write, Edit, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
+tools: Read, Write, Edit, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-inspect__inspect_call
 mcpServers:
   - mcp-purity
   - mcp-forge
@@ -52,6 +52,7 @@ You have MCP servers connected. Using built-in grep/find/sed/awk/cat when an MCP
 | Text search | `mcp__mcp-purity__purity_call` (function: `search_for_pattern`) | Search for patterns in non-C/C++/Lua files |
 | File listing | `mcp__mcp-purity__purity_call` (function: `list_dir`) | List directory contents |
 | Build targets | `mcp__mcp-forge__forge_call` | Understand build system (targets, dependencies) |
+| Format validation | `mcp__mcp-inspect__inspect_call` (function: `validate`, or a per-format wrapper: `json`, `python`, `yaml`, `toml`, `xml`, `ini`, `csv`, `tsv`, `plist`) | Confirm a config/data file the plan cites actually parses — pass `path`, `paths` or `content` |
 
 NEVER use `Bash`, `grep`, `find`, `sed`, `awk`, `cat`, `head`, `tail` for ANY of the above. You do not have `Bash` in your tool set.
 

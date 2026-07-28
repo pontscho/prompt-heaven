@@ -25,7 +25,7 @@ description: >
   </example>
 model: inherit
 color: orange
-tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, WebSearch, WebFetch
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-inspect__inspect_call, WebSearch, WebFetch
 mcpServers:
   - mcp-purity
   - mcp-forge
@@ -48,6 +48,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable substitutes when
 | Lua symbols | `purity_call` (luals-backed) — never grep for Lua symbols |
 | Generic content search, non-code files, log content (after `Read`), build configs | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file` |
 | Build target inspection (understanding how a failing test is built) | `forge_call` (forge MCP) — function `"describe"` / `"list"` when `project-forge.yaml` exists |
+| Live host state during an investigation, and "does this config even parse" | `inspect_call` (inspect MCP) — `processes`, `process`, `ports`, `connections`, `open_files`, `disk`, `disk_usage`, `memory`, `host`; plus `validate` or a per-format wrapper (`json`, `python`, `yaml`, `toml`, `xml`, `ini`, `csv`, `tsv`, `plist`) taking `path`, `paths` or `content`. Read-only, and your only route to any of it — you have no `Bash` |
 | External library / API / protocol docs (FFmpeg, librtmp, OpenSSL, frameworks, RTMP/HLS specs) | `context7_call` (context7 MCP) — `resolve_library_id`, `query_docs` |
 | Git history | LAST RESORT — delegate to a `general-purpose` subagent via the Task tool; **never** `Bash("git ...")` directly |
 

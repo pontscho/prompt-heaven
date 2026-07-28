@@ -2,7 +2,7 @@
 name: minion-explorer
 description: >-
   This minion's name is Scott. Read-only codebase explorer and deep code analyst. Capable of serious structural analysis: traces call chains, maps data flows, reads and interprets source code at line level, explains exactly how a function or module works internally. Suitable for planning preparation — call this before implementing a feature to understand what already exists, what the entry points are, and where changes would land. Returns precise findings with file:line references. Use INSTEAD OF inline Glob/Grep/Read loops when the task requires multi-round search, broad exploration, deep code reading, or a structured summary of a subsystem. For C/C++ uses purity_call (clangd-backed) for compiler-accurate symbol resolution. Does NOT modify anything.
-tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-inspect__inspect_call
 mcpServers:
   - mcp-purity
   - mcp-forge
@@ -30,6 +30,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for symbol-aware
 | Lua symbols (`.lua`) | `purity_call` (purity MCP, luals-backed) — ALWAYS for symbol queries |
 | File discovery, generic content search, reading non-code files (yaml/json/md/CMakeLists) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Build target inspection (read-only) | `forge_call` (forge MCP) — function `"list"` / `"describe"` when `project-forge.yaml` exists |
+| Well-formedness of a config/data file you report on (json, yaml, toml, xml, ini, csv, tsv, plist, python) | `inspect_call` (inspect MCP) — `validate` (auto-detects from the extension) or a per-format wrapper, taking `path`, `paths` or `content`. Read-only; also your only route to live host state (`processes`, `ports`, `open_files`, `disk`, `disk_usage`, `memory`) since you have no `Bash` |
 
 **Tool priority for symbol queries** (already established in Phase 2 below — restating because it's the law):
 1. FIRST → language semantic functions (purity clangd-backed for C/C++ / luals for Lua): semantic, compiler-accurate

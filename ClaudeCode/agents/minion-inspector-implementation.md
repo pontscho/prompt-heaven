@@ -25,7 +25,7 @@ description: >
   </example>
 model: inherit
 color: blue
-tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, mcp__mcp-inspect__inspect_call
 mcpServers:
   - mcp-purity
   - mcp-forge
@@ -55,6 +55,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 | File existence, content search, non-code file reads | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Git operations (diff / log / status / show / blame / branch list / merge-base) | `git_call` (git MCP) — **never** `Bash("git ...")` for read-only ops. The change-detection step (`git diff HEAD~N --name-only`, `git status`, `git log --oneline`) goes through `git_call`. |
 | Build system / build target validation | `forge_call` (forge MCP) — function `"list"` / `"describe"` / `"validate"` when `project-forge.yaml` exists |
+| Well-formedness of a config/data file the implementation added or changed | `inspect_call` (inspect MCP) — `validate` or a per-format wrapper (`json`, `python`, `yaml`, `toml`, `xml`, `ini`, `csv`, `tsv`, `plist`). Read-only; `paths` audits everything the diff touched in one call, `content` checks text not yet on disk |
 
 **Batching is mandatory.** Independent file outlines, diagnostics, and symbol contexts go in a single parallel message.
 

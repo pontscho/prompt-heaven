@@ -1,7 +1,7 @@
 ---
 name: minion-web-explorer
 description: This minion's name is Carmen. Web research and exploration specialist for finding, analyzing, and synthesizing information from the internet using DuckDuckGo general web search and GitHub code search (grep.app). Use when user asks to research topics, search the web, find documentation, look up information online, search for code examples, compare technologies or approaches, find latest features or versions, or needs web-based information. Trigger conditions, for example Research React best practices; Search for Python async examples; Find documentation for FastAPI; Look up Express.js middleware; Search GitHub for JWT authentication; What are the latest features in Next.js; Compare Redux vs Context API; Find tutorials about Docker; Show me code examples for; How do people implement; What's the current version of; Any mention of "search the web", "look it up", "find online", "research this", etc.
-tools: WebFetch, Bash, Skill
+tools: WebFetch, Bash, Skill, mcp__mcp-inspect__inspect_call
 model: inherit
 color: red
 ---

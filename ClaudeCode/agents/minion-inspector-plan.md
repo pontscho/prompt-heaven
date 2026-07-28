@@ -25,7 +25,7 @@ description: >
   </example>
 model: inherit
 color: blue
-tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-inspect__inspect_call
 mcpServers:
   - mcp-purity
   - mcp-forge
@@ -53,6 +53,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for verifying sy
 | Lua symbol verification | `purity_call` (purity MCP, luals-backed) — same set, type-aware |
 | File existence checks, content search, non-code file reads (yaml/json/md/CMakeLists) | `purity_call` (purity MCP) — `find_file`, `search_for_pattern`, `read_file`, `list_dir` |
 | Build system / build target validation | `forge_call` (forge MCP) — function `"list"` / `"describe"` / `"validate"` when `project-forge.yaml` exists |
+| Well-formedness of a config/data file the plan adds or changes | `inspect_call` (inspect MCP) — `validate` or a per-format wrapper (`json`, `python`, `yaml`, `toml`, `xml`, `ini`, `csv`, `tsv`, `plist`) taking `path`, `paths` or `content`. Read-only. A plan that cites an unparseable file is itself a finding |
 
 **Batching is mandatory.** File lookups + symbol checks for multiple plan items go in a single parallel message.
 
