@@ -11,7 +11,28 @@ not check that a JSON has the right keys, that a YAML matches an expected shape,
 or that values are sensible — only that the bytes are a valid document of that
 format. For schema checks, see *When NOT to use* below.
 
-## Quick start
+## Quick start — if you are an agent with MCP access, THIS is the way
+
+All nine formats are exposed by the pre-approved `mcp-inspect` server: no
+permission prompt, a Markdown table back, and a batch of files in one call.
+
+```
+inspect_call {function: "validate", params: {path: "settings.json"}}          # auto-detect
+inspect_call {function: "python",   params: {path: "hooks/guard.py"}}
+inspect_call {function: "validate", params: {paths: ["a.json", "b.yaml"]}}    # batch: ONE call
+inspect_call {function: "json",     params: {content: "{\"a\":1}"}}           # inline, no file
+```
+
+Reach for Bash **only** when MCP is genuinely unavailable. Never validate by
+shelling out to `python3 -c "import ast; ast.parse(...)"`, `python3 -m py_compile`,
+`python3 -m json.tool`, `jq .` or `xmllint --noout` — the first two are weaker or
+dirtier than what this skill does (see the Python row below), and all of them cost
+a prompt. See the `p:mcp-inspect` skill for the full function reference.
+
+## Quick start — shell and CI
+
+The bundled script covers the same nine formats for pre-commit hooks, `make`
+targets and humans at a terminal:
 
 ```bash
 python ~/.claude/skills/p/skills/verify/scripts/validate.py path/to/file.json
@@ -22,26 +43,6 @@ echo '{"a":1}' | python ~/.claude/skills/p/skills/verify/scripts/validate.py --f
 Format is auto-detected from the extension; override with `--format`. Use `-` as
 a path to read stdin (then `--format` is required). One line of output per file;
 a one-line summary goes to stderr.
-
-## Inside a Claude session, use the MCP tool instead
-
-The bundled script exists for **shell and CI** use (pre-commit hooks, `make`
-targets, a human at a terminal). When you are an agent with MCP access, the same
-nine formats are exposed by the pre-approved `mcp-inspect` server, which needs
-**no permission prompt** and returns a Markdown table:
-
-```
-inspect_call {function: "validate", params: {path: "settings.json"}}          # auto-detect
-inspect_call {function: "python",   params: {path: "hooks/guard.py"}}
-inspect_call {function: "validate", params: {paths: ["a.json", "b.yaml"]}}    # batch
-inspect_call {function: "json",     params: {content: "{\"a\":1}"}}           # inline, no file
-```
-
-Reach for Bash **only** when MCP is unavailable. In particular never validate by
-shelling out to `python3 -c "import ast; ast.parse(...)"`, `python3 -m py_compile`,
-`python3 -m json.tool`, `jq .` or `xmllint --noout` — the first two are weaker or
-dirtier than what this skill does (see the Python row below), and all of them cost
-a prompt. See the `p:mcp-inspect` skill for the full function reference.
 
 **Exit code** — `0` when nothing FAILED, `1` if any file FAILED. With `--strict`,
 LIMITED and SKIPPED also make the exit non-zero. This makes the tool usable as a
