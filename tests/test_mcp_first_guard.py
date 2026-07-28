@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Suite for ClaudeCode/hooks/mcp-first-guard.py, the PreToolUse Bash guard
-(165 cases, groups A-J).
+(groups A-K).
+
+The case COUNT is deliberately absent from this docstring: it is written down
+once, in the SUITES table in tests/run.py, which checks it against the run. A
+second copy here would be a number nobody verifies.
 
 Runs the hook as a subprocess once per case, feeding a JSON payload on stdin.
 A case is DENY when stdout parses to a dict whose
@@ -20,9 +24,14 @@ Coverage by group:
   E  regression: every pre-existing primary-DENY / downstream-ALLOW plus steers
   F  heredoc awareness: bodies stripped, intro line and post-terminator analyzed
   G  plumbing: non-Bash tools, missing/null fields, fail-open, separators, dedup
-  H  extra edges, informational only -- actual behaviour recorded
+  H  the wrapper forms deferred as D76, now CLOSED and asserted: subshell,
+     brace group, command substitution, `bash -c`, ALL-CAPS spelling -- plus
+     the two D3 probes that stay informational (see their notes)
   I  herestring fix (D1): `<<<` is no longer mistaken for a heredoc
   J  `&` as a statement separator, plus its false-positive probes (2>&1, URLs)
+  K  wrapper unwrapping in depth (nesting, quoting, exemptions and
+     false-positive probes) + the `python3 -m py_compile` steer and the scope
+     limit that keeps `python3 -c` / `-m json.tool` allowed
 
 The hook is never imported in the default run -- only `--whitebox` imports it,
 and then only via a loader that cannot write __pycache__ into the repo.
@@ -60,6 +69,19 @@ def case(group, name, cmd, expect, must=(), must_not=(), note=""):
 def raw(group, name, payload, expect, note=""):
     return {"group": group, "name": name, "expect": expect, "payload": payload,
             "must": [], "must_not": [], "note": note}
+
+
+VIOL = "MCP-first routing violation: "
+
+
+def only(*names):
+    """Reason-prefix assertion: the hit list is EXACTLY these names, in order.
+
+    Stronger than a bare `must=["`cat`"]`: it also proves nothing ELSE was
+    flagged, which is how a peeled wrapper (`(cat f)`) is distinguished from a
+    guard that started flagging the wrapper itself.
+    """
+    return VIOL + ", ".join(f"`{n}`" for n in names) + " is forbidden"
 
 
 CASES = []
@@ -231,44 +253,50 @@ CASES += [
          must=["`cat`, `grep`, `ls`"]),
 ]
 
-H_GROUP = "H. Extra edges (informational — actual behaviour recorded)"
+H_GROUP = "H. Wrapper forms (D76) — closed, now asserted"
 CASES += [
-    case(H_GROUP, "subshell `(cat f)`", "(cat f.txt)", INFO,
-         note="paren-wrapped primary command"),
-    case(H_GROUP, "brace group `{ cat f; }`", "{ cat f; }", INFO,
-         note="brace-group wrapped primary command"),
-    case(H_GROUP, "command substitution `echo $(cat f)`", "echo $(cat f)", INFO,
-         note="blocked cmd inside $( )"),
-    case(H_GROUP, "bash -c 'cat f'", "bash -c 'cat f'", INFO, note="blocked cmd inside -c string"),
+    case(H_GROUP, "subshell `(cat f)`", "(cat f.txt)", DENY, must=[only("cat")],
+         note="the `(` opener is peeled; only `cat` is named, not `(cat`"),
+    case(H_GROUP, "brace group `{ cat f; }`", "{ cat f; }", DENY, must=[only("cat")],
+         note="`{` is a token of its own here and is skipped like a wrapper"),
+    case(H_GROUP, "command substitution `echo $(cat f)`", "echo $(cat f)", DENY,
+         must=[only("cat")], must_not=["`echo`"],
+         note="the $( ) body is scanned as a command in its own right"),
+    case(H_GROUP, "bash -c 'cat f'", "bash -c 'cat f'", DENY, must=[only("cat")],
+         must_not=["`bash`"], note="the -c STRING is scanned; bash itself is not blocked"),
     case(H_GROUP, "tail 'weird -f name'", "tail 'weird -f name.txt'", INFO,
-         note="mode_exempt splits without quote awareness"),
+         note="STILL INFO: mode_exempt splits the raw stage without quote "
+              "awareness, so a filename containing `-f` reads as follow-mode. "
+              "That is D3, a separate deferred decision the user has not "
+              "reopened; it fails in the ALLOW direction, like every other "
+              "limit in a fail-open guard."),
     case(H_GROUP, "tail -- -f (after end-of-options)", "tail -- -f", INFO,
-         note="`--` terminator not honoured by mode_exempt"),
-    case(H_GROUP, "herestring `foo <<<EOF` then blocked line", "foo <<<WORD\ncat f", INFO,
-         note="does <<< get mistaken for a heredoc, swallowing the next line?"),
-    case(H_GROUP, "backgrounded `cat f &`", "cat f &", INFO, note="& is not a split separator"),
-    case(H_GROUP, "`&` chain: echo a & cat f", "echo a & cat f", INFO,
-         note="`&` separator not split -> later hit may be missed"),
-    case(H_GROUP, "tab-separated command", "\tcat\tf.txt", INFO, note="leading tab + tab args"),
-    case(H_GROUP, "CAT uppercase", "CAT f", INFO, note="case sensitivity"),
-    case(H_GROUP, "./cat f", "./cat f", INFO, note="basename of ./cat"),
+         note="STILL INFO: same D3 deferral — mode_exempt does not honour the "
+              "`--` end-of-options terminator, so a file literally named `-f` "
+              "reads as follow-mode. Fails ALLOW-wards."),
+    case(H_GROUP, "herestring `foo <<<EOF` then blocked line", "foo <<<WORD\ncat f", DENY,
+         must=[only("cat")], note="`<<<` is not a heredoc: the next line is still scanned"),
+    case(H_GROUP, "backgrounded `cat f &`", "cat f &", DENY, must=[only("cat")],
+         note="`&` is a statement separator (D75)"),
+    case(H_GROUP, "`&` chain: echo a & cat f", "echo a & cat f", DENY, must=[only("cat")],
+         note="second statement after a bare `&` is scanned"),
+    case(H_GROUP, "tab-separated command", "\tcat\tf.txt", DENY, must=[only("cat")],
+         note="the tokenizer splits on any isspace(), leading tab included"),
+    case(H_GROUP, "CAT uppercase", "CAT f", DENY, must=[only("cat")], must_not=["`CAT`"],
+         note="ALL-CAPS spelling of a blocked name is folded to lower case "
+              "(/bin/CAT resolves on a case-insensitive filesystem), and the "
+              "reason names the canonical `cat` so dedup still works"),
+    case(H_GROUP, "./cat f", "./cat f", DENY, must=[only("cat")], note="basename of ./cat"),
     case(H_GROUP, "herestring probe: `<<<WORD` .. WORD .. ls",
-         "foo <<<WORD\ncat f\nWORD\nls", INFO,
-         note="if `<<<` is parsed as heredoc, `cat` is swallowed and only `ls` is flagged"),
+         "foo <<<WORD\ncat f\nWORD\nls", DENY, must=[only("cat", "ls")],
+         note="both statements survive: `<<<` swallows nothing"),
     case(H_GROUP, "herestring quoted `<<<'WORD'` then blocked line",
-         "foo <<<'WORD'\ncat f", INFO, note="quoted herestring variant"),
+         "foo <<<'WORD'\ncat f", DENY, must=[only("cat")], note="quoted herestring variant"),
 ]
 
 # ---------------------------------------------------------------------------
 # Added after the D1 (herestring lookarounds) + `&` separator fixes.
 # ---------------------------------------------------------------------------
-VIOL = "MCP-first routing violation: "
-
-
-def only(*names):
-    """Reason-prefix assertion: the hit list is EXACTLY these names, in order."""
-    return VIOL + ", ".join(f"`{n}`" for n in names) + " is forbidden"
-
 
 I_GROUP = "I. Herestring fix (D1) — `<<<` is no longer a heredoc"
 CASES += [
@@ -327,6 +355,152 @@ CASES += [
     case(J_GROUP, "cmd | tail -5 & (downstream, backgrounded)", "git log | tail -5 &", ALLOW),
 ]
 
+K_GROUP = "K. Wrapper unwrapping in depth + `python3 -m py_compile`"
+CASES += [
+    # -- subshell / brace group ---------------------------------------------
+    case(K_GROUP, "spaced subshell `( cat f )`", "( cat f )", DENY, must=[only("cat")]),
+    case(K_GROUP, "subshell plus sibling `(cat f) && ls`", "(cat f) && ls", DENY,
+         must=[only("cat", "ls")]),
+    case(K_GROUP, "innocent subshell `(cd x && make)`", "(cd x && make)", ALLOW),
+    case(K_GROUP, "innocent brace group `{ echo hi; }`", "{ echo hi; }", ALLOW),
+    case(K_GROUP, "wrapper plus group `time (cat f)`", "time (cat f)", DENY,
+         must=[only("cat")], note="peeling composes with SKIP_WRAPPERS in any order"),
+    case(K_GROUP, "inspection in a subshell `(ps aux)`", "(ps aux)", DENY, must=[only("ps")]),
+    case(K_GROUP, "brace group, two statements", "{ cat a; ls; }", DENY,
+         must=[only("cat", "ls")]),
+    case(K_GROUP, "exemption survives peeling `(tail -f x)`", "(tail -f x)", ALLOW),
+    case(K_GROUP, "`{cat f;}` is not a group in bash", "{cat f;}", ALLOW,
+         note="bash needs whitespace after `{`, so `{cat` is a command NAME; "
+              "peeling it would deny a command bash never runs"),
+    # -- command substitution ----------------------------------------------
+    case(K_GROUP, 'double-quoted subst `echo "$(cat f)"`', 'echo "$(cat f)"', DENY,
+         must=[only("cat")], note='"$( )" still runs the command'),
+    case(K_GROUP, "single-quoted subst `echo '$(cat f)'`", "echo '$(cat f)'", ALLOW,
+         note="nothing expands inside '...' — false-positive probe"),
+    case(K_GROUP, "backticks", "echo `cat f`", DENY, must=[only("cat")]),
+    case(K_GROUP, "process substitution", "diff <(cat a) <(cat b)", DENY, must=[only("cat")]),
+    case(K_GROUP, 'quoted process subst `echo "<(cat f)"`', 'echo "<(cat f)"', ALLOW,
+         note='inside "..." a <( ) is literal text, not a command — FP probe'),
+    case(K_GROUP, "arithmetic `echo $((1+2))`", "echo $((1+2))", ALLOW,
+         note="`$((` is arithmetic; it holds no command"),
+    case(K_GROUP, "subst feeding another command", "kill $(lsof -t -i:3000)", DENY,
+         must=[only("lsof")]),
+    case(K_GROUP, "innocent subst", "echo $(git rev-parse HEAD)", ALLOW),
+    case(K_GROUP, "apostrophe inside \"...\" then a subst",
+         "echo \"it's $(cat f)\"", DENY, must=[only("cat")],
+         note="a lone `'` inside \"...\" must not derail the extractor"),
+    case(K_GROUP, "unterminated subst", "echo $(cat f", DENY, must=[only("cat")],
+         note="an unclosed opener yields the rest of the string, so the text is "
+              "still scanned instead of silently dropped"),
+    case(K_GROUP, "unterminated backtick", "echo `cat f", DENY, must=[only("cat")]),
+    case(K_GROUP, "3 nested substitutions", "echo $(echo $(echo $(cat f)))", DENY,
+         must=[only("cat")]),
+    case(K_GROUP, "4 nested substitutions -> MAX_DEPTH cap",
+         "echo $(echo $(echo $(echo $(cat f))))", ALLOW,
+         note="documented cap: MAX_DEPTH=3 unwrap layers, and the miss is in the "
+              "ALLOW direction like every other limit in a fail-open guard"),
+    # -- `-c STRING` payloads ----------------------------------------------
+    case(K_GROUP, 'sh -c "cat f"', 'sh -c "cat f"', DENY, must=[only("cat")]),
+    case(K_GROUP, "nested quoting in a payload", "bash -c 'cat \"my file.txt\"'", DENY,
+         must=[only("cat")]),
+    case(K_GROUP, "two shell layers", "bash -c 'bash -c \"cat f\"'", DENY,
+         must=[only("cat")], note="recursion, not one-level-and-stop"),
+    case(K_GROUP, "short cluster `bash -lc`", "bash -lc 'cat f'", DENY, must=[only("cat")],
+         note="`c` found letterwise inside the cluster"),
+    case(K_GROUP, "payload with BACKSLASH-escaped inner quotes",
+         'bash -c "bash -c \\"cat f\\""', INFO,
+         note="INFO on purpose, and NOT the depth cap: the tokenizer (unchanged "
+              "here — it is the old first_cmd_token body) has no backslash-escape "
+              "handling, so `\\\"` mangles the payload into `bash -c \\\\cat`. Only "
+              "reachable past two nesting layers, because two quote styles cover "
+              "two layers without escaping. Closing it means changing the "
+              "tokenizer all 200+ cases depend on; fails ALLOW-wards until then."),
+    case(K_GROUP, "zsh -c 'ls'", "zsh -c 'ls'", DENY, must=[only("ls")]),
+    case(K_GROUP, "bash running a script file", "bash script.sh", ALLOW),
+    case(K_GROUP, "bash -c with no payload", "bash -c", ALLOW),
+    case(K_GROUP, "downstream rule holds inside a payload", "bash -c 'ps aux | head -5'",
+         DENY, must=[only("ps")], must_not=["`head`"]),
+    case(K_GROUP, "follow-mode exemption holds inside a payload",
+         "bash -c 'tail -f /var/log/x'", ALLOW),
+    case(K_GROUP, "innocent payload", "bash -c 'git status'", ALLOW),
+    case(K_GROUP, "xargs plus payload", "xargs bash -c 'cat \"$1\"' _", DENY,
+         must=[only("cat")]),
+    # -- ALL-CAPS spelling --------------------------------------------------
+    case(K_GROUP, "LS -la", "LS -la", DENY, must=[only("ls")]),
+    case(K_GROUP, "GREP foo f", "GREP foo f", DENY, must=[only("grep")]),
+    case(K_GROUP, "assignment `CAT=/bin/cat echo hi`", "CAT=/bin/cat echo hi", ALLOW,
+         note="VAR=val is skipped before the fold — false-positive probe"),
+    case(K_GROUP, "variable `$CAT f`", "$CAT f", ALLOW,
+         note="`$CAT` is not the NAME `CAT` — false-positive probe"),
+    case(K_GROUP, "Cat f (mixed case)", "Cat f", INFO,
+         note="INFO on purpose: only an ALL-CAPS spelling is folded. Mixed case "
+              "would also resolve on a case-insensitive filesystem, and this "
+              "host has no case-insensitive collision with ANY blocked name in "
+              "15 PATH dirs, so broadening is available — but it was not asked "
+              "for, and a mixed-case name is likelier to be a DIFFERENT program."),
+    # -- python3 -m py_compile ---------------------------------------------
+    case(K_GROUP, "python3 -m py_compile", "python3 -m py_compile x.py", DENY,
+         must=[only("python3 -m py_compile"), "inspect_call(function=python)", "__pycache__"]),
+    case(K_GROUP, "python -m py_compile (unversioned)", "python -m py_compile x.py", DENY,
+         must=[only("python3 -m py_compile")]),
+    case(K_GROUP, "python3.12 -m py_compile", "python3.12 -m py_compile x.py", DENY,
+         must=[only("python3 -m py_compile")]),
+    case(K_GROUP, "cluster `-Bm py_compile`", "python3 -Bm py_compile x.py", DENY,
+         must=[only("python3 -m py_compile")], note="letterwise inside the cluster"),
+    case(K_GROUP, "glued `-mpy_compile`", "python3 -mpy_compile x.py", DENY,
+         must=[only("python3 -m py_compile")]),
+    case(K_GROUP, "option with an argument before -m",
+         "python3 -X importtime -m py_compile x.py", DENY,
+         must=[only("python3 -m py_compile")]),
+    case(K_GROUP, "GLUED option whose argument contains an m",
+         "python3 -Ximporttime -m py_compile x.py", DENY,
+         must=[only("python3 -m py_compile")],
+         note="the `m` of `importtime` must not read as `-m`: an "
+              "argument-taking letter ends the cluster"),
+    case(K_GROUP, "plain flag clustered before -m", "python3 -B -m py_compile x.py", DENY,
+         must=[only("python3 -m py_compile")]),
+    case(K_GROUP, "glued -W argument before -m", "python3 -Wignore -m py_compile x.py",
+         DENY, must=[only("python3 -m py_compile")]),
+    case(K_GROUP, "-c must not read as -m", "python3 -c 'import py_compile'", ALLOW,
+         note="`c` takes an argument too, but only `m` names a module"),
+    case(K_GROUP, "py_compile inside a payload", "bash -c 'python3 -m py_compile x.py'",
+         DENY, must=[only("python3 -m py_compile")]),
+    case(K_GROUP, "py_compile plus a blocked sibling", "python3 -m py_compile a.py && ls",
+         DENY, must=[only("ls", "python3 -m py_compile")]),
+    case(K_GROUP, "py_compile with a blocked downstream stage",
+         "python3 -m py_compile a.py | tail -5", DENY,
+         must=[only("python3 -m py_compile")], must_not=["`tail`"]),
+    case(K_GROUP, "dedup: two py_compile runs named once",
+         "python3 -m py_compile a.py; python -m py_compile b.py", DENY,
+         must=[only("python3 -m py_compile")]),
+    case(K_GROUP, "python3 -c stays ALLOW", "python3 -c 'print(1)'", ALLOW,
+         note="scope limit: read-only, and far too much legitimate use to block"),
+    case(K_GROUP, "python3 -m json.tool stays ALLOW", "python3 -m json.tool f.json", ALLOW,
+         note="scope limit: read-only"),
+    case(K_GROUP, "python3 -m pytest stays ALLOW", "python3 -m pytest tests/", ALLOW),
+    case(K_GROUP, "`-m py_compile` after the script is the SCRIPT's",
+         "python3 tool.py -m py_compile", ALLOW,
+         note="python's option region ends at the script operand — FP probe"),
+    case(K_GROUP, "the prescribed in-memory replacement stays ALLOW",
+         "python3 -c \"import sys; compile(open(sys.argv[1],'rb').read(), "
+         "sys.argv[1], 'exec')\" f.py", ALLOW,
+         note="denying the documented py_compile substitute would be a dead end"),
+    case(K_GROUP, "downstream py_compile stage not inspected",
+         "foo | python3 -m py_compile x.py", ALLOW,
+         note="consistent with every other binary: only stage 0 is the primary "
+              "command. Asserted so the asymmetry is visible, not accidental."),
+    # -- invariants the unwrapping must not break ---------------------------
+    case(K_GROUP, "commit body naming every wrapper form stays ALLOW",
+         "git commit -F - <<'EOF'\nsee $(cat f) and (ls -la) and bash -c 'cat x'\nEOF",
+         ALLOW, note="heredoc bodies are DATA — this is the repo's commit path"),
+    case(K_GROUP, "unquoted-delimiter body with a substitution stays ALLOW",
+         "git commit -F - <<EOF\nsee $(cat f)\nEOF", ALLOW,
+         note="bash WOULD expand this body, but stripping bodies whole is what "
+              "keeps `git commit -F -` working; the miss is ALLOW-wards"),
+    case(K_GROUP, "pathological unbalanced openers", "echo $((((( `` <( $(", ALLOW,
+         note="malformed nesting must not crash, hang or block"),
+]
+
 
 # ---------------------------------------------------------------------------
 # execution
@@ -376,6 +550,14 @@ def whitebox():
               "git commit -F - 2><<EOF\ncat f\nEOF",
               "foo <<<<WORD\ncat f", "grep x <<< \"$var\""]:
         print(f"  {s!r:44s} -> {g._strip_heredocs(s)!r}")
+    print("--- white-box: substitutions() / primary() ---")
+    for s in ["echo $(cat f)", 'echo "$(cat f)"', "echo '$(cat f)'",
+              "echo \"it's $(cat f)\"", "diff <(cat a) <(cat b)",
+              'echo "<(cat f)"', "echo $((1+2))", "echo $(cat f",
+              "(cat f.txt)", "{ cat f; }", "{cat f;}", "time (cat f)",
+              "CAT f", "$CAT f", "bash -c 'bash -c \"cat f\"'",
+              "python3 -m py_compile x.py", "python3 tool.py -m py_compile"]:
+        print(f"  {s!r:38s} -> subs={g.substitutions(s)} primary={g.primary(s)}")
 
 
 def run(opts=None):
