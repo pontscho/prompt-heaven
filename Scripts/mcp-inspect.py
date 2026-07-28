@@ -9,16 +9,20 @@ Single-tool dispatcher pattern (like mcp-git): one MCP tool (inspect_call)
 routes to internal handlers via the 'function' parameter. Every handler is
 READ-ONLY — it inspects live system state (processes, process tree, open files,
 sockets, network interfaces/routes, memory, disk, mounts, file metadata,
-services, resource limits, toolchain versions, host, environment) and NEVER
-mutates anything. There is no way
+services, resource limits, toolchain versions, host, environment) or the FORMAL
+well-formedness of a file (json, python, yaml, toml, xml, ini, csv, tsv, plist),
+and NEVER mutates anything. There is no way
 to pass a raw shell string: each function builds a fixed argv (shell=False),
 filters are applied in Python, and numeric params (pid/port) are int-validated,
 so there is no shell-injection surface.
 
 Purpose: let the model run the common non-invasive `ps` / `lsof` / `netstat` /
 `ss` / `df` / `du` / `free` / `env` / `stat` / `ifconfig` / `pstree` / `ulimit` /
-`launchctl` / `<tool> --version` / `shasum` / `md5sum` inspections through a
-single pre-approved MCP tool instead of per-call Bash prompts.
+`launchctl` / `<tool> --version` / `shasum` / `md5sum` inspections — and the
+`python3 -c "import ast; ast.parse(...)"` / `py_compile` / `json.tool` / `jq .` /
+`xmllint --noout` validation one-liners — through a single pre-approved MCP tool
+instead of per-call Bash prompts. Validators run in-process (stdlib parsers), so
+nothing is written: `py_compile` in particular would leave a __pycache__/*.pyc.
 
 The one execution-shaped function, `versions`, probes only an ALLOW-LISTED set of
 binary NAMES (_VERSION_TOOLS) with fixed flags; the caller can never supply argv.
@@ -130,6 +134,16 @@ def _run(cmd: List[str], timeout: int = 15) -> Tuple[int, str, str]:
 
 def _have(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+def _mod_present(name: str) -> bool:
+    """Is an importable module available? Checked WITHOUT importing it."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _truncate(text: str, max_chars: int) -> Tuple[str, bool]:
@@ -966,6 +980,437 @@ def h_md5(p: dict) -> str:
     return h_hash(p, "md5")
 
 
+# ---------------------------------------------------------------------------
+# Format / syntax validation
+# ---------------------------------------------------------------------------
+
+# Validation runs IN-PROCESS with stdlib parsers instead of shelling out to
+# `python3 -c "import ast; ast.parse(...)"`, `python3 -m json.tool`, `jq .` or
+# `xmllint --noout`: each of those costs a Bash permission prompt, differs per
+# platform, and its output has to be re-parsed. Two deliberate choices:
+#   * Python is compiled with compile() IN MEMORY — NEVER py_compile, which
+#     writes __pycache__/*.pyc and would make this read-only server mutate the
+#     tree. compile() is also strictly stronger than ast.parse: it runs the
+#     symtable/codegen pass, so `break` outside a loop, `return` outside a
+#     function and module-level `nonlocal` are caught too.
+#   * XML entity declarations are refused (XXE + billion-laughs guard), so the
+#     validator is safe on untrusted input.
+# This is FORMAL well-formedness (does it parse), NOT schema validation.
+# Verdict vocabulary matches the p:verify skill: OK / FAIL / LIMITED / SKIP.
+
+_V_OK = "OK"
+_V_FAIL = "FAIL"
+_V_LIMITED = "LIMITED"
+_V_SKIP = "SKIP"
+
+# extension -> format. Parity with ClaudeCode/skills/verify/scripts/validate.py,
+# plus .py/.pyi which that script does not cover.
+_VALIDATE_EXT = {
+    ".json": "json",
+    ".yaml": "yaml", ".yml": "yaml",
+    ".toml": "toml",
+    ".xml": "xml", ".svg": "xml", ".xsd": "xml", ".rss": "xml",
+    ".plist": "plist",
+    ".ini": "ini", ".cfg": "ini",
+    ".csv": "csv",
+    ".tsv": "tsv",
+    ".py": "python", ".pyi": "python",
+}
+
+_VALIDATE_MAX_MB = 32        # parsers build a full in-memory tree; the server
+                             # loop is single-threaded while parsing
+
+# (status, message, line, col)
+_VResult = Tuple[str, str, Optional[int], Optional[int]]
+
+
+def _v_ok(msg: str) -> _VResult:
+    return (_V_OK, msg, None, None)
+
+
+def _v_fail(msg: str, line: Optional[int] = None,
+            col: Optional[int] = None) -> _VResult:
+    return (_V_FAIL, msg, line, col)
+
+
+def _v_limited(msg: str, line: Optional[int] = None) -> _VResult:
+    return (_V_LIMITED, msg, line, None)
+
+
+def _v_skip(msg: str) -> _VResult:
+    return (_V_SKIP, msg, None, None)
+
+
+def _v_decode(data: bytes) -> str:
+    # utf-8-sig tolerates (and strips) a leading BOM: legal for these formats,
+    # and it otherwise trips up the parsers.
+    return data.decode("utf-8-sig")
+
+
+def _v_json(data: bytes, name: str) -> _VResult:
+    try:
+        text = _v_decode(data)
+    except UnicodeDecodeError as exc:
+        return _v_fail(f"not valid UTF-8: {exc}")
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        return _v_fail(exc.msg, exc.lineno, exc.colno)
+    return _v_ok("valid JSON")
+
+
+def _v_python(data: bytes, name: str) -> _VResult:
+    import warnings
+
+    caught: List[Any] = []
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            # SyntaxWarnings (invalid escape sequence, `assert (x, y)`, `is` with
+            # a literal) are real defects that ast.parse never surfaces.
+            warnings.simplefilter("always", SyntaxWarning)
+            # compile() is fed the RAW BYTES, never a pre-decoded str: only then
+            # does the tokenizer honour a PEP-263 coding cookie / UTF-8 BOM the
+            # way the interpreter itself does, so a valid
+            # `# -*- coding: latin-1 -*-` source is not mis-reported as "not
+            # valid UTF-8". A genuinely broken encoding surfaces as a
+            # SyntaxError from compile(), which is exactly right.
+            compile(data, name or "<content>", "exec", dont_inherit=True)
+    except SyntaxError as exc:
+        return _v_fail(exc.msg or "syntax error", exc.lineno, exc.offset)
+    except Exception as exc:      # null bytes, recursion depth, ...
+        return _v_fail(f"{type(exc).__name__}: {exc}")
+    ver = "%d.%d" % sys.version_info[:2]
+    warned = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+    if warned:
+        first = warned[0]
+        return _v_ok(f"compiles on Python {ver} but emits {len(warned)} "
+                     f"SyntaxWarning(s); first: {first.message} "
+                     f"(line {first.lineno})")
+    return _v_ok(f"valid Python syntax (compiled on {ver})")
+
+
+def _v_xml(data: bytes, name: str) -> _VResult:
+    import xml.parsers.expat as expat
+
+    parser = expat.ParserCreate()
+
+    def _block_entity_decl(ent, is_param, value, base, system_id, public_id,
+                           notation):
+        # No inline value but a SYSTEM/PUBLIC id => external entity (XXE).
+        # An inline value => internal entity (the billion-laughs vector).
+        if value is None and (system_id is not None or public_id is not None):
+            raise ValueError("external entity declaration not allowed (XXE guard)")
+        raise ValueError("entity declaration not allowed (entity-expansion guard)")
+
+    def _block_external(*_a, **_k):
+        raise ValueError("external entity reference not allowed (XXE guard)")
+
+    # A plain DOCTYPE is still accepted. expat fires the entity-declaration
+    # handler before any reference, so both vectors die at declaration time.
+    parser.EntityDeclHandler = _block_entity_decl
+    parser.ExternalEntityRefHandler = _block_external
+    try:
+        parser.Parse(data, True)
+    except expat.ExpatError as exc:
+        # expat reports a 0-based column
+        return _v_fail(expat.ErrorString(exc.code), exc.lineno, exc.offset + 1)
+    except ValueError as exc:
+        return _v_fail(str(exc))
+    return _v_ok("well-formed XML")
+
+
+def _v_ini(data: bytes, name: str) -> _VResult:
+    import configparser
+
+    try:
+        text = _v_decode(data)
+    except UnicodeDecodeError as exc:
+        return _v_fail(f"not valid UTF-8: {exc}")
+    cp = configparser.ConfigParser(strict=True)   # strict => duplicate detection
+    try:
+        cp.read_string(text)
+    except configparser.Error as exc:
+        # most configparser errors carry .lineno; ParsingError instead keeps a
+        # list of (lineno, line) in .errors
+        line = getattr(exc, "lineno", None)
+        if line is None:
+            errs = getattr(exc, "errors", None)
+            if errs:
+                line = errs[0][0]
+        return _v_fail(" ".join(str(exc).split()), line)
+    return _v_ok(f"valid INI ({len(cp.sections())} section(s))")
+
+
+def _v_delim(data: bytes, delimiter: str, label: str) -> _VResult:
+    import csv
+    import io
+
+    try:
+        text = _v_decode(data)
+    except UnicodeDecodeError as exc:
+        return _v_fail(f"not valid UTF-8: {exc}")
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
+    expected: Optional[int] = None
+    seen = 0
+    try:
+        for i, row in enumerate(reader, 1):
+            seen += 1
+            if expected is None:
+                expected = len(row)
+            elif len(row) != expected:
+                return _v_fail(f"inconsistent column count: row {i} has "
+                               f"{len(row)} field(s), expected {expected}", i)
+    except csv.Error as exc:
+        # csv.Error has no position; the reader tracks the physical line
+        return _v_fail(f"{label} parse error: {exc}", reader.line_num)
+    if expected is None:
+        return _v_ok(f"empty {label} (no rows)")
+    return _v_ok(f"consistent {label} ({seen} row(s) x {expected} column(s))")
+
+
+def _v_csv(data: bytes, name: str) -> _VResult:
+    return _v_delim(data, ",", "CSV")
+
+
+def _v_tsv(data: bytes, name: str) -> _VResult:
+    return _v_delim(data, "\t", "TSV")
+
+
+def _v_plist(data: bytes, name: str) -> _VResult:
+    import plistlib
+
+    try:
+        plistlib.loads(data)
+    except Exception as exc:   # plistlib raises a grab-bag of exception types
+        # an XML plist fails through expat, whose ExpatError carries
+        # lineno + a 0-based offset; binary/InvalidFileException carries neither
+        line = getattr(exc, "lineno", None)
+        off = getattr(exc, "offset", None)
+        col = (off + 1) if (line is not None and off is not None) else None
+        return _v_fail(f"{type(exc).__name__}: {exc}", line, col)
+    return _v_ok("valid plist")
+
+
+def _v_toml(data: bytes, name: str) -> _VResult:
+    loads = None
+    for modname in ("tomllib", "tomli"):   # tomllib is 3.11+, tomli the backport
+        try:
+            loads = __import__(modname).loads
+            break
+        except ImportError:
+            continue
+    if loads is None:
+        return _v_skip("no TOML parser available (tomllib is Python 3.11+; "
+                       "`pip install tomli` to validate TOML on 3.9/3.10)")
+    try:
+        text = _v_decode(data)
+    except UnicodeDecodeError as exc:
+        return _v_fail(f"not valid UTF-8: {exc}")
+    try:
+        loads(text)
+    except Exception as exc:
+        # tomllib (3.14+) / tomli (2.2+) expose lineno+colno; older builds only
+        # put the position in the message text
+        line = getattr(exc, "lineno", None)
+        col = getattr(exc, "colno", None)
+        if line is None:
+            m = re.search(r"at line (\d+), column (\d+)", str(exc))
+            if m:
+                line, col = int(m.group(1)), int(m.group(2))
+        return _v_fail(f"{type(exc).__name__}: " + " ".join(str(exc).split()),
+                       line, col)
+    return _v_ok("valid TOML")
+
+
+def _v_yaml(data: bytes, name: str) -> _VResult:
+    try:
+        text = _v_decode(data)
+    except UnicodeDecodeError as exc:
+        return _v_fail(f"not valid UTF-8: {exc}")
+    try:
+        import yaml          # PyYAML — NOT stdlib
+    except ImportError:
+        # Conservative stdlib fallback: prove what can be proven and say
+        # plainly that this is NOT a parse. (The p:verify skill additionally
+        # balances flow collections; that heuristic is deliberately not
+        # duplicated here — a LIMITED verdict already tells the caller the file
+        # was never parsed, so the extra 90 lines buy very little.)
+        for i, ln in enumerate(text.splitlines(), 1):
+            stripped = ln.lstrip(" \t")
+            if "\t" in ln[:len(ln) - len(stripped)]:
+                return _v_limited("tab character in indentation (YAML forbids "
+                                  "tabs for indentation) [stdlib pre-check; "
+                                  "no PyYAML]", i)
+        return _v_limited("structural pre-check passed (UTF-8 decodes, no tab "
+                          "indentation) — NOT a full parse; install PyYAML for "
+                          "real YAML validation")
+    try:
+        # Every document in the stream; safe_load_all refuses arbitrary Python
+        # object construction.
+        for _ in yaml.safe_load_all(text):
+            pass
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        line = (mark.line + 1) if mark is not None else None
+        col = (mark.column + 1) if mark is not None else None
+        first = str(exc).splitlines()[0] if str(exc) else "YAML error"
+        return _v_fail(first, line, col)
+    return _v_ok("valid YAML (PyYAML safe_load_all)")
+
+
+_VALIDATORS = {
+    "json":   _v_json,
+    "python": _v_python,
+    "yaml":   _v_yaml,
+    "toml":   _v_toml,
+    "xml":    _v_xml,
+    "ini":    _v_ini,
+    "csv":    _v_csv,
+    "tsv":    _v_tsv,
+    "plist":  _v_plist,
+}
+
+
+def _validate_bytes(data: bytes, fmt: str, name: str) -> _VResult:
+    try:
+        return _VALIDATORS[fmt](data, name)
+    except Exception as exc:   # a validator bug must not sink the whole batch
+        log.exception("validator %s crashed on %s", fmt, name)
+        return _v_fail(f"validator error: {type(exc).__name__}: {exc}")
+
+
+def _v_pos(line: Optional[int], col: Optional[int]) -> str:
+    if line is None:
+        return ""
+    return f"{line}:{col}" if col else str(line)
+
+
+def h_validate(p: dict, fmt: str = "") -> str:
+    single = p.get("path") or p.get("file")
+    multi = p.get("paths")
+    content = p.get("content")
+    if content is None:
+        content = p.get("text")
+    if single and multi:
+        raise ValueError("pass either 'path' (one file) or 'paths' (a list) — "
+                         "not both, so nothing is silently dropped.")
+    if content is not None and (single or multi):
+        raise ValueError("pass either 'content' (inline text) or 'path'/'paths' "
+                         "(files) — not both.")
+    fmt = (fmt or str(p.get("format") or p.get("fmt") or "")).strip().lower()
+    if fmt and fmt not in _VALIDATORS:
+        raise ValueError(f"unsupported format {fmt!r}; use one of: "
+                         + ", ".join(sorted(_VALIDATORS)))
+    max_mb = _int_param(p.get("max_mb", _VALIDATE_MAX_MB), "max_mb") \
+        if "max_mb" in p else _VALIDATE_MAX_MB
+    strict = _bool_param(p.get("strict"), False)
+
+    rows: List[List[str]] = []
+    counts = {_V_OK: 0, _V_FAIL: 0, _V_LIMITED: 0, _V_SKIP: 0}
+
+    def record(status: str, msg: str, line: Optional[int], col: Optional[int],
+               used_fmt: str, target: str) -> None:
+        counts[status] = counts.get(status, 0) + 1
+        rows.append([status, used_fmt or "?", _v_pos(line, col), target, msg])
+
+    if content is not None:
+        if not fmt:
+            raise ValueError("validating inline 'content' requires params.format "
+                             "(one of: " + ", ".join(sorted(_VALIDATORS))
+                             + ") — there is no filename to detect it from.")
+        if isinstance(content, str):
+            data = content.encode("utf-8")
+        elif isinstance(content, (bytes, bytearray)):
+            data = bytes(content)
+        else:
+            raise ValueError("'content' must be a string; got "
+                             f"{type(content).__name__}.")
+        record(*_validate_bytes(data, fmt, "<content>"), fmt, "<content>")
+    else:
+        # an empty 'paths' is falsy, so it has to be caught BEFORE the
+        # `single or multi` collapse or it degrades to the generic message
+        if isinstance(multi, (list, tuple)) and not multi and not single:
+            raise ValueError("'paths' was an empty list — nothing to validate.")
+        raw = single or multi
+        if not raw:
+            raise ValueError("validation requires params.path (one file), "
+                             "params.paths (a list), or params.content "
+                             "(inline text + format).")
+        paths = list(raw) if isinstance(raw, list) else [raw]
+        for item in paths:
+            path = os.path.expanduser(str(item).strip())
+            used = fmt or _VALIDATE_EXT.get(os.path.splitext(path)[1].lower(), "")
+            if os.path.isdir(path):
+                record(_V_SKIP, "is a directory", None, None, used, path)
+                continue
+            if not used:
+                record(_V_SKIP, "unknown format for this extension — pass "
+                       "params.format", None, None, "", path)
+                continue
+            try:
+                size = os.path.getsize(path)
+                if max_mb > 0 and size > max_mb * 1024 * 1024:
+                    record(_V_SKIP, f"{_kb_human(size / 1024)} exceeds "
+                           f"max_mb={max_mb}", None, None, used, path)
+                    continue
+                with open(path, "rb") as fh:
+                    data = fh.read()
+            except OSError as exc:
+                record(_V_FAIL, f"cannot read: {exc.strerror or exc}",
+                       None, None, used, path)
+                continue
+            record(*_validate_bytes(data, used, path), used, path)
+
+    summary = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
+    if counts[_V_FAIL]:
+        verdict = "**FAILED**"
+    elif strict and (counts[_V_LIMITED] or counts[_V_SKIP]):
+        verdict = "**NOT VERIFIED (strict)**"
+    else:
+        verdict = "**PASSED**"
+    head = f"## validate — {fmt}" if fmt else "## validate"
+    return (head + "\n\n"
+            + _md_fence(_fmt_table(["status", "format", "at", "target",
+                                    "detail"], rows))
+            + f"\n\n{verdict} — {summary}.")
+
+
+def h_json(p: dict) -> str:
+    return h_validate(p, "json")
+
+
+def h_python(p: dict) -> str:
+    return h_validate(p, "python")
+
+
+def h_yaml(p: dict) -> str:
+    return h_validate(p, "yaml")
+
+
+def h_toml(p: dict) -> str:
+    return h_validate(p, "toml")
+
+
+def h_xml(p: dict) -> str:
+    return h_validate(p, "xml")
+
+
+def h_ini(p: dict) -> str:
+    return h_validate(p, "ini")
+
+
+def h_csv(p: dict) -> str:
+    return h_validate(p, "csv")
+
+
+def h_tsv(p: dict) -> str:
+    return h_validate(p, "tsv")
+
+
+def h_plist(p: dict) -> str:
+    return h_validate(p, "plist")
+
+
 # canonical -> (handler, one-line description)
 HANDLERS: Dict[str, Tuple[Any, str]] = {
     "processes":   (h_processes, "List processes (params: filter, user, sort=cpu|mem|pid, limit)"),
@@ -990,6 +1435,16 @@ HANDLERS: Dict[str, Tuple[Any, str]] = {
     "hash":        (h_hash, "File digest (params: path [req], algo=sha256|sha512|sha1|md5|blake2b, expect, max_mb)"),
     "sha256":      (h_sha256, "SHA-256 of a file or files (params: path [req], expect)"),
     "md5":         (h_md5, "MD5 of a file or files (params: path [req], expect)"),
+    "validate":    (h_validate, "Syntax/format validation, format auto-detected from the extension (params: path | paths | content+format; format, strict, max_mb)"),
+    "json":        (h_json, "Validate JSON (params: path | paths | content)"),
+    "python":      (h_python, "Validate Python syntax via in-memory compile() — stronger than ast.parse, writes no .pyc (params: path | paths | content)"),
+    "yaml":        (h_yaml, "Validate YAML, all documents — PyYAML if installed, else a LIMITED stdlib pre-check (params: path | paths | content)"),
+    "toml":        (h_toml, "Validate TOML — needs tomllib (3.11+) or tomli, else SKIP (params: path | paths | content)"),
+    "xml":         (h_xml, "Validate XML well-formedness, entity declarations refused (XXE guard) (params: path | paths | content)"),
+    "ini":         (h_ini, "Validate INI/.cfg, duplicate sections/keys rejected (params: path | paths | content)"),
+    "csv":         (h_csv, "Validate CSV + column-count consistency (params: path | paths | content)"),
+    "tsv":         (h_tsv, "Validate TSV + column-count consistency (params: path | paths | content)"),
+    "plist":       (h_plist, "Validate binary or XML plist (params: path | paths | content)"),
 }
 
 # alias -> canonical
@@ -1016,6 +1471,11 @@ ALIASES = {
     "checksum": "hash", "digest": "hash",
     "sha256sum": "sha256", "shasum": "sha256", "sha": "sha256",
     "md5sum": "md5",
+    "lint": "validate", "check": "validate", "verify": "validate",
+    "syntax": "validate", "parse": "validate", "wellformed": "validate",
+    "py": "python", "ast": "python", "py_compile": "python",
+    "pycompile": "python", "python3": "python",
+    "yml": "yaml", "jsonlint": "json", "xmllint": "xml", "plutil": "plist",
 }
 
 
@@ -1030,6 +1490,12 @@ def _status_text(project_root: Optional[str]) -> str:
             "launchctl", "systemctl"]
     avail = ", ".join(f"{b}{'' if _have(b) else '✗'}" for b in bins)
     lines.append(f"Underlying binaries (✗ = missing): {avail}\n")
+    has_toml = _mod_present("tomllib") or _mod_present("tomli")
+    lines.append(
+        "Optional validation parsers (✗ = missing, that format degrades to "
+        f"LIMITED/SKIP): PyYAML{'' if _mod_present('yaml') else '✗'}, "
+        f"tomllib/tomli{'' if has_toml else '✗'}. Everything else "
+        "(json/python/xml/ini/csv/tsv/plist) is stdlib.\n")
     lines.append("Functions (all READ-ONLY):\n")
     for name, (_, desc) in HANDLERS.items():
         al = [a for a, c in ALIASES.items() if c == name]
@@ -1085,12 +1551,17 @@ INSPECT_CALL_TOOL = {
     "description": (
         "Read-only, non-invasive system inspection: processes, open files, "
         "sockets, memory, disk, host, file metadata, file digests, network topology, "
-        "services, toolchain versions, environment. PREFER THIS over Bash for `ps`, `lsof`, "
+        "services, toolchain versions, environment — plus SYNTAX/FORMAT VALIDATION "
+        "of json, python, yaml, toml, xml, ini, csv, tsv and plist. "
+        "PREFER THIS over Bash for `ps`, `lsof`, "
         "`netstat`, `ss`, `df`, `du`, `free`, `env`, `stat`, `ifconfig`/`ip addr`, "
         "`pstree`, `ulimit`, `launchctl`/`systemctl`, `<tool> --version` as the "
         "PRIMARY command — it is pre-approved (no permission prompt) and returns "
         "structured Markdown. (Piping a stream into grep/etc. in Bash is still "
         "fine — that is not what this replaces.)\n\n"
+        "Also replaces the validate-by-shell one-liners (`ast.parse`, "
+        "`py_compile`, `json.tool`, `jq .`, `xmllint --noout`): reports "
+        "line:col and writes nothing.\n\n"
         "Single-tool dispatcher: pass `function` + `params` (or `f` + `p`). "
         "Called without `function` → server status + full function list.\n\n"
         "Functions (aliases in parens):\n"
@@ -1118,7 +1589,12 @@ INSPECT_CALL_TOOL = {
         "  sha256 (shasum)       params: path [required] (or a list), expect\n"
         "  md5 (md5sum)          params: path [required] (or a list), expect\n"
         "  hash (checksum)       params: path [required], algo=sha256|sha512|sha1|"
-        "md5|blake2b, expect, max_mb\n\n"
+        "md5|blake2b, expect, max_mb\n"
+        "  validate (lint/check) params: path | paths (list) | content+format; "
+        "format (else from the extension), strict, max_mb (0 = no cap)\n"
+        "  json python yaml toml xml ini csv tsv plist — each is also its own "
+        "function, same params, format pinned; aliases py/ast/yml/xmllint/plutil. "
+        "Per-format detail: the p:mcp-inspect skill.\n\n"
         "Everything is READ-ONLY (no mutation, shell=False, no injection surface). "
         "Example: function=\"processes\", params={\"filter\":\"node\",\"sort\":\"mem\"}"
     ),
