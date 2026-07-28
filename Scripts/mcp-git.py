@@ -298,11 +298,49 @@ DEFAULT_MAX_CHARS = 100_000
 # Keys in params that are handled specially (not forwarded as git CLI flags)
 _META_KEYS = {"args", "cwd", "timeout", "max_answer_chars"}
 
-# Keys that map to positional arguments (appended after flags, not as --key=val)
-_POSITIONAL_KEYS = {
-    "revisions", "revision", "ref", "object", "pathspec",
-    "paths", "path", "commit", "commits", "tree_ish", "treeish",
+# Keys naming a revision or revision RANGE. These are positional args in git
+# (`git log A..B`), so they need an entry here — otherwise the generic conversion
+# below turns a caller-invented name like `range` into a bogus `--range=A..B`
+# flag and git dies with "unrecognized argument". All of these address the same
+# slot; `range` is the canonical spelling, the rest are aliases so callers do not
+# have to guess.
+_REVISION_KEYS = {
+    "range", "revision_range", "rev_range", "rev", "revs",
+    "revision", "revisions", "ref", "commit", "commits",
+    "object", "tree_ish", "treeish",
 }
+
+# Keys naming file paths / pathspecs (also positional)
+_PATH_KEYS = {"pathspec", "paths", "path"}
+
+# Keys that map to positional arguments (appended after flags, not as --key=val)
+_POSITIONAL_KEYS = _REVISION_KEYS | _PATH_KEYS
+
+
+def _check_revision(value: str, key: str) -> None:
+    """Reject a revision value that git's option parser would read as a flag.
+
+    Revision values reach git as separate argv elements (subprocess list form, no
+    shell), so the only smuggling vector is git's own parser — and that treats an
+    argument as an option only when it starts with '-'. Refusing a leading dash
+    therefore closes the hole completely, including bundled short options
+    (`-wt` == `-w -t`, the hash-object lesson) and `--long=value` forms that an
+    exact-match blocklist would miss. Nothing else needs restricting: legitimate
+    revisions contain spaces and colons (`HEAD@{2 days ago}`, `:/fix typo`) and
+    may start with '^' (`^master`), none of which git can read as an option.
+    A `--` separator is deliberately NOT used: git reads everything after `--`
+    as a path, which would break every revision.
+    """
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError(f"params.{key} must not be empty.")
+    if stripped.startswith("-"):
+        raise ValueError(
+            f"params.{key} must be a revision or range (e.g. 'master..HEAD'), "
+            f"not an option: {value!r}. Values starting with '-' are refused "
+            "because git would parse them as flags (and short options bundle: "
+            "-wt == -w -t). Pass flags as named params or via params.args."
+        )
 
 
 def _semantic_params_to_args(params: dict) -> List[str]:
@@ -311,6 +349,12 @@ def _semantic_params_to_args(params: dict) -> List[str]:
     Models sometimes pass named parameters (e.g. max_count=5, pretty="%h %s")
     instead of raw args lists.  This converts them to CLI flags so both
     calling styles work.
+
+    Keys in _POSITIONAL_KEYS become positional args after the flags (revisions
+    and pathspecs); revision values are checked by _check_revision. Every other
+    key becomes a `--key[=value]` flag, so an unknown key reaches git verbatim.
+
+    Raises ValueError on a rejected revision value.
     """
     flags: List[str] = []
     positionals: List[str] = []
@@ -319,10 +363,12 @@ def _semantic_params_to_args(params: dict) -> List[str]:
         if key in _META_KEYS:
             continue
         if key in _POSITIONAL_KEYS:
-            if isinstance(value, list):
-                positionals.extend(str(v) for v in value)
-            else:
-                positionals.append(str(value))
+            values = value if isinstance(value, list) else [value]
+            for v in values:
+                v = str(v)
+                if key in _REVISION_KEYS:
+                    _check_revision(v, key)
+                positionals.append(v)
             continue
 
         cli_key = key.replace("_", "-")
@@ -393,7 +439,10 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
             "Use the Bash tool for mutating operations."
         )}
 
-    semantic_args = _semantic_params_to_args(params)
+    try:
+        semantic_args = _semantic_params_to_args(params)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     args = params.get("args", [])
     if args is None:
@@ -535,7 +584,21 @@ GIT_CALL_TOOL = {
         "      unless the user explicitly requests it.\n\n"
         "Params: args (CLI args list), cwd (sub-repo, default project root), "
         "max_answer_chars (default 100000), timeout (default 60s). Markdown output.\n\n"
-        "Example: function=\"log\", params={\"args\":[\"--oneline\",\"-20\"]}\n"
+        "NAMED PARAMS (alternative to args):\n"
+        "  - booleans -> flags: stat=true gives --stat\n"
+        "  - strings/numbers -> --key=value: max_count=10 gives --max-count=10\n"
+        "  - `_` becomes `-` in the flag name\n"
+        "  - A revision or revision RANGE is POSITIONAL, so it needs a dedicated\n"
+        "    key: `range` (canonical). Aliases: revision_range, rev_range, rev,\n"
+        "    revs, revision, revisions, ref, commit, commits, object, tree_ish.\n"
+        "    Values starting with '-' are refused (no flag smuggling).\n"
+        "  - File paths: `path` / `paths` / `pathspec`.\n"
+        "  - ANY OTHER key is forwarded verbatim as `--key[=value]`, so an\n"
+        "    invented or misspelled param name reaches git as an unknown flag.\n\n"
+        "Examples:\n"
+        "  function=\"log\", params={\"args\":[\"--oneline\",\"-20\"]}\n"
+        "  function=\"log\", params={\"range\":\"master..HEAD\",\"stat\":true}\n"
+        "    -> git log --stat master..HEAD   (diffstat-annotated range log)\n"
         "Call without 'function' for full allowlist."
     ),
     "inputSchema": {
