@@ -3,7 +3,11 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""mcp-postgres — Pure-stdlib PostgreSQL MCP server.
+"""mcp-psql — Pure-stdlib PostgreSQL MCP server (this file: mcp-postgres.py).
+
+Registered with Claude Code as `mcp-psql`, so the model-facing tool name is
+`mcp__mcp-psql__postgres_call`. The string mcp-postgres.py is only ever this
+module's filename, never the server's identity.
 
 Single-tool dispatcher pattern: exposes one MCP tool (postgres_call) that routes
 to internal handler functions via the 'function' parameter.

@@ -1,23 +1,37 @@
 #!/usr/bin/env python3
 """Single entry point for the prompt-heaven test suites.
 
-Registered suites:
+Registered suites (see SUITES below -- that table is the only place a case
+count is written down, and every written-down count is checked against the
+run):
+
   inspect_validate   tests/test_inspect_validate.py   mcp-inspect VALIDATION
-                                                      family, 94 cases (A-N)
+                                                      family (A-N)
   mcp_first_guard    tests/test_mcp_first_guard.py    ClaudeCode/hooks/
                                                       mcp-first-guard.py PreToolUse
-                                                      Bash guard, 165 cases (A-J)
+                                                      Bash guard (A-J)
   purity_lsp         tests/test_purity_lsp.py         purity_call semantic
                                                       navigation vs the retired
                                                       mcp-clangd / mcp-luals
                                                       servers (A-I)
-  smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing invariants
-                                                      across 16 MCP servers
+  mcp_git_params     tests/test_mcp_git_params.py     mcp-git named params ->
+                                                      git argv, fully offline
+                                                      (A-I)
+  name_existence     tests/test_name_existence.py     every MCP name the prompt
+                                                      corpus and the servers'
+                                                      own model-facing text
+                                                      prescribe must exist in
+                                                      the live inventory (A-H)
+  smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
+                                                      invariants across the
+                                                      whole server fleet
 
-`purity_lsp` drives live clangd / lua-language-server children, so it is the
-slow one (~2.5 min): purity blocks the first semantic call on a full backend
-handshake whose indexing wait times out at 60s in a repo with no
-compile_commands.json.  It SKIPs cleanly when those binaries are absent.
+`purity_lsp` is the slow one (~45 s): it drives live clangd /
+lua-language-server children through a real handshake.  It SKIPs cleanly when
+those binaries are absent.  (It used to take ~2.5 min because each backend's
+init blocked on an indexing-progress event that a project with no
+compile_commands.json never sends, so the 60 s deadline could only expire.
+That wait is now gated on indexing actually announcing itself.)
 
 `smoke` is deliberately left standalone -- its path is referenced from ~15
 places in the repo docs, so it is invoked here as a subprocess and only its
@@ -33,23 +47,35 @@ Usage:
   python3 tests/run.py --keep                # keep generated fixture dirs
   python3 tests/run.py --brief               # terse per-case lines
 
-Exit code 0 iff every selected suite passed.  Works from ANY working directory:
-paths are derived from __file__, never from os.getcwd().
+Exit code 0 iff every selected suite passed AND no declared case count drifted.
+Works from ANY working directory: paths are derived from __file__, never from
+os.getcwd().
 
 Adding a suite takes three lines: write tests/test_<x>.py exposing
-`run(opts) -> Suite`, then add one SUITES entry naming it.
+`run(opts) -> Suite`, then add one SUITES entry naming it and declaring its
+case count (or None if the count is data-derived rather than a fixed table).
 """
 
 import os
 import sys
 
+# Must precede every repo import: several suites assert that a run leaves no
+# .pyc behind, and importing a repo module is exactly how one would appear.
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _harness as H  # noqa: E402
 
 SMOKE = H.repo_path("Scripts", "_mcp_smoke_test.py")
-SMOKE_SERVERS = 16
+
+# The fleet size is DERIVED from the smoke harness's own launch table, never
+# typed here -- a hand-maintained copy of this number was wrong within a day of
+# being written (it said 16 after the table dropped to 15).  The module is
+# import-safe: SERVERS is module-level and main() is behind an __main__ guard.
+sys.path.insert(0, H.repo_path("Scripts"))
+import _mcp_smoke_test as _smoke_mod  # noqa: E402
+
+SMOKE_SERVERS = len(_smoke_mod.SERVERS)
 
 
 def run_python_suite(module_name, opts):
@@ -70,6 +96,14 @@ def run_purity_lsp(opts):
     return run_python_suite("test_purity_lsp", opts)
 
 
+def run_mcp_git_params(opts):
+    return run_python_suite("test_mcp_git_params", opts)
+
+
+def run_name_existence(opts):
+    return run_python_suite("test_name_existence", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -86,19 +120,37 @@ def run_smoke(opts):
                          output=out, note="rc=%d" % rc)
 
 
-# name -> (runner, one-line description)
+# name -> (runner, one-line description, declared case count)
+#
+# The count is the SINGLE place this number is written down: the banner prints
+# it, and main() asserts it against what the suite actually reported.  A count
+# that lives in prose and is checked by nobody is a lie waiting to happen --
+# this repo shipped six of them (a commit message claiming "119 cases" for a
+# 121-case suite, an unpushed-commit total, two "10 canonical" comments, a
+# "13 luals_* names" blurb, and a hardcoded fleet size of 16).
+#
+# None means the count is DATA-DERIVED, not a fixed case table, so pinning it
+# would fail on every legitimate change to the thing being measured:
+#   - smoke        reports servers, and that number is derived above
+#   - name_existence generates one case per name found in the corpus, so it
+#     moves whenever the corpus or the server inventory moves -- which is the
+#     entire point of the suite
 SUITES = [
     ("inspect_validate", run_inspect_validate,
-     "mcp-inspect VALIDATION family (94 cases)"),
+     "mcp-inspect VALIDATION family", 94),
     ("mcp_first_guard", run_mcp_first_guard,
-     "mcp-first-guard PreToolUse Bash hook (165 cases)"),
+     "mcp-first-guard PreToolUse Bash hook", 227),
     ("purity_lsp", run_purity_lsp,
-     "purity_call semantic navigation: clangd + luals absorption"),
+     "purity_call semantic navigation: clangd + luals absorption", 139),
+    ("mcp_git_params", run_mcp_git_params,
+     "mcp-git named params -> git argv, offline", 166),
+    ("name_existence", run_name_existence,
+     "corpus + server text <-> live MCP inventory name existence", None),
     ("smoke", run_smoke,
-     "MCP JSON-RPC plumbing invariants (16 servers)"),
+     "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]
 
-SUITE_NAMES = [name for name, _runner, _desc in SUITES]
+SUITE_NAMES = [name for name, _runner, _desc, _count in SUITES]
 
 
 def usage():
@@ -122,18 +174,23 @@ def main(argv=None):
     selected = [s for s in SUITES if not opts.names or s[0] in opts.names]
 
     reports = []
-    for name, runner, desc in selected:
+    drift = []
+    for name, runner, desc, declared in selected:
+        label = desc if declared is None else "%s (%d cases)" % (desc, declared)
         print("\n" + H.BANNER)
-        print("SUITE %s -- %s" % (name, desc))
+        print("SUITE %s -- %s" % (name, label))
         print(H.BANNER)
-        reports.append(runner(opts))
+        report = runner(opts)
+        reports.append(report)
+        if declared is not None and report.count != declared:
+            drift.append((name, declared, report.count))
 
     total_cases = sum(r.count for r in reports if r.unit == "cases")
     total_pass = sum(r.passed for r in reports if r.unit == "cases")
     total_fail = sum(r.failed for r in reports if r.unit == "cases")
     total_info = sum(r.info for r in reports if r.unit == "cases")
     total_servers = sum(r.count for r in reports if r.unit == "servers")
-    ok = all(r.ok for r in reports)
+    ok = all(r.ok for r in reports) and not drift
 
     print("\n" + H.BANNER)
     print("AGGREGATE")
@@ -149,9 +206,17 @@ def main(argv=None):
     if total_cases:
         print("  cases: %d pass, %d fail, %d info" % (total_pass, total_fail,
                                                       total_info))
+    if drift:
+        print("\nCASE COUNT DRIFT -- a declared count no longer matches the run:")
+        for name, declared, actual in drift:
+            print("  %-18s declared %d, ran %d" % (name, declared, actual))
+        print("  Fix the number in the SUITES table in this file (it is the")
+        print("  only place it is written down), then re-run.  This is a hard")
+        print("  failure on purpose: a stale count gets quoted as fact.")
     if not ok:
-        print("\nFAILING SUITES: %s"
-              % ", ".join(r.name for r in reports if not r.ok))
+        failing = [r.name for r in reports if not r.ok]
+        if failing:
+            print("\nFAILING SUITES: %s" % ", ".join(failing))
     return 0 if ok else 1
 
 
