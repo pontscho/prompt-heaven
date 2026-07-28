@@ -42,8 +42,8 @@ Before you read, understand, or edit a code reference, navigate it with the lang
 
 | Language | Tool | Use for |
 |---|---|---|
-| C / C++ / CUDA | `purity_call` (clangd-backed) | `find_definition`, `find_references`, `find_implementations`, `type_at`, `outline`, `symbol`, `symbol_context`, `diagnostics` |
-| Lua | `purity_call` (luals-backed) | `luals_find_definition[_at]`, `luals_find_references`, `luals_hover`, `luals_diagnostics`, `luals_document_outline`, `luals_workspace_symbols` |
+| C / C++ / CUDA | `purity_call` (clangd-backed) | `find_definition`, `find_type_definition`, `find_references`, `find_implementations`, `type_at`, `outline`, `symbol`, `symbol_context`, `diagnostics` |
+| Lua | `purity_call` (luals-backed) | `luals_find_definition[_at]`, `luals_find_type_definition_at`, `luals_find_references`, `luals_hover`, `luals_diagnostics`, `luals_document_outline`, `luals_workspace_symbols` |
 | Any file (search / find / read / edit) | `purity_call` | `search_for_pattern`, `find_file`, `read_file`, `list_dir`, `replace_content`, `replace_lines`, `insert_at_line`, `create_text_file` |
 
 - "Where is this defined / who calls it?" → `find_definition` / `find_references` (NEVER a text search).

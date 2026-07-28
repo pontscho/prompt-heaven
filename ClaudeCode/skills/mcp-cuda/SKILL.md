@@ -8,7 +8,8 @@ description: >
   definition, reference, type, or diagnostic, I will consider it a failure.
 
   MANDATORY — before you Read, Edit, or Write any `.cu` or `.cuh` file, use
-  `purity_call` for ALL symbol navigation: find_definition, find_references,
+  `purity_call` for ALL symbol navigation: find_definition, find_type_definition,
+  find_references,
   find_implementations, type_at, outline, symbol, symbol_context, symbol_change_impact,
   inlay_hints, diagnostics. Using grep, find, sed, awk, ctags, cscope, or any
   text-matching hack for CUDA code is a violation. The standalone `mcp-cuda` server is
@@ -86,6 +87,7 @@ mcp__mcp-purity__purity_call(function="find_definition", params={"symbol":"forwa
 | Function | Purpose | Key params |
 |-|-|-|
 | `find_definition` | Definition of a symbol/kernel | `symbol` **or** `relative_path`+`line`+`character` |
+| `find_type_definition` | Where the TYPE at a position is declared | `relative_path`+`line`+`character` (position only) |
 | `find_references` | All references to a symbol | `symbol` **or** position; `max_results` |
 | `find_implementations` | Implementations at a position | `relative_path`+`line`+`character` |
 | `type_at` | Type / hover at a position (incl. `auto`) | `relative_path`+`line`+`character` |
@@ -112,6 +114,7 @@ Canonical mapping:
 | Old `cuda_*` | `purity_call` |
 |-|-|
 | `cuda_find_definition`, `cuda_find_definition_at` | `find_definition` |
+| `cuda_find_type_definition_at` | `find_type_definition` |
 | `cuda_find_references`, `cuda_find_references_at` | `find_references` |
 | `cuda_find_implementations_at` | `find_implementations` |
 | `cuda_hover`, `cuda_deduced_type_at` | `type_at` |

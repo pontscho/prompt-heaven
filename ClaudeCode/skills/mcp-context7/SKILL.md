@@ -26,17 +26,17 @@ All Context7 operations go through `context7_call(function=..., params={...})`. 
 ## How to call any Context7 function
 
 ```
-mcp__context7__context7_call(function="<function_name>",params={...parameters...})
+mcp__mcp-context7__context7_call(function="<function_name>",params={...parameters...})
 ```
 
 **Example — resolve a library ID:**
 ```
-mcp__context7__context7_call(function="context7_resolve_library_id",params={"query":"react hooks","library_name":"react"})
+mcp__mcp-context7__context7_call(function="context7_resolve_library_id",params={"query":"react hooks","library_name":"react"})
 ```
 
 **Example — fetch documentation:**
 ```
-mcp__context7__context7_call(function="context7_query_docs",params={"library_id":"/websites/react_dev","query":"useEffect cleanup"})
+mcp__mcp-context7__context7_call(function="context7_query_docs",params={"library_id":"/websites/react_dev","query":"useEffect cleanup"})
 ```
 
 When the server is unavailable, `context7_call` (without `function`) will fail. Check this first.

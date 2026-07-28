@@ -17,7 +17,7 @@ description: >
   context.
   One tool: `purity_call`. The standalone `mcp-luals` server is NO LONGER REGISTERED,
   so the `luals_call` tool does not exist; its functionality was folded into
-  `purity_call`, which accepts all 13 `luals_*` function names plus the canonical
+  `purity_call`, which accepts all 14 `luals_*` function names plus the canonical
   short names. All analysis calls are freely batchable.
 
   Tool-name mapping for Lua work — these are NOT optional substitutions:
@@ -78,9 +78,9 @@ results report positions as `path:line:character`, also 1-based.
 
 - the `luals_*` legacy names used throughout this page, and
 - the canonical short names shared with the C/C++/CUDA backends
-  (`find_definition`, `find_references`, `find_implementations`, `type_at`,
-  `outline`, `symbol`, `symbol_context`, `symbol_change_impact`, `inlay_hints`,
-  `diagnostics`).
+  (`find_definition`, `find_type_definition`, `find_references`,
+  `find_implementations`, `type_at`, `outline`, `symbol`, `symbol_context`,
+  `symbol_change_impact`, `inlay_hints`, `diagnostics`).
 
 The backend is chosen from the file extension, so the canonical short names give you
 Lua results for `.lua` paths. Prefer the short names in mixed-language work; the
@@ -100,14 +100,6 @@ The lua-language-server backend initialises **lazily** on the first semantic cal
 the first call can take a while as it indexes. `luals_init` is accepted but is a
 **no-op** — you never need to call it. To force a restart/reindex, use
 `restart_lsp`.
-
-### Not available
-
-`luals_find_type_definition_at` (the old standalone server's
-`textDocument/typeDefinition` wrapper) has **no `purity_call` equivalent** — there is
-no type-definition function in the unified server for any language. Workaround: use
-`luals_hover` to read the annotated type name, then `luals_find_definition` with that
-name to jump to the `---@class` declaration.
 
 ## Navigation
 
@@ -145,6 +137,27 @@ Find definition at a specific file position.
 `luals_find_definition` and `luals_find_definition_at` share one handler: pass
 `symbol_name` for name-based lookup, or `relative_path`+`line`+`character` for
 position-based. Either name accepts either param shape.
+
+### `luals_find_type_definition_at`
+
+Find where the **type** of the value at a position is declared
+(`textDocument/typeDefinition`) — one hop past `luals_find_definition`. **Position
+only**: there is no by-name spelling.
+
+```json
+{"function":"luals_find_type_definition_at","params":{"relative_path":"src/foo.lua","line":42,"character":10,"context_lines":5}}
+```
+
+|Param|Required|Description|
+|-|-|-|
+|`relative_path`|yes|File path|
+|`line`|yes|Line number (1-based)|
+|`character`|yes|Character offset (1-based)|
+|`context_lines`|no|Lines of context (default: 5)|
+
+lua-language-server lands on the annotated `function ...` declaration line at
+character 1 — not the identifier column `luals_find_definition_at` reports. Returns an
+error rather than a guess when the value carries no resolvable type.
 
 ### `luals_find_implementations_at`
 
@@ -309,6 +322,7 @@ Both columns are live keys on `purity_call`; the right column is preferred.
 | `luals_*` name | Canonical `purity_call` name |
 |-|-|
 | `luals_find_definition`, `luals_find_definition_at` | `find_definition` |
+| `luals_find_type_definition_at` | `find_type_definition` |
 | `luals_find_references`, `luals_find_references_at` | `find_references` |
 | `luals_find_implementations_at` | `find_implementations` |
 | `luals_hover` | `type_at` |
@@ -319,7 +333,6 @@ Both columns are live keys on `purity_call`; the right column is preferred.
 | `luals_inlay_hints` | `inlay_hints` |
 | `luals_diagnostics` | `diagnostics` |
 | `luals_init` | (no-op — backend inits lazily; use `restart_lsp` to reindex) |
-| `luals_find_type_definition_at` | **none — see "Not available" above** |
 
 The `_at` variants fold onto their non-`_at` counterpart; position vs name is detected
 from the params.
@@ -366,7 +379,13 @@ purity_call(function="luals_diagnostics", params={"relative_path":"src/foo.lua"}
 purity_call(function="luals_hover", params={"relative_path":"src/foo.lua","line":42,"character":10})
 ```
 
-**Navigate to a type declaration from a variable** (no direct function — two steps):
+**Navigate to a type declaration from a variable:**
+```
+purity_call(function="luals_find_type_definition_at", params={"relative_path":"src/foo.lua","line":42,"character":10})
+```
+
+*Fallback only* — if that errors because the value has no resolvable type, read the
+inferred type name off hover and look it up by name:
 ```
 purity_call(function="luals_hover", params={"relative_path":"src/foo.lua","line":42,"character":10})
 purity_call(function="luals_find_definition", params={"symbol_name":"<type name from hover>"})

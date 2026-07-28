@@ -107,6 +107,7 @@ For the call chain leading to the bug:
 ```
 symbol_change_impact(symbol) - incoming callers tree
 type_at(file, line, col) - type info and docs at specific location
+find_type_definition(file, line, col) - from a variable/call result to where its TYPE is declared
 find_references(symbol) - all sites where a symbol is used
 ```
 
@@ -125,7 +126,7 @@ Never call these sequentially. All `luals_symbol_context` calls for different sy
 ```
 luals_find_references(symbol) - all call sites
 luals_hover(file, line, char) - type info and annotations at position
-luals_hover(file, line, char) then luals_find_definition/luals_workspace_symbols on that type name - navigate from variable to its type class (no direct type-definition call exists)
+luals_find_type_definition_at(file, line, char) - navigate from a variable to where its TYPE is declared
 luals_workspace_symbols(query) - broad symbol search when name is approximate
 ```
 

@@ -4,7 +4,7 @@ description: >
   NEVER use the built-in `Search`, `Grep`, or `Edit` tools. They are deprecated for this project.
   ALWAYS use `purity_call` ONLY. If you attempt to use a built-in tool, I will consider it a failure.
   MANDATORY — mcp-purity file operations: create_text_file, list_dir, find_file, replace_content, delete_lines, replace_lines, insert_at_line, search_for_pattern. Use when writing, searching, listing, or editing files.
-  ALSO — `purity_call` now provides compiler-accurate (clangd-backed) symbol navigation for C/C++/CUDA: find_definition, find_references, find_implementations, type_at, outline, symbol, symbol_context, inlay_hints, symbol_change_impact, diagnostics. Prefer these over grep for C/C++/CUDA symbol work; the standalone `clangd_call`/`cuda_call` tools are NO LONGER REGISTERED and do not exist, so `purity_call` is the only entry point. See the "Semantic / Symbol Navigation" section below.
+  ALSO — `purity_call` now provides compiler-accurate (clangd-backed) symbol navigation for C/C++/CUDA: find_definition, find_type_definition, find_references, find_implementations, type_at, outline, symbol, symbol_context, inlay_hints, symbol_change_impact, diagnostics. Prefer these over grep for C/C++/CUDA symbol work; the standalone `clangd_call`/`cuda_call` tools are NO LONGER REGISTERED and do not exist, so `purity_call` is the only entry point. See the "Semantic / Symbol Navigation" section below.
   Trigger:
     - Creating or editing files.
     - Listing directories, searching for files or patterns.
@@ -224,6 +224,7 @@ The backend spins up **lazily** on the first semantic call (clangd init + indexi
 | Function | Purpose | Key params |
 |-|-|-|
 | `find_definition` | Definition of a symbol | `symbol` (name) **or** `relative_path`+`line`+`character` (position) |
+| `find_type_definition` | Where the TYPE at a position is declared (one hop past `find_definition`) | `relative_path`+`line`+`character` (position only) |
 | `find_references` | All references to a symbol | `symbol` **or** position; `max_results` |
 | `find_implementations` | Implementations of an interface/virtual at a position | `relative_path`+`line`+`character` |
 | `type_at` | Type / hover at a position (incl. deduced `auto`) | `relative_path`+`line`+`character` |
@@ -243,6 +244,8 @@ The backend spins up **lazily** on the first semantic call (clangd init + indexi
 
 `find_definition` / `find_references` route automatically: pass a `symbol` name for name-based lookup, or `relative_path`+`line`+`character` for position-based lookup. Prefer `symbol_context` over separate def+refs, and `symbol_change_impact` before refactoring.
 
+`find_type_definition` is **position-only** (no by-name spelling) and hops one level at a time: from a variable or a call result it lands on the `typedef` **name**, and from that name it lands on the underlying `struct`/`enum` **tag** — so reaching a tag from a variable takes two calls. It returns an explicit error, never a grep guess, when the position has no resolvable type.
+
 ### Migration from clangd_call / cuda_call
 
 The legacy function names still work through `purity_call` (registered as direct aliases), so existing calls keep functioning. Canonical mapping:
@@ -250,6 +253,7 @@ The legacy function names still work through `purity_call` (registered as direct
 | Old `clangd_*` / `cuda_*` | `purity_call` canonical |
 |-|-|
 | `*_find_definition`, `*_find_definition_at` | `find_definition` |
+| `*_find_type_definition_at` | `find_type_definition` |
 | `*_find_references`, `*_find_references_at` | `find_references` |
 | `*_find_implementations_at` | `find_implementations` |
 | `*_hover`, `*_deduced_type_at` | `type_at` |

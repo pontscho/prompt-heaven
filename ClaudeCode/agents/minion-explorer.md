@@ -82,6 +82,7 @@ NEVER guess a file path twice and give up — fall back to a root-level `find_fi
 [BATCH any of these — lines/characters are 1-based]
   - symbol_context       → definition + all references in one call (preferred for unknown symbol)
   - find_definition      → where a symbol is defined (by name, or at exact file:line:char)
+  - find_type_definition → variable/expression → where its TYPE is declared (position only)
   - find_references      → all call sites
   - symbol               → fuzzy symbol search across project
   - outline              → full symbol list of a file
@@ -97,7 +98,7 @@ NEVER guess a file path twice and give up — fall back to a root-level `find_fi
   - luals_symbol_context        → definition + all references in one call (preferred for unknown symbol)
   - luals_find_definition       → where a symbol is defined (by name)
   - luals_find_definition_at    → definition at exact file:line:char (when you have a position)
-  - (variable → its type decl)  → `luals_hover` for the annotated type name, then `luals_find_definition`/`luals_workspace_symbols` on that name
+  - luals_find_type_definition_at → variable → where its TYPE is declared (position only; one hop past find_definition)
   - luals_find_implementations_at → find implementations at a position
   - luals_find_references       → all reference sites for a symbol
   - luals_workspace_symbols     → search symbols across workspace (substring match)
@@ -116,7 +117,7 @@ NEVER guess a file path twice and give up — fall back to a root-level `find_fi
 | Multiple symbol definitions | batch `find_definition` | batch `luals_find_definition` |
 | Multiple files diagnostics | batch `diagnostics` | batch `luals_diagnostics` |
 | Symbol at known file:line | `find_definition` | `luals_find_definition_at` |
-| Navigate to type declaration | — | `luals_hover` for the type name, then `luals_find_definition`/`luals_workspace_symbols` on it |
+| Navigate to type declaration | `find_type_definition` | `luals_find_type_definition_at` |
 | File symbol overview | `outline` | `luals_document_outline` |
 
 **Tool priority for symbol-related queries (C/C++/Lua):**

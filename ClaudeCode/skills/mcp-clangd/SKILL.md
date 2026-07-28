@@ -9,7 +9,8 @@ description: >
 
   MANDATORY — before you Read, Edit, or Write any `.c`, `.cpp`, `.cc`, `.cxx`, `.h`,
   `.hpp`, `.hh`, `.hxx`, `.m`, or `.mm` file, use `purity_call` for ALL symbol
-  navigation: find_definition, find_references, find_implementations, type_at, outline,
+  navigation: find_definition, find_type_definition, find_references,
+  find_implementations, type_at, outline,
   symbol, symbol_context, symbol_change_impact, inlay_hints, diagnostics. Using grep,
   find, sed, awk, ctags, cscope, or any text-matching hack for C/C++ code is a
   violation. The standalone `mcp-clangd` server is NO LONGER REGISTERED, so the
@@ -81,6 +82,7 @@ mcp__mcp-purity__purity_call(function="find_definition", params={"symbol":"my_fu
 | Function | Purpose | Key params |
 |-|-|-|
 | `find_definition` | Definition of a symbol | `symbol` **or** `relative_path`+`line`+`character` |
+| `find_type_definition` | Where the TYPE at a position is declared | `relative_path`+`line`+`character` (position only) |
 | `find_references` | All references to a symbol | `symbol` **or** position; `max_results` |
 | `find_implementations` | Implementations at a position | `relative_path`+`line`+`character` |
 | `type_at` | Type / hover at a position (incl. `auto`) | `relative_path`+`line`+`character` |
@@ -94,6 +96,8 @@ mcp__mcp-purity__purity_call(function="find_definition", params={"symbol":"my_fu
 - Lines/characters are **1-based**; paths resolve against `--project-root`.
 - `find_definition` / `find_references` auto-route: pass `symbol` for name-based
   lookup, or `relative_path`+`line`+`character` for position-based.
+- `find_type_definition` hops one level per call: a variable or call result lands on the
+  `typedef` **name**; that name lands on the underlying `struct`/`enum` **tag**.
 - The clangd backend inits **lazily** on the first semantic call (first call can take
   tens of seconds while clangd indexes; subsequent calls are fast).
 - Prefer `symbol_context` over separate def+refs; prefer `symbol_change_impact` before
@@ -108,6 +112,7 @@ Canonical mapping:
 | Old `clangd_*` | `purity_call` |
 |-|-|
 | `clangd_find_definition`, `clangd_find_definition_at` | `find_definition` |
+| `clangd_find_type_definition_at` | `find_type_definition` |
 | `clangd_find_references`, `clangd_find_references_at` | `find_references` |
 | `clangd_find_implementations_at` | `find_implementations` |
 | `clangd_hover`, `clangd_deduced_type_at` | `type_at` |
