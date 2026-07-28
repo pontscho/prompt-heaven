@@ -34,7 +34,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Per-server launch config: minimal args so argparse succeeds and the
 # initialize/ping/unknown path runs WITHOUT spawning heavy subprocess work.
 SERVERS = [
-    {"file": "mcp-compile.py",  "tool": "compile_call",  "args": ["--project-root", "/tmp"]},
     {"file": "mcp-forge.py",    "tool": "forge_call",    "args": ["--project-root", "/tmp"]},
     {"file": "mcp-git.py",      "tool": "git_call",      "args": ["--project-root", "/tmp"]},
     {"file": "mcp-purity.py",   "tool": "purity_call",   "args": ["--project-root", "/tmp"]},
@@ -142,7 +141,8 @@ def _purity_call(srv, call_id, function, params=None):
 
 # Canonical semantic functions the Phase-0 fold registers in purity_call.
 PURITY_SEMANTIC = [
-    "find_definition", "find_references", "find_implementations", "type_at",
+    "find_definition", "find_type_definition", "find_references",
+    "find_implementations", "type_at",
     "diagnostics", "outline", "symbol", "symbol_context", "inlay_hints",
     "symbol_change_impact",
 ]
@@ -157,14 +157,14 @@ def purity_semantic_checks(srv, checks):
     """
     cid = 100
 
-    # (a) all 10 canonical semantic names dispatch (no "Unknown function")
+    # (a) all 11 canonical semantic names dispatch (no "Unknown function")
     undispatched = []
     for fn in PURITY_SEMANTIC:
         text, _ = _purity_call(srv, cid, fn)
         cid += 1
         if "Unknown function" in text:
             undispatched.append(fn)
-    checks.append(check("purity: 10 semantic names dispatch",
+    checks.append(check("purity: 11 semantic names dispatch",
                         not undispatched, "undispatched=%r" % undispatched))
 
     # (b) legacy clangd_*/cuda_* names dispatch (direct HANDLERS keys [C1])

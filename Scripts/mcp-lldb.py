@@ -765,7 +765,7 @@ LISTED_TOOLS = [
             "Invoke the lldb-mcp skill for the full list of available functions and their parameters."
             "\n\n"
             "When NOT to use:\n"
-            "  - Ad-hoc shell → Bash. Build → mcp-compile. Code navigation → mcp-clangd.\n\n"
+            "  - Ad-hoc shell → Bash. Build → mcp-forge. Code navigation → mcp-purity.\n\n"
             "Prefer this OVER Bash(\"lldb ...\") — interactive LLDB in Bash doesn't work; "
             "this gives structured, scriptable access to all LLDB operations.\n\n"
             "IMPORTANT: Before first use, load the p:mcp-lldb skill for full API reference "

@@ -5,7 +5,7 @@
 > *plumbing* (PEP-723 header, logging, JSON-RPC framing, dispatch, catch-all) onto
 > the shapes below. The actual tool logic of each server stays unique.
 >
-> Source of truth: distilled from `mcp-compile.py` (sync canonical) plus the
+> Source of truth: distilled from `mcp-forge.py` (sync canonical) plus the
 > designed async variant for the LSP/subprocess ("A-family") servers.
 >
 > **When you touch a server's plumbing, diff it against this file.** When this file
@@ -19,12 +19,12 @@ Throughout this document, substitute per server:
 
 | Placeholder | Meaning | Example |
 |---|---|---|
-| `SERVER_NAME` | logger name + `serverInfo.name` | `mcp-compile`, `mcp-clangd` |
-| `TOOL_NAME` | the single tool exposed in `tools/list` | `compile_call`, `clangd_call` |
-| `DISPATCH(...)` | the server-specific tool handler call | `handle_compile_call(...)` |
+| `SERVER_NAME` | logger name + `serverInfo.name` | `mcp-forge`, `mcp-clangd` |
+| `TOOL_NAME` | the single tool exposed in `tools/list` | `forge_call`, `clangd_call` |
+| `DISPATCH(...)` | the server-specific tool handler call | `handle_forge_call(...)` |
 
 **Indentation is NOT unified.** Each file keeps its existing indentation —
-`mcp-compile.py` / `mcp-forge.py` / `mcp-webfetch.py` / `mcp-tshark.py` use **TABS**;
+`mcp-forge.py` / `mcp-webfetch.py` / `mcp-tshark.py` use **TABS**;
 all others use **4 spaces**. Match the file you are editing. Examples below use 4 spaces.
 
 **Dispatch sync/async is NOT unified.** Servers that `await` a subprocess (the

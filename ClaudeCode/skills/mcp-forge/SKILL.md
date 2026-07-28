@@ -59,8 +59,8 @@ operations is forbidden.
 | `Bash("make clean")` | `forge_call(function="clean", ...)` |
 
 **When NOT to use forge:**
-- `project-forge.yaml` does not exist in the project → use `mcp-compile` for
-  builds or Bash for one-off commands.
+- `project-forge.yaml` does not exist in the project → there is NO MCP build
+  surface; run the project's own build command directly with Bash.
 - Truly ad-hoc one-off shell commands unrelated to build/test → Bash is fine.
 - File search/edit → `mcp-purity`. Git → `mcp-git`. C/C++/CUDA and Lua symbol
   nav → `mcp-purity` (clangd/luals-backed).

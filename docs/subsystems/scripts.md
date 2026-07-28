@@ -40,7 +40,7 @@ The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 | `Scripts/mcp-context7.py` | mcp-context7 | Context7 documentation lookup |
 | `Scripts/mcp-wiki.py` | mcp-wiki | Wiki freshness / reindex / search / page reads over `docs/` |
 
-Other servers: `mcp-compile.py`, `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`,
+Other servers: `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`,
 `mcp-postgres.py`.
 
 ## Task utilities

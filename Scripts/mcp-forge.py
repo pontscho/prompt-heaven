@@ -779,7 +779,7 @@ def interpolate(text: str, ctx: Dict[str, str]) -> str:
 
 
 # ===========================================================================
-# Output filtering (ported from mcp-compile)
+# Output filtering (ported from the retired mcp-compile server)
 # ===========================================================================
 
 def _apply_grep(lines: List[str], pattern: str, context: int = 0,
@@ -1534,12 +1534,12 @@ FORGE_CALL_TOOL = {
 		"=======================================================================\n"
 		"When this tool is NOT applicable (the ONLY exceptions)\n"
 		"=======================================================================\n"
-		"  - Project has NO `project-forge.yaml` at the root -> use Bash (or\n"
-		"    mcp-compile if present) for build/test/clean.\n"
+		"  - Project has NO `project-forge.yaml` at the root -> there is no MCP\n"
+		"    build surface; use the project's own build command via Bash.\n"
 		"  - Operation is NOT build/test/clean (e.g. starting the app for\n"
 		"    manual smoke testing, one-off shell utilities) -> use Bash.\n"
 		"  - File search/edit -> mcp-purity. Git -> mcp-git.\n"
-		"    Code intel -> mcp-clangd/luals/cuda. Debug -> mcp-lldb.\n\n"
+		"    Code intel (C/C++/CUDA/Lua symbols) -> mcp-purity. Debug -> mcp-lldb.\n\n"
 		"=======================================================================\n"
 		"Why this tool exists (so you understand WHY the mandate is absolute)\n"
 		"=======================================================================\n"
