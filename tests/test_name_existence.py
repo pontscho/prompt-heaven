@@ -27,7 +27,7 @@ TWO CORPORA, because a prompt is a prompt wherever it is stored:
     `mcp-clangd`, `mcp-cuda`, `mcp-lua-lsp` and `mcp-webfetch` are retired /
     unregistered today, so their routing text is inert by definition.
 
-Two directions, deliberately asymmetric:
+Three directions, deliberately asymmetric:
 
   Direction 1  text -> inventory   (FAILS the suite)
       A function name / dispatcher tool / server the text PRESCRIBES must
@@ -40,6 +40,86 @@ Two directions, deliberately asymmetric:
       own server's description mentions is still one no agent was ever told
       about, so the per-server row states how many of its orphans at least
       appear in server-side description text.
+
+  Direction 3  agent GRANTS <-> agent PRESCRIPTIONS   (see D3 section below)
+      D1 catches "a prompt prescribes a tool that does not exist".  The MIRROR
+      failure is invisible to it: a tool that EXISTS, is prescribed to an agent,
+      and that agent was never GRANTED it.  Found live -- `p:minion-builder` was
+      told to call `inspect_call` and it is in no agent's `tools:` at all, so the
+      model silently substituted a documented workaround instead of erroring.
+
+-----------------------------------------------------------------------------
+Direction 3 -- the grant surface (group I)
+-----------------------------------------------------------------------------
+An agent definition makes TWO typed claims that must agree:
+  * frontmatter `tools:`  -- the tools the agent may call (the GRANT)
+  * its body              -- the tools the agent is told to call (the PRESCRIPTION)
+
+  3a  dead grant     (FAIL) a `tools:` entry naming an MCP tool the live
+                     inventory does not have.  Inert at runtime (verified: all
+                     15 agents load with a bogus entry present) but misleading,
+                     and a 21-file manual sweep already cleaned these once.
+  3b  missing grant  (FAIL / INFO) the body prescribes a tool that EXISTS, is
+                     REGISTERED, and is absent from this agent's `tools:`.
+  3c  ungranted      (INFO)  a registered dispatcher NO agent's `tools:` names
+                     -- the tools-level analogue of Direction 2.  This is the
+                     row that catches the live `inspect_call` defect.
+
+SCOPE: `ClaudeCode/agents/*.md` frontmatter, and nothing else.  NOT "every file
+with a `tools:` line": `tools:` also appears ~20 times inside fenced examples in
+p:writer-agent's SKILL.md, as an ARCHITECTURE.md template placeholder, and as
+prose in p:mcp-inspect ("tools: interpreters, package managers, compilers").
+None of those is a grant, and treating them as one would flood the group.
+
+IN SCOPE BY SHAPE, never by allowlist: only `mcp__<server>__<tool>`,
+`mcp__<server>` (whole-server grant) and the bare `<x>_call` dispatcher spelling
+are MCP names.  `Read` / `Write` / `Edit` / `Bash` / `Glob` / `Grep` / `Agent` /
+`Skill` / `TodoWrite` / `WebFetch` / `WebSearch` are BUILT-INS and are skipped
+because they do not match those shapes -- deliberately not because they are on a
+list, since a hardcoded built-in list rots the moment Claude Code ships a new
+tool and would then FAIL every agent that adopts it.
+
+3b reuses D1's EXTRACTION verbatim -- the same `Prescription` objects R1/R2/R3/R5
+already produced -- so there is no second, drifting scanner.  Only
+dispatcher-level evidence is used: R5's `<x>_call` mention, R1's `mcp__s__t`
+token, and the dispatcher hint R2/R3 attach to a call.  Frontmatter lines are
+excluded (that is R1/R6's surface).
+
+3b SEVERITY.  A false FAIL here would fire on every prompt edit, which is this
+repo's main activity, so a mention only FAILS when it is a first-person
+prescription BY this agent.  Four documented suppressors turn a candidate into
+INFO-with-evidence instead:
+  1. NOT GRANTABLE -> not a finding at all.  A tool whose server is absent from
+     ~/.claude.json cannot be granted, so naming it is a retirement note, not a
+     missing grant.  This is the same registration-driven reasoning R5 uses, and
+     it is what makes all 11 corpus mentions of `clangd_call` / `cuda_call` /
+     `luals_call` non-findings.  Asserted explicitly (see the retirement case in
+     group H), because a suppressor nobody tests is a hole.
+  2. `mcpServers:` DISAGREEMENT -> INFO.  When `tools:` omits the tool but
+     `mcpServers:` DOES declare its server, the two frontmatter keys disagree
+     and whether `mcpServers:` alone confers the grant is a PLATFORM-semantics
+     question this suite cannot answer.  Reporting it as a failure would assert
+     an answer.  (Live: p:minion-watson / `context7_call`.)
+  3. ILLUSTRATIVE context -> INFO.  `e.g.` / `for example` / `such as` / `etc.`
+     on the mention line.  "Most servers expose one `*_call` dispatcher (e.g.
+     `forge_call`, `gdc_call`, `lldb_call`)" is toolbelt-discovery advice, not a
+     prescription.  (Live: p:minion-builder / `gdc_call`, `lldb_call`.)
+  4. NEGATIVE / DELEGATION context -> INFO.  A retirement or "does not exist"
+     sentence within +/-1 line, or another agent named on the line (an
+     orchestrator may legitimately describe what its DELEGATE calls -- the
+     agent's OWN name never counts as delegation).
+
+NO DOUBLE-REPORTING of D1's surfaces: `mcpServers:` entries stay R6's (group D)
+and a body mention of a dispatcher NO server exposes stays R5's (group D) --
+group I drops it rather than restating it.  3a does report a dead
+`mcp__s__t` grant that R1 also sees, on purpose: "this agent may call X" and
+"call X" are different claims, and only the group-I row names the agent.
+
+D3 LIMITATIONS: a `tools:` typo that breaks the shape (`purity_calll`) is
+skipped, not flagged, because shape is what separates MCP names from built-ins.
+A body that prescribes only a FUNCTION name (`` `search_for_pattern` ``) without
+naming its dispatcher yields no 3b candidate.  A skill or CLAUDE.md prescription
+is never attributed to an agent -- which is exactly why 3c exists.
 
 -----------------------------------------------------------------------------
 Getting the inventory
@@ -159,7 +239,9 @@ Groups:
   G  D2 -- inventory functions no prompt-corpus file mentions (INFO)
   H  negative control -- one synthetic corpus fixture and one synthetic SERVER
      the detector MUST flag, plus precision bait it must NOT flag, plus proof
-     that the same fixture read as an unregistered server yields INFO not FAIL
+     that the same fixture read as an unregistered server yields INFO not FAIL,
+     plus nine synthetic AGENTS pinning every D3 verdict (FAIL / INFO / silence)
+  I  D3 -- agent `tools:` grants vs the tools the agent's own body prescribes
 
 Offline, read-only, ~8s.
 
@@ -232,6 +314,7 @@ GE = "E. D1 server text, REGISTERED server (live instruction -> FAIL)"
 GF = "F. D1 server text, unregistered server (inert -> INFO)"
 GG = "G. D2 unmentioned functions"
 GH = "H. negative control"
+GI = "I. D3 agent grants vs agent prescriptions"
 
 # Prescription origins.  The class decides the group and the severity ceiling.
 O_CORPUS = "corpus"            # ClaudeCode/**            -> FAIL
@@ -757,6 +840,166 @@ def _expand_backtick(token):
 
 
 # ---------------------------------------------------------------------------
+# Direction 3: the agent GRANT surface
+# ---------------------------------------------------------------------------
+
+# An agent definition is `<corpus>/agents/<name>.md`.  Scoped to that directory
+# on purpose -- see the D3 SCOPE paragraph in the module docstring: `tools:`
+# appears in fenced SKILL.md examples, in a template and in prose, and none of
+# those is a grant.  A parameter-free constant keeps the negative control able to
+# point the same collector at a synthetic fixture tree.
+AGENT_SUBDIR = "agents"
+
+# The only three MCP-name SHAPES that can appear in a `tools:` list.  Anything
+# else (Read, Write, Bash, Glob, TodoWrite, ...) is a built-in and out of scope.
+RX_GRANT_MCP_TOOL = re.compile(r"^mcp__(?P<server>[A-Za-z0-9][A-Za-z0-9.+-]*)__"
+                               r"(?P<tool>[A-Za-z_][A-Za-z0-9_]*)$")
+RX_GRANT_MCP_SERVER = re.compile(r"^mcp__(?P<server>[A-Za-z0-9][A-Za-z0-9.+-]*)$")
+RX_GRANT_DISPATCHER = re.compile(r"^[a-z][a-z0-9]*_call$")
+
+# A grant that covers everything: 3b can never fire against it.
+WILDCARD_GRANTS = {"*", "all", "any"}
+
+# 3b severity suppressors.  Each turns a missing-grant candidate into an
+# INFO-with-evidence row instead of a build break; every one of them exists
+# because the corpus already contains the shape it describes.
+RX_ILLUSTRATIVE = re.compile(r"\be\.?g\.|\bfor example\b|\bfor instance\b"
+                             r"|\bsuch as\b|\betc\b|\bexamples?:", re.I)
+RX_NEGATIVE = re.compile(r"\bretir\w*|\bunregistered\b|\bdoes ?n[o']?t exist\b"
+                         r"|\bnever exist\w*|\bno longer\b|\bremoved\b"
+                         r"|\bdeleted\b|\bdead\b|\bgone\b|\bdeprecat\w*"
+                         r"|\bobsolete\b|\babsorbed\b|\breplaced by\b"
+                         r"|\brenamed\b", re.I)
+RX_OTHER_AGENT = re.compile(r"\b(?:p:)?minion-[a-z0-9-]+|\bsubagent\b"
+                            r"|\bdelegat\w*|\bTask tool\b|\bgeneral-purpose\b",
+                            re.I)
+
+
+def _frontmatter_values(lines, key, fm_end):
+    """(key_present, [values]) for one frontmatter key.
+
+    Handles all three spellings this corpus uses:
+      `tools: A, B, C`          inline comma list
+      `mcpServers: [A, B]`      inline bracketed list
+      `mcpServers:` + `  - A`   block list
+    """
+    present, values = False, []
+    idx = 0
+    while idx < fm_end:
+        match = re.match(r"^%s\s*:(.*)$" % re.escape(key), lines[idx])
+        if not match:
+            idx += 1
+            continue
+        present = True
+        inline = match.group(1).strip().strip("[]").strip()
+        idx += 1
+        if inline:
+            values += [tok for tok in re.split(r"[,\s]+", inline) if tok]
+            continue
+        while idx < fm_end:
+            item = re.match(r"^\s*-\s*(.+?)\s*$", lines[idx])
+            if not item:
+                break
+            values.append(item.group(1))
+            idx += 1
+    return present, values
+
+
+class Agent:
+    """One agent definition: its GRANTS (frontmatter) and its BODY."""
+
+    def __init__(self, rel, name, lines, fm_end):
+        self.rel = rel
+        self.name = name
+        self.lines = lines
+        self.fm_end = fm_end          # 1-based line numbers <= fm_end are frontmatter
+        self.tools_present, self.tool_entries = _frontmatter_values(
+            lines, "tools", fm_end)
+        self.servers_present, self.server_entries = _frontmatter_values(
+            lines, "mcpServers", fm_end)
+        self.wildcard = any(e in WILDCARD_GRANTS for e in self.tool_entries)
+
+    @property
+    def unrestricted(self):
+        """No `tools:` key at all, or a wildcard -> every tool is available."""
+        return (not self.tools_present) or self.wildcard
+
+    def line(self, lineno):
+        """1-based source line, or "" when out of range."""
+        if 1 <= lineno <= len(self.lines):
+            return self.lines[lineno - 1]
+        return ""
+
+    def key_line(self, key):
+        """1-based line number of a frontmatter key (for file:line evidence)."""
+        for idx in range(self.fm_end):
+            if re.match(r"^%s\s*:" % re.escape(key), self.lines[idx]):
+                return idx + 1
+        return 1
+
+
+def collect_agents(root, repo_root=None):
+    """Every agent definition under `<root>/agents/`.
+
+    `root` is a parameter for the same reason `scan_corpus`'s is: the negative
+    control points this collector at a synthetic fixture tree.
+    """
+    repo_root = repo_root or H.REPO_ROOT
+    out = []
+    for dirpath, dirnames, filenames in os.walk(os.path.join(root,
+                                                             AGENT_SUBDIR)):
+        dirnames[:] = sorted(d for d in dirnames if d not in CORPUS_SKIP_DIRS)
+        for filename in sorted(filenames):
+            if not filename.endswith(".md"):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    lines = handle.read().splitlines()
+            except (UnicodeDecodeError, OSError):
+                continue
+            fm_end = _frontmatter_end(lines)
+            if not fm_end:
+                continue          # no frontmatter -> not an agent definition
+            _present, names = _frontmatter_values(lines, "name", fm_end)
+            name = names[0] if names else os.path.splitext(filename)[0]
+            out.append(Agent(os.path.relpath(path, repo_root), name, lines,
+                             fm_end))
+    return out
+
+
+def prescribed_tool(pre):
+    """The DISPATCHER TOOL a body prescription requires, or None.
+
+    Deliberately dispatcher-level only, and deliberately built on the SAME
+    `Prescription` objects Direction 1 already extracted:
+      R5 `dispatcher`   -- the name IS the tool (`git_call`)
+      R1 `mcp_token`    -- the tool half of `mcp__<server>__<tool>`
+      R2/R3             -- the dispatcher a call was made against
+    A backticked FUNCTION name alone (R4) implies a dispatcher only by ownership
+    inference, which is too weak to gate a build on, so it is skipped.
+    """
+    if pre.kind in ("dispatcher", "mcp_token"):
+        return pre.name
+    if pre.kind in ("dispatch_call", "function_kv"):
+        if pre.server and RX_GRANT_DISPATCHER.match(pre.server):
+            return pre.server
+    return None
+
+
+class Grants:
+    """What one agent's frontmatter `tools:` list actually grants."""
+
+    def __init__(self, agent):
+        self.agent = agent
+        self.tools = set()        # dispatcher tool names the agent may call
+        self.servers = set()      # `mcpServers:` entries (severity hints only)
+        self.rows = []            # one rendered verdict per `tools:` entry
+        self.dead = []            # (entry, why) -- 3a failures
+        self.unverified = []      # (entry, why) -- 3a INFO
+
+
+# ---------------------------------------------------------------------------
 # evaluation
 # ---------------------------------------------------------------------------
 
@@ -764,7 +1007,7 @@ class Finding:
     """One verdict about one distinct prescribed subject."""
 
     def __init__(self, group, kind, subject, severity, problem="", note="",
-                 evidence=()):
+                 evidence=(), detail=()):
         self.group = group
         self.kind = kind
         self.subject = subject
@@ -772,6 +1015,10 @@ class Finding:
         self.problem = problem
         self.note = note
         self.evidence = list(evidence)
+        # Extra rendered lines between the note and the evidence.  Direction 3
+        # needs them: a grant verdict is a TABLE (one row per `tools:` entry),
+        # not a sentence.
+        self.detail = list(detail)
 
 
 def _levenshtein(a, b, cap=3):
@@ -1109,6 +1356,316 @@ class Checker:
             out[inv.file] = missing
         return out
 
+    # -- Direction 3: the agent grant surface ------------------------------
+
+    def dispatcher_of_server(self, server):
+        """Registered server name -> the dispatcher tool its script exposes."""
+        script = (self.registration or {}).get(server)
+        inv = self.by_file.get(script) if script else None
+        return inv.tool if inv is not None and inv.ok else None
+
+    def grantable(self):
+        """tool -> [registered server name] for every GRANTABLE dispatcher.
+
+        Registration is what makes a tool grantable, and that single fact is the
+        whole retirement filter: `clangd_call` / `cuda_call` / `luals_call` are
+        in the launch table but no ~/.claude.json entry launches them, so an
+        agent body that names one cannot be a MISSING GRANT -- there is nothing
+        to grant.  Same reasoning R5 already applies to prose.
+        """
+        out = {}
+        if self.registration is None:
+            return out
+        for tool, script in self.tools.items():
+            inv = self.by_file.get(script)
+            if inv is None or not inv.ok:
+                continue
+            names = sorted(n for n, s in self.registration.items() if s == script)
+            if names:
+                out[tool] = names
+        return out
+
+    def agent_grants(self, agent):
+        """Classify every frontmatter `tools:` entry of one agent (3a input)."""
+        grants = Grants(agent)
+        grants.servers = set(agent.server_entries)
+        for entry in agent.tool_entries:
+            if entry in WILDCARD_GRANTS:
+                grants.rows.append("grant       : %-42s WILDCARD -- grants "
+                                   "every tool" % entry)
+                continue
+
+            match = RX_GRANT_MCP_TOOL.match(entry)
+            if match:
+                tool = match.group("tool")
+                if tool in self.tools:
+                    grants.tools.add(tool)
+                    grants.rows.append("grant       : %-42s MCP tool, exposed "
+                                       "by Scripts/%s" % (entry,
+                                                          self.tools[tool]))
+                else:
+                    grants.dead.append(
+                        (entry, "no server in the launch table exposes a %r "
+                                "tool%s" % (tool, self._hint_suffix(tool))))
+                continue
+
+            match = RX_GRANT_MCP_SERVER.match(entry)
+            if match:
+                server = match.group("server")
+                tool = self.dispatcher_of_server(server)
+                if tool:
+                    grants.tools.add(tool)
+                    grants.rows.append("grant       : %-42s whole-server grant "
+                                       "-> %s" % (entry, tool))
+                elif self.registration is None:
+                    grants.unverified.append(
+                        (entry, "registration unknown: %s" % self.reg_error))
+                elif server in self.registration:
+                    grants.unverified.append(
+                        (entry, "server %r is registered but its launch script "
+                                "(%s) is not in the smoke launch table, so its "
+                                "tool cannot be resolved"
+                         % (server, self.registration[server])))
+                else:
+                    grants.dead.append(
+                        (entry, "server %r is NOT registered in ~/.claude.json"
+                         % server))
+                continue
+
+            if RX_GRANT_DISPATCHER.match(entry):
+                if entry in self.tools:
+                    grants.tools.add(entry)
+                    grants.rows.append("grant       : %-42s bare dispatcher "
+                                       "spelling -> Scripts/%s"
+                                       % (entry, self.tools[entry]))
+                else:
+                    grants.dead.append(
+                        (entry, "no server in the launch table exposes a %r "
+                                "tool%s" % (entry, self._hint_suffix(entry))))
+                continue
+
+            grants.rows.append("grant       : %-42s not an MCP name shape "
+                               "(built-in / unknown) -- out of scope" % entry)
+        return grants
+
+    def check_grants(self, agent, grants):
+        """3a: an agent must not GRANT a tool the live inventory does not have."""
+        subject = "tools: %s" % agent.name
+        evidence = [("%s:%d" % (agent.rel, agent.key_line("tools")),
+                     ("tools: " + ", ".join(agent.tool_entries))
+                     if agent.tool_entries else "(no tools: key)")]
+
+        if not agent.tools_present:
+            return Finding(
+                GI, "d3_grants", subject, H.INFO,
+                note="no `tools:` key at all -- the agent inherits the full "
+                     "toolbelt, so there is no grant to verify and 3b cannot "
+                     "fire for it", evidence=evidence)
+        if agent.wildcard:
+            return Finding(
+                GI, "d3_grants", subject, H.INFO,
+                note="wildcard grant -- every tool is available, so there is "
+                     "no dead grant to find and 3b cannot fire for it",
+                detail=grants.rows, evidence=evidence)
+
+        detail = list(grants.rows)
+        detail += ["DEAD        : %-42s %s" % kv for kv in grants.dead]
+        detail += ["unverified  : %-42s %s" % kv for kv in grants.unverified]
+        if grants.dead:
+            return Finding(
+                GI, "d3_grants", subject, H.FAIL,
+                problem="frontmatter grants %d MCP tool(s) that do NOT exist "
+                        "in the live inventory: %s"
+                        % (len(grants.dead),
+                           "; ".join("%s -- %s" % kv for kv in grants.dead)),
+                note="a nonexistent entry in `tools:` is inert at load time but "
+                     "misleading: it reads as a granted capability that can "
+                     "never be called",
+                detail=detail, evidence=evidence)
+        if grants.unverified:
+            return Finding(
+                GI, "d3_grants", subject, H.INFO,
+                note="%d grant(s) could not be verified: %s"
+                     % (len(grants.unverified),
+                        "; ".join("%s -- %s" % kv for kv in grants.unverified)),
+                detail=detail, evidence=evidence)
+        return Finding(
+            GI, "d3_grants", subject, H.PASS,
+            note="%d entr%s, %d MCP tool(s), all present in the live inventory"
+                 % (len(agent.tool_entries),
+                    "y" if len(agent.tool_entries) == 1 else "ies",
+                    len(grants.tools)),
+            detail=detail, evidence=evidence)
+
+    def _context_excuse(self, agent, pre):
+        """Why THIS mention cannot be attributed to the agent itself, else ""."""
+        line = agent.line(pre.lineno)
+        # A retirement sentence routinely spans a line break, so the negative
+        # window is +/-1 line.  The other two are line-exact on purpose: a
+        # neighbouring `e.g.` must not excuse a prescription of its own.
+        window = " ".join(agent.line(n) for n in (pre.lineno - 1, pre.lineno,
+                                                  pre.lineno + 1))
+        if RX_NEGATIVE.search(window):
+            return "negative / retirement context"
+        if RX_ILLUSTRATIVE.search(line):
+            return "illustrative example (e.g. / for example / such as / etc.)"
+        others = sorted({m.group(0) for m in RX_OTHER_AGENT.finditer(line)
+                         if agent.name not in m.group(0)})
+        if others:
+            return "delegation context (%s)" % ", ".join(others[:3])
+        return ""
+
+    def _missing_grant(self, agent, grants, tool, pres, servers):
+        """3b: one (agent, ungranted-but-existing tool) verdict."""
+        subject = "%s body -> %s" % (agent.name, tool)
+        evidence = [(p.where, p.snippet) for p in pres]
+        disagree = sorted(s for s in servers if s in grants.servers)
+
+        excuses, attributable = {}, []
+        for pre in pres:
+            excuse = self._context_excuse(agent, pre)
+            if excuse:
+                excuses.setdefault(excuse, []).append(pre.where)
+            else:
+                attributable.append(pre)
+
+        detail = ["granted     : %s" % (", ".join(sorted(grants.tools)) or "-"),
+                  "provider    : %s (Scripts/%s)"
+                  % (", ".join(servers), self.tools[tool]),
+                  "grant needed: mcp__%s__%s" % (servers[0], tool),
+                  "mentions    : %d, attributable to this agent: %d"
+                  % (len(pres), len(attributable))]
+        detail += ["suppressed  : %s -- %s" % (why, ", ".join(wheres))
+                   for why, wheres in sorted(excuses.items())]
+
+        if disagree:
+            return Finding(
+                GI, "d3_missing_grant", subject, H.INFO,
+                note="`tools:` does NOT grant %s, but this agent's "
+                     "`mcpServers:` DOES declare %s -- the two frontmatter keys "
+                     "disagree. Whether `mcpServers:` alone confers the grant "
+                     "is a platform-semantics question this suite cannot "
+                     "answer, so it is reported, not failed. Decide it by hand: "
+                     "add mcp__%s__%s to `tools:`, or stop prescribing it."
+                     % (tool, ", ".join(disagree), disagree[0], tool),
+                detail=detail, evidence=evidence)
+        if not attributable:
+            return Finding(
+                GI, "d3_missing_grant", subject, H.INFO,
+                note="%s is prescribed nowhere this suite can attribute to the "
+                     "agent itself (%s) -- reported with evidence rather than "
+                     "failed, because attribution is what separates a real "
+                     "missing grant from generic prose"
+                     % (tool, "; ".join(sorted(excuses))),
+                detail=detail, evidence=evidence)
+        return Finding(
+            GI, "d3_missing_grant", subject, H.FAIL,
+            problem="the agent's own body prescribes %s (registered via %s) but "
+                    "its frontmatter `tools:` does not grant it -- at runtime "
+                    "the tool is simply absent, so the model silently "
+                    "substitutes something else. Fix by granting "
+                    "mcp__%s__%s or by not prescribing it."
+                    % (tool, ", ".join(servers), servers[0], tool),
+            detail=detail, evidence=evidence)
+
+    def check_body(self, agent, grants, prescriptions):
+        """3b for one agent -> (receipt, findings, retired_mentions).
+
+        `retired_mentions` are candidates dropped because the tool is not
+        grantable at all; group H asserts that they never become findings.
+        """
+        grantable = self.grantable()
+        mentions = {}
+        for pre in prescriptions:
+            if pre.lineno <= agent.fm_end:
+                continue          # frontmatter is R1/R6's surface, not 3b's
+            tool = prescribed_tool(pre)
+            if tool:
+                mentions.setdefault(tool, []).append(pre)
+
+        findings, retired, covered, unknown = [], [], [], []
+        for tool, pres in sorted(mentions.items()):
+            if agent.unrestricted or tool in grants.tools:
+                covered.append(tool)
+            elif tool not in self.tools:
+                unknown.append(tool)      # R5 already FAILs this in group D
+            elif tool not in grantable:
+                retired.append((tool, pres))
+            else:
+                findings.append(self._missing_grant(agent, grants, tool, pres,
+                                                    grantable[tool]))
+
+        candidates = [f.subject.split("-> ")[-1] for f in findings]
+        receipt = Finding(
+            GI, "d3_body_scan", "body scan: %s" % agent.name,
+            H.INFO if agent.unrestricted else H.PASS,
+            note="%d dispatcher(s) prescribed in the body, %d covered by "
+                 "`tools:`%s" % (len(mentions), len(covered),
+                                 ", UNRESTRICTED grant"
+                                 if agent.unrestricted else ""),
+            detail=["prescribed  : %s" % (", ".join(sorted(mentions)) or "-"),
+                    "granted     : %s" % (", ".join(sorted(grants.tools)) or "-"),
+                    "covered     : %s" % (", ".join(sorted(covered)) or "-"),
+                    "reported    : %s" % (", ".join(sorted(candidates)) or "-"),
+                    "not grantable (retirement notes, never a finding): %s"
+                    % (", ".join(sorted(t for t, _p in retired)) or "-"),
+                    "no such dispatcher anywhere (R5's job, group D): %s"
+                    % (", ".join(sorted(unknown)) or "-")],
+            evidence=[("%s:%d" % (agent.rel, agent.fm_end + 1),
+                       "body starts here")])
+        return receipt, findings, retired
+
+    def check_ungranted(self, granted_by_tool, agents):
+        """3c: a registered dispatcher NO agent's `tools:` names (INFO only)."""
+        wildcard = sorted(a.name for a in agents if a.unrestricted)
+        out = []
+        for tool, servers in sorted(self.grantable().items()):
+            holders = sorted(granted_by_tool.get(tool, ()))
+            detail = ["server(s)   : %s" % ", ".join(servers),
+                      "script      : Scripts/%s" % self.tools[tool],
+                      "granted to  : %s" % (", ".join(holders) or "NO agent")]
+            if holders:
+                note = "granted to %d agent(s)" % len(holders)
+            elif wildcard:
+                detail.append("note        : %d agent(s) carry an unrestricted "
+                              "grant (%s), which covers every tool"
+                              % (len(wildcard), ", ".join(wildcard)))
+                note = ("no explicit grant, but an unrestricted agent covers it")
+            else:
+                out.append(Finding(
+                    GI, "d3_ungranted", "capability: %s" % tool, H.INFO,
+                    note="registered and reachable, but NO agent's `tools:` "
+                         "grants it -- an orphan capability. Either an agent "
+                         "should be granted it or the prompts that prescribe it "
+                         "are prescribing something no minion can run.",
+                    detail=detail))
+                continue
+            out.append(Finding(GI, "d3_ungranted", "capability: %s" % tool,
+                               H.PASS, note=note, detail=detail))
+        return out
+
+
+def evaluate_agents(checker, agents, prescriptions):
+    """Direction 3 over a whole agent corpus."""
+    by_path = {}
+    for pre in prescriptions:
+        by_path.setdefault(pre.path, []).append(pre)
+
+    findings, retired, granted_by_tool = [], [], {}
+    for agent in sorted(agents, key=lambda a: a.rel):
+        grants = checker.agent_grants(agent)
+        findings.append(checker.check_grants(agent, grants))
+        for tool in grants.tools:
+            granted_by_tool.setdefault(tool, []).append(agent.name)
+        receipt, body, retired_here = checker.check_body(
+            agent, grants, by_path.get(agent.rel, []))
+        findings.append(receipt)
+        findings += body
+        retired += [(agent, tool, pres) for tool, pres in retired_here]
+    findings += checker.check_ungranted(granted_by_tool, agents)
+    return {"findings": findings, "retired": retired,
+            "granted_by_tool": granted_by_tool, "agents": agents}
+
 
 # ---------------------------------------------------------------------------
 # negative control
@@ -1135,6 +1692,99 @@ FIXTURE_FILES = {
         "purity function, git does not have it.\n"
         "Real ones that MUST stay clean: `purity_call(find_definition)`, "
         "`purity_call(function: \"search_for_pattern\")`, `luals_hover`.\n"
+    ),
+    # -- Direction 3 fixtures.  One synthetic AGENT per verdict, because a D3
+    # that is silently broken looks exactly like a clean corpus.  Every one of
+    # these lives under `agents/`, which is the only place collect_agents()
+    # looks.  They deliberately avoid `create_temp_dir` (group H's D2 probe
+    # asserts it stays unmentioned) and avoid bare `mcp-<name>` refs (R8 is not
+    # applied to the corpus).
+    "agents/d3-dead-grant.md": (
+        "---\n"
+        "name: d3-dead-grant\n"
+        "tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-purity__ghost_call\n"
+        "---\n"
+        "\n"
+        "Body prescribes only what it was granted: `purity_call`.\n"
+    ),
+    "agents/d3-missing-grant.md": (
+        "---\n"
+        "name: d3-missing-grant\n"
+        "tools: Read, mcp__mcp-purity__purity_call\n"
+        "---\n"
+        "\n"
+        "| Packet captures | `tshark_call` — MANDATORY for every pcap |\n"
+    ),
+    "agents/d3-ok.md": (
+        "---\n"
+        "name: d3-ok\n"
+        "tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call\n"
+        "---\n"
+        "\n"
+        "Routing: `purity_call` for symbols, `forge_call` for builds.\n"
+    ),
+    "agents/d3-retired.md": (
+        "---\n"
+        "name: d3-retired\n"
+        "tools: Read, mcp__mcp-purity__purity_call\n"
+        "---\n"
+        "\n"
+        "`luals_call` was RETIRED and its server is unregistered -- use "
+        "`purity_call` instead.\n"
+    ),
+    "agents/d3-negative.md": (
+        "---\n"
+        "name: d3-negative\n"
+        "tools: Read, mcp__mcp-purity__purity_call\n"
+        "---\n"
+        "\n"
+        "`jenkins_call` does not exist in this project's toolbelt. Never "
+        "call it.\n"
+    ),
+    "agents/d3-illustrative.md": (
+        "---\n"
+        "name: d3-illustrative\n"
+        "tools: Read, mcp__mcp-purity__purity_call\n"
+        "---\n"
+        "\n"
+        "Most servers expose one dispatcher (e.g. `lldb_call`, `gdc_call`) -- "
+        "check which ones your session actually has.\n"
+    ),
+    "agents/d3-delegation.md": (
+        "---\n"
+        "name: d3-delegation\n"
+        "tools: Read, mcp__mcp-purity__purity_call\n"
+        "---\n"
+        "\n"
+        "Hand pcap work to `p:minion-sniffer`, which calls `tshark_call` in "
+        "its own context.\n"
+    ),
+    "agents/d3-mcpservers.md": (
+        "---\n"
+        "name: d3-mcpservers\n"
+        "tools: Read, mcp__mcp-purity__purity_call\n"
+        "mcpServers:\n"
+        "  - mcp-purity\n"
+        "  - mcp-tshark\n"
+        "---\n"
+        "\n"
+        "| Packet captures | `tshark_call` — MANDATORY for every pcap |\n"
+    ),
+    "agents/d3-wildcard.md": (
+        "---\n"
+        "name: d3-wildcard\n"
+        "tools: *\n"
+        "---\n"
+        "\n"
+        "A wildcard grant, so `tshark_call` here is NOT a missing grant.\n"
+    ),
+    "agents/d3-no-tools-key.md": (
+        "---\n"
+        "name: d3-no-tools-key\n"
+        "model: inherit\n"
+        "---\n"
+        "\n"
+        "No grant list at all, so `jenkins_call` here is NOT a missing grant.\n"
     ),
     "skills/fake-skill/SKILL.md": (
         "---\ntitle: fake skill\n---\n"
@@ -1172,6 +1822,48 @@ MUST_NOT_FLAG = [
     "poluah_websocket_send_frame", "find_definition", "search_for_pattern",
     "luals_hover", "mcp__mcp-purity__purity_call", "mcpServers: mcp-purity",
     "cat", "README", "function", "params", "targets",
+]
+
+# Direction 3 control: (subject, EXACT expected severity, why).
+#
+# `None` means "no finding at all" and is a real assertion, not a gap: a
+# suppressor that silently swallows a genuine defect and a suppressor that
+# correctly drops a non-defect both look like "no FAIL", so the INFO rows and
+# the silent drops are pinned just as hard as the failures.
+D3_EXPECT = [
+    ("tools: d3-dead-grant", H.FAIL,
+     "3a: grants mcp__mcp-purity__ghost_call, a tool no server exposes"),
+    ("tools: fake-agent", H.FAIL,
+     "3a: the older fixture's grant list is dead too (foo_call, not_a_tool)"),
+    ("tools: d3-ok", H.PASS, "3a: every grant exists in the live inventory"),
+    ("tools: d3-wildcard", H.INFO, "3a: `tools: *` -- nothing to verify"),
+    ("tools: d3-no-tools-key", H.INFO, "3a: no `tools:` key -- unrestricted"),
+    ("d3-missing-grant body -> tshark_call", H.FAIL,
+     "3b: the body prescribes a real, REGISTERED, ungranted dispatcher"),
+    ("fake-agent body -> git_call", H.FAIL,
+     "3b: the older fixture's body calls git_call(function=\"outline\") while "
+     "its tools: grants purity_call only -- pinned so an edit to that fixture "
+     "cannot silently drop a FAIL"),
+    ("d3-ok body -> purity_call", None,
+     "3b: correctly granted -> no finding at all"),
+    ("d3-retired body -> luals_call", None,
+     "3b: the tool's server is unregistered, so there is nothing to grant -- a "
+     "retirement note is never a missing grant"),
+    ("d3-negative body -> jenkins_call", H.INFO,
+     "3b: a 'does not exist' sentence -> INFO, never a FAIL"),
+    ("d3-illustrative body -> lldb_call", H.INFO,
+     "3b: named inside an illustrative `e.g.` list -> INFO"),
+    ("d3-illustrative body -> gdc_call", H.INFO,
+     "3b: named inside an illustrative `e.g.` list -> INFO"),
+    ("d3-delegation body -> tshark_call", H.INFO,
+     "3b: the tool belongs to the DELEGATE, not to this agent -> INFO"),
+    ("d3-mcpservers body -> tshark_call", H.INFO,
+     "3b: `mcpServers:` declares the server while `tools:` does not -- a "
+     "platform-semantics question, so INFO with evidence"),
+    ("d3-wildcard body -> tshark_call", None,
+     "3b: a wildcard grant covers every tool"),
+    ("d3-no-tools-key body -> jenkins_call", None,
+     "3b: no `tools:` key, so the agent is unrestricted"),
 ]
 
 # A synthetic MCP server whose tool description carries dead routing text.  It
@@ -1244,6 +1936,7 @@ def _record_finding(suite, finding, group=None):
     detail = []
     if finding.note:
         detail.append("note        : %s" % finding.note)
+    detail += list(finding.detail)
     for where, snippet in finding.evidence[:MAX_EVIDENCE]:
         detail.append("evidence    : %s | %s" % (where, snippet))
     extra = len(finding.evidence) - MAX_EVIDENCE
@@ -1297,6 +1990,43 @@ def _assert_control(suite, label, must_flag, must_not_flag, flagged,
                                 else "not flagged (correct)")],
                      brief="%s | %s must not flag %s"
                            % (H.FAIL if problems else H.PASS, label, subject))
+
+
+def _assert_d3_control(suite, findings, expectations, registration_known=True):
+    """Pin the EXACT Direction 3 verdict of every synthetic agent.
+
+    Deliberately stricter than the flag/no-flag control above: D3's whole risk
+    is a suppressor that is too eager, and an over-eager suppressor produces the
+    same "no FAIL" as a correct one.  So INFO is asserted to be INFO and silence
+    is asserted to be silence.
+    """
+    by_subject = {f.subject: f for f in findings}
+    for subject, expected, why in expectations:
+        label = "d3 control: %s" % subject
+        if not registration_known:
+            suite.record(GH, label, [], status=SKIP,
+                         detail=["rule        : %s" % why,
+                                 "reason      : D3 decides grantability from "
+                                 "~/.claude.json, which could not be read -- "
+                                 "degraded to SKIP rather than failing for an "
+                                 "environmental reason"],
+                         brief="%s | %s (registration unknown)" % (SKIP, label))
+            continue
+        actual = by_subject.get(subject)
+        got = actual.severity if actual else None
+        problems = []
+        if got != expected:
+            problems.append("expected %s, got %s"
+                            % (expected or "NO finding", got or "NO finding"))
+        detail = ["rule        : %s" % why,
+                  "expected    : %s" % (expected or "no finding at all"),
+                  "actual      : %s" % (got or "no finding at all")]
+        if actual:
+            detail.append("verdict     : %s" % (actual.problem or actual.note))
+        suite.record(GH, label, problems, detail=detail,
+                     brief="%s | %s -> %s"
+                           % (H.FAIL if problems else H.PASS, label,
+                              got or "no finding"))
 
 
 def run(opts=None):
@@ -1574,6 +2304,99 @@ def _run(suite, opts):
                      brief="INFO | %s | %d/%d unmentioned"
                            % (inv.file, len(missing), len(inv.functions)))
 
+    # -- I. Direction 3: agent grants vs agent prescriptions --------------
+    agents = collect_agents(CORPUS_ROOT)
+    problems = []
+    if not agents:
+        problems.append("no agent definition found under %s/ -- Direction 3 "
+                        "would pass vacuously"
+                        % os.path.join(os.path.relpath(CORPUS_ROOT, H.REPO_ROOT),
+                                       AGENT_SUBDIR))
+    suite.record(GB, "scan ClaudeCode/agents/**", problems,
+                 status=None if problems else H.INFO,
+                 detail=["agents      : %d" % len(agents),
+                         "names       : %s"
+                         % ", ".join(a.name for a in agents),
+                         "with tools: : %d"
+                         % sum(1 for a in agents if a.tools_present),
+                         "unrestricted: %d"
+                         % sum(1 for a in agents if a.unrestricted),
+                         "grantable   : %d dispatcher(s) a live session can put "
+                         "in a tools: list" % len(checker.grantable())],
+                 brief="INFO | agent scan | %d agents" % len(agents))
+
+    d3 = evaluate_agents(checker, agents, corpus["prescriptions"])
+    for finding in d3["findings"]:
+        _record_finding(suite, finding)
+
+    # The retirement suppressor, ASSERTED rather than assumed.  Anchored on the
+    # corpus-wide mention count so the case cannot pass merely because nobody
+    # mentions a retired dispatcher anywhere.
+    retired_tools = sorted(set(checker.tools) - set(checker.grantable()))
+    hits = [p for p in corpus["prescriptions"]
+            if p.kind == "dispatcher" and p.name in retired_tools]
+    per_tool = {}
+    for pre in hits:
+        per_tool.setdefault(pre.name, []).append(pre.where)
+    leaked = sorted(f.subject for f in d3["findings"]
+                    if any(f.subject.endswith("-> " + t) for t in retired_tools))
+    problems = []
+    if registration is not None and not hits:
+        problems.append("no corpus mention of a retired dispatcher was found at "
+                        "all, so this control is vacuous -- either the "
+                        "retirement notes are gone or the extractor stopped "
+                        "seeing them")
+    if leaked:
+        problems.append("Direction 3 produced finding(s) for a dispatcher that "
+                        "cannot be granted at all: %s" % ", ".join(leaked))
+    suite.record(GI, "%-18s %s" % ("d3_retirement",
+                                   "retired dispatchers are never missing grants"),
+                 problems, status=SKIP if registration is None else None,
+                 detail=["not grantable: %s" % (", ".join(retired_tools) or "-"),
+                         "corpus mentions: %d" % len(hits)]
+                        + ["  %-14s %d mention(s): %s"
+                           % (tool, len(wheres), ", ".join(wheres[:4])
+                              + (" ..." if len(wheres) > 4 else ""))
+                           for tool, wheres in sorted(per_tool.items())]
+                        + ["agent-body mentions: %d" % len(d3["retired"])]
+                        + ["  %s -> %s (%s)" % (a.name, t, p[0].where)
+                           for a, t, p in d3["retired"]]
+                        + (["reason      : registration unknown, so "
+                            "grantability cannot be decided"]
+                           if registration is None else []),
+                 brief="%s | retirement suppressor | %d corpus mentions, %d "
+                       "leaked" % (SKIP if registration is None else
+                                   (H.FAIL if problems else H.PASS),
+                                   len(hits), len(leaked)))
+
+    # 3c must DISCRIMINATE: an all-PASS or all-INFO capability table would be
+    # indistinguishable from a broken one.
+    cap_rows = [f for f in d3["findings"] if f.kind == "d3_ungranted"]
+    granted_rows = [f for f in cap_rows if f.severity == H.PASS]
+    orphan_rows = [f for f in cap_rows if f.severity == H.INFO]
+    problems = []
+    if registration is not None:
+        if len(cap_rows) != len(checker.grantable()):
+            problems.append("3c produced %d row(s) for %d grantable dispatcher(s)"
+                            % (len(cap_rows), len(checker.grantable())))
+        if cap_rows and not granted_rows:
+            problems.append("3c classified NO dispatcher as granted, so the "
+                            "granted/ungranted split is not discriminating")
+    suite.record(GI, "%-18s %s" % ("d3_ungranted",
+                                   "3c discriminates granted from orphaned"),
+                 problems, status=SKIP if registration is None else None,
+                 detail=["capabilities: %d" % len(cap_rows),
+                         "granted     : %s"
+                         % (", ".join(f.subject.split(": ")[-1]
+                                      for f in granted_rows) or "-"),
+                         "orphaned    : %s"
+                         % (", ".join(f.subject.split(": ")[-1]
+                                      for f in orphan_rows) or "-")],
+                 brief="%s | 3c | %d granted, %d orphaned"
+                       % (SKIP if registration is None else
+                          (H.FAIL if problems else H.PASS),
+                          len(granted_rows), len(orphan_rows)))
+
     # -- H. negative control ---------------------------------------------
     fixture_root = write_fixture(os.path.join(FIXTURE_ROOT, "corpus"))
     fake = scan_corpus(fixture_root, repo_root=FIXTURE_ROOT)
@@ -1645,6 +2468,30 @@ def _run(suite, opts):
                        % (SKIP if not reg_known else
                           (H.FAIL if problems else H.PASS)))
 
+    # The same negative control for DIRECTION 3: synthetic agents whose grant
+    # lists and bodies pin every verdict the group can reach -- one per
+    # suppressor, so a suppressor that starts swallowing real defects fails here
+    # instead of quietly turning group I green.
+    fake_agents = collect_agents(fixture_root, repo_root=FIXTURE_ROOT)
+    fake_d3 = evaluate_agents(checker, fake_agents, fake["prescriptions"])
+    d3_flagged = sorted(f.subject for f in fake_d3["findings"]
+                        if f.severity == H.FAIL)
+    problems = []
+    if not fake_agents:
+        problems.append("no synthetic agent was collected from the fixture, so "
+                        "the Direction 3 control below cannot fail")
+    suite.record(GH, "d3 fixture scanned", problems,
+                 status=None if problems else H.INFO,
+                 detail=["agents      : %d (%s)"
+                         % (len(fake_agents),
+                            ", ".join(a.name for a in fake_agents)),
+                         "findings    : %d" % len(fake_d3["findings"]),
+                         "flagged     : %s" % (", ".join(d3_flagged) or "-")],
+                 brief="INFO | d3 fixture | %d agents, %d flagged"
+                       % (len(fake_agents), len(d3_flagged)))
+    _assert_d3_control(suite, fake_d3["findings"], D3_EXPECT,
+                       registration_known=reg_known)
+
     # Direction 2 must also work against an alternate root: the fixture
     # mentions `find_definition` but not, say, `create_temp_dir`.
     fake_unmentioned = checker.unmentioned(fake["text"])
@@ -1675,6 +2522,13 @@ def _run(suite, opts):
           "server text that no model ever sees (unregistered servers), so it "
           "is INFO by design too. INFO rows in C/D/E are in-flight churn, "
           "near-misses or unverifiable-by-design; each carries its reason.")
+    print("NOTE: group I is Direction 3. Its `d3_ungranted` INFO rows are "
+          "orphan CAPABILITIES (3c, the tools-level analogue of group G), and "
+          "its `d3_missing_grant` INFO rows are missing grants this suite "
+          "refuses to fail on -- each names the suppressor that spared it "
+          "(mcpServers: disagreement / illustrative / negative / delegation) "
+          "and carries file:line evidence. Both are decisions for a human, not "
+          "noise.")
     return suite
 
 
