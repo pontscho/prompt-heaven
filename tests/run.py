@@ -6,7 +6,7 @@ count is written down, and every written-down count is checked against the
 run):
 
   inspect_validate   tests/test_inspect_validate.py   mcp-inspect VALIDATION
-                                                      family (A-N)
+                                                      family (A-O)
   mcp_first_guard    tests/test_mcp_first_guard.py    ClaudeCode/hooks/
                                                       mcp-first-guard.py PreToolUse
                                                       Bash guard (A-M)
@@ -174,7 +174,7 @@ def run_smoke(opts):
 #     Adding or retiring a server would trip a typed count for no defect.
 SUITES = [
     ("inspect_validate", run_inspect_validate,
-     "mcp-inspect VALIDATION family", 94),
+     "mcp-inspect VALIDATION family", 105),
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 308),
     ("purity_lsp", run_purity_lsp,

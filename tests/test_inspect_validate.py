@@ -33,6 +33,7 @@ Exit code 0 iff every case passes.
 import ast
 import os
 import plistlib
+import re
 import sys
 
 sys.dont_write_bytecode = True
@@ -175,6 +176,23 @@ def case(suite, cli, group, cid, fn, params, want_error=False,
             problems.append("UNEXPECTED %r" % s)
     suite.record(group, cid, problems, text=text, showable=True)
     return text
+
+
+def unfenced(text):
+    """The reply's OWN markdown lines, fenced payload dropped.
+
+    A `#` inside a fence is somebody else's text -- a config dump, a comment in
+    a validated file -- and flagging it would make the envelope gate lie.  What
+    the gate is about is markup mcp-inspect itself wrote.
+    """
+    out, in_fence = [], False
+    for ln in text.splitlines():
+        if re.match(r"^`{3,}", ln):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            out.append(ln)
+    return out
 
 
 def row_for(text, target):
@@ -409,18 +427,59 @@ def run(opts=None):
              must=["FAIL", "nested parentheses"])
         case(suite, cli, "N", "py-null-byte", "python", {"content": "x = 1\x00\n"},
              must=["FAIL", "null bytes"])
-        case(suite, cli, "N", "alive-after-stress", "host", {}, must=["## host"])
+        case(suite, cli, "N", "alive-after-stress", "host", {},
+             must=["hostname"])
 
         # ================= L: no regression =================
-        case(suite, cli, "L", "host", "host", {}, must=["## host", "hostname"])
+        # These assert PAYLOAD markers, not the `## <fn>` titles they used to:
+        # a title can be present over an empty body, a body marker cannot, so
+        # every one of these is a strictly stronger liveness check than before.
+        case(suite, cli, "L", "host", "host", {},
+             must=["hostname", "platform"])
         case(suite, cli, "L", "stat", "stat", {"path": SERVER},
-             must=["## stat", "mode"])
+             must=["mode", "inode"])
+        # `sha256` names the table's FIRST COLUMN -- the very thing that took
+        # over from the old title.
         case(suite, cli, "L", "sha256", "sha256", {"path": SERVER},
-             must=["## sha256"])
+             must=["sha256", "size", "path"])
+        # `|- ` proves the tree actually rendered; `processes` is the count line
+        # that says how much of the host it covered.
         case(suite, cli, "L", "pstree", "pstree", {"limit": 20},
-             must=["## process tree"])
+             must=["processes", "|- "])
+        # `sort cpu` pins the injected-value rule: the caller passed `limit` but
+        # not `sort`, so the server owes them the ordering it chose.
         case(suite, cli, "L", "processes", "processes", {"limit": 5},
-             must=["## processes"])
+             must=["sort cpu", "PID", "COMM"])
+
+        # ===== O: envelope discipline -- form, not values, so it cannot age =====
+        for cid, fn, params in [
+                ("host", "host", {}),
+                ("stat", "stat", {"path": SERVER}),
+                ("processes", "processes", {"limit": 3}),
+                ("disk_usage", "disk_usage",
+                 {"path": H.repo_path("tests"), "top": 3}),
+                ("sha256", "sha256", {"path": SERVER}),
+                ("validate", "validate", {"path": SERVER}),
+                ("versions", "versions", {"tools": ["git"]}),
+                ("which", "which", {"name": "git"}),
+                ("pstree", "pstree", {"limit": 10}),
+                ("env", "env", {"key": "HOME"}),
+        ]:
+            err, t = cli.call_tool(fn, params)
+            bad = [ln for ln in unfenced(t) if ln.startswith("#")]
+            problems = []
+            if err:
+                problems.append("isError=True on a call that should succeed")
+            if bad:
+                problems.append("heading on a successful reply: %r" % bad[:2])
+            suite.record("O", "no-heading-" + cid, problems, text=t,
+                         showable=True)
+        # A gate that cannot fail is not a gate: prove `unfenced` sees the
+        # reply's OWN heading and not a `#` line inside someone else's payload.
+        seen = [ln for ln in unfenced("## title\n\n```\n# not a heading\n```")
+                if ln.startswith("#")]
+        suite.record("O", "gate-discriminates",
+                     [] if seen == ["## title"] else ["unfenced() saw %r" % seen])
 
         cli.close()
 

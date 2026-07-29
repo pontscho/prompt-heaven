@@ -218,6 +218,7 @@ def _kb_human(kb: float) -> str:
 def h_processes(p: dict) -> str:
     filt = (p.get("filter") or p.get("name") or "").strip().lower()
     user = (p.get("user") or "").strip()
+    sort_given = bool((p.get("sort") or "").strip())
     sort = (p.get("sort") or "cpu").strip().lower()
     limit = _int_param(p.get("limit", 30), "limit") if "limit" in p else 30
     timeout = _int_param(p.get("timeout", 15), "timeout") if "timeout" in p else 15
@@ -254,13 +255,13 @@ def h_processes(p: dict) -> str:
         rows = rows[:limit]
 
     body = _fmt_table(header, rows)
-    head = f"## processes (sort={sort}"
-    if filt:
-        head += f", filter={filt!r}"
-    if user:
-        head += f", user={user}"
-    head += f") — showing {len(rows)} of {total}"
-    return head + "\n\n" + _md_fence(body)
+    # `filter`/`user`/`limit` were the caller's own words.  `sort` is worth a
+    # word only when the SERVER picked it, because it is what put these rows in
+    # this order.  The count stays either way: it is what says whether `limit`
+    # bit, which no parameter echo can tell.
+    said = [] if sort_given else [f"sort {sort}"]
+    said.append(f"{len(rows)} of {total}")
+    return "_" + ", ".join(said) + "_\n\n" + _md_fence(body)
 
 
 def h_process(p: dict) -> str:
@@ -272,7 +273,7 @@ def h_process(p: dict) -> str:
     if rc != 0 or not out.strip() or len(out.splitlines()) < 2:
         raise ValueError(err.strip() or f"no such process: {pid}")
     header, rows = _parse_ps(out)
-    parts = [f"## process {pid}", "", _md_fence(_fmt_table(header, rows))]
+    parts = [_md_fence(_fmt_table(header, rows))]
     if _have("lsof"):
         rc2, out2, _ = _run(["lsof", "-nP", "-p", str(pid)], 15)
         if rc2 == 0 and out2.strip():
@@ -316,7 +317,10 @@ def h_ports(p: dict) -> str:
         raise ValueError("no lsof/ss/netstat available to list ports.")
     if rc not in (0,) and not out.strip():
         raise ValueError(err.strip() or "port listing failed")
-    return f"## listening ports — {label}\n\n" + (_md_fence(out.strip()) if out.strip() else "_(none)_")
+    # The backend stays: which of lsof/ss/netstat answered decides how to read
+    # these columns, and the caller never chose it.  The `netstat -an` fallback
+    # in particular is NOT filtered to listening sockets -- the other two are.
+    return f"_{label}_\n\n" + (_md_fence(out.strip()) if out.strip() else "_(none)_")
 
 
 def h_connections(p: dict) -> str:
@@ -338,7 +342,7 @@ def h_connections(p: dict) -> str:
         raise ValueError("no lsof/ss/netstat available to list connections.")
     if rc not in (0,) and not out.strip():
         raise ValueError(err.strip() or "connection listing failed")
-    return f"## connections — {label}\n\n" + (_md_fence(out.strip()) if out.strip() else "_(none)_")
+    return f"_{label}_\n\n" + (_md_fence(out.strip()) if out.strip() else "_(none)_")
 
 
 def h_open_files(p: dict) -> str:
@@ -376,11 +380,11 @@ def h_open_files(p: dict) -> str:
     if limit > 0 and len(lines) > limit + 1:
         lines = lines[: limit + 1]
         note += f"\n\n_truncated to first {limit} of {total} entries._"
-    return f"## open files\n\n{_md_fence(chr(10).join(lines))}{note}"
+    return f"{_md_fence(chr(10).join(lines))}{note}"
 
 
 def h_host(p: dict) -> str:
-    parts = ["## host", ""]
+    parts = []
     parts.append(f"- hostname: `{socket.gethostname()}`")
     parts.append(f"- platform: `{platform.platform()}`")
     rc, out, _ = _run(["uname", "-a"], 5)
@@ -416,7 +420,10 @@ def h_host(p: dict) -> str:
 
 def h_memory(p: dict) -> str:
     if IS_MAC:
-        parts = ["## memory (macOS)", ""]
+        # No source label on any of the three branches: `vm_stat`, `free -h` and
+        # /proc/meminfo are unmistakable from their own first line, so naming
+        # them would restate what the payload already says.
+        parts = []
         rc, out, _ = _run(["sysctl", "-n", "hw.memsize"], 5)
         if rc == 0 and out.strip().isdigit():
             parts.append(f"- total: {_kb_human(int(out.strip()) / 1024)}")
@@ -430,11 +437,11 @@ def h_memory(p: dict) -> str:
     if _have("free"):
         rc, out, err = _run(["free", "-h"], 5)
         if rc == 0 and out.strip():
-            return "## memory (Linux)\n\n" + _md_fence(out.strip())
+            return _md_fence(out.strip())
     try:
         with open("/proc/meminfo") as f:
             data = f.read()
-        return "## memory (/proc/meminfo)\n\n" + _md_fence(data.strip())
+        return _md_fence(data.strip())
     except OSError as exc:
         raise ValueError(f"cannot read memory info: {exc}")
 
@@ -461,13 +468,14 @@ def h_disk(p: dict) -> str:
             else:
                 rebuilt.append(ln)
         out = "\n".join(rebuilt)
-    return "## disk (df)\n\n" + _md_fence(out.strip())
+    return _md_fence(out.strip())
 
 
 def h_disk_usage(p: dict) -> str:
     if not p.get("path") or not str(p["path"]).strip():
         raise ValueError("'disk_usage' requires params.path.")
-    path = os.path.realpath(str(p["path"]).strip())
+    raw = str(p["path"]).strip()
+    path = os.path.realpath(raw)
     if not os.path.exists(path):
         raise ValueError(f"path does not exist: {path}")
     depth = _int_param(p.get("depth", 1), "depth") if "depth" in p else 1
@@ -483,23 +491,42 @@ def h_disk_usage(p: dict) -> str:
         if len(parts) == 2 and parts[0].strip().isdigit():
             entries.append((int(parts[0]), parts[1].strip()))
     entries.sort(reverse=True)
+    total = len(entries)
     if top > 0:
         entries = entries[:top]
-    body = "\n".join(f"{_kb_human(kb):>9}  {name}" for kb, name in entries)
+    # Names relative to the queried root: `du` prefixes every line with the
+    # root, which is the caller's own argument -- repeating a long absolute
+    # path once per row is pure echo.  `.` is the root itself.  Lexical only,
+    # and safe: `du` was rooted at `path`, so every name starts with it.
+    body = "\n".join(f"{_kb_human(kb):>9}  {os.path.relpath(name, path)}"
+                     for kb, name in entries)
+    # Say only what the caller could not know: the resolved path when it is
+    # NOT the one they passed, a depth THEY did not choose, and a clip that
+    # actually dropped rows (`top` alone would not say whether it bit).
+    said = []
+    if path != raw:
+        said.append(f"`{path}`")
+    if "depth" not in p:
+        said.append(f"depth {depth}")
+    if len(entries) < total:
+        said.append(f"top {top} of {total}")
+    head = "_" + ", ".join(said) + "_\n\n" if said else ""
     note = ""
     if err.strip():
         note = "\n\n_(some paths were not readable and were skipped)_"
-    return f"## disk usage — `{path}` (depth {depth}, top {top})\n\n{_md_fence(body)}{note}"
+    return f"{head}{_md_fence(body)}{note}"
 
 
 def h_mounts(p: dict) -> str:
     if _have("mount"):
         rc, out, err = _run(["mount"], 10)
         if rc == 0 and out.strip():
-            return "## mounts\n\n" + _md_fence(out.strip())
+            return _md_fence(out.strip())
     try:
         with open("/proc/mounts") as f:
-            return "## mounts (/proc/mounts)\n\n" + _md_fence(f.read().strip())
+            # The fallback IS news: `mount` was unavailable, and /proc/mounts
+            # has a different column layout.
+            return "_/proc/mounts_\n\n" + _md_fence(f.read().strip())
     except OSError as exc:
         raise ValueError(f"cannot read mounts: {exc}")
 
@@ -509,7 +536,7 @@ def h_which(p: dict) -> str:
     if not name:
         raise ValueError("'which' requires params.name (binary to resolve).")
     names = name if isinstance(name, list) else [name]
-    lines = ["## which", ""]
+    lines: List[str] = []
     for n in names:
         n = str(n).strip()
         resolved = shutil.which(n)
@@ -537,14 +564,15 @@ def h_env(p: dict) -> str:
         k = str(key)
         if k not in env:
             return f"_env var `{k}` is not set_"
-        return "## env\n\n" + render(k, env[k])
+        return render(k, env[k])
     keys = sorted(env)
     if filt:
         keys = [k for k in keys if filt in k.lower()]
     if not keys:
         return "_no matching env vars_"
-    lines = [f"## env ({len(keys)} vars"
-             + (f", filter={filt!r}" if filt else "") + ")", ""]
+    # The count survives, the filter does not: how many matched is news, what
+    # was matched against is the caller's own word.
+    lines = [f"_{len(keys)} vars_", ""]
     lines += [render(k, env[k]) for k in keys]
     if not show_secrets:
         lines.append("\n_secret-looking values redacted; pass show_secrets=true to reveal_")
@@ -590,8 +618,7 @@ def h_stat(p: dict) -> str:
             pass
         return f"{uname or uid}:{gname or gid}  (uid={uid}, gid={gid})"
 
-    lines = [f"## stat — `{path}`", "",
-             f"- type   : {kind}",
+    lines = [f"- type   : {kind}",
              f"- mode   : `{st_mod.filemode(st.st_mode)}`  ({oct(st_mod.S_IMODE(st.st_mode))})",
              f"- owner  : {owner(st.st_uid, st.st_gid)}",
              f"- size   : {st.st_size} B ({_kb_human(st.st_size / 1024)})",
@@ -600,6 +627,10 @@ def h_stat(p: dict) -> str:
              f"- mtime  : {_fmt_time(st.st_mtime)}",
              f"- atime  : {_fmt_time(st.st_atime)}",
              f"- ctime  : {_fmt_time(st.st_ctime)}"]
+    if path != str(raw).strip():
+        # expanduser() rewrote the caller's own argument -- THAT is news.  An
+        # unchanged path is not: they are holding the string they sent.
+        lines[:0] = [f"_`{path}`_", ""]
 
     if is_link:
         try:
@@ -667,7 +698,7 @@ def h_interfaces(p: dict) -> str:
         if not text.strip():
             return f"_no interface matching {filt!r}_"
 
-    head = f"## interfaces — {label}"
+    head = f"_{label}_"
     try:
         names = ", ".join(n for _, n in socket.if_nameindex())
         if names:
@@ -688,7 +719,7 @@ def h_route(p: dict) -> str:
         raise ValueError("no ip/netstat available to show the routing table.")
     if rc != 0 and not out.strip():
         raise ValueError(err.strip() or "route listing failed")
-    return f"## routes — {label}\n\n" + (_md_fence(out.strip()) if out.strip() else "_(empty)_")
+    return f"_{label}_\n\n" + (_md_fence(out.strip()) if out.strip() else "_(empty)_")
 
 
 def h_pstree(p: dict) -> str:
@@ -755,14 +786,12 @@ def h_pstree(p: dict) -> str:
     for n, r_pid in enumerate(roots):
         walk(r_pid, "", n == len(roots) - 1, 0)
 
-    head = "## process tree"
-    if root is not None:
-        head += f" — subtree of pid {root}"
-    if depth > 0:
-        head += f" (depth {depth})"
-    head += (f" — {len(lines)} rows (host total {len(info)} processes)"
-             if root is not None or depth > 0
-             else f" — {len(lines)} of {len(info)} processes")
+    # `pid` and `depth` were the caller's own words.  The two counts are not:
+    # they say how much of the host this tree actually covers, which is the one
+    # thing a subtree request cannot answer for itself.
+    head = (f"_{len(lines)} rows of {len(info)} host processes_"
+            if root is not None or depth > 0
+            else f"_{len(lines)} of {len(info)} processes_")
     note = f"\n\n_truncated at limit={limit}; pass a larger limit or a pid to narrow._" \
         if state["truncated"] else ""
     return head + "\n\n" + _md_fence("\n".join(lines)) + note
@@ -777,8 +806,7 @@ def h_limits(p: dict) -> str:
         if IS_LINUX:
             try:
                 with open(f"/proc/{pid}/limits") as f:
-                    return (f"## limits — pid {pid} (/proc/{pid}/limits)\n\n"
-                            + _md_fence(f.read().strip()))
+                    return _md_fence(f.read().strip())
             except OSError as exc:
                 raise ValueError(f"cannot read limits for pid {pid}: "
                                  f"{exc.strerror or exc}")
@@ -795,8 +823,10 @@ def h_limits(p: dict) -> str:
             return "unlimited" if v == resource.RLIM_INFINITY else str(v)
         rows.append([name[len("RLIMIT_"):].lower(), show(soft), show(hard)])
 
-    parts += ["## limits — this MCP server process", "",
-              "_inherited from whatever launched the server; NOT the Bash tool's shell._", "",
+    # No "## limits — this MCP server process" title: the italic line below
+    # already says WHOSE limits these are, which is the only part the caller
+    # could not have worked out, and it says it better.
+    parts += ["_inherited from whatever launched the server; NOT the Bash tool's shell._", "",
               _md_fence(_fmt_table(["limit", "soft", "hard"], rows))]
 
     if IS_MAC and _have("launchctl"):
@@ -847,9 +877,7 @@ def h_services(p: dict) -> str:
         body_lines = body_lines[:limit]
         note = f"\n\n_showing first {limit} of {shown} matches._"
     text = "\n".join(([header] if header else []) + body_lines)
-    head = f"## services — {label} — {len(body_lines)} of {total}"
-    if filt:
-        head += f" (filter={filt!r})"
+    head = f"_{label} — {len(body_lines)} of {total}_"
     return head + "\n\n" + _md_fence(text) + note
 
 
@@ -905,10 +933,12 @@ def h_versions(p: dict) -> str:
                      resolved])
     if not rows:
         return "_none of the allow-listed tools are installed_"
-    head = "## versions"
-    if not explicit:
-        head += f" — {len(rows)} of {len(_VERSION_TOOLS)} allow-listed tools installed"
-    return head + "\n\n" + _md_fence(_fmt_table(["tool", "version", "path"], rows))
+    # Only the implicit call gets a line: there the caller named nothing, so how
+    # many of the allow-list are actually installed is the whole answer.  When
+    # they named the tools, the rows already are the answer.
+    head = ("" if explicit else
+            f"_{len(rows)} of {len(_VERSION_TOOLS)} allow-listed tools installed_\n\n")
+    return head + _md_fence(_fmt_table(["tool", "version", "path"], rows))
 
 
 # Digests are computed with hashlib, NOT by shelling out to shasum/sha256sum/
@@ -971,8 +1001,9 @@ def h_hash(p: dict, algo: str = "") -> str:
         if expect:
             verdict = digest == expect
 
-    out = f"## {algo}\n\n" + _md_fence(
-        _fmt_table([algo, "size", "path"], rows))
+    # No "## sha256" title: the table's FIRST COLUMN is named after the algo,
+    # so the title restated a word the payload already carries.
+    out = _md_fence(_fmt_table([algo, "size", "path"], rows))
     if expect:
         out += ("\n\n**MATCH** — the digest equals the expected value."
                 if verdict else
@@ -1376,10 +1407,11 @@ def h_validate(p: dict, fmt: str = "") -> str:
         verdict = "**NOT VERIFIED (strict)**"
     else:
         verdict = "**PASSED**"
-    head = f"## validate — {fmt}" if fmt else "## validate"
-    return (head + "\n\n"
-            + _md_fence(_fmt_table(["status", "format", "at", "target",
-                                    "detail"], rows))
+    # No title: the `format` column already carries the format PER ROW, which is
+    # strictly better than one in a header -- a mixed-extension batch has no
+    # single format to name, and the old header printed nothing at all for it.
+    return (_md_fence(_fmt_table(["status", "format", "at", "target",
+                                  "detail"], rows))
             + f"\n\n{verdict} — {summary}.")
 
 
