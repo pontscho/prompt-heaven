@@ -126,10 +126,14 @@ class StubSubprocess:
 
     def __init__(self):
         self.calls = []
+        self.returncode = 0
+        self.stdout = "STUB-STDOUT\n"
+        self.stderr = ""
 
     def run(self, cmd, **kwargs):
         self.calls.append(list(cmd))
-        return subprocess.CompletedProcess(list(cmd), 0, "STUB-STDOUT\n", "")
+        return subprocess.CompletedProcess(list(cmd), self.returncode,
+                                           self.stdout, self.stderr)
 
 
 def extract_cmdline(text):
@@ -152,7 +156,10 @@ class Driver:
         self.stub = StubSubprocess()
         self.mod.subprocess = self.stub
 
-    def call(self, function, params):
+    def call(self, function, params, rc=0, stdout="STUB-STDOUT\n", stderr=""):
+        self.stub.returncode = rc
+        self.stub.stdout = stdout
+        self.stub.stderr = stderr
         before = len(self.stub.calls)
         result = self.mod.handle_git_call(
             {"function": function, "params": params}, H.REPO_ROOT)
@@ -193,9 +200,19 @@ def shell_words(shell, cmdline, cwd):
 # ---------------------------------------------------------------------------
 
 def check(suite, drv, group, cid, function, params, argv=None, cmdline=None,
-          error=None, must=(), must_not=(), spawns=1, status=None, note=""):
-    """One conversion case.  `error` set => the call must be REFUSED, unspawned."""
-    rep = drv.call(function, params)
+          error=None, must=(), must_not=(), spawns=1, status=None, note="",
+          rc=None, stdout="STUB-STDOUT\n"):
+    """One conversion case.  `error` set => the call must be REFUSED, unspawned.
+
+    The success path no longer echoes the command line — the caller already knows
+    what it sent — so a case that asserts on the ECHO must exercise the path that
+    still carries it: a non-zero exit. The stub returns stdout regardless, so
+    `is_error` stays False and no other assertion in the case shifts. Pass `rc`
+    explicitly to override.
+    """
+    if rc is None:
+        rc = 1 if cmdline is not None else 0
+    rep = drv.call(function, params, rc=rc, stdout=stdout)
     problems = []
     detail = ["function    : %r" % function, "params      : %r" % (params,)]
     if note:
@@ -266,8 +283,13 @@ def pinned_set(suite, group, cid, actual, expected, label):
 
 
 def quoting(suite, drv, cid, arg, rendered, shell_cwd, note=""):
-    """One _quote_arg case: exact rendering PLUS a real-shell round trip."""
-    rep = drv.call("log", {"args": [arg]})
+    """One _quote_arg case: exact rendering PLUS a real-shell round trip.
+
+    rc=1 because the echoed command line — the thing under test here — is now
+    only emitted on the failure path. `_quote_arg`'s rendering is identical
+    either way; this just picks the reply that still shows it.
+    """
+    rep = drv.call("log", {"args": [arg]}, rc=1)
     want_line = "git log " + rendered
     want_argv = ["git", "log", arg]
     problems = []
@@ -535,7 +557,8 @@ def run(opts=None):
         for arg in STAYS_BARE:
             quoting(suite, drv, "bare-" + arg, arg, arg, sh_cwd,
                     note="common case: must stay readable")
-        rep = drv.call("log", {"args": ["--grep", "a b; ls", "master..HEAD"]})
+        rep = drv.call("log", {"args": ["--grep", "a b; ls", "master..HEAD"]},
+                       rc=1)
         want = "git log --grep 'a b; ls' master..HEAD"
         want_words = ["git", "log", "--grep", "a b; ls", "master..HEAD"]
         problems = []
@@ -573,7 +596,7 @@ def run(opts=None):
         check(suite, drv, "G", "live-lsremote-remote-upload-pack", "ls-remote",
               {"remote": "--upload-pack=/tmp/x"}, error=REPO_REJECT,
               note="the same hole in the NEW repository slot, closed with it")
-        rep = drv.call("log", {"args": ["a;b"]})
+        rep = drv.call("log", {"args": ["a;b"]}, rc=1)   # echo lives on the failure path
         problems = []
         if rep["cmdline"] != "git log 'a;b'":
             problems.append("cmdline %r not quoted" % rep["cmdline"])
@@ -729,6 +752,118 @@ def run(opts=None):
                              % sorted(set(changed) - set(plain_caught)),
                              "this is why group F replays the line under real "
                              "shells as well"])
+
+        # ====== J: git status defaults to a machine format ======
+        # Plain `git status` spends ~190 chars on advice git_call can never act
+        # on -- it is read-only, so `git add` / `git restore` are unreachable
+        # through it. The default is prepended ONLY when the caller expressed no
+        # format preference; anyone who states one keeps it byte for byte.
+        check(suite, drv, "J", "bare-status-gets-porcelain", "status", {},
+              argv=["git", "status", "--porcelain=v1", "-b"],
+              note="the point of the change: no advice lines, branch delta kept")
+        for cid, given in [
+            ("short-s", ["-s"]),
+            ("short-cluster-sb", ["-sb"]),
+            ("short-long-spelling", ["--short"]),
+            ("porcelain-bare", ["--porcelain"]),
+            ("porcelain-v2", ["--porcelain=v2"]),
+            ("long-explicit", ["--long"]),
+            ("nul-separated", ["-z"]),
+            ("nul-in-cluster", ["-zb"]),
+        ]:
+            check(suite, drv, "J", "caller-format-kept-" + cid, "status",
+                  {"args": given}, argv=["git", "status"] + given,
+                  note="caller chose a format -> argv untouched")
+        check(suite, drv, "J", "branch-flag-not-duplicated", "status",
+              {"args": ["-b"]},
+              argv=["git", "status", "--porcelain=v1", "-b"],
+              note="-b already there -> add porcelain only, no doubled flag")
+        check(suite, drv, "J", "branch-long-not-duplicated", "status",
+              {"args": ["--branch"]},
+              argv=["git", "status", "--porcelain=v1", "--branch"])
+        check(suite, drv, "J", "untracked-param-survives", "status",
+              {"untracked": "all"},
+              argv=["git", "status", "--porcelain=v1", "-b", "--untracked=all"],
+              note="a real call site from session 19 -- must still reach git")
+        check(suite, drv, "J", "u-cluster-is-not-a-format", "status",
+              {"args": ["-uall"]},
+              argv=["git", "status", "--porcelain=v1", "-b", "-uall"],
+              note="-uall carries no s/z letter -> not a format choice")
+        check(suite, drv, "J", "pathspec-after-dashdash-not-a-flag", "status",
+              {"args": ["--", "-s"]},
+              argv=["git", "status", "--porcelain=v1", "-b", "--", "-s"],
+              note="a file literally named -s must not read as --short")
+        for fn in ("log", "diff", "show"):
+            check(suite, drv, "J", "no-leak-into-" + fn, fn, {},
+                  argv=["git", fn], note="the default is status-only")
+
+        # ====== K: the envelope states only what the caller cannot know ======
+        # It knows which function it called and with what params -- that IS the
+        # tool call -- so on the success path a heading, a command echo and
+        # `(exit 0)` are pure cost. What it cannot know: flags the server added,
+        # a non-zero exit, and (with no stdout at all) whether the thing worked.
+        check(suite, drv, "K", "success-has-no-heading-echo-or-exit", "log",
+              {"args": ["--oneline"]}, must=["STUB-STDOUT"],
+              must_not=["## git", "(exit 0)", "`git log"],
+              note="the caller sent these params; reading them back buys nothing")
+        check(suite, drv, "K", "no-stdout-success-says-exit-0", "merge-base",
+              {"args": ["--is-ancestor", "A", "B"]}, stdout="",
+              must=["exit 0"], must_not=["_(no output)_", "## git"],
+              note="--is-ancestor: the exit code IS the answer, not a placeholder")
+        check(suite, drv, "K", "failure-keeps-full-echo", "log",
+              {"args": ["--oneline"]}, rc=2,
+              must=["`git log --oneline` (exit 2)"],
+              note="an exit code is only diagnosable next to the argv that made it")
+
+        rep = drv.call("merge-base", {"args": ["--is-ancestor", "A", "B"]},
+                       rc=1, stdout="")
+        problems = []
+        if not rep["error"]:
+            problems.append("rc!=0 with no stdout should return an error reply")
+        for want in ("(exit 1)", "`git merge-base"):
+            if want not in rep["text"]:
+                problems.append("error reply is missing %r" % want)
+        suite.record("K", "error-reply-keeps-exit-and-argv", problems,
+                     detail=["reply       : %r" % rep["text"]],
+                     brief="%s | error-reply-keeps-exit-and-argv"
+                           % (H.FAIL if problems else H.PASS))
+
+        # --- a fence only where Markdown would damage the payload ---
+        for cid, out, fenced, why in [
+            ("sha-single-line", "28eca15a1def7e1978387b15ad0470c2914c9c0a\n",
+             False, "one markdown-neutral line: nothing to protect"),
+            ("branch-name", "master\n", False, "same"),
+            ("multi-line", "a\nb\n", True,
+             "Markdown folds a lone newline into a space"),
+            ("porcelain-branch-header", "## master...github/master\n", True,
+             "`##` would render as an H2 heading -- the status -b reply"),
+            ("backtick", "fix `foo` in bar\n", True, "a backtick breaks out"),
+            ("leading-space", "  indented\n", True,
+             "edge whitespace is part of the answer"),
+            ("list-dash", "- item\n", True, "block-level lead character"),
+            ("table-pipe-midline", "a|b\n", False,
+             "a lone mid-line pipe is NOT a table: GFM needs a separator row"),
+            ("table-pipe-leading", "|a|b|\n", True,
+             "leads with a pipe -> reads as a table row"),
+        ]:
+            rep = drv.call("log", {"args": ["--oneline"]}, stdout=out)
+            has = "```" in rep["text"]
+            problems = ([] if has == fenced
+                        else ["fenced=%s, expected %s" % (has, fenced)])
+            suite.record("K", "fence-" + cid, problems,
+                         detail=["stdout      : %r" % out,
+                                 "fenced      : %s" % has,
+                                 "why         : %s" % why,
+                                 "reply       : %r" % rep["text"][:120]],
+                         brief="%s | fence-%s | fenced=%s"
+                               % (H.FAIL if problems else H.PASS, cid, has))
+
+        check(suite, drv, "K", "injected-flags-disclosed", "status", {},
+              must=["_+ --porcelain=v1 -b_"],
+              note="a bare status coming back in porcelain must say why")
+        check(suite, drv, "K", "no-disclosure-when-caller-chose", "status",
+              {"args": ["-s"]}, must_not=["_+ "],
+              note="nothing was injected -> nothing to disclose")
 
         stub_ok = drv.mod.subprocess is drv.stub
         non_git = [c for c in drv.stub.calls if not c or c[0] != "git"]

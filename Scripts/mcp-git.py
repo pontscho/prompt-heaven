@@ -283,6 +283,39 @@ def _md_fence(content: str, lang: str = "") -> str:
     return f"{fence}{lang}\n{content}\n{fence}"
 
 
+def _needs_fence(text: str) -> bool:
+    """True when *text* cannot sit in Markdown prose unharmed.
+
+    `_md_fence` already decides how WIDE a fence must be; this decides whether
+    one is needed at all. It errs toward keeping it, because a fence is the
+    cheapest part of the envelope (7-8 chars) and the failure it prevents is a
+    corrupted reply, not a wasted token. It may only be dropped for a payload
+    that survives verbatim: ONE line, no backtick, no block-level lead
+    character, no edge whitespace to lose.
+
+    Multi-line ALWAYS needs one: Markdown folds a single newline into a space,
+    so an unfenced two-line answer silently arrives as one line. That is the
+    same class of quiet corruption as an unbalanced fence, just quieter.
+    """
+    body = text.strip("\n")
+    if not body:
+        return False
+    if "\n" in body:
+        return True                      # Markdown would fold the line breaks
+    if body != body.strip():
+        return True                      # edge whitespace is part of the answer
+    if "`" in body:
+        return True
+    # Block-level lead characters: heading, quote, list, table row, setext rule.
+    # `git status -b` opens with `## master...`, which without a fence renders
+    # as an H2 heading — this branch is why the fence stays on that reply.
+    if body[0] in "#>|-*+=":
+        return True
+    if body[0].isdigit() and body[1:2] in (".", ")"):
+        return True                      # ordered-list marker
+    return False
+
+
 # Characters that survive an unquoted shell word unchanged, in any position.
 _SHELL_SAFE_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -500,6 +533,64 @@ def _semantic_params_to_args(params: dict) -> List[str]:
     return flags + repos + positionals
 
 
+_STATUS_FORMAT_FLAGS = ("--short", "--long", "--porcelain", "--no-short")
+
+
+def _status_format_chosen(args: List[str]) -> bool:
+    """True when the caller already picked a `git status` output format.
+
+    Short-option clusters count: `-sb` chose short just as `-s` did. That is the
+    bug class this repo already paid for once on `hash-object -wt`, where a
+    bundled letter slipped past a check that only compared whole arguments.
+    """
+    for a in args:
+        if a == "--":            # everything after this is a pathspec, not a flag
+            break
+        if a.split("=", 1)[0] in _STATUS_FORMAT_FLAGS:
+            return True
+        if len(a) > 1 and a[0] == "-" and not a.startswith("--"):
+            if "s" in a[1:] or "z" in a[1:]:
+                return True
+    return False
+
+
+def _status_branch_flag_present(args: List[str]) -> bool:
+    """True when the caller already asked for the branch header (-b / --branch)."""
+    for a in args:
+        if a == "--":
+            break
+        if a == "--branch":
+            return True
+        if len(a) > 1 and a[0] == "-" and not a.startswith("--") and "b" in a[1:]:
+            return True
+    return False
+
+
+def _status_default_format(args: List[str]) -> List[str]:
+    """Prepend a machine format to `git status` when the caller chose none.
+
+    Plain `git status` spends ~190 characters on advice this tool physically
+    cannot act on — `(use "git add ...")`, `(use "git restore ...")`, `no changes
+    added to commit` — because git_call is read-only and not one of those commands
+    can be run through it. For the model reading the reply that is pure cost: the
+    same answer (branch, upstream delta, per-file state) fits in three lines.
+
+    `--porcelain=v1` rather than `-s`, because git contractually keeps porcelain
+    stable across versions while the short format is explicitly not guaranteed.
+    `-b` restores the branch/upstream line the long format gave for free, in
+    `## master...github/master [ahead 5]` form — the delta is what callers here
+    actually read before a push.
+
+    A caller who states a format keeps it, untouched.
+    """
+    if _status_format_chosen(args):
+        return args
+    prefix = ["--porcelain=v1"]
+    if not _status_branch_flag_present(args):
+        prefix.append("-b")
+    return prefix + args
+
+
 def _ensure_dict(value: Any, name: str = "params") -> dict:
     """Coerce *value* to a dict.
 
@@ -580,6 +671,15 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     if not os.path.isdir(cwd):
         return {"error": f"cwd is not a directory: {cwd_param}"}
 
+    # After the validator: it must judge the caller's argv, not ours.
+    # `injected` is what the SERVER added — the reply has to disclose it, or a
+    # bare `status` coming back in porcelain is unexplainable to the caller.
+    injected: List[str] = []
+    if function == "status":
+        extended = _status_default_format(args)
+        injected = extended[:len(extended) - len(args)]
+        args = extended
+
     cmd = ["git", function] + args
     try:
         result = subprocess.run(
@@ -608,16 +708,30 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
 
     cmd_str = "git " + function + ("" if not args else " " + " ".join(_quote_arg(a) for a in args))
 
-    parts = [f"## git {function}", ""]
+    # The envelope states only what the caller could NOT know. It knows which
+    # function it called and with what params — that is the tool call itself —
+    # so a heading and a full command echo are pure cost on the success path.
+    # What it cannot know: a non-default cwd, flags the server added, a non-zero
+    # exit, and (when there is no stdout at all) whether the command succeeded.
+    parts: List[str] = []
     if cwd != project_root:
         parts.append(f"_cwd: `{os.path.relpath(cwd, project_root)}`_")
-        parts.append("")
-    parts.append(f"`{cmd_str}` (exit {result.returncode})")
-    parts.append("")
+    if result.returncode != 0:
+        # The failure path is where verbosity pays: an exit code is only
+        # diagnosable next to the argv that produced it. Full echo stays here.
+        parts.append(f"`{cmd_str}` (exit {result.returncode})")
+    elif injected:
+        parts.append("_+ " + " ".join(_quote_arg(a) for a in injected) + "_")
+
     if stdout:
-        parts.append(_md_fence(stdout))
+        parts.append(_md_fence(stdout) if _needs_fence(stdout)
+                     else stdout.strip("\n"))
     elif not stderr and result.returncode == 0:
-        parts.append("_(no output)_")
+        # No stdout and success: the exit code IS the answer. This is the whole
+        # point of `merge-base --is-ancestor`, `diff --quiet` and `apply
+        # --check` — a placeholder saying "no output" throws that bit away and
+        # charges 13 characters for it.
+        parts.append("exit 0")
     if truncated_stdout:
         parts.append(f"_stdout truncated at {max_chars} chars_")
     if stderr.strip():
