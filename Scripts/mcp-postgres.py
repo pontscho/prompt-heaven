@@ -3,7 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""mcp-psql — Pure-stdlib PostgreSQL MCP server (this file: mcp-postgres.py).
+r"""mcp-psql — Pure-stdlib PostgreSQL MCP server (this file: mcp-postgres.py).
 
 Registered with Claude Code as `mcp-psql`, so the model-facing tool name is
 `mcp__mcp-psql__postgres_call`. The string mcp-postgres.py is only ever this
@@ -18,6 +18,16 @@ the same approach pg8000 proves is possible from pure Python. Authentication
 supports SCRAM-SHA-256, MD5 and cleartext.
 
 Requires only Python 3.9+ stdlib modules.
+
+Output shape (cap convention v1): result sets are rendered as an unaligned
+header row plus data rows joined by a single '|', no padding and no rule line —
+the reader is a model that parses on the delimiter, not an eye scanning a
+column. Cells are backslash-escaped so '|' inside a value stays unambiguous
+(\\ \| \n \r \t); SQL NULL is the bare token NULL, an empty string is an empty
+field, the literal string "NULL" is \NULL. Answers are capped by
+max_answer_chars (default 24000 chars, ~6k tokens): row-shaped payloads drop
+whole ROWS and say where to resume, everything else is cut on a line boundary
+with one closing accounting line.
 
 Usage:
   python3 mcp-postgres.py [--host [ssl://]ip:port] [--user U] [--password P]
@@ -55,7 +65,14 @@ log = logging.getLogger("mcp-postgres")
 
 PROTOCOL_VERSION_3 = 196608           # 3.0
 SSL_REQUEST_CODE = 80877103           # magic for SSLRequest
-DEFAULT_MAX_ANSWER_CHARS = 50000
+
+# Cap convention v1. 24000 chars is ~6k tokens at the usual ~4 chars/token — a
+# reply one call may spend, not a reply that eats the session. The previous
+# 50000 was ~12k tokens for a SINGLE call, and a result set is the one payload
+# in this fleet that can be arbitrarily large by accident (one missing WHERE).
+# Per-call overridable via the max_answer_chars parameter, so a caller who
+# genuinely wants the whole dump asks for it explicitly.
+DEFAULT_MAX_ANSWER_CHARS = 24000
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +638,7 @@ PARAM_ALIASES = {
     "database": "dbname",
     "rows": "max_rows",
     "limit": "max_rows",
+    "skip": "offset",
     "fmt": "format",
     "system": "include_system",
     "max_chars": "max_answer_chars",
@@ -707,58 +725,189 @@ def _split_name(name: str, schema: Optional[str]):
     return None, name
 
 
-def _render_table(columns: List[str], rows: List[List[Optional[str]]], max_rows: int = 0) -> str:
-    ncol = len(columns)
-    widths = [len(c) for c in columns]
-    display = rows[:max_rows] if (max_rows and max_rows > 0) else rows
-    cells: List[List[str]] = []
-    for r in display:
-        row_cells: List[str] = []
-        for i in range(ncol):
-            v = r[i] if i < len(r) else None
-            s = "NULL" if v is None else str(v)
-            s = s.replace("\n", "\\n").replace("\t", " ")
-            if len(s) > 120:
-                s = s[:119] + "…"
-            row_cells.append(s)
-            widths[i] = max(widths[i], len(s))
-        cells.append(row_cells)
-    out = [" | ".join(columns[i].ljust(widths[i]) for i in range(ncol))]
-    out.append("-+-".join("-" * widths[i] for i in range(ncol)))
-    for row_cells in cells:
-        out.append(" | ".join(row_cells[i].ljust(widths[i]) for i in range(ncol)))
-    return "\n".join(out)
+# -- the row table ----------------------------------------------------------
+#
+# The consumer of this output is an LLM, not a terminal, so the table pays for a
+# field BOUNDARY and for nothing else. psql's aligned layout charges three
+# times over for that one piece of information: the " | " separator, the padding
+# that widens every cell to the longest value in its column, and the "-+-" rule
+# under the header. Alignment serves a human eye scanning down a column; a model
+# parses on the delimiter. On a wide text column the padding is the majority of
+# the reply — every row pays for the single longest value in the set.
+#
+# So: ONE single-character delimiter, no padding, no rule line. The header row
+# stays, because the key names carry meaning, but unaligned.
+DELIM = "|"
+
+# Dropping the padding must not cost field UNAMBIGUITY: a table whose rows
+# cannot be split back into fields is worse than a padded one. Cells are escaped
+# C-style, and because the escape character is itself escaped the encoding is
+# reversible rather than merely suggestive:
+#     \\ = a literal backslash        \| = a literal delimiter
+#     \n = newline    \r = CR         \t = tab
+# NULL handling rides on the same scheme, keeping the three-way distinction the
+# padded table also had: SQL NULL is the bare token below, the empty string is
+# an empty field, and the 4-char STRING "NULL" is written \NULL — unreachable
+# for any other value, since a real backslash always doubles.
+NULL_TOKEN = "NULL"
+
+# No single cell may swallow the answer (a pg_get_functiondef body, a JSONB
+# blob). Applied to the RAW value, BEFORE escaping, so the cut can never land
+# inside an escape sequence and leave a dangling backslash behind.
+CELL_MAX_CHARS = 120
+
+# Room kept free for a page/closing line while filling a row budget.
+PAGE_LINE_RESERVE = 80
 
 
-def _format_results(results: List[QueryResult], max_rows: int = 0) -> str:
+def _escape_cell(text: str) -> str:
+    r"""Escape one field so DELIM cannot occur inside it. Reversible."""
+    text = text.replace("\\", "\\\\").replace(DELIM, "\\" + DELIM)
+    return text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
+def _cell(value: Optional[str]) -> str:
+    """Render one value: NULL marker, per-cell clamp, then escaping."""
+    if value is None:
+        return NULL_TOKEN
+    text = str(value)
+    if len(text) > CELL_MAX_CHARS:
+        text = text[:CELL_MAX_CHARS - 1] + "…"
+    text = _escape_cell(text)
+    # Only reachable when the VALUE is the string "NULL"; see NULL_TOKEN.
+    return "\\" + text if text == NULL_TOKEN else text
+
+
+def _rows_note(start: int, shown: int, total: int) -> str:
+    """Row accounting for a row-shaped payload; goes on its LAST line.
+
+    <total> is EXACT and always known here: DataRow messages are fully buffered
+    before a QueryResult is handed back (see _read_query_results), so this
+    server never streams a cursor and so never has to guess a row count. A
+    server that CANNOT know its total must SAY so on this line instead of
+    inventing a number.
+
+    Display indices are 1-based inclusive, which makes the 1-based last row
+    equal to the 0-based ``offset`` of the next one — so the hint is literally
+    the value to pass back. ``offset=`` is emitted only when rows really remain:
+    a resume hint that would return nothing is worse than no hint.
+    """
+    last = start + shown
+    if shown == 0:
+        # Spelled out rather than as a 1-based range, which would invert
+        # ("rows 100-99") when the caller offsets past the end.
+        return (f"[no rows at offset {start} of {total}]" if start
+                else f"[{total} rows]")
+    if last < total:
+        return (f"[showing rows {start + 1}-{last} of {total}; "
+                f"offset={last} for more]")
+    if start > 0:
+        return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
+    # Whole set shown: just the count, which a model cannot cheaply derive from
+    # a long answer without counting lines.
+    return f"[{total} row{'s' if total != 1 else ''}]"
+
+
+def _render_result(res: QueryResult, max_rows: int = 0, offset: int = 0,
+                   char_budget: int = 0) -> str:
+    """One result set as header + data lines, paged by ROW — never mid-row.
+
+    A result set is row-shaped by definition, so its share of the answer ceiling
+    is spent by dropping whole rows rather than by cutting characters: the last
+    line kept is always a complete row, and the closing line says where to
+    resume. ``char_budget`` of 0 means unlimited.
+    """
+    columns = res.columns
+    lines = [DELIM.join(_escape_cell(c) for c in columns)]
+    total = len(res.rows)
+    start = max(0, offset)
+
+    budget = char_budget - len(lines[0]) if char_budget > 0 else 0
+    shown = 0
+    for row in res.rows[start:]:
+        if max_rows > 0 and shown >= max_rows:
+            break
+        line = DELIM.join(_cell(row[i] if i < len(row) else None)
+                          for i in range(len(columns)))
+        # At least one row always survives: a header on its own tells the caller
+        # nothing, and _cap_text() below is the hard backstop for the ceiling.
+        if budget > 0 and shown > 0 and budget - len(line) - 1 < PAGE_LINE_RESERVE:
+            break
+        budget -= len(line) + 1
+        lines.append(line)
+        shown += 1
+
+    lines.append(_rows_note(start, shown, total))
+    return "\n".join(lines)
+
+
+def _format_results(results: List[QueryResult], max_rows: int = 0,
+                    offset: int = 0, char_budget: int = 0) -> str:
     blocks: List[str] = []
+    spent = 0
     for res in results:
         if res.columns:
-            table = _render_table(res.columns, res.rows, max_rows)
-            nrows = len(res.rows)
-            if max_rows and 0 < max_rows < nrows:
-                note = f"({nrows} rows, showing {max_rows})"
-            else:
-                note = f"({nrows} row{'s' if nrows != 1 else ''})"
-            blocks.append(table + "\n" + note)
+            # Budget left for THIS result set. Clamped to 1 rather than 0: 0
+            # means "unlimited" here, and an exhausted budget is the opposite.
+            budget = max(1, char_budget - spent) if char_budget > 0 else 0
+            block = _render_result(res, max_rows, offset, budget)
         else:
-            blocks.append(res.command_tag or "OK")
+            block = res.command_tag or "OK"
+        blocks.append(block)
+        spent += len(block) + 2
         for notice in res.notices:
             blocks.append(notice)
-    return "\n\n".join(blocks) if blocks else "(no result)"
+            spent += len(notice) + 2
+    return "\n\n".join(blocks) if blocks else "(none)"
 
 
-def _truncate(text: str, max_chars: int) -> str:
-    if max_chars and max_chars > 0 and len(text) > max_chars:
-        return text[:max_chars] + f"\n… (truncated at {max_chars} chars)"
-    return text
+def _cap_text(text: str, max_chars: int) -> str:
+    """Clamp to ``max_chars`` on a LINE boundary, head-biased, one closing line.
+
+    Head-biased because the informative end of every payload this server builds
+    is the top: the first rows of a result set, the first nodes of a plan, the
+    signature above a function body. The closing line names the end that was
+    kept, so the bias is never something the caller has to assume.
+
+    This is the LAST resort, not the main path: row-shaped answers are paged by
+    row in _render_result(), so what actually lands here is the row-less
+    payloads (an EXPLAIN plan, a function definition, a describe report) and any
+    overflow the row pager could not prevent. The notice is counted against the
+    ceiling, so the whole reply stays within max_chars.
+    """
+    if not max_chars or max_chars <= 0 or len(text) <= max_chars:
+        return text
+    total = len(text)
+
+    def marker(kept: int) -> str:
+        return (f"\n[truncated: kept {kept} of {total} chars from the head; "
+                f"raise max_answer_chars or narrow the query]")
+
+    # marker(total) is the longest the notice can get (kept <= total), so
+    # reserving that much cannot overshoot once the real count is known.
+    keep = max_chars - len(marker(total))
+    if keep <= 0:
+        # The ceiling is smaller than the accounting line itself. The line still
+        # wins: a payload with no accounting is worse than no payload.
+        return marker(0).lstrip("\n")
+    cut = text.rfind("\n", 0, keep + 1)
+    if cut <= 0:
+        # No line boundary fits: either the payload is one enormous line (a
+        # function body, a JSON plan) or the ceiling is narrower than the first
+        # line. The cap wins over the boundary here, and the notice sitting
+        # right below says so. Row-shaped answers are paged whole-row before
+        # they ever reach this point, so the only table that can land here is a
+        # single row wider than the entire ceiling.
+        cut = keep
+    return text[:cut] + marker(cut)
 
 
 def _conn_name(params: dict) -> str:
     return params.get("connection") or "default"
 
 
-def _max_chars(params: dict) -> int:
+def _max_answer_chars(params: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
     try:
         return int(params.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
     except (TypeError, ValueError):
@@ -768,6 +917,20 @@ def _max_chars(params: dict) -> int:
 def _max_rows(params: dict) -> int:
     try:
         return int(params.get("max_rows", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _offset(params: dict) -> int:
+    """First row to display, 0-based — the value the page line hands back.
+
+    Display-level paging over the rows this call already fetched, NOT a SQL
+    OFFSET: the statement is re-executed on every call, so a caller paging a big
+    result set pays for the scan each time. It exists so the row-truncation
+    line's ``offset=<n> for more`` is an instruction that actually works.
+    """
+    try:
+        return max(0, int(params.get("offset", 0)))
     except (TypeError, ValueError):
         return 0
 
@@ -788,6 +951,19 @@ def _bool_param(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+def _row_answer(results: List[QueryResult], params: dict) -> dict:
+    """The standard row-shaped reply: page by row first, then clamp characters.
+
+    Both layers are in play on purpose. Row paging keeps the common case whole —
+    complete rows plus a resume hint — and the character clamp is the hard
+    ceiling that also covers what rows alone cannot bound (a single monstrous
+    row, notices, several result sets from one multi-statement call).
+    """
+    cap = _max_answer_chars(params)
+    text = _format_results(results, _max_rows(params), _offset(params), cap)
+    return {"__raw_text__": _cap_text(text, cap)}
+
+
 # ---------------------------------------------------------------------------
 # Layer 3 — Handlers
 # ---------------------------------------------------------------------------
@@ -800,12 +976,10 @@ def handle_query(params: dict, mgr: ConnectionManager) -> dict:
     bind = params.get("params")
 
     if isinstance(bind, list) and len(bind) > 0:
-        result = mgr.extended_query(conn, sql, bind)
-        text = _format_results([result], _max_rows(params))
+        results = [mgr.extended_query(conn, sql, bind)]
     else:
         results = mgr.simple_query(conn, sql)
-        text = _format_results(results, _max_rows(params))
-    return {"__raw_text__": _truncate(text, _max_chars(params))}
+    return _row_answer(results, params)
 
 
 def handle_explain(params: dict, mgr: ConnectionManager) -> dict:
@@ -828,7 +1002,7 @@ def handle_explain(params: dict, mgr: ConnectionManager) -> dict:
         for row in res.rows:
             lines.append(row[0] if row and row[0] is not None else "")
     text = "\n".join(lines) if lines else _format_results(results)
-    return {"__raw_text__": _truncate(text, _max_chars(params))}
+    return {"__raw_text__": _cap_text(text, _max_answer_chars(params))}
 
 
 def handle_list_schemas(params: dict, mgr: ConnectionManager) -> dict:
@@ -842,7 +1016,7 @@ def handle_list_schemas(params: dict, mgr: ConnectionManager) -> dict:
         sql += "WHERE n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' "
     sql += "ORDER BY 1"
     results = mgr.simple_query(_conn_name(params), sql)
-    return {"__raw_text__": _truncate(_format_results(results, _max_rows(params)), _max_chars(params))}
+    return _row_answer(results, params)
 
 
 def handle_list_tables(params: dict, mgr: ConnectionManager) -> dict:
@@ -866,7 +1040,7 @@ def handle_list_tables(params: dict, mgr: ConnectionManager) -> dict:
         sql += ("AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' "
                 "ORDER BY 1, 2")
         results = mgr.simple_query(conn, sql)
-    return {"__raw_text__": _truncate(_format_results(results, _max_rows(params)), _max_chars(params))}
+    return _row_answer(results, params)
 
 
 def handle_describe_table(params: dict, mgr: ConnectionManager) -> dict:
@@ -904,13 +1078,19 @@ def handle_describe_table(params: dict, mgr: ConnectionManager) -> dict:
     idxs = mgr.extended_query(conn, index_sql, [target])
     fks = mgr.extended_query(conn, fk_sql, [target])
 
+    # Same formatter as query/list_tables — one table shape across the server.
+    # Deliberately NOT row-paged, unlike the list_* handlers: this is a
+    # fixed-shape three-section report, one offset could not mean anything
+    # sensible across three different result sets, and a page line reading
+    # "offset=N for more" would be an instruction describe_table does not
+    # accept. So the character ceiling (line-boundary) is the only clamp here.
     sections = [
         f"Table: {target}",
         "── Columns ──\n" + _format_results([cols]),
         "── Indexes ──\n" + _format_results([idxs]),
         "── Foreign keys ──\n" + _format_results([fks]),
     ]
-    return {"__raw_text__": _truncate("\n\n".join(sections), _max_chars(params))}
+    return {"__raw_text__": _cap_text("\n\n".join(sections), _max_answer_chars(params))}
 
 
 def handle_list_indexes(params: dict, mgr: ConnectionManager) -> dict:
@@ -934,7 +1114,7 @@ def handle_list_indexes(params: dict, mgr: ConnectionManager) -> dict:
         results = [mgr.extended_query(conn, sql, binds)]
     else:
         results = mgr.simple_query(conn, sql)
-    return {"__raw_text__": _truncate(_format_results(results, _max_rows(params)), _max_chars(params))}
+    return _row_answer(results, params)
 
 
 def handle_list_functions(params: dict, mgr: ConnectionManager) -> dict:
@@ -958,7 +1138,7 @@ def handle_list_functions(params: dict, mgr: ConnectionManager) -> dict:
         sql += ("WHERE n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' "
                 "ORDER BY 1, 2")
         results = mgr.simple_query(conn, sql)
-    return {"__raw_text__": _truncate(_format_results(results, _max_rows(params)), _max_chars(params))}
+    return _row_answer(results, params)
 
 
 def handle_describe_function(params: dict, mgr: ConnectionManager) -> dict:
@@ -1023,7 +1203,7 @@ def handle_describe_function(params: dict, mgr: ConnectionManager) -> dict:
     except PgError as exc:
         # pg_get_functiondef rejects aggregates/window funcs — show signature only.
         text = header + f"\n\n(definition unavailable: {exc.message})"
-    return {"__raw_text__": _truncate(text, _max_chars(params))}
+    return {"__raw_text__": _cap_text(text, _max_answer_chars(params))}
 
 
 def handle_call_function(params: dict, mgr: ConnectionManager) -> dict:
@@ -1039,8 +1219,7 @@ def handle_call_function(params: dict, mgr: ConnectionManager) -> dict:
     placeholders = ", ".join(f"${i + 1}" for i in range(len(args)))
     sql = f"SELECT {target}({placeholders})"
     result = mgr.extended_query(_conn_name(params), sql, args)
-    text = _format_results([result], _max_rows(params))
-    return {"__raw_text__": _truncate(text, _max_chars(params))}
+    return _row_answer([result], params)
 
 
 def handle_call_procedure(params: dict, mgr: ConnectionManager) -> dict:
@@ -1056,8 +1235,7 @@ def handle_call_procedure(params: dict, mgr: ConnectionManager) -> dict:
     placeholders = ", ".join(f"${i + 1}" for i in range(len(args)))
     sql = f"CALL {target}({placeholders})"
     result = mgr.extended_query(_conn_name(params), sql, args)
-    text = _format_results([result], _max_rows(params))
-    return {"__raw_text__": _truncate(text, _max_chars(params))}
+    return _row_answer([result], params)
 
 
 def handle_list_connections(params: dict, mgr: ConnectionManager) -> dict:
@@ -1169,17 +1347,21 @@ HANDLERS: Dict[str, Callable[[dict, ConnectionManager], dict]] = {
     "disconnect": handle_disconnect,
 }
 
+# 'offset' is accepted exactly where a row-truncation line can be emitted (the
+# row-shaped handlers), because that line tells the caller to pass it back.
 HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
-    "query": {"sql", "params", "connection", "max_rows", "max_answer_chars"},
+    "query": {"sql", "params", "connection", "max_rows", "offset", "max_answer_chars"},
     "explain": {"sql", "analyze", "format", "connection", "max_answer_chars"},
-    "list_schemas": {"include_system", "connection", "max_rows", "max_answer_chars"},
-    "list_tables": {"schema", "connection", "max_rows", "max_answer_chars"},
+    "list_schemas": {"include_system", "connection", "max_rows", "offset", "max_answer_chars"},
+    "list_tables": {"schema", "connection", "max_rows", "offset", "max_answer_chars"},
     "describe_table": {"table", "schema", "connection", "max_answer_chars"},
-    "list_indexes": {"table", "schema", "connection", "max_rows", "max_answer_chars"},
-    "list_functions": {"schema", "connection", "max_rows", "max_answer_chars"},
+    "list_indexes": {"table", "schema", "connection", "max_rows", "offset", "max_answer_chars"},
+    "list_functions": {"schema", "connection", "max_rows", "offset", "max_answer_chars"},
     "describe_function": {"name", "schema", "args", "connection", "max_answer_chars"},
-    "call_function": {"name", "schema", "args", "connection", "max_rows", "max_answer_chars"},
-    "call_procedure": {"name", "schema", "args", "connection", "max_rows", "max_answer_chars"},
+    "call_function": {"name", "schema", "args", "connection", "max_rows", "offset",
+                      "max_answer_chars"},
+    "call_procedure": {"name", "schema", "args", "connection", "max_rows", "offset",
+                       "max_answer_chars"},
     "list_connections": set(),
     "connect": {"name", "host", "port", "user", "password", "password_env", "dbname", "sslmode"},
     "disconnect": {"name"},
@@ -1281,6 +1463,12 @@ POSTGRES_CALL_TOOL = {
         "  call_procedure             — CALL schema.name($1,…) with text args\n"
         "  connect/disconnect/list_connections — manage named connections\n\n"
         "Every handler takes an optional 'connection' (default \"default\").\n\n"
+        "Result tables are `|`-delimited and UNALIGNED (header row, then one row "
+        "per line). Cells are escaped reversibly: `\\\\`=backslash, `\\|`=literal "
+        "`|`, plus `\\n`/`\\r`/`\\t`. Bare NULL = SQL null, empty field = empty "
+        "string, `\\NULL` = the 4-char string \"NULL\" — so decide NULL-ness on the "
+        "RAW field BEFORE unescaping. Cells over 120 chars are clamped with `…`. "
+        "Row-shaped replies end with a paging line; pass `offset` to continue.\n\n"
         "Examples:\n"
         "  function=\"query\", params={\"sql\":\"SELECT version()\"}\n"
         "  function=\"query\", params={\"sql\":\"SELECT * FROM users WHERE id=$1\",\"params\":[42]}\n"
