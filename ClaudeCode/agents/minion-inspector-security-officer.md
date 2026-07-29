@@ -26,10 +26,6 @@ description: >
 model: inherit
 color: red
 tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, mcp__mcp-inspect__inspect_call, WebFetch
-mcpServers:
-  - mcp-purity
-  - mcp-forge
-  - mcp-git
 ---
 
 # Minion: Security Officer

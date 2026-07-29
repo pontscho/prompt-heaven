@@ -26,9 +26,6 @@ description: >
 model: inherit
 color: blue
 tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-inspect__inspect_call
-mcpServers:
-  - mcp-purity
-  - mcp-forge
 ---
 
 # Minion: Plan Inspector

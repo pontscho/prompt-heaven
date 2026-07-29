@@ -64,6 +64,13 @@ An agent definition makes TWO typed claims that must agree:
   3c  ungranted      (INFO)  a registered dispatcher NO agent's `tools:` names
                      -- the tools-level analogue of Direction 2.  This is the
                      row that catches the live `inspect_call` defect.
+  3d  inert key      (FAIL) an `mcpServers:` key in a PLUGIN agent's
+                     frontmatter.  Claude Code IGNORES `hooks:`, `mcpServers:`
+                     and `permissionMode:` in a plugin-shipped agent -- they
+                     are dropped at load time, for security reasons -- so the
+                     key confers nothing while reading as a granted
+                     capability.  See the 3d section below for the doc fact,
+                     the severity defence and the R6 split.
 
 SCOPE: `ClaudeCode/agents/*.md` frontmatter, and nothing else.  NOT "every file
 with a `tools:` line": `tools:` also appears ~20 times inside fenced examples in
@@ -87,7 +94,7 @@ excluded (that is R1/R6's surface).
 
 3b SEVERITY.  A false FAIL here would fire on every prompt edit, which is this
 repo's main activity, so a mention only FAILS when it is a first-person
-prescription BY this agent.  Four documented suppressors turn a candidate into
+prescription BY this agent.  Three documented suppressors turn a candidate into
 INFO-with-evidence instead:
   1. NOT GRANTABLE -> not a finding at all.  A tool whose server is absent from
      ~/.claude.json cannot be granted, so naming it is a retirement note, not a
@@ -95,25 +102,62 @@ INFO-with-evidence instead:
      it is what makes all 11 corpus mentions of `clangd_call` / `cuda_call` /
      `luals_call` non-findings.  Asserted explicitly (see the retirement case in
      group H), because a suppressor nobody tests is a hole.
-  2. `mcpServers:` DISAGREEMENT -> INFO.  When `tools:` omits the tool but
-     `mcpServers:` DOES declare its server, the two frontmatter keys disagree
-     and whether `mcpServers:` alone confers the grant is a PLATFORM-semantics
-     question this suite cannot answer.  Reporting it as a failure would assert
-     an answer.  (Live: p:minion-watson / `context7_call`.)
-  3. ILLUSTRATIVE context -> INFO.  `e.g.` / `for example` / `such as` / `etc.`
+  2. ILLUSTRATIVE context -> INFO.  `e.g.` / `for example` / `such as` / `etc.`
      on the mention line.  "Most servers expose one `*_call` dispatcher (e.g.
      `forge_call`, `gdc_call`, `lldb_call`)" is toolbelt-discovery advice, not a
      prescription.  (Live: p:minion-builder / `gdc_call`, `lldb_call`.)
-  4. NEGATIVE / DELEGATION context -> INFO.  A retirement or "does not exist"
+  3. NEGATIVE / DELEGATION context -> INFO.  A retirement or "does not exist"
      sentence within +/-1 line, or another agent named on the line (an
      orchestrator may legitimately describe what its DELEGATE calls -- the
      agent's OWN name never counts as delegation).
 
-NO DOUBLE-REPORTING of D1's surfaces: `mcpServers:` entries stay R6's (group D)
+REMOVED SUPPRESSOR -- `mcpServers:` DISAGREEMENT.  A fourth suppressor used to
+demote a candidate to INFO when `tools:` omitted the tool but `mcpServers:` DID
+declare its server, on the stated grounds that "whether `mcpServers:` alone
+confers the grant is a PLATFORM-semantics question this suite cannot answer".
+That question IS answered now (see 3d): in a plugin-shipped agent the key is
+ignored at load time, so it can never confer anything and a disagreement with it
+is never an excuse.  Its only live subject was p:minion-watson / `context7_call`
+-- a REAL missing grant that the suppressor hid, leaving watson silently unable
+to do the documentation lookup its own routing table prescribes.  That is the
+cost of answering a platform question with a suppressor instead of a fact, and
+it is why 3d fails on the key rather than reasoning about it.
+
+NO DOUBLE-REPORTING of D1's surfaces: `mcpServers:` VALUES stay R6's (group D)
 and a body mention of a dispatcher NO server exposes stays R5's (group D) --
 group I drops it rather than restating it.  3a does report a dead
 `mcp__s__t` grant that R1 also sees, on purpose: "this agent may call X" and
-"call X" are different claims, and only the group-I row names the agent.
+"call X" are different claims, and only the group-I row names the agent.  3d and
+R6 overlap on purpose too, and are NOT the same claim: R6 judges what the key
+SAYS ("mcp-nowhere is not a registered server"), 3d judges that the key EXISTS
+("this is ignored at load time, whatever it says").  Both must keep speaking, so
+that a key reintroduced with a bogus server name trips both rules at once.
+
+-----------------------------------------------------------------------------
+3d -- an `mcpServers:` key in a plugin agent is inert (group I)
+-----------------------------------------------------------------------------
+THE DOC FACT.  The official Claude Code sub-agent documentation states that
+agents shipped inside a PLUGIN do not support the `hooks:`, `mcpServers:` or
+`permissionMode:` frontmatter fields: they are IGNORED at load time, for
+security reasons.  `ClaudeCode/` IS a plugin -- `.claude-plugin/plugin.json`,
+plugin name `p`, installed via a skills-dir symlink -- so every `mcpServers:`
+key in this corpus was inert.  Runtime evidence agrees: 4 of the 15 agents never
+carried the key and work fine, and all 15 load with it gone.
+
+SEVERITY: FAIL.  The defence is in `Checker.check_mcpservers_key`, which is
+where a future reader will be standing when they want to argue with it.  The
+short form: the key is not merely redundant, it already HID a real defect from
+this very gate (the removed suppressor above), and FAIL is what stops it being
+reintroduced from stale docs -- ClaudeCode/ARCHITECTURE.md's agent-frontmatter
+template still shows an `mcpServers:` line.  FAIL is safe rather than flaky
+because the corpus now carries ZERO such keys: the rule has no live subject, so
+it cannot fire on an ordinary prompt edit, only on a regression.
+
+THE ONE SCENARIO THAT MAKES IT WRONG is a copy of these files installed OUTSIDE
+a plugin, into ~/.claude/agents/, where `mcpServers:` would be live again.  That
+is not how this repo installs, and it is handled by flipping the single named
+constant CORPUS_SHIPS_AS_PLUGIN -- a reviewable one-line decision instead of a
+silent drift.
 
 D3 LIMITATIONS: a `tools:` typo that breaks the shape (`purity_calll`) is
 skipped, not flagged, because shape is what separates MCP names from built-ins.
@@ -179,7 +223,12 @@ R5  `<x>_call` dispatcher mentions.  No server exposing that tool -> FAIL.
     Tool exists but its server is unregistered -> INFO (retirement notes in
     p:mcp-clangd / p:mcp-luals / p:mcp-cuda legitimately name the dead
     dispatchers, so failing on those would punish honest documentation).
-R6  frontmatter `mcpServers:` list entries -> must be registered.
+R6  frontmatter `mcpServers:` list entries -> must be registered.  Since 3d
+    landed the AGENT corpus carries no such key at all, so R6 has no live
+    subject there.  It is deliberately KEPT rather than deleted, and kept
+    exercised by the synthetic fixtures, so that a key reintroduced with a bogus
+    server name is still caught on its VALUES by R6 as well as on its PRESENCE
+    by 3d.
 R7  near-miss INFO: a backticked snake_case identifier that is NOT in the
     inventory but is within edit distance 2 of a name that IS (same 4-char
     prefix).  Catches unprefixed typos R4 cannot see.  INFO only.
@@ -241,7 +290,8 @@ Groups:
      the detector MUST flag, plus precision bait it must NOT flag, plus proof
      that the same fixture read as an unregistered server yields INFO not FAIL,
      plus nine synthetic AGENTS pinning every D3 verdict (FAIL / INFO / silence)
-  I  D3 -- agent `tools:` grants vs the tools the agent's own body prescribes
+  I  D3 -- agent `tools:` grants vs the tools the agent's own body prescribes,
+     plus 3d: no plugin agent may carry an inert `mcpServers:` key
 
 Offline, read-only, ~8s.
 
@@ -860,6 +910,22 @@ RX_GRANT_DISPATCHER = re.compile(r"^[a-z][a-z0-9]*_call$")
 # A grant that covers everything: 3b can never fire against it.
 WILDCARD_GRANTS = {"*", "all", "any"}
 
+# 3d's ONLY input, and the ONLY thing that decides its severity.
+#
+# The official Claude Code sub-agent documentation states that agents shipped
+# inside a PLUGIN do not support `hooks:`, `mcpServers:` or `permissionMode:` --
+# those keys are ignored at load time, for security reasons.  `ClaudeCode/` is a
+# plugin (`.claude-plugin/plugin.json`, name `p`, installed via a skills-dir
+# symlink), so an `mcpServers:` key here is inert.
+#
+# A named constant rather than an inline literal because this encodes an INSTALL
+# SHAPE, not a truth about YAML: copy one of these files outside a plugin, into
+# ~/.claude/agents/, and the key becomes live again.  That is the one scenario in
+# which 3d is the wrong rule, and flipping this to False is then a one-line,
+# reviewable decision instead of a silent drift.  R6 (group D) keeps judging the
+# key's VALUES either way.
+CORPUS_SHIPS_AS_PLUGIN = True
+
 # 3b severity suppressors.  Each turns a missing-grant candidate into an
 # INFO-with-evidence row instead of a build break; every one of them exists
 # because the corpus already contains the shape it describes.
@@ -993,7 +1059,9 @@ class Grants:
     def __init__(self, agent):
         self.agent = agent
         self.tools = set()        # dispatcher tool names the agent may call
-        self.servers = set()      # `mcpServers:` entries (severity hints only)
+        # NO `mcpServers:` mirror here on purpose: that key is ignored at load
+        # time (see CORPUS_SHIPS_AS_PLUGIN), so it grants nothing and must not
+        # feed a severity decision.  3d reports the key itself; R6 its values.
         self.rows = []            # one rendered verdict per `tools:` entry
         self.dead = []            # (entry, why) -- 3a failures
         self.unverified = []      # (entry, why) -- 3a INFO
@@ -1388,7 +1456,6 @@ class Checker:
     def agent_grants(self, agent):
         """Classify every frontmatter `tools:` entry of one agent (3a input)."""
         grants = Grants(agent)
-        grants.servers = set(agent.server_entries)
         for entry in agent.tool_entries:
             if entry in WILDCARD_GRANTS:
                 grants.rows.append("grant       : %-42s WILDCARD -- grants "
@@ -1497,6 +1564,92 @@ class Checker:
                     len(grants.tools)),
             detail=detail, evidence=evidence)
 
+    def check_mcpservers_key(self, agent):
+        """3d: a plugin agent must not carry an `mcpServers:` key AT ALL.
+
+        SEVERITY: FAIL.  The defence, because a future reader will want to argue
+        with it right here:
+
+        1. IT IS THE SAME DEFECT CLASS 3a ALREADY FAILS ON, one key over.  The
+           key is not merely redundant -- it is IGNORED at load time (see
+           CORPUS_SHIPS_AS_PLUGIN), so it reads as a conferred capability that
+           can never be conferred.  3a fails a `tools:` entry naming a tool that
+           does not exist for exactly that reason, and calls it "inert at load
+           time but misleading".  A key the platform drops wholesale is more
+           misleading, not less.
+
+        2. IT HAS ALREADY HIDDEN A REAL DEFECT FROM THIS GATE.  While it existed,
+           3b demoted p:minion-watson's genuine, live `context7_call` missing
+           grant to INFO purely because `mcpServers:` "declared" the server, so
+           watson was silently unable to do the documentation lookup its own
+           routing table prescribes.  A frontmatter key that can suppress the
+           gate built to catch it has earned a FAIL, not a note.
+
+        3. FAIL IS THE ONLY SEVERITY THAT STOPS REINTRODUCTION, which is the
+           whole point.  The stale documentation is real and in-tree:
+           ClaudeCode/ARCHITECTURE.md's agent-frontmatter template still shows
+           an `mcpServers:` line, so the next agent authored from it will carry
+           the key.  Group I's INFO rows are by design a decisions-for-a-human
+           list, and a green run invites skimming them -- INFO would let the key
+           come straight back.
+
+        4. FAIL IS SAFE HERE, WHICH IS EXACTLY WHAT DISQUALIFIES IT IN 3b.  3b
+           needs suppressors because it fires on prose, and prose edits are this
+           repo's main activity.  3d fires on a structural key, and the corpus
+           now carries ZERO of them: the rule has no live subject, so it cannot
+           flap on an ordinary prompt edit.  It can only fire on a REGRESSION --
+           precisely the event worth breaking a build for.
+
+        THE COUNTER-ARGUMENT, and why it does not win: a copy of these files
+        installed OUTSIDE a plugin, into ~/.claude/agents/, WOULD have a live
+        `mcpServers:` key, and a blanket FAIL would then be wrong.  That is not
+        how this repo installs, and it is not silently assumed either: it is the
+        single named constant CORPUS_SHIPS_AS_PLUGIN, which flips this row to
+        INFO.  The FAIL is the alarm that forces that call to be made
+        deliberately rather than by drift -- which is strictly better than an
+        INFO that never forces it at all.
+
+        A PASS row is emitted per clean agent on purpose: a rule that can only
+        ever FAIL is as blind as one that can only ever PASS, and the PASS rows
+        prove 3d actually ran across the whole corpus.
+        """
+        subject = "mcpServers: key in %s" % agent.name
+        lineno = agent.key_line("mcpServers") if agent.servers_present else 1
+        evidence = [("%s:%d" % (agent.rel, lineno),
+                     agent.line(lineno).strip() if agent.servers_present
+                     else "(no mcpServers: key -- correct)")]
+
+        if not CORPUS_SHIPS_AS_PLUGIN:
+            return Finding(
+                GI, "d3_inert_key", subject, H.INFO,
+                note="CORPUS_SHIPS_AS_PLUGIN is False, so this corpus is not "
+                     "assumed to install as a plugin and `mcpServers:` may be "
+                     "live -- its PRESENCE is not judged. R6 (group D) still "
+                     "judges its VALUES.", evidence=evidence)
+        if not agent.servers_present:
+            return Finding(
+                GI, "d3_inert_key", subject, H.PASS,
+                note="no `mcpServers:` key -- nothing is silently ignored, and "
+                     "the agent's whole grant surface is the `tools:` list that "
+                     "3a and 3b judge", evidence=evidence)
+        return Finding(
+            GI, "d3_inert_key", subject, H.FAIL,
+            problem="frontmatter carries an `mcpServers:` key, which a "
+                    "PLUGIN-shipped agent does not support: Claude Code ignores "
+                    "`hooks:`, `mcpServers:` and `permissionMode:` in a plugin "
+                    "agent at load time, for security reasons. The key confers "
+                    "NOTHING while reading as a granted capability. Delete it "
+                    "and put the grant in `tools:` as mcp__<server>__<tool>.",
+            note="not merely redundant: this key has already hidden a real "
+                 "defect, because 3b used to demote a genuine missing grant to "
+                 "INFO whenever `mcpServers:` declared the server",
+            detail=["declares    : %s" % (", ".join(agent.server_entries) or
+                                          "(key present, no entries)"),
+                    "grants      : %s" % (", ".join(agent.tool_entries) or "-"),
+                    "R6 (group D): still judges those VALUES independently -- a "
+                    "key reintroduced with a bogus server name trips both rules"],
+            evidence=evidence)
+
     def _context_excuse(self, agent, pre):
         """Why THIS mention cannot be attributed to the agent itself, else ""."""
         line = agent.line(pre.lineno)
@@ -1516,10 +1669,14 @@ class Checker:
         return ""
 
     def _missing_grant(self, agent, grants, tool, pres, servers):
-        """3b: one (agent, ungranted-but-existing tool) verdict."""
+        """3b: one (agent, ungranted-but-existing tool) verdict.
+
+        There is NO `mcpServers:` escape hatch -- see the REMOVED SUPPRESSOR note
+        in the module docstring.  A plugin agent's `mcpServers:` key is ignored at
+        load time, so it cannot soften a missing grant; 3d fails on the key.
+        """
         subject = "%s body -> %s" % (agent.name, tool)
         evidence = [(p.where, p.snippet) for p in pres]
-        disagree = sorted(s for s in servers if s in grants.servers)
 
         excuses, attributable = {}, []
         for pre in pres:
@@ -1538,17 +1695,6 @@ class Checker:
         detail += ["suppressed  : %s -- %s" % (why, ", ".join(wheres))
                    for why, wheres in sorted(excuses.items())]
 
-        if disagree:
-            return Finding(
-                GI, "d3_missing_grant", subject, H.INFO,
-                note="`tools:` does NOT grant %s, but this agent's "
-                     "`mcpServers:` DOES declare %s -- the two frontmatter keys "
-                     "disagree. Whether `mcpServers:` alone confers the grant "
-                     "is a platform-semantics question this suite cannot "
-                     "answer, so it is reported, not failed. Decide it by hand: "
-                     "add mcp__%s__%s to `tools:`, or stop prescribing it."
-                     % (tool, ", ".join(disagree), disagree[0], tool),
-                detail=detail, evidence=evidence)
         if not attributable:
             return Finding(
                 GI, "d3_missing_grant", subject, H.INFO,
@@ -1655,6 +1801,7 @@ def evaluate_agents(checker, agents, prescriptions):
     for agent in sorted(agents, key=lambda a: a.rel):
         grants = checker.agent_grants(agent)
         findings.append(checker.check_grants(agent, grants))
+        findings.append(checker.check_mcpservers_key(agent))
         for tool in grants.tools:
             granted_by_tool.setdefault(tool, []).append(agent.name)
         receipt, body, retired_here = checker.check_body(
@@ -1759,6 +1906,13 @@ FIXTURE_FILES = {
         "Hand pcap work to `p:minion-sniffer`, which calls `tshark_call` in "
         "its own context.\n"
     ),
+    # 3d PLUS the REMOVED `mcpServers:` suppressor, in one fixture.  It used to
+    # prove that an `mcpServers:` declaration DEMOTED a missing grant to INFO; it
+    # now proves the opposite, and both halves are pinned in D3_EXPECT: the
+    # declaration rescues nothing (3b FAIL on `tshark_call`) and the key itself
+    # is the defect (3d FAIL).  Both servers named here are REGISTERED on
+    # purpose, so R6 stays PASS on the VALUES while 3d fails on the PRESENCE --
+    # the two rules must be shown to be independent, not one rule twice.
     "agents/d3-mcpservers.md": (
         "---\n"
         "name: d3-mcpservers\n"
@@ -1857,9 +2011,25 @@ D3_EXPECT = [
      "3b: named inside an illustrative `e.g.` list -> INFO"),
     ("d3-delegation body -> tshark_call", H.INFO,
      "3b: the tool belongs to the DELEGATE, not to this agent -> INFO"),
-    ("d3-mcpservers body -> tshark_call", H.INFO,
-     "3b: `mcpServers:` declares the server while `tools:` does not -- a "
-     "platform-semantics question, so INFO with evidence"),
+    ("d3-mcpservers body -> tshark_call", H.FAIL,
+     "3b: `mcpServers:` declares the server while `tools:` does not -- and that "
+     "no longer rescues anything. The key is ignored at load time, so this is a "
+     "plain missing grant. Pinned as FAIL because it is the exact row the "
+     "REMOVED suppressor used to demote to INFO, and the exact shape of the live "
+     "p:minion-watson / context7_call defect it hid"),
+    # -- 3d.  A FAIL-only rule is as blind as a PASS-only one, so the key's
+    # presence AND its absence are both pinned, on two different fixtures.
+    ("mcpServers: key in d3-mcpservers", H.FAIL,
+     "3d: a plugin agent carrying an `mcpServers:` key -- inert at load time, so "
+     "the key is the defect regardless of what it names (both its servers are "
+     "REGISTERED, so R6 has nothing to say and only 3d can fail this)"),
+    ("mcpServers: key in fake-agent", H.FAIL,
+     "3d: the older fixture carries the key too, with one bogus server -- pinned "
+     "so it is visible that 3d (PRESENCE) and R6 (VALUES) both fire on it, "
+     "rather than one masking the other"),
+    ("mcpServers: key in d3-ok", H.PASS,
+     "3d: no `mcpServers:` key -- proves the rule discriminates instead of "
+     "failing every agent it sees"),
     ("d3-wildcard body -> tshark_call", None,
      "3b: a wildcard grant covers every tool"),
     ("d3-no-tools-key body -> jenkins_call", None,
@@ -2526,9 +2696,10 @@ def _run(suite, opts):
           "orphan CAPABILITIES (3c, the tools-level analogue of group G), and "
           "its `d3_missing_grant` INFO rows are missing grants this suite "
           "refuses to fail on -- each names the suppressor that spared it "
-          "(mcpServers: disagreement / illustrative / negative / delegation) "
-          "and carries file:line evidence. Both are decisions for a human, not "
-          "noise.")
+          "(illustrative / negative / delegation) and carries file:line "
+          "evidence. Both are decisions for a human, not noise. Its "
+          "`d3_inert_key` rows are 3d: an `mcpServers:` key in a plugin agent "
+          "is IGNORED at load time, so it FAILs; PASS means the key is absent.")
     return suite
 
 

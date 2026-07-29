@@ -5,10 +5,6 @@ description: >-
 model: inherit
 color: green
 tools: Read, Write, mcp__mcp-wiki__wiki_call, mcp__mcp-purity__purity_call, mcp__mcp-git__git_call, mcp__mcp-inspect__inspect_call
-mcpServers:
-  - mcp-wiki
-  - mcp-purity
-  - mcp-git
 ---
 
 # Minion: Wiki Janitor

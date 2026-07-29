@@ -3,10 +3,6 @@ name: minion-builder
 description: >-
   This minion's name is Bob. Iterative build-and-test agent. Generates or modifies code, runs the build and tests, analyzes failures, fixes, and retries until everything passes or max iterations reached. Use for code changes that need compile + test verification. Returns clean pass/fail report. Keeps the main context free of build noise. IMPORTANT: Use this INSTEAD OF manually running build/test commands inline. Never do build+fix+test cycles directly in the main context - always delegate to this agent.
 tools: Bash, Read, Write, Edit, Glob, Grep, mcp__mcp-forge__forge_call, mcp__mcp-purity__purity_call, mcp__mcp-git__git_call, mcp__mcp-inspect__inspect_call
-mcpServers:
-  - mcp-forge
-  - mcp-purity
-  - mcp-git
 model: inherit
 color: red
 ---
