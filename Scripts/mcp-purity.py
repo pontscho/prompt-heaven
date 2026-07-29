@@ -323,7 +323,11 @@ def _row_page(rows: List[str], offset: int = 0, head_limit: int = 0,
         if head_limit > 0 and len(kept) >= head_limit:
             break
         # At least one row always survives: a lone header tells the caller
-        # nothing, and _cap_text() is the hard backstop for the ceiling.
+        # nothing, and _cap_text() is the hard backstop for the ceiling. That
+        # first row may therefore overshoot the budget on its own, and _cap_text
+        # honours the intent rather than undoing it: when no whole line fits it
+        # keeps the row's HEAD, anchor included, instead of dropping the row and
+        # handing back the bare header (see its degenerate case).
         if char_budget > 0 and kept and budget - len(row) - 1 < PAGE_LINE_RESERVE:
             break
         budget -= len(row) + 1
@@ -333,6 +337,23 @@ def _row_page(rows: List[str], offset: int = 0, head_limit: int = 0,
 
 
 _FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
+
+# The resumable head of a purity row: `path:line:` or `path:line:col:`. The line
+# number must be digits, so a prose line that merely contains two colons
+# ("note: see also: below") is not mistaken for an anchor.
+_ANCHOR_PREFIX_RE = re.compile(r"^[^\s:][^:\n]*:\d+:(?:\d+:)?")
+
+
+def _anchor_prefix(line: str) -> str:
+    """The `path:line:` head of one row, or "" when the row is not an anchor.
+
+    Only used by the in-line cut in _cap_text: it is the part of a row that must
+    survive a mid-row cut, because it is the part the caller can hand back to
+    read_file / find_definition. Everything after it is context; the anchor is
+    the address.
+    """
+    match = _ANCHOR_PREFIX_RE.match(line)
+    return match.group(0) if match else ""
 
 
 def _balance_fences(body: str) -> str:
@@ -366,9 +387,29 @@ def _cap_text(text: str, max_chars: int, repair_fences: bool = False) -> str:
 
     Cutting at a newline is what keeps a `path:line:col` anchor whole: every
     anchor purity emits lives inside one line, so a cut that only ever lands
-    between lines can never halve one. The single exception is a payload with no
-    newline to cut at, where the boundary does not exist and the hard cut is the
-    honest answer.
+    between lines can never halve one. That is the rule for the ordinary case and
+    it is not relaxed here.
+
+    THE DEGENERATE CASE, and why it cuts inside a line. When not one whole line
+    fits under the ceiling, a boundary-only cut returns the lines that DID fit —
+    which for a row-shaped reply is the count header and nothing else. Measured,
+    live: `search_for_pattern("_wikilib", offset=13)` answered "15 match(es)" plus
+    the truncation notice, 12 chars of payload, ZERO rows. The reply it capped was
+    84257 chars: a header, ONE row of a `.claude/tmp` artefact some 84k chars wide,
+    and the note. Every row pager here keeps its FIRST row whatever it costs, so a
+    single row wider than the whole ceiling does reach this function, and the only
+    newline inside the budget was then the one ending the header — the boundary cut
+    dropped the row entire and kept the header alone. That is not a small answer,
+    it is no answer: every purity row BEGINS with the `file:line`
+    anchor the caller feeds to the next call, so zero rows means zero anchors and
+    the caller has nothing to go on. So when the budget cannot hold a whole line,
+    the cut goes INSIDE the line, keeping its head, and the closing line says so
+    in as many words. `_anchor_prefix` is the floor: the `path:line:` head of the
+    partial row is emitted even when it alone exceeds the ceiling, which is the
+    one place this function knowingly overshoots max_chars — for the same reason
+    the ceiling-narrower-than-the-notice branch below overshoots, namely that an
+    unusable reply is worse than an oversized one. This is a FALLBACK for the
+    degenerate case only; while any whole line fits, nothing cuts mid-row.
 
     This is the LAST resort, not the main path: row-shaped answers are paged by
     row against the same ceiling first (see _row_page / _md_page), so what lands
@@ -378,11 +419,12 @@ def _cap_text(text: str, max_chars: int, repair_fences: bool = False) -> str:
     reply stays within max_chars.
 
     *repair_fences* is set only by the callers that emit their own ``` blocks; see
-    _balance_fences for why it must stay off for everything else. The marker text
-    spells "from the head" as a LITERAL rather than interpolating a bias variable:
-    the footprint suite harvests string templates and rewrites every interpolated
-    slot to `{}`, so an interpolated bias would erase the very phrase it looks for
-    and the reply would read as having no truncation line at all.
+    _balance_fences for why it must stay off for everything else. Both marker texts
+    spell "from the head" as a LITERAL rather than interpolating a bias variable,
+    and the in-line variant is written out in full rather than assembled from the
+    other: the footprint suite harvests string templates and rewrites every
+    interpolated slot to `{}`, so an interpolated bias would erase the very phrase
+    it looks for and the reply would read as having no truncation line at all.
     """
     if max_chars <= 0 or len(text) <= max_chars:
         return text
@@ -392,29 +434,57 @@ def _cap_text(text: str, max_chars: int, repair_fences: bool = False) -> str:
         return (f"\n[truncated: kept {kept} of {total} chars from the head; "
                 f"raise max_answer_chars or narrow the query]")
 
+    def marker_inline(kept: int) -> str:
+        return (f"\n[truncated: kept {kept} of {total} chars from the head, cut "
+                f"INSIDE a line (no whole line fit); "
+                f"raise max_answer_chars or narrow the query]")
+
     # marker(total) is the longest the notice can get (kept <= total), so
     # reserving that much cannot overshoot once the real count is known. The
     # repair fence is reserved the same way: it can only ever be one of the fence
     # tokens already present, so the widest one plus its newline bounds it and the
     # whole reply stays inside the ceiling.
     fences = _FENCE_LINE_RE.findall(text) if repair_fences else []
-    keep = max_chars - len(marker(total))
-    if fences:
-        keep -= max(len(f) for f in fences) + 1
+    reserve = (max(len(f) for f in fences) + 1) if fences else 0
+    keep = max_chars - len(marker(total)) - reserve
     if keep <= 0:
         # The ceiling is smaller than the accounting line itself. The line still
         # wins: a payload with no accounting is worse than no payload.
         return marker(0).lstrip("\n")
+
+    def close(body: str, notice: Callable[[int], str]) -> str:
+        # The accounting reports the payload chars that survived, so the repair
+        # fence is added after the count is taken.
+        if repair_fences:
+            body = _balance_fences(body)
+        return body + notice(len(body))
+
     cut = text.rfind("\n", 0, keep + 1)
-    body = text[:cut] if cut > 0 else text[:keep]
-    # No line boundary fits when cut <= 0: the payload is one enormous line (a
-    # minified file, a single hover blob) or the ceiling is narrower than its
-    # first line. The cap wins over the boundary there, and the notice below says
-    # so. The accounting reports the payload chars that survived, so the repair
-    # fence is added after the count is taken.
-    if repair_fences:
-        body = _balance_fences(body)
-    return body + marker(len(body))
+    if cut > 0 and text.find("\n") != cut:
+        # The ordinary path: at least one whole line past the first one fits, so
+        # the boundary cut keeps every surviving anchor intact.
+        return close(text[:cut], marker)
+
+    # Degenerate. Either there is no line boundary inside the budget at all
+    # (cut <= 0: one enormous line — a minified file, a single hover blob), or the
+    # only one is the newline ENDING the first line, which means line two does not
+    # fit whole and a boundary cut would drop it entirely. Both are cut in-line.
+    line_start = cut + 1 if cut > 0 else 0
+    line_end = text.find("\n", line_start)
+    line = text[line_start:] if line_end < 0 else text[line_start:line_end]
+    # The anchor floor: never hand back a halved `path:line:` head.
+    floor = line_start + len(_anchor_prefix(line))
+    stop = max(keep - (len(marker_inline(total)) - len(marker(total))), floor)
+    if stop <= line_start:
+        # The wider notice leaves no room to enter the line at all, and there is
+        # no anchor to force. Keep the boundary cut with its own notice: claiming
+        # an in-line cut that did not happen is worse than the thinner reply.
+        return close(text[:cut] if cut > 0 else text[:keep], marker)
+    if stop >= total:
+        # The anchor floor reached the end of the payload, so nothing was dropped
+        # after all. A "truncated" notice would be false; the reply stands as is.
+        return text
+    return close(text[:stop], marker_inline)
 
 
 def _cap_result(result: dict, params: dict) -> dict:
@@ -1328,20 +1398,31 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     # happened to reach as the total.
     exact = not truncated
 
+    # ...and the HEADER carries the same qualification as the note, because one
+    # reply must not state two different totals for the same set. It used to:
+    # a curtailed scan answered "14 match(es)" on top and "of 14+ (scan stopped at
+    # the ceiling; true total unknown)" at the bottom, leaving the caller to guess
+    # which of the two numbers to believe. Same meaning as before — the count is
+    # what the scan reached — with the `+` saying in both places that more may
+    # exist. `_rows_note` spells out WHY once, at the bottom, so the header does
+    # not repeat the sentence.
+    approx = "" if exact else "+"
+
     def _reply(header: str, entries: List[str], note: str) -> dict:
         body = f"{header}\n" + "\n".join(entries) if entries else header
         return {"__raw_text__": f"{body}\n{note}" if note else body}
 
     if output_mode == "count":
         entries = [f"{f}: {c}" for f, c in file_matches.items()]
-        header = f"{total_match_count} match(es) in {len(file_matches)} file(s)"
+        header = (f"{total_match_count}{approx} match(es) in "
+                  f"{len(file_matches)}{approx} file(s)")
         budget = max_chars - len(header) - PAGE_LINE_RESERVE if max_chars > 0 else 0
         entries, note = _row_page(entries, offset, head_limit, budget, exact)
         return _reply(header, entries, note)
 
     elif output_mode == "files_with_matches":
         entries = list(file_matches.keys())
-        header = f"{len(file_matches)} file(s) with matches"
+        header = f"{len(file_matches)}{approx} file(s) with matches"
         budget = max_chars - len(header) - PAGE_LINE_RESERVE if max_chars > 0 else 0
         entries, note = _row_page(entries, offset, head_limit, budget, exact)
         return _reply(header, entries, note)
@@ -1350,7 +1431,7 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
         # `offset`, `head_limit` and the row budget were all applied while
         # collecting, so there is nothing left to page here — only to account for.
         entries = content_entries
-        header = f"{total_match_count} match(es)"
+        header = f"{total_match_count}{approx} match(es)"
         note = (_rows_note(offset, len(entries), total_match_count, exact)
                 if truncated or offset else "")
         return _reply(header, entries, note)

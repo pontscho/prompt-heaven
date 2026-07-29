@@ -32,6 +32,9 @@ silently reads zero is worse than no tape at all:
                 the prober is broken, not the fleet.
   * group G  -- hygiene: every write under `.claude/tmp`, no `.pyc` anywhere,
                 no child handed a project root outside the sandbox.
+  * group H  -- purity's truncation behaviour at RUNTIME.  Not a conformance
+                verdict pending a decision: a regression guard on a defect that
+                shipped and has been fixed (a reply of one header and zero rows).
 
 THE REGISTERED-vs-EXISTING DISTINCTION IS LOAD-BEARING
 ------------------------------------------------------
@@ -64,7 +67,10 @@ Decided by the caller; this suite MEASURES conformance and enforces nothing:
 
 Three of those are checkable from source text (param name, default value, the
 marker sentence including its head/tail phrase).  The row form is reported as an
-extra.  Line-boundary behaviour is NOT statically checkable and is not claimed.
+extra.  Line-boundary behaviour is NOT statically checkable, so groups A-G do not
+claim it; group H drives ONE server (purity) in-process and asserts it there,
+including the degenerate case where no whole line fits and the cut must go inside
+a row -- keeping its `file:line` anchor -- rather than return a bare header.
 
 STRUCTURAL, NOT TEXTUAL
 -----------------------
@@ -108,6 +114,8 @@ Groups:
      exemplars, plus the one live number that is actually comparable
   F  registry drift -- SERVERS.registered vs ~/.claude.json (INFO this round)
   G  hygiene -- sandbox discipline and a bytecode-free tree
+  H  cap runtime, purity white-box -- what the cut LANDS on: whole rows while any
+     fit, an anchored in-line cut when none does, one count per reply
 
 Offline apart from spawning the servers themselves; ~5-10 s.
 
@@ -146,6 +154,7 @@ GD = "D. negative control: the ceiling detector discriminates"
 GE = "E. boilerplate: the fixed per-call payload"
 GF = "F. registry drift: SERVERS.registered vs ~/.claude.json"
 GG = "G. hygiene"
+GH = "H. cap runtime: purity's line-boundary contract (white-box, GATED)"
 
 # All scratch lives here, one mkdtemp subdir per run: a standalone run and a
 # tests/run.py run may overlap, and a fixed path means one instance's teardown
@@ -1093,6 +1102,74 @@ def observed_expectation(report):
 
 
 # ---------------------------------------------------------------------------
+# the v1 rule only RUNTIME can answer: truncation on a line boundary
+# ---------------------------------------------------------------------------
+#
+# Groups C/D read source text, so the one v1 rule they cannot judge is what the
+# cut actually LANDS on.  This subgroup drives purity's own `_cap_text` and its
+# search handler in-process, on synthetic payloads, and asserts the rule from the
+# outside: whole rows in the ordinary case, and -- the case that produced a real
+# zero-payload reply in this repo -- an in-line cut that still yields an ANCHOR
+# when not one row fits.
+#
+# Why GATED while every other server finding here is INFO: this is not fleet
+# conformance pending a decision, it is a regression guard on a defect that has
+# been fixed.  Same footing as group D (the detector must discriminate) and
+# group G (hygiene) -- suite/server integrity, not a verdict on the fleet.
+
+PURITY_FILE = "mcp-purity.py"
+
+# Small enough to keep fixtures readable, large enough that a `path:line:` anchor
+# and some payload fit under it.
+CAP_CEILING = 900
+
+# The phrase the closing line MUST carry when the cut went inside a row, and must
+# NOT carry otherwise.  Written as a literal here for the same reason purity
+# writes it as a literal there: an interpolated phrase is invisible to
+# harvest_strings, and this suite's marker detector would then read zero.
+V1_INLINE_WORDS = "cut INSIDE a line"
+
+# `14+ match(es)` / `[... of 14+ (scan stopped ...)]` -- the count and its
+# lower-bound marker, at the two places one reply states it.
+HEADER_COUNT_RX = re.compile(r"(\d+)(\+?)")
+NOTE_TOTAL_RX = re.compile(r" of (\d+)(\+?)")
+
+# 13 short hits then two rows no ceiling can hold: the exact shape of the live
+# `search_for_pattern("_wikilib", offset=13)` call that answered with a header and
+# nothing else.  `offset=13` is the resume hint the previous reply itself handed
+# back, which is what made the empty answer a dead end rather than an
+# inconvenience.
+CAP_NEEDLE = "_ph_capfix_needle"
+CAP_LONG_ROW = 30_000
+CAP_SHORT_HITS = 13
+
+
+def cap_fixture_body():
+    rows = ["%s short hit %d" % (CAP_NEEDLE, i) for i in range(CAP_SHORT_HITS)]
+    rows.append("%s %s" % (CAP_NEEDLE, "Z" * CAP_LONG_ROW))
+    rows.append("%s %s" % (CAP_NEEDLE, "Q" * CAP_LONG_ROW))
+    return "\n".join(rows) + "\n"
+
+
+def cap_probe(mod, text, ceiling=CAP_CEILING):
+    """(reply, payload lines, closing line) for one _cap_text call."""
+    reply = mod._cap_text(text, ceiling)
+    lines = reply.split("\n")
+    return reply, lines[:-1], lines[-1]
+
+
+def count_claims(reply):
+    """([(count, '+')] from the header, (total, '+') from the closing line).
+
+    A header may state two counts (`N match(es) in M file(s)`), so the caller
+    says which one the closing line's total is about.
+    """
+    lines = reply.split("\n")
+    note = NOTE_TOTAL_RX.search(lines[-1])
+    return HEADER_COUNT_RX.findall(lines[0]), (note.groups() if note else None)
+
+
+# ---------------------------------------------------------------------------
 # rendering helpers
 # ---------------------------------------------------------------------------
 
@@ -1301,10 +1378,13 @@ def group_ceilings(suite, reports):
                     "gated         : NO. This round MEASURES conformance. "
                     "Turning it into a gate is a separate work item and would "
                     "paint the whole run red until the server fixes land",
-                    "not claimed   : line-boundary truncation. The v1 rule "
-                    "that a `file:line` anchor is never cut in half is a "
-                    "RUNTIME property; no static reading of the source can "
-                    "assert it, so this suite does not pretend to"])
+                    "not claimed   : line-boundary truncation, in THIS group. "
+                    "The v1 rule that a `file:line` anchor is never cut in half "
+                    "is a RUNTIME property; no static reading of the source can "
+                    "assert it, so nothing above pretends to. Group H asserts it "
+                    "in-process for %s -- one server, gated -- and the other %d "
+                    "stay unmeasured on that rule"
+                    % (PURITY_FILE, max(0, len(live) - 1))])
 
     unparsed = [r for r in reports if r.parse_error]
     suite.record(GC, "every server source parsed",
@@ -1618,6 +1698,241 @@ def group_drift(suite, servers, table_flagged):
                          "flag" % (table_flagged, len(servers))])
 
 
+def group_cap_runtime(suite, fixture_root, purity_source):
+    """H: purity's line-boundary contract, driven in-process.  GATED.
+
+    Every case here is a regression guard on a defect this repo actually shipped,
+    so unlike the fleet measurements above these FAIL rather than inform.
+    """
+    try:
+        mod = H.load_module_from_path("ph_cap_runtime",
+                                      os.path.join(SCRIPTS_DIR, PURITY_FILE))
+    except Exception as exc:                                      # noqa: BLE001
+        suite.record(GH, "purity loads for white-box probing",
+                     ["%s: %s" % (type(exc).__name__, exc)],
+                     detail=["file        : Scripts/%s" % PURITY_FILE,
+                             "note        : the whole group needs the module in "
+                             "process; a load failure is a FAILURE, not a skip"])
+        return
+
+    # -- H1: the degenerate case. One row, wider than the ceiling, under a count
+    # header. Before the fix this answered with the header and nothing else: the
+    # last newline inside the budget was the one ENDING the header, so the
+    # boundary-only cut dropped the single row whole.
+    anchor = "src/artefact.txt:14:"
+    text = "15+ match(es)\n%s %s" % (anchor, "Z" * (CAP_CEILING * 4))
+    reply, payload, note = cap_probe(mod, text)
+    rows = [ln for ln in payload[1:] if ln.strip()]
+    problems = []
+    if not rows:
+        problems.append("no payload under the header: %d char(s) kept, which is "
+                        "the header alone -- zero anchors, nothing to resume "
+                        "from" % len(payload[0]))
+    elif not rows[0].startswith(anchor):
+        problems.append("the row's %r anchor did not survive: row starts %r"
+                        % (anchor, rows[0][:len(anchor) + 8]))
+    if not v1_truncation_marker(note):
+        problems.append("closing line is not the v1 marker: %r" % note)
+    if V1_INLINE_WORDS not in note:
+        problems.append("the closing line does not say the cut went inside a "
+                        "line: %r" % note)
+    if len(reply) > CAP_CEILING:
+        problems.append("reply is %d chars, over the %d ceiling"
+                        % (len(reply), CAP_CEILING))
+    suite.record(GH, "cap-degenerate-row-keeps-its-head-and-anchor", problems,
+                 detail=["input       : header + one row of %d chars, ceiling %d"
+                         % (len(text) - len(payload[0]) - 1, CAP_CEILING),
+                         "kept        : %d chars, %d payload row(s)"
+                         % (len(reply), len(rows)),
+                         "row head    : %r" % (rows[0][:48] if rows else ""),
+                         "closing line: %r" % note,
+                         "why gated   : a reply with zero rows carries zero "
+                         "`file:line` anchors, so the caller has nothing to "
+                         "pass to read_file or find_definition. Measured live: "
+                         "12 chars of payload out of 84257"])
+
+    # -- H2: the anchor prefix is longer than the whole ceiling. Defined,
+    # non-empty behaviour: the prefix is emitted intact and the reply overshoots,
+    # which is a deliberate, documented exception -- an unusable reply is worse
+    # than an oversized one, the same trade the notice-wider-than-the-ceiling
+    # branch already makes.
+    long_anchor = "src/" + "deeply/" * 40 + "buried.txt:1201:"
+    reply = mod._cap_text(long_anchor + " payload " + "Q" * 2000, 200)
+    note = reply.split("\n")[-1]
+    problems = []
+    if not reply.strip():
+        problems.append("empty reply")
+    if not reply.startswith(long_anchor):
+        problems.append("the anchor was cut: reply starts %r"
+                        % reply[:len(long_anchor)])
+    if not v1_truncation_marker(note):
+        problems.append("closing line is not the v1 marker: %r" % note)
+    suite.record(GH, "cap-anchor-wider-than-the-ceiling-is-still-whole",
+                 problems,
+                 detail=["input       : one row whose %d-char anchor alone "
+                         "exceeds the 200-char ceiling" % len(long_anchor),
+                         "kept        : %d chars" % len(reply),
+                         "closing line: %r" % note,
+                         "overshoot   : %d chars over the ceiling -- DELIBERATE "
+                         "and documented at _cap_text; half an anchor is not an "
+                         "address" % max(0, len(reply) - 200)])
+
+    # -- H3: the ordinary case is UNCHANGED -- the v1 rule itself. Every kept row
+    # must be a whole row, so the in-line fallback must not leak out of the
+    # degenerate case it exists for.
+    fixture_rows = ["src/f%02d.py:%d: match number %d" % (i, i * 7, i)
+                    for i in range(1, 60)]
+    text = "59 match(es)\n" + "\n".join(fixture_rows)
+    reply, payload, note = cap_probe(mod, text)
+    kept = payload[1:]
+    partial = [ln for ln in kept if ln not in fixture_rows]
+    problems = []
+    if partial:
+        problems.append("%d kept row(s) are not whole rows, e.g. %r"
+                        % (len(partial), partial[0][-40:]))
+    if len(kept) >= len(fixture_rows):
+        problems.append("the fixture did not truncate at all (%d of %d rows "
+                        "kept), so this case proves nothing"
+                        % (len(kept), len(fixture_rows)))
+    if len(kept) < 2:
+        problems.append("only %d row(s) survived a ceiling that fits many"
+                        % len(kept))
+    if V1_INLINE_WORDS in note:
+        problems.append("the in-line notice appeared while whole rows still "
+                        "fit: %r" % note)
+    if not v1_truncation_marker(note):
+        problems.append("closing line is not the v1 marker: %r" % note)
+    if len(reply) > CAP_CEILING:
+        problems.append("reply is %d chars, over the %d ceiling"
+                        % (len(reply), CAP_CEILING))
+    suite.record(GH, "cap-normal-case-still-cuts-on-a-line-boundary", problems,
+                 detail=["input       : header + %d rows of ~%d chars, ceiling "
+                         "%d" % (len(fixture_rows), len(fixture_rows[0]),
+                                 CAP_CEILING),
+                         "kept        : %d of %d rows, %d chars"
+                         % (len(kept), len(fixture_rows), len(reply)),
+                         "closing line: %r" % note,
+                         "pins        : the v1 rule that a `file:line` anchor is "
+                         "never halved. The in-line cut is a FALLBACK for the "
+                         "degenerate case only"])
+
+    # -- H4: the same defect end to end, through the real search handler and the
+    # dispatcher's cap, on a real file -- not just the helper in isolation.
+    cap_root = os.path.join(fixture_root, "cap-root")
+    write_text(os.path.join(cap_root, "artefact.txt"), cap_fixture_body())
+    base = {"substring_pattern": CAP_NEEDLE,
+            "restrict_search_to_code_files": False}
+    resumed = dict(base, offset=CAP_SHORT_HITS)
+    reply = mod._cap_result(
+        mod.handle_search_for_pattern(dict(resumed), cap_root),
+        resumed)["__raw_text__"]
+    lines = reply.split("\n")
+    row_anchor = "artefact.txt:%d:" % (CAP_SHORT_HITS + 1)
+    problems = []
+    if len(lines) < 2 or not lines[1].strip():
+        problems.append("the reply is a header plus a notice, no payload")
+    elif row_anchor not in lines[1]:
+        problems.append("the surviving row carries no %r anchor: %r"
+                        % (row_anchor, lines[1][:60]))
+    if not v1_truncation_marker(lines[-1]):
+        problems.append("no v1 closing line: %r" % lines[-1])
+    if len(reply) > mod.DEFAULT_MAX_ANSWER_CHARS:
+        problems.append("reply is %d chars, over the %d default ceiling"
+                        % (len(reply), mod.DEFAULT_MAX_ANSWER_CHARS))
+    suite.record(GH, "cap-search-reply-at-a-resume-offset-is-never-empty",
+                 problems,
+                 detail=["call        : search_for_pattern(%r, offset=%d) over "
+                         "one file: %d short hits then two %d-char rows"
+                         % (CAP_NEEDLE, CAP_SHORT_HITS, CAP_SHORT_HITS,
+                            CAP_LONG_ROW),
+                         "ceiling     : %d (the default, not overridden)"
+                         % mod.DEFAULT_MAX_ANSWER_CHARS,
+                         "kept        : %d chars, first payload line %r"
+                         % (len(reply),
+                            (lines[1][:48] if len(lines) > 1 else "")),
+                         "closing line: %r" % lines[-1],
+                         "history     : the offset came from the PREVIOUS "
+                         "reply's own `offset=%d for more` hint, and the answer "
+                         "was 12 chars of header" % CAP_SHORT_HITS])
+
+    # -- H5: one reply, one count. A curtailed scan makes every count a lower
+    # bound; the header used to state a bare number while the closing line said
+    # `N+ (scan stopped at the ceiling; true total unknown)`, leaving the caller
+    # to pick. (mode, params, which header number the closing total is about.)
+    multi_root = os.path.join(fixture_root, "cap-multi")
+    for idx in range(3):
+        write_text(os.path.join(multi_root, "hit%d.txt" % idx),
+                   "%s in file %d\n" % (CAP_NEEDLE, idx))
+    probes = [
+        ("content", dict(base), cap_root, 0),
+        ("files_with_matches",
+         dict(base, output_mode="files_with_matches", head_limit=1),
+         multi_root, 0),
+        ("count", dict(base, output_mode="count", head_limit=1),
+         multi_root, 1),
+    ]
+    problems, detail = [], []
+    for mode, params, root, which in probes:
+        reply = mod.handle_search_for_pattern(dict(params),
+                                              root)["__raw_text__"]
+        heads, total = count_claims(reply)
+        first, last = reply.split("\n")[0], reply.split("\n")[-1]
+        detail.append("%-18s: header %r" % (mode, first))
+        detail.append("%-18s  note   %r" % ("", last))
+        if not v1_row_marker(last):
+            problems.append("%s: closing line is not the v1 row marker: %r"
+                            % (mode, last))
+            continue
+        if total is None:
+            problems.append("%s: no total in the closing line: %r"
+                            % (mode, last))
+            continue
+        if which >= len(heads):
+            problems.append("%s: header states %d count(s), needed #%d: %r"
+                            % (mode, len(heads), which + 1, first))
+            continue
+        if heads[which] != total:
+            problems.append("%s: header says %s%s but the closing line says %s%s "
+                            "-- one reply, two totals for the same set"
+                            % (mode, heads[which][0], heads[which][1] or "",
+                               total[0], total[1] or ""))
+    suite.record(GH, "cap-curtailed-header-and-closing-line-agree", problems,
+                 detail=detail
+                 + ["pins        : the `+` lower-bound marking appears in BOTH "
+                    "places or NEITHER. The meaning is unchanged -- the count is "
+                    "what the scan reached -- and _rows_note still spells out "
+                    "WHY once, at the bottom"])
+
+    # -- H6: both markers must be visible to THIS suite's detector. The in-line
+    # variant is written out in full in the source on purpose: build it by
+    # interpolating a bias word and harvest_strings rewrites the slot to `{}`,
+    # the marker check reads zero, and the v1 column goes green on a server that
+    # emits no recognisable notice at all.
+    problems, found = [], []
+    try:
+        tree = ast.parse(purity_source, filename=PURITY_FILE)
+    except SyntaxError as exc:
+        problems.append("purity source did not parse: %s" % exc)
+    else:
+        found = [(ln, text) for ln, text in harvest_strings(tree)
+                 if v1_truncation_marker(text)]
+        if not found:
+            problems.append("harvest_strings sees NO v1 truncation marker in "
+                            "Scripts/%s" % PURITY_FILE)
+        if not any(V1_INLINE_WORDS in text for _ln, text in found):
+            problems.append("the in-line variant is not harvestable: no "
+                            "template carries %r together with the v1 phrases "
+                            "-- it was probably assembled by interpolation"
+                            % V1_INLINE_WORDS)
+    suite.record(GH, "cap-both-marker-templates-are-harvestable", problems,
+                 detail=["file        : Scripts/%s" % PURITY_FILE,
+                         "markers     : %d" % len(found)]
+                 + exemplars(found, PURITY_FILE, 4)
+                 + ["trap        : an f-string slot is harvested as `{}`, so an "
+                    "interpolated head/tail or in-line phrase erases the exact "
+                    "words v1_truncation_marker() looks for"])
+
+
 def group_hygiene(suite, fixture_root, pyc_before, sandbox):
     """G: sandbox discipline and a bytecode-free tree."""
     stray = [p for p in WRITES if not inside(p, FIXTURE_BASE)]
@@ -1712,9 +2027,10 @@ def run(opts=None):
         group_probe_floor(suite, len(answering), len(live))
         group_description_tax(suite, inert, GB, "INERT")
 
-        reports, census_rows = [], []
+        reports, census_rows, sources = [], [], {}
         for cfg in servers:
             source, err = read_source(os.path.join(SCRIPTS_DIR, cfg["file"]))
+            sources[cfg["file"]] = source
             registered = bool(cfg.get("registered"))
             if err:
                 report = CapReport(cfg["file"], registered)
@@ -1734,6 +2050,9 @@ def run(opts=None):
         group_control(suite, fixture_root)
         group_boilerplate(suite, census_rows, feet_by_file)
         group_drift(suite, servers, table_flagged)
+        # Before hygiene: group G asserts over every write this run made, and
+        # group H writes search fixtures of its own.
+        group_cap_runtime(suite, fixture_root, sources.get(PURITY_FILE, ""))
         group_hygiene(suite, fixture_root, pyc_before, sandbox)
     finally:
         if opts.keep:
