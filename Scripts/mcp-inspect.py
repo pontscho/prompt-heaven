@@ -119,6 +119,40 @@ def _md_fence(content: str, lang: str = "") -> str:
     return f"{fence}{lang}\n{content}\n{fence}"
 
 
+def _md_lines(lines: List[str]) -> str:
+    """Join bare `key: value` lines, fencing ONLY when there is more than one.
+
+    Markdown folds a lone newline into a space, so a multi-line block needs the
+    fence or it silently runs together.  A single line does not, and there the
+    fence would be 8 characters of overhead on a 17-character answer -- worse
+    than the `- ` bullets it replaced.  Assumes a `key:` lead, which is why no
+    block-level first character has to be considered here.
+    """
+    if len(lines) <= 1:
+        return "\n".join(lines)
+    return _md_fence("\n".join(lines))
+
+
+def _fold_kv(text: str) -> List[str]:
+    """`Key:<padding>value` -> bare `key: value`, alignment and trailing dot gone.
+
+    vm_stat and /proc/meminfo are both key/value already, and both pad the value
+    out to a fixed column -- about 30 characters a line on vm_stat's 21 lines.
+    Shared by both so the Linux path runs the code the macOS tests exercise.
+    A line with no colon is passed through rather than dropped: losing data to
+    tidy a format would be a bad trade.
+    """
+    out: List[str] = []
+    for ln in text.splitlines():
+        key, sep, val = ln.partition(":")
+        if not sep:
+            out.append(ln.strip())
+            continue
+        key, val = key.strip().strip('"').lower(), val.strip().rstrip(".")
+        out.append(f"{key}: {val}" if key and val else ln.strip())
+    return out
+
+
 def _run(cmd: List[str], timeout: int = 15) -> Tuple[int, str, str]:
     """Run an argv (shell=False) read-only. Never raises; returns (rc, out, err).
 
@@ -393,38 +427,39 @@ def h_open_files(p: dict) -> str:
 
 
 def h_host(p: dict) -> str:
-    parts = []
-    parts.append(f"- hostname: `{socket.gethostname()}`")
-    parts.append(f"- platform: `{platform.platform()}`")
+    lines = [f"hostname: {socket.gethostname()}",
+             f"platform: {platform.platform()}"]
     rc, out, _ = _run(["uname", "-a"], 5)
     if rc == 0 and out.strip():
-        parts.append(f"- uname: `{out.strip()}`")
+        lines.append(f"uname: {out.strip()}")
     if IS_MAC:
         rc, out, _ = _run(["sw_vers"], 5)
         if rc == 0 and out.strip():
-            parts.append("\n" + _md_fence(out.strip()))
+            # sw_vers is key/value already -- folded into the same block rather
+            # than nested in its own fence, which a fence cannot hold anyway.
+            lines += _fold_kv(out.strip())
         rc, out, _ = _run(["sysctl", "-n", "hw.ncpu"], 5)
         if rc == 0 and out.strip():
-            parts.append(f"- cpus: {out.strip()}")
+            lines.append(f"cpus: {out.strip()}")
     else:
         try:
             with open("/etc/os-release") as f:
                 osr = {k: v.strip('"') for k, v in
                        (ln.split("=", 1) for ln in f.read().splitlines() if "=" in ln)}
             if osr.get("PRETTY_NAME"):
-                parts.append(f"- os: {osr['PRETTY_NAME']}")
+                lines.append(f"os: {osr['PRETTY_NAME']}")
         except OSError:
             pass
-        parts.append(f"- cpus: {os.cpu_count()}")
+        lines.append(f"cpus: {os.cpu_count()}")
     try:
         la = os.getloadavg()
-        parts.append(f"- loadavg: {la[0]:.2f} {la[1]:.2f} {la[2]:.2f}")
+        lines.append(f"loadavg: {la[0]:.2f} {la[1]:.2f} {la[2]:.2f}")
     except (OSError, AttributeError):
         pass
     rc, out, _ = _run(["uptime"], 5)
     if rc == 0 and out.strip():
-        parts.append(f"- uptime: `{out.strip()}`")
-    return "\n".join(parts)
+        lines.append(f"uptime: {out.strip()}")
+    return _md_lines(lines)
 
 
 def h_memory(p: dict) -> str:
@@ -432,25 +467,33 @@ def h_memory(p: dict) -> str:
         # No source label on any of the three branches: `vm_stat`, `free -h` and
         # /proc/meminfo are unmistakable from their own first line, so naming
         # them would restate what the payload already says.
-        parts = []
+        lines = []
         rc, out, _ = _run(["sysctl", "-n", "hw.memsize"], 5)
         if rc == 0 and out.strip().isdigit():
-            parts.append(f"- total: {_kb_human(int(out.strip()) / 1024)}")
+            lines.append(f"total: {_kb_human(int(out.strip()) / 1024)}")
         rc, out, _ = _run(["vm_stat"], 5)
-        if rc == 0 and out.strip():
-            parts.append("\n" + _md_fence(out.strip()))
-        else:
+        if rc != 0 or not out.strip():
             raise ValueError("vm_stat unavailable")
-        return "\n".join(parts)
+        for ln in _fold_kv(out.strip()):
+            # vm_stat's banner is the one line whose value is prose; the only
+            # thing in it a caller needs is the page size the counts are in.
+            if ln.startswith("mach virtual memory statistics"):
+                m = re.search(r"(\d+)", ln)
+                if m:
+                    lines.append(f"page size: {m.group(1)}")
+                continue
+            lines.append(ln)
+        return _md_lines(lines)
     # linux
     if _have("free"):
         rc, out, err = _run(["free", "-h"], 5)
         if rc == 0 and out.strip():
+            # `free -h` is a TABLE, not key/value -- folding it would be wrong.
             return _md_fence(out.strip())
     try:
         with open("/proc/meminfo") as f:
             data = f.read()
-        return _md_fence(data.strip())
+        return _md_lines(_fold_kv(data.strip()))
     except OSError as exc:
         raise ValueError(f"cannot read memory info: {exc}")
 
@@ -553,11 +596,11 @@ def h_which(p: dict) -> str:
         resolved = shutil.which(n)
         if resolved:
             real = os.path.realpath(resolved)
-            extra = f" → `{real}`" if real != resolved else ""
-            lines.append(f"- `{n}`: `{resolved}`{extra}")
+            extra = f" → {real}" if real != resolved else ""
+            lines.append(f"{n}: {resolved}{extra}")
         else:
-            lines.append(f"- `{n}`: _not found in PATH_")
-    return "\n".join(lines)
+            lines.append(f"{n}: not found in PATH")
+    return _md_lines(lines)
 
 
 def h_env(p: dict) -> str:
@@ -565,29 +608,36 @@ def h_env(p: dict) -> str:
     filt = (p.get("filter") or "").strip().lower()
     show_secrets = _bool_param(p.get("show_secrets", False))
 
+    redacted: List[str] = []
+
     def render(k: str, v: str) -> str:
         if _SECRET_KEY_RE.search(k) and not show_secrets:
-            return f"- `{k}` = ***REDACTED*** _(len {len(v)})_"
-        return f"- `{k}` = `{v}`"
+            redacted.append(k)
+            return f"{k} = ***REDACTED*** (len {len(v)})"
+        return f"{k} = {v}"
 
     env = dict(os.environ)
     if key:
         k = str(key)
         if k not in env:
             return f"_env var `{k}` is not set_"
-        return render(k, env[k])
-    keys = sorted(env)
-    if filt:
-        keys = [k for k in keys if filt in k.lower()]
-    if not keys:
-        return "_no matching env vars_"
-    # The count survives, the filter does not: how many matched is news, what
-    # was matched against is the caller's own word.
-    lines = [f"_{len(keys)} vars_", ""]
-    lines += [render(k, env[k]) for k in keys]
-    if not show_secrets:
-        lines.append("\n_secret-looking values redacted; pass show_secrets=true to reveal_")
-    return "\n".join(lines)
+        head, body = "", render(k, env[k])
+    else:
+        keys = sorted(env)
+        if filt:
+            keys = [k for k in keys if filt in k.lower()]
+        if not keys:
+            return "_no matching env vars_"
+        # The count survives, the filter does not: how many matched is news,
+        # what was matched against is the caller's own word.
+        head = f"_{len(keys)} vars_\n\n"
+        body = _md_lines([render(k, env[k]) for k in keys])
+    # Only when something WAS redacted.  The old form printed the policy
+    # unconditionally, so a reply holding nothing secret still spent 77
+    # characters announcing a redaction that never happened.
+    note = ("\n\n_secret-looking values redacted; pass show_secrets=true to "
+            "reveal_") if redacted else ""
+    return head + body + note
 
 
 def _fmt_time(ts: float) -> str:
