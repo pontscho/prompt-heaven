@@ -275,6 +275,24 @@ SUBCOMMAND_DESCRIPTIONS = {
 # ---------------------------------------------------------------------------
 
 def _md_fence(content: str, lang: str = "") -> str:
+    """Wrap *content* in a fence wide enough to survive its own backticks.
+
+    The `strip("\\n")` is not cosmetic, it removes a DIVERGENCE: the unfenced
+    branch in handle_git_call already emits `stdout.strip("\\n")`, and
+    `_needs_fence` already decides on `text.strip("\\n")` -- so the payload's
+    trailing newline was being stripped everywhere EXCEPT here, where it landed
+    a blank line before the closing fence on every fenced reply. One payload
+    rendering two ways depending on which branch caught it is the same shape of
+    defect as the `_cap_text` pager bug: two individually reasonable layers that
+    jointly revoke a property.
+
+    Only NEWLINES go. Trailing SPACES stay, per line: for `diff`, `blame` and
+    `grep` a line's trailing whitespace is the payload rather than padding --
+    `git diff --check` exists to hunt exactly that -- so stripping it would edit
+    the evidence. That is also why the space-squeeze is per-subcommand and lives
+    in _squeeze, not here.
+    """
+    content = content.strip("\n")
     max_run = 0
     for run in re.findall(r"`+", content):
         if len(run) > max_run:

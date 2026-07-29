@@ -16,7 +16,7 @@ run):
                                                       servers (A-J)
   mcp_git_params     tests/test_mcp_git_params.py     mcp-git named params ->
                                                       git argv, fully offline
-                                                      (A-K)
+                                                      (A-L)
   name_existence     tests/test_name_existence.py     every MCP name the prompt
                                                       corpus and the servers'
                                                       own model-facing text
@@ -180,7 +180,7 @@ SUITES = [
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 152),
     ("mcp_git_params", run_mcp_git_params,
-     "mcp-git named params -> git argv, offline", 198),
+     "mcp-git named params -> git argv, offline", 209),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,

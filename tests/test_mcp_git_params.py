@@ -52,6 +52,7 @@ Exit code 0 iff every non-informational case passes.
 """
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -198,6 +199,38 @@ def shell_words(shell, cmdline, cwd):
 # ---------------------------------------------------------------------------
 # assertion helpers
 # ---------------------------------------------------------------------------
+
+def fence_edge_offenders(text):
+    """Empty lines sitting against a fence delimiter, one message each.
+
+    A reply must never hold one: `_md_fence` strips the payload's edge newlines,
+    so the line after an opening fence and the line before a closing one are
+    always content. Checked as a PROPERTY of the rendered reply rather than
+    against an expected string, so it covers call sites nobody listed here.
+
+    The open/close state is tracked by fence WIDTH, not by counting delimiters:
+    `_md_fence` picks a fence wider than the longest backtick run in the payload,
+    so a ``` line inside a 4-wide fence is the payload's, not ours. Toggling on
+    every match would mistake it for our closer and check the wrong lines.
+    """
+    lines = text.split("\n")
+    bad = []
+    open_width = 0
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(`{3,})", ln)
+        if not m:
+            continue
+        width = len(m.group(1))
+        if not open_width:
+            open_width = width
+            if i + 1 < len(lines) and lines[i + 1] == "":
+                bad.append("blank line after the opening fence (line %d)" % i)
+        elif width >= open_width:
+            open_width = 0
+            if i and lines[i - 1] == "":
+                bad.append("blank line before the closing fence (line %d)" % i)
+    return bad
+
 
 def check(suite, drv, group, cid, function, params, argv=None, cmdline=None,
           error=None, must=(), must_not=(), spawns=1, status=None, note="",
@@ -864,6 +897,116 @@ def run(opts=None):
         check(suite, drv, "K", "no-disclosure-when-caller-chose", "status",
               {"args": ["-s"]}, must_not=["_+ "],
               note="nothing was injected -> nothing to disclose")
+
+        # ====== L: no fenced payload carries an edge blank line ======
+        # `_md_fence` strips the payload's edge newlines. Before that, the
+        # UNFENCED branch stripped (`stdout.strip("\n")`) and `_needs_fence`
+        # decided on a stripped body, but the fenced branch did not -- so one
+        # payload rendered two ways depending on which branch caught it, and
+        # every fenced reply paid a blank line for it. Measured on 32 live calls:
+        # 24 of them carried one, shortlog carried two.
+        #
+        # Asserted as a FORMAT property of the rendered reply -- no character
+        # count, no expected string -- so nothing here can go stale, and a
+        # future call site that fences a raw payload is covered without being
+        # named. The two `-preserved` cases are the other half of the contract:
+        # this strips EDGES only, and never touches a line's interior or tail.
+        for cid, out, why in [
+            ("one-trailing-newline", "a\nb\n", "the ordinary git payload"),
+            ("two-trailing-newlines", "a\nb\n\n",
+             "shortlog really does end with a blank line of its own"),
+            ("three-trailing-newlines", "a\nb\n\n\n", "and any number of them"),
+            ("leading-newlines", "\n\na\nb\n", "same at the head of the payload"),
+            ("payload-owns-a-fence", "a\n```\nb\n\n",
+             "the payload's own fence must not be read as ours"),
+        ]:
+            rep = drv.call("log", {"args": ["--oneline"]}, stdout=out)
+            problems = fence_edge_offenders(rep["text"])
+            suite.record("L", "fence-edges-" + cid, problems,
+                         detail=["stdout      : %r" % out,
+                                 "why         : %s" % why,
+                                 "reply       : %r" % rep["text"]],
+                         brief="%s | fence-edges-%s"
+                               % (H.FAIL if problems else H.PASS, cid))
+
+        rep = drv.call("log", {"args": ["--oneline"]}, stdout="a\n\nb\n")
+        suite.record("L", "interior-blank-line-preserved",
+                     [] if "a\n\nb" in rep["text"]
+                     else ["an interior blank line was eaten: %r" % rep["text"]],
+                     detail=["reply       : %r" % rep["text"],
+                             "why         : a blank line BETWEEN two hunks is "
+                             "content; only the payload's edges are presentation"],
+                     brief="%s | interior-blank-line-preserved"
+                           % (H.PASS if "a\n\nb" in rep["text"] else H.FAIL))
+
+        rep = drv.call("log", {"args": ["--oneline"]}, stdout="a  \nb\n")
+        kept = "a  \n" in rep["text"]
+        suite.record("L", "trailing-spaces-preserved",
+                     [] if kept
+                     else ["per-line trailing whitespace was stripped: %r"
+                           % rep["text"]],
+                     detail=["reply       : %r" % rep["text"],
+                             "why         : for diff/blame/grep a line's "
+                             "trailing whitespace IS the payload -- `git diff "
+                             "--check` exists to hunt it. Stripping it would "
+                             "edit the evidence, so the space squeeze is "
+                             "per-subcommand and does not live in _md_fence"],
+                     brief="%s | trailing-spaces-preserved"
+                           % (H.PASS if kept else H.FAIL))
+
+        rep = drv.call("log", {"args": ["--oneline"]}, rc=2, stdout="",
+                       stderr="fatal: bad revision\n\n")
+        problems = fence_edge_offenders(rep["text"])
+        suite.record("L", "fence-edges-stderr", problems,
+                     detail=["reply       : %r" % rep["text"],
+                             "why         : the failure path fences stderr "
+                             "through the same helper"],
+                     brief="%s | fence-edges-stderr"
+                           % (H.FAIL if problems else H.PASS))
+
+        # The gate is DERIVED from the server's own allowlist and must account
+        # for every name on it -- exercised, or refused with a reason. A gate
+        # hand-fed a few subcommands cannot say which ones it never looked at;
+        # that is exactly how a stray markdown heading survived the sweep meant
+        # to remove it in mcp-inspect (S21).
+        names = sorted(set(list(drv.mod.SAFE_SUBCOMMANDS)
+                           + list(drv.mod.FILTERED_SUBCOMMANDS.keys())))
+        swept, refused, offenders = [], [], []
+        for name in names:
+            rep = drv.call(name, {}, stdout="a\nb\n\n")
+            if rep["error"]:
+                refused.append(name)      # a validator wants flags we did not send
+                continue
+            swept.append(name)
+            offenders += ["%s: %s" % (name, o)
+                          for o in fence_edge_offenders(rep["text"])]
+        suite.record("L", "fence-edges-every-subcommand", offenders,
+                     detail=["exercised   : %d (%s)" % (len(swept),
+                                                        " ".join(swept)),
+                             "refused     : %d (%s)" % (len(refused),
+                                                        " ".join(refused)),
+                             "payload     : 'a\\nb\\n\\n' through every name on "
+                             "the server's own whitelist"],
+                     brief="%s | fence-edges-every-subcommand | %d swept"
+                           % (H.FAIL if offenders else H.PASS, len(swept)))
+        unaccounted = sorted(set(names) - set(swept) - set(refused))
+        suite.record("L", "gate-covers-every-subcommand",
+                     [] if not unaccounted
+                     else ["names neither exercised nor refused: %r"
+                           % unaccounted],
+                     detail=["whitelist   : %d names" % len(names),
+                             "a refusal is an ACCOUNTED hole: the validator "
+                             "rejected a bare call, so no reply was rendered "
+                             "to inspect"])
+
+        # A gate that cannot fail is not a gate.
+        planted = fence_edge_offenders("```\n\na\n\n```")
+        suite.record("L", "gate-discriminates",
+                     [] if len(planted) == 2
+                     else ["a hand-built offender scored %r" % planted],
+                     detail=["input       : '```\\n\\na\\n\\n```'",
+                             "offenders   : %r" % planted,
+                             "both edges must be reported, not just one"])
 
         stub_ok = drv.mod.subprocess is drv.stub
         non_git = [c for c in drv.stub.calls if not c or c[0] != "git"]
