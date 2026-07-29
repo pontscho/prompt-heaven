@@ -10,11 +10,21 @@ Design:
   tools/list  → exposes only 'context7_call' (minimal token footprint)
   tools/call  → dispatches all Context7 documentation tools
 
+Output ceiling (cap convention v1): replies are capped by max_answer_chars
+(default 24000 chars, ~6k tokens). This server hands an UPSTREAM payload through,
+so its size is decided by context7.com and not by anything here — which is
+exactly why the ceiling matters most on this one. The library list is row-shaped
+and drops whole RECORDS with an 'offset' resume hint; a documentation answer is
+one opaque blob with no stable index, so it is cut on a line boundary, head-first
+(upstream ranks by relevance to the query), and gets NO resume hint, because
+there is nothing to resume from.
+
 Usage:
   python3 mcp-context7.py [--api-key <key>] [--debug]
 """
 
 import os
+import re
 import sys
 import json
 import logging
@@ -64,6 +74,152 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
 
 CONTEXT7_API_BASE_URL = "https://context7.com/api"
 API_KEY: Optional[str] = None
+
+
+# ============================================================
+# Output ceiling (cap convention v1)
+# ============================================================
+
+# 24000 chars is ~6k tokens at the usual ~4 chars/token — a reply one call may
+# spend, not a reply that eats the session.
+#
+# Until now this server had NO ceiling of any kind, so the only backstop was the
+# Claude Code harness: it generates the whole oversized payload, spills it to a
+# file and costs an extra round trip to read it back. One uncapped call in this
+# fleet has already produced 511617 chars that way. This server is the fleet's
+# worst exposure, because the payload is UPSTREAM text: a /v2/context answer is
+# as large as context7.com decides to make it, and no amount of care on this side
+# bounds it.
+#
+# Per-call overridable via max_answer_chars, so a caller who genuinely wants the
+# whole document asks for it explicitly. <= 0 means unlimited.
+DEFAULT_MAX_ANSWER_CHARS = 24000
+
+# Room kept free for the closing accounting line while filling a record budget.
+PAGE_LINE_RESERVE = 80
+
+# The separator between two search records. Named because the record pager has to
+# charge it against the budget; the rendering is unchanged.
+RESULT_SEPARATOR = "\n----------\n"
+
+
+def _max_answer_chars(args: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
+    try:
+        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ANSWER_CHARS
+
+
+def _offset(args: dict) -> int:
+    """First search RECORD to display, 0-based — the value the page line hands back.
+
+    Display-level paging over the record list this call already fetched, not an
+    upstream cursor: the search is re-run on every call. Only
+    context7_resolve_library_id reads it, because only its payload has records to
+    index; context7_query_docs never emits an ``offset=`` hint, since a resume
+    hint for a knob that does not exist lies to the caller.
+    """
+    try:
+        return max(0, int(args.get("offset", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rows_note(start: int, shown: int, total: int) -> str:
+    """Record accounting for a row-shaped payload; goes on its LAST line.
+
+    <total> is EXACT here: the search response is parsed into a complete list
+    before any of it is rendered, so this server never has to guess a count for
+    THIS payload. (It cannot know the size of a documentation answer in advance
+    either, but that payload is not row-shaped and never reaches this line.)
+
+    Display indices are 1-based inclusive, which makes the 1-based last record
+    equal to the 0-based ``offset`` of the next one — so the hint is literally the
+    value to pass back. ``offset=`` is emitted only when records really remain: a
+    resume hint that would return nothing is worse than no hint.
+    """
+    last = start + shown
+    if shown == 0:
+        # Spelled out rather than as a 1-based range, which would invert
+        # ("rows 100-99") when the caller offsets past the end.
+        return (f"[no rows at offset {start} of {total}]" if start
+                else f"[{total} rows]")
+    if last < total:
+        return (f"[showing rows {start + 1}-{last} of {total}; "
+                f"offset={last} for more]")
+    if start > 0:
+        return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
+    return f"[{total} row{'s' if total != 1 else ''}]"
+
+
+_FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
+
+
+def _balance_fences(body: str) -> str:
+    """Close a fenced block the cut landed inside.
+
+    This is the one server in the fleet that cannot inspect its payload before
+    committing to it: a /v2/context answer is upstream MARKDOWN, and its bulk is
+    fenced code snippets. Cutting such a document at an arbitrary line has a good
+    chance of landing between an opening fence and its close, and a reply that
+    stops mid-fence swallows the accounting line into what reads as code — the
+    caller is then told nothing about the cut it can actually see.
+
+    An odd number of fence lines means exactly one is missing. Only the "close at
+    the bottom" direction exists here, because this server has no tail-biased
+    payload — see _cap_text. (mcp-jenkins.py:603 carries both directions; if a
+    tail bias is ever added here, take the other branch from there.)
+    """
+    fences = _FENCE_LINE_RE.findall(body)
+    if len(fences) % 2 == 0:
+        return body
+    return "%s\n%s" % (body.rstrip("\n"), fences[-1])
+
+
+def _cap_text(text: str, max_chars: int) -> str:
+    """Cut to ``max_chars`` on a LINE BOUNDARY, head-biased, with ONE closing line.
+
+    Head-biased, and there is no tail option: the informative end of every
+    payload this server returns is the top — upstream ranks documentation
+    snippets by relevance to the query, and a search record leads with its title
+    and library ID. The closing line names the end it kept and is always the
+    payload's last line, so the caller never has to guess which half survived.
+
+    Cutting on a line boundary is what keeps a snippet line, an import path or a
+    library ID from being served in half; the single exception is a payload with
+    no newline to cut at (upstream minified into one line), where the boundary
+    does not exist and a hard cut is the honest answer.
+
+    For the search list this is the backstop, not the main path — records are
+    dropped whole in _format_search_results() first.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    total = len(text)
+
+    def marker(kept: int) -> str:
+        return (f"\n[truncated: kept {kept} of {total} chars from the head; "
+                f"raise max_answer_chars or narrow the query]")
+
+    # marker(total) is the longest the line can ever get (kept <= total), so
+    # reserving that much cannot overshoot once the real count is known. The
+    # repair fence is reserved the same way: it can only ever be one of the fence
+    # tokens already present, so the widest one plus its newline bounds it and the
+    # whole reply stays inside the ceiling.
+    fences = _FENCE_LINE_RE.findall(text)
+    keep = max_chars - len(marker(total))
+    if fences:
+        keep -= max(len(f) for f in fences) + 1
+    if keep <= 0:
+        # The ceiling is smaller than the accounting line itself. The line still
+        # wins: a payload with no accounting is worse than no payload.
+        return marker(0).lstrip("\n")
+    cut = text.rfind("\n", 0, keep + 1)
+    body = text[:cut] if cut > 0 else text[:keep]
+    # The accounting reports the payload chars that survived, so the repair fence
+    # is added after the count is taken.
+    return _balance_fences(body) + marker(len(body))
 
 
 # ============================================================
@@ -131,10 +287,48 @@ def _format_search_result(result: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_search_results(results: list) -> str:
+def _format_search_results(results: list, offset: int = 0,
+                           char_budget: int = 0) -> str:
+    """The library list, paged by RECORD — never half a record.
+
+    A search answer is row-shaped by definition, so its share of the ceiling is
+    spent by dropping whole records rather than by cutting characters: every
+    record kept is complete, and the closing line says where to resume. Each
+    record is six upstream-controlled fields, one of which is a free-text
+    description, so a handful of verbose libraries can outgrow the ceiling on
+    their own. ``char_budget`` of 0 means unlimited.
+
+    The note is emitted only when the view is actually partial; a full list needs
+    no accounting line, and one on every reply is pure per-call boilerplate.
+    """
     if not results:
         return "No documentation libraries found matching your query."
-    return "\n----------\n".join(_format_search_result(r) for r in results)
+
+    total = len(results)
+    # NOT clamped to `total`: an over-offset must be reported back as the value
+    # the CALLER passed. Clamping first turns `offset=99 of 40` into the
+    # meaningless `offset=40 of 40` and hides the caller's mistake. A Python
+    # slice past the end is already empty, so the clamp bought nothing.
+    start = max(0, offset)
+    budget = char_budget if char_budget > 0 else 0
+
+    blocks = []
+    for result in results[start:]:
+        block = _format_search_result(result)
+        # At least one record always survives: a bare accounting line tells the
+        # caller nothing, and _cap_text() is the hard backstop for the ceiling.
+        if (budget > 0 and blocks
+                and budget - len(block) - len(RESULT_SEPARATOR) < PAGE_LINE_RESERVE):
+            break
+        budget -= len(block) + len(RESULT_SEPARATOR)
+        blocks.append(block)
+
+    if start == 0 and len(blocks) == total:
+        return RESULT_SEPARATOR.join(blocks)
+    note = _rows_note(start, len(blocks), total)
+    if not blocks:
+        return note
+    return RESULT_SEPARATOR.join(blocks) + "\n" + note
 
 
 def _parse_error_response(status: int, body: str, api_key: Optional[str]) -> str:
@@ -171,6 +365,10 @@ async def handle_context7_status(args: dict) -> str:
 
 
 async def handle_context7_resolve_library_id(args: dict) -> str:
+    # Capped everywhere a value from UPSTREAM can reach the reply: the record
+    # list, but also the two error paths, since `message` and `error` are fields
+    # context7.com fills in and neither has a documented length.
+    cap = _max_answer_chars(args)
     query = args.get("query", "").strip()
     library_name = args.get("library_name", "").strip()
 
@@ -184,19 +382,31 @@ async def handle_context7_resolve_library_id(args: dict) -> str:
         data = json.loads(raw)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        return _parse_error_response(e.code, body, API_KEY)
+        return _cap_text(_parse_error_response(e.code, body, API_KEY), cap)
     except Exception as e:
-        return f"Error searching libraries: {e}"
+        return _cap_text(f"Error searching libraries: {e}", cap)
 
     results = data.get("results", [])
     if not results:
         error = data.get("error")
-        return error if error else "No libraries found matching the provided name."
+        return _cap_text(error, cap) if error \
+            else "No libraries found matching the provided name."
 
-    return f"Available Libraries:\n\n{_format_search_results(results)}"
+    header = "Available Libraries:\n\n"
+    body = _format_search_results(results, _offset(args),
+                                  max(0, cap - len(header)) if cap > 0 else 0)
+    return _cap_text(header + body, cap)
 
 
 async def handle_context7_query_docs(args: dict) -> str:
+    # THE payload this ceiling exists for: /v2/context returns as much markdown as
+    # context7.com decides to return, and nothing on this side bounds it. Cut
+    # head-first (upstream ranks snippets by relevance to `query`) with NO resume
+    # hint: the answer is one opaque blob with no stable index, a second call
+    # re-runs the upstream search, and there is no `offset` here to hand back.
+    # The closing line points at the two levers that do exist instead — raise
+    # max_answer_chars, or narrow the query.
+    cap = _max_answer_chars(args)
     library_id = args.get("library_id", "").strip()
     query = args.get("query", "").strip()
 
@@ -209,9 +419,9 @@ async def handle_context7_query_docs(args: dict) -> str:
         text = await _api_get("/v2/context", {"query": query, "libraryId": library_id}, API_KEY)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        return _parse_error_response(e.code, body, API_KEY)
+        return _cap_text(_parse_error_response(e.code, body, API_KEY), cap)
     except Exception as e:
-        return f"Error fetching library context. Please try again later. {e}"
+        return _cap_text(f"Error fetching library context. Please try again later. {e}", cap)
 
     if not text or not text.strip():
         return (
@@ -221,7 +431,7 @@ async def handle_context7_query_docs(args: dict) -> str:
             "with the package name you wish to retrieve documentation for."
         )
 
-    return text
+    return _cap_text(text, cap)
 
 
 async def handle_context7_call(args: dict) -> str:

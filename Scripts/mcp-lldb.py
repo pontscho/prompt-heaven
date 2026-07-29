@@ -10,6 +10,15 @@ Design:
   tools/list  → exposes only 'lldb_mcp_status' (minimal token footprint)
   tools/call  → dispatches all ~25 LLDB tools (documented in lldb-mcp skill)
 
+Output ceiling (cap convention v1): every reply is capped by max_answer_chars
+(default 24000 chars, ~6k tokens). Line-shaped payloads — backtrace frames,
+disassembly, a register bank, a breakpoint or thread list — are truncated by
+dropping whole LINES and say where to resume via 'offset'; everything else is cut
+on a line boundary and carries one closing accounting line. WHICH END survives is
+a per-function decision, not a default — see CAP_POLICY: execution control is
+tail-biased because the stop reason arrives after whatever the inferior printed,
+everything else is head-biased.
+
 Usage:
   python3 mcp-lldb.py [--debug]
 """
@@ -69,6 +78,178 @@ def _bool_param(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
+
+
+# ============================================================
+# Output ceiling (cap convention v1)
+# ============================================================
+
+# 24000 chars is ~6k tokens at the usual ~4 chars/token — a reply one call may
+# spend, not a reply that eats the session.
+#
+# Until now this server had NO ceiling of any kind, so the only backstop was the
+# Claude Code harness: it generates the whole oversized payload, spills it to a
+# file and costs an extra round trip to read it back. One uncapped call in this
+# fleet has already produced 511617 chars that way. LLDB is the worst candidate
+# for that treatment, because long output is its NORMAL output: `bt full` on a
+# deep stack, `memory read -c 100000`, `disassemble` over a whole function,
+# `register read` with the vector banks, `help` with no argument.
+#
+# Per-call overridable via max_answer_chars, so a caller who genuinely wants the
+# whole dump asks for it explicitly. <= 0 means unlimited.
+DEFAULT_MAX_ANSWER_CHARS = 24000
+
+# Room kept free for the closing accounting line while filling a line budget.
+PAGE_LINE_RESERVE = 80
+
+BIAS_HEAD = "head"
+BIAS_TAIL = "tail"
+
+
+def _max_answer_chars(args: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
+    try:
+        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ANSWER_CHARS
+
+
+def _offset(args: dict) -> int:
+    """First payload LINE to display, 0-based — the value the page line hands back.
+
+    Display-level paging over output this call already produced. It is NOT an
+    address offset and NOT an index inside an LLDB command: the command is
+    re-executed on every call, so a caller walking a long dump pays for the
+    command each time.
+
+    Read only for the functions CAP_POLICY marks pageable — the ones that can
+    really resume. The others never emit an ``offset=`` hint, because a resume
+    hint for a knob that does not exist lies to the caller.
+    """
+    try:
+        return max(0, int(args.get("offset", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rows_note(start: int, shown: int, total: int) -> str:
+    """Line accounting for a line-shaped payload; goes on its LAST line.
+
+    <total> is EXACT and always known here: read_until_prompt() buffers the whole
+    PTY reply before any handler sees it, so this server never streams and never
+    has to guess a count. A server that CANNOT know its total must SAY so on this
+    line instead of inventing a number.
+
+    Display indices are 1-based inclusive, which makes the 1-based last line
+    equal to the 0-based ``offset`` of the next one — so the hint is literally the
+    value to pass back. ``offset=`` is emitted only when lines really remain: a
+    resume hint that would return nothing is worse than no hint.
+    """
+    last = start + shown
+    if shown == 0:
+        # Spelled out rather than as a 1-based range, which would invert
+        # ("rows 100-99") when the caller offsets past the end.
+        return (f"[no rows at offset {start} of {total}]" if start
+                else f"[{total} rows]")
+    if last < total:
+        return (f"[showing rows {start + 1}-{last} of {total}; "
+                f"offset={last} for more]")
+    if start > 0:
+        return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
+    return f"[{total} row{'s' if total != 1 else ''}]"
+
+
+def _page_lines(text: str, offset: int, max_chars: int) -> str:
+    """A line-shaped payload, paged by LINE — never cut mid-line.
+
+    A backtrace frame, a disassembled instruction, a register, one breakpoint:
+    the unit of meaning is a whole line, and half an address or half a mangled
+    symbol name is worse than a missing line. So the ceiling is spent by dropping
+    whole lines, and the closing line says where to resume.
+
+    The note is emitted ONLY when the view is actually partial. Unlike a SQL row
+    count, the line count of a debugger reply is not something the caller asked
+    for, and a bare "[42 rows]" appended to every single answer is pure per-call
+    boilerplate — the exact cost this convention exists to cut.
+    """
+    lines = text.split("\n")
+    total = len(lines)
+    # NOT clamped to `total`: an over-offset must be reported back as the value
+    # the CALLER passed. Clamping first turns `offset=99 of 6` into the
+    # meaningless `offset=6 of 6` and hides the caller's mistake. A Python slice
+    # past the end is already empty, so the clamp bought nothing.
+    start = max(0, offset)
+    budget = max_chars if max_chars > 0 else 0
+
+    kept: List[str] = []
+    for line in lines[start:]:
+        # At least one line always survives: a bare accounting line tells the
+        # caller nothing, and _cap_text() below is the hard backstop anyway.
+        if budget > 0 and kept and budget - len(line) - 1 < PAGE_LINE_RESERVE:
+            break
+        budget -= len(line) + 1
+        kept.append(line)
+
+    if start == 0 and len(kept) == total:
+        return text
+    note = _rows_note(start, len(kept), total)
+    return "\n".join(kept + [note]) if kept else note
+
+
+def _cap_text(text: str, max_chars: int, bias: str = BIAS_HEAD) -> str:
+    """Cut to ``max_chars`` on a LINE BOUNDARY, with ONE closing line.
+
+    ``bias`` names which END is kept; it is a per-function decision (CAP_POLICY),
+    not a default anyone should rely on. The closing line always names the end it
+    kept and is always the payload's LAST line — even for a tail-biased cut, where
+    what was dropped is at the top. Both because the end of a payload is what
+    actually gets read, and because a marker at the cut site is the one place a
+    reader skips.
+
+    A frame address or a mangled symbol name is never halved, because the cut
+    lands on a newline; the single exception is a payload with no newline to cut
+    at, where the boundary does not exist and the hard cut is the honest answer.
+
+    For a pageable function this is the LAST resort: _page_lines() has already
+    spent the ceiling by whole lines. What lands here is the non-line payloads (a
+    value dump, a composite of several command outputs) plus the one overflow the
+    line pager cannot prevent — a single line wider than the whole ceiling.
+
+    No fence repair, unlike mcp-context7.py and mcp-jenkins.py:619: those two
+    emit or forward markdown, while every payload here is raw PTY text under a
+    plain label — this file contains no fence literal at all. Balancing fences in
+    debugger output could only ever fire on an odd count the INFERIOR printed,
+    where "repairing" it would fabricate a line LLDB never produced.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    total = len(text)
+    keep_tail = bias == BIAS_TAIL
+
+    def marker(kept: int) -> str:
+        # The two ends are spelled out instead of interpolating ``bias``, so a
+        # search for the convention's closing line finds it verbatim in the
+        # source rather than as a template with a hole in it.
+        if keep_tail:
+            return (f"\n[truncated: kept {kept} of {total} chars from the tail; "
+                    f"raise max_answer_chars or narrow the query]")
+        return (f"\n[truncated: kept {kept} of {total} chars from the head; "
+                f"raise max_answer_chars or narrow the query]")
+
+    # marker(total) is the longest the line can ever get (kept <= total), so
+    # reserving that much cannot overshoot once the real count is known.
+    keep = max_chars - len(marker(total))
+    if keep <= 0:
+        # The ceiling is smaller than the accounting line itself. The line still
+        # wins: a payload with no accounting is worse than no payload.
+        return marker(0).lstrip("\n")
+    if keep_tail:
+        cut = text.find("\n", total - keep)
+        body = text[cut + 1:] if 0 <= cut < total - 1 else text[total - keep:]
+    else:
+        cut = text.rfind("\n", 0, keep + 1)
+        body = text[:cut] if cut > 0 else text[:keep]
+    return body + marker(len(body))
 
 
 # ============================================================
@@ -753,7 +934,10 @@ async def handle_lldb_call(mgr: SessionManager, args: dict) -> str:
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
         return f"Unknown function: '{function}'. Available: {available}"
 
-    return await handler(mgr, params)
+    # The ceiling is imposed HERE, at the one point every function passes
+    # through, so the per-function head/tail decision lives in one auditable
+    # table instead of scattered across 29 return statements.
+    return _apply_cap(function, params, await handler(mgr, params))
 
 
 # ============================================================
@@ -828,6 +1012,98 @@ ALL_HANDLERS = {
 }
 
 
+# Per-function output policy: (which end survives, line-pageable).
+#
+# BIAS is a real decision for a debugger, not a default. Two shapes occur here:
+#
+#   HEAD — the answer is at the TOP. A backtrace starts at frame 0, which is the
+#     crash; a disassembly and a memory dump start at the address the caller
+#     asked for; `register read` prints the general-purpose bank before the far
+#     bulkier vector banks; a value dump prints the object before its nested
+#     members; `help` prints the synopsis first. Cutting the bottom loses
+#     context, cutting the top loses the answer.
+#
+#   TAIL — the answer is at the BOTTOM. Every execution-control command shares
+#     the inferior's PTY, so its reply is [everything the program printed] and
+#     THEN `Process N stopped`, the stop reason and the current frame. A chatty
+#     program can push megabytes of its own stdout ahead of those few lines — and
+#     those few lines are the entire reason the call was made. Head-biasing
+#     `lldb_continue` would faithfully return 24000 chars of printf spam and drop
+#     the stop reason.
+#
+# LINE-PAGEABLE means the payload is a uniform sequence of lines, so the ceiling
+# is spent by dropping whole lines with a truthful `offset=` resume hint instead
+# of by cutting characters. It is False for composite replies (several
+# concatenated command outputs, where "line N" is not a unit of anything) and for
+# structured value dumps (nesting makes an arbitrary line offset unreadable) —
+# those get a plain line-boundary cut and NO resume hint, since they cannot
+# resume.
+#
+# INVARIANT: pageable implies HEAD. The page note sits on the last line, so a
+# tail-biased cut would keep that note AND add the truncation notice — two
+# closing lines where the convention allows exactly one. A head-biased cut drops
+# the page note it supersedes, leaving exactly one.
+CAP_POLICY = {
+    # Line-shaped enumerations and dumps: paged by line, resumable.
+    "lldb_backtrace":         (BIAS_HEAD, True),
+    "lldb_disassemble":       (BIAS_HEAD, True),
+    "lldb_examine":           (BIAS_HEAD, True),
+    "lldb_info_registers":    (BIAS_HEAD, True),
+    "lldb_breakpoint_list":   (BIAS_HEAD, True),
+    "lldb_thread_list":       (BIAS_HEAD, True),
+    "lldb_list_sessions":     (BIAS_HEAD, True),
+    "lldb_help":              (BIAS_HEAD, True),
+    # An arbitrary LLDB command: the shape is unknown, so a line is the only unit
+    # that is always safe, and paging is the only volume knob this one has.
+    "lldb_command":           (BIAS_HEAD, True),
+
+    # Structured value dumps: the top-level value first, nested members after.
+    "lldb_print":             (BIAS_HEAD, False),
+    "lldb_expression":        (BIAS_HEAD, False),
+
+    # Composites of several command outputs. Head keeps the setup confirmation
+    # AND frame 0 of the backtrace that follows it — which is the whole point of
+    # opening a core file or selecting a thread.
+    "lldb_load_core":         (BIAS_HEAD, False),
+    "lldb_thread_select":     (BIAS_HEAD, False),
+    "lldb_frame_info":        (BIAS_HEAD, False),
+    "lldb_process_info":      (BIAS_HEAD, False),
+    "lldb_start":             (BIAS_HEAD, False),
+    "lldb_load":              (BIAS_HEAD, False),
+
+    # Short confirmations whose PTY output can still carry a long resolved-
+    # location or error list; the verdict line comes first either way.
+    "lldb_set_breakpoint":    (BIAS_HEAD, False),
+    "lldb_watchpoint":        (BIAS_HEAD, False),
+    "lldb_breakpoint_delete": (BIAS_HEAD, False),
+    "lldb_terminate":         (BIAS_HEAD, False),
+    "lldb_mcp_status":        (BIAS_HEAD, False),
+
+    # Execution control: the stop reason and the current frame arrive LAST, after
+    # however much the inferior printed to the shared PTY.
+    "lldb_run":               (BIAS_TAIL, False),
+    "lldb_continue":          (BIAS_TAIL, False),
+    "lldb_step":              (BIAS_TAIL, False),
+    "lldb_next":              (BIAS_TAIL, False),
+    "lldb_finish":            (BIAS_TAIL, False),
+    "lldb_attach":            (BIAS_TAIL, False),
+    "lldb_kill":              (BIAS_TAIL, False),
+}
+
+
+def _apply_cap(function: str, args: dict, text: str) -> str:
+    """Impose the per-call ceiling on one function's reply.
+
+    An unlisted function falls back to (head, not pageable): a handler added
+    later is capped from its first call rather than silently unbounded.
+    """
+    bias, pageable = CAP_POLICY.get(function, (BIAS_HEAD, False))
+    cap = _max_answer_chars(args)
+    if pageable:
+        text = _page_lines(text, _offset(args), cap)
+    return _cap_text(text, cap, bias)
+
+
 # ============================================================
 # MCP Server — JSON-RPC 2.0 over stdio
 # ============================================================
@@ -899,6 +1175,12 @@ class McpServer:
 
         try:
             result = await handler(self.manager, args)
+            if name != "lldb_call":
+                # lldb_call has already capped its inner function's reply under
+                # THAT function's policy. Capping again here would append a
+                # second closing line whenever the inner call raised the ceiling,
+                # and the convention allows exactly one.
+                result = _apply_cap(name, args, result)
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
             log.debug(f"Handler '{name}' error: {e}")

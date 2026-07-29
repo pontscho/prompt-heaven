@@ -220,6 +220,235 @@ def _bool_param(value, default=False):
     return bool(value)
 
 
+def _int_param(value, default: int) -> int:
+    """Coerce a wire value to int, falling back instead of raising."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# ---------------------------------------------------------------------------
+# Answer ceiling — cap convention v1
+# ---------------------------------------------------------------------------
+
+# 24000 chars is ~6k tokens at the usual ~4 chars/token: a reply ONE call may
+# spend, not a reply that eats the session. Until now purity had no ceiling
+# worth the name — the file ops defaulted max_answer_chars to -1 (UNLIMITED) and
+# the whole semantic path never capped at all — so the only backstop was Claude
+# Code's own spill-to-file: it GENERATES the entire payload, writes it to disk,
+# and then costs an extra round trip to read back the part the model wanted. One
+# search_for_pattern call measured 511617 chars (~128k tokens) that way, more
+# than the whole fleet's description tax for a session. Capping here means the
+# oversized half is never built, and the caller is told in one line how to ask
+# for the rest. Per-call overridable via max_answer_chars, so a caller who
+# genuinely wants the whole dump asks for it explicitly.
+DEFAULT_MAX_ANSWER_CHARS = 24000
+
+# Room kept free for the accounting line while a row pager fills its budget.
+PAGE_LINE_RESERVE = 80
+
+
+def _max_answer_chars(params: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
+    return _int_param(params.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS),
+                      DEFAULT_MAX_ANSWER_CHARS)
+
+
+def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
+    """Row accounting for a row-shaped payload; goes on its LAST line.
+
+    Display indices are 1-based inclusive, which makes the 1-based last row equal
+    to the 0-based ``offset`` of the next one — so the hint is literally the value
+    to pass back. ``offset=`` is only ever emitted by handlers that ACCEPT
+    ``offset`` (see HANDLER_ACCEPTED_PARAMS); a resume hint the handler would
+    reject is worse than no hint, so the block-shaped payloads get the character
+    cap and no hint at all.
+
+    ``exact=False`` is for the one payload whose total is a LOWER BOUND:
+    search_for_pattern stops scanning when the ceiling is reached, so the files
+    it never opened may hold more matches. It says so rather than presenting the
+    count it happens to have reached as the total.
+
+    The four canonical forms, shared verbatim with the psql/jenkins twins:
+        [3 rows]                                       whole set delivered
+        [showing rows 1-20 of 347; offset=20 for more]  rows remain
+        [showing rows 5-6 of 6; no rows left]           window ends at the end
+        [no rows at offset 99 of 6]                     offset past the end
+    The first form is not reached from purity's callers, ON PURPOSE and by two
+    separate routes: every payload that can carry this line already states its
+    count in the header above it, so _row_page returns an EMPTY note for a
+    complete set rather than spend a line restating the count, and the one caller
+    that builds the note itself (search_for_pattern) only does so when the scan
+    was curtailed or an offset was given. It cannot be reached with
+    ``exact=False`` either, since a curtailed scan always keeps at least one row
+    (see the budget guard in _row_page and the collection loop). The branch stays
+    because the WORDING is fleet-wide and must not drift if a caller ever does
+    need it.
+    """
+    last = start + shown
+    total_disp = (str(total) if exact
+                  else f"{total}+ (scan stopped at the ceiling; true total unknown)")
+    if shown <= 0:
+        # Spelled out rather than as a 1-based range, which would INVERT
+        # ("rows 100-99 of 10") when the caller offsets past the end.
+        return (f"[no rows at offset {start} of {total_disp}]" if start
+                else f"[{total} rows]")
+    if last < total or not exact:
+        return (f"[showing rows {start + 1}-{last} of {total_disp}; "
+                f"offset={last} for more]")
+    if start > 0:
+        return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
+    return f"[{total} row{'s' if total != 1 else ''}]"
+
+
+def _row_page(rows: List[str], offset: int = 0, head_limit: int = 0,
+              char_budget: int = 0, exact: bool = True) -> tuple:
+    """(kept rows, accounting line) for a row-shaped payload — paged by ROW.
+
+    Row truncation instead of character truncation wherever the payload IS rows:
+    purity's rows are `path:line:col` anchors, and cutting one in half yields a
+    reference that cannot be clicked, pasted or resumed from. Dropping whole rows
+    keeps every surviving anchor intact and the closing line says where to
+    resume. ``char_budget`` <= 0 means unlimited; the accounting line is empty
+    when the whole set was delivered. ``exact=False`` marks a *rows* list that is
+    itself only what a curtailed scan managed to collect, so the note reports the
+    total as a lower bound instead of a fact.
+    """
+    total = len(rows)
+    start = max(0, offset)
+    kept: List[str] = []
+    budget = char_budget
+    for row in rows[start:]:
+        if head_limit > 0 and len(kept) >= head_limit:
+            break
+        # At least one row always survives: a lone header tells the caller
+        # nothing, and _cap_text() is the hard backstop for the ceiling.
+        if char_budget > 0 and kept and budget - len(row) - 1 < PAGE_LINE_RESERVE:
+            break
+        budget -= len(row) + 1
+        kept.append(row)
+    complete = start == 0 and len(kept) == total and exact
+    return kept, ("" if complete else _rows_note(start, len(kept), total, exact))
+
+
+_FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
+
+
+def _balance_fences(body: str) -> str:
+    """Close a fenced block the cut landed inside.
+
+    A truncated reply that stops mid-fence leaves the accounting line looking like
+    source code, and every reader after that has to guess where the block ended.
+    An odd number of fence lines means exactly one is missing, and since purity is
+    head-biased the missing one is always the closer at the bottom.
+
+    ONLY for payloads whose fences purity itself emits — the semantic block
+    renderers, which wrap every definition, hover blob and code context in a ```
+    block (see _md_ctx / _md_type_at). It must NOT run over payloads that merely
+    CARRY someone else's text: read_file on a Markdown file, or a search whose
+    matched lines are fences, would otherwise gain a closing fence the file never
+    contained. Repairing a fence one wrote is honest; inventing one is not.
+    """
+    fences = _FENCE_LINE_RE.findall(body)
+    if len(fences) % 2 == 0:
+        return body
+    return "%s\n%s" % (body.rstrip("\n"), fences[-1])
+
+
+def _cap_text(text: str, max_chars: int, repair_fences: bool = False) -> str:
+    """Clamp to *max_chars* on a LINE BOUNDARY, head-biased, one closing line.
+
+    Head-biased because the informative end of every purity payload is the top:
+    the first matches of a search, the definition above its call sites, the
+    first entries of an outline. The closing line names the end that was kept, so
+    the bias is never something the caller has to assume.
+
+    Cutting at a newline is what keeps a `path:line:col` anchor whole: every
+    anchor purity emits lives inside one line, so a cut that only ever lands
+    between lines can never halve one. The single exception is a payload with no
+    newline to cut at, where the boundary does not exist and the hard cut is the
+    honest answer.
+
+    This is the LAST resort, not the main path: row-shaped answers are paged by
+    row against the same ceiling first (see _row_page / _md_page), so what lands
+    here is the block-shaped payloads (a definition with its code context, a
+    hover blob, a composite change-impact report) and any overflow the row pager
+    could not prevent. The notice is counted against the ceiling, so the whole
+    reply stays within max_chars.
+
+    *repair_fences* is set only by the callers that emit their own ``` blocks; see
+    _balance_fences for why it must stay off for everything else. The marker text
+    spells "from the head" as a LITERAL rather than interpolating a bias variable:
+    the footprint suite harvests string templates and rewrites every interpolated
+    slot to `{}`, so an interpolated bias would erase the very phrase it looks for
+    and the reply would read as having no truncation line at all.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    total = len(text)
+
+    def marker(kept: int) -> str:
+        return (f"\n[truncated: kept {kept} of {total} chars from the head; "
+                f"raise max_answer_chars or narrow the query]")
+
+    # marker(total) is the longest the notice can get (kept <= total), so
+    # reserving that much cannot overshoot once the real count is known. The
+    # repair fence is reserved the same way: it can only ever be one of the fence
+    # tokens already present, so the widest one plus its newline bounds it and the
+    # whole reply stays inside the ceiling.
+    fences = _FENCE_LINE_RE.findall(text) if repair_fences else []
+    keep = max_chars - len(marker(total))
+    if fences:
+        keep -= max(len(f) for f in fences) + 1
+    if keep <= 0:
+        # The ceiling is smaller than the accounting line itself. The line still
+        # wins: a payload with no accounting is worse than no payload.
+        return marker(0).lstrip("\n")
+    cut = text.rfind("\n", 0, keep + 1)
+    body = text[:cut] if cut > 0 else text[:keep]
+    # No line boundary fits when cut <= 0: the payload is one enormous line (a
+    # minified file, a single hover blob) or the ceiling is narrower than its
+    # first line. The cap wins over the boundary there, and the notice below says
+    # so. The accounting reports the payload chars that survived, so the repair
+    # fence is added after the count is taken.
+    if repair_fences:
+        body = _balance_fences(body)
+    return body + marker(len(body))
+
+
+def _cap_result(result: dict, params: dict) -> dict:
+    """Apply the answer ceiling to a handler's ``__raw_text__`` payload.
+
+    The dispatcher-level backstop, and the reason the ceiling is a GUARANTEE
+    rather than a per-handler habit: every one of the 73 registered function
+    names funnels through here, so a handler that forgets to page (or a future
+    one that never learns) still cannot spend the window. Handlers that page by
+    row budget against the SAME ceiling and reserve PAGE_LINE_RESERVE for their
+    accounting line, so in the normal case this call is a no-op and the reply
+    carries exactly one closing line.
+
+    ``error`` payloads are deliberately untouched: they are bounded by
+    construction, and the "Unknown function" reply listing every available name
+    is the one long error that is worth its size.
+
+    ``__fenced__`` is the provenance flag set by _md_block: it marks a payload
+    whose ``` blocks purity WROTE, which is the only kind where a cut fence may be
+    repaired. A file-op payload carrying someone else's Markdown must never gain a
+    fence it did not have, so the flag is absent there and the repair stays off.
+    """
+    text = result.get("__raw_text__")
+    if not isinstance(text, str):
+        return result
+    capped = _cap_text(text, _max_answer_chars(params),
+                       repair_fences=bool(result.get("__fenced__")))
+    if capped is text:
+        return result
+    out = dict(result)
+    out["__raw_text__"] = capped
+    return out
+
+
 def _canonical_function(function: str) -> str:
     return FUNCTION_ALIASES.get(function, function)
 
@@ -320,26 +549,49 @@ def handle_read_file(params: dict, project_root: str, strict: bool = False) -> d
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         lines = fh.readlines()
 
-    start = params.get("start_line", 1)  # 1-based
+    start = params.get("start_line")
+    if start is None:
+        # `offset` is the 0-based synonym of start_line, so the resume hint the
+        # truncation note prints (`offset=<n>`) names a parameter this handler
+        # really accepts. Without it the hint would be a lie.
+        start = _int_param(params.get("offset", 0), 0) + 1
+    start = _int_param(start, 1)
     end = params.get("end_line")          # 1-based, inclusive
     idx_start = start - 1
     if end is not None:
+        end = _int_param(end, len(lines))
         selected = lines[idx_start:end]
     else:
         selected = lines[idx_start:]
         end = len(lines)
 
+    # A file is row-shaped by definition, so its share of the ceiling is spent by
+    # dropping whole LINES: a half line of source is not something the caller can
+    # compile, quote or resume from. `total` is the last row available within the
+    # requested range, which is what makes `offset=<n>` land inside it.
+    max_chars = _max_answer_chars(params)
+    total = min(end, len(lines))
+    note = ""
+    if max_chars > 0 and sum(len(line) for line in selected) > max_chars:
+        # The header is not built yet (its line range depends on what survives),
+        # so its width is bounded rather than measured: the fixed text plus the
+        # path. PAGE_LINE_RESERVE covers the accounting line below.
+        budget = max_chars - (len(rel) + 48) - PAGE_LINE_RESERVE
+        kept: List[str] = []
+        used = 0
+        for line in selected:
+            if kept and used + len(line) > budget:
+                break
+            kept.append(line)
+            used += len(line)
+        selected = kept
+        note = _rows_note(idx_start, len(selected), total)
+
     content = "".join(selected)
-
-    max_chars = params.get("max_answer_chars", -1)
-    truncated = False
-    if max_chars > 0 and len(content) > max_chars:
-        content = content[:max_chars]
-        truncated = True
-
     header = f"[{rel}] lines {start}-{start + len(selected) - 1} of {len(lines)}"
-    if truncated:
-        header += " (truncated)"
+    if note:
+        sep = "" if content.endswith("\n") else "\n"
+        return {"__raw_text__": f"{header}\n{content}{sep}{note}"}
     return {"__raw_text__": f"{header}\n{content}"}
 
 
@@ -431,8 +683,8 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     show_hidden = _bool_param(params.get("show_hidden", False)) or _bool_param(params.get("all", False)) or _bool_param(params.get("hidden", False))
     glob_pattern = params.get("glob", None) or params.get("paths_include_glob", None) or params.get("filter", None)
     grep_pattern = params.get("grep", None) or params.get("grep_pattern", None)
-    head_limit = params.get("head_limit", 0)
-    offset = params.get("offset", 0)
+    head_limit = _int_param(params.get("head_limit", 0), 0)
+    offset = max(0, _int_param(params.get("offset", 0), 0))
 
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
@@ -525,26 +777,21 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
         lines = filtered
 
     total = len(lines)
-    if offset:
-        lines = lines[offset:]
-    if head_limit > 0:
-        lines = lines[:head_limit]
+    # One entry per line: paged by ROW, so a truncated listing never ends in half
+    # a path — a path cut to fit is a path you cannot pass back to any other call.
+    max_chars = _max_answer_chars(params)
+    header_bound = len(rel) + 96
+    budget = max_chars - header_bound - PAGE_LINE_RESERVE if max_chars > 0 else 0
+    lines, note = _row_page(lines, offset, head_limit, budget)
 
     listing = "\n".join(lines)
-    max_chars = params.get("max_answer_chars", -1)
-    truncated = False
-    if max_chars > 0 and len(listing) > max_chars:
-        listing = listing[:max_chars]
-        truncated = True
-
     header = f"[{rel}] {len(raw)} entries"
     if grep_re:
         header += f", {total} matched"
     if offset or head_limit > 0:
         header += f" (showing {offset+1}-{offset+len(lines)} of {total})"
-    if truncated:
-        header += " (truncated)"
-    return {"__raw_text__": f"{header}\n{listing}"}
+    body = f"{header}\n{listing}"
+    return {"__raw_text__": f"{body}\n{note}" if note else body}
 
 
 def _compile_path_glob(mask: str) -> "re.Pattern[str]":
@@ -582,8 +829,8 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
     if not file_mask:
         raise ValueError("Missing required parameter: file_mask")
     rel = params.get("relative_path", ".")
-    head_limit = params.get("head_limit", 0)  # 0 = unlimited
-    offset = params.get("offset", 0)
+    head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
+    offset = max(0, _int_param(params.get("offset", 0), 0))
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
         return {"text": f"(directory does not exist: {rel})", "count": 0}
@@ -609,17 +856,18 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
                 matches.append(os.path.relpath(full, project_root))
 
     total = len(matches)
-    if offset:
-        matches = matches[offset:]
-    truncated = False
-    if head_limit > 0 and len(matches) > head_limit:
-        matches = matches[:head_limit]
-        truncated = True
+    # One path per line: paged by ROW for the same reason as list_dir — half a
+    # path is worse than a missing one.
+    max_chars = _max_answer_chars(params)
+    header_bound = len(_sanitize_log(file_mask)) + 96
+    budget = max_chars - header_bound - PAGE_LINE_RESERVE if max_chars > 0 else 0
+    matches, note = _row_page(matches, offset, head_limit, budget)
 
     header = f"Found {total} file(s) matching '{_sanitize_log(file_mask)}'"
-    if truncated or offset:
+    if note or offset:
         header += f" (showing {offset+1}-{offset+len(matches)} of {total})"
-    return {"__raw_text__": f"{header}\n" + "\n".join(matches) if matches else header}
+    body = f"{header}\n" + "\n".join(matches) if matches else header
+    return {"__raw_text__": f"{body}\n{note}" if note else body}
 
 
 def handle_replace_content(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -874,9 +1122,9 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     include_glob = params.get("paths_include_glob", "")
     exclude_glob = params.get("paths_exclude_glob", "")
     search_rel = params.get("relative_path", "")
-    max_chars = params.get("max_answer_chars", -1)
-    head_limit = params.get("head_limit", 0)  # 0 = unlimited
-    offset = params.get("offset", 0)
+    max_chars = _max_answer_chars(params)
+    head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
+    offset = max(0, _int_param(params.get("offset", 0), 0))
 
     search_root = safe_path(project_root, search_rel, strict) if search_rel else project_root
     search_single_file = os.path.isfile(search_root)
@@ -923,6 +1171,15 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     total_match_count = 0
     total_chars = 0
     truncated = False
+
+    # The row budget for `content` mode. Spent on the entries actually KEPT: a
+    # match the caller paged past with `offset` costs nothing, which is what makes
+    # `offset=<n> for more` work. Before this, the budget was charged against
+    # every match the scan saw, so a second call at the returned offset stopped at
+    # the same place and came back EMPTY — the resume hint would have been a lie.
+    # Rows are whole entries, so a `path:line:col` anchor is never halved. Two
+    # reserves: one for the count header above the rows, one for the note below.
+    row_budget = (max_chars - PAGE_LINE_RESERVE * 2) if max_chars > 0 else 0
 
     # Wall-clock deadline: abort if the aggregate scan exceeds the budget.
     # Checked between files and every 256 lines within a file so a runaway
@@ -1007,17 +1264,20 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                     if pattern.search(line):
                         file_hit_count += 1
                         total_match_count += 1
+                        if total_match_count <= offset:
+                            continue      # paged past: costs no budget
                         line_num = i + 1
                         start = max(0, i - ctx_before)
                         end = min(len(lines), i + ctx_after + 1)
                         ctx = "".join(lines[start:end]).rstrip("\n")
                         entry = f"{file_rel}:{line_num}:\n{ctx}"
-                        if max_chars > 0 and total_chars + len(entry) + 1 > max_chars:
+                        if (row_budget > 0 and content_entries
+                                and total_chars + len(entry) + 1 > row_budget):
                             truncated = True
                             break
                         content_entries.append(entry)
                         total_chars += len(entry) + 1
-                        if head_limit > 0 and len(content_entries) >= offset + head_limit:
+                        if head_limit > 0 and len(content_entries) >= head_limit:
                             truncated = True
                             break
             else:
@@ -1033,13 +1293,16 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                             file_hit_count += 1
                             total_match_count += 1
                             if output_mode == "content":
+                                if total_match_count <= offset:
+                                    continue   # paged past: costs no budget
                                 entry = f"{file_rel}:{i + 1}: {line.rstrip(chr(10))}"
-                                if max_chars > 0 and total_chars + len(entry) + 1 > max_chars:
+                                if (row_budget > 0 and content_entries
+                                        and total_chars + len(entry) + 1 > row_budget):
                                     truncated = True
                                     break
                                 content_entries.append(entry)
                                 total_chars += len(entry) + 1
-                                if head_limit > 0 and len(content_entries) >= offset + head_limit:
+                                if head_limit > 0 and len(content_entries) >= head_limit:
                                     truncated = True
                                     break
                 finally:
@@ -1059,39 +1322,38 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
         if truncated:
             break
 
-    # Format output based on mode
+    # Format output based on mode. `truncated` means the SCAN stopped early, so
+    # every count below it is a lower bound: the files never opened may hold more
+    # matches. The note says so rather than presenting the number the scan
+    # happened to reach as the total.
+    exact = not truncated
+
+    def _reply(header: str, entries: List[str], note: str) -> dict:
+        body = f"{header}\n" + "\n".join(entries) if entries else header
+        return {"__raw_text__": f"{body}\n{note}" if note else body}
+
     if output_mode == "count":
         entries = [f"{f}: {c}" for f, c in file_matches.items()]
-        if offset:
-            entries = entries[offset:]
-        if head_limit > 0:
-            entries = entries[:head_limit]
         header = f"{total_match_count} match(es) in {len(file_matches)} file(s)"
-        if truncated:
-            header += " (truncated)"
-        return {"__raw_text__": f"{header}\n" + "\n".join(entries) if entries else header}
+        budget = max_chars - len(header) - PAGE_LINE_RESERVE if max_chars > 0 else 0
+        entries, note = _row_page(entries, offset, head_limit, budget, exact)
+        return _reply(header, entries, note)
 
     elif output_mode == "files_with_matches":
         entries = list(file_matches.keys())
-        if offset:
-            entries = entries[offset:]
-        if head_limit > 0:
-            entries = entries[:head_limit]
         header = f"{len(file_matches)} file(s) with matches"
-        if truncated:
-            header += " (truncated)"
-        return {"__raw_text__": f"{header}\n" + "\n".join(entries) if entries else header}
+        budget = max_chars - len(header) - PAGE_LINE_RESERVE if max_chars > 0 else 0
+        entries, note = _row_page(entries, offset, head_limit, budget, exact)
+        return _reply(header, entries, note)
 
     else:  # content
+        # `offset`, `head_limit` and the row budget were all applied while
+        # collecting, so there is nothing left to page here — only to account for.
         entries = content_entries
-        if offset:
-            entries = entries[offset:]
-        if head_limit > 0:
-            entries = entries[:head_limit]
         header = f"{total_match_count} match(es)"
-        if truncated:
-            header += " (truncated)"
-        return {"__raw_text__": f"{header}\n" + "\n".join(entries) if entries else header}
+        note = (_rows_note(offset, len(entries), total_match_count, exact)
+                if truncated or offset else "")
+        return _reply(header, entries, note)
 
 
 # ===========================================================================
@@ -3801,6 +4063,57 @@ def _md(text: str) -> dict:
     return {"__raw_text__": text}
 
 
+def _md_block(text: str) -> dict:
+    """`_md` for the BLOCK-shaped semantic payloads — the ones purity fences.
+
+    Definitions, type definitions, implementations, hover text and the composite
+    reports all wrap source excerpts in ``` blocks written by _md_ctx /
+    _md_type_at. They are not row-shaped (one result is a heading plus a fenced
+    excerpt, not a line), so the ceiling reaches them as a character cut, and that
+    cut can land inside a fence purity opened. The flag tells _cap_result it may
+    close it — see _balance_fences for why no other payload gets that.
+    """
+    return {"__raw_text__": text, "__fenced__": True}
+
+
+def _md_paged(text: str, params: dict) -> dict:
+    """`_md` for the ROW-SHAPED semantic payloads: page by row, then wrap.
+
+    Every renderer this is used from emits the same shape — a preamble (heading,
+    optional source note) then a BLANK line, then one row per result — so the
+    blank line is the split point and a "row" is one rendered line. Paging the
+    rendered lines rather than the underlying list is what makes it exact for
+    `outline` too, where one tree node renders as a whole subtree of lines.
+
+    Rows, not characters, because every one of these lines carries a
+    `path:line:col` anchor: dropping whole lines keeps each surviving anchor
+    clickable, while a character cut at the ceiling would halve one. The closing
+    line hands back the `offset` to resume from, and each of the five callers
+    accepts `offset` (see HANDLER_ACCEPTED_PARAMS) so the hint is an instruction
+    that actually works.
+
+    A payload with no blank line is not row-shaped (`_(no symbols)_` and friends)
+    and is passed through untouched.
+    """
+    max_chars = _max_answer_chars(params)
+    offset = max(0, _int_param(params.get("offset", 0), 0))
+    lines = text.split("\n")
+    try:
+        split = lines.index("")
+    except ValueError:
+        return _md(text)
+    preamble, rows = lines[:split + 1], lines[split + 1:]
+    head_len = sum(len(line) + 1 for line in preamble)
+    budget = max_chars - head_len - PAGE_LINE_RESERVE if max_chars > 0 else 0
+    kept, note = _row_page(rows, offset, 0, budget)
+    # No fence repair here: none of the five renderers routed through this
+    # function emits a ``` block, so any fence in these rows came from a
+    # diagnostic message or a symbol name — foreign text, which purity has no
+    # business closing.
+    body = "\n".join(preamble + kept)
+    return _md(f"{body}\n{note}" if note else body)
+
+
 # ---------------------------------------------------------------------------
 # Markdown render atoms (shared by the per-handler renderers below)
 # ---------------------------------------------------------------------------
@@ -4061,7 +4374,7 @@ async def handle_find_definition(params: dict, project_root: str, strict: bool =
 
     if isinstance(data, dict) and "error" in data:
         return data
-    return _md(_md_definition(data))
+    return _md_block(_md_definition(data))
 
 
 async def handle_find_type_definition(params: dict, project_root: str,
@@ -4085,7 +4398,7 @@ async def handle_find_type_definition(params: dict, project_root: str,
         return data
     if not data:
         return {"error": "No type definition found at this position"}
-    return _md(_md_type_definition(data))
+    return _md_block(_md_type_definition(data))
 
 
 async def handle_find_references(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4113,7 +4426,7 @@ async def handle_find_references(params: dict, project_root: str, strict: bool =
     else:
         return {"error": "find_references requires either 'symbol' (name) or 'at' (path + line + character)"}
 
-    return _md(_md_references(data))
+    return _md_paged(_md_references(data), params)
 
 
 async def handle_find_implementations(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4140,7 +4453,7 @@ async def handle_find_implementations(params: dict, project_root: str, strict: b
         })
     if not results:
         return {"error": "No implementations found at this position"}
-    return _md(_md_implementations(results))
+    return _md_block(_md_implementations(results))
 
 
 async def handle_type_at(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4163,7 +4476,7 @@ async def handle_type_at(params: dict, project_root: str, strict: bool = False) 
     if hover_range:
         uri = pathlib.Path(client._abs_path(abs_path)).as_uri()
         location = _format_location(uri, hover_range, client.project_root)
-    return _md(_md_type_at({"text": raw_text, "deduced_type": deduced, "location": location}))
+    return _md_block(_md_type_at({"text": raw_text, "deduced_type": deduced, "location": location}))
 
 
 async def handle_diagnostics(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4188,11 +4501,11 @@ async def handle_diagnostics(params: dict, project_root: str, strict: bool = Fal
             "source": d.get("source"),
             "location": _format_location(uri, lsp_range, client.project_root),
         })
-    return _md(_md_diagnostics({
+    return _md_paged(_md_diagnostics({
         "path": _relative_path(pathlib.Path(cpath).as_uri(), client.project_root),
         "count": len(results),
         "diagnostics": results,
-    }))
+    }), params)
 
 
 async def handle_outline(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4230,7 +4543,7 @@ async def handle_outline(params: dict, project_root: str, strict: bool = False) 
             }
         return node
 
-    return _md(_md_outline([fmt(s) for s in symbols]))
+    return _md_paged(_md_outline([fmt(s) for s in symbols]), params)
 
 
 async def handle_symbol(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4264,7 +4577,7 @@ async def handle_symbol(params: dict, project_root: str, strict: bool = False) -
     out = {"query": query, "count": len(results), "symbols": results}
     if fallback_used:
         out["source"] = "fallback:document_symbol"
-    return _md(_md_symbols(out))
+    return _md_paged(_md_symbols(out), params)
 
 
 async def handle_symbol_context(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4280,7 +4593,7 @@ async def handle_symbol_context(params: dict, project_root: str, strict: bool = 
     client = await _ensure_backend(ft, project_root)
     definition = await _def_by_name(client, symbol_name, abs_path, context_lines)
     references = await _refs_by_name(client, symbol_name, abs_path, max_references, 2)
-    return _md(_md_symbol_context({"symbol": symbol_name, "definition": definition, "references": references}))
+    return _md_block(_md_symbol_context({"symbol": symbol_name, "definition": definition, "references": references}))
 
 
 async def handle_inlay_hints(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4314,7 +4627,7 @@ async def handle_inlay_hints(params: dict, project_root: str, strict: bool = Fal
             },
             "tooltip": hint.get("tooltip"),
         })
-    return _md(_md_inlay_hints(results))
+    return _md_paged(_md_inlay_hints(results), params)
 
 
 async def handle_symbol_change_impact(params: dict, project_root: str, strict: bool = False) -> dict:
@@ -4360,7 +4673,7 @@ async def handle_symbol_change_impact(params: dict, project_root: str, strict: b
         if r.get("location", {}).get("path")
     })
 
-    return _md(_md_change_impact({
+    return _md_block(_md_change_impact({
         "symbol": symbol_name,
         "definition": definition,
         "references": references,
@@ -4639,11 +4952,12 @@ async def handle_clang_tidy(params: dict, project_root: str, strict: bool = Fals
                if cc_dir else "compile db: none (reduced accuracy)")
     lines = [f"# clang-tidy — {files_disp}", db_note, f"exit code: {proc.returncode}", ""]
 
-    body = stdout or "(no diagnostics)"
-    max_chars = params.get("max_answer_chars", 40000)
-    if max_chars and max_chars > 0 and len(body) > max_chars:
-        body = body[:max_chars] + "\n... (truncated)"
-    lines.append(body)
+    # No local cap: the 40000 here predated the ceiling and both truncated at the
+    # wrong place (mid-line, with a marker no reader can act on) and at the wrong
+    # size. The dispatcher's _cap_text now clamps this reply on a line boundary
+    # against the shared max_answer_chars, so a second cap would only risk a
+    # second closing line.
+    lines.append(stdout or "(no diagnostics)")
     if stderr:
         lines.append(f"\n--- stderr ---\n{stderr}")
     return _md("\n".join(lines))
@@ -4770,15 +5084,23 @@ _READONLY_HANDLERS: frozenset = frozenset({
 # Keys here are POST-alias canonical names — by the time this set is
 # consulted, _resolve_aliases has already mapped caller-supplied aliases
 # onto these canonical names.
+#
+# `max_answer_chars` is accepted by EVERY function, because the answer ceiling is
+# applied at the dispatcher (see _cap_result) and therefore applies to every
+# function: a knob the reply obeys but the param check rejects would be the worst
+# of both. `offset` is present on exactly the functions whose truncation note can
+# print `offset=<n> for more`; the block-shaped payloads (find_definition,
+# find_type_definition, find_implementations, type_at, symbol_context,
+# symbol_change_impact, clang_tidy) cannot page, so they promise nothing.
 HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "read_file": {
-        "relative_path", "start_line", "end_line", "max_answer_chars",
+        "relative_path", "start_line", "end_line", "max_answer_chars", "offset",
     },
     "create_text_file": {
-        "relative_path", "content", "overwrite",
+        "relative_path", "content", "overwrite", "max_answer_chars",
     },
-    "create_temp_dir": {"subpath", "unique"},
-    "restart_lsp": {"backend", "filetype", "reindex"},
+    "create_temp_dir": {"subpath", "unique", "max_answer_chars"},
+    "restart_lsp": {"backend", "filetype", "reindex", "max_answer_chars"},
     "list_dir": {
         "relative_path", "recursive", "skip_ignored_files",
         "long", "show_hidden", "all", "hidden",
@@ -4787,20 +5109,21 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     },
     "find_file": {
         "file_mask", "pattern", "substring_pattern", "relative_path",
-        "head_limit", "offset",
+        "head_limit", "offset", "max_answer_chars",
     },
     "replace_content": {
         "relative_path", "needle", "repl", "mode",
-        "allow_multiple_occurrences",
+        "allow_multiple_occurrences", "max_answer_chars",
     },
     "delete_lines": {
-        "relative_path", "start_line", "end_line", "line",
+        "relative_path", "start_line", "end_line", "line", "max_answer_chars",
     },
     "replace_lines": {
         "relative_path", "start_line", "end_line", "line", "content",
+        "max_answer_chars",
     },
     "insert_at_line": {
-        "relative_path", "line", "content",
+        "relative_path", "line", "content", "max_answer_chars",
     },
     "search_for_pattern": {
         "substring_pattern", "context_lines", "context_lines_before", "context_lines_after",
@@ -4811,37 +5134,44 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     # --- semantic (LSP) functions: POST-alias canonical param names ---
     "find_definition": {
         "relative_path", "line", "character", "symbol_name", "context_lines",
+        "max_answer_chars",
     },
     "find_type_definition": {
         "relative_path", "line", "character", "context_lines",
+        "max_answer_chars",
     },
     "find_references": {
         "relative_path", "line", "character", "symbol_name", "max_results",
-        "context_lines",
+        "context_lines", "max_answer_chars", "offset",
     },
     "find_implementations": {
         "relative_path", "line", "character", "context_lines",
+        "max_answer_chars",
     },
     "type_at": {
-        "relative_path", "line", "character",
+        "relative_path", "line", "character", "max_answer_chars",
     },
     "diagnostics": {
-        "relative_path", "timeout",
+        "relative_path", "timeout", "max_answer_chars", "offset",
     },
     "outline": {
-        "relative_path",
+        "relative_path", "max_answer_chars", "offset",
     },
     "symbol": {
         "query", "symbol_name", "limit", "max_results", "strict",
+        "max_answer_chars", "offset",
     },
     "symbol_context": {
         "symbol_name", "relative_path", "max_references", "context_lines",
+        "max_answer_chars",
     },
     "inlay_hints": {
         "relative_path", "start_line", "end_line", "limit",
+        "max_answer_chars", "offset",
     },
     "symbol_change_impact": {
         "symbol_name", "relative_path", "max_references", "call_hierarchy_depth",
+        "max_answer_chars",
     },
     "clang_tidy": {
         "relative_path", "build_dir", "checks", "header_filter", "fix",
@@ -4950,12 +5280,14 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     outside_token = _ALLOW_OUTSIDE_ROOT.set(handler in _READONLY_HANDLERS)
     try:
         if asyncio.iscoroutinefunction(handler):
-            return await handler(params, project_root, strict)
-        loop = asyncio.get_running_loop()
-        ctx = contextvars.copy_context()
-        return await loop.run_in_executor(
-            None, lambda: ctx.run(handler, params, project_root, strict)
-        )
+            result = await handler(params, project_root, strict)
+        else:
+            loop = asyncio.get_running_loop()
+            ctx = contextvars.copy_context()
+            result = await loop.run_in_executor(
+                None, lambda: ctx.run(handler, params, project_root, strict)
+            )
+        return _cap_result(result, params)
     except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
         err = str(exc)
         accepted = _accepted_params_for(function, canonical_func)
