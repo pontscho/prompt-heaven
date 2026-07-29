@@ -183,8 +183,16 @@ def _parse_ps(out: str) -> Tuple[List[str], List[List[str]]]:
     return header, rows
 
 
-def _fmt_table(header: List[str], rows: List[List[str]]) -> str:
-    widths = [len(h) for h in header]
+def _fmt_table(header: List[str], rows: List[List[str]],
+               show_header: bool = True) -> str:
+    """Align columns; `show_header=False` drops the header ROW but not its job.
+
+    A caller drops the header only when the values name themselves (a 64-char
+    hex digest, a size, a path).  The alignment then stays load-bearing: with no
+    header to count columns against, a path containing a space is only
+    unambiguous because the columns line up.
+    """
+    widths = [len(h) for h in header] if show_header else [0] * len(header)
     for row in rows:
         for i, cell in enumerate(row):
             if i < len(widths):
@@ -198,7 +206,8 @@ def _fmt_table(header: List[str], rows: List[List[str]]) -> str:
             else:
                 out.append(cell.ljust(widths[i]))
         return "  ".join(out)
-    return "\n".join([fmt_row(header)] + [fmt_row(r) for r in rows])
+    return "\n".join(([fmt_row(header)] if show_header else [])
+                     + [fmt_row(r) for r in rows])
 
 
 def _kb_human(kb: float) -> str:
@@ -498,7 +507,9 @@ def h_disk_usage(p: dict) -> str:
     # root, which is the caller's own argument -- repeating a long absolute
     # path once per row is pure echo.  `.` is the root itself.  Lexical only,
     # and safe: `du` was rooted at `path`, so every name starts with it.
-    body = "\n".join(f"{_kb_human(kb):>9}  {os.path.relpath(name, path)}"
+    # One space, no right-alignment: a size never contains one, so the first
+    # space IS the column boundary and the padding bought nothing but width.
+    body = "\n".join(f"{_kb_human(kb)} {os.path.relpath(name, path)}"
                      for kb, name in entries)
     # Say only what the caller could not know: the resolved path when it is
     # NOT the one they passed, a depth THEY did not choose, and a clip that
@@ -616,49 +627,53 @@ def h_stat(p: dict) -> str:
             gname = grp.getgrgid(gid).gr_name
         except (ImportError, KeyError):
             pass
-        return f"{uname or uid}:{gname or gid}  (uid={uid}, gid={gid})"
+        return f"{uname or uid}:{gname or gid} (uid={uid}, gid={gid})"
 
-    lines = [f"- type   : {kind}",
-             f"- mode   : `{st_mod.filemode(st.st_mode)}`  ({oct(st_mod.S_IMODE(st.st_mode))})",
-             f"- owner  : {owner(st.st_uid, st.st_gid)}",
-             f"- size   : {st.st_size} B ({_kb_human(st.st_size / 1024)})",
-             f"- links  : {st.st_nlink}",
-             f"- inode  : {st.st_ino}  (device {st.st_dev})",
-             f"- mtime  : {_fmt_time(st.st_mtime)}",
-             f"- atime  : {_fmt_time(st.st_atime)}",
-             f"- ctime  : {_fmt_time(st.st_ctime)}"]
-    if path != str(raw).strip():
-        # expanduser() rewrote the caller's own argument -- THAT is news.  An
-        # unchanged path is not: they are holding the string they sent.
-        lines[:0] = [f"_`{path}`_", ""]
+    # Bare `key: value`, fenced.  The old `- ` bullets were not decoration --
+    # they are what kept these on separate lines, because Markdown folds a lone
+    # newline into a space.  A fence does the same job for 8 characters where
+    # ten bullets cost 20, and it retires the colon alignment as well.
+    lines = [f"type: {kind}",
+             f"mode: {st_mod.filemode(st.st_mode)} ({oct(st_mod.S_IMODE(st.st_mode))})",
+             f"owner: {owner(st.st_uid, st.st_gid)}",
+             f"size: {st.st_size} B ({_kb_human(st.st_size / 1024)})",
+             f"links: {st.st_nlink}",
+             f"inode: {st.st_ino} (device {st.st_dev})",
+             f"mtime: {_fmt_time(st.st_mtime)}",
+             f"atime: {_fmt_time(st.st_atime)}",
+             f"ctime: {_fmt_time(st.st_ctime)}"]
 
     if is_link:
         try:
-            lines.append(f"- target : `{os.readlink(path)}`")
+            lines.append(f"target: {os.readlink(path)}")
         except OSError:
             pass
         real = os.path.realpath(path)
-        broken = "" if os.path.exists(real) else "  _(BROKEN — target missing)_"
-        lines.append(f"- resolves to: `{real}`{broken}")
+        broken = "" if os.path.exists(real) else "  (BROKEN — target missing)"
+        lines.append(f"resolves to: {real}{broken}")
     else:
         real = os.path.realpath(path)
         if real != os.path.abspath(path):
-            lines.append(f"- realpath: `{real}`  _(path traverses a symlink)_")
+            lines.append(f"realpath: {real}  (path traverses a symlink)")
 
     if st_mod.S_ISDIR(st.st_mode):
         try:
             entries = os.listdir(path)
             ndirs = sum(1 for e in entries
                         if os.path.isdir(os.path.join(path, e)))
-            lines.append(f"- entries: {len(entries)} "
+            lines.append(f"entries: {len(entries)} "
                          f"({len(entries) - ndirs} files, {ndirs} dirs)")
         except OSError as exc:
-            lines.append(f"- entries: _unreadable ({exc.strerror})_")
+            lines.append(f"entries: unreadable ({exc.strerror})")
 
     acc = "".join(n for n, m in (("r", os.R_OK), ("w", os.W_OK), ("x", os.X_OK))
                   if os.access(path, m))
-    lines.append(f"- access for this server process: {acc or 'none'}")
-    return "\n".join(lines)
+    lines.append(f"access for this server process: {acc or 'none'}")
+    # The resolved path stays OUTSIDE the fence: it is the server talking about
+    # the argument, not part of the stat record.  And only when expanduser()
+    # rewrote what the caller sent -- an unchanged path is theirs already.
+    head = f"_`{path}`_\n\n" if path != str(raw).strip() else ""
+    return head + _md_fence("\n".join(lines))
 
 
 def h_interfaces(p: dict) -> str:
@@ -979,31 +994,32 @@ def h_hash(p: dict, algo: str = "") -> str:
     for item in paths:
         path = os.path.expanduser(str(item).strip())
         if os.path.isdir(path):
-            rows.append(["_is a directory_", "", path])
+            rows.append([path, "(is a directory)", ""])
             continue
         try:
             size = os.path.getsize(path)
             if max_mb > 0 and size > max_mb * 1024 * 1024:
-                rows.append([f"_skipped: {_kb_human(size / 1024)} exceeds "
-                             f"max_mb={max_mb}_", "", path])
+                rows.append([path, f"(skipped: {_kb_human(size / 1024)} "
+                             f"exceeds max_mb={max_mb})", ""])
                 continue
             digest_obj = hashlib.new(algo)
             with open(path, "rb") as fh:
                 for chunk in iter(lambda: fh.read(_HASH_CHUNK), b""):
                     digest_obj.update(chunk)
         except OSError as exc:
-            rows.append([f"_error: {exc.strerror or exc}_", "", path])
+            rows.append([path, f"(error: {exc.strerror or exc})", ""])
             continue
         digest = digest_obj.hexdigest()
-        rows.append([digest,
-                     f"{size} B" if size < 1024 else _kb_human(size / 1024),
-                     path])
+        rows.append([path, digest,
+                     f"{size} B" if size < 1024 else _kb_human(size / 1024)])
         if expect:
             verdict = digest == expect
 
-    # No "## sha256" title: the table's FIRST COLUMN is named after the algo,
-    # so the title restated a word the payload already carries.
-    out = _md_fence(_fmt_table([algo, "size", "path"], rows))
+    # `path` first, because that is what identifies the row, and no header row
+    # at all: a 64-char hex digest and a size name themselves.  Which is also
+    # why the alignment has to stay -- with no header to count columns against,
+    # it is the only thing keeping a path that contains a space unambiguous.
+    out = _md_fence(_fmt_table(["path", algo, "size"], rows, show_header=False))
     if expect:
         out += ("\n\n**MATCH** — the digest equals the expected value."
                 if verdict else

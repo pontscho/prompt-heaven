@@ -438,10 +438,17 @@ def run(opts=None):
              must=["hostname", "platform"])
         case(suite, cli, "L", "stat", "stat", {"path": SERVER},
              must=["mode", "inode"])
-        # `sha256` names the table's FIRST COLUMN -- the very thing that took
-        # over from the old title.
-        case(suite, cli, "L", "sha256", "sha256", {"path": SERVER},
-             must=["sha256", "size", "path"])
+        # The header ROW is gone too, so no column name is assertable any more.
+        # What identifies a digest is its SHAPE -- exactly 64 hex characters --
+        # and that is a stronger claim than any label would have been.
+        t = case(suite, cli, "L", "sha256", "sha256", {"path": SERVER},
+                 must=["mcp-inspect.py"])
+        hexes = [w for ln in t.splitlines() for w in ln.split()
+                 if len(w) == 64 and all(c in "0123456789abcdef" for c in w)]
+        suite.record("L", "sha256-digest-shape",
+                     [] if len(hexes) == 1 else
+                     ["expected exactly one 64-hex token, found %d" % len(hexes)],
+                     text=t)
         # `|- ` proves the tree actually rendered; `processes` is the count line
         # that says how much of the host it covered.
         case(suite, cli, "L", "pstree", "pstree", {"limit": 20},
