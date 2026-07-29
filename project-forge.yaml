@@ -89,6 +89,15 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|EXPLICIT|MISSING|INDETERMINATE|NO-STDIN-FORM'
 
+  mcp_footprint:
+    description: "Fleet token footprint: tools/list description tax, per-call result ceilings, boilerplate. Measures, does not gate."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py mcp_footprint
+    timeout: 300
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|TOTAL|desc|wire|ceiling|CONFORMS|MATCH|DRIFT'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]

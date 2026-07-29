@@ -31,6 +31,14 @@ run):
                                                       because an MCP server's
                                                       stdin IS the JSON-RPC
                                                       stream (AST-based, A-D)
+  mcp_footprint      tests/test_mcp_footprint.py      what the fleet costs in
+                                                      tokens: the permanent
+                                                      tools/list description
+                                                      tax, the per-call result
+                                                      ceiling, and the fixed
+                                                      boilerplate -- summed over
+                                                      the REGISTERED servers,
+                                                      not the file set (A-G)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -119,6 +127,10 @@ def run_spawn_stdin(opts):
     return run_python_suite("test_spawn_stdin", opts)
 
 
+def run_mcp_footprint(opts):
+    return run_python_suite("test_mcp_footprint", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -156,6 +168,10 @@ def run_smoke(opts):
 #     drift line reading "265 != 262" would be a strictly worse error message
 #     than "new spawn site with no explicit stdin at foo.py:120".  What is typed
 #     gets checked; what is derived gets derived.
+#   - mcp_footprint emits several cases PER SERVER (description tax, result
+#     ceiling, boilerplate), so its count is a multiple of the launch-table size
+#     -- the same derived quantity SMOKE_SERVERS above refuses to hardcode.
+#     Adding or retiring a server would trip a typed count for no defect.
 SUITES = [
     ("inspect_validate", run_inspect_validate,
      "mcp-inspect VALIDATION family", 94),
@@ -169,6 +185,9 @@ SUITES = [
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,
      "explicit stdin= at every subprocess spawn site", None),
+    ("mcp_footprint", run_mcp_footprint,
+     "MCP fleet token footprint: description tax, result ceilings, boilerplate",
+     None),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

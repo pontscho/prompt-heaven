@@ -33,22 +33,36 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Per-server launch config: minimal args so argparse succeeds and the
 # initialize/ping/unknown path runs WITHOUT spawning heavy subprocess work.
+#
+# `registered` says whether Claude Code actually LAUNCHES this server (i.e.
+# whether ~/.claude.json has an `mcpServers` entry for it).  It is NOT the same
+# question as "is this file in the table": this table enumerates server FILES,
+# and an unregistered file is inert -- never started, so its tools/list
+# descriptions are never sent to a model and its token footprint is exactly
+# zero.  Conflating the two sets has already produced one wrong fleet-wide
+# conclusion in this repo, so the distinction is now written down per entry
+# instead of being re-derived (badly) each time.
+#
+# tests/test_mcp_footprint.py sums the fleet footprint over `registered: True`
+# only, reports the rest separately, and cross-checks these flags against the
+# live ~/.claude.json.  This smoke harness itself ignores the flag on purpose:
+# its job is that every server file still speaks the protocol, registered or not.
 SERVERS = [
-    {"file": "mcp-forge.py",    "tool": "forge_call",    "args": ["--project-root", "/tmp"]},
-    {"file": "mcp-git.py",      "tool": "git_call",      "args": ["--project-root", "/tmp"]},
-    {"file": "mcp-purity.py",   "tool": "purity_call",   "args": ["--project-root", "/tmp"]},
-    {"file": "mcp-jenkins.py",  "tool": "jenkins_call",  "args": ["--endpoint", "http://127.0.0.1:1", "--username", "x", "--token", "y"]},
-    {"file": "mcp-tshark.py",   "tool": "tshark_call",   "args": ["--project-root", "/tmp"]},
-    {"file": "mcp-webfetch.py", "tool": "webfetch_call", "args": []},
-    {"file": "mcp-context7.py", "tool": "context7_call", "args": []},
-    {"file": "mcp-lldb.py",     "tool": "lldb_call",     "args": []},
-    {"file": "mcp-gdc.py",      "tool": "gdc_call",      "args": []},
-    {"file": "mcp-lua-lsp.py",  "tool": "luals_call",    "args": []},
-    {"file": "mcp-clangd.py",   "tool": "clangd_call",   "args": []},
-    {"file": "mcp-cuda.py",     "tool": "cuda_call",     "args": []},
-    {"file": "mcp-postgres.py", "tool": "postgres_call", "args": ["--host", "127.0.0.1:1", "--dbname", "x"]},
-    {"file": "mcp-wiki.py",     "tool": "wiki_call",     "args": ["--project-root", "/tmp"]},
-    {"file": "mcp-inspect.py",  "tool": "inspect_call",  "args": []},
+    {"file": "mcp-forge.py",    "tool": "forge_call",    "args": ["--project-root", "/tmp"], "registered": True},
+    {"file": "mcp-git.py",      "tool": "git_call",      "args": ["--project-root", "/tmp"], "registered": True},
+    {"file": "mcp-purity.py",   "tool": "purity_call",   "args": ["--project-root", "/tmp"], "registered": True},
+    {"file": "mcp-jenkins.py",  "tool": "jenkins_call",  "args": ["--endpoint", "http://127.0.0.1:1", "--username", "x", "--token", "y"], "registered": True},
+    {"file": "mcp-tshark.py",   "tool": "tshark_call",   "args": ["--project-root", "/tmp"], "registered": True},
+    {"file": "mcp-webfetch.py", "tool": "webfetch_call", "args": [], "registered": False},
+    {"file": "mcp-context7.py", "tool": "context7_call", "args": [], "registered": True},
+    {"file": "mcp-lldb.py",     "tool": "lldb_call",     "args": [], "registered": True},
+    {"file": "mcp-gdc.py",      "tool": "gdc_call",      "args": [], "registered": True},
+    {"file": "mcp-lua-lsp.py",  "tool": "luals_call",    "args": [], "registered": False},
+    {"file": "mcp-clangd.py",   "tool": "clangd_call",   "args": [], "registered": False},
+    {"file": "mcp-cuda.py",     "tool": "cuda_call",     "args": [], "registered": False},
+    {"file": "mcp-postgres.py", "tool": "postgres_call", "args": ["--host", "127.0.0.1:1", "--dbname", "x"], "registered": True},
+    {"file": "mcp-wiki.py",     "tool": "wiki_call",     "args": ["--project-root", "/tmp"], "registered": True},
+    {"file": "mcp-inspect.py",  "tool": "inspect_call",  "args": [], "registered": True},
 ]
 
 READ_TIMEOUT = 8.0  # seconds to wait for a single response line
