@@ -24,10 +24,20 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 def git(args: List[str], cwd: str) -> Tuple[int, str, str]:
-	"""Run a git command; return (returncode, stdout, stderr)."""
+	"""Run a git command; return (returncode, stdout, stderr).
+
+	stdin=DEVNULL is deliberate: the call redirects only stdout/stderr, so stdin
+	would be inherited. No caller here needs it (rev-parse, diff --name-only),
+	and under an automated harness an inherited stdin turns a credential or
+	editor prompt into a silent hang instead of an immediate error.
+	`Scripts/mcp-wiki.py` vendors this helper (tabs -> 4 spaces) and carries the
+	same line, where it additionally guards the JSON-RPC stream -- keep the two
+	copies in step.
+	"""
 	try:
 		proc = subprocess.run(
 			["git"] + args, cwd=cwd,
+			stdin=subprocess.DEVNULL,
 			stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
 		)
 		return proc.returncode, proc.stdout, proc.stderr
