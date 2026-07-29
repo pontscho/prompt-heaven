@@ -133,6 +133,26 @@ def _md_lines(lines: List[str]) -> str:
     return _md_fence("\n".join(lines))
 
 
+def _squeeze(text: str, dedent: bool = False) -> str:
+    """Runs of spaces -> one, and no trailing whitespace, per line.
+
+    These payloads are aligned tables from ps/lsof/netstat/df/launchctl, not
+    source code: the padding is presentation, and one space marks the same
+    column boundary for a fraction of the width.
+
+    TABS are deliberately untouched.  ifconfig indents each stanza body with
+    one, and that indent is the ONLY thing saying which interface a line
+    belongs to -- collapsing it would merge two interfaces into one reading.
+    `dedent` is for launchctl, which prefixes every line but the first with a
+    tab of its own accord, where the indent means nothing at all.
+    """
+    out = []
+    for ln in text.splitlines():
+        ln = re.sub(r" {2,}", " ", ln).rstrip()
+        out.append(ln.lstrip() if dedent else ln)
+    return "\n".join(out)
+
+
 def _fold_kv(text: str) -> List[str]:
     """`Key:<padding>value` -> bare `key: value`, alignment and trailing dot gone.
 
@@ -239,7 +259,11 @@ def _fmt_table(header: List[str], rows: List[List[str]],
                 out.append(cell)
             else:
                 out.append(cell.ljust(widths[i]))
-        return "  ".join(out)
+        # One space, and no trailing whitespace: the ljust above already fixes
+        # the columns, so the second space was pure width.  The rstrip is what
+        # stops a short row from being padded out to a long column and then
+        # ending in nothing -- which is how `md5` grew trailing spaces.
+        return " ".join(out).rstrip()
     return "\n".join(([fmt_row(header)] if show_header else [])
                      + [fmt_row(r) for r in rows])
 
@@ -363,7 +387,8 @@ def h_ports(p: dict) -> str:
     # The backend stays: which of lsof/ss/netstat answered decides how to read
     # these columns, and the caller never chose it.  The `netstat -an` fallback
     # in particular is NOT filtered to listening sockets -- the other two are.
-    return f"_{label}_\n\n" + (_md_fence(out.strip()) if out.strip() else "_(none)_")
+    return f"_{label}_\n\n" + (_md_fence(_squeeze(out.strip()))
+                               if out.strip() else "_(none)_")
 
 
 def h_connections(p: dict) -> str:
@@ -385,7 +410,8 @@ def h_connections(p: dict) -> str:
         raise ValueError("no lsof/ss/netstat available to list connections.")
     if rc not in (0,) and not out.strip():
         raise ValueError(err.strip() or "connection listing failed")
-    return f"_{label}_\n\n" + (_md_fence(out.strip()) if out.strip() else "_(none)_")
+    return f"_{label}_\n\n" + (_md_fence(_squeeze(out.strip()))
+                               if out.strip() else "_(none)_")
 
 
 def h_open_files(p: dict) -> str:
@@ -423,7 +449,7 @@ def h_open_files(p: dict) -> str:
     if limit > 0 and len(lines) > limit + 1:
         lines = lines[: limit + 1]
         note += f"\n\n_truncated to first {limit} of {total} entries._"
-    return f"{_md_fence(chr(10).join(lines))}{note}"
+    return f"{_md_fence(_squeeze(chr(10).join(lines)))}{note}"
 
 
 def h_host(p: dict) -> str:
@@ -489,7 +515,7 @@ def h_memory(p: dict) -> str:
         rc, out, err = _run(["free", "-h"], 5)
         if rc == 0 and out.strip():
             # `free -h` is a TABLE, not key/value -- folding it would be wrong.
-            return _md_fence(out.strip())
+            return _md_fence(_squeeze(out.strip()))
     try:
         with open("/proc/meminfo") as f:
             data = f.read()
@@ -516,11 +542,13 @@ def h_disk(p: dict) -> str:
                 cols[1] = _kb_human(float(cols[1]))
                 cols[2] = _kb_human(float(cols[2])) if cols[2].isdigit() else cols[2]
                 cols[3] = _kb_human(float(cols[3])) if cols[3].isdigit() else cols[3]
-                rebuilt.append("  ".join(cols))
+                rebuilt.append(" ".join(cols))
             else:
                 rebuilt.append(ln)
         out = "\n".join(rebuilt)
-    return _md_fence(out.strip())
+    # `df`'s own header keeps its original padding while the rows above are
+    # rebuilt -- squeezing puts both on the same footing.
+    return _md_fence(_squeeze(out.strip()))
 
 
 def h_disk_usage(p: dict) -> str:
@@ -575,12 +603,12 @@ def h_mounts(p: dict) -> str:
     if _have("mount"):
         rc, out, err = _run(["mount"], 10)
         if rc == 0 and out.strip():
-            return _md_fence(out.strip())
+            return _md_fence(_squeeze(out.strip()))
     try:
         with open("/proc/mounts") as f:
             # The fallback IS news: `mount` was unavailable, and /proc/mounts
             # has a different column layout.
-            return "_/proc/mounts_\n\n" + _md_fence(f.read().strip())
+            return "_/proc/mounts_\n\n" + _md_fence(_squeeze(f.read().strip()))
     except OSError as exc:
         raise ValueError(f"cannot read mounts: {exc}")
 
@@ -770,7 +798,9 @@ def h_interfaces(p: dict) -> str:
             head += f"\n\n_present: {names}_"
     except (OSError, AttributeError):
         pass
-    return head + "\n\n" + _md_fence(text)
+    # Squeezed but NOT dedented: ifconfig's leading tab is what marks a line as
+    # belonging to the interface above it rather than starting a new one.
+    return head + "\n\n" + _md_fence(_squeeze(text))
 
 
 def h_route(p: dict) -> str:
@@ -784,7 +814,8 @@ def h_route(p: dict) -> str:
         raise ValueError("no ip/netstat available to show the routing table.")
     if rc != 0 and not out.strip():
         raise ValueError(err.strip() or "route listing failed")
-    return f"_{label}_\n\n" + (_md_fence(out.strip()) if out.strip() else "_(empty)_")
+    return f"_{label}_\n\n" + (_md_fence(_squeeze(out.strip()))
+                               if out.strip() else "_(empty)_")
 
 
 def h_pstree(p: dict) -> str:
@@ -838,11 +869,11 @@ def h_pstree(p: dict) -> str:
         visited.add(pid)
         user, comm = info.get(pid, ("?", "?"))
         if level == 0:
-            lines.append(f"{pid:>7}  {user:<10} {comm}")
+            lines.append(f"{pid:>7} {user:<10} {comm}".rstrip())
             child_prefix = ""
         else:
             branch = "`- " if is_last else "|- "
-            lines.append(f"{pid:>7}  {user:<10} {prefix}{branch}{comm}")
+            lines.append(f"{pid:>7} {user:<10} {prefix}{branch}{comm}".rstrip())
             child_prefix = prefix + ("   " if is_last else "|  ")
         children = kids.get(pid, [])
         for n, child in enumerate(children):
@@ -859,6 +890,9 @@ def h_pstree(p: dict) -> str:
             else f"_{len(lines)} of {len(info)} processes_")
     note = f"\n\n_truncated at limit={limit}; pass a larger limit or a pid to narrow._" \
         if state["truncated"] else ""
+    # NOT squeezed.  The `|  ` and `   ` runs inside each row ARE the depth of
+    # the tree, and the pid/user columns are padded so every branch starts at
+    # the same column -- collapse either and the tree stops being one.
     return head + "\n\n" + _md_fence("\n".join(lines)) + note
 
 
@@ -871,7 +905,7 @@ def h_limits(p: dict) -> str:
         if IS_LINUX:
             try:
                 with open(f"/proc/{pid}/limits") as f:
-                    return _md_fence(f.read().strip())
+                    return _md_fence(_squeeze(f.read().strip()))
             except OSError as exc:
                 raise ValueError(f"cannot read limits for pid {pid}: "
                                  f"{exc.strerror or exc}")
@@ -897,7 +931,11 @@ def h_limits(p: dict) -> str:
     if IS_MAC and _have("launchctl"):
         rc, out, _ = _run(["launchctl", "limit"], 5)
         if rc == 0 and out.strip():
-            parts += ["", "### system (launchctl limit)", "", _md_fence(out.strip())]
+            # An italic label, not the `###` heading it used to be: this was the
+            # last Markdown heading left in the server.  `dedent` because
+            # launchctl tabs every line but the first for no reason at all.
+            parts += ["", "_system (launchctl limit)_", "",
+                      _md_fence(_squeeze(out.strip(), dedent=True))]
     elif IS_LINUX:
         try:
             with open("/proc/sys/fs/file-max") as f:
@@ -941,7 +979,7 @@ def h_services(p: dict) -> str:
     if limit > 0 and shown > limit:
         body_lines = body_lines[:limit]
         note = f"\n\n_showing first {limit} of {shown} matches._"
-    text = "\n".join(([header] if header else []) + body_lines)
+    text = _squeeze("\n".join(([header] if header else []) + body_lines))
     head = f"_{label} — {len(body_lines)} of {total}_"
     return head + "\n\n" + _md_fence(text) + note
 

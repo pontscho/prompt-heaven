@@ -459,28 +459,73 @@ def run(opts=None):
              must=["sort cpu", "PID", "COMM"])
 
         # ===== O: envelope discipline -- form, not values, so it cannot age =====
-        for cid, fn, params in [
-                ("host", "host", {}),
-                ("stat", "stat", {"path": SERVER}),
-                ("processes", "processes", {"limit": 3}),
-                ("disk_usage", "disk_usage",
-                 {"path": H.repo_path("tests"), "top": 3}),
-                ("sha256", "sha256", {"path": SERVER}),
-                ("validate", "validate", {"path": SERVER}),
-                ("versions", "versions", {"tools": ["git"]}),
-                ("which", "which", {"name": "git"}),
-                ("pstree", "pstree", {"limit": 10}),
-                ("env", "env", {"key": "HOME"}),
-        ]:
+        # Two invariants over a successful reply: mcp-inspect writes no Markdown
+        # heading of its own, and no line ends in whitespace.  Neither is a
+        # value, so neither goes stale the way a character count would.
+        gate = [
+            ("processes", {"limit": 3}),
+            ("process", {"pid": 1}),
+            ("ports", {"proto": "udp"}),
+            ("open_files", {"pid": 1, "limit": 3}),
+            ("host", {}),
+            ("memory", {}),
+            ("disk", {"path": H.REPO_ROOT}),
+            ("disk_usage", {"path": H.repo_path("tests"), "top": 3}),
+            ("mounts", {}),
+            ("which", {"name": "git"}),
+            ("env", {"key": "HOME"}),
+            ("stat", {"path": SERVER}),
+            ("interfaces", {"filter": "lo0"}),
+            ("route", {}),
+            ("pstree", {"limit": 10}),
+            ("limits", {}),
+            ("services", {"filter": "ssh", "limit": 3}),
+            ("versions", {"tools": ["git"]}),
+            ("hash", {"path": SERVER}),
+            ("sha256", {"path": SERVER}),
+            ("md5", {"path": SERVER}),
+            ("validate", {"path": SERVER}),
+        ]
+        # Named WITH the reason rather than quietly absent: an uncovered handler
+        # is exactly how `### system (launchctl limit)` survived this group's
+        # first version.
+        skipped = {
+            "connections": "same renderer as `ports`, and an unfiltered lsof "
+                           "sweep costs seconds of suite time",
+            "json": "thin wrapper over `validate`", "python": "ditto",
+            "yaml": "ditto", "toml": "ditto", "xml": "ditto", "ini": "ditto",
+            "csv": "ditto", "tsv": "ditto", "plist": "ditto",
+        }
+        for fn, params in gate:
             err, t = cli.call_tool(fn, params)
-            bad = [ln for ln in unfenced(t) if ln.startswith("#")]
             problems = []
             if err:
                 problems.append("isError=True on a call that should succeed")
-            if bad:
-                problems.append("heading on a successful reply: %r" % bad[:2])
-            suite.record("O", "no-heading-" + cid, problems, text=t,
+            heads = [ln for ln in unfenced(t) if ln.startswith("#")]
+            if heads:
+                problems.append("heading of its own: %r" % heads[:2])
+            ragged = [ln for ln in t.splitlines() if ln != ln.rstrip()]
+            if ragged:
+                problems.append("%d line(s) end in whitespace, first %r"
+                                % (len(ragged), ragged[0][-40:]))
+            suite.record("O", "envelope-" + fn, problems, text=t,
                          showable=True)
+        # Coverage, cross-checked against the server's OWN function list: every
+        # canonical name is either exercised above or named in `skipped`.  A new
+        # handler fails HERE instead of slipping in ungated.
+        _, avail = cli.call_tool("__ph_gate_probe__", {})
+        names = set()
+        if "Available: " in avail:
+            names = {n.strip() for n in
+                     avail.split("Available: ", 1)[1].split(". Call with no")[0]
+                     .split(",") if n.strip()}
+        ungated = sorted(names - {f for f, _ in gate} - set(skipped))
+        suite.record("O", "gate-covers-every-handler",
+                     [] if (names and not ungated) else
+                     ["server returned no function list"] if not names else
+                     ["ungated: %s" % ", ".join(ungated)], text=avail)
+        suite.note("      gated %d handler(s), %d skipped with a reason"
+                   % (len(gate), len(skipped)))
         # A gate that cannot fail is not a gate: prove `unfenced` sees the
         # reply's OWN heading and not a `#` line inside someone else's payload.
         seen = [ln for ln in unfenced("## title\n\n```\n# not a heading\n```")
