@@ -536,6 +536,109 @@ def _changed_files(commit: str, head: str, repo: str, cache: dict):
     return changed
 
 
+# The changed-file sets for the RECALL path, memoized across calls, keyed on
+# (repo, HEAD sha) -> {verified commit: changed set}. `freshness` keeps its own
+# per-call cache: it walks the whole corpus once and is asked for explicitly, so
+# it should always be answering about the repo as it is right now.
+#
+# Why this cache exists at all: the classification itself is free (0.012-0.075 ms
+# per page, measured), but each `git diff` is ~47 ms and 98% of that is process
+# startup. Bolting the freshness computation onto `search` unmemoized measured
+# 267 ms against 5.7 ms — 47x. With this cache a warm search pays +1.04 ms, and a
+# cold one pays 47 ms per DISTINCT verified commit among its own hits (1-3 on real
+# queries), once per HEAD.
+_FRESH_CACHE: Dict[tuple, dict] = {}
+
+
+_REPO_ROOT_CACHE: Dict[str, str] = {}
+
+
+def _repo_root_cached(root: str) -> str:
+    """`repo_root` memoized per path, because it SPAWNS git.
+
+    Measured at 16.41 ms — `git rev-parse --show-toplevel` — which made it the
+    single most expensive thing on the recall path, dwarfing the work it was there
+    to support (classification is 0.037 ms per page). Paying git 16 ms to find out
+    where the repo is, in order to decide whether a cache of git calls is still
+    valid, is exactly the absurdity `_head_sha_nospawn` was written to avoid; the
+    line calling it just recreated it one level up.
+
+    Which directory contains a repository does not change under a running server,
+    so one answer per path is enough. `freshness` deliberately keeps calling
+    `repo_root` directly: it is an explicitly requested audit that already costs
+    ~240 ms in diffs, and its output is pinned byte-for-byte.
+    """
+    if root not in _REPO_ROOT_CACHE:
+        _REPO_ROOT_CACHE[root] = repo_root(root)
+    return _REPO_ROOT_CACHE[root]
+
+
+def _head_sha_nospawn(repo: str) -> str:
+    """The sha HEAD points at, read from the filesystem — NO subprocess.
+
+    Used ONLY as a cache key, never rendered, so the full sha is fine and the
+    `--short` formatting rules do not matter here. Measured at 0.076 ms against
+    19.04 ms for `git rev-parse --short HEAD`: spawning git to decide whether a
+    cache of git calls is still valid would cost more than the calls it saves.
+
+    Returns "" when HEAD cannot be read from disk — a linked worktree or a
+    submodule where `.git` is a FILE, a packed ref this does not find, or any IO
+    error. The caller MUST treat "" as "do not cache", never as a key: an empty
+    key would be identical across two different HEADs, which is precisely how a
+    cache starts serving a stale answer with total confidence.
+    """
+    git_dir = os.path.join(repo, ".git")
+    if not os.path.isdir(git_dir):
+        return ""
+    try:
+        with open(os.path.join(git_dir, "HEAD"), "r", encoding="utf-8") as fh:
+            head = fh.read().strip()
+    except OSError:
+        return ""
+    if not head.startswith("ref: "):
+        return head                      # detached HEAD holds the sha directly
+    ref = head[5:].strip()
+    try:
+        with open(os.path.join(git_dir, ref), "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        pass
+    try:                                 # loose ref absent -> it may be packed
+        with open(os.path.join(git_dir, "packed-refs"), "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("#") or line.startswith("^"):
+                    continue
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return parts[0]
+    except OSError:
+        pass
+    return ""
+
+
+def _recall_diff_cache(repo: str) -> dict:
+    """The commit-keyed changed-file cache for the recall path.
+
+    Returns a plain dict for `_changed_files` to fill, so the diff logic itself is
+    not duplicated here — this function only decides WHICH dict, and therefore how
+    long the memory lives.
+
+    A fresh dict (no cross-call memory) whenever HEAD cannot be read from disk,
+    which degrades to the old cost and never to a wrong answer. Otherwise one dict
+    per (repo, HEAD); when HEAD moves the whole store is dropped rather than grown,
+    because only the current HEAD can ever be asked about again.
+    """
+    head_key = _head_sha_nospawn(repo)
+    if not head_key:
+        return {}
+    key = (repo, head_key)
+    cache = _FRESH_CACHE.get(key)
+    if cache is None:
+        _FRESH_CACHE.clear()
+        cache = _FRESH_CACHE.setdefault(key, {})
+    return cache
+
+
 def _evaluate(sources, changed, repo):
     """Classify a page's sources against the changed-file set."""
     changed_sources = []
@@ -555,60 +658,74 @@ def _evaluate(sources, changed, repo):
     return changed_sources, missing
 
 
+def _classify_page(relpath: str, fm: dict, repo: str, changed_for) -> dict:
+    """The git-derived state of ONE page.
+
+    `changed_for(commit)` yields the set of files changed between that commit and
+    HEAD, or None when the commit cannot be resolved. Everything else here is pure
+    dict/filesystem work, which is why one page can be classified for the price of
+    a few microseconds once the diff is in hand.
+
+    EXTRACTED, NOT REIMPLEMENTED, and that is the whole point. Two callers need
+    this rule: `freshness_analyze` for the whole corpus, and the recall replies
+    (`search`, `source_to_pages`) for the handful of pages in one answer. A second
+    copy would be a second place to edit, and this repo has paid for that shape
+    three times already — the `_cap_text` twins, the `_md_fence` divergence, and a
+    test suite that re-implemented a server step and then disagreed with it. The
+    recall path is only allowed to be cheap; it is not allowed to be its own
+    authority on what "stale" means.
+
+    Eight states, and the distinction that matters for rendering: only `current`
+    means "compared against HEAD and clean". `unverified`, `promotable`, `planned`,
+    `untracked` and `no-sources` all mean NOT CHECKABLE — a page with no anchors
+    can never be stale, which is emphatically not the same as being fresh. A label
+    that showed any of those as `current` would be re-telling the lie this work
+    removes.
+    """
+    name = fm.get("name") or relpath
+    typ = fm.get("type") or ""
+    sources = as_list(fm.get("sources"))
+    targets = as_list(fm.get("targets"))
+    materialized = [t for t in targets
+                    if os.path.exists(os.path.join(repo, _source_path(t, repo)))]
+    verified = fm.get("verified") if isinstance(fm.get("verified"), dict) else {}
+    commit = (verified or {}).get("commit")
+    base = {"name": name, "path": relpath, "type": typ}
+
+    if not sources:
+        if materialized:
+            return dict(base, status="promotable", materialized=materialized)
+        if targets:
+            return dict(base, status="planned")
+        return dict(base, status="untracked" if typ in UNTRACKED_TYPES else "no-sources")
+    if not commit:
+        return dict(base, status="unverified", reason="no verified.commit")
+    changed = changed_for(commit)
+    if changed is None:
+        return dict(base, status="unverified",
+                    reason="verified.commit not in history", commit=commit)
+    changed_sources, missing = _evaluate(sources, changed, repo)
+    if missing:
+        return dict(base, status="orphaned-source", missing=missing,
+                    changed_sources=changed_sources, verified_at=commit)
+    if changed_sources:
+        return dict(base, status="stale", changed_sources=changed_sources,
+                    verified_at=commit)
+    if materialized:
+        return dict(base, status="promotable", materialized=materialized,
+                    verified_at=commit)
+    return dict(base, status="current", verified_at=commit)
+
+
 def freshness_analyze(root: str, head: str) -> dict:
     repo = repo_root(root)
     code, head_sha, _ = git(["rev-parse", "--short", head], cwd=repo)
     head_sha = head_sha.strip() if code == 0 else head
 
     cache: dict = {}
-    pages = []
-    for relpath, fm, _body in iter_pages(root):
-        name = fm.get("name") or relpath
-        typ = fm.get("type") or ""
-        sources = as_list(fm.get("sources"))
-        targets = as_list(fm.get("targets"))
-        materialized = [t for t in targets
-                        if os.path.exists(os.path.join(repo, _source_path(t, repo)))]
-        verified = fm.get("verified") if isinstance(fm.get("verified"), dict) else {}
-        commit = (verified or {}).get("commit")
-
-        if not sources:
-            if materialized:
-                pages.append({"name": name, "path": relpath, "type": typ,
-                              "status": "promotable", "materialized": materialized})
-            elif targets:
-                pages.append({"name": name, "path": relpath, "type": typ,
-                              "status": "planned"})
-            else:
-                status = "untracked" if typ in UNTRACKED_TYPES else "no-sources"
-                pages.append({"name": name, "path": relpath, "type": typ, "status": status})
-            continue
-        if not commit:
-            pages.append({"name": name, "path": relpath, "type": typ,
-                          "status": "unverified", "reason": "no verified.commit"})
-            continue
-        changed = _changed_files(commit, head, repo, cache)
-        if changed is None:
-            pages.append({"name": name, "path": relpath, "type": typ,
-                          "status": "unverified", "reason": "verified.commit not in history",
-                          "commit": commit})
-            continue
-        changed_sources, missing = _evaluate(sources, changed, repo)
-        if missing:
-            pages.append({"name": name, "path": relpath, "type": typ,
-                          "status": "orphaned-source", "missing": missing,
-                          "changed_sources": changed_sources, "verified_at": commit})
-        elif changed_sources:
-            pages.append({"name": name, "path": relpath, "type": typ,
-                          "status": "stale", "changed_sources": changed_sources,
-                          "verified_at": commit})
-        elif materialized:
-            pages.append({"name": name, "path": relpath, "type": typ,
-                          "status": "promotable", "materialized": materialized,
-                          "verified_at": commit})
-        else:
-            pages.append({"name": name, "path": relpath, "type": typ,
-                          "status": "current", "verified_at": commit})
+    pages = [_classify_page(relpath, fm, repo,
+                            lambda c: _changed_files(c, head, repo, cache))
+             for relpath, fm, _body in iter_pages(root)]
 
     summary: dict = {}
     for page in pages:
@@ -893,6 +1010,12 @@ def _fn_search(params, project_root, wiki_root, strict):
     # Corpus stats are GLOBAL (over all pages, pre-filter) so a term's rarity
     # does not shift with the caller's type/status/prefix filter.
     corpus, avgfl, n_docs = _build_corpus_cached(abs_root)
+    # W11: the state shown per hit is MEASURED against git, not read from the
+    # frontmatter. Prepared here, spent only on pages that actually match — the
+    # diff is the expensive part and a query with no hits must pay nothing.
+    repo = _repo_root_cached(abs_root)
+    _diff_cache = _recall_diff_cache(repo)
+    changed_for = lambda c: _changed_files(c, "HEAD", repo, _diff_cache)  # noqa: E731
     df = {t: 0 for t in terms}
     for pd in corpus:
         for t in terms:
@@ -910,8 +1033,6 @@ def _fn_search(params, project_root, wiki_root, strict):
         if prefix and not relpath.startswith(prefix):
             continue
         if f_type and (fm.get("type") or "") != f_type:
-            continue
-        if f_status and (fm.get("status") or "") != f_status:
             continue
         score = 0.0
         hit_terms = []
@@ -934,16 +1055,41 @@ def _fn_search(params, project_root, wiki_root, strict):
         # just for the winner) so the caller can see the ranking decay, and so a
         # weak page is filtered on its own merit rather than on the leader's.
         coverage = (sum(idf[t] for t in hit_terms) / idf_total) if idf_total else 0.0
+        # The state is MEASURED, and WHERE it is measured depends on who is asking.
+        #
+        # With a `status` filter it must happen HERE, before the coverage gate: the
+        # gate computes `best_cov` and may refuse with "no page passes", and that
+        # message has to describe the set the caller actually asked for — a page
+        # the filter excludes must not be the one the refusal quotes. The filter
+        # selects on the measured state, never on the frontmatter field, because a
+        # filter picking by one value while the reply prints another would
+        # contradict itself on screen.
+        #
+        # Without a filter it is DEFERRED to after the gate and `limit`, because a
+        # query the gate silences must pay no git at all. "After the lexical match"
+        # sounded narrow and is not: one corpus-wide token drags every page in —
+        # `mcp` is df10 here, the same fact that made the relevance gate
+        # structurally unreachable in W8 — so measured, the gated query classified
+        # 10/10 pages and spent 5 subprocesses to render 193 characters that say
+        # there is no answer.
+        state = None
+        if f_status:
+            state = _classify_page(relpath, fm, repo, changed_for)
+            if state["status"] != f_status:
+                continue
         snippet, _section, anchor = _best_snippet(pd["body"], pd["headings"], terms, relpath)
         if not snippet:
             snippet = fm.get("description") or ""
         results.append({
             "title": fm.get("title") or fm.get("name") or relpath,
             "slug": fm.get("name") or relpath,
-            "type": fm.get("type") or "", "status": fm.get("status") or "",
+            "type": fm.get("type") or "",
+            "status": state["status"] if state else None,
+            "fm_status": fm.get("status") or "",
             "anchor": anchor, "snippet": snippet,
             "score": score, "coverage": coverage,
             "missed": [t for t in terms if t not in hit_terms],
+            "_relpath": relpath, "_fm": fm,   # only for the deferred classification
         })
 
     results.sort(key=lambda r: r["score"], reverse=True)  # pure BM25F relevance
@@ -952,6 +1098,13 @@ def _fn_search(params, project_root, wiki_root, strict):
     n_lexical = len(results)          # pages sharing at least one term with the query
     best_cov = results[0]["coverage"] if results else 0.0
     results = [r for r in results if r["coverage"] >= min_cov][:limit]
+    # The deferred classification (see the loop above): now that the gate and the
+    # limit have run, this is the handful of pages the answer will actually show —
+    # at most `limit`, and zero when the gate silenced the query.
+    for r in results:
+        if r["status"] is None:
+            r["status"] = _classify_page(r["_relpath"], r["_fm"], repo,
+                                         changed_for)["status"]
 
     unknown = [t for t in terms if df[t] == 0]
     lines = ["# search: %r — %d hit(s) in %s/  (BM25F, k1=%g b=%g)"
@@ -963,6 +1116,18 @@ def _fn_search(params, project_root, wiki_root, strict):
         lines.append("ignored function words: %s" % ", ".join(dropped))
     if unknown:
         lines.append("unknown to the corpus: %s" % ", ".join(unknown))
+    # The frontmatter `status:` disagreeing with the measured state is ONE fact
+    # about how the wiki is kept, not per-hit news — so it is said once, not
+    # appended to every label. Measured justification for the placement: the field
+    # reads `current` on all ten pages of this corpus, i.e. its variance is ZERO,
+    # so per hit it carries no information at all; that it is unmaintained is a
+    # corpus-level fact and belongs with the other header notes.
+    fm_disagree = sum(1 for r in results
+                      if r["fm_status"] and r["fm_status"] != r["status"])
+    if fm_disagree:
+        lines.append("frontmatter status: disagrees on %d of %d hit(s) — the labels "
+                     "below are measured against git, the field is hand-written"
+                     % (fm_disagree, len(results)))
     if not results:
         # TWO different silences, and the difference is the caller's next move:
         # nothing matched at all (rephrase / wrong wiki) versus matches that were
@@ -976,7 +1141,7 @@ def _fn_search(params, project_root, wiki_root, strict):
                      "no page passes the relevance gate "
                      "(best coverage %d%%, need %d%%)"
                      % (math.floor(100 * best_cov), math.floor(100 * min_cov)))
-    elif unknown or dropped:
+    elif unknown or dropped or fm_disagree:
         lines.append("")              # keep the notes clear of the ranking
     for i, r in enumerate(results, 1):
         meta = "/".join(x for x in [r["type"], r["status"]] if x)
@@ -1014,15 +1179,24 @@ def _fn_source_to_pages(params, project_root, wiki_root, strict):
             return q_sym == a_sym
         return True
 
+    # Same measured state as `search` renders, via the same classifier and the same
+    # cross-call diff cache — classified only for pages that matched, so a source
+    # nothing documents costs no git at all.
+    repo = _repo_root_cached(abs_root)
+    _diff_cache = _recall_diff_cache(repo)
+    changed_for = lambda c: _changed_files(c, "HEAD", repo, _diff_cache)  # noqa: E731
+
     hits = []
     for relpath, fm, _body in iter_pages(abs_root):
         matched_sources = [a for a in as_list(fm.get("sources")) if _matches(str(a))]
         matched_targets = [a for a in as_list(fm.get("targets")) if _matches(str(a))]
         if matched_sources or matched_targets:
+            state = _classify_page(relpath, fm, repo, changed_for)
             hits.append({
                 "title": fm.get("title") or fm.get("name") or relpath,
                 "slug": fm.get("name") or relpath, "path": relpath,
-                "type": fm.get("type") or "", "status": fm.get("status") or "",
+                "type": fm.get("type") or "", "status": state["status"],
+                "fm_status": fm.get("status") or "",
                 "description": fm.get("description") or "",
                 "sources": matched_sources, "targets": matched_targets,
             })
@@ -1030,6 +1204,12 @@ def _fn_source_to_pages(params, project_root, wiki_root, strict):
     lines = ["# source_to_pages: %s — %d page(s) in %s/" % (source, len(hits), rel_root), ""]
     if not hits:
         lines.append("no page references this source")
+    fm_disagree = sum(1 for h in hits if h["fm_status"] and h["fm_status"] != h["status"])
+    if fm_disagree:
+        lines.append("frontmatter status: disagrees on %d of %d page(s) — the labels "
+                     "below are measured against git, the field is hand-written"
+                     % (fm_disagree, len(hits)))
+        lines.append("")
     for h in hits:
         meta = "/".join(x for x in [h["type"], h["status"]] if x)
         meta = (" [%s]" % meta) if meta else ""
@@ -1380,6 +1560,16 @@ WIKI_CALL_TOOL = {
         "                   share of the query's idf mass or it is NOT reported,\n"
         "                   so an undocumented topic answers 'no page passes the\n"
         "                   relevance gate' instead of ranking noise; 0 disables)\n"
+        "                   The state in each hit's [type/state] label is MEASURED\n"
+        "                   against git (did a source anchor change since the page\n"
+        "                   was last verified), not read from the frontmatter\n"
+        "                   status field, which is hand-written and goes stale\n"
+        "                   silently. The status param filters on that measured\n"
+        "                   state too. Only current means checked-and-clean;\n"
+        "                   unverified, promotable, planned, untracked and\n"
+        "                   no-sources all mean NOT CHECKABLE, which is not the\n"
+        "                   same as fresh. Use list or get_page to see the\n"
+        "                   frontmatter field itself.\n"
         "  source_to_pages  reverse lookup — which pages document a source file,\n"
         "                   each with its one-line description, so the answer says\n"
         "                   what they cover and not merely that they do; params:\n"

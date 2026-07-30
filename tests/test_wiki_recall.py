@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """Mechanical suite for the `search` relevance gate, the `get_page` section
-index and the `source_to_pages` per-hit description in Scripts/mcp-wiki.py
-(60 cases, A-K).
+index, the `source_to_pages` per-hit description and the MEASURED state in
+every recall reply's `[type/state]` label, in Scripts/mcp-wiki.py
+(73 cases, A-L).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
-a temp workspace -- never the repo's real docs/.  Nothing is spawned, nothing
-is written outside mkdtemp, and `reindex`/`freshness` are never called.
+a temp workspace -- never the repo's real docs/.  Nothing is written outside
+mkdtemp.
+
+Two spawns exist, both in group L and both deliberate.  (1) `git show
+HEAD:Scripts/mcp-wiki.py`, which is the only way to compare the worktree's
+`freshness` output against the code that shipped.  (2) The unpatched-driver
+case, which MEASURES what the recall path costs in a directory git does not
+track -- production spawns there, so a stub would hide the finding.  Every
+other group-L driver has the git boundary replaced by a lookup table, so
+`stale` and `orphaned-source` are reachable offline and deterministically.
 
 The fixture is not decoration.  It reproduces, in miniature, the measured
 pathologies the gate and the query-side stoplist exist for:
@@ -105,13 +114,34 @@ Coverage by group:
      premise -- and, strongest, that the rest of the answer did not move: the
      reply with its description lines filtered out is BYTE-IDENTICAL to what the
      same corpus renders with the `description:` frontmatter lines removed
+  L  the state in `[type/state]` is MEASURED against git, not read from the
+     frontmatter `status:` field.  The defect was measured on the real wiki:
+     `freshness` said 9 of 10 pages stale while all 10 wrote `current`, and
+     `search` rendered the field -- so one query answered with four hits
+     labelled `current`, all four of them stale.  The group pins the label (a
+     moved anchor renders `stale`; a page with no anchors renders one of the
+     NOT-CHECKABLE states and never `current`; all eight states are reachable),
+     the disclosure (said ONCE, right N of M, silent on a corpus whose field
+     agrees and on a page that has no field to disagree with), the `status`
+     param (it now selects on the measurement, so a value the field claims but
+     the measurement does not returns nothing), the AGREEMENT of the two recall
+     callers (`search` and `source_to_pages` render one classifier's answer,
+     which is also, dict for dict, what `freshness` publishes), the two
+     invariants of the cross-call diff memo (it spans calls, it dies with HEAD,
+     and two repos never share one changed-file set), and the two claims the
+     refactor itself makes: `freshness` is byte-identical to the committed
+     server, and moving the `status` filter to AFTER the scoring loop moved no
+     score, no coverage and no `best coverage N%`
 
-Group J runs on its OWN six-page fixture in a SECOND workspace, and group K on
-its own five-page one in a THIRD (plus a FOURTH that mirrors it), and that is
-not tidiness.  The six pages above ARE the calibration window group D measures:
-one more page moves `n_docs`, moves every term's idf, and shifts -- or closes --
-the window, so a page added here for a `get_page` test would fail group D for a
-reason that has nothing to do with search.  The fixtures never mix.
+Group J runs on its OWN six-page fixture in a SECOND workspace, group K on its
+own five-page one in a THIRD (plus a FOURTH that mirrors it), and group L on a
+FIFTH (the frontmatter disagreeing), a SIXTH (the same pages with the field
+written to agree) and a SEVENTH (a synthetic `.git/HEAD`, the only way the diff
+memo can be keyed).  That is not tidiness.  The six pages above ARE the
+calibration window group D measures: one more page moves `n_docs`, moves every
+term's idf, and shifts -- or closes -- the window, so a page added here for a
+`get_page` test would fail group D for a reason that has nothing to do with
+search.  The fixtures never mix.
 
 Usage:
   python3 tests/test_wiki_recall.py
@@ -496,10 +526,17 @@ def parse_answer(text):
 
 
 class Driver:
-    """One in-process wiki server pointed at the synthetic corpus."""
+    """One in-process wiki server pointed at the synthetic corpus.
 
-    def __init__(self, project_root):
-        self.mod = H.load_module_from_path("mcp_wiki_under_test", SERVER)
+    `server` exists for group L alone: the same class drives HEAD's copy of the
+    server beside the worktree's, so "the extraction changed nothing" is a
+    comparison against the code that shipped rather than against a description
+    of it.  Each Driver holds its OWN module instance, which is what makes
+    patching one module's git seam invisible to every other group.
+    """
+
+    def __init__(self, project_root, server=None, name="mcp_wiki_under_test"):
+        self.mod = H.load_module_from_path(name, server or SERVER)
         self.root = project_root
         self.abs_wiki = os.path.join(project_root, WIKI_REL)
 
@@ -550,6 +587,25 @@ class Driver:
         test believes it wrote."""
         fm, _body = self.mod.read_page(os.path.join(self.abs_wiki, fname))
         return fm
+
+    def freshness(self, **params):
+        """The rendered `freshness` report, raw."""
+        res = self.mod.handle_wiki_call(
+            {"function": "freshness", "params": params}, self.root, WIKI_REL)
+        return res.get("__raw_text__") or res.get("error") or ""
+
+    def classify(self, relpath):
+        """`_classify_page` for ONE page, driven the way the recall path drives
+        it: the same repo root, the same cross-call diff cache, the same
+        `changed_for` closure shape.  Group L's oracle for "one authority": what
+        this returns must be, dict for dict, what `freshness` reports."""
+        mod = self.mod
+        repo = mod.repo_root(self.abs_wiki)
+        cache = mod._recall_diff_cache(repo)
+        fm, _body = mod.read_page(os.path.join(self.abs_wiki, relpath))
+        return mod._classify_page(
+            relpath, fm, repo,
+            lambda c: mod._changed_files(c, "HEAD", repo, cache))
 
     def split_query(self, query):
         """(dropped, kept) for a query, split by the server's OWN stoplist.
@@ -1058,6 +1114,13 @@ K_ABSENT_SOURCE = "Scripts/never-documented.py"
 # that truncates -- the check is exact equality, so the only way it goes blind
 # is a fixture whose strings are shorter than the cut somebody introduces.
 K_DESC_MIN_CHARS = 80
+# The state every page in THIS corpus measures, and why it is a constant here:
+# each of the five carries `sources:` and no `verified:` block, and that shape is
+# decided before any git diff is asked for -- so the label does not depend on the
+# workspace being a git repo, on HEAD, or on anything a temp dir cannot promise.
+# Deliberately NOT one of the `status:` values the fixture writes, so a renderer
+# that fell back to the frontmatter field would fail rather than coincide.
+K_MEASURED_STATE = "unverified"
 
 _S2P_HEADER_RE = re.compile(
     r"^# source_to_pages: (?P<source>.+) — (?P<count>\d+) page\(s\) in "
@@ -1192,6 +1255,257 @@ def k_expected_hits(source):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Group L's fixture: the state in a recall reply's `[type/state]` label is
+# MEASURED against git, not read from the frontmatter `status:` field.
+#
+# The defect this group exists for was measured on the real wiki: `freshness`
+# said 9 of 10 pages were stale while every one of those pages carried
+# `status: current` in its frontmatter -- and `search` rendered the frontmatter
+# value, so on one real query all four hits were labelled `current` while all
+# four were stale.  A caller reading `[adr/current]` trusted a page whose
+# sources had moved.
+#
+# A FIFTH and SIXTH workspace, for the reason group J and K have their own: the
+# six calibration pages ARE group D's measured window.  These ten are also the
+# only fixture in this file that needs SOURCE FILES on disk -- `_evaluate` calls
+# a source `missing` when its path does not exist under the repo, so the
+# orphaned-source shape cannot be built out of frontmatter alone.
+#
+# The eight states, one page each (two pages for `unverified`, which has two
+# distinct reasons, and one extra page carrying NO status field at all):
+#
+#   st-stale        sources changed since verified.commit -> `stale`, while its
+#                   frontmatter says `current`.  THE case.
+#   st-current      sources unchanged since verified.commit -> `current`.  The
+#                   control: without it, `stale` could be a constant.
+#   st-orphan       its source anchor names a file that is not on disk ->
+#                   `orphaned-source`, which outranks `stale`.
+#   st-unverified   sources, no `verified:` block -> `unverified` (reason: no
+#                   verified.commit).  Needs no git at all to reach.
+#   st-lostcommit   sources and a verified.commit git cannot resolve ->
+#                   `unverified` (reason: not in history).  The SAME word for a
+#                   different fact, which is why both shapes are here.
+#   st-nosources    no anchors, type NOT in UNTRACKED_TYPES -> `no-sources`.
+#   st-untracked    no anchors, type in UNTRACKED_TYPES -> `untracked`.
+#   st-planned      targets only, none materialized -> `planned`.
+#   st-promotable   targets only, one materialized -> `promotable`.
+#   st-nostatus     no `status:` key at all -> the label still carries a state,
+#                   and the disagreement tally must NOT count it: there is no
+#                   hand-written claim on that page to disagree with.
+#
+# Every page carries the token `statepage`, so ONE query returns the whole
+# corpus and the "said once, N of M" claim is made against every state at once.
+# `anchors` sits on the three pages with real source anchors only, so coverage
+# VARIES across the hit list -- a filter that perturbed a score would show up.
+# `zzunknownword` is absent everywhere: a df-0 term is how group L reaches the
+# relevance gate, which is where `best coverage N%` is rendered.
+#
+# The git boundary is STUBBED, not spawned: `_changed_files` is replaced by a
+# lookup over L_DIFFS in the module under test.  That is the only external
+# oracle `_classify_page` consults, and stubbing it is what makes `stale` and
+# `orphaned-source` reachable offline, deterministically, in every one of the
+# eight arms.  The cases that consume it assert the stub was CONSULTED, so a
+# server that stopped asking git fails here rather than passing quietly.
+# ---------------------------------------------------------------------------
+
+(L_FILE, L_SLUG, L_TITLE, L_TYPE, L_STATUS, L_SRCS, L_TGTS, L_COMMIT, L_STATE,
+ L_BODY) = range(10)
+
+# The three source files the fixture materializes, and the two it deliberately
+# does not.  `src/moved.py` is the one the stubbed diff reports as changed.
+L_SRC_CHANGED = "src/moved.py"
+L_SRC_CLEAN = "src/kept.py"
+L_SRC_ABSENT = "src/deleted.py"
+L_TGT_ABSENT = "src/future.py"
+L_ON_DISK = (L_SRC_CHANGED, L_SRC_CLEAN)
+
+# The verified commits, and what the stubbed `git diff` reports for each.
+L_C_CHANGED = "c0ffee1"
+L_C_CLEAN = "c0ffee2"
+L_C_LOST = "deadbee"
+L_DIFFS = {
+    L_C_CHANGED: {L_SRC_CHANGED},
+    L_C_CLEAN: {"src/somewhere-else.py"},
+    L_C_LOST: None,                  # None == git cannot resolve the commit
+}
+
+L_SHARED_TERM = "statepage"
+L_ANCHOR_TERM = "anchors"
+L_UNKNOWN_TERM = "zzunknownword"
+# The probe that reaches the relevance GATE, which is the only place `best
+# coverage N%` is rendered: `zzunknownword` has df 0 and therefore the maximum
+# idf, so no page can clear 55% -- while `anchors` (df 3) keeps the coverage of
+# the three sourced pages well above the other seven, so the hit list has a real
+# spread for a filter to disturb.
+L_GATED_QUERY = "%s %s %s" % (L_SHARED_TERM, L_ANCHOR_TERM, L_UNKNOWN_TERM)
+
+L_PAGES = [
+    ("st-stale.md", "st-stale", "The page whose source moved", "component",
+     "current", [L_SRC_CHANGED], [], L_C_CHANGED, "stale",
+     "This statepage owns anchors that moved after it was last verified."),
+    ("st-current.md", "st-current", "The page nothing touched", "component",
+     "current", [L_SRC_CLEAN], [], L_C_CLEAN, "current",
+     "This statepage owns anchors that nobody has touched since."),
+    ("st-orphan.md", "st-orphan", "The page pointing at a deleted file",
+     "component", "current", [L_SRC_ABSENT], [], L_C_CLEAN, "orphaned-source",
+     "This statepage owns anchors on a file that is gone from the tree."),
+    ("st-unverified.md", "st-unverified", "The page nobody ever verified",
+     "component", "current", [L_SRC_CLEAN], [], None, "unverified",
+     "This statepage was never compared against the code it claims."),
+    ("st-lostcommit.md", "st-lostcommit", "The page verified against a ghost",
+     "component", "current", [L_SRC_CLEAN], [], L_C_LOST, "unverified",
+     "This statepage names a commit the history no longer holds."),
+    ("st-nosources.md", "st-nosources", "The page tied to no code at all",
+     "reference", "current", [], [], None, "no-sources",
+     "This statepage claims nothing about code, so nothing can go stale."),
+    ("st-untracked.md", "st-untracked", "The page whose type needs no code",
+     "adr", "current", [], [], None, "untracked",
+     "This statepage records a decision, and decisions do not drift."),
+    ("st-planned.md", "st-planned", "The page whose code is not written yet",
+     "spec", "current", [], [L_TGT_ABSENT], None, "planned",
+     "This statepage describes a file that does not exist yet."),
+    ("st-promotable.md", "st-promotable", "The page whose target arrived",
+     "spec", "current", [], [L_SRC_CLEAN], None, "promotable",
+     "This statepage described a file that has since been written."),
+    # `promotable` is the one state with TWO branches: no sources at all (above),
+    # and sources that are VERIFIED AND CLEAN plus a target that has since
+    # materialized (here).  Without this page the second branch is never
+    # executed, and a rule change inside it survives every case in the file --
+    # measured: the mutant that turns this branch into `current` was the one
+    # mutant the suite let through until this page existed.
+    ("st-promoted.md", "st-promoted", "The page verified, clean, and overtaken",
+     "spec", "current", [L_SRC_CLEAN], [L_SRC_CHANGED], L_C_CLEAN, "promotable",
+     "This statepage owns a target that landed while its sources stayed put."),
+    ("st-nostatus.md", "st-nostatus", "The page with no status field",
+     "reference", None, [], [], None, "no-sources",
+     "This statepage carries no hand-written status to be wrong."),
+]
+
+L_BY_FILE = {p[L_FILE]: p for p in L_PAGES}
+L_BY_SLUG = {p[L_SLUG]: p for p in L_PAGES}
+# Every group-L query passes this: the corpus is larger than `limit`'s default of
+# 10, and the disclosure's denominator is the number of RENDERED hits -- so a
+# truncated answer would make "N of M" a claim about the page count `limit`
+# happened to allow.  Derived from the table, so a page added here cannot
+# silently re-introduce the truncation.
+L_LIMIT = len(L_PAGES)
+# The states that mean NOT CHECKABLE.  None of them may ever render as anything
+# a caller could read as checked-and-clean, and `current` is not among them.
+L_NOT_CHECKABLE = {"unverified", "promotable", "planned", "untracked",
+                   "no-sources"}
+L_ALL_STATES = sorted({p[L_STATE] for p in L_PAGES})
+
+_FM_DISAGREE_RE = re.compile(
+    r"^frontmatter status: disagrees on (?P<n>\d+) of (?P<m>\d+) "
+    r"(?:hit|page)\(s\) — ", re.M)
+FM_DISAGREE_SENTINEL = "frontmatter status:"
+
+
+def l_page_text(page, agree=False):
+    """Render one group-L page.
+
+    `agree=True` writes the MEASURED state into the frontmatter `status:` field
+    instead of the page's own value, which is what turns the corpus into the
+    control the "no disclosure when they agree" case needs.  The page that
+    carries no status field keeps none in either corpus.
+    """
+    out = ["---",
+           "name: %s" % page[L_SLUG],
+           "title: %s" % page[L_TITLE],
+           "type: %s" % page[L_TYPE]]
+    if page[L_STATUS] is not None:
+        out.append("status: %s" % (page[L_STATE] if agree else page[L_STATUS]))
+    if page[L_SRCS]:
+        out.append("sources:")
+        out += ["  - %s" % s for s in page[L_SRCS]]
+    if page[L_TGTS]:
+        out.append("targets:")
+        out += ["  - %s" % t for t in page[L_TGTS]]
+    if page[L_COMMIT]:
+        out += ["verified:", "  commit: %s" % page[L_COMMIT],
+                "  date: 2026-01-01"]
+    out += ["---", "", "# %s" % page[L_TITLE], "", page[L_BODY], ""]
+    return "\n".join(out)
+
+
+def build_state_fixture(work, agree=False):
+    """Write group L's ten pages plus the source files on disk.
+
+    The source files are the point of the workspace, not decoration:
+    `_evaluate` reports a source `missing` when its path does not exist under
+    the repo, so `orphaned-source` and `promotable` are decided by the
+    filesystem and cannot be faked in frontmatter.
+    """
+    for page in L_PAGES:
+        work.write_text(os.path.join(WIKI_REL, page[L_FILE]),
+                        l_page_text(page, agree))
+    for rel in L_ON_DISK:
+        work.write_text(rel, "# materialized source file\n")
+    return os.path.realpath(work.path)
+
+
+def patch_git_boundary(mod, repo):
+    """Replace every git call the state path makes; return the MISS log.
+
+    Three seams, and each one is a spawn this suite must not make:
+      `repo_root`      -> the fixture root (production runs `git rev-parse
+                          --show-toplevel`, which in a temp dir answers the temp
+                          dir anyway -- but only after paying a subprocess).
+      `_changed_files` -> a lookup over L_DIFFS.  THE external oracle
+                          `_classify_page` consults; the log is what lets a case
+                          assert it was consulted at all.
+      `git`            -> a hard failure, which is what a temp dir really
+                          produces, so `freshness`'s head sha falls back to the
+                          literal `head` deterministically instead of spawning.
+
+    The log records CACHE MISSES, not every ask: a miss is exactly where the
+    real implementation spawns `git diff`, so the list length is the number of
+    subprocesses production would have paid for.  That is what makes "the memo
+    memoizes" and "the memo dies with HEAD" measurable rather than asserted.
+
+    Every seam is patched on the module OBJECT, and each Driver loads its own
+    module instance, so no other group sees any of this.
+    """
+    log = []
+
+    def changed_files(commit, head, repo_arg, cache):
+        if commit in cache:
+            val = cache[commit]
+            return None if val == mod._INVALID else val
+        log.append((commit, head))
+        value = L_DIFFS.get(commit)
+        cache[commit] = mod._INVALID if value is None else value
+        return value
+
+    mod.repo_root = lambda start=None: repo
+    mod._changed_files = changed_files
+    mod.git = lambda args, cwd: (1, "", "stubbed: no git in this fixture")
+    return log
+
+
+def log_git_calls(mod):
+    """Wrap `git` on a module and return the argv log.  The spawns still happen.
+
+    Used on the UNPATCHED driver only, where the point is to measure what a
+    plain (non-repo) directory really costs the recall path.
+    """
+    log = []
+    inner = mod.git
+
+    def counting(args, cwd):
+        log.append(list(args))
+        return inner(args, cwd)
+
+    mod.git = counting
+    return log
+
+
+def state_of(hit):
+    """The state half of a rendered `[type/state]` label."""
+    return hit["status"]
+
+
 def tool_paragraph(desc, name):
     """The `  <name>   ...` entry of the tool description, continuations included.
 
@@ -1219,8 +1533,9 @@ def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME, title="mcp-wiki `search` relevance gate: silence, "
                                 "measured calibration window, floored "
-                                "percentages, query-side stopwords, and "
-                                "`get_page`'s section index",
+                                "percentages, query-side stopwords, "
+                                "`get_page`'s section index, and the MEASURED "
+                                "state in every recall label",
                     opts=opts, mode="grouped")
     work = H.TempWorkspace("ph-wiki-recall-", keep=opts.keep)
     pyc_before = H.pycache_snapshot()
@@ -2893,14 +3208,37 @@ def run(opts=None):
             if hit is None:
                 problems.append("%s: matching page not rendered" % page[K_FILE])
                 continue
-            want_meta = "/".join(x for x in (page[K_TYPE], page[K_STATUS]) if x)
+            # The state half of the label is MEASURED, never the frontmatter's
+            # `status:` -- and on these five pages the measurement needs no git
+            # at all: `sources:` present with no `verified:` block IS
+            # `unverified`, decided before any diff is asked for.  The premise
+            # (that shape, on every hit page) is asserted below, so the constant
+            # is a consequence of the rule rather than an observation.
+            want_meta = "/".join(x for x in (page[K_TYPE], K_MEASURED_STATE)
+                                 if x)
+            page_fm = kdrv.frontmatter(page[K_FILE])
+            if not page_fm.get("sources"):
+                problems.append("premise broken: %s carries no `sources:`, so "
+                                "%r is not the state the rule assigns it"
+                                % (page[K_FILE], K_MEASURED_STATE))
+            if page_fm.get("verified"):
+                problems.append("premise broken: %s carries a `verified:` block "
+                                "(%r), so its state depends on a git diff and "
+                                "this fixture cannot predict it"
+                                % (page[K_FILE], page_fm.get("verified")))
+            if page[K_STATUS] == K_MEASURED_STATE:
+                problems.append("fixture drift: %s writes %r in its frontmatter, "
+                                "which is also the measured state -- a renderer "
+                                "reading the FIELD would pass on this page"
+                                % (page[K_FILE], page[K_STATUS]))
             for label, got, wanted in (("title", hit["title"], page[K_TITLE]),
                                        ("slug", hit["slug"], page[K_SLUG]),
                                        ("meta", hit["meta"], want_meta)):
                 if got != wanted:
                     problems.append("%s: %s %r, want %r"
                                     % (page[K_FILE], label, got, wanted))
-        suite.record("K", "hit-lines-and-header-are-the-fixture", problems,
+        suite.record("K", "hit-lines-are-the-fixture-with-the-measured-state",
+                     problems,
                      detail=[_d("call", "source_to_pages %r" % K_SHARED_SOURCE),
                              _d("header", "%r page(s) in %r/"
                                 % (shared["header_count"], shared["header_root"])),
@@ -2910,9 +3248,17 @@ def run(opts=None):
                                           "fixture table)" % want_paths),
                              _d("slug order", "%r -- deliberately NOT the "
                                               "document order" % want_slugs),
-                             _d("why", "the description line is an ADDITION; "
-                                       "the count, the order and the hit lines "
-                                       "themselves must not have moved")],
+                             _d("labels", "%r" % [h["meta"]
+                                                  for h in shared["hits"]]),
+                             _d("state", "%r for every hit -- sources with no "
+                                         "`verified:` block, measured, not the "
+                                         "frontmatter's %r"
+                                % (K_MEASURED_STATE,
+                                   sorted({p[K_STATUS] for p in want_pages}))),
+                             _d("why", "the description line is an ADDITION and "
+                                       "the state label is a REPLACEMENT; the "
+                                       "count, the order, the titles and the "
+                                       "slugs must not have moved for either")],
                      text=shared["text"])
 
         problems = []
@@ -3280,6 +3626,756 @@ def run(opts=None):
     finally:
         desc_work.cleanup()
         bare_work.cleanup()
+
+    # ============ L: the state label is MEASURED, not the frontmatter ========
+    # A FIFTH workspace (the ten states, frontmatter DISAGREEING), a SIXTH (the
+    # same ten with the frontmatter written to AGREE -- the control), and a
+    # SEVENTH carrying a synthetic `.git/HEAD`, which is the only way the
+    # cross-call diff cache can be keyed at all.
+    st_work = H.TempWorkspace("ph-wiki-state-", keep=opts.keep)
+    ag_work = H.TempWorkspace("ph-wiki-state-agree-", keep=opts.keep)
+    cache_work = H.TempWorkspace("ph-wiki-state-cache-", keep=opts.keep)
+    try:
+        st_root = build_state_fixture(st_work, agree=False)
+        ag_root = build_state_fixture(ag_work, agree=True)
+
+        # ---- the UNPATCHED driver, on a directory that is not a git repo -----
+        # Its own module instance, and it runs FIRST: the whole point is the
+        # behaviour with every git seam intact.
+        rawdrv = Driver(st_root, name="mcp_wiki_state_raw")
+        raw_repo = rawdrv.mod.repo_root(rawdrv.abs_wiki)
+        raw_head = rawdrv.mod._head_sha_nospawn(raw_repo)
+        rawdrv.mod._FRESH_CACHE.clear()
+        cache_a = rawdrv.mod._recall_diff_cache(raw_repo)
+        cache_b = rawdrv.mod._recall_diff_cache(raw_repo)
+        raw_log = log_git_calls(rawdrv.mod)
+        raw_run = rawdrv.search(L_SHARED_TERM, limit=L_LIMIT)
+        raw_first = list(raw_log)
+        raw_log.clear()
+        rawdrv.search(L_SHARED_TERM, limit=L_LIMIT)
+        raw_second = list(raw_log)
+        problems = []
+        if raw_head != "":
+            problems.append("premise gone: _head_sha_nospawn reads %r for the "
+                            "fixture's repo root, so TMPDIR sits inside a git "
+                            "repo and this case is measuring that repo instead "
+                            "of the bypass" % raw_head)
+        if cache_a is cache_b:
+            problems.append("two calls got the SAME dict although HEAD is "
+                            "unreadable -- an unkeyable cache that is shared "
+                            "anyway is a cache keyed on the empty string, and "
+                            "every unknown HEAD would collide on it")
+        if rawdrv.mod._FRESH_CACHE:
+            problems.append("_FRESH_CACHE holds %r although HEAD could not be "
+                            "read: an empty key is exactly the collision the "
+                            "bypass exists to prevent"
+                            % list(rawdrv.mod._FRESH_CACHE))
+        rendered = sorted({state_of(h) for h in raw_run["hits"]})
+        checkable = [s for s in rendered if s not in L_NOT_CHECKABLE]
+        if not raw_run["hits"]:
+            problems.append("no hits at all, so nothing was labelled")
+        if checkable:
+            problems.append("state(s) %r rendered although git can answer NOTHING "
+                            "in a directory it does not track -- `current`, "
+                            "`stale` and `orphaned-source` are all claims about a "
+                            "comparison that never happened" % checkable)
+        if not raw_first:
+            problems.append("the reply spawned no git at all, so 'the bypass "
+                            "re-pays on every call' is not what is being measured")
+        # Count the DIFFS, not every spawn. `repo_root` is memoized per path, so
+        # the second reply legitimately skips its `rev-parse --show-toplevel` --
+        # that is a separate optimisation and not what this case is about. What
+        # must repeat is the diff behind the state, because THAT is the thing with
+        # no memo when HEAD cannot be keyed.
+        diff_first = [a for a in raw_first if "diff" in a]
+        diff_second = [a for a in raw_second if "diff" in a]
+        if len(diff_second) != len(diff_first):
+            problems.append("the second identical reply spawned %d git diff(s) "
+                            "against the first's %d -- with HEAD unreadable there "
+                            "is no memo, so the diffs must be re-paid in full"
+                            % (len(diff_second), len(diff_first)))
+        suite.record("L", "unkeyable-head-bypasses-the-cache-and-repays",
+                     problems,
+                     detail=[_d("repo root", "%r (git rev-parse failed, so "
+                                             "`repo_root` fell back to the path "
+                                             "it was handed)"
+                                % os.path.basename(raw_repo)),
+                             _d("head", "%r -> not cacheable" % raw_head),
+                             _d("states", "%r" % rendered),
+                             _d("git/reply", "%d then %d spawn(s): %r"
+                                % (len(raw_first), len(raw_second),
+                                   [" ".join(a) for a in raw_first])),
+                             _d("cost", "the bypass is not 'the old cost of "
+                                        "search' -- search paid ZERO git before "
+                                        "this work; it is the full uncached cost, "
+                                        "on every call, forever"),
+                             _d("gate", "slow is acceptable, a wrong label is not: "
+                                        "no page may read as checked-and-clean "
+                                        "where nothing could be checked")],
+                     text=raw_run["text"])
+
+        # ---- the patched drivers: the git boundary is a table, not a repo ----
+        ldrv = Driver(st_root, name="mcp_wiki_state")
+        l_log = patch_git_boundary(ldrv.mod, st_root)
+        adrv = Driver(ag_root, name="mcp_wiki_state_agree")
+        patch_git_boundary(adrv.mod, ag_root)
+
+        run_all = ldrv.search(L_SHARED_TERM, limit=L_LIMIT)
+        by_slug = {h["slug"]: h for h in run_all["hits"]}
+
+        # ---- the page whose source moved ------------------------------------
+        stale_page = L_BY_SLUG["st-stale"]
+        stale_fm = ldrv.frontmatter(stale_page[L_FILE])
+        stale_hit = by_slug.get(stale_page[L_SLUG])
+        problems = []
+        if stale_fm.get("status") != "current":
+            problems.append("premise broken: the page's frontmatter says %r, so "
+                            "'the field claims current' is not what is being "
+                            "contradicted" % stale_fm.get("status"))
+        if L_SRC_CHANGED not in (L_DIFFS.get(L_C_CHANGED) or set()):
+            problems.append("premise broken: the stubbed diff for %r does not "
+                            "report %r as changed" % (L_C_CHANGED, L_SRC_CHANGED))
+        if not os.path.exists(os.path.join(st_root, L_SRC_CHANGED)):
+            problems.append("premise broken: %r is not on disk, so the page is "
+                            "`orphaned-source` for a different reason entirely"
+                            % L_SRC_CHANGED)
+        if (L_C_CHANGED, "HEAD") not in l_log:
+            problems.append("the classifier never asked git about %r -- the label "
+                            "cannot be a measurement if nothing was measured"
+                            % L_C_CHANGED)
+        if stale_hit is None:
+            problems.append("the page is not in the answer at all")
+        else:
+            if state_of(stale_hit) != "stale":
+                problems.append("rendered %r, want 'stale'"
+                                % state_of(stale_hit))
+            if state_of(stale_hit) == stale_fm.get("status"):
+                problems.append("rendered the frontmatter value %r -- this is the "
+                                "defect: a caller reads [%s] and trusts a page "
+                                "whose sources moved"
+                                % (stale_fm.get("status"), stale_hit["type"]
+                                   + "/" + state_of(stale_hit)))
+        suite.record("L", "moved-anchor-renders-stale-not-the-fields-current",
+                     problems,
+                     detail=[_d("page", "%s" % stale_page[L_FILE]),
+                             _d("frontmatter", "status: %r"
+                                % stale_fm.get("status")),
+                             _d("measured", "%r"
+                                % (state_of(stale_hit) if stale_hit else None)),
+                             _d("diff", "%r changed %r since %r"
+                                % (L_C_CHANGED, sorted(L_DIFFS[L_C_CHANGED]),
+                                   stale_page[L_SRCS])),
+                             _d("measured on", "the real wiki: freshness said 9 of "
+                                               "10 pages stale while all 10 wrote "
+                                               "`current`, and one query returned "
+                                               "4 hits labelled `current` of which "
+                                               "4 were stale")],
+                     text=run_all["text"])
+
+        # ---- the pages nothing can be checked against ------------------------
+        problems = []
+        rows = []
+        unsourced = [p for p in L_PAGES if not p[L_SRCS]]
+        if len(unsourced) < 3:
+            problems.append("fixture drift: %d page(s) without `sources:`, so the "
+                            "not-checkable shapes are not covered" % len(unsourced))
+        for page in unsourced:
+            hit = by_slug.get(page[L_SLUG])
+            fm = ldrv.frontmatter(page[L_FILE])
+            if fm.get("sources"):
+                problems.append("premise broken: %s carries `sources:` after all"
+                                % page[L_FILE])
+            if hit is None:
+                problems.append("%s: not in the answer" % page[L_FILE])
+                continue
+            got = state_of(hit)
+            rows.append("%-18s fm=%-9s measured=%s"
+                        % (page[L_SLUG], fm.get("status"), got))
+            if got == "current":
+                problems.append("%s renders `current` although it has no anchors "
+                                "at all -- a page with nothing to compare can "
+                                "never be stale, which is emphatically not the "
+                                "same as being fresh" % page[L_FILE])
+            if got not in L_NOT_CHECKABLE:
+                problems.append("%s renders %r, which is not one of the "
+                                "not-checkable states %r"
+                                % (page[L_FILE], got, sorted(L_NOT_CHECKABLE)))
+            if got != page[L_STATE]:
+                problems.append("%s renders %r, the rule assigns %r"
+                                % (page[L_FILE], got, page[L_STATE]))
+        suite.record("L", "page-without-sources-is-never-current", problems,
+                     detail=[_d("pages", "%d without `sources:`" % len(unsourced)),
+                             _d("states", "%r"
+                                % sorted({p[L_STATE] for p in unsourced})),
+                             _d("why", "`no-sources`, `untracked`, `planned` and "
+                                       "`promotable` all mean NOT CHECKABLE; a "
+                                       "label that showed any of them as `current` "
+                                       "would re-tell the lie this work removes")]
+                            + ["        " + r for r in rows],
+                     text=run_all["text"])
+
+        # ---- the disclosure: once, with the right N of M ---------------------
+        # The expected count comes from the FIXTURE TABLE, not from the server's
+        # own `fm_status` bookkeeping: a page counts only if it wrote a status AND
+        # that status differs from the state the rule assigns it.
+        want_n = sum(1 for h in run_all["hits"]
+                     for p in [L_BY_SLUG[h["slug"]]]
+                     if p[L_STATUS] is not None and p[L_STATUS] != p[L_STATE])
+        want_m = len(run_all["hits"])
+        found = _FM_DISAGREE_RE.findall(run_all["text"])
+        agreeing = [p[L_SLUG] for p in L_PAGES if p[L_STATUS] == p[L_STATE]]
+        silent = [p[L_SLUG] for p in L_PAGES if p[L_STATUS] is None]
+        problems = []
+        if want_m != len(L_PAGES):
+            problems.append("fixture drift: %d of %d page(s) in the answer, so N "
+                            "of M is not being read against the whole corpus"
+                            % (want_m, len(L_PAGES)))
+        if not agreeing:
+            problems.append("fixture drift: every page disagrees, so 'the "
+                            "agreeing page is not counted' is vacuous")
+        if not silent:
+            problems.append("fixture drift: every page writes a status, so 'a "
+                            "page with no field is not counted' is vacuous")
+        if len(found) != 1:
+            problems.append("%d disclosure line(s), want exactly 1 -- it is ONE "
+                            "fact about how the wiki is kept, not per-hit news"
+                            % len(found))
+        elif (int(found[0][0]), int(found[0][1])) != (want_n, want_m):
+            problems.append("says %s of %s, want %d of %d"
+                            % (found[0][0], found[0][1], want_n, want_m))
+        if run_all["text"].count(FM_DISAGREE_SENTINEL) != 1:
+            problems.append("the phrase %r appears %d time(s) in the answer"
+                            % (FM_DISAGREE_SENTINEL,
+                               run_all["text"].count(FM_DISAGREE_SENTINEL)))
+        for slug in agreeing + silent:
+            if slug not in by_slug:
+                problems.append("%s is not rendered, so it cannot be counted in "
+                                "M either" % slug)
+        if want_n >= want_m:
+            problems.append("fixture drift: N (%d) is not strictly below M (%d), "
+                            "so a server that printed 'all of them' would pass"
+                            % (want_n, want_m))
+        suite.record("L", "disagreement-is-disclosed-once-with-the-right-count",
+                     problems,
+                     detail=[_d("rendered", "%r" % found),
+                             _d("oracle", "%d of %d, counted off the fixture table"
+                                % (want_n, want_m)),
+                             _d("excluded", "agreeing %r, no status field %r"
+                                % (agreeing, silent)),
+                             _d("why", "a page with no hand-written status has no "
+                                       "claim to disagree WITH -- and one whose "
+                                       "claim happens to be right is not evidence "
+                                       "the field is unmaintained")],
+                     text=run_all["text"])
+
+        # ---- the control: frontmatter that AGREES says nothing ---------------
+        agree_run = adrv.search(L_SHARED_TERM, limit=L_LIMIT)
+        problems = []
+        mismatched = []
+        for hit in agree_run["hits"]:
+            fm = adrv.frontmatter(L_BY_SLUG[hit["slug"]][L_FILE])
+            if fm.get("status") and fm.get("status") != state_of(hit):
+                mismatched.append((hit["slug"], fm.get("status"),
+                                   state_of(hit)))
+        if len(agree_run["hits"]) != len(L_PAGES):
+            problems.append("%d hit(s), want %d -- the control corpus must render "
+                            "the same pages as the other one"
+                            % (len(agree_run["hits"]), len(L_PAGES)))
+        if mismatched:
+            problems.append("premise broken: %r still disagree in the control "
+                            "corpus, so its silence proves nothing" % mismatched)
+        if _FM_DISAGREE_RE.search(agree_run["text"]):
+            problems.append("the disclosure fired although every field matches "
+                            "its measured state")
+        if FM_DISAGREE_SENTINEL in agree_run["text"]:
+            problems.append("the phrase %r appears anyway, in some other shape"
+                            % FM_DISAGREE_SENTINEL)
+        if not _FM_DISAGREE_RE.search(run_all["text"]):
+            problems.append("premise broken: the DISAGREEING corpus prints no "
+                            "disclosure either, so this silence is unconditional "
+                            "rather than earned")
+        suite.record("L", "agreeing-frontmatter-earns-no-disclosure", problems,
+                     detail=[_d("control", "the same ten pages with `status:` "
+                                           "written to the measured state"),
+                             _d("hits", "%d, all agreeing"
+                                % len(agree_run["hits"])),
+                             _d("line", "present=%r (the other corpus: %r)"
+                                % (bool(_FM_DISAGREE_RE.search(
+                                    agree_run["text"])),
+                                   bool(_FM_DISAGREE_RE.search(
+                                       run_all["text"])))),
+                             _d("contract", "silence when there is nothing to "
+                                            "report -- a maintained wiki pays "
+                                            "nothing for the disclosure")],
+                     text=agree_run["text"])
+
+        # ---- the status filter selects on the MEASURED state -----------------
+        problems = []
+        rows = []
+        for value in sorted({p[L_STATE] for p in L_PAGES}
+                            | {p[L_STATUS] for p in L_PAGES if p[L_STATUS]}):
+            got = sorted(h["slug"] for h in
+                         ldrv.search(L_SHARED_TERM, status=value,
+                                     limit=L_LIMIT)["hits"])
+            want = sorted(p[L_SLUG] for p in L_PAGES if p[L_STATE] == value)
+            claim = sorted(p[L_SLUG] for p in L_PAGES
+                           if (p[L_STATUS] or "") == value)
+            rows.append("status=%-16s -> %d hit(s); measured %d, field claims %d"
+                        % (value, len(got), len(want), len(claim)))
+            if got != want:
+                problems.append("status=%r selected %r, want the pages whose "
+                                "MEASURED state is %r: %r"
+                                % (value, got, value, want))
+            leaked = sorted(set(claim) - set(want))
+            if leaked and set(leaked) & set(got):
+                problems.append("status=%r returned %r, whose FRONTMATTER says "
+                                "%r but whose measured state does not -- the "
+                                "filter is still reading the field"
+                                % (value, sorted(set(leaked) & set(got)), value))
+        # The one that matters most: `current` is what every page in this corpus
+        # claims and what exactly one page measures.
+        cur = sorted(h["slug"] for h in
+                     ldrv.search(L_SHARED_TERM, status="current",
+                                 limit=L_LIMIT)["hits"])
+        claim_cur = sorted(p[L_SLUG] for p in L_PAGES if p[L_STATUS] == "current")
+        if len(claim_cur) < 2:
+            problems.append("fixture drift: only %d page(s) write "
+                            "`status: current`, so the filter has almost nothing "
+                            "to refuse" % len(claim_cur))
+        if len(cur) != 1:
+            problems.append("status='current' returned %r, want the single page "
+                            "whose sources are verified and unchanged" % cur)
+        suite.record("L", "status-filter-selects-the-measured-state", problems,
+                     detail=[_d("current", "%r selected of %d claiming the field"
+                                % (cur, len(claim_cur))),
+                             _d("why", "a filter that selected on the field while "
+                                       "the reply displayed the measurement would "
+                                       "contradict itself on screen")]
+                            + ["        " + r for r in rows],
+                     text=ldrv.search(L_SHARED_TERM, status="current",
+                                      limit=L_LIMIT)["text"])
+
+        # ---- source_to_pages renders the same state as search ----------------
+        s2p = ldrv.sources(L_SRC_CLEAN)
+        problems = []
+        rows = []
+        s2p_states = {}
+        for hit in s2p["hits"]:
+            page = L_BY_FILE.get(hit["path"])
+            got = hit["meta"].split("/", 1)[1] if "/" in hit["meta"] else ""
+            s2p_states[hit["path"]] = got
+            search_hit = by_slug.get(page[L_SLUG]) if page else None
+            rows.append("%-20s s2p=%-16s search=%s"
+                        % (hit["path"], got,
+                           state_of(search_hit) if search_hit else None))
+            if page is None:
+                problems.append("%r is not a fixture page" % hit["path"])
+                continue
+            if search_hit is None:
+                problems.append("%s: `search` did not render it, so the two "
+                                "cannot be compared" % hit["path"])
+                continue
+            if got != state_of(search_hit):
+                problems.append("%s: source_to_pages says %r, search says %r -- "
+                                "two renderings of one fact, and the caller has "
+                                "no way to know which one moved"
+                                % (hit["path"], got, state_of(search_hit)))
+            if got != page[L_STATE]:
+                problems.append("%s: rendered %r, the rule assigns %r"
+                                % (hit["path"], got, page[L_STATE]))
+        if len(s2p["hits"]) < 2:
+            problems.append("fixture drift: %d hit(s), so 'the same states' is a "
+                            "claim about one page" % len(s2p["hits"]))
+        if len(set(s2p_states.values())) < 2:
+            problems.append("fixture drift: every hit renders %r, so a server "
+                            "that printed one constant would pass"
+                            % sorted(set(s2p_states.values())))
+        if not _FM_DISAGREE_RE.search(s2p["text"]):
+            problems.append("the reverse lookup prints no disclosure although "
+                            "%d of its hits disagree with their own field"
+                            % sum(1 for p, s in s2p_states.items()
+                                  if (L_BY_FILE[p][L_STATUS] or "") not in ("", s)))
+        suite.record("L", "source-to-pages-renders-the-same-state-as-search",
+                     problems,
+                     detail=[_d("call", "source_to_pages %r" % L_SRC_CLEAN),
+                             _d("states", "%r" % sorted(set(s2p_states.values()))),
+                             _d("why", "one classifier, two callers: a second copy "
+                                       "of the rule would be a second place to "
+                                       "edit, and this repo has paid for that "
+                                       "shape three times")]
+                            + ["        " + r for r in rows],
+                     text=s2p["text"])
+
+        # ---- the extraction changed nothing: `freshness`, byte for byte ------
+        # HEAD's copy of the server, driven against the SAME workspace with the
+        # SAME stubbed git boundary.  The claim is not "freshness still works" --
+        # it is that lifting the if/else chain out of `freshness_analyze` into
+        # `_classify_page` did not move one character of its output.
+        rc, blob, err = H.run_process(
+            ["git", "show", "HEAD:Scripts/mcp-wiki.py"], cwd=H.REPO_ROOT)
+        problems = []
+        b_text = c_text = ""
+        b_report = c_report = None
+        differs = None
+        if rc != 0 or not blob:
+            problems.append("could not read HEAD's copy of the server (rc=%d, "
+                            "stderr=%r) -- without it this case has no baseline "
+                            "to compare against" % (rc, err[:120]))
+        else:
+            with open(SERVER, "r", encoding="utf-8") as fh:
+                differs = fh.read() != blob
+            base_path = st_work.write_text("baseline_server.py", blob)
+            bsdrv = Driver(st_root, server=base_path,
+                           name="mcp_wiki_state_baseline")
+            patch_git_boundary(bsdrv.mod, st_root)
+            b_text, c_text = bsdrv.freshness(), ldrv.freshness()
+            b_report = bsdrv.mod.freshness_analyze(bsdrv.abs_wiki, "HEAD")
+            c_report = ldrv.mod.freshness_analyze(ldrv.abs_wiki, "HEAD")
+            if b_text != c_text:
+                problems.append("the rendered report is NOT byte-identical:\n"
+                                "  HEAD %r\n  work %r" % (b_text, c_text))
+            if b_report != c_report:
+                problems.append("freshness_analyze returns a different dict:\n"
+                                "  HEAD %r\n  work %r" % (b_report, c_report))
+            states = set((c_report or {}).get("summary", {}))
+            if len(states) < 5:
+                problems.append("the report covers only %r, so most of the "
+                                "extracted if/else chain was never executed and "
+                                "the identity claim is thin" % sorted(states))
+        suite.record("L", "freshness-is-byte-identical-to-the-committed-server",
+                     problems,
+                     detail=[_d("baseline", "git show HEAD:Scripts/mcp-wiki.py "
+                                            "(%d chars, differs from the "
+                                            "worktree: %r)" % (len(blob), differs)),
+                             _d("identical", "%r" % (b_text == c_text)),
+                             _d("summary", "%r"
+                                % ((c_report or {}).get("summary"),)),
+                             _d("note", "vacuous when the worktree is clean -- the "
+                                        "DURABLE form of this claim is the "
+                                        "one-authority case below, which needs no "
+                                        "baseline at all")],
+                     text=c_text)
+
+        # ---- one authority: `_classify_page` IS what freshness reports -------
+        # The durable half of the case above: no matter what the two callers do
+        # later, the recall path's state for a page must be, dict for dict, the
+        # entry `freshness` publishes for it -- extra keys included, because
+        # `changed_sources` / `missing` / `verified_at` are the evidence.
+        report = ldrv.mod.freshness_analyze(ldrv.abs_wiki, "HEAD")
+        by_rel = {p["path"]: p for p in report["pages"]}
+        problems = []
+        rows = []
+        for page in L_PAGES:
+            got = ldrv.classify(page[L_FILE])
+            want = by_rel.get(page[L_FILE])
+            rows.append("%-20s %-16s %s"
+                        % (page[L_FILE], got.get("status"),
+                           "== freshness" if got == want else "!= freshness"))
+            if want is None:
+                problems.append("%s: freshness does not report this page at all"
+                                % page[L_FILE])
+                continue
+            if got != want:
+                problems.append("%s: the recall path classifies %r, freshness "
+                                "publishes %r" % (page[L_FILE], got, want))
+            if got.get("status") != page[L_STATE]:
+                problems.append("%s: state %r, the rule assigns %r"
+                                % (page[L_FILE], got.get("status"),
+                                   page[L_STATE]))
+        if len(by_rel) != len(L_PAGES):
+            problems.append("freshness reports %d page(s), the fixture has %d"
+                            % (len(by_rel), len(L_PAGES)))
+        if len({p[L_STATE] for p in L_PAGES}) < 8:
+            problems.append("fixture drift: only %d distinct state(s), so the "
+                            "agreement is not tested over the whole rule"
+                            % len({p[L_STATE] for p in L_PAGES}))
+        suite.record("L", "classify-page-is-the-only-authority-on-state", problems,
+                     detail=[_d("pages", "%d, %d distinct state(s)"
+                                % (len(L_PAGES),
+                                   len({p[L_STATE] for p in L_PAGES}))),
+                             _d("states", "%r" % L_ALL_STATES),
+                             _d("compared", "the whole dict, not just `status`: "
+                                            "changed_sources / missing / "
+                                            "verified_at / reason are the evidence "
+                                            "behind the word")]
+                            + ["        " + r for r in rows],
+                     text="")
+
+        # ---- the state is classified once per page per reply ------------------
+        counted = []
+        _orig_classify = ldrv.mod._classify_page
+
+        def _counting_classify(relpath, fm, repo, changed_for):
+            counted.append(relpath)
+            return _orig_classify(relpath, fm, repo, changed_for)
+
+        ldrv.mod._classify_page = _counting_classify
+        try:
+            counted.clear()
+            ldrv.search(L_SHARED_TERM, limit=L_LIMIT)
+            search_calls = list(counted)
+            counted.clear()
+            ldrv.sources(L_SRC_CLEAN)
+            s2p_calls = list(counted)
+            counted.clear()
+            ldrv.freshness()
+            fresh_calls = list(counted)
+            # The gated query, measured for its own sake: the classification
+            # happens INSIDE the scoring loop, i.e. before the relevance gate
+            # runs, so a query that is refused still pays for every lexical
+            # candidate.  Reported, not gated -- the position is what makes the
+            # `status` filter agree with the label, and that is worth the cost.
+            counted.clear()
+            gated_run = ldrv.search(L_GATED_QUERY)
+            gated_calls = list(counted)
+            # A query only SOME pages match, which is the only shape that can
+            # see whether the classifier sits after the lexical test or before
+            # it.  Both positions render the same answer, so nothing else in
+            # this file can tell them apart -- and the difference is a git diff
+            # per non-matching page on every call.
+            counted.clear()
+            narrow_run = ldrv.search(L_ANCHOR_TERM)
+            narrow_calls = list(counted)
+        finally:
+            ldrv.mod._classify_page = _orig_classify
+        problems = []
+        if not (0 < len(narrow_run["hits"]) < len(L_PAGES)):
+            problems.append("fixture drift: %r matches %d of %d page(s), so "
+                            "'classified only for pages that matched' cannot be "
+                            "distinguished from 'classified for the corpus'"
+                            % (L_ANCHOR_TERM, len(narrow_run["hits"]),
+                               len(L_PAGES)))
+        elif len(narrow_calls) != len(narrow_run["hits"]):
+            problems.append("%r rendered %d hit(s) but classified %d page(s) -- "
+                            "the state is being measured before the lexical "
+                            "test, so a query with one answer pays a git diff "
+                            "for every page that has nothing to do with it"
+                            % (L_ANCHOR_TERM, len(narrow_run["hits"]),
+                               len(narrow_calls)))
+        for label, calls in (("search", search_calls),
+                             ("source_to_pages", s2p_calls),
+                             ("freshness", fresh_calls),
+                             ):
+            if not calls:
+                problems.append("%s classified nothing, so the count proves "
+                                "nothing" % label)
+            dupes = sorted({p for p in calls if calls.count(p) > 1})
+            if dupes:
+                problems.append("%s classified %r more than once -- every extra "
+                                "call is a git diff the reply did not need"
+                                % (label, dupes))
+        if len(search_calls) > len(L_PAGES):
+            problems.append("search classified %d time(s) over a %d-page corpus"
+                            % (len(search_calls), len(L_PAGES)))
+        # A SILENCED query must pay nothing. The classifier runs after the coverage
+        # gate and the limit, so the pages the caller never sees are never
+        # classified -- and one corpus-wide token drags every page into the lexical
+        # match, which is why "after the match" was not narrow enough on its own.
+        if gated_calls:
+            problems.append("the gated query classified %d page(s) for a reply "
+                            "that renders none -- a silenced query must pay no git"
+                            % len(gated_calls))
+        suite.record("L", "state-is-classified-once-per-page-per-reply", problems,
+                     detail=[_d("search", "%d call(s), %d distinct"
+                                % (len(search_calls), len(set(search_calls)))),
+                             _d("source_to_pages", "%d call(s), %d distinct"
+                                % (len(s2p_calls), len(set(s2p_calls)))),
+                             _d("freshness", "%d call(s), %d distinct"
+                                % (len(fresh_calls), len(set(fresh_calls)))),
+                             _d("gated", "%d classification(s) for %d rendered "
+                                         "hit(s) -- the gate and the limit run "
+                                         "BEFORE the classifier, so a silenced "
+                                         "query pays nothing"
+                                % (len(gated_calls), len(gated_run["hits"]))),
+                             _d("narrow", "%r: %d hit(s), %d classification(s) "
+                                          "-- equal, so the state is measured "
+                                          "AFTER the lexical test"
+                                % (L_ANCHOR_TERM, len(narrow_run["hits"]),
+                                   len(narrow_calls))),
+                             _d("why", "the classification is cheap only because "
+                                       "the diff behind it is memoized; asking "
+                                       "twice for one page is asking git twice")],
+                     text="")
+
+        # ---- the filter moved AFTER the scoring loop: nothing else moved -----
+        # `status` used to be applied BEFORE the score was computed and is now
+        # applied after it.  A surviving page's score, coverage and `missed:` are
+        # functions of the GLOBAL corpus statistics alone, so the position cannot
+        # touch them -- and `best coverage N%` is the coverage of the top-scoring
+        # SURVIVOR, before and after, which this case pins in both directions.
+        gated = ldrv.search(L_GATED_QUERY)
+        ungated = ldrv.search(L_GATED_QUERY, min_coverage=0.0, limit=L_LIMIT)
+        problems = []
+        rows = []
+        top = ungated["hits"][0] if ungated["hits"] else None
+        top_state = state_of(top) if top else ""
+        keep = ldrv.search(L_GATED_QUERY, status=top_state)
+        keep_ungated = ldrv.search(L_GATED_QUERY, min_coverage=0.0,
+                                   status=top_state, limit=L_LIMIT)
+        drop_state = next((s for s in L_ALL_STATES if s != top_state
+                           and any(p[L_STATE] == s for p in L_PAGES)), "")
+        drop = ldrv.search(L_GATED_QUERY, status=drop_state)
+        if not ungated["hits"]:
+            problems.append("the probe query matches nothing, so there is nothing "
+                            "to compare")
+        if gated["hits"]:
+            problems.append("premise broken: %r is not gated out (%d hit(s)), so "
+                            "no `best coverage` line is rendered at all"
+                            % (L_GATED_QUERY, len(gated["hits"])))
+        if gated["best_pct"] is None:
+            problems.append("premise broken: the refusal reports no best coverage")
+        if len(keep_ungated["hits"]) >= len(ungated["hits"]):
+            problems.append("premise broken: status=%r removed nothing (%d of %d), "
+                            "so 'the survivors kept their numbers' is not a claim "
+                            "about a filtered run"
+                            % (top_state, len(keep_ungated["hits"]),
+                               len(ungated["hits"])))
+        base_nums = {h["slug"]: (h["score"], h["cov"], tuple(h["missed"]))
+                     for h in ungated["hits"]}
+        for hit in keep_ungated["hits"]:
+            got = (hit["score"], hit["cov"], tuple(hit["missed"]))
+            rows.append("%-18s unfiltered %r  filtered %r"
+                        % (hit["slug"], base_nums.get(hit["slug"]), got))
+            if base_nums.get(hit["slug"]) != got:
+                problems.append("%s: score/cov/missed moved when a status filter "
+                                "was added: %r -> %r"
+                                % (hit["slug"], base_nums.get(hit["slug"]), got))
+        if top is not None and keep["best_pct"] != gated["best_pct"]:
+            problems.append("the refusal reports best coverage %r%% with the "
+                            "filter and %r%% without it, although the top-scoring "
+                            "page (%s, state %r) survives BOTH"
+                            % (keep["best_pct"], gated["best_pct"], top["slug"],
+                               top_state))
+        # The other direction, so the case states the real semantics rather than
+        # only the invariant half: a filter that removes the best page DOES move
+        # the number, and always has -- `best_cov` is the best SURVIVOR's.
+        if drop_state and drop["best_pct"] == gated["best_pct"]:
+            problems.append("status=%r reports the same best coverage %r%% "
+                            "although it removes every page that scored that -- "
+                            "the number would then be an artefact, not the best "
+                            "survivor's" % (drop_state, drop["best_pct"]))
+        suite.record("L", "status-filter-does-not-perturb-score-or-best-coverage",
+                     problems,
+                     detail=[_d("query", repr(L_GATED_QUERY)),
+                             _d("top", "%s [%s] cov %r%%"
+                                % (top["slug"] if top else None, top_state,
+                                   top["cov"] if top else None)),
+                             _d("best cov", "no filter %r%%, status=%r %r%%, "
+                                            "status=%r %r%%"
+                                % (gated["best_pct"], top_state,
+                                   keep["best_pct"], drop_state,
+                                   drop["best_pct"])),
+                             _d("survivors", "%d of %d at min_coverage=0.0"
+                                % (len(keep_ungated["hits"]),
+                                   len(ungated["hits"]))),
+                             _d("proof", "score and coverage are functions of the "
+                                         "GLOBAL df/idf table, which is built "
+                                         "before any filter runs -- so no filter, "
+                                         "at any position, can move them")]
+                            + ["        " + r for r in rows],
+                     text=gated["text"])
+
+        # ---- the cross-call memo: it memoizes, and it dies with HEAD ---------
+        cache_root = build_state_fixture(cache_work, agree=False)
+        cache_work.write_text(os.path.join(".git", "HEAD"), "%s\n" % ("a" * 40))
+        cdrv = Driver(cache_root, name="mcp_wiki_state_memo")
+        c_log = patch_git_boundary(cdrv.mod, cache_root)
+        cdrv.mod._FRESH_CACHE.clear()
+        cdrv.search(L_SHARED_TERM)
+        first = list(c_log)
+        c_log.clear()
+        cdrv.search(L_SHARED_TERM)
+        second = list(c_log)
+        cache_work.write_text(os.path.join(".git", "HEAD"), "%s\n" % ("b" * 40))
+        c_log.clear()
+        cdrv.search(L_SHARED_TERM)
+        third = list(c_log)
+        problems = []
+        if cdrv.mod._head_sha_nospawn(cache_root) != "b" * 40:
+            problems.append("premise broken: _head_sha_nospawn reads %r, not the "
+                            "sha just written -- the memo cannot be keyed on HEAD "
+                            "here" % cdrv.mod._head_sha_nospawn(cache_root))
+        if not first:
+            problems.append("the first reply resolved no commit, so there is "
+                            "nothing to memoize")
+        if second:
+            problems.append("the second identical reply re-resolved %r -- the memo "
+                            "is not memoizing, and each entry is a git diff"
+                            % second)
+        if sorted(third) != sorted(first):
+            problems.append("after HEAD moved the reply resolved %r, want the "
+                            "same commits as the cold run %r -- a memo that "
+                            "survives a HEAD change answers about a repo that no "
+                            "longer exists" % (sorted(third), sorted(first)))
+        if len(cdrv.mod._FRESH_CACHE) != 1:
+            problems.append("_FRESH_CACHE holds %d entr(ies) %r; the old HEAD's "
+                            "one can never be asked about again"
+                            % (len(cdrv.mod._FRESH_CACHE),
+                               list(cdrv.mod._FRESH_CACHE)))
+        suite.record("L", "diff-memo-spans-calls-and-dies-with-head", problems,
+                     detail=[_d("cold", "%d commit(s) resolved: %r"
+                                % (len(first), sorted(c for c, _h in first))),
+                             _d("warm", "%d" % len(second)),
+                             _d("after HEAD", "%d" % len(third)),
+                             _d("store", "%r" % [k[1][:8]
+                                                 for k in cdrv.mod._FRESH_CACHE]),
+                             _d("why", "each miss is a ~47 ms subprocess and 98% "
+                                       "of that is process startup, so the memo "
+                                       "is the difference between a 5 ms reply and "
+                                       "a 250 ms one")],
+                     text="")
+
+        # ---- two repos in one process: slow is fine, wrong is not ------------
+        # `_recall_diff_cache` CLEARS the whole store on a miss, not only on a
+        # HEAD move -- and the `root` param lets one process be asked about two
+        # different repos.  What must never happen is one repo being served the
+        # other's changed-file sets.
+        mem = cdrv.mod
+        repo_a = os.path.join(cache_work.path, "repoA")
+        repo_b = os.path.join(cache_work.path, "repoB")
+        for path, sha in ((repo_a, "1" * 40), (repo_b, "2" * 40)):
+            cache_work.write_text(os.path.join(os.path.basename(path), ".git",
+                                               "HEAD"), "%s\n" % sha)
+        mem._FRESH_CACHE.clear()
+        dict_a = mem._recall_diff_cache(repo_a)
+        dict_a["sentinel-A"] = {"a"}
+        dict_b = mem._recall_diff_cache(repo_b)
+        dict_b["sentinel-B"] = {"b"}
+        dict_a2 = mem._recall_diff_cache(repo_a)
+        dict_b2 = mem._recall_diff_cache(repo_b)
+        problems = []
+        if mem._head_sha_nospawn(repo_a) == mem._head_sha_nospawn(repo_b):
+            problems.append("premise broken: both fixture repos report HEAD %r, "
+                            "so the two keys are indistinguishable"
+                            % mem._head_sha_nospawn(repo_a))
+        if "sentinel-B" in dict_a2:
+            problems.append("repo A was handed repo B's changed-file sets (%r) -- "
+                            "the label it renders would be measured against the "
+                            "wrong repository" % sorted(dict_a2))
+        if "sentinel-A" in dict_b2:
+            problems.append("repo B was handed repo A's changed-file sets (%r)"
+                            % sorted(dict_b2))
+        if "sentinel-A" in dict_b or "sentinel-B" in dict_a:
+            problems.append("the two dicts are the same object, so every entry "
+                            "either repo computes is served to the other")
+        suite.record("L", "two-repos-never-share-a-changed-file-set", problems,
+                     detail=[_d("A then B", "A kept its memo across B's call: %r"
+                                % ("sentinel-A" in dict_a2)),
+                             _d("A again", "%r" % sorted(dict_a2)),
+                             _d("B again", "%r" % sorted(dict_b2)),
+                             _d("store", "%d entr(ies) after four calls"
+                                % len(mem._FRESH_CACHE)),
+                             _d("measured", "the store is CLEARED on any miss, not "
+                                            "only on a HEAD move, so alternating "
+                                            "roots recomputes every time -- slow, "
+                                            "and correct: a dropped memo can only "
+                                            "cost a subprocess, never a wrong "
+                                            "label")],
+                     text="")
+    finally:
+        st_work.cleanup()
+        ag_work.cleanup()
+        cache_work.cleanup()
 
     # ============ H: hygiene ============
     pyc_after = H.pycache_snapshot()
