@@ -1,37 +1,54 @@
 #!/usr/bin/env python3
 """Mechanical suite for the `search` relevance gate in Scripts/mcp-wiki.py
-(30 cases, A-H).
+(36 cases, A-I).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/.  Nothing is spawned, nothing
 is written outside mkdtemp, and `reindex`/`freshness` are never called.
 
-The fixture is not decoration.  It reproduces, in miniature, the two measured
-pathologies the gate exists for:
+The fixture is not decoration.  It reproduces, in miniature, the measured
+pathologies the gate and the query-side stoplist exist for:
 
   * one token (`mcp`) sits in EVERY page, so "zero terms matched" -- the only
-    silencing condition the pre-gate search had -- can never fire.  `the` is
-    ubiquitous for the same reason and by accident of prose, which is exactly
-    how it happens in a real corpus.
+    silencing condition the pre-gate search had -- can never fire.  It is also
+    what keeps a should-be-silent query LEXICALLY matching once the function
+    words are dropped: every page still enters the candidate set, so the refusal
+    has to come from the COVERAGE GATE rather than from the "nothing matched"
+    arm.  That is the shape measured on the real wiki -- `mcp server output
+    verbosity token cost`, where `output`/`token`/`cost` hit real pages and
+    `verbosity` exists nowhere, coverage 49%, gate refuses.
+  * the DISCRIMINATING term of a should-be-silent query (`telemetry`, `vendor`)
+    is absent from the corpus, and a df-0 term takes the MAXIMUM idf, so it
+    drags coverage under the bar no matter how many ubiquitous tokens the query
+    also hits.
   * one page (detour-notes) carries ONLY the function words of a question
     ("why did we ...") and NONE of its content terms, and those function words
-    are RARE in a six-page corpus, so their idf is near the maximum.  That is
-    the small-corpus inversion, measured: idf(`why`) = 1.540 while
-    idf(`mcp`) = 0.074, so the page that answers nothing outranks every page
-    that answers something.
+    are RARE in a six-page corpus, so their idf is near the maximum: measured,
+    idf(`why`) = 1.540 while idf(`mcp`) = 0.074, so pre-stoplist the page that
+    answers nothing outranked every page that answers something.  That is the
+    small-corpus inversion, and it is the reason QUERY_STOPWORDS exists.  Group D
+    still MEASURES it on the raw term list (the only place it is visible now);
+    group I asserts the drop defuses it -- the decoy no longer wins.
+  * `zzqx wibblefrotz` matches nothing lexically at all, so the "no matching
+    pages" arm stays covered and group B's distinction stays real rather than
+    hypothetical.
 
 Everything numeric is DERIVED, never typed:
   * the gate value comes from `mod.DEFAULT_MIN_COVERAGE`;
+  * the stoplist comes from `mod.QUERY_STOPWORDS` -- group I keeps no copy of
+    it, because a hardcoded list would still pass after somebody swapped in a
+    standard stoplist, which is the exact edit group I exists to catch;
   * the calibration window in group D is MEASURED by driving the server at
     `min_coverage: 0.0` and parsing `cov N%` off the rendered hit lines;
   * group F's exact coverages are recomputed from the server's OWN building
-    blocks (`_tokenize`, `_build_corpus_cached`, `_prefix_count`, the idf
-    formula), so the floor-vs-round claim is checked against a real float
-    instead of a constant somebody once observed.
+    blocks (`_tokenize`, `QUERY_STOPWORDS`, `_build_corpus_cached`,
+    `_prefix_count`, the idf formula), so the floor-vs-round claim is checked
+    against a real float instead of a constant somebody once observed.
 
 Coverage by group:
   A  the gate can be SILENT: a query whose discriminating term is unknown to
-     the corpus returns zero hits, names the unknown term, and says why
+     the corpus returns zero hits, names the unknown term, and says why -- while
+     still matching every page lexically, so it is the GATE that refuses
   B  nothing-matched and gated-out are DIFFERENT silences.  The caller's next
      move differs -- rephrase versus "this topic is undocumented" -- so the two
      sentences must never be confusable
@@ -56,6 +73,13 @@ Coverage by group:
      regression escape hatch), 1.0 admits only pages matching every term, the
      dispatcher accepts the param, and garbage falls back to the default
   H  hygiene: the run leaves no __pycache__ behind
+  I  the query-side stopword drop: it is DISCLOSED and names exactly the words
+     it dropped, it stays silent when there was nothing to drop, an
+     all-function-words query gets a THIRD silence of its own (all three are
+     mutually distinguishable), the drop actually re-orders the ranking so the
+     function-word decoy stops winning, and the two deliberate NON-drops
+     (`search`, a function name here; `done`, a plausible frontmatter status)
+     still reach the search
 
 Usage:
   python3 tests/test_wiki_recall.py
@@ -89,8 +113,14 @@ WIKI_REL = "wiki"
 #   df 3 : search
 #   df 2 : coverage, gate, field, frontmatter
 #   df 1 : why, did, we, replace, pipeline, calibration, threshold, relevance,
-#          bm25f, boost, slug, dispatcher
-#   df 0 : telemetry, quantile, vendor, grafana, dashboard, zzqx, wibblefrotz
+#          bm25f, boost, slug, dispatcher, cache, signature, tokenizer
+#   df 0 : telemetry, quantile, vendor, grafana, dashboard, done, zzqx,
+#          wibblefrotz
+#
+# `mcp` is the load-bearing one twice over: it defeats "zero terms matched", and
+# because it is not a function word it SURVIVES the query-side stoplist -- which
+# is what keeps a should-be-silent query in the candidate set at all now, so the
+# coverage gate (not the nothing-matched arm) is what does the refusing.
 #
 # `why`, `did` and `we` live on ONE page only -- the decoy -- which is why they
 # are worth 1.540 each while `mcp` is worth 0.074.  Every other page therefore
@@ -98,6 +128,12 @@ WIKI_REL = "wiki"
 # matching is by prefix, so a single "weighting" elsewhere would collapse the
 # inversion this fixture exists to reproduce.  Group D re-measures the df table
 # on every run, so a drift shows up as a named failure rather than as silence.
+#
+# `cache` + `signature` sit on corpus-cache and `tokenizer` sits on the decoy
+# ALONE: that split is group I's ranking contest, and it only proves anything
+# because neither side carries any of the other's terms.  `done` is absent from
+# every page on purpose -- being reported `unknown to the corpus` is how the
+# suite OBSERVES that the server did not silently drop it as a stopword.
 # ---------------------------------------------------------------------------
 
 P_GATE = ("relevance-gate.md", "relevance-gate", "adr", """\
@@ -281,16 +317,32 @@ query side keeps nothing at all.
 PAGES = [P_GATE, P_RANKING, P_SERVER, P_DETOUR, P_SNIPPET, P_CACHE]
 SLUG_TO_REL = {slug: fname for fname, slug, _t, _x in PAGES}
 DECOY_REL = P_DETOUR[0]
+DECOY_SLUG = P_DETOUR[1]
+# The page group I's ranking contest must be won by: it carries the CONTENT terms
+# of a question whose function words all live on the decoy.
+CONTENT_SLUG = P_CACHE[1]
 
 # ---------------------------------------------------------------------------
 # The queries.  Two populations, and the whole suite turns on keeping them apart.
 # ---------------------------------------------------------------------------
 
-# Should be SILENT: the discriminating term is unknown to the corpus and the
-# only thing that matches is the decoy's function-word hoard.
-Q_SILENT_NEAR = "why did we replace the telemetry pipeline"
-Q_SILENT_FAR = "why did we vendor the grafana dashboard"
+# Should be SILENT -- and silenced by the GATE, which is a stronger claim than
+# it looks.  Each query keeps LEXICAL matches on every page (`mcp` is in all six
+# and survives the stoplist) while its DISCRIMINATING term is unknown to the
+# corpus, so the candidate set is full and the refusal has to be earned on
+# coverage.  A query whose survivors were ALL unknown would take the
+# nothing-matched arm instead and prove something else entirely -- Q_NONSENSE
+# below is there to cover that arm deliberately, not by accident.
+#
+# The function words are still in both queries on purpose: the refusal has to
+# co-exist with the `ignored function words:` disclosure, and group D probes the
+# decoy with Q_SILENT_NEAR's raw term list.
+Q_SILENT_NEAR = "why did we replace the mcp telemetry pipeline"
+Q_SILENT_FAR = "how does the mcp search vendor its grafana dashboard"
 SILENT = [("silent-near", Q_SILENT_NEAR), ("silent-far", Q_SILENT_FAR)]
+# The content terms of Q_SILENT_NEAR that DISCRIMINATE -- i.e. everything except
+# the corpus-wide `mcp`.  The decoy must carry none of them.
+NEAR_DISCRIMINATING = ("replace", "telemetry", "pipeline")
 
 # Matches NOTHING, lexically -- a different silence with a different remedy.
 Q_NONSENSE = "zzqx wibblefrotz"
@@ -310,6 +362,24 @@ ANSWERS = [
 # Winner coverage 0.787587 -> floors to 78, rounds to 79.  Group F's whole point.
 Q_FLOOR = "calibration coverage search"
 
+# ---- group I: the query-side stopword drop ---------------------------------
+# A real question, mixing four function words with four content words, that
+# still has an answer -- so the disclosure is checked next to a ranking rather
+# than next to a refusal.
+Q_MIXED = "why is the coverage gate in the mcp search"
+# Nothing but function words: the THIRD silence, which must not borrow either of
+# the other two sentences.
+Q_ALL_FUNCTION = "why did we do that"
+# The ranking contest.  `cache` + `signature` are on corpus-cache, `tokenizer` is
+# on the decoy, and the decoy also owns `why`/`did`/`we` -- the words that used
+# to hand it the query.  The content page has to win on content alone.
+Q_DECOY = "why did we cache the tokenizer signature"
+# The two deliberate NON-stopwords.  `search` has df 3 so its survival is visible
+# as hits; `done` has df 0 so its survival is visible as `unknown to the corpus`.
+# Neither observation is possible if the word is dropped before df is computed.
+Q_KEEP = "search done"
+KEEP_WORDS = ("search", "done")
+
 # Every token whose df this fixture pins.  df is a per-term quantity, so one
 # probe query measures the entire table in a single corpus pass.
 PROBE_ALL = ("mcp the why did we replace pipeline coverage gate calibration "
@@ -318,7 +388,9 @@ PROBE_ALL = ("mcp the why did we replace pipeline coverage gate calibration "
 
 GATE_MSG = "no page passes the relevance gate"
 NO_MATCH_MSG = "no matching pages"
+ALL_FUNC_MSG = "the query is all function words"
 UNKNOWN_MSG = "unknown to the corpus:"
+IGNORED_MSG = "ignored function words:"
 MISSED_PREFIX = "   missed: "
 
 
@@ -334,7 +406,13 @@ _HIT_RE = re.compile(
 
 _HEADER_RE = re.compile(r"— (\d+) hit\(s\) in ")
 _UNKNOWN_RE = re.compile(r"^unknown to the corpus: (.*)$", re.M)
+_IGNORED_RE = re.compile(r"^ignored function words: (.*)$", re.M)
 _GATE_RE = re.compile(GATE_MSG + r" \(best coverage (\d+)%, need (\d+)%\)")
+# The third silence names the words it threw away, so the list is parsed out and
+# compared term-by-term -- "it said something about function words" is not the
+# contract, "it said WHICH ones" is.
+_ALL_FUNC_RE = re.compile(
+    r"^" + ALL_FUNC_MSG + r" \(([^)]*)\) — nothing left to search for$", re.M)
 
 
 def _csv(raw):
@@ -365,16 +443,22 @@ def parse_answer(text):
         })
     hm = _HEADER_RE.search(text)
     um = _UNKNOWN_RE.search(text)
+    im = _IGNORED_RE.search(text)
     gm = _GATE_RE.search(text)
+    fm = _ALL_FUNC_RE.search(text)
     return {
         "hits": hits,
         "header_hits": int(hm.group(1)) if hm else None,
         "unknown": _csv(um.group(1)) if um else [],
         "has_unknown_line": um is not None,
+        "ignored": _csv(im.group(1)) if im else [],
+        "has_ignored_line": im is not None,
         "best_pct": int(gm.group(1)) if gm else None,
         "need_pct": int(gm.group(2)) if gm else None,
         "has_gate_msg": GATE_MSG in text,
         "has_no_match_msg": NO_MATCH_MSG in text,
+        "has_all_func_msg": ALL_FUNC_MSG in text,
+        "all_func_words": _csv(fm.group(1)) if fm else [],
         "missed_lines": [ln for ln in lines if ln.startswith(MISSED_PREFIX)],
     }
 
@@ -400,18 +484,38 @@ class Driver:
         out["params"] = payload
         return out
 
-    def measure(self, query):
+    def split_query(self, query):
+        """(dropped, kept) for a query, split by the server's OWN stoplist.
+
+        Reads `QUERY_STOPWORDS` out of the module under test instead of keeping a
+        copy here: a suite that hardcoded the word list would still pass after
+        somebody swapped in a standard stoplist, and that edit is exactly what
+        group I exists to catch.
+        """
+        raw = list(dict.fromkeys(self.mod._tokenize(query)))
+        stop = self.mod.QUERY_STOPWORDS
+        return ([t for t in raw if t in stop], [t for t in raw if t not in stop])
+
+    def measure(self, query, drop_stopwords=True):
         """Recompute df / idf / per-page coverage from the server's OWN parts.
 
         Not a second implementation of search: it reuses `_tokenize`,
-        `_build_corpus_cached`, `_prefix_count`, `_SEARCH_FIELDS` and the idf
-        expression from the module under test, so what it produces is the exact
-        float the renderer was handed.  That is what makes "floored, not
-        rounded" checkable at all -- the rendered integer alone cannot say
-        which operation produced it.
+        `QUERY_STOPWORDS`, `_build_corpus_cached`, `_prefix_count`,
+        `_SEARCH_FIELDS` and the idf expression from the module under test, so
+        what it produces is the exact float the renderer was handed.  That is
+        what makes "floored, not rounded" checkable at all -- the rendered
+        integer alone cannot say which operation produced it.
+
+        `drop_stopwords` mirrors `_fn_search`, which drops the function words
+        BEFORE it counts df, so the default is the only setting that reproduces
+        what the server actually computed.  Pass False for the RAW table: the
+        small-corpus idf inversion lives entirely in terms the search now refuses
+        to score, so group D can measure it nowhere else.
         """
         mod = self.mod
         terms = list(dict.fromkeys(mod._tokenize(query)))
+        if drop_stopwords:
+            terms = [t for t in terms if t not in mod.QUERY_STOPWORDS]
         corpus, _avgfl, n_docs = mod._build_corpus_cached(self.abs_wiki)
         per_page = {}
         for pd in corpus:
@@ -464,7 +568,8 @@ def naive_round(value):
 def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME, title="mcp-wiki `search` relevance gate: silence, "
-                                "measured calibration window, floored percentages",
+                                "measured calibration window, floored "
+                                "percentages, query-side stopwords",
                     opts=opts, mode="grouped")
     work = H.TempWorkspace("ph-wiki-recall-", keep=opts.keep)
     pyc_before = H.pycache_snapshot()
@@ -493,9 +598,10 @@ def run(opts=None):
                      detail=[_d("query", repr(Q_SILENT_NEAR)),
                              _d("min_coverage", "default (%.2f)" % gate),
                              _d("header", "%r hit(s)" % near["header_hits"]),
-                             _d("why", "`telemetry` is unknown to the corpus, so "
-                                       "the decoy's function-word hoard is all "
-                                       "that matches")],
+                             _d("why", "`telemetry` is unknown to the corpus and "
+                                       "takes the maximum idf, while the only "
+                                       "term every page shares is the near-"
+                                       "worthless `mcp`")],
                      text=near["text"])
 
         problems = []
@@ -535,6 +641,10 @@ def run(opts=None):
                             % (far["header_hits"], len(far["hits"])))
         if not far["has_gate_msg"]:
             problems.append("missing %r" % GATE_MSG)
+        if far["has_no_match_msg"]:
+            problems.append("claims %r, but `mcp` and `search` matched -- this "
+                            "query must be refused by the GATE, or it stops "
+                            "testing the gate" % NO_MATCH_MSG)
         if far["unknown"] != ["vendor", "grafana", "dashboard"]:
             problems.append("unknown list %r, want ['vendor', 'grafana', "
                             "'dashboard']" % far["unknown"])
@@ -542,9 +652,11 @@ def run(opts=None):
                      detail=[_d("query", repr(Q_SILENT_FAR)),
                              _d("header", "%r hit(s)" % far["header_hits"]),
                              _d("unknown", "%r" % far["unknown"]),
-                             _d("why", "three df-0 terms drag coverage further "
-                                       "down; the same decoy is still the best "
-                                       "page and still not good enough")],
+                             _d("ignored", "%r" % far["ignored"]),
+                             _d("why", "three df-0 terms drag coverage down to "
+                                       "single digits, but `mcp` and `search` "
+                                       "keep all six pages in the candidate set, "
+                                       "so the GATE has to do the refusing")],
                      text=far["text"])
 
         # ============ B: two silences, and they must not be confusable ======
@@ -573,14 +685,15 @@ def run(opts=None):
         if not near["has_gate_msg"]:
             problems.append("missing %r" % GATE_MSG)
         if near["has_no_match_msg"]:
-            problems.append("claims %r, but 6 pages matched `the`" % NO_MATCH_MSG)
+            problems.append("claims %r, but 6 pages matched `mcp`" % NO_MATCH_MSG)
         suite.record("B", "gated-out-not-no-matching", problems,
                      detail=[_d("query", repr(Q_SILENT_NEAR)),
                              _d("sentinels", "no-match=%r gate=%r"
                                 % (near["has_no_match_msg"],
                                    near["has_gate_msg"])),
-                             _d("why", "every page shares `the` with the query, "
-                                       "so 'nothing matched' would be a lie")],
+                             _d("why", "every page shares `mcp` with the query "
+                                       "and `mcp` is no function word, so "
+                                       "'nothing matched' would be a lie")],
                      text=near["text"])
 
         flags_nonsense = (nonsense["has_no_match_msg"], nonsense["has_gate_msg"])
@@ -640,7 +753,13 @@ def run(opts=None):
         # Everything below is driven at min_coverage 0.0 -- the gate is switched
         # OFF so the raw coverage of every candidate is visible, including the
         # candidates the default gate would have hidden.
-        probe = drv.measure(PROBE_ALL)
+        # RAW (drop_stopwords=False): the inversion this fixture models lives in
+        # `why`/`did`/`we`/`the`, and the search now refuses to score those, so
+        # the post-drop term list cannot show the df table at all.  Measuring it
+        # raw is not measuring the wrong thing -- it is measuring the INPUT that
+        # QUERY_STOPWORDS was introduced to neutralize, which is the one thing
+        # that must not quietly disappear from the fixture.
+        probe = drv.measure(PROBE_ALL, drop_stopwords=False)
         df, idf, n_docs = probe["df"], probe["idf"], probe["n_docs"]
         problems = []
         for token in ("mcp", "the"):
@@ -661,11 +780,17 @@ def run(opts=None):
                             "small-corpus inversion is gone and the fixture no "
                             "longer models the pathology"
                             % (idf["why"], idf["mcp"]))
-        decoy_hits = set(drv.measure(Q_SILENT_NEAR)["hits"][DECOY_REL])
-        leaked = sorted(decoy_hits & {"replace", "telemetry", "pipeline"})
+        decoy_hits = set(drv.measure(Q_SILENT_NEAR,
+                                     drop_stopwords=False)["hits"][DECOY_REL])
+        leaked = sorted(decoy_hits & set(NEAR_DISCRIMINATING))
         if leaked:
-            problems.append("the decoy page carries content terms %r; it must "
-                            "carry ONLY function words" % leaked)
+            problems.append("the decoy page carries discriminating content "
+                            "term(s) %r; it must carry only the query's function "
+                            "words and the corpus-wide `mcp`" % leaked)
+        if not decoy_hits >= {"why", "did", "we"}:
+            problems.append("the decoy no longer carries the question's function "
+                            "words (%r); it is not a decoy any more"
+                            % sorted(decoy_hits))
         suite.record("D", "fixture-reproduces-pathologies", problems,
                      detail=[_d("n_docs", n_docs),
                              _d("ubiquitous", "df[mcp]=%d df[the]=%d"
@@ -1048,6 +1173,246 @@ def run(opts=None):
                                             "handler must absorb it instead of "
                                             "500-ing")],
                      text=garbage["text"])
+
+        # ============ I: the query-side stopword drop ============
+        # What counts as a query TERM is not a tokenizer detail here: `terms` is
+        # the denominator of the coverage gate, so dropping a word changes every
+        # percentage the previous eight groups measure.  These six cases pin the
+        # drop itself -- which words go, that the answer admits it, that an
+        # all-function-words question gets its own refusal, that the drop really
+        # re-orders the ranking, and that the two deliberate NON-drops survive.
+        #
+        # Every expected word list is derived through `drv.split_query`, which
+        # reads `mod.QUERY_STOPWORDS` live.  Each case therefore also asserts its
+        # OWN premise (that the query does mix the two kinds of word, that a
+        # "clean" query really has no function words, that df[search] > 0): a
+        # derived expectation can collapse into `[] == []` and pass while proving
+        # nothing, and that is worse than a red case.
+        mixed = drv.search(Q_MIXED)
+        mixed_dropped, mixed_kept = drv.split_query(Q_MIXED)
+        problems = []
+        if not mixed_dropped or not mixed_kept:
+            problems.append("fixture drift: %r no longer MIXES the two kinds of "
+                            "word (function=%r content=%r), so this case cannot "
+                            "test the mixture"
+                            % (Q_MIXED, mixed_dropped, mixed_kept))
+        if not mixed["has_ignored_line"]:
+            problems.append("no %r line although %r were dropped"
+                            % (IGNORED_MSG, mixed_dropped))
+        if mixed["ignored"] != mixed_dropped:
+            problems.append("ignored %r, want exactly %r (query order)"
+                            % (mixed["ignored"], mixed_dropped))
+        wrongly_named = [t for t in mixed["ignored"] if t in mixed_kept]
+        if wrongly_named:
+            problems.append("content word(s) %r reported as function words -- the "
+                            "caller is told the search ignored what it searched "
+                            "for" % wrongly_named)
+        undisclosed = [t for t in mixed_dropped if t not in mixed["ignored"]]
+        if undisclosed:
+            problems.append("function word(s) %r were dropped but never named"
+                            % undisclosed)
+        if not mixed["hits"]:
+            problems.append("the query lost its answer (%r hit(s)) -- the "
+                            "disclosure must ride along with a ranking, not "
+                            "replace it" % mixed["header_hits"])
+        suite.record("I", "ignored-line-names-exactly-the-dropped-words", problems,
+                     detail=[_d("query", repr(Q_MIXED)),
+                             _d("rendered", "%r" % mixed["ignored"]),
+                             _d("dropped", "%r" % mixed_dropped),
+                             _d("kept", "%r" % mixed_kept),
+                             _d("hits", "%r" % mixed["header_hits"]),
+                             _d("derived", "both lists come from "
+                                           "mod.QUERY_STOPWORDS, not from a copy "
+                                           "of it in this file")],
+                     text=mixed["text"])
+
+        clean_dropped, clean_kept = drv.split_query(Q_GATE_ADR)
+        clean = answered[Q_GATE_ADR]
+        problems = []
+        if clean_dropped:
+            problems.append("fixture drift: %r carries function word(s) %r, so "
+                            "'no line' would prove nothing about silence"
+                            % (Q_GATE_ADR, clean_dropped))
+        if not clean_kept:
+            problems.append("fixture drift: %r has no content terms at all"
+                            % Q_GATE_ADR)
+        if clean["has_ignored_line"]:
+            problems.append("%r printed for a query with no function words: %r"
+                            % (IGNORED_MSG, clean["ignored"]))
+        if IGNORED_MSG in clean["text"]:
+            problems.append("the phrase %r appears in the answer anyway (in some "
+                            "other shape than a header line)" % IGNORED_MSG)
+        suite.record("I", "clean-query-emits-no-ignored-line", problems,
+                     detail=[_d("query", repr(Q_GATE_ADR)),
+                             _d("premise", "function words in the query: %r"
+                                % clean_dropped),
+                             _d("line", "present=%r" % clean["has_ignored_line"]),
+                             _d("contract", "silence when there is nothing to "
+                                            "report -- a clean query pays nothing "
+                                            "for the disclosure")],
+                     text=clean["text"])
+
+        allfunc = drv.search(Q_ALL_FUNCTION)
+        af_dropped, af_kept = drv.split_query(Q_ALL_FUNCTION)
+        problems = []
+        if af_kept:
+            problems.append("fixture drift: %r still carries content term(s) %r, "
+                            "so it can never reach the third silence"
+                            % (Q_ALL_FUNCTION, af_kept))
+        if allfunc["error"]:
+            problems.append("call failed: %s" % allfunc["text"][:160])
+        if not allfunc["has_all_func_msg"]:
+            problems.append("missing %r" % ALL_FUNC_MSG)
+        if allfunc["all_func_words"] != af_dropped:
+            problems.append("names %r, want exactly %r -- the caller has to see "
+                            "WHICH words were the whole query"
+                            % (allfunc["all_func_words"], af_dropped))
+        if allfunc["has_no_match_msg"]:
+            problems.append("also says %r, which blames the wiki for a question "
+                            "that asked nothing" % NO_MATCH_MSG)
+        if allfunc["has_gate_msg"]:
+            problems.append("also says %r, but nothing was ever ranked" % GATE_MSG)
+        if allfunc["header_hits"] != 0 or allfunc["hits"]:
+            problems.append("expected zero hits, got header=%r lines=%d"
+                            % (allfunc["header_hits"], len(allfunc["hits"])))
+        suite.record("I", "all-function-words-gets-its-own-refusal", problems,
+                     detail=[_d("query", repr(Q_ALL_FUNCTION)),
+                             _d("named", "%r" % allfunc["all_func_words"]),
+                             _d("dropped", "%r" % af_dropped),
+                             _d("borrowed", "no-match=%r gate=%r"
+                                % (allfunc["has_no_match_msg"],
+                                   allfunc["has_gate_msg"])),
+                             _d("why", "the corpus is never even walked, so both "
+                                       "of the other refusals would be false")],
+                     text=allfunc["text"])
+
+        def sentinels(res):
+            return (res["has_no_match_msg"], res["has_gate_msg"],
+                    res["has_all_func_msg"])
+
+        trio = {"nothing-matched": sentinels(nonsense),
+                "gated-out": sentinels(near),
+                "all-function": sentinels(allfunc)}
+        want_trio = {"nothing-matched": (True, False, False),
+                     "gated-out": (False, True, False),
+                     "all-function": (False, False, True)}
+        problems = []
+        for label in sorted(want_trio):
+            if trio[label] != want_trio[label]:
+                problems.append("%s renders (no_match, gate, all_func) = %r, want "
+                                "%r" % (label, trio[label], want_trio[label]))
+        if len(set(trio.values())) != len(trio):
+            problems.append("two of the THREE silences render the same sentinel "
+                            "triple -- the caller cannot tell them apart, and "
+                            "each one implies a different next move")
+        suite.record("I", "three-silences-mutually-distinct", problems,
+                     detail=[_d(label, "%r" % (trio[label],))
+                             for label in sorted(trio)]
+                            + [_d("moves", "rephrase / the topic is undocumented "
+                                           "/ ask an actual question"),
+                               _d("contract", "exactly one sentinel per answer, "
+                                              "and never the same one twice")],
+                     text=allfunc["text"])
+
+        # The old server is gone, so "the decoy used to win this" is not runnable.
+        # What IS runnable is the invariant that made it a bug: a page which
+        # answers NOTHING must never be rank 1.  Driven at min_coverage=0.0 on
+        # purpose -- with the gate off, the ORDER is the only thing under test, so
+        # a pass cannot be an accident of the decoy being filtered out.
+        decoy_run = drv.search(Q_DECOY, min_coverage=0.0)
+        dq_dropped, dq_kept = drv.split_query(Q_DECOY)
+        ranks = {h["slug"]: h["rank"] for h in decoy_run["hits"]}
+        problems = []
+        if not dq_dropped:
+            problems.append("fixture drift: %r carries no function words, so the "
+                            "decoy was never in the contest" % Q_DECOY)
+        if DECOY_SLUG not in ranks:
+            problems.append("the decoy %r is not a candidate at all, so "
+                            "'the content page outranks it' is vacuous"
+                            % DECOY_SLUG)
+        elif ranks[DECOY_SLUG] == 1:
+            problems.append("the decoy %r is rank 1 -- it carries the query's "
+                            "function words and one content term, and it is "
+                            "beating the page that carries the rest"
+                            % DECOY_SLUG)
+        if not decoy_run["hits"]:
+            problems.append("no hits at min_coverage=0.0")
+        else:
+            top = decoy_run["hits"][0]
+            if top["slug"] != CONTENT_SLUG:
+                problems.append("rank 1 is %r, want the content page %r"
+                                % (top["slug"], CONTENT_SLUG))
+            if set(top["missed"]) >= set(dq_kept):
+                problems.append("rank 1 (%s) missed EVERY content term %r -- a "
+                                "page that answers nothing is winning the query"
+                                % (top["slug"], dq_kept))
+        suite.record("I", "stopword-drop-reorders-the-ranking", problems,
+                     detail=[_d("query", repr(Q_DECOY)),
+                             _d("min_coverage", "0.0 (gate off: order is the only "
+                                                "thing under test)"),
+                             _d("dropped", "%r" % dq_dropped),
+                             _d("content", "%r" % dq_kept),
+                             _d("ranking", "%r" % [(h["rank"], h["slug"],
+                                                    h["cov"], h["missed"])
+                                                   for h in decoy_run["hits"]]),
+                             _d("invariant", "the winner's `missed:` must not be "
+                                             "the whole content term list")],
+                     text=decoy_run["text"])
+
+        keep = drv.search(Q_KEEP, min_coverage=0.0)
+        keep_probe = drv.measure(Q_KEEP)
+        kp_dropped, kp_kept = drv.split_query(Q_KEEP)
+        want_keep_hits = keep_probe["df"].get("search", 0)
+        problems = []
+        for word in KEEP_WORDS:
+            if word in drv.mod.QUERY_STOPWORDS:
+                problems.append("%r is in QUERY_STOPWORDS -- in THIS corpus it is "
+                                "a function name / a frontmatter status value, not "
+                                "a function word, and dropping it answers the "
+                                "wrong question" % word)
+            if word not in kp_kept:
+                problems.append("%r did not survive tokenize+drop (kept=%r)"
+                                % (word, kp_kept))
+        if kp_dropped:
+            problems.append("%r dropped %r, but neither of %r is a function word"
+                            % (Q_KEEP, kp_dropped, list(KEEP_WORDS)))
+        if keep["has_ignored_line"]:
+            problems.append("%r printed for %r: %r"
+                            % (IGNORED_MSG, Q_KEEP, keep["ignored"]))
+        if keep["has_all_func_msg"]:
+            problems.append("refused as all-function-words -- the whole query was "
+                            "thrown away")
+        if keep["unknown"] != ["done"]:
+            problems.append("unknown %r, want ['done'] -- `done` can only be "
+                            "reported unknown if it reached the df table, which is "
+                            "the observable proof it was not dropped"
+                            % keep["unknown"])
+        if want_keep_hits < 1:
+            problems.append("fixture drift: df[search]=0, so `search` surviving "
+                            "is unobservable through the hit list")
+        if len(keep["hits"]) != want_keep_hits:
+            problems.append("%d hit(s), want df[search]=%d -- `search` is the only "
+                            "term that can pull a page in here"
+                            % (len(keep["hits"]), want_keep_hits))
+        for hit in keep["hits"]:
+            if hit["missed"] != ["done"]:
+                problems.append("%s missed %r, want ['done']"
+                                % (hit["slug"], hit["missed"]))
+        suite.record("I", "query-verb-and-done-are-not-stopwords", problems,
+                     detail=[_d("query", repr(Q_KEEP)),
+                             _d("in stoplist", "%r"
+                                % {w: w in drv.mod.QUERY_STOPWORDS
+                                   for w in KEEP_WORDS}),
+                             _d("kept", "%r" % kp_kept),
+                             _d("unknown", "%r (df[done]=%d)"
+                                % (keep["unknown"],
+                                   keep_probe["df"].get("done", -1))),
+                             _d("hits", "%d, df[search]=%d"
+                                % (len(keep["hits"]), want_keep_hits)),
+                             _d("contract", "a future 'let us just use a standard "
+                                            "stoplist' edit has to fail HERE, "
+                                            "loudly")],
+                     text=keep["text"])
     finally:
         work.cleanup()
 

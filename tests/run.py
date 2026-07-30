@@ -43,10 +43,12 @@ run):
                                                       relevance gate on a
                                                       synthetic corpus that
                                                       reproduces the measured
-                                                      pathologies: silence,
-                                                      the MEASURED calibration
-                                                      window, and floored
-                                                      percentages (A-H)
+                                                      pathologies: silence, the
+                                                      MEASURED calibration
+                                                      window, floored
+                                                      percentages, and the
+                                                      query-side stopword drop
+                                                      (A-I)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -202,7 +204,7 @@ SUITES = [
      None),
     ("wiki_recall", run_wiki_recall,
      "mcp-wiki search relevance gate: silence, measured calibration window, "
-     "floored percentages", 30),
+     "floored percentages, query-side stopwords", 36),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

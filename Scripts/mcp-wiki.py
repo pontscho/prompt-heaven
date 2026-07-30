@@ -87,6 +87,43 @@ FIELD_WEIGHTS = {"name": 8, "title": 8, "anchor": 5, "description": 4,
 # seen takes the maximum idf, so an unknown topic drags coverage down hard.
 DEFAULT_MIN_COVERAGE = 0.55
 
+# Query-side stopwords, dropped BEFORE idf is computed.
+#
+# Not a nicety -- on a 10-page corpus idf is INVERTED for function words, and it
+# corrupts both the ranking and the coverage gate above. Measured on the real
+# wiki: `did` occurs in 1 page -> idf 1.99, while `merge` (2 pages) gets 1.48 and
+# `clangd` (7 pages) only 0.38. So `why did we merge clangd into purity` hands 61%
+# of its total idf mass to four function words, and the one page carrying NONE of
+# the content terms wins the query on them. Rarity looks like information; on a
+# corpus this small it is just an accident of prose style.
+#
+# Hand-curated on purpose. A df-based cutoff cannot do this job: the function
+# words here are RARE, so any "too common to matter" rule leaves them untouched.
+#
+# Deliberately ABSENT: query verbs (search, find, show, get, list, build, run,
+# create, make, use, add). A general-purpose stoplist drops those, and doing so
+# here would be a bug -- in THIS corpus they are function names and topic words
+# (`search`, `get_page`, `list`, `stats`), and one of the calibration queries is
+# built on `search` itself. Also absent for the same reason: `done`, which reads
+# as a participle but is a plausible frontmatter `status:` value, and `status` is
+# a filter this very function accepts -- dropping it would answer "the query is
+# all function words" about first-class schema metadata.
+#
+# Editing this set re-opens the DEFAULT_MIN_COVERAGE calibration, because it
+# changes the denominator of every coverage figure. The set is an input to the
+# measurement, not a cosmetic filter.
+QUERY_STOPWORDS = frozenset("""
+    a an the this that these those
+    i we you he she it they me us him her them my our your his its their
+    am is are was were be been being do does did have has had having
+    can could will would shall should may might must
+    and or but nor if then than because while although though whether
+    as at by for from in into of on onto to up with within without
+    over under about between through during before after above below off out
+    again further here there when where why what which who whom whose how
+    not no nor yes very just only also too either neither both each
+    """.split())
+
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
@@ -702,9 +739,21 @@ def _fn_search(params, project_root, wiki_root, strict):
     if not query:
         raise ValueError("search requires 'query'")
     abs_root, rel_root = _resolve_root(params, project_root, wiki_root, strict)
-    terms = list(dict.fromkeys(_tokenize(query)))  # unique, order-preserving
-    if not terms:
+    raw_terms = list(dict.fromkeys(_tokenize(query)))  # unique, order-preserving
+    if not raw_terms:
         raise ValueError("search 'query' contains no searchable tokens")
+    # Stopwords go BEFORE df/idf: a term that never reaches `terms` cannot skew
+    # the ranking, and cannot inflate the coverage denominator either.
+    terms = [t for t in raw_terms if t not in QUERY_STOPWORDS]
+    dropped = [t for t in raw_terms if t in QUERY_STOPWORDS]
+    if not terms:
+        # A THIRD kind of silence, and it needs its own words: the query carried no
+        # content at all. Telling the caller "no matching pages" here would blame
+        # the wiki for the question.
+        return _finalize(
+            "# search: %r — 0 hit(s) in %s/\n\n"
+            "the query is all function words (%s) — nothing left to search for\n"
+            % (query, rel_root, ", ".join(dropped)), params)
     f_type = params.get("type")
     f_status = params.get("status")
     prefix = params.get("path_prefix")
@@ -793,6 +842,11 @@ def _fn_search(params, project_root, wiki_root, strict):
     unknown = [t for t in terms if df[t] == 0]
     lines = ["# search: %r — %d hit(s) in %s/  (BM25F, k1=%g b=%g)"
              % (query, len(results), rel_root, k1, b), ""]
+    # The caller asked for seven words and got an answer about three of them; that
+    # is exactly the kind of thing a reply must volunteer. Silent when nothing was
+    # dropped, so a clean query pays nothing for the disclosure.
+    if dropped:
+        lines.append("ignored function words: %s" % ", ".join(dropped))
     if unknown:
         lines.append("unknown to the corpus: %s" % ", ".join(unknown))
     if not results:
@@ -808,8 +862,8 @@ def _fn_search(params, project_root, wiki_root, strict):
                      "no page passes the relevance gate "
                      "(best coverage %d%%, need %d%%)"
                      % (math.floor(100 * best_cov), math.floor(100 * min_cov)))
-    elif unknown:
-        lines.append("")              # keep the note clear of the ranking
+    elif unknown or dropped:
+        lines.append("")              # keep the notes clear of the ranking
     for i, r in enumerate(results, 1):
         meta = "/".join(x for x in [r["type"], r["status"]] if x)
         meta = (" [%s]" % meta) if meta else ""
