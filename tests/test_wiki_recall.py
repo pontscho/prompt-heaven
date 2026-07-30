@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Mechanical suite for the `search` relevance gate and the `get_page` section
-index in Scripts/mcp-wiki.py (51 cases, A-J).
+"""Mechanical suite for the `search` relevance gate, the `get_page` section
+index and the `source_to_pages` per-hit description in Scripts/mcp-wiki.py
+(60 cases, A-K).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/.  Nothing is spawned, nothing
@@ -95,12 +96,22 @@ Coverage by group:
      byte), and the two empty answers stay different sentences -- a page with no
      headings and a page whose only heading is its title imply opposite next
      moves, so a merge of the two must fail here
+  K  `source_to_pages` now says WHAT each page covering a source has to say, not
+     merely THAT it covers it: one `description:` line per hit, verbatim from
+     the frontmatter, above the anchor lines and indented with them.  The group
+     asserts the line, its POSITION (by line index, not by presence), its indent
+     (derived from the sibling anchor line, never typed), the SILENCE on a page
+     that has no `description` key -- with the missing key asserted as the
+     premise -- and, strongest, that the rest of the answer did not move: the
+     reply with its description lines filtered out is BYTE-IDENTICAL to what the
+     same corpus renders with the `description:` frontmatter lines removed
 
-Group J runs on its OWN three-page fixture in a SECOND workspace, and that is
+Group J runs on its OWN six-page fixture in a SECOND workspace, and group K on
+its own five-page one in a THIRD (plus a FOURTH that mirrors it), and that is
 not tidiness.  The six pages above ARE the calibration window group D measures:
 one more page moves `n_docs`, moves every term's idf, and shifts -- or closes --
 the window, so a page added here for a `get_page` test would fail group D for a
-reason that has nothing to do with search.  The two fixtures never mix.
+reason that has nothing to do with search.  The fixtures never mix.
 
 Usage:
   python3 tests/test_wiki_recall.py
@@ -518,6 +529,27 @@ class Driver:
         out["text"] = text
         out["params"] = payload
         return out
+
+    def sources(self, source, **params):
+        """One rendered `source_to_pages` answer, parsed for its hit blocks."""
+        payload = {"source": source}
+        payload.update(params)
+        res = self.mod.handle_wiki_call(
+            {"function": "source_to_pages", "params": payload},
+            self.root, WIKI_REL)
+        text = res.get("__raw_text__") or res.get("error") or ""
+        out = parse_sources(text)
+        out["error"] = "error" in res
+        out["params"] = payload
+        return out
+
+    def frontmatter(self, fname):
+        """The frontmatter of a fixture page, read back through the SERVER's own
+        parser -- so a case can assert its own premise (a key really is absent)
+        against the same reader the handler used, not against the string the
+        test believes it wrote."""
+        fm, _body = self.mod.read_page(os.path.join(self.abs_wiki, fname))
+        return fm
 
     def split_query(self, query):
         """(dropped, kept) for a query, split by the server's OWN stoplist.
@@ -939,6 +971,246 @@ def served_section(text, name):
         if i and pattern.match(line):
             return "\n".join(lines[i:]).strip()
     return None
+
+
+# ---------------------------------------------------------------------------
+# Group K's fixture: the per-hit `description` line of `source_to_pages`.
+#
+# A THIRD workspace -- and a FOURTH that MIRRORS it -- for the reason group J
+# has its own: the six calibration pages ARE group D's measured window, and one
+# more page there moves every idf in it.
+#
+# The reverse lookup used to parse `description` out of the frontmatter and then
+# throw it away, so the answer said WHICH pages cover a source and nothing about
+# WHAT they say.  These five pages are the four shapes the new line has to
+# survive, plus one page that must never be listed at all:
+#
+#   hit-alpha     described, TWO matching `sources:` anchors -- so one query
+#                 returns several hits and the anchor line the description has
+#                 to sit above is a LIST, not a lone value.
+#   hit-beta      described, one matching anchor, and its slug
+#                 (`zeta-second-page`) sorts LAST while its filename sorts
+#                 second.  Document order and slug order therefore DISAGREE on
+#                 this corpus, which is what makes "the hit order did not move"
+#                 a claim capable of failing.
+#   hit-mute      NO `description` key at all, same query anchor: the SILENCE.
+#                 Its case asserts the premise too -- the key really is absent,
+#                 read back through the server's own parser -- because "no
+#                 description line" is trivially true for a page the fixture
+#                 forgot to match, or one that has a description nobody dropped.
+#   hit-target    described, matched through `targets:` and NOT through
+#                 `sources:` (its source anchor points elsewhere), so the
+#                 description is pinned above the OTHER anchor line as well.
+#   zz-elsewhere  described, matches nothing: present so "only the matching
+#                 pages are listed" runs against a corpus that has something to
+#                 leak, and so the no-hit query has a described page to ignore.
+#
+# Every description is token-DISJOINT from its own title, and the cases assert
+# it.  On a fixture whose two fields shared any vocabulary, a renderer that
+# printed the TITLE under each hit could not be told apart from one that printed
+# the description -- which is mutation (ii) of the proof harness.
+# ---------------------------------------------------------------------------
+
+# (filename, slug, title, type, status, description|None, sources, targets, body)
+K_FILE, K_SLUG, K_TITLE, K_TYPE, K_STATUS, K_DESC, K_SRCS, K_TGTS, K_BODY = range(9)
+
+K_PAGES = [
+    ("hit-alpha.md", "hit-alpha", "Reverse lookup, first page",
+     "component", "current",
+     "Every anchor that names a symbol keeps its colon suffix intact, and a "
+     "bare path matches all of them at once.",
+     ["Scripts/reverse-lookup.py:resolve_anchor",
+      "Scripts/reverse-lookup.py:iter_anchors"], [],
+     "Two anchors on one file, so the anchor line under this hit is a list."),
+    ("hit-beta.md", "zeta-second-page", "Second document over identical ground",
+     "reference", "draft",
+     "Two pages can cover one module without either being a duplicate of its "
+     "neighbour.",
+     ["Scripts/reverse-lookup.py:render_hits"], [],
+     "The slug and the filename sort differently, on purpose."),
+    ("hit-mute.md", "hit-mute", "Frontmatter that stops at its anchors",
+     "analysis", "draft", None,
+     ["Scripts/reverse-lookup.py:parse_row"], [],
+     "No description key at all: the line under this hit must not appear."),
+    ("hit-target.md", "hit-target", "Downstream consumer",
+     "spec", "current",
+     "Written by the generator rather than read by it, which is what puts this "
+     "page on the far side of an arrow.",
+     ["Scripts/unrelated-writer.py:emit"],
+     ["Scripts/reverse-lookup.py:emit_report"],
+     "Matched through targets, and through targets only."),
+    ("zz-elsewhere.md", "zz-elsewhere", "Page about a different module",
+     "concept", "current",
+     "Its only anchor points somewhere else, so no query in this group may "
+     "ever list it.",
+     ["Scripts/other-module.py:unrelated"], [],
+     "Never a hit, always in the corpus."),
+]
+
+# The anchor every hit page carries and the one page that does not.
+K_SHARED_SOURCE = "Scripts/reverse-lookup.py"
+# The same file, narrowed to ONE symbol: a second live query, so the byte-for-
+# byte preservation claim is not made about a single rendering.
+K_SYMBOL_SOURCE = "Scripts/reverse-lookup.py:render_hits"
+# A path no fixture anchor mentions: the `no page references this source` arm.
+K_ABSENT_SOURCE = "Scripts/never-documented.py"
+# A description shorter than this could not tell a VERBATIM renderer from one
+# that truncates -- the check is exact equality, so the only way it goes blind
+# is a fixture whose strings are shorter than the cut somebody introduces.
+K_DESC_MIN_CHARS = 80
+
+_S2P_HEADER_RE = re.compile(
+    r"^# source_to_pages: (?P<source>.+) — (?P<count>\d+) page\(s\) in "
+    r"(?P<root>.+)/$", re.M)
+_S2P_HIT_RE = re.compile(
+    r"^- \*\*(?P<title>.*?)\*\* — (?P<slug>.+?) `(?P<path>[^`]*)`"
+    r"(?: \[(?P<meta>[^\]]*)\])?$")
+# The value is OPTIONAL: `description:` with nothing after it is a rendering the
+# silence case has to be able to SEE, and a parser that demanded a value would
+# report the empty line as no line at all.
+_S2P_ATTR_RE = re.compile(r"^(?P<indent>[ \t]+)(?P<key>[a-z_]+):(?: (?P<value>.*))?$")
+
+DESC_KEY = "description"
+NO_REF_MSG = "no page references this source"
+
+
+def _attr_key(line):
+    m = _S2P_ATTR_RE.match(line)
+    return m.group("key") if m else None
+
+
+def parse_sources(text):
+    """Structured view of one rendered `source_to_pages` answer.
+
+    Every element keeps its LINE INDEX, because half of what group K pins is an
+    ORDER: the description belongs between a hit's header line and its anchor
+    lines, and a parser that only collected values could not tell a correctly
+    placed line from one rendered after `sources:`.
+
+    Attribute lines are attached to the hit ABOVE them; one that appears before
+    any hit becomes an orphan rather than being silently dropped, so a renderer
+    that emitted the description above its own header is visible instead of
+    invisible.
+    """
+    lines = text.split("\n")
+    hits, orphans = [], []
+    for i, line in enumerate(lines):
+        m = _S2P_HIT_RE.match(line)
+        if m:
+            meta = m.group("meta") or ""
+            hits.append({"line_i": i, "title": m.group("title"),
+                         "slug": m.group("slug"), "path": m.group("path"),
+                         "meta": meta, "attrs": []})
+            continue
+        a = _S2P_ATTR_RE.match(line)
+        if not a:
+            continue
+        rec = {"line_i": i, "indent": a.group("indent"), "key": a.group("key"),
+               "value": a.group("value") if a.group("value") is not None else ""}
+        (hits[-1]["attrs"] if hits else orphans).append(rec)
+    hm = _S2P_HEADER_RE.search(text)
+    return {
+        "text": text, "lines": lines, "hits": hits, "orphan_attrs": orphans,
+        "header_source": hm.group("source") if hm else None,
+        "header_count": int(hm.group("count")) if hm else None,
+        "header_root": hm.group("root") if hm else None,
+        "has_header": hm is not None,
+        "has_no_ref_msg": NO_REF_MSG in text,
+        "desc_lines": [ln for ln in lines if _attr_key(ln) == DESC_KEY],
+        "attr_lines": [ln for ln in lines if _attr_key(ln) is not None],
+    }
+
+
+def hit_attrs(hit, key):
+    return [a for a in hit["attrs"] if a["key"] == key]
+
+
+def strip_desc_lines(text):
+    """The answer with every `description:` attribute line removed, and nothing
+    else touched -- the left-hand side of group K's preservation claim."""
+    return "\n".join(ln for ln in text.split("\n")
+                     if _attr_key(ln) != DESC_KEY)
+
+
+def k_page_text(page, with_description=True):
+    """Render one group-K page.
+
+    `with_description=False` drops EXACTLY the `description:` frontmatter line
+    and touches nothing else.  That identity is ASSERTED by the case that uses
+    it, not assumed here: the mirror corpus is only a control if it is the same
+    corpus minus one line per page.
+    """
+    out = ["---",
+           "name: %s" % page[K_SLUG],
+           "title: %s" % page[K_TITLE],
+           "type: %s" % page[K_TYPE],
+           "status: %s" % page[K_STATUS]]
+    if page[K_DESC] and with_description:
+        out.append("description: %s" % page[K_DESC])
+    if page[K_SRCS]:
+        out.append("sources:")
+        out += ["  - %s" % s for s in page[K_SRCS]]
+    if page[K_TGTS]:
+        out.append("targets:")
+        out += ["  - %s" % t for t in page[K_TGTS]]
+    out += ["---", "", page[K_BODY], ""]
+    return "\n".join(out)
+
+
+def build_desc_fixture(work, with_description=True):
+    """Write group K's five pages; return the project root for the server.
+
+    realpath for the same reason the other two builders do it: `safe_path`
+    compares the RESOLVED wiki root against the project root it was handed.
+    """
+    for page in K_PAGES:
+        work.write_text(os.path.join(WIKI_REL, page[K_FILE]),
+                        k_page_text(page, with_description))
+    return os.path.realpath(work.path)
+
+
+def k_expected_hits(source):
+    """[(page, matched_anchors)] a `source_to_pages` query must land on.
+
+    An INDEPENDENT oracle: a naive first-colon split over the fixture table,
+    sharing no code with the server's `_matches`/`_source_path`.  It is exact
+    for these five pages because every anchor here is a plain `path:symbol` with
+    no colon inside the path -- the case that consumes it asserts that premise.
+
+    Document order is `os.walk`'s: filenames, sorted.
+    """
+    q_path, _, q_sym = source.partition(":")
+    out = []
+    for page in sorted(K_PAGES, key=lambda p: p[K_FILE]):
+        matched = []
+        for anchor in list(page[K_SRCS]) + list(page[K_TGTS]):
+            a_path, _, a_sym = anchor.partition(":")
+            if a_path == q_path and (not q_sym or not a_sym or a_sym == q_sym):
+                matched.append(anchor)
+        if matched:
+            out.append((page, matched))
+    return out
+
+
+def tool_paragraph(desc, name):
+    """The `  <name>   ...` entry of the tool description, continuations included.
+
+    Entries start at column 2 and their continuation lines are indented far
+    deeper, so the block ends at the next line that is not deeply indented.
+    Scoping the check to ONE entry matters: `description` is a word that appears
+    elsewhere in this text, and a bare `in desc` would pass on somebody else's
+    sentence.
+    """
+    lines = desc.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("  %s " % name):
+            block = [line]
+            for nxt in lines[i + 1:]:
+                if not nxt.startswith("    "):
+                    break
+                block.append(nxt)
+            return "\n".join(block)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -2548,6 +2820,466 @@ def run(opts=None):
                      text="")
     finally:
         sec_work.cleanup()
+
+    # ============ K: `source_to_pages` says WHAT each page covers ============
+    # A THIRD workspace, and a FOURTH holding the same five pages with their
+    # `description:` frontmatter lines removed.  The mirror is what turns the
+    # preservation claim from a shape check into a byte-for-byte one: whatever
+    # the reverse lookup renders for a corpus WITHOUT the field is, definitionally,
+    # the answer this commit was not allowed to change.
+    desc_work = H.TempWorkspace("ph-wiki-desc-", keep=opts.keep)
+    bare_work = H.TempWorkspace("ph-wiki-desc-bare-", keep=opts.keep)
+    try:
+        desc_root = build_desc_fixture(desc_work, True)
+        bare_root = build_desc_fixture(bare_work, False)
+        kdrv = Driver(desc_root)
+        bdrv = Driver(bare_root)
+
+        shared = kdrv.sources(K_SHARED_SOURCE)
+        want = k_expected_hits(K_SHARED_SOURCE)
+        want_pages = [p for p, _m in want]
+        matched_by_file = {p[K_FILE]: m for p, m in want}
+        # Indexed by PATH, never by position: the hit ORDER is a separate claim
+        # below, and a misordered answer must fail that case rather than quietly
+        # mispair every other one.
+        by_path = {h["path"]: h for h in shared["hits"]}
+        described_pages = [p for p in want_pages if p[K_DESC]]
+
+        problems = []
+        if shared["error"]:
+            problems.append("call failed: %s" % shared["text"][:160])
+        if len(want) < 2:
+            problems.append("fixture drift: the shared anchor lands on %d "
+                            "page(s), so a multi-hit answer is never rendered"
+                            % len(want))
+        if any(a.count(":") > 1 for p in K_PAGES
+               for a in list(p[K_SRCS]) + list(p[K_TGTS])):
+            problems.append("fixture drift: an anchor carries more than one "
+                            "colon, so the oracle's first-colon split is no "
+                            "longer the server's rule and this case is guessing")
+        want_paths = [p[K_FILE] for p in want_pages]
+        want_slugs = [p[K_SLUG] for p in want_pages]
+        if want_slugs == sorted(want_slugs):
+            problems.append("fixture drift: document order and slug order agree "
+                            "on the hit set, so a renderer that sorted by slug "
+                            "would pass this case")
+        if not shared["has_header"]:
+            problems.append("no header line at all: %r" % shared["lines"][:1])
+        if shared["header_source"] != K_SHARED_SOURCE:
+            problems.append("the header echoes %r, want %r"
+                            % (shared["header_source"], K_SHARED_SOURCE))
+        if shared["header_root"] != WIKI_REL:
+            problems.append("the header names root %r, want %r"
+                            % (shared["header_root"], WIKI_REL))
+        if shared["header_count"] != len(want):
+            problems.append("the header claims %r page(s), want %d"
+                            % (shared["header_count"], len(want)))
+        if shared["header_count"] != len(shared["hits"]):
+            problems.append("the header claims %r page(s) but %d hit line(s) "
+                            "were rendered"
+                            % (shared["header_count"], len(shared["hits"])))
+        if [h["path"] for h in shared["hits"]] != want_paths:
+            problems.append("listed %r, want %r (every matching fixture page, "
+                            "in document order)"
+                            % ([h["path"] for h in shared["hits"]], want_paths))
+        if shared["orphan_attrs"]:
+            problems.append("%d attribute line(s) sit above the first hit: %r "
+                            "-- an indented line belongs to a hit, and one that "
+                            "precedes every header belongs to none"
+                            % (len(shared["orphan_attrs"]),
+                               [a["key"] for a in shared["orphan_attrs"]]))
+        for page in want_pages:
+            hit = by_path.get(page[K_FILE])
+            if hit is None:
+                problems.append("%s: matching page not rendered" % page[K_FILE])
+                continue
+            want_meta = "/".join(x for x in (page[K_TYPE], page[K_STATUS]) if x)
+            for label, got, wanted in (("title", hit["title"], page[K_TITLE]),
+                                       ("slug", hit["slug"], page[K_SLUG]),
+                                       ("meta", hit["meta"], want_meta)):
+                if got != wanted:
+                    problems.append("%s: %s %r, want %r"
+                                    % (page[K_FILE], label, got, wanted))
+        suite.record("K", "hit-lines-and-header-are-the-fixture", problems,
+                     detail=[_d("call", "source_to_pages %r" % K_SHARED_SOURCE),
+                             _d("header", "%r page(s) in %r/"
+                                % (shared["header_count"], shared["header_root"])),
+                             _d("listed", "%r" % [h["path"]
+                                                  for h in shared["hits"]]),
+                             _d("oracle", "%r (naive first-colon split over the "
+                                          "fixture table)" % want_paths),
+                             _d("slug order", "%r -- deliberately NOT the "
+                                              "document order" % want_slugs),
+                             _d("why", "the description line is an ADDITION; "
+                                       "the count, the order and the hit lines "
+                                       "themselves must not have moved")],
+                     text=shared["text"])
+
+        problems = []
+        rows = []
+        if len(described_pages) < 2:
+            problems.append("fixture drift: %d described page(s) in the hit "
+                            "set, so 'every described hit carries the line' is "
+                            "a claim about one page" % len(described_pages))
+        for page in described_pages:
+            hit = by_path.get(page[K_FILE])
+            fm_value = kdrv.frontmatter(page[K_FILE]).get(DESC_KEY)
+            if fm_value != page[K_DESC]:
+                problems.append("%s: the fixture file parses back as %r, not "
+                                "the table's %r -- the premise is broken, not "
+                                "the renderer"
+                                % (page[K_FILE], fm_value, page[K_DESC]))
+            if len(page[K_DESC]) < K_DESC_MIN_CHARS:
+                problems.append("fixture drift: %s carries a %d-char "
+                                "description, under the %d chars that make a "
+                                "truncating renderer visible at all"
+                                % (page[K_FILE], len(page[K_DESC]),
+                                   K_DESC_MIN_CHARS))
+            overlap = sorted(set(kdrv.mod._tokenize(page[K_TITLE]))
+                             & set(kdrv.mod._tokenize(page[K_DESC])))
+            if overlap:
+                problems.append("fixture drift: %s shares %r between its title "
+                                "and its description, so 'the title was printed "
+                                "instead' stops being distinguishable"
+                                % (page[K_FILE], overlap))
+            if hit is None:
+                problems.append("%s: not rendered at all" % page[K_FILE])
+                continue
+            got = hit_attrs(hit, DESC_KEY)
+            if len(got) != 1:
+                problems.append("%s: %d description line(s), want exactly 1"
+                                % (page[K_FILE], len(got)))
+                continue
+            if got[0]["value"] != fm_value:
+                problems.append("%s: rendered %r, want the frontmatter value "
+                                "%r -- verbatim, not trimmed and not the title"
+                                % (page[K_FILE], got[0]["value"], fm_value))
+            rows.append("%-16s %dc  %r"
+                        % (page[K_FILE], len(got[0]["value"]),
+                           got[0]["value"][:52]))
+        suite.record("K", "description-is-the-frontmatter-value", problems,
+                     detail=[_d("described", "%d of %d hit page(s)"
+                                % (len(described_pages), len(want_pages))),
+                             _d("oracle", "the page re-parsed by the server's "
+                                          "OWN read_page, not the string the "
+                                          "test believes it wrote"),
+                             _d("why", "the handler already PARSED this field "
+                                       "and then dropped it, so 'which page' "
+                                       "was answered and 'what does it say' "
+                                       "cost the caller a second call")]
+                            + ["        " + r for r in rows],
+                     text=shared["text"])
+
+        problems = []
+        rows = []
+        anchor_keys = set()
+        for page in described_pages:
+            hit = by_path.get(page[K_FILE])
+            if hit is None:
+                continue
+            got = hit_attrs(hit, DESC_KEY)
+            others = [a for a in hit["attrs"] if a["key"] != DESC_KEY]
+            anchor_keys.update(a["key"] for a in others)
+            if not got:
+                problems.append("%s: no description line to place" % page[K_FILE])
+                continue
+            if not others:
+                problems.append("%s: the hit renders no anchor line, so "
+                                "'the description comes first' orders a set of "
+                                "one" % page[K_FILE])
+                continue
+            d = got[0]
+            if d["line_i"] <= hit["line_i"]:
+                problems.append("%s: the description sits on line %d, at or "
+                                "above its own hit header on line %d"
+                                % (page[K_FILE], d["line_i"], hit["line_i"]))
+            late = [(a["key"], a["line_i"]) for a in others
+                    if a["line_i"] < d["line_i"]]
+            if late:
+                problems.append("%s: %r render(s) BEFORE the description"
+                                % (page[K_FILE], late))
+            if hit["attrs"][0]["key"] != DESC_KEY:
+                problems.append("%s: the first line under the hit header is %r"
+                                % (page[K_FILE], hit["attrs"][0]["key"]))
+            rows.append("%-16s header L%-3d description L%-3d then %r"
+                        % (page[K_FILE], hit["line_i"], d["line_i"],
+                           [(a["key"], a["line_i"]) for a in others]))
+        if anchor_keys != {"sources", "targets"}:
+            problems.append("fixture drift: the described hits carry %r, so the "
+                            "position is not pinned above BOTH anchor kinds"
+                            % sorted(anchor_keys))
+        suite.record("K", "description-precedes-the-anchor-lines", problems,
+                     detail=[_d("checked", "%d described hit(s), by LINE INDEX"
+                                % len(rows)),
+                             _d("anchors", "%r" % sorted(anchor_keys)),
+                             _d("why", "presence is not the contract: a "
+                                       "sentence rendered under the anchors "
+                                       "reads as a note ON them, and the block "
+                                       "stops scanning as one thing")]
+                            + ["        " + r for r in rows],
+                     text=shared["text"])
+
+        problems = []
+        rows = []
+        pairs = 0
+        for page in described_pages:
+            hit = by_path.get(page[K_FILE])
+            if hit is None:
+                continue
+            got = hit_attrs(hit, DESC_KEY)
+            others = [a for a in hit["attrs"] if a["key"] != DESC_KEY]
+            if not got or not others:
+                continue
+            d = got[0]
+            if not d["indent"]:
+                problems.append("%s: the description line carries no indent at "
+                                "all, so it does not read as part of the hit "
+                                "block" % page[K_FILE])
+            for a in others:
+                pairs += 1
+                if a["indent"] != d["indent"]:
+                    problems.append("%s: description indented %r, `%s:` "
+                                    "indented %r -- the two lines no longer "
+                                    "line up under their hit"
+                                    % (page[K_FILE], d["indent"], a["key"],
+                                       a["indent"]))
+            rows.append("%-16s description %r == %r"
+                        % (page[K_FILE], d["indent"],
+                           [a["indent"] for a in others]))
+        if not pairs:
+            problems.append("no description/anchor pair was compared, so the "
+                            "indent claim is vacuous")
+        suite.record("K", "description-indent-matches-the-anchor-line", problems,
+                     detail=[_d("pairs", "%d, indent DERIVED from the sibling "
+                                         "anchor line" % pairs),
+                             _d("why", "the width is not the point -- agreeing "
+                                       "with the line it was inserted above is, "
+                                       "and a typed space count would pass a "
+                                       "server that changed both")]
+                            + ["        " + r for r in rows],
+                     text=shared["text"])
+
+        mute = [p for p in K_PAGES if p[K_DESC] is None]
+        problems = []
+        if len(mute) != 1:
+            problems.append("fixture drift: %d page(s) carry no description, "
+                            "want exactly 1" % len(mute))
+        mute_page = mute[0] if mute else None
+        mute_fm = kdrv.frontmatter(mute_page[K_FILE]) if mute_page else {}
+        mute_hit = by_path.get(mute_page[K_FILE]) if mute_page else None
+        if mute_page and DESC_KEY in mute_fm:
+            problems.append("premise broken: %s DOES carry a description key "
+                            "(%r), so an absent line proves nothing about the "
+                            "renderer" % (mute_page[K_FILE], mute_fm[DESC_KEY]))
+        if not shared["desc_lines"]:
+            problems.append("premise broken: no hit in this answer carries a "
+                            "description, so the silence is global and says "
+                            "nothing about this page")
+        if mute_hit is None:
+            problems.append("premise broken: %s is not in the hit set, so it "
+                            "has no block to be silent in"
+                            % (mute_page[K_FILE] if mute_page else "?"))
+        else:
+            got = hit_attrs(mute_hit, DESC_KEY)
+            if got:
+                problems.append("a description line was rendered anyway (%r): "
+                                "an empty or placeholder one is worse than "
+                                "none, because the caller cannot tell a page "
+                                "with nothing to say from a field nobody filled"
+                                % [a["value"] for a in got])
+            if not hit_attrs(mute_hit, "sources"):
+                problems.append("the silent page lost its `sources:` line too "
+                                "-- what goes missing is the description alone")
+        suite.record("K", "page-without-description-stays-silent", problems,
+                     detail=[_d("page", "%s" % (mute_page[K_FILE] if mute_page
+                                                else "?")),
+                             _d("premise", "frontmatter keys %r -- %r absent"
+                                % (sorted(mute_fm), DESC_KEY)),
+                             _d("rendered", "%r"
+                                % ([a["key"] for a in mute_hit["attrs"]]
+                                   if mute_hit else None)),
+                             _d("others", "%d description line(s) elsewhere in "
+                                          "the same answer"
+                                % len(shared["desc_lines"]))],
+                     text=shared["text"])
+
+        tgt_pages = [p for p in want_pages if p[K_TGTS]]
+        problems = []
+        if len(tgt_pages) != 1:
+            problems.append("fixture drift: %d hit page(s) carry `targets:`, "
+                            "want exactly 1" % len(tgt_pages))
+        tgt_page = tgt_pages[0] if tgt_pages else None
+        tgt_matched = matched_by_file.get(tgt_page[K_FILE], []) if tgt_page else []
+        tgt_hit = by_path.get(tgt_page[K_FILE]) if tgt_page else None
+        if tgt_page and not tgt_page[K_DESC]:
+            problems.append("premise broken: the targets page has no "
+                            "description, so there is nothing to place")
+        if tgt_page and [a for a in tgt_matched if a in tgt_page[K_SRCS]]:
+            problems.append("premise broken: the query ALSO matches a "
+                            "`sources:` anchor of %s, so this is not the "
+                            "targets-only shape" % tgt_page[K_FILE])
+        if tgt_hit is None:
+            problems.append("the targets page is not in the answer at all")
+        else:
+            if hit_attrs(tgt_hit, "sources"):
+                problems.append("a `sources:` line was rendered although no "
+                                "source anchor matched: %r"
+                                % [a["value"] for a in hit_attrs(tgt_hit,
+                                                                 "sources")])
+            tg = hit_attrs(tgt_hit, "targets")
+            dl = hit_attrs(tgt_hit, DESC_KEY)
+            if len(tg) != 1:
+                problems.append("%d `targets:` line(s), want 1" % len(tg))
+            elif tg[0]["value"] != ", ".join(tgt_matched):
+                problems.append("the targets line reads %r, want %r"
+                                % (tg[0]["value"], ", ".join(tgt_matched)))
+            if len(dl) != 1:
+                problems.append("%d description line(s) on the targets-only "
+                                "hit, want 1" % len(dl))
+            if len(tg) == 1 and len(dl) == 1:
+                if dl[0]["line_i"] > tg[0]["line_i"]:
+                    problems.append("the description (line %d) renders AFTER "
+                                    "the targets line (%d)"
+                                    % (dl[0]["line_i"], tg[0]["line_i"]))
+                if dl[0]["indent"] != tg[0]["indent"]:
+                    problems.append("description indent %r, targets indent %r"
+                                    % (dl[0]["indent"], tg[0]["indent"]))
+        suite.record("K", "targets-only-hit-is-described-too", problems,
+                     detail=[_d("page", "%s" % (tgt_page[K_FILE] if tgt_page
+                                                else "?")),
+                             _d("matched", "%r (all from `targets:`)"
+                                % tgt_matched),
+                             _d("rendered", "%r"
+                                % ([(a["key"], a["line_i"])
+                                    for a in tgt_hit["attrs"]]
+                                   if tgt_hit else None)),
+                             _d("why", "a page can be a hit through the OTHER "
+                                       "anchor list, and the same line has to "
+                                       "come first there too")],
+                     text=shared["text"])
+
+        problems = []
+        rows = []
+        for page in K_PAGES:
+            full_text = k_page_text(page, True)
+            bare_text = k_page_text(page, False)
+            manual = "\n".join(ln for ln in full_text.split("\n")
+                               if not ln.startswith("description: "))
+            if bare_text != manual:
+                problems.append("%s: the mirror page is NOT the full page minus "
+                                "its description line, so the control corpus "
+                                "differs in more than the field" % page[K_FILE])
+            dropped = len(full_text.split("\n")) - len(bare_text.split("\n"))
+            if dropped != (1 if page[K_DESC] else 0):
+                problems.append("%s: the mirror drops %d line(s), want %d"
+                                % (page[K_FILE], dropped,
+                                   1 if page[K_DESC] else 0))
+        for source in (K_SHARED_SOURCE, K_SYMBOL_SOURCE):
+            full = kdrv.sources(source)
+            bare = bdrv.sources(source)
+            stripped = strip_desc_lines(full["text"])
+            if not full["desc_lines"]:
+                problems.append("%s: the described corpus rendered no "
+                                "description line at all" % source)
+            if bare["desc_lines"]:
+                problems.append("%s: the mirror rendered %d description line(s) "
+                                "although no page carries the field: %r"
+                                % (source, len(bare["desc_lines"]),
+                                   bare["desc_lines"]))
+            if full["text"] == bare["text"]:
+                problems.append("%s: the two answers are identical, so the "
+                                "comparison below cannot fail" % source)
+            if stripped == full["text"]:
+                problems.append("%s: the filter removed nothing, so the "
+                                "comparison is vacuous" % source)
+            if stripped != bare["text"]:
+                problems.append("%s: with its description lines filtered out "
+                                "the answer is NOT what the same corpus renders "
+                                "without the field:\n  want %r\n  got  %r"
+                                % (source, bare["text"], stripped))
+            rows.append("%-42s full %4dc  bare %4dc  filtered==bare %r"
+                        % (source, len(full["text"]), len(bare["text"]),
+                           stripped == bare["text"]))
+        suite.record("K", "only-the-description-lines-are-new", problems,
+                     detail=[_d("control", "the same five pages with their "
+                                           "`description:` frontmatter line "
+                                           "removed, in a separate workspace"),
+                             _d("claim", "answer minus its description lines == "
+                                         "answer of the corpus without the "
+                                         "field, BYTE for byte")]
+                            + ["        " + r for r in rows],
+                     text=kdrv.sources(K_SHARED_SOURCE)["text"])
+
+        none_full = kdrv.sources(K_ABSENT_SOURCE)
+        none_bare = bdrv.sources(K_ABSENT_SOURCE)
+        problems = []
+        if k_expected_hits(K_ABSENT_SOURCE):
+            problems.append("fixture drift: %r matches %d fixture page(s), so "
+                            "the empty arm is not being exercised"
+                            % (K_ABSENT_SOURCE,
+                               len(k_expected_hits(K_ABSENT_SOURCE))))
+        if not shared["desc_lines"]:
+            problems.append("premise broken: this corpus renders no description "
+                            "line on ANY query, so an empty answer without one "
+                            "is not evidence")
+        if none_full["error"]:
+            problems.append("call failed: %s" % none_full["text"][:160])
+        if none_full["header_count"] != 0:
+            problems.append("the header claims %r page(s), want 0"
+                            % none_full["header_count"])
+        if not none_full["has_no_ref_msg"]:
+            problems.append("missing %r" % NO_REF_MSG)
+        if none_full["hits"]:
+            problems.append("%d hit line(s) rendered: %r"
+                            % (len(none_full["hits"]),
+                               [h["path"] for h in none_full["hits"]]))
+        if none_full["attr_lines"]:
+            problems.append("the empty answer carries %d attribute line(s): %r"
+                            % (len(none_full["attr_lines"]),
+                               none_full["attr_lines"]))
+        if none_full["text"] != none_bare["text"]:
+            problems.append("the empty answer differs between the described "
+                            "corpus and the mirror:\n  bare %r\n  full %r"
+                            % (none_bare["text"], none_full["text"]))
+        suite.record("K", "empty-result-is-untouched", problems,
+                     detail=[_d("call", "source_to_pages %r" % K_ABSENT_SOURCE),
+                             _d("answer", "%r" % none_full["text"]),
+                             _d("mirror", "identical: %r"
+                                % (none_full["text"] == none_bare["text"])),
+                             _d("why", "a hit-less reply has no hit to describe, "
+                                       "and the sentence it does carry is the "
+                                       "one the caller already knew")],
+                     text=none_full["text"])
+
+        tool_desc = kdrv.mod.WIKI_CALL_TOOL["description"]
+        para = tool_paragraph(tool_desc, "source_to_pages")
+        problems = []
+        if not para:
+            problems.append("no `source_to_pages` entry in the tool description "
+                            "at all, so this case is reading nothing")
+        if DESC_KEY not in para:
+            problems.append("the source_to_pages entry never mentions the "
+                            "description, so the only way to learn the answer "
+                            "carries one is to call it and look -- the same "
+                            "invisibility min_coverage had")
+        if "`%s`" % DESC_KEY in tool_desc:
+            problems.append("the description BACKTICKS description: the "
+                            "name_existence suite reads backticked identifiers "
+                            "in server text as function-name prescriptions, so "
+                            "a backticked field name turns into a dead-name "
+                            "finding over there -- leave it bare")
+        suite.record("K", "description-is-discoverable-unbackticked", problems,
+                     detail=[_d("entry", "%d char(s)" % len(para)),
+                             _d("mentions", "%r" % (DESC_KEY in para)),
+                             _d("backticked", "%r"
+                                % ("`%s`" % DESC_KEY in tool_desc)),
+                             _d("why", "a reverse lookup that now answers 'what '"
+                                       "do they say' is worth nothing if the "
+                                       "caller still expects only 'which page'")],
+                     text=para)
+    finally:
+        desc_work.cleanup()
+        bare_work.cleanup()
 
     # ============ H: hygiene ============
     pyc_after = H.pycache_snapshot()

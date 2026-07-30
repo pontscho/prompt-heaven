@@ -1023,6 +1023,7 @@ def _fn_source_to_pages(params, project_root, wiki_root, strict):
                 "title": fm.get("title") or fm.get("name") or relpath,
                 "slug": fm.get("name") or relpath, "path": relpath,
                 "type": fm.get("type") or "", "status": fm.get("status") or "",
+                "description": fm.get("description") or "",
                 "sources": matched_sources, "targets": matched_targets,
             })
 
@@ -1033,6 +1034,17 @@ def _fn_source_to_pages(params, project_root, wiki_root, strict):
         meta = "/".join(x for x in [h["type"], h["status"]] if x)
         meta = (" [%s]" % meta) if meta else ""
         lines.append("- **%s** — %s `%s`%s" % (h["title"], h["slug"], h["path"], meta))
+        # The one line that answers the question actually being asked. This
+        # handler was parsing `description` and then dropping it, so the reply
+        # said WHICH pages cover a source and nothing about WHAT they say — a
+        # pointer the caller has to spend another call to cash in, which is the
+        # leak this whole line of work is chasing. Measured against the
+        # alternative: a section list under every hit costs +116%..+178%, the
+        # description +54%..+63%, and it is present on all ten pages, so it
+        # never silently adds nothing. Structure is `get_page`'s answer; this
+        # function is asked "which page", and a sentence answers that.
+        if h["description"]:
+            lines.append("    description: %s" % h["description"])
         if h["sources"]:
             lines.append("    sources: %s" % ", ".join(map(str, h["sources"])))
         if h["targets"]:
@@ -1368,8 +1380,10 @@ WIKI_CALL_TOOL = {
         "                   share of the query's idf mass or it is NOT reported,\n"
         "                   so an undocumented topic answers 'no page passes the\n"
         "                   relevance gate' instead of ranking noise; 0 disables)\n"
-        "  source_to_pages  reverse lookup — which pages document a source file;\n"
-        "                   params: source (req, a path or path:symbol)\n"
+        "  source_to_pages  reverse lookup — which pages document a source file,\n"
+        "                   each with its one-line description, so the answer says\n"
+        "                   what they cover and not merely that they do; params:\n"
+        "                   source (req, a path or path:symbol)\n"
         "  get_page         read one page whole or a single section; params: slug\n"
         "                   (req), section, include_body (default true), depth\n"
         "                   (default 2). When the section does not match, or\n"
