@@ -12,7 +12,9 @@ the p:wiki scripts (freshness.py / reindex.py) by absolute path and reading page
 one at a time.
 
 Functions:
-  search           BM25F-ranked (prefix, per-field weighted) full-text search over pages
+  search           BM25F-ranked (prefix, per-field weighted) full-text search over
+                   pages, behind a calibrated relevance gate so a query the wiki
+                   cannot answer gets silence instead of the best-scoring noise
   source_to_pages  reverse lookup: a source file/anchor -> the pages that cover it
   get_page         read one page (whole, or a single section) by slug/path
   list             list pages, grouped by type, with type/status/prefix filters
@@ -68,6 +70,22 @@ SKIP_DIRS = {"sources", "plans", ".git", ".claude", ".cache"}
 # Search field weights — a term hit in the title counts far more than in the body.
 FIELD_WEIGHTS = {"name": 8, "title": 8, "anchor": 5, "description": 4,
                  "heading": 3, "body": 1}
+# Relevance gate for `search`: the share of the query's total idf mass a page
+# must actually carry to be reported at all. Without it the ONLY silencing
+# condition is "zero terms matched", which never fires on this corpus -- the
+# token `mcp` occurs in all 10 pages, so one ubiquitous term drags every page
+# into every answer and the search cannot say "I don't know".
+#
+# CALIBRATED, not chosen: .claude/tmp/wiki-density/probe.py runs six fixed
+# queries through both HEAD and the worktree. The best FALSE positive tops out
+# at 49% coverage; the weakest REAL answer sits at 59%. The usable window is
+# therefore (0.49, 0.59] and this value is the middle of it. Above 0.59 real
+# answers start dying; at or below 0.49 false positives leak back in.
+#
+# The SCORE cannot do this job -- measured, a real hit scored 5.28 while a false
+# one scored 5.70. Coverage separates them because a term the corpus has never
+# seen takes the maximum idf, so an unknown topic drags coverage down hard.
+DEFAULT_MIN_COVERAGE = 0.55
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -702,6 +720,12 @@ def _fn_search(params, project_root, wiki_root, strict):
         b = min(1.0, max(0.0, float(params.get("b")))) if params.get("b") is not None else 0.75
     except (TypeError, ValueError):
         b = 0.75
+    try:
+        raw_cov = params.get("min_coverage")
+        min_cov = (min(1.0, max(0.0, float(raw_cov))) if raw_cov is not None
+                   else DEFAULT_MIN_COVERAGE)
+    except (TypeError, ValueError):
+        min_cov = DEFAULT_MIN_COVERAGE
 
     # Corpus stats are GLOBAL (over all pages, pre-filter) so a term's rarity
     # does not shift with the caller's type/status/prefix filter.
@@ -712,6 +736,10 @@ def _fn_search(params, project_root, wiki_root, strict):
             if any(_prefix_count(pd["tokens"][f], t) for f in _SEARCH_FIELDS):
                 df[t] += 1
     idf = {t: math.log((n_docs - df[t] + 0.5) / (df[t] + 0.5) + 1.0) for t in terms}
+    # Total query "information mass": the denominator of the coverage gate. A term
+    # NO page carries still counts here (df 0 earns the maximum idf), which is the
+    # point -- an unknown word is evidence the corpus does not cover the topic.
+    idf_total = sum(idf.values())
 
     results = []
     for pd in corpus:
@@ -723,7 +751,7 @@ def _fn_search(params, project_root, wiki_root, strict):
         if f_status and (fm.get("status") or "") != f_status:
             continue
         score = 0.0
-        matched = 0
+        hit_terms = []
         for t in terms:
             # BM25F pseudo-TF: each field length-normalized on its OWN avg length,
             # boosted, then summed — saturation is applied ONCE afterwards.
@@ -735,10 +763,14 @@ def _fn_search(params, project_root, wiki_root, strict):
                 norm = (1.0 - b + b * (pd["field_len"][f] / avgfl[f])) if avgfl[f] > 0 else 1.0
                 ftilde += FIELD_WEIGHTS[f] * cnt / norm
             if ftilde > 0:
-                matched += 1
+                hit_terms.append(t)
                 score += idf[t] * (ftilde * (k1 + 1.0)) / (ftilde + k1)
-        if matched == 0:
+        if not hit_terms:
             continue
+        # What share of the query this page actually answers. Kept per-page (not
+        # just for the winner) so the caller can see the ranking decay, and so a
+        # weak page is filtered on its own merit rather than on the leader's.
+        coverage = (sum(idf[t] for t in hit_terms) / idf_total) if idf_total else 0.0
         snippet, _section, anchor = _best_snippet(pd["body"], pd["headings"], terms, relpath)
         if not snippet:
             snippet = fm.get("description") or ""
@@ -747,21 +779,48 @@ def _fn_search(params, project_root, wiki_root, strict):
             "slug": fm.get("name") or relpath,
             "type": fm.get("type") or "", "status": fm.get("status") or "",
             "anchor": anchor, "snippet": snippet,
-            "score": score, "matched": matched,
+            "score": score, "coverage": coverage,
+            "missed": [t for t in terms if t not in hit_terms],
         })
 
     results.sort(key=lambda r: r["score"], reverse=True)  # pure BM25F relevance
-    results = results[:limit]
+    # The gate runs BEFORE `limit`: `best_cov` is then the true best of the whole
+    # corpus, so the "not good enough" message cannot be an artefact of truncation.
+    n_lexical = len(results)          # pages sharing at least one term with the query
+    best_cov = results[0]["coverage"] if results else 0.0
+    results = [r for r in results if r["coverage"] >= min_cov][:limit]
 
+    unknown = [t for t in terms if df[t] == 0]
     lines = ["# search: %r — %d hit(s) in %s/  (BM25F, k1=%g b=%g)"
              % (query, len(results), rel_root, k1, b), ""]
+    if unknown:
+        lines.append("unknown to the corpus: %s" % ", ".join(unknown))
     if not results:
-        lines.append("no matching pages")
+        # TWO different silences, and the difference is the caller's next move:
+        # nothing matched at all (rephrase / wrong wiki) versus matches that were
+        # not good enough (the topic is probably undocumented). Only the first was
+        # expressible before -- and it never fired, because one corpus-wide token
+        # is enough to match every page.
+        # Percentages are FLOORED, never rounded. Rounding 54.6% up to "55%"
+        # against a 55% gate would make this very line contradict itself --
+        # claiming the best page met the bar while refusing to show it.
+        lines.append("no matching pages" if not n_lexical else
+                     "no page passes the relevance gate "
+                     "(best coverage %d%%, need %d%%)"
+                     % (math.floor(100 * best_cov), math.floor(100 * min_cov)))
+    elif unknown:
+        lines.append("")              # keep the note clear of the ranking
     for i, r in enumerate(results, 1):
         meta = "/".join(x for x in [r["type"], r["status"]] if x)
         meta = (" [%s]" % meta) if meta else ""
-        lines.append("%d. **%s** — %s `%s`%s  (score %.2f, %d/%d terms)" % (
-            i, r["title"], r["slug"], r["anchor"], meta, r["score"], r["matched"], len(terms)))
+        lines.append("%d. **%s** — %s `%s`%s  (score %.2f, cov %d%%)" % (
+            i, r["title"], r["slug"], r["anchor"], meta, r["score"],
+            math.floor(100 * r["coverage"])))
+        # Names the terms this page does NOT answer. Replaces the old `4/6 terms`
+        # counter, which said HOW MANY were missing but never WHICH -- and stays
+        # silent when nothing is missing, so a full match costs nothing.
+        if r["missed"]:
+            lines.append("   missed: %s" % ", ".join(r["missed"]))
         if r["snippet"]:
             lines.append("   %s" % r["snippet"])
     return _finalize("\n".join(lines).rstrip() + "\n", params)
@@ -971,7 +1030,8 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
 
 _COMMON_PARAMS = {"root", "max_answer_chars"}
 HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
-    "search": _COMMON_PARAMS | {"query", "type", "status", "path_prefix", "limit", "k1", "b"},
+    "search": _COMMON_PARAMS | {"query", "type", "status", "path_prefix", "limit",
+                                "k1", "b", "min_coverage"},
     "source_to_pages": _COMMON_PARAMS | {"source"},
     "get_page": _COMMON_PARAMS | {"slug", "section", "include_body"},
     "list": _COMMON_PARAMS | {"type", "status", "path_prefix"},
@@ -1125,7 +1185,11 @@ WIKI_CALL_TOOL = {
         "Functions (pass via 'function'):\n"
         "  search           BM25F-ranked token search (prefix match, per-field\n"
         "                   weighting); params: query (req), type, status,\n"
-        "                   path_prefix, limit (default 10), k1/b (BM25 tuning)\n"
+        "                   path_prefix, limit (default 10), k1/b (BM25 tuning),\n"
+        "                   min_coverage (default 0.55: a page must carry that\n"
+        "                   share of the query's idf mass or it is NOT reported,\n"
+        "                   so an undocumented topic answers 'no page passes the\n"
+        "                   relevance gate' instead of ranking noise; 0 disables)\n"
         "  source_to_pages  reverse lookup — which pages document a source file;\n"
         "                   params: source (req, a path or path:symbol)\n"
         "  get_page         read one page whole or a single section; params: slug\n"

@@ -39,6 +39,14 @@ run):
                                                       boilerplate -- summed over
                                                       the REGISTERED servers,
                                                       not the file set (A-G)
+  wiki_recall        tests/test_wiki_recall.py        the mcp-wiki `search`
+                                                      relevance gate on a
+                                                      synthetic corpus that
+                                                      reproduces the measured
+                                                      pathologies: silence,
+                                                      the MEASURED calibration
+                                                      window, and floored
+                                                      percentages (A-H)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -131,6 +139,10 @@ def run_mcp_footprint(opts):
     return run_python_suite("test_mcp_footprint", opts)
 
 
+def run_wiki_recall(opts):
+    return run_python_suite("test_wiki_recall", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -188,6 +200,9 @@ SUITES = [
     ("mcp_footprint", run_mcp_footprint,
      "MCP fleet token footprint: description tax, result ceilings, boilerplate",
      None),
+    ("wiki_recall", run_wiki_recall,
+     "mcp-wiki search relevance gate: silence, measured calibration window, "
+     "floored percentages", 30),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

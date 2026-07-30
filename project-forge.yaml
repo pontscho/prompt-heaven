@@ -98,6 +98,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|TOTAL|desc|wire|ceiling|CONFORMS|MATCH|DRIFT'
 
+  wiki_recall:
+    description: "mcp-wiki search relevance gate on a synthetic corpus: silence, measured calibration window, floored percentages"
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py wiki_recall
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|window|gate'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]
