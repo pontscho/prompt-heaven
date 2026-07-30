@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Mechanical suite for the `search` relevance gate in Scripts/mcp-wiki.py
-(36 cases, A-I).
+"""Mechanical suite for the `search` relevance gate and the `get_page` section
+index in Scripts/mcp-wiki.py (51 cases, A-J).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/.  Nothing is spawned, nothing
@@ -80,6 +80,27 @@ Coverage by group:
      function-word decoy stops winning, and the two deliberate NON-drops
      (`search`, a function name here; `done`, a plausible frontmatter status)
      still reach the search
+  J  `get_page`'s SECTION INDEX -- the answer to "your section did not match":
+     both no-body branches list what IS there, the line numbers are FILE-
+     relative (each one checked against the fixture file itself), every
+     advertised size equals the slice `section:` actually serves, the depth hint
+     is mechanically honest (re-calling at the depth it names empties it and
+     shows exactly the promised extra headings), a heading whose slice IS the
+     page is never offered (measured per page, not assumed from its level: two
+     H1s bound each other and BOTH are listed), the ORDER of the two skip tests
+     is pinned on the one page that can see it, and the two WORKING branches --
+     default body, successful extraction -- stay free of the new block.  Two cases pin what the index
+     does when it CANNOT be complete: an unreadable file drops the L and NOTHING
+     else (the block is the readable one minus its `L<n>, ` prefixes, byte for
+     byte), and the two empty answers stay different sentences -- a page with no
+     headings and a page whose only heading is its title imply opposite next
+     moves, so a merge of the two must fail here
+
+Group J runs on its OWN three-page fixture in a SECOND workspace, and that is
+not tidiness.  The six pages above ARE the calibration window group D measures:
+one more page moves `n_docs`, moves every term's idf, and shifts -- or closes --
+the window, so a page added here for a `get_page` test would fail group D for a
+reason that has nothing to do with search.  The two fixtures never mix.
 
 Usage:
   python3 tests/test_wiki_recall.py
@@ -484,6 +505,20 @@ class Driver:
         out["params"] = payload
         return out
 
+    def get_page(self, slug, **params):
+        """One rendered `get_page` answer, parsed for its section index."""
+        payload = {"slug": slug}
+        payload.update(params)
+        res = self.mod.handle_wiki_call(
+            {"function": "get_page", "params": payload},
+            self.root, WIKI_REL)
+        text = res.get("__raw_text__") or res.get("error") or ""
+        out = parse_page(text)
+        out["error"] = "error" in res
+        out["text"] = text
+        out["params"] = payload
+        return out
+
     def split_query(self, query):
         """(dropped, kept) for a query, split by the server's OWN stoplist.
 
@@ -564,12 +599,356 @@ def naive_round(value):
 
 
 # ---------------------------------------------------------------------------
+# Group J's fixture: `get_page`'s SECTION INDEX.
+#
+# A SECOND workspace, three pages, and NOT one line added to the six above --
+# see the module docstring: those six are group D's calibration window, and an
+# extra page moves every idf in it.
+#
+# The six pages are the six shapes the index has to survive.  Note what the
+# skip rule now IS: a heading whose slice is the WHOLE PAGE is not offered, and
+# that is a statement about size, not about level.  Four of these pages are
+# there because the two readings agree on them and two because they do NOT:
+#
+#   layered-page    an H1, three level-2 sections and two level-3 ones under the
+#                   second of them, with a frontmatter block TALL on purpose --
+#                   the whole point of `_body_line_offset` is that a body-
+#                   relative line number is wrong by exactly that height, so a
+#                   short header would let the bug hide.  The section sizes are
+#                   deliberately unequal, or a renderer that printed one constant
+#                   would pass the size case.
+#   flat-page       no headings at all -> there is nothing to list, and an empty
+#                   `sections:` label would be worse than saying so.
+#   title-only-page an H1 and NOTHING else -> it DOES have a heading, the index
+#                   skips it on purpose, and telling the caller the page has no
+#                   headings would be a plain lie.  Its whole job is to be
+#                   confusable with flat-page and to prove it is not.
+#   deep-only-page  every heading below the title is level 3, so the DEFAULT
+#                   listing is empty and the hint is the entire answer.  This is
+#                   the page where "the hint is not decoration" is checkable.
+#   two-titles-page TWO H1s, nothing else.  They BOUND each other, so neither
+#                   slice is the whole page and both are real sections -- the
+#                   page where `level < 2` and `size >= whole` disagree, and the
+#                   one the old proxy silently hid a usable slice on.
+#   deep-solo-page  ONE level-3 heading and no other, so its slice IS the page
+#                   AND its level is past the default depth.  The only page
+#                   where the ORDER of the two tests is observable: sized first
+#                   it vanishes, depth-tested first it becomes a `deeper` count
+#                   and the answer advertises an escape hatch that leads to the
+#                   same empty answer.
+#
+# No page carries a code fence: group J's oracle for "which headings exist" is a
+# naive ATX scan of the RAW file (`fixture_headings`), which shares no code with
+# the server's `_headings` -- and that independence only holds while the naive
+# rule is exact, i.e. while no fenced `# comment` exists to be skipped.
+# ---------------------------------------------------------------------------
+
+SEC_LAYERED = ("layered-page.md", "layered-page", """\
+---
+name: layered-page
+title: A page with two heading levels
+type: reference
+status: current
+description: Three level two sections and two level three ones under a frontmatter block tall enough that a body relative line number would be visibly wrong.
+sources:
+  - Scripts/mcp-wiki.py:_section_list
+  - Scripts/mcp-wiki.py:_body_line_offset
+  - Scripts/mcp-wiki.py:_section_index_block
+---
+
+# A page with two heading levels
+
+Intro prose that sits under no level two heading at all.
+
+## First section
+
+Short on purpose.
+
+## Second section
+
+Longer than the first one, so the two advertised sizes differ and a size column
+that reported the same number everywhere would be caught here instead of looking
+plausible. This section also owns the two level three headings below it, so its
+slice runs past them.
+
+### A nested detail
+
+The nested headings are what make the depth hint fire at all.
+
+### Another nested detail
+
+Two of them, so the number in the hint is a count and not a coincidence.
+
+## Third section
+
+The last section runs to the end of the file, which is the one slice whose size
+is not bounded by a following heading.
+""")
+
+SEC_FLAT = ("flat-page.md", "flat-page", """\
+---
+name: flat-page
+title: A page with no headings whatsoever
+type: reference
+status: current
+description: Prose only, so the section index has nothing to list and has to say so instead of rendering an empty label.
+sources:
+  - Scripts/mcp-wiki.py:_section_index_block
+---
+
+This page is one paragraph and no headings at all. An index that rendered an
+empty label here would tell the caller nothing, which is the one thing worse
+than a refusal.
+
+A second paragraph, still with no heading above it.
+""")
+
+SEC_TITLE = ("title-only-page.md", "title-only-page", """\
+---
+name: title-only-page
+title: A page whose only heading is its own title
+type: reference
+status: current
+description: One H1 and prose. The index skips the H1 on purpose, so it lists nothing and must not claim the page has no headings.
+sources:
+  - Scripts/mcp-wiki.py:_section_index_block
+---
+
+# A page whose only heading is its own title
+
+One heading exists on this page and the index deliberately declines to offer it,
+because its slice runs to the end of the file and is therefore the whole page.
+
+That is a different fact from having no headings at all, and the two sentences
+are not interchangeable: one says look elsewhere, the other says read the page.
+""")
+
+SEC_DEEP = ("deep-only-page.md", "deep-only-page", """\
+---
+name: deep-only-page
+title: A page whose only headings are level three
+type: reference
+status: current
+description: Every heading below the title is level three, so the default listing is empty and the hint is the entire answer.
+sources:
+  - Scripts/mcp-wiki.py:_section_list
+---
+
+# A page whose only headings are level three
+
+### First deep heading
+
+Nothing above level three here except the title.
+
+### Second deep heading
+
+So the default depth lists nothing and the hint has to carry the whole answer.
+
+### Third deep heading
+
+Three of them, so the count the hint reports is checkable against the file.
+""")
+
+SEC_TWO = ("two-titles-page.md", "two-titles-page", """\
+---
+name: two-titles-page
+title: A page that carries two top level headings
+type: reference
+status: current
+description: Two H1s that bound each other, so neither slice is the whole page and both are sections a caller can actually ask for.
+sources:
+  - Scripts/mcp-wiki.py:_section_list
+---
+
+# The first top level heading
+
+Prose under the first title. This block ends where the second title begins, so
+its slice is strictly smaller than the body — and a level based skip rule hid a
+section the caller could have asked for and been served.
+
+# The second top level heading
+
+Prose under the second title. This one runs to the end of the file and is still
+not the whole page, because the first title's block sits above it.
+""")
+
+SEC_SOLO = ("deep-solo-page.md", "deep-solo-page", """\
+---
+name: deep-solo-page
+title: A page with one level three heading and nothing else
+type: reference
+status: current
+description: The single heading starts the body and runs to the end, so its slice is the whole page while its level sits past the default depth.
+sources:
+  - Scripts/mcp-wiki.py:_section_list
+---
+
+### A single deep heading
+
+This heading is the first line of the body and nothing follows it at its own
+level or above, so asking for it as a section returns the entire page.
+
+Its level is below the default depth, which is what makes the ORDER of the two
+skip tests visible: depth-tested first it would be counted as hidden, and the
+caller would be sent to a depth that reveals nothing.
+""")
+
+SEC_PAGES = [SEC_LAYERED, SEC_FLAT, SEC_TITLE, SEC_DEEP, SEC_TWO, SEC_SOLO]
+LAYERED_FILE, LAYERED_SLUG = SEC_LAYERED[0], SEC_LAYERED[1]
+FLAT_FILE, FLAT_SLUG = SEC_FLAT[0], SEC_FLAT[1]
+TITLE_FILE, TITLE_SLUG = SEC_TITLE[0], SEC_TITLE[1]
+DEEP_FILE, DEEP_SLUG = SEC_DEEP[0], SEC_DEEP[1]
+TWO_FILE, TWO_SLUG = SEC_TWO[0], SEC_TWO[1]
+SOLO_FILE, SOLO_SLUG = SEC_SOLO[0], SEC_SOLO[1]
+
+# A heading no fixture page has, and no page may ever grow.
+MISSING_SECTION = "there-is-no-such-heading"
+# A path that cannot be opened: the shortest route to `_section_index_block`'s
+# OSError arm, where the file line is UNKNOWABLE and must therefore go unprinted.
+UNREADABLE_FILE = "no-such-file-on-disk.md"
+
+SECTIONS_LABEL = "sections:"
+# The two empties.  They are NOT interchangeable: "no headings" means there is
+# nothing here to slice, while the second names the RULE -- every heading on the
+# page spans it -- and so implies the next move, `get_page` without a section.
+# The second one deliberately mentions no title: it has to stay true on a page
+# whose single heading is not one.
+NO_HEADINGS_MSG = "_(this page has no headings)_"
+NO_SECTIONS_MSG = "_(no section here is smaller than the whole page)_"
+EMPTY_MSGS = (NO_HEADINGS_MSG, NO_SECTIONS_MSG)
+HINT_SENTINEL = "deeper heading"
+
+# `L<n>, ` is OPTIONAL: when the offset cannot be established the server drops
+# the file line and keeps the size, so both shapes are one line format with one
+# part missing -- and parsing them with one regex is what lets a case assert
+# that ONLY that part went missing.
+_INDEX_LINE_RE = re.compile(
+    r"^- (?P<name>.+) \((?:L(?P<line>\d+), )?(?P<size>\d+)c\)$", re.M)
+# What a line loses when the offset is unknown, and nothing else.
+_L_PREFIX_RE = re.compile(r" \(L\d+, ")
+_HINT_RE = re.compile(
+    r"^(?P<hidden>\d+) deeper heading\(s\) not listed — pass depth: "
+    r"(?P<depth>\d+) to see them$", re.M)
+_NOT_FOUND_RE = re.compile(r"^_\(section (?P<name>.+) not found\)_$", re.M)
+_ATX_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<text>.*?)\s*$")
+
+
+def parse_page(text):
+    """Structured view of one rendered `get_page` answer.
+
+    The index lines are matched anywhere in the answer, not only under the
+    label: "the H1 is never offered as a section" is a claim about the whole
+    reply, and a parser that only looked inside a `sections:` block could not
+    see a dash line rendered somewhere else.
+    """
+    sections = [{"name": m.group("name"),
+                 "line": int(m.group("line")) if m.group("line") else None,
+                 "size": int(m.group("size"))}
+                for m in _INDEX_LINE_RE.finditer(text)]
+    hint = _HINT_RE.search(text)
+    miss = _NOT_FOUND_RE.search(text)
+    return {
+        "sections": sections,
+        "names": [s["name"] for s in sections],
+        "sized": [(s["name"], s["size"]) for s in sections],
+        "with_line": [s for s in sections if s["line"] is not None],
+        "has_sections_label": any(ln == SECTIONS_LABEL
+                                  for ln in text.split("\n")),
+        "hint": (int(hint.group("hidden")), int(hint.group("depth")))
+        if hint else None,
+        "has_hint_sentinel": HINT_SENTINEL in text,
+        "has_no_headings_msg": NO_HEADINGS_MSG in text,
+        "has_no_sections_msg": NO_SECTIONS_MSG in text,
+        # Which of the two empties this answer actually rendered.  A list, so a
+        # server that printed BOTH is a visible failure rather than a coin toss.
+        "empty_msgs": [ln for ln in text.split("\n") if ln in EMPTY_MSGS],
+        "not_found": miss.group("name") if miss else None,
+    }
+
+
+def triples(answer):
+    """The section index as comparable tuples -- what the two arms must share."""
+    return [(s["name"], s["line"], s["size"]) for s in answer["sections"]]
+
+
+def build_section_fixture(work):
+    """Write group J's three pages; return the project root for the server.
+
+    realpath for the same reason `build_fixture` does it: `safe_path` compares
+    the RESOLVED wiki root against the project root it was handed.
+    """
+    for fname, _slug, text in SEC_PAGES:
+        work.write_text(os.path.join(WIKI_REL, fname), text)
+    return os.path.realpath(work.path)
+
+
+def file_lines(root, fname):
+    """The RAW fixture file: frontmatter included, nothing stripped."""
+    with open(os.path.join(root, WIKI_REL, fname), "r", encoding="utf-8") as fh:
+        return fh.read().splitlines()
+
+
+def fixture_headings(lines):
+    """[(file_line_1based, level, text)] for every ATX heading in the RAW file.
+
+    Deliberately naive -- no frontmatter split, no fence tracking -- so it is an
+    INDEPENDENT oracle rather than a second call into the code under test.  It
+    is exact for these three pages because none of them carries a code fence or
+    a '#' inside its frontmatter block.
+    """
+    out = []
+    for i, line in enumerate(lines):
+        m = _ATX_RE.match(line)
+        if m:
+            out.append((i + 1, len(m.group("hashes")), m.group("text")))
+    return out
+
+
+def fixture_body_offset(lines):
+    """File line (1-based) the body starts on, read off the RAW file.
+
+    Used as the PREMISE of the file-relative case: if this is 1 the page has no
+    frontmatter, body-relative and file-relative numbering agree, and the case
+    could not fail however the server numbered its headings.
+    """
+    if not lines or lines[0].strip() != "---":
+        return 1
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return i + 2
+    return 1
+
+
+def served_section(text, name):
+    """The slice a `section:` call actually returned, or None.
+
+    `_fn_get_page` appends the extracted markdown last, after a blank line, and
+    rstrips the whole answer -- so everything from the heading line onward,
+    stripped, IS the extracted string, byte for byte.
+
+    ANY level, including H1: since two H1s bound each other, an H1 can be a real
+    section, and a helper that could not see one would silently return None for
+    exactly the slice the level-based skip rule used to hide.  The rendered
+    answer's own first line is `# <frontmatter title>` and is not a section, so
+    the scan starts at line 1 -- and the two-H1 case asserts the fixture's title
+    differs from its headings, which is what keeps that exclusion sufficient.
+    """
+    pattern = re.compile(r"^#{1,6}\s+%s\s*$" % re.escape(name))
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if i and pattern.match(line):
+            return "\n".join(lines[i:]).strip()
+    return None
+
+
+# ---------------------------------------------------------------------------
 
 def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME, title="mcp-wiki `search` relevance gate: silence, "
                                 "measured calibration window, floored "
-                                "percentages, query-side stopwords",
+                                "percentages, query-side stopwords, and "
+                                "`get_page`'s section index",
                     opts=opts, mode="grouped")
     work = H.TempWorkspace("ph-wiki-recall-", keep=opts.keep)
     pyc_before = H.pycache_snapshot()
@@ -1415,6 +1794,760 @@ def run(opts=None):
                      text=keep["text"])
     finally:
         work.cleanup()
+
+    # ============ J: `get_page`'s section index ============
+    # A SEPARATE workspace and a SEPARATE three-page corpus: the six pages above
+    # are group D's measured calibration window, so a page added there for a
+    # `get_page` case would move every idf and fail a group it has nothing to do
+    # with.  Nothing below touches `search`.
+    sec_work = H.TempWorkspace("ph-wiki-sections-", keep=opts.keep)
+    try:
+        sec_root = build_section_fixture(sec_work)
+        sdrv = Driver(sec_root)
+
+        # The oracles: the RAW fixture file, scanned naively.  Every expectation
+        # in this group is derived from these, never typed.
+        raw = file_lines(sec_root, LAYERED_FILE)
+        heads = fixture_headings(raw)
+        offset = fixture_body_offset(raw)
+        h1 = [h for h in heads if h[1] == 1]
+        want_l2 = [h for h in heads if h[1] == 2]
+        want_deep = [h for h in heads if h[1] > 2]
+        want_all = [h for h in heads if h[1] >= 2]
+        deepest = max([h[1] for h in want_deep] or [2])
+        _sec_fm, layered_body = sdrv.mod.read_page(
+            os.path.join(sec_root, WIKI_REL, LAYERED_FILE))
+        # A body line that is neither blank nor a heading: the marker for "the
+        # body was served" / "the body was withheld".
+        body_probe = [ln for ln in layered_body.splitlines()
+                      if ln.strip() and not ln.startswith("#")][0]
+
+        miss = sdrv.get_page(LAYERED_SLUG, section=MISSING_SECTION)
+        deep_miss = sdrv.get_page(LAYERED_SLUG, section=MISSING_SECTION,
+                                  depth=deepest)
+
+        problems = []
+        if miss["error"]:
+            problems.append("call failed: %s" % miss["text"][:160])
+        if miss["not_found"] != repr(MISSING_SECTION):
+            problems.append("the refusal names %r, want %r -- the OLD contract "
+                            "(the caller learns its section did not match) has "
+                            "to survive the new block"
+                            % (miss["not_found"], repr(MISSING_SECTION)))
+        if not want_l2:
+            problems.append("fixture drift: the page carries no level-2 heading, "
+                            "so 'it lists them' proves nothing")
+        if not miss["has_sections_label"]:
+            problems.append("no %r label: the refusal still does not say what IS "
+                            "there, so the caller's only remaining move is the "
+                            "whole page again -- the circle this block cuts"
+                            % SECTIONS_LABEL)
+        if miss["names"] != [h[2] for h in want_l2]:
+            problems.append("listed %r, want %r (every level-2 heading of the "
+                            "fixture file, in document order)"
+                            % (miss["names"], [h[2] for h in want_l2]))
+        suite.record("J", "missing-section-lists-what-is-there", problems,
+                     detail=[_d("call", "get_page %r section=%r"
+                                % (LAYERED_SLUG, MISSING_SECTION)),
+                             _d("refusal", "%s" % miss["not_found"]),
+                             _d("listed", "%r" % miss["names"]),
+                             _d("oracle", "%r (naive ATX scan of the fixture "
+                                          "file)" % [h[2] for h in want_l2]),
+                             _d("measured", "4 real pages cost 2035c of refusals "
+                                            "against 115026c of full-body "
+                                            "re-reads without this block")],
+                     text=miss["text"])
+
+        problems = []
+        rows = []
+        if offset <= 1:
+            problems.append("fixture drift: the body starts on file line %d, so "
+                            "body-relative and file-relative numbering AGREE and "
+                            "this case cannot fail" % offset)
+        if not miss["sections"]:
+            problems.append("no index lines to check")
+        if len(miss["with_line"]) != len(miss["sections"]):
+            problems.append("%d of %d line(s) carry no L at all -- the offset is "
+                            "establishable here (the file is readable), so "
+                            "dropping it is the OSError arm firing on the happy "
+                            "path" % (len(miss["sections"])
+                                      - len(miss["with_line"]),
+                                      len(miss["sections"])))
+        for sec in miss["with_line"]:
+            n = sec["line"]
+            if not 1 <= n <= len(raw):
+                problems.append("%s: L%d is outside the %d-line file"
+                                % (sec["name"], n, len(raw)))
+                continue
+            m = _ATX_RE.match(raw[n - 1])
+            if not m or m.group("text") != sec["name"]:
+                problems.append("%s: file line %d is %r, not that heading -- L%d "
+                                "is NOT a file line"
+                                % (sec["name"], n, raw[n - 1], n))
+            body_rel = n - (offset - 1)
+            other = raw[body_rel - 1] if 1 <= body_rel <= len(raw) else "<off file>"
+            if other == raw[n - 1]:
+                problems.append("%s: the body-relative line %d carries the same "
+                                "text, so the two readings are indistinguishable "
+                                "here and the case is blind"
+                                % (sec["name"], body_rel))
+            rows.append("%-16s L%-3d %-34r   body-relative L%-3d %r"
+                        % (sec["name"], n, raw[n - 1][:34], body_rel,
+                           other[:34]))
+        suite.record("J", "index-line-numbers-are-file-relative", problems,
+                     detail=[_d("frontmatter", "%d line(s); the body's first line "
+                                               "is file line %d"
+                                % (offset - 1, offset)),
+                             _d("checked", "%d line(s), each against the FILE"
+                                % len(miss["sections"])),
+                             _d("why", "read_page hands the body back with the "
+                                       "frontmatter stripped, so a body-relative "
+                                       "number is short by exactly the header "
+                                       "height -- silently, and on every page")]
+                            + ["        " + r for r in rows],
+                     text=miss["text"])
+
+        # The PAIR of the case above.  When the file cannot be re-read the file
+        # line is not knowable, and the server drops the L instead of guessing
+        # one -- so this case has to assert both halves: that the number is GONE
+        # (the ban) and that everything else survived it (the preservation).
+        # `_section_index_block` is driven DIRECTLY, because an unreadable path
+        # is the whole input and `get_page` would never hand it one.
+        good_path = os.path.join(sec_root, WIKI_REL, LAYERED_FILE)
+        gone_path = os.path.join(sec_root, WIKI_REL, UNREADABLE_FILE)
+        # Depth 2 on purpose: at that depth the block carries the label, the
+        # dash lines AND the hint, so "everything else survived" is a claim
+        # about all three, not only about the lines.
+        good_block = "\n".join(
+            sdrv.mod._section_index_block(layered_body, good_path, 2))
+        gone_block = "\n".join(
+            sdrv.mod._section_index_block(layered_body, gone_path, 2))
+        good_parsed, gone_parsed = parse_page(good_block), parse_page(gone_block)
+        problems = []
+        if os.path.exists(gone_path):
+            problems.append("fixture drift: %r EXISTS, so the OSError arm was "
+                            "never reached" % UNREADABLE_FILE)
+        if not good_parsed["with_line"]:
+            problems.append("the readable path printed no L at all, so 'the L is "
+                            "gone' below distinguishes nothing")
+        if gone_parsed["with_line"]:
+            problems.append("%d line(s) still carry an L although the file could "
+                            "not be read: %r -- the number is a guess, and a "
+                            "guess the caller cannot tell from a fact"
+                            % (len(gone_parsed["with_line"]),
+                               [s["name"] for s in gone_parsed["with_line"]]))
+        if re.search(r"\(L\d+", gone_block):
+            problems.append("an L<n> survives somewhere in the block: %r"
+                            % gone_block)
+        if gone_parsed["sized"] != good_parsed["sized"]:
+            problems.append("names/sizes changed with the offset: %r vs %r -- "
+                            "only the line number is unknowable, the sizes came "
+                            "from the body and are still facts"
+                            % (gone_parsed["sized"], good_parsed["sized"]))
+        # The strongest form: the whole block, byte for byte, minus the `L<n>, `.
+        if _L_PREFIX_RE.sub(" (", good_block) != gone_block:
+            problems.append("the block is not the readable one minus its L "
+                            "prefixes:\n  want %r\n  got  %r"
+                            % (_L_PREFIX_RE.sub(" (", good_block), gone_block))
+        if _L_PREFIX_RE.sub(" (", good_block) == good_block:
+            problems.append("the substitution changed nothing, so this "
+                            "comparison is vacuous")
+        suite.record("J", "unknowable-line-drops-only-the-number", problems,
+                     detail=[_d("readable", "%d line(s), all with L: %r"
+                                % (len(good_parsed["sections"]),
+                                   len(good_parsed["with_line"])
+                                   == len(good_parsed["sections"]))),
+                             _d("unreadable", "%d line(s), %d with L"
+                                % (len(gone_parsed["sections"]),
+                                   len(gone_parsed["with_line"]))),
+                             _d("sizes", "identical=%r"
+                                % (gone_parsed["sized"] == good_parsed["sized"])),
+                             _d("hint", "%r vs %r"
+                                % (good_parsed["hint"], gone_parsed["hint"])),
+                             _d("contract", "a silently-shifted number is worse "
+                                            "than a missing one -- the caller "
+                                            "cannot tell it is being misled")]
+                            + ["        " + ln for ln in gone_block.split("\n")
+                               if ln],
+                     text=gone_block)
+
+        listed_sizes = {}
+        for answer in (miss, deep_miss):
+            for sec in answer["sections"]:
+                listed_sizes[sec["name"]] = sec["size"]
+        problems = []
+        rows = []
+        for name in sorted(listed_sizes):
+            advertised = listed_sizes[name]
+            extracted = sdrv.mod._extract_section(layered_body, name)
+            served = served_section(
+                sdrv.get_page(LAYERED_SLUG, section=name)["text"], name)
+            rows.append("%-22s advertised %4d   _extract_section %s   served %s"
+                        % (name, advertised,
+                           "%4d" % len(extracted) if extracted is not None
+                           else "NONE",
+                           "%4d" % len(served) if served is not None else "NONE"))
+            if extracted is None:
+                problems.append("%r is offered in the index but `section: %s` "
+                                "extracts nothing" % (name, name))
+                continue
+            if advertised != len(extracted):
+                problems.append("%s: the index advertises %dc, _extract_section "
+                                "returns %dc" % (name, advertised, len(extracted)))
+            if served is None:
+                problems.append("%s: the served answer carries no such heading, "
+                                "so the advertised size describes nothing"
+                                % name)
+            elif advertised != len(served):
+                problems.append("%s: the index advertises %dc, the slice the "
+                                "server actually SERVES is %dc"
+                                % (name, advertised, len(served)))
+        if len(set(listed_sizes.values())) < 2:
+            problems.append("fixture drift: every listed section advertises the "
+                            "same size %r, so a renderer printing one constant "
+                            "would pass" % sorted(set(listed_sizes.values())))
+        suite.record("J", "advertised-size-is-the-served-size", problems,
+                     detail=[_d("checked", "%d section(s) across depth 2 and "
+                                           "depth %d" % (len(listed_sizes),
+                                                         deepest)),
+                             _d("oracles", "mod._extract_section AND a live "
+                                           "`section:` call, both per section"),
+                             _d("why", "the size is the caller's decision basis "
+                                       "-- a list that lies about it is worse "
+                                       "than no list")]
+                            + ["        " + r for r in rows],
+                     text=miss["text"])
+
+        problems = []
+        if not want_deep:
+            problems.append("fixture drift: nothing on the page is below level 2, "
+                            "so the hint can never fire")
+        if miss["hint"] is None:
+            problems.append("no hint although the page carries %d heading(s) "
+                            "below level 2 (%r)"
+                            % (len(want_deep), [h[2] for h in want_deep]))
+        else:
+            hidden, escape = miss["hint"]
+            if hidden != len(want_deep):
+                problems.append("the hint claims %d hidden heading(s), the file "
+                                "has %d" % (hidden, len(want_deep)))
+            if escape != deepest:
+                problems.append("the hint sends the caller to depth %d, the "
+                                "deepest heading is level %d" % (escape, deepest))
+            if deep_miss["hint"] is not None:
+                problems.append("depth %d STILL prints a hint (%r) -- the escape "
+                                "hatch it named does not empty it, so the caller "
+                                "is sent one level down into the same dead end"
+                                % (escape, deep_miss["hint"]))
+            if deep_miss["has_hint_sentinel"]:
+                problems.append("depth %d still mentions %r somewhere in the "
+                                "answer" % (escape, HINT_SENTINEL))
+            if deep_miss["names"] != [h[2] for h in want_all]:
+                problems.append("depth %d lists %r, want every level>=2 heading "
+                                "of the fixture file: %r"
+                                % (escape, deep_miss["names"],
+                                   [h[2] for h in want_all]))
+            if len(deep_miss["sections"]) != len(miss["sections"]) + hidden:
+                problems.append("depth %d shows %d section(s); depth 2 showed %d "
+                                "and the hint promised %d more"
+                                % (escape, len(deep_miss["sections"]),
+                                   len(miss["sections"]), hidden))
+        suite.record("J", "depth-hint-does-not-lie", problems,
+                     detail=[_d("hint", "%r" % (miss["hint"],)),
+                             _d("hidden", "%d heading(s) below level 2 in the "
+                                          "file: %r"
+                                % (len(want_deep), [h[2] for h in want_deep])),
+                             _d("re-called", "depth %d -> %d line(s), hint %r"
+                                % (deepest, len(deep_miss["sections"]),
+                                   deep_miss["hint"])),
+                             _d("gate", "the hint names its own escape hatch, so "
+                                        "taking it must both empty the hint and "
+                                        "produce exactly the promised extras")],
+                     text=deep_miss["text"])
+
+        # NOT "H1s are skipped" -- that was the proxy.  The rule is "a slice that
+        # IS the page is not a section", and on THIS page the H1 is the heading
+        # that satisfies it.  The premise is therefore measured, not assumed: if
+        # the H1 ever stopped spanning the body, the correct answer would be to
+        # LIST it, and this case has to fail rather than keep demanding silence.
+        problems = []
+        layered_whole = len(layered_body.strip())
+        h1_slice = (sdrv.mod._extract_section(layered_body, h1[0][2])
+                    if h1 else None)
+        if not h1:
+            problems.append("fixture drift: the page has no H1, so 'the H1 is "
+                            "never listed' is vacuous")
+        elif h1_slice is None or len(h1_slice) != layered_whole:
+            problems.append("premise gone: the H1's slice is %r of a %dc body, "
+                            "so it no longer spans the page -- it is a real "
+                            "section now and hiding it would be the defect"
+                            % (len(h1_slice) if h1_slice else None,
+                               layered_whole))
+        else:
+            title = h1[0][2]
+            for label, answer in (("depth 2", miss),
+                                  ("depth %d" % deepest, deep_miss)):
+                if title in answer["names"]:
+                    problems.append("%s offers the H1 %r as a section -- its "
+                                    "slice is the whole body (%dc), so it is the "
+                                    "page under another name"
+                                    % (label, title, layered_whole))
+                if ("- %s (L" % title) in answer["text"]:
+                    problems.append("%s renders a dash line for the H1 %r"
+                                    % (label, title))
+        suite.record("J", "h1-is-never-offered-as-a-section", problems,
+                     detail=[_d("h1", "%r" % (h1[0][2] if h1 else None)),
+                             _d("spans", "slice %r == body %dc"
+                                % (len(h1_slice) if h1_slice else None,
+                                   layered_whole)),
+                             _d("depth 2", "%r" % miss["names"]),
+                             _d("depth %d" % deepest, "%r" % deep_miss["names"]),
+                             _d("why", "offering a page-spanning slice as a "
+                                       "section is offering `include_body: true` "
+                                       "again, under another name")],
+                     text=deep_miss["text"])
+
+        whole = sdrv.get_page(LAYERED_SLUG)
+        hit_name = want_l2[0][2] if want_l2 else MISSING_SECTION
+        hit = sdrv.get_page(LAYERED_SLUG, section=hit_name)
+        problems = []
+        if body_probe not in whole["text"]:
+            problems.append("the default answer no longer carries the body "
+                            "(%r missing), so 'no index leaked in' proves nothing"
+                            % body_probe[:60])
+        if served_section(hit["text"], hit_name) is None:
+            problems.append("`section: %s` served no such heading, so this case "
+                            "is not looking at the SUCCESS arm" % hit_name)
+        for label, answer in (("include_body default", whole),
+                              ("section hit", hit)):
+            if answer["has_sections_label"]:
+                problems.append("%s carries a %r block" % (label, SECTIONS_LABEL))
+            if answer["sections"]:
+                problems.append("%s carries %d index line(s): %r"
+                                % (label, len(answer["sections"]),
+                                   answer["names"]))
+            if answer["hint"] is not None:
+                problems.append("%s carries the depth hint %r"
+                                % (label, answer["hint"]))
+            if answer["empty_msgs"]:
+                problems.append("%s carries %r" % (label, answer["empty_msgs"]))
+        suite.record("J", "working-branches-carry-no-index", problems,
+                     detail=[_d("default", "body served=%r, index lines=%d"
+                                % (body_probe in whole["text"],
+                                   len(whole["sections"]))),
+                             _d("hit", "section %r served=%r, index lines=%d"
+                                % (hit_name,
+                                   served_section(hit["text"], hit_name)
+                                   is not None, len(hit["sections"]))),
+                             _d("contract", "the block belongs to the two answers "
+                                            "that carry NO body; a caller who got "
+                                            "what it asked for pays nothing")],
+                     text=hit["text"])
+
+        nobody = sdrv.get_page(LAYERED_SLUG, include_body=False)
+        problems = []
+        if not nobody["has_sections_label"]:
+            problems.append("no %r block: include_body false still drops the "
+                            "headings along with the body, which was the real "
+                            "leak -- the 'cheap' call teaches the caller nothing "
+                            "and it re-reads the page" % SECTIONS_LABEL)
+        if body_probe in nobody["text"]:
+            problems.append("the body came back anyway (%r), so include_body "
+                            "false is not doing its own half" % body_probe[:60])
+        if triples(nobody) != triples(miss):
+            problems.append("the block differs from the missing-section arm's: "
+                            "%r vs %r" % (triples(nobody), triples(miss)))
+        if nobody["hint"] != miss["hint"]:
+            problems.append("hint %r, the other arm renders %r -- one block, two "
+                            "renderings" % (nobody["hint"], miss["hint"]))
+        suite.record("J", "include-body-false-carries-the-index", problems,
+                     detail=[_d("call", "get_page %r include_body=False"
+                                % LAYERED_SLUG),
+                             _d("listed", "%r" % nobody["names"]),
+                             _d("body", "withheld=%r"
+                                % (body_probe not in nobody["text"])),
+                             _d("identical", "same triples as the missing-section "
+                                             "arm: %r"
+                                % (triples(nobody) == triples(miss)))],
+                     text=nobody["text"])
+
+        flat_heads = fixture_headings(file_lines(sec_root, FLAT_FILE))
+        flat_nobody = sdrv.get_page(FLAT_SLUG, include_body=False)
+        flat_miss = sdrv.get_page(FLAT_SLUG, section=MISSING_SECTION)
+        problems = []
+        if flat_heads:
+            problems.append("fixture drift: the page grew heading(s) %r"
+                            % [h[2] for h in flat_heads])
+        for label, answer in (("include_body false", flat_nobody),
+                              ("missing section", flat_miss)):
+            if answer["empty_msgs"] != [NO_HEADINGS_MSG]:
+                problems.append("%s rendered %r, want exactly [%r]"
+                                % (label, answer["empty_msgs"], NO_HEADINGS_MSG))
+            if answer["has_no_sections_msg"]:
+                problems.append("%s says %r on a page that really has NO heading "
+                                "-- that sentence belongs to the page whose only "
+                                "heading is its title"
+                                % (label, NO_SECTIONS_MSG))
+            if answer["has_sections_label"]:
+                problems.append("%s renders an EMPTY %r label"
+                                % (label, SECTIONS_LABEL))
+            if answer["sections"]:
+                problems.append("%s listed %r on a page with no headings"
+                                % (label, answer["names"]))
+            if answer["hint"] is not None:
+                problems.append("%s offers a depth escape (%r) on a page with no "
+                                "headings at all" % (label, answer["hint"]))
+        suite.record("J", "page-without-headings-says-so", problems,
+                     detail=[_d("page", "%r, %d heading(s) in the file"
+                                % (FLAT_SLUG, len(flat_heads))),
+                             _d("both arms", "%r / %r"
+                                % (flat_nobody["empty_msgs"],
+                                   flat_miss["empty_msgs"])),
+                             _d("contract", "an empty `sections:` label reads as "
+                                            "a rendering bug; the sentence reads "
+                                            "as an answer")],
+                     text=flat_nobody["text"])
+
+        # The page that is CONFUSABLE with the one above and must not be
+        # confused with it: it HAS a heading, the index skips it on purpose, and
+        # "this page has no headings" would simply be false.  The two sentences
+        # imply opposite next moves -- read the page vs. look elsewhere -- so the
+        # gate here is that they are never the same string.
+        title_raw = file_lines(sec_root, TITLE_FILE)
+        title_heads = fixture_headings(title_raw)
+        title_nobody = sdrv.get_page(TITLE_SLUG, include_body=False)
+        title_miss = sdrv.get_page(TITLE_SLUG, section=MISSING_SECTION)
+        problems = []
+        if [h[1] for h in title_heads] != [1]:
+            problems.append("fixture drift: the page's heading levels are %r, "
+                            "want exactly [1] -- one H1 and nothing else is the "
+                            "whole point of this page"
+                            % [h[1] for h in title_heads])
+        for label, answer in (("include_body false", title_nobody),
+                              ("missing section", title_miss)):
+            if answer["empty_msgs"] != [NO_SECTIONS_MSG]:
+                problems.append("%s rendered %r, want exactly [%r]"
+                                % (label, answer["empty_msgs"], NO_SECTIONS_MSG))
+            if answer["has_no_headings_msg"]:
+                problems.append("%s claims the page has NO headings, but it has "
+                                "%d -- the index declined to offer the H1, which "
+                                "is not the same fact"
+                                % (label, len(title_heads)))
+            if answer["sections"] or answer["has_sections_label"]:
+                problems.append("%s listed %r / label=%r for an H1-only page"
+                                % (label, answer["names"],
+                                   answer["has_sections_label"]))
+            if answer["hint"] is not None:
+                problems.append("%s offers a depth escape (%r); no depth reaches "
+                                "a heading that is skipped by LEVEL, so the "
+                                "escape hatch leads nowhere"
+                                % (label, answer["hint"]))
+        if title_nobody["empty_msgs"] == flat_nobody["empty_msgs"]:
+            problems.append("the H1-only page and the heading-less page render "
+                            "the SAME sentence (%r) -- one of the two is being "
+                            "told something untrue, and the caller cannot tell "
+                            "which" % title_nobody["empty_msgs"])
+        suite.record("J", "h1-only-and-headingless-are-different-empties",
+                     problems,
+                     detail=[_d("h1-only", "%r -> %r"
+                                % (TITLE_SLUG, title_nobody["empty_msgs"])),
+                             _d("headingless", "%r -> %r"
+                                % (FLAT_SLUG, flat_nobody["empty_msgs"])),
+                             _d("headings", "%r vs %r"
+                                % ([h[2] for h in title_heads],
+                                   [h[2] for h in flat_heads])),
+                             _d("moves", "'no section is smaller than the page' "
+                                         "-> ask without a section; 'no "
+                                         "headings' -> there is nothing here to "
+                                         "slice at all"),
+                             _d("gate", "the two sentences must never be equal, "
+                                        "so a merge cannot pass")],
+                     text=title_nobody["text"])
+
+        # The page where the OLD rule and the new one disagree.  `level < 2` was
+        # a proxy for "this slice is the whole page", exact only while no page
+        # carries a second H1 -- and two H1s BOUND each other, so both slices are
+        # real and both are servable.  The first one is the section the proxy hid.
+        two_raw = file_lines(sec_root, TWO_FILE)
+        two_heads = fixture_headings(two_raw)
+        two_fm, two_body = sdrv.mod.read_page(
+            os.path.join(sec_root, WIKI_REL, TWO_FILE))
+        two_whole = len(two_body.strip())
+        want_two = [h[2] for h in two_heads]
+        two_nobody = sdrv.get_page(TWO_SLUG, include_body=False)
+        two_miss = sdrv.get_page(TWO_SLUG, section=MISSING_SECTION)
+        problems = []
+        rows = []
+        if [h[1] for h in two_heads] != [1, 1]:
+            problems.append("fixture drift: heading levels %r, want exactly "
+                            "[1, 1] -- two top-level headings and nothing else "
+                            "is the entire point of this page"
+                            % [h[1] for h in two_heads])
+        if two_fm.get("title") in want_two:
+            problems.append("fixture drift: the frontmatter title %r is also a "
+                            "heading, so `served_section` cannot tell the "
+                            "rendered title line from the section"
+                            % two_fm.get("title"))
+        # THE premise: the first H1's slice must be STRICTLY smaller than the
+        # body.  If it were not, the size rule would hide it for a good reason
+        # and every assertion below would be green for the wrong one.
+        first_slice = (sdrv.mod._extract_section(two_body, want_two[0])
+                       if want_two else None)
+        if first_slice is None:
+            problems.append("the first heading is not extractable at all, so "
+                            "'the caller could have asked for it' is false")
+        elif len(first_slice) >= two_whole:
+            problems.append("premise gone: the first H1's slice is %dc of a %dc "
+                            "body -- it spans the page, so hiding it is correct "
+                            "and this case proves nothing"
+                            % (len(first_slice), two_whole))
+        for label, answer in (("include_body false", two_nobody),
+                              ("missing section", two_miss)):
+            if answer["names"] != want_two:
+                problems.append("%s lists %r, want both titles in document "
+                                "order: %r" % (label, answer["names"], want_two))
+            if answer["empty_msgs"]:
+                problems.append("%s claims the page is empty (%r) although both "
+                                "of its headings delimit a real slice"
+                                % (label, answer["empty_msgs"]))
+            if not answer["has_sections_label"]:
+                problems.append("%s renders the lines without a %r label"
+                                % (label, SECTIONS_LABEL))
+            if answer["hint"] is not None:
+                problems.append("%s offers a depth escape (%r) although nothing "
+                                "here sits below level 1"
+                                % (label, answer["hint"]))
+        for sec in two_nobody["sections"]:
+            extracted = sdrv.mod._extract_section(two_body, sec["name"])
+            served = served_section(
+                sdrv.get_page(TWO_SLUG, section=sec["name"])["text"],
+                sec["name"])
+            rows.append("%-30s advertised %4d  extract %s  served %s  whole %d"
+                        % (sec["name"], sec["size"],
+                           "%4d" % len(extracted) if extracted is not None
+                           else "NONE",
+                           "%4d" % len(served) if served is not None else "NONE",
+                           two_whole))
+            if extracted is None or sec["size"] != len(extracted):
+                problems.append("%s: advertised %dc, _extract_section gives %r"
+                                % (sec["name"], sec["size"],
+                                   len(extracted) if extracted is not None
+                                   else None))
+            if served is None:
+                problems.append("%s is offered but `section:` serves nothing -- "
+                                "the index points at a slice the server will "
+                                "not hand over" % sec["name"])
+            elif sec["size"] != len(served):
+                problems.append("%s: advertised %dc, served %dc"
+                                % (sec["name"], sec["size"], len(served)))
+            if served is not None and len(served) >= two_whole:
+                problems.append("%s: the served slice is %dc of a %dc body -- it "
+                                "IS the page, so it should never have been listed"
+                                % (sec["name"], len(served), two_whole))
+        suite.record("J", "two-h1s-bound-each-other-so-both-are-sections",
+                     problems,
+                     detail=[_d("page", "%r, heading levels %r"
+                                % (TWO_SLUG, [h[1] for h in two_heads])),
+                             _d("listed", "%r" % two_nobody["names"]),
+                             _d("body", "%dc; the first slice is %r"
+                                % (two_whole,
+                                   len(first_slice) if first_slice else None)),
+                             _d("was", "`level < 2` hid BOTH of these, and the "
+                                       "first one is a bounded, servable slice "
+                                       "the caller was never told about"),
+                             _d("rule", "skip when the slice IS the page, which "
+                                        "is what the level test was standing in "
+                                        "for")]
+                            + ["        " + r for r in rows],
+                     text=two_nobody["text"])
+
+        # The ORDER of the two skip tests, made observable.  A heading that spans
+        # the page AND sits past the default depth is the only shape that can
+        # tell them apart: sized first it disappears, depth-tested first it is
+        # counted as `deeper` and the answer advertises a depth that reveals
+        # nothing -- the exact lie the hint may never tell.
+        solo_raw = file_lines(sec_root, SOLO_FILE)
+        solo_heads = fixture_headings(solo_raw)
+        _solo_fm, solo_body = sdrv.mod.read_page(
+            os.path.join(sec_root, WIKI_REL, SOLO_FILE))
+        solo_whole = len(solo_body.strip())
+        solo_level = solo_heads[0][1] if solo_heads else 0
+        solo_nobody = sdrv.get_page(SOLO_SLUG, include_body=False)
+        solo_miss = sdrv.get_page(SOLO_SLUG, section=MISSING_SECTION)
+        solo_deep = sdrv.get_page(SOLO_SLUG, include_body=False,
+                                  depth=solo_level)
+        solo_slice = (sdrv.mod._extract_section(solo_body, solo_heads[0][2])
+                      if solo_heads else None)
+        problems = []
+        if [h[1] for h in solo_heads] != [solo_level] or solo_level <= 2:
+            problems.append("fixture drift: heading levels %r -- this page needs "
+                            "exactly one heading and it must sit BELOW the "
+                            "default depth 2, or the two tests cannot be told "
+                            "apart" % [h[1] for h in solo_heads])
+        if solo_slice is None or len(solo_slice) != solo_whole:
+            problems.append("premise gone: the heading's slice is %r of a %dc "
+                            "body -- it must BE the page, or the size test never "
+                            "fires and the ordering is invisible"
+                            % (len(solo_slice) if solo_slice else None,
+                               solo_whole))
+        for label, answer in (("include_body false", solo_nobody),
+                              ("missing section", solo_miss),
+                              ("depth %d" % solo_level, solo_deep)):
+            if answer["hint"] is not None:
+                problems.append("%s advertises %r for a heading whose slice is "
+                                "the WHOLE page -- the depth it names reveals "
+                                "nothing, so the escape hatch is a lie"
+                                % (label, answer["hint"]))
+            if answer["has_hint_sentinel"]:
+                problems.append("%s mentions %r anyway"
+                                % (label, HINT_SENTINEL))
+            if answer["sections"]:
+                problems.append("%s offers %r, which is the whole page under "
+                                "another name" % (label, answer["names"]))
+            # The empty here must name the RULE, not a title: this page has no
+            # title -- its one heading is an H3 -- so a sentence about what sits
+            # "below its title" would be describing a page that does not exist.
+            if answer["empty_msgs"] != [NO_SECTIONS_MSG]:
+                problems.append("%s rendered %r, want exactly [%r]"
+                                % (label, answer["empty_msgs"], NO_SECTIONS_MSG))
+            if "title" in answer["text"].lower():
+                problems.append("%s says 'title' somewhere (%r) although this "
+                                "page has none -- its only heading is level %d, "
+                                "and the reason the list is empty is the SIZE of "
+                                "the slice, not where it sits relative to a title"
+                                % (label,
+                                   [ln for ln in answer["text"].split("\n")
+                                    if "title" in ln.lower()], solo_level))
+        if solo_deep["text"] != solo_nobody["text"]:
+            problems.append("depth %d renders something different from the "
+                            "default, so the level DOES hide something and the "
+                            "silence above is wrong" % solo_level)
+        suite.record("J", "page-spanning-heading-is-not-a-depth-secret", problems,
+                     detail=[_d("page", "%r, heading levels %r, body %dc"
+                                % (SOLO_SLUG, [h[1] for h in solo_heads],
+                                   solo_whole)),
+                             _d("slice", "%r == body -> the size test must fire "
+                                         "FIRST"
+                                % (len(solo_slice) if solo_slice else None)),
+                             _d("default", "listed %r, hint %r, empty %r"
+                                % (solo_nobody["names"], solo_nobody["hint"],
+                                   solo_nobody["empty_msgs"])),
+                             _d("no title", "the word appears in the answer: %r"
+                                % ("title" in solo_nobody["text"].lower())),
+                             _d("depth %d" % solo_level, "identical to the "
+                                                         "default: %r"
+                                % (solo_deep["text"] == solo_nobody["text"])),
+                             _d("gate", "depth-tested first this page would "
+                                        "report `1 deeper heading(s) ... pass "
+                                        "depth: %d`, and taking it would return "
+                                        "this same empty answer" % solo_level)],
+                     text=solo_nobody["text"])
+
+        deep_heads = fixture_headings(file_lines(sec_root, DEEP_FILE))
+        deep_l2 = [h for h in deep_heads if h[1] == 2]
+        deep_l3 = [h for h in deep_heads if h[1] > 2]
+        deep_level = max([h[1] for h in deep_l3] or [2])
+        only = sdrv.get_page(DEEP_SLUG, include_body=False)
+        only_deep = sdrv.get_page(DEEP_SLUG, include_body=False, depth=deep_level)
+        problems = []
+        if deep_l2 or not deep_l3:
+            problems.append("fixture drift: level-2 %r / deeper %r -- this page "
+                            "must carry ONLY headings below level 2"
+                            % ([h[2] for h in deep_l2], [h[2] for h in deep_l3]))
+        if only["sections"]:
+            problems.append("listed %r at the default depth, want nothing"
+                            % only["names"])
+        if only["has_sections_label"]:
+            problems.append("an empty %r label with no lines under it"
+                            % SECTIONS_LABEL)
+        if only["has_no_headings_msg"]:
+            problems.append("claims %r although %d heading(s) exist -- the caller "
+                            "is told to stop looking"
+                            % (NO_HEADINGS_MSG, len(deep_l3)))
+        if only["hint"] != (len(deep_l3), deep_level):
+            problems.append("hint %r, want %r -- on this page the hint is the "
+                            "ENTIRE index, so a wrong one is the whole answer "
+                            "being wrong"
+                            % (only["hint"], (len(deep_l3), deep_level)))
+        if only_deep["names"] != [h[2] for h in deep_l3]:
+            problems.append("depth %d lists %r, want %r"
+                            % (deep_level, only_deep["names"],
+                               [h[2] for h in deep_l3]))
+        if only_deep["hint"] is not None:
+            problems.append("depth %d still hints %r"
+                            % (deep_level, only_deep["hint"]))
+        suite.record("J", "only-deeper-headings-leaves-the-hint-alone", problems,
+                     detail=[_d("page", "%r, headings %r"
+                                % (DEEP_SLUG,
+                                   [(h[1], h[2]) for h in deep_heads])),
+                             _d("default", "listed %r, hint %r"
+                                % (only["names"], only["hint"])),
+                             _d("depth %d" % deep_level, "listed %r, hint %r"
+                                % (only_deep["names"], only_deep["hint"])),
+                             _d("why", "empty list + hint is not a degenerate "
+                                       "case: it is the only output this page's "
+                                       "index has")],
+                     text=only["text"])
+
+        accepted = sdrv.mod.HANDLER_ACCEPTED_PARAMS["get_page"]
+        problems = []
+        if "depth" not in accepted:
+            problems.append("'depth' missing from "
+                            "HANDLER_ACCEPTED_PARAMS['get_page'] -- the "
+                            "dispatcher would reject the very call the hint "
+                            "tells the caller to make")
+        if deep_miss["error"] or "Unknown params" in deep_miss["text"]:
+            problems.append("a call carrying depth was refused: %s"
+                            % deep_miss["text"][:160])
+        if deep_miss["text"] == miss["text"]:
+            problems.append("depth %d renders exactly the default answer, so "
+                            "'lower values fall back to the default' would prove "
+                            "nothing" % deepest)
+        floored = []
+        for value in (1, 0, "abc", None):
+            low = sdrv.get_page(LAYERED_SLUG, section=MISSING_SECTION,
+                                depth=value)
+            floored.append((value, low["text"] == miss["text"]))
+            if low["error"]:
+                problems.append("depth %r produced an error: %s"
+                                % (value, low["text"][:160]))
+            if low["text"] != miss["text"]:
+                problems.append("depth %r renders something other than the "
+                                "default depth-2 answer -- the floor is not a "
+                                "floor" % (value,))
+        suite.record("J", "depth-is-accepted-and-floored-at-two", problems,
+                     detail=[_d("accepted", "%r" % sorted(accepted)),
+                             _d("live", "depth=%d -> %d line(s), error=%r"
+                                % (deepest, len(deep_miss["sections"]),
+                                   deep_miss["error"])),
+                             _d("floored", "%r" % floored),
+                             _d("contract", "max(2, ...) plus a swallowed "
+                                            "int() failure: no value of depth may "
+                                            "produce less than the default, and "
+                                            "none may 500")],
+                     text=miss["text"])
+
+        desc = sdrv.mod.WIKI_CALL_TOOL["description"]
+        problems = []
+        if "depth" not in desc:
+            problems.append("the tool description never mentions depth, so the "
+                            "only way to find the knob the hint names is reading "
+                            "the source")
+        if "`depth`" in desc:
+            problems.append("the description BACKTICKS depth: the name_existence "
+                            "suite reads backticked identifiers in server text as "
+                            "function-name prescriptions, so a backticked param "
+                            "turns into a dead-name finding over there -- leave "
+                            "it bare")
+        suite.record("J", "depth-is-discoverable-unbackticked", problems,
+                     detail=[_d("mentioned", "%r" % ("depth" in desc)),
+                             _d("backticked", "%r" % ("`depth`" in desc)),
+                             _d("why", "a parameter nobody can see is a parameter "
+                                       "nobody passes; a BACKTICKED one is a "
+                                       "failure in another suite")],
+                     text="")
+    finally:
+        sec_work.cleanup()
 
     # ============ H: hygiene ============
     pyc_after = H.pycache_snapshot()

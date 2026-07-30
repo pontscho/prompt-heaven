@@ -48,7 +48,9 @@ run):
                                                       window, floored
                                                       percentages, and the
                                                       query-side stopword drop
-                                                      (A-I)
+                                                      -- plus `get_page`'s
+                                                      section index on a SECOND,
+                                                      separate fixture (A-J)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -204,7 +206,7 @@ SUITES = [
      None),
     ("wiki_recall", run_wiki_recall,
      "mcp-wiki search relevance gate: silence, measured calibration window, "
-     "floored percentages, query-side stopwords", 36),
+     "floored percentages, query-side stopwords, get_page section index", 51),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

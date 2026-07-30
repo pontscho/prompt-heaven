@@ -16,7 +16,9 @@ Functions:
                    pages, behind a calibrated relevance gate so a query the wiki
                    cannot answer gets silence instead of the best-scoring noise
   source_to_pages  reverse lookup: a source file/anchor -> the pages that cover it
-  get_page         read one page (whole, or a single section) by slug/path
+  get_page         read one page (whole, a single section, or — when the section
+                   misses or the body is declined — just its section index) by
+                   slug/path
   list             list pages, grouped by type, with type/status/prefix filters
   freshness        git-only staleness report (ports freshness.py logic)
   reindex          regenerate INDEX.md + structural audit (ports reindex.py logic)
@@ -402,6 +404,118 @@ def _extract_section(body: str, name: str) -> Optional[str]:
                     break
             return "\n".join(lines[line_i:end]).strip()
     return None
+
+
+def _body_line_offset(text: str) -> int:
+    """File line (1-based) that the body's first line sits on.
+
+    `read_page` hands the body back with the frontmatter already stripped, so a
+    heading's index inside the body is NOT its line in the file. Printing the
+    body-relative number as L<n> would be wrong by exactly the frontmatter
+    height — silently, and only for pages that have frontmatter, which is all of
+    them. Derived from `split_frontmatter` rather than re-scanning for the '---'
+    delimiters, so there is one parser for where the body starts, not two.
+    """
+    _fm, body = split_frontmatter(text)
+    if body == text:
+        return 1
+    return len(text.splitlines()) - len(body.splitlines()) + 1
+
+
+def _section_list(body: str, line_offset: Optional[int] = 1, depth: int = 2):
+    """Return (lines, deeper, deepest) for the page's section index.
+
+    Each line reads `- <heading> (L<file line>, <n>c)`, where <n> is the size of
+    the slice `get_page` would return for that heading. The caller is choosing a
+    slice, so the size IS the decision — measured on this wiki, section sizes run
+    from 17c to 69435c, and a list without them invites the caller to ask for the
+    69435c one blind.
+
+    A heading whose slice IS the whole page is skipped, because offering it as a
+    section is offering the whole page under another name — which is what
+    `get_page` without `section` already does. On this wiki that rule hides
+    exactly the H1 of all ten pages (`max_sec == body_c` on every one), but it is
+    written as the rule it actually is: `level < 2` would be a proxy that holds
+    only while no page has a second H1. Two H1s bound each other, and then both
+    slices are real and both belong in the list — a page is not required to have
+    one title just because these ten do.
+
+    `deeper` counts headings below `depth` and `deepest` is the level that would
+    reach them, so the caller can be TOLD the escape hatch instead of hitting the
+    same dead end one level down. `depth` is a caller knob, not a tuned
+    threshold: level 2 keeps the common case at ~267c/page against ~944c for
+    every heading, and nothing here is calibrated against the corpus.
+
+    `line_offset` None means the file line could not be established, and then no
+    L is printed at all. A number that is silently wrong by the frontmatter
+    height is worse than no number: the caller cannot tell it is being misled,
+    and this whole list exists so it does not have to guess.
+    """
+    headings = _headings(body)
+    lines = body.splitlines()
+    whole = len(body.strip())
+    out: List[str] = []
+    deeper, deepest = 0, 0
+    for idx, (line_i, level, text) in enumerate(headings):
+        end = len(lines)
+        for (nl_i, nl_level, _t) in headings[idx + 1:]:
+            if nl_level <= level:
+                end = nl_i
+                break
+        size = len("\n".join(lines[line_i:end]).strip())
+        # Sized BEFORE the depth test on purpose: a page-spanning heading is not
+        # hidden by `depth`, so counting it as `deeper` would advertise an escape
+        # hatch that reveals nothing.
+        if size >= whole:
+            continue
+        if level > depth:
+            deeper += 1
+            deepest = max(deepest, level)
+            continue
+        out.append("- %s (%dc)" % (text, size) if line_offset is None else
+                   "- %s (L%d, %dc)" % (text, line_i + line_offset, size))
+    return out, deeper, deepest
+
+
+def _section_index_block(body: str, path: str, depth: int) -> List[str]:
+    """The `sections:` block, for the two answers that carry no body.
+
+    Both callers are places where the caller is left holding a pointer: a
+    `section` that did not match, and `include_body: false`. Measured on this
+    wiki, discovering the heading names without this block costs a full-body
+    re-read — 115026c across a four-page sample against 2035c of refusals, 56x —
+    and `include_body: false` was no escape hatch, since it drops the headings
+    along with the body.
+    """
+    # A second read of a file `iter_pages` already parsed — deliberately, because
+    # the body arrives frontmatter-stripped and the offset is not recoverable
+    # from it. If that read fails, the offset stays None and the L is dropped
+    # rather than guessed; see `_section_list`.
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            offset = _body_line_offset(fh.read())
+    except OSError:
+        offset = None
+    listed, deeper, deepest = _section_list(body, offset, depth)
+    if not listed and not deeper:
+        # Two different empties, and neither may overstate. A page whose only
+        # heading spans the whole body DOES have a heading — it was skipped on
+        # purpose — so "no headings" is false there; and "nothing below its
+        # title" is false in turn on a page whose one heading is not a title.
+        # So name the RULE: it holds in both shapes, it explains why the list is
+        # empty, and it tells the caller what to do instead — ask without a
+        # section. A wiki that misreports its own shape is the thing this work
+        # exists to stop.
+        return ["", "_(this page has no headings)_" if not _headings(body)
+                else "_(no section here is smaller than the whole page)_"]
+    block = [""]
+    if listed:
+        block.append("sections:")
+        block += listed
+    if deeper:
+        block.append("%d deeper heading(s) not listed — pass depth: %d to see them"
+                     % (deeper, deepest))
+    return block
 
 
 # ---------------------------------------------------------------------------
@@ -970,14 +1084,24 @@ def _fn_get_page(params, project_root, wiki_root, strict):
 
     section = params.get("section")
     include_body = _bool_param(params.get("include_body", True), True)
+    try:
+        depth = max(2, int(params.get("depth") or 2))
+    except (TypeError, ValueError):
+        depth = 2
     if section:
         extracted = _extract_section(body, str(section))
         if extracted is None:
+            # A refusal that does not say what IS there sends the caller back for
+            # the whole page — the circular dependency this block exists to cut.
             lines += ["", "_(section %r not found)_" % section]
+            lines += _section_index_block(body, os.path.join(abs_root, relpath),
+                                          depth)
         else:
             lines += ["", extracted]
     elif include_body:
         lines += ["", body.strip()]
+    else:
+        lines += _section_index_block(body, os.path.join(abs_root, relpath), depth)
     return _finalize("\n".join(lines).rstrip() + "\n", params)
 
 
@@ -1087,7 +1211,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "search": _COMMON_PARAMS | {"query", "type", "status", "path_prefix", "limit",
                                 "k1", "b", "min_coverage"},
     "source_to_pages": _COMMON_PARAMS | {"source"},
-    "get_page": _COMMON_PARAMS | {"slug", "section", "include_body"},
+    "get_page": _COMMON_PARAMS | {"slug", "section", "include_body", "depth"},
     "list": _COMMON_PARAMS | {"type", "status", "path_prefix"},
     "freshness": _COMMON_PARAMS | {"head"},
     "reindex": _COMMON_PARAMS | {"check"},
@@ -1247,7 +1371,13 @@ WIKI_CALL_TOOL = {
         "  source_to_pages  reverse lookup — which pages document a source file;\n"
         "                   params: source (req, a path or path:symbol)\n"
         "  get_page         read one page whole or a single section; params: slug\n"
-        "                   (req), section, include_body (default true)\n"
+        "                   (req), section, include_body (default true), depth\n"
+        "                   (default 2). When the section does not match, or\n"
+        "                   include_body is false, the answer carries the page's\n"
+        "                   section index — one dash line per heading with its\n"
+        "                   file line and size in chars — so the next call can ask\n"
+        "                   for one slice instead of re-reading the whole page.\n"
+        "                   Raise depth to list headings below level 2.\n"
         "  list             list pages grouped by type; params: type, status,\n"
         "                   path_prefix\n"
         "  freshness        git-only staleness report; params: head (default HEAD)\n"
