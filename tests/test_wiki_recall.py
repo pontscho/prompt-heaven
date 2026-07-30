@@ -133,7 +133,25 @@ Coverage by group:
      server, and moving the `status` filter to AFTER the scoring loop moved no
      score, no coverage and no `best coverage N%`
 
-Group J runs on its OWN six-page fixture in a SECOND workspace, group K on its
+  M  the truncation ceiling cuts on a LINE boundary and the marker states the
+     REAL length instead of the parameter -- half an anchor still reads as an
+     anchor, and a first line longer than the whole ceiling still gets a hard
+     character cut rather than an empty answer
+  N  the line window: `from`/`lines` serve FILE lines, the same numbers the
+     section index prints, on a page whose every body line NAMES the line it
+     sits on -- so a window served from the body's coordinate system is visible
+     in the text and not only in a diff.  The group pins the header's three
+     outside counts (they must close against the total), the default height read
+     off the module rather than typed, the clamp at the end and the refusal past
+     it, the `count`/`start` aliases (`count` means `limit` globally, so
+     `get_page` has to override it), six values that are not coordinates, the
+     precedence over `section` and `include_body` WITH the disclosure of which
+     selector lost, and the index's advert for the window wherever it printed an
+     L to point at
+
+Group J runs on its OWN six-page fixture in a SECOND workspace (group N adds a
+SEVENTH page to that same workspace -- `get_page` resolves by slug, so a page
+nothing above names is invisible to it), group K on its
 own five-page one in a THIRD (plus a FOURTH that mirrors it), and group L on a
 FIFTH (the frontmatter disagreeing), a SIXTH (the same pages with the field
 written to agree) and a SEVENTH (a synthetic `.git/HEAD`, the only way the diff
@@ -881,6 +899,50 @@ skip tests visible: depth-tested first it would be counted as hidden, and the
 caller would be sent to a depth that reveals nothing.
 """)
 
+# Group N's page, written into group J's workspace (a `get_page` lookup is by
+# slug, so an extra page there is invisible to every case above -- unlike the six
+# calibration pages, where one more would move every idf).
+#
+# Two properties nothing in group J has, and group N needs both:
+#
+#   TALLER than the default window.  The layered page is 39 lines, and the
+#   default is 40, so every `lines` value past 39 renders the same answer there
+#   and "the default is the constant" is unfalsifiable.
+#
+#   Every body line NAMES the file line it sits on.  A window served from the
+#   body's coordinate system returns the right NUMBER of lines from the wrong
+#   place, and against ordinary prose that is a diff; here the text itself says
+#   `file line 18` when the header claims L25.
+TALL_FILE, TALL_SLUG = "tall-page.md", "tall-page"
+_TALL_HEAD = """\
+---
+name: tall-page
+title: A page taller than the default line window
+type: reference
+status: current
+description: Every body line names the file line it sits on, so a window served from the wrong offset is visible in the text and not only in a diff.
+sources:
+  - Scripts/mcp-wiki.py:_file_line_window
+---
+"""
+TALL_BODY_LINES = 60
+# "did the answer serve body text?" as a WHOLE-LINE match, and the reason is a
+# failure this suite already had: the substring `file line` also occurs in this
+# page's own `description:` (which every answer renders) and in the server's
+# refusal for a non-coordinate (`from is a file line, not a flag`), so a
+# substring probe called both of them a leak.  The instrument has to name the
+# shape it is looking for, not a phrase that shape happens to contain.
+_TALL_BODY_RE = re.compile(r"^file line \d+$", re.M)
+
+
+def tall_page_text():
+    """The tall page, with `file line N` on the line whose file line IS N."""
+    lines = _TALL_HEAD.splitlines()
+    first = len(lines) + 1
+    lines += ["file line %d" % (first + i) for i in range(TALL_BODY_LINES)]
+    return "\n".join(lines) + "\n"
+
+
 SEC_PAGES = [SEC_LAYERED, SEC_FLAT, SEC_TITLE, SEC_DEEP, SEC_TWO, SEC_SOLO]
 LAYERED_FILE, LAYERED_SLUG = SEC_LAYERED[0], SEC_LAYERED[1]
 FLAT_FILE, FLAT_SLUG = SEC_FLAT[0], SEC_FLAT[1]
@@ -957,6 +1019,54 @@ def parse_page(text):
 def triples(answer):
     """The section index as comparable tuples -- what the two arms must share."""
     return [(s["name"], s["line"], s["size"]) for s in answer["sections"]]
+
+
+# The line window (group N).  The header is parsed field by field rather than
+# matched as a string, because every number in it is a separate claim: the range
+# is what the caller asked for, but `of N lines` and the two context counts are
+# things only the server knows, and a case has to be able to fail on one of them
+# alone.
+_WINDOW_RE = re.compile(
+    r"^@@ L(?P<start>\d+)-L(?P<end>\d+) of (?P<total>\d+) lines — "
+    r"(?P<before>\d+) before, (?P<after>\d+) after @@$", re.M)
+_NO_LINE_RE = re.compile(
+    r"^_\(no line (?P<line>\d+) — the file has (?P<total>\d+) line\(s\)\)_$", re.M)
+_OVERRIDE_RE = re.compile(
+    r"^_\(line window takes precedence — ignored: (?P<keys>.+)\)_$", re.M)
+WINDOW_ADVERT = "for a line window inside any slice above"
+
+
+def parse_window(text):
+    """Structured view of one rendered `get_page` line-window answer.
+
+    `served` is every line after the header's blank separator, kept RAW so a case
+    can compare it against the fixture file byte for byte -- that comparison is
+    the only check that can tell a file-relative window from a body-relative one
+    of the same height.
+    """
+    lines = text.split("\n")
+    hdr = next((i for i, ln in enumerate(lines) if _WINDOW_RE.match(ln)), None)
+    served = lines[hdr + 2:] if hdr is not None else []
+    # `_finalize` rstrips the whole answer, so a trailing blank is an artefact of
+    # the envelope and not evidence about the window.
+    while served and served[-1] == "":
+        served.pop()
+    m = _WINDOW_RE.search(text)
+    ov = _OVERRIDE_RE.search(text)
+    nl = _NO_LINE_RE.search(text)
+    return {
+        "has_header": m is not None,
+        "start": int(m.group("start")) if m else None,
+        "end": int(m.group("end")) if m else None,
+        "total": int(m.group("total")) if m else None,
+        "before": int(m.group("before")) if m else None,
+        "after": int(m.group("after")) if m else None,
+        "height": (int(m.group("end")) - int(m.group("start")) + 1) if m else None,
+        "served": served,
+        "overridden": _csv(ov.group("keys")) if ov else [],
+        "no_line": (int(nl.group("line")), int(nl.group("total"))) if nl else None,
+        "has_advert": WINDOW_ADVERT in text,
+    }
 
 
 def build_section_fixture(work):
@@ -3133,6 +3243,307 @@ def run(opts=None):
                                        "nobody passes; a BACKTICKED one is a "
                                        "failure in another suite")],
                      text="")
+
+        # ============ N: the line window (W4c) ============
+        # The escape hatch FROM the index above.  That list prints a file line and
+        # a size per section; measured on the real wiki 19 sections are 4000c or
+        # more and the top five run 23k-69k, so before this the only move on a
+        # page like that was to ask for the whole slice -- exactly the
+        # all-or-nothing the index was built to end.  A seventh page goes into
+        # this same workspace: `get_page` resolves by slug, so it is invisible to
+        # every case above.
+        sec_work.write_text(os.path.join(WIKI_REL, TALL_FILE), tall_page_text())
+        traw = file_lines(sec_root, TALL_FILE)
+        toffset = fixture_body_offset(traw)
+        default_w = sdrv.mod.DEFAULT_WINDOW_LINES
+        wstart, wspan = toffset + 10, 6
+        want = traw[wstart - 1:wstart - 1 + wspan]
+        canonical = sdrv.get_page(TALL_SLUG, **{"from": wstart, "lines": wspan})
+        win = parse_window(canonical["text"])
+
+        # The same ask read as a BODY line: the right height from the wrong place.
+        body_read = traw[wstart + toffset - 2:wstart + toffset - 2 + wspan]
+        mislabeled = [ln for i, ln in enumerate(win["served"])
+                      if ln != "file line %d" % (wstart + i)]
+        problems = []
+        if toffset <= 1:
+            problems.append("fixture drift: the body starts on file line %d, so "
+                            "file- and body-relative numbering AGREE and this case "
+                            "cannot fail" % toffset)
+        if body_read == want:
+            problems.append("the body-relative window carries the same text here, "
+                            "so the two readings are indistinguishable and the case "
+                            "is blind")
+        if not win["has_header"]:
+            problems.append("no window header: %r" % canonical["text"][-160:])
+        if win["served"] != want:
+            problems.append("served %r, want %r -- file lines %d..%d of the fixture"
+                            % (win["served"], want, wstart, wstart + wspan - 1))
+        if mislabeled:
+            problems.append("line(s) that name a DIFFERENT file line than the one "
+                            "they were served as: %r" % mislabeled)
+        if (win["start"], win["height"]) != (wstart, wspan):
+            problems.append("header says L%s-L%s (%s line(s)) for a %d-line ask at "
+                            "L%d" % (win["start"], win["end"], win["height"],
+                                     wspan, wstart))
+        suite.record("N", "window-lines-are-file-lines", problems,
+                     detail=[_d("call", "get_page %r from=%d lines=%d"
+                                % (TALL_SLUG, wstart, wspan)),
+                             _d("frontmatter", "%d line(s); the body starts on file "
+                                               "line %d" % (toffset - 1, toffset)),
+                             _d("served", "%r" % win["served"][:2]),
+                             _d("body-read", "%r" % body_read[:2]),
+                             _d("why", "the section index prints L<file line> and "
+                                       "this is the call made with that number -- "
+                                       "two coordinate systems would be "
+                                       "indistinguishable from outside, since the "
+                                       "reply looks the same either way")],
+                     text=canonical["text"])
+
+        problems = []
+        if win["total"] != len(traw):
+            problems.append("header claims %s total against a %d-line file"
+                            % (win["total"], len(traw)))
+        if win["before"] != wstart - 1:
+            problems.append("claims %s line(s) before L%d" % (win["before"], wstart))
+        if win["after"] != len(traw) - (win["end"] or 0):
+            problems.append("claims %s line(s) after L%s, file is %d lines"
+                            % (win["after"], win["end"], len(traw)))
+        if None not in (win["before"], win["height"], win["after"], win["total"]) \
+                and win["before"] + win["height"] + win["after"] != win["total"]:
+            problems.append("the three counts do not close: %d + %d + %d != %d"
+                            % (win["before"], win["height"], win["after"],
+                               win["total"]))
+        hdr_m = _WINDOW_RE.search(canonical["text"])
+        suite.record("N", "header-states-what-lies-outside-the-window", problems,
+                     detail=[_d("header", hdr_m.group(0) if hdr_m else "<none>"),
+                             _d("file", "%d lines" % len(traw)),
+                             _d("why", "the range is what the caller asked for; the "
+                                       "total and the two context counts are the "
+                                       "half it cannot compute, and `107 after` is "
+                                       "the difference between asking again and "
+                                       "stopping")],
+                     text="")
+
+        dflt = parse_window(sdrv.get_page(TALL_SLUG, **{"from": toffset})["text"])
+        problems = []
+        if len(traw) <= default_w:
+            problems.append("fixture drift: the page is %d line(s) against a %d-line "
+                            "default, so every value past the page height renders "
+                            "the same answer and the default cannot be told from "
+                            "the clamp" % (len(traw), default_w))
+        if toffset + default_w - 1 > len(traw):
+            problems.append("fixture drift: a default window from L%d runs past the "
+                            "end of a %d-line file" % (toffset, len(traw)))
+        if dflt["height"] != default_w:
+            problems.append("a bare from served %s line(s) against the module's "
+                            "own default of %d" % (dflt["height"], default_w))
+        suite.record("N", "from-without-lines-uses-the-modules-own-default", problems,
+                     detail=[_d("default", "%d (read off the module, not typed here)"
+                                % default_w),
+                             _d("served", "L%s-L%s of %s"
+                                % (dflt["start"], dflt["end"], dflt["total"])),
+                             _d("why", "a knob's default, not a calibrated "
+                                       "threshold -- but a default nobody can "
+                                       "predict is one the caller has to measure "
+                                       "by trying")],
+                     text="")
+
+        tail_at = len(traw) - 2
+        tail = parse_window(sdrv.get_page(TALL_SLUG,
+                                          **{"from": tail_at, "lines": 99})["text"])
+        want_tail = traw[tail_at - 1:]
+        while want_tail and want_tail[-1] == "":
+            want_tail.pop()
+        problems = []
+        if tail["end"] != len(traw):
+            problems.append("a 99-line ask 3 lines from the end claims to end at "
+                            "L%s of a %d-line file" % (tail["end"], len(traw)))
+        if tail["after"] != 0:
+            problems.append("claims %s line(s) after a window that reaches the end"
+                            % tail["after"])
+        if tail["served"] != want_tail:
+            problems.append("served %r, want %r" % (tail["served"], want_tail))
+        suite.record("N", "a-window-past-the-end-clamps-and-says-zero-after", problems,
+                     detail=[_d("call", "from=%d lines=99 on a %d-line file"
+                                % (tail_at, len(traw))),
+                             _d("served", "L%s-L%s, %s after"
+                                % (tail["start"], tail["end"], tail["after"])),
+                             _d("why", "clamping is right and silence about it is "
+                                       "not: `0 after` is what tells the caller it "
+                                       "has the end and can stop")],
+                     text="")
+
+        past_at = len(traw) + 7
+        past = sdrv.get_page(TALL_SLUG, **{"from": past_at, "lines": 3})
+        pw = parse_window(past["text"])
+        problems = []
+        if pw["no_line"] != (past_at, len(traw)):
+            problems.append("the refusal reads %r, want the asked line and the "
+                            "file's real height (%d, %d)"
+                            % (pw["no_line"], past_at, len(traw)))
+        if pw["has_header"]:
+            problems.append("rendered a window header for a line the file does not "
+                            "have")
+        if _TALL_BODY_RE.search(past["text"]):
+            problems.append("served body text for an out-of-range ask")
+        suite.record("N", "out-of-range-from-refuses-with-the-real-height", problems,
+                     detail=[_d("call", "from=%d on a %d-line file"
+                                % (past_at, len(traw))),
+                             _d("answer", "%r" % (pw["no_line"],)),
+                             _d("why", "an empty window would read as 'this part of "
+                                       "the page is blank', which is a different "
+                                       "claim; and the height is what makes the "
+                                       "next ask right")],
+                     text=past["text"])
+
+        aliased = sdrv.get_page(TALL_SLUG, **{"from": wstart, "count": wspan})
+        started = sdrv.get_page(TALL_SLUG, **{"start": wstart, "lines": wspan})
+        problems = []
+        if aliased["error"]:
+            problems.append("count did not reach lines: %s" % aliased["text"][:200])
+        elif aliased["text"] != canonical["text"]:
+            problems.append("count and lines render different answers")
+        if started["error"]:
+            problems.append("start did not reach from: %s" % started["text"][:200])
+        elif started["text"] != canonical["text"]:
+            problems.append("start and from render different answers")
+        if sdrv.mod.PARAM_ALIASES.get("count") != "limit":
+            problems.append("the GLOBAL meaning of count changed; this pin is about "
+                            "get_page overriding it, not about renaming it for every "
+                            "function")
+        if sdrv.mod.PARAM_ALIASES_BY_FUNC["get_page"].get("count") != "lines":
+            problems.append("get_page no longer overrides count, so the natural "
+                            "spelling of a window height arrives as limit")
+        suite.record("N", "count-and-start-reach-the-window-not-the-limit", problems,
+                     detail=[_d("global", "count -> %r"
+                                % sdrv.mod.PARAM_ALIASES.get("count")),
+                             _d("get_page", "%r"
+                                % sdrv.mod.PARAM_ALIASES_BY_FUNC["get_page"]),
+                             _d("why", "globally count means the search result "
+                                       "count, and get_page has no result list for "
+                                       "that to mean anything on -- without the "
+                                       "override the natural word is rejected for a "
+                                       "request that was never wrong")],
+                     text="")
+
+        rows, problems = [], []
+        for value, what in ((True, "a flag"), (False, "a flag"), ("abc", "a word"),
+                            (0, "line zero"), (-3, "a negative"),
+                            (3.7, "a fraction")):
+            got = sdrv.get_page(TALL_SLUG, **{"from": value})
+            leaked = bool(_TALL_BODY_RE.search(got["text"]))
+            if not got["error"]:
+                problems.append("from=%r (%s) was ACCEPTED" % (value, what))
+            if leaked:
+                problems.append("from=%r served body text anyway" % (value,))
+            rows.append("%-8r %-12s error=%-5r leaked=%-5r  %s"
+                        % (value, what, got["error"], leaked,
+                           got["text"].split("\n")[0][:58]))
+        suite.record("N", "a-coordinate-that-is-not-one-is-refused-loudly", problems,
+                     detail=[_d("why", "depth can shrug at garbage because a wrong "
+                                       "depth shows FEWER headings; a wrong from "
+                                       "shows the WRONG TEXT under a number the "
+                                       "caller did not choose, and nothing in the "
+                                       "answer could reveal the substitution"),
+                             _d("bool", "int(True) == 1, so the flag has to be "
+                                        "rejected BEFORE int() sees it -- the rule "
+                                        "mcp-git's positional layer learned in "
+                                        "53894ea")]
+                            + ["        " + r for r in rows],
+                     text="")
+
+        ov_sec = sdrv.get_page(TALL_SLUG, **{"from": wstart, "lines": wspan,
+                                             "section": MISSING_SECTION})
+        w = parse_window(ov_sec["text"])
+        problems = []
+        if w["overridden"] != ["section"]:
+            problems.append("the answer names %r as overridden, want ['section'] -- "
+                            "a caller that sent two selectors and got one silently "
+                            "cannot tell which" % (w["overridden"],))
+        if not w["has_header"] or w["served"] != want:
+            problems.append("the window did not win: %r" % ov_sec["text"][-200:])
+        if ov_sec["not_found"] is not None:
+            problems.append("the section refusal rendered TOO, so one answer "
+                            "carries two")
+        suite.record("N", "the-window-wins-over-section-and-says-so", problems,
+                     detail=[_d("call", "from=%d lines=%d section=%r"
+                                % (wstart, wspan, MISSING_SECTION)),
+                             _d("overridden", "%r" % (w["overridden"],)),
+                             _d("why", "an exact range is the most specific of the "
+                                       "three selectors, so it wins -- but [D6] "
+                                       "says the caller is owed what it could not "
+                                       "know, and which selector lost is exactly "
+                                       "that")],
+                     text=ov_sec["text"])
+
+        ov_body = sdrv.get_page(TALL_SLUG, **{"from": wstart, "lines": wspan,
+                                              "include_body": False})
+        w2 = parse_window(ov_body["text"])
+        problems = []
+        if w2["overridden"] != ["include_body"]:
+            problems.append("the answer names %r as overridden, want "
+                            "['include_body']" % (w2["overridden"],))
+        if not w2["has_header"] or w2["served"] != want:
+            problems.append("the window did not win over include_body: %r"
+                            % ov_body["text"][-200:])
+        if ov_body["has_sections_label"] or ov_body["has_no_headings_msg"]:
+            problems.append("the index arm rendered as well, so the reply answers "
+                            "both requests at once")
+        suite.record("N", "the-window-wins-over-include-body-false", problems,
+                     detail=[_d("overridden", "%r" % (w2["overridden"],)),
+                             _d("why", "include_body: false means 'not the whole "
+                                       "body' -- a window IS that, so refusing it "
+                                       "here would answer a narrower ask with a "
+                                       "broader refusal")],
+                     text="")
+
+        flat_idx = sdrv.get_page(FLAT_SLUG, section=MISSING_SECTION)
+        problems = []
+        if not parse_window(miss["text"])["has_advert"]:
+            problems.append("the section index never mentions the window, so the "
+                            "only way to act on a 23000c slice is to read the "
+                            "source [D66]")
+        if parse_window(flat_idx["text"])["has_advert"]:
+            problems.append("a page with NO listed sections advertises a window "
+                            "'inside any slice above' with no slice above it")
+        suite.record("N", "the-index-advertises-the-window-where-lines-exist",
+                     problems,
+                     detail=[_d("layered", "%r"
+                                % parse_window(miss["text"])["has_advert"]),
+                             _d("flat", "%r"
+                                % parse_window(flat_idx["text"])["has_advert"]),
+                             _d("why", "the list can now show a section is too big "
+                                       "to read whole; without the advert the "
+                                       "caller can see the problem and still not "
+                                       "act on it")],
+                     text="")
+
+        para = tool_paragraph(sdrv.mod.WIKI_CALL_TOOL["description"], "get_page")
+        accepted = sdrv.mod.HANDLER_ACCEPTED_PARAMS["get_page"]
+        problems = []
+        for name in ("from", "lines"):
+            if name not in para:
+                problems.append("the get_page paragraph never names %r" % name)
+            if "`%s`" % name in sdrv.mod.WIKI_CALL_TOOL["description"]:
+                problems.append("%r is BACKTICKED in the description: the "
+                                "name_existence suite reads backticked identifiers "
+                                "in server text as function-name prescriptions"
+                                % name)
+            if name not in accepted:
+                problems.append("%r is not in HANDLER_ACCEPTED_PARAMS, so every "
+                                "call carrying it is rejected as unknown" % name)
+        if "L<n>" not in para:
+            problems.append("the paragraph never says the numbers are FILE lines, "
+                            "which is the one thing a caller cannot guess wrong "
+                            "without noticing")
+        suite.record("N", "the-window-params-are-discoverable-unbackticked", problems,
+                     detail=[_d("accepted", "%r" % sorted(accepted)),
+                             _d("why", "[D66]: a param the model cannot see is a "
+                                       "param it never passes, and the tool "
+                                       "description is the only channel that "
+                                       "reaches every subagent [D34]")],
+                     text=para)
     finally:
         sec_work.cleanup()
 

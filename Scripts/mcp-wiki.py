@@ -16,9 +16,9 @@ Functions:
                    pages, behind a calibrated relevance gate so a query the wiki
                    cannot answer gets silence instead of the best-scoring noise
   source_to_pages  reverse lookup: a source file/anchor -> the pages that cover it
-  get_page         read one page (whole, a single section, or — when the section
-                   misses or the body is declined — just its section index) by
-                   slug/path
+  get_page         read one page (whole, a single section, a window of file
+                   lines, or — when the section misses or the body is declined —
+                   just its section index) by slug/path
   list             list pages, grouped by type, with type/status/prefix filters
   freshness        git-only staleness report (ports freshness.py logic)
   reindex          regenerate INDEX.md + structural audit (ports reindex.py logic)
@@ -515,7 +515,85 @@ def _section_index_block(body: str, path: str, depth: int) -> List[str]:
     if deeper:
         block.append("%d deeper heading(s) not listed — pass depth: %d to see them"
                      % (deeper, deepest))
+    if listed:
+        # The escape hatch FROM this list. Some of the slices it offers are tens
+        # of thousands of chars on this wiki, and a caller that can only ask for
+        # a whole section is back to the all-or-nothing choice the block exists
+        # to remove -- it can now see the size, but not act on it. Advertised
+        # unconditionally and only where L values exist to name: an
+        # only-when-big rule would be a threshold with nothing to tune it
+        # against, and [D66] holds that an escape hatch the caller cannot
+        # discover does not exist.
+        block.append("pass from: <L> and lines: <n> for a line window inside any "
+                     "slice above")
     return block
+
+
+# Window height when the caller names a `from` line but no `lines`. A caller
+# knob's default, not a calibrated threshold -- there is nothing in the corpus to
+# tune it against, and since the window header states how many lines lie outside
+# it, a default that is too small costs one more call and never misleads.
+DEFAULT_WINDOW_LINES = 40
+
+
+def _window_int(params: dict, key: str) -> Optional[int]:
+    """A 1-based line coordinate from `params`, or None when it is absent.
+
+    Loud on everything else, unlike `depth` two callers down, and the difference
+    is not style: a wrong depth shows FEWER headings, a wrong `from` shows the
+    WRONG TEXT under a number the caller did not choose. Nothing in the rendered
+    answer could reveal that substitution, so there is no safe default to fall
+    back to -- only a refusal.
+
+    bool is rejected before int() can see it, because `int(True) == 1` and a line
+    coordinate is never spelled `true`. Same rule mcp-git's positional layer had
+    to learn in `53894ea`, arrived at from the same direction: the boolean is a
+    plausible-looking value that silently means something else.
+    """
+    raw = params.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise ValueError("get_page %s is a file line, not a flag; got %r" % (key, raw))
+    try:
+        # Via str() on purpose, so 3.7 and [3] raise instead of quietly becoming
+        # 3 -- int() truncates a float and would answer a nonexistent request.
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise ValueError("get_page %s must be an integer file line, got %r"
+                         % (key, raw))
+    if value < 1:
+        raise ValueError("get_page %s counts from 1 (the file's first line), got %d"
+                         % (key, value))
+    return value
+
+
+def _file_line_window(text: str, start: int, count: int) -> List[str]:
+    """`count` lines from file line `start`, headed by what lies OUTSIDE them.
+
+    FILE lines, deliberately: the section index prints `L<file line>`, and this
+    is the call a caller makes with the number it read there. A window numbered
+    in body coordinates would look identical from the outside, so the two systems
+    would be indistinguishable in the one place it matters -- hence the RAW file
+    text here, frontmatter included, not the frontmatter-stripped body.
+
+    The header states the lines BEFORE and AFTER the window, not merely its own
+    range, because that is the half the caller cannot compute: it does not know
+    the file's height until something tells it, and `107 after` is the whole
+    difference between asking again and stopping. `of N lines` follows the
+    truncation marker's contract -- state the real total, never the parameter.
+    """
+    all_lines = text.splitlines()
+    total = len(all_lines)
+    if start > total:
+        # No window rather than an empty one: a blank slice would read as "this
+        # part of the page is empty", which is a different claim than "that line
+        # is not in this file". The real height is what makes the next ask right.
+        return ["", "_(no line %d — the file has %d line(s))_" % (start, total)]
+    end = min(total, start + count - 1)
+    return ["", "@@ L%d-L%d of %d lines — %d before, %d after @@"
+            % (start, end, total, start - 1, total - end), ""] \
+        + all_lines[start - 1:end]
 
 
 # ---------------------------------------------------------------------------
@@ -1297,6 +1375,28 @@ def _fn_get_page(params, project_root, wiki_root, strict):
         depth = max(2, int(params.get("depth") or 2))
     except (TypeError, ValueError):
         depth = 2
+    start = _window_int(params, "from")
+    count = _window_int(params, "lines")
+    if start is not None or count is not None:
+        # The window wins over the other two selectors, and the answer says which
+        # one it overrode. It is the most specific of the three -- an exact range
+        # against a heading name or a yes/no -- and a caller that sent two is owed
+        # the knowledge of which one it got instead of a silent pick [D6].
+        overridden = [name for name, hit in (("section", bool(section)),
+                                             ("include_body", not include_body))
+                      if hit]
+        try:
+            with open(os.path.join(abs_root, relpath), "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            # `_section_index_block` can drop its L and carry on when this read
+            # fails; a window cannot, because here the numbers ARE the answer.
+            raise ValueError("cannot read %s for a line window: %s" % (relpath, exc))
+        if overridden:
+            lines += ["", "_(line window takes precedence — ignored: %s)_"
+                      % ", ".join(overridden)]
+        lines += _file_line_window(text, start or 1, count or DEFAULT_WINDOW_LINES)
+        return _finalize("\n".join(lines).rstrip() + "\n", params)
     if section:
         extracted = _extract_section(body, str(section))
         if extracted is None:
@@ -1420,7 +1520,8 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "search": _COMMON_PARAMS | {"query", "type", "status", "path_prefix", "limit",
                                 "k1", "b", "min_coverage"},
     "source_to_pages": _COMMON_PARAMS | {"source"},
-    "get_page": _COMMON_PARAMS | {"slug", "section", "include_body", "depth"},
+    "get_page": _COMMON_PARAMS | {"slug", "section", "include_body", "depth",
+                                  "from", "lines"},
     "list": _COMMON_PARAMS | {"type", "status", "path_prefix"},
     "freshness": _COMMON_PARAMS | {"head"},
     "reindex": _COMMON_PARAMS | {"check"},
@@ -1460,7 +1561,13 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     "search": {"prefix": "path_prefix", "dir": "path_prefix", "pattern": "query"},
     "list": {"prefix": "path_prefix", "dir": "path_prefix"},
     "source_to_pages": {"file": "source", "path": "source", "anchor": "source"},
-    "get_page": {"name": "slug", "heading": "section", "body": "include_body"},
+    # `count` -> `lines` is NOT redundant with the global table, it OVERRIDES it:
+    # globally `count` means `limit`, the search result count, and get_page has no
+    # result list for that to mean anything on. Without this entry the natural
+    # spelling of a window height would arrive as `limit` and be rejected as an
+    # unknown param -- loudly, but for a request that was never wrong.
+    "get_page": {"name": "slug", "heading": "section", "body": "include_body",
+                 "count": "lines", "start": "from"},
     "reindex": {"check_only": "check", "dry_run": "check"},
 }
 
@@ -1591,14 +1698,20 @@ WIKI_CALL_TOOL = {
         "                   each with its one-line description, so the answer says\n"
         "                   what they cover and not merely that they do; params:\n"
         "                   source (req, a path or path:symbol)\n"
-        "  get_page         read one page whole or a single section; params: slug\n"
-        "                   (req), section, include_body (default true), depth\n"
+        "  get_page         read one page whole, a single section, or a window of\n"
+        "                   file lines; params: slug (req), section, from, lines\n"
+        "                   (default 40), include_body (default true), depth\n"
         "                   (default 2). When the section does not match, or\n"
         "                   include_body is false, the answer carries the page's\n"
         "                   section index — one dash line per heading with its\n"
         "                   file line and size in chars — so the next call can ask\n"
         "                   for one slice instead of re-reading the whole page.\n"
-        "                   Raise depth to list headings below level 2.\n"
+        "                   Raise depth to list headings below level 2. from and\n"
+        "                   lines are FILE lines — the same numbers that index\n"
+        "                   prints as L<n> — and the window is headed by how many\n"
+        "                   lines lie before and after it, so a section too big to\n"
+        "                   read whole can be walked instead. from wins over\n"
+        "                   section and over include_body, and says so.\n"
         "  list             list pages grouped by type; params: type, status,\n"
         "                   path_prefix\n"
         "  freshness        git-only staleness report; params: head (default HEAD)\n"
