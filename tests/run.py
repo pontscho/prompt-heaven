@@ -212,7 +212,7 @@ SUITES = [
     ("wiki_recall", run_wiki_recall,
      "mcp-wiki search relevance gate: silence, measured calibration window, "
      "floored percentages, query-side stopwords, get_page section index, "
-     "source_to_pages per-hit description, MEASURED state labels", 73),
+     "source_to_pages per-hit description, MEASURED state labels", 76),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

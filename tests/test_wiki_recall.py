@@ -4377,6 +4377,62 @@ def run(opts=None):
         ag_work.cleanup()
         cache_work.cleanup()
 
+    # ============ M: the truncation ceiling (W1/W2) ============
+    # `_finalize` is a pure function of (markdown, params) — no workspace, no git.
+    # These cases are about the CUT, not about the corpus.
+    fin = H.load_module_from_path("mcp_wiki_finalize", SERVER)
+    HIT = "1. **Page** — slug `subsystems/scripts.md#mcp-servers` [subsystem/stale]"
+    doc = "\n".join([HIT] * 6) + "\n"
+    whole_lines = set(doc.split("\n"))
+
+    cut_at = len(HIT) * 3 + 20            # lands well inside the 4th line
+    got = fin._finalize(doc, {"max_answer_chars": cut_at})["__raw_text__"]
+    kept, _, marker = got.partition("\n\n… (truncated")
+
+    partial = [ln for ln in kept.split("\n") if ln and ln not in whole_lines]
+    suite.record("M", "cut-lands-on-a-line-boundary",
+                 ["kept a PARTIAL line, so a broken anchor still reads as an "
+                  "anchor: %r" % partial] if partial else [],
+                 detail=[_d("limit", "%d chars, mid-way through line 4" % cut_at),
+                         _d("kept", "%d line(s), every one whole"
+                            % len([ln for ln in kept.split("\n") if ln])),
+                         _d("why", "every line here is structure -- an anchor, a "
+                                   "section entry with its size, a missed: list. "
+                                   "Half an anchor costs the caller a call to "
+                                   "discover it does not resolve")])
+
+    nums = [int(x) for x in marker.replace("(", " ").replace(")", " ").split()
+            if x.isdigit()]
+    problems = []
+    if len(nums) < 2:
+        problems.append("the marker does not state N of M: %r" % marker)
+    else:
+        said_kept, said_full = nums[0], nums[1]
+        if said_full != len(doc):
+            problems.append("marker claims %d total against a %d-char document"
+                            % (said_full, len(doc)))
+        if said_kept != len(kept):
+            problems.append("marker claims %d kept against %d delivered"
+                            % (said_kept, len(kept)))
+        if said_full == cut_at:
+            problems.append("the marker echoes the PARAMETER, not the real length")
+    suite.record("M", "marker-states-the-real-length-not-the-parameter", problems,
+                 detail=[_d("marker", marker.strip()),
+                         _d("document", "%d chars, ceiling %d" % (len(doc), cut_at)),
+                         _d("why", "the caller knows the ceiling it asked for; what "
+                                   "it cannot know is how much is missing, which is "
+                                   "the whole ask-again-or-narrow decision")])
+
+    # A first line longer than the entire ceiling: no boundary exists to honour,
+    # and an empty reply would be worse than a hard character cut.
+    got = fin._finalize(doc, {"max_answer_chars": 20})["__raw_text__"]
+    suite.record("M", "no-boundary-falls-back-to-the-character-cut",
+                 ["a first line over the limit produced an EMPTY answer"]
+                 if not got.split("\n")[0].strip() else [],
+                 detail=[_d("limit", "20 chars against a %d-char first line"
+                            % len(HIT)),
+                         _d("kept", "%r" % got.split("\n")[0][:40])])
+
     # ============ H: hygiene ============
     pyc_after = H.pycache_snapshot()
     new_pyc = sorted(set(pyc_after) - set(pyc_before))

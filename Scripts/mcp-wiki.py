@@ -867,8 +867,25 @@ def _finalize(md: str, params: dict) -> dict:
     except (TypeError, ValueError):
         limit = 100000
     if limit and len(md) > limit:
-        md = md[:limit].rstrip() + (
-            "\n\n… (truncated at %d chars — raise max_answer_chars for more)\n" % limit)
+        # Cut on a LINE boundary. Every line here is load-bearing structure — a
+        # `path.md#heading-slug` anchor, a `- Context (L24, 595c)` section entry, a
+        # `missed:` list — and half of one is worse than none of it: an anchor
+        # truncated mid-slug still LOOKS like an anchor, so the caller spends a call
+        # discovering it does not resolve. Floored at nothing, i.e. if the first
+        # line alone exceeds the limit the character cut stands; a reply with no
+        # newline in it has no boundary to honour.
+        full = len(md)
+        cut = md[:limit]
+        nl = cut.rfind("\n")
+        if nl > 0:
+            cut = cut[:nl]
+        # Report the REAL length, not the parameter. `full` is already computed by
+        # the condition above, and the caller knows what it asked for — what it
+        # cannot know is how much it is missing, which is the whole decision about
+        # whether to ask again with a bigger ceiling or narrow the query instead.
+        md = cut.rstrip() + (
+            "\n\n… (truncated at %d of %d chars — raise max_answer_chars for more)\n"
+            % (len(cut.rstrip()), full))
     return {"__raw_text__": md}
 
 
