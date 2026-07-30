@@ -21,8 +21,14 @@ Coverage by group:
      (`^master`, `:/fix typo`, `HEAD@{2 days ago}`, a URL)
   C  the `--key=value` fall-through, pinned case by case.  The traps are
      recorded as INFO: they are deliberate behaviour, not a feature.
-  D  ORDER: flags first, then the repository, then revisions/paths -- and the
-     order does NOT follow the caller's dict order for the repository
+  D  ORDER: flags first, then the repository, then revisions, then the paths
+     behind a `--` -- and the order does NOT follow the caller's dict order for
+     the repository OR for the paths.  The separator is appended LAST, after the
+     validators and after the status injection, so every flag scan in the module
+     (each of which stops at a `--`) still sees the whole argv, and the caller's
+     own flags stay in front of it.  Its three carve-outs (no paths, a `--` the
+     caller already wrote, `rev-parse` which echoes the separator as output) are
+     pinned here too.
   E  the new `remote` / `repository` / `repo` key on ls-remote and fetch
   F  _quote_arg display fidelity, end to end: the exact rendering of the echoed
      line, plus what a REAL shell makes of it (`printf "%s\\0" <line>` under
@@ -73,6 +79,7 @@ RANGE_ALIASES = ["range", "revision_range", "rev_range", "rev", "revs",
                  "revision", "revisions", "ref", "refs", "commit", "commits",
                  "object", "tree_ish", "treeish"]
 REPO_ALIASES = ["remote", "repository", "repo"]
+PATH_ALIASES = ["path", "paths", "pathspec"]
 
 REV_REJECT = "must be a revision or range"
 REPO_REJECT = "must be a remote name or URL"
@@ -472,6 +479,33 @@ def run(opts=None):
               {"remote": "https://example.invalid/x.git"},
               argv=["git", "ls-remote", "https://example.invalid/x.git"])
 
+        # The PATH slot is not screened for a leading dash, and now does not
+        # need to be where the separator lands: git cannot read a flag past a
+        # `--`. Measured on git 2.39.2 with the exact smuggling value the
+        # revision/repository guards exist for:
+        #   git ls-remote --upload-pack=/tmp/nope .   -> RUNS /tmp/nope
+        #   git ls-remote -- --upload-pack=/tmp/nope . -> "fatal: strange
+        #                                                 pathname ... blocked"
+        # Before this change the path joined the positionals unseparated, so the
+        # first shape is what `{"path": "--upload-pack=..."}` used to build. The
+        # separator closes it.
+        check(suite, drv, "B", "ok-path-dash-neutralised-by-separator",
+              "ls-remote", {"remote": ".", "paths": "--upload-pack=/tmp/nope"},
+              argv=["git", "ls-remote", ".", "--", "--upload-pack=/tmp/nope"],
+              note="unscreened but inert: past the `--` git treats it as a "
+                   "pathname, not as an option")
+        check(suite, drv, "B", "path-dash-unscreened-on-revparse", "rev-parse",
+              {"paths": "--upload-pack=/tmp/nope"},
+              argv=["git", "rev-parse", "--upload-pack=/tmp/nope"],
+              status=H.INFO,
+              note="the honest residue: `rev-parse` is exempt from the "
+                   "separator, so there an unscreened leading-dash path DOES "
+                   "reach git's option parser. Benign on this subcommand -- "
+                   "rev-parse has no option that runs a command and no "
+                   "--upload-pack at all -- but it is the one slot/subcommand "
+                   "pair where neither the dash screen nor the separator "
+                   "applies")
+
         # ====== C: the --key=value fall-through, pinned (traps = INFO) ======
         for cid, fn, params, want, note in [
             ("trap-raw_exit", "log", {"raw_exit": True},
@@ -507,6 +541,19 @@ def run(opts=None):
              "revision slot as the string \"None\", and _check_revision accepts "
              "it -- no leading dash. True of every positional key, but NEW for "
              "`refs`, which used to emit nothing at all"),
+            ("trap-null-path-becomes-the-string-None", "log", {"paths": None},
+             ["git", "log", "--", "None"],
+             "the same for the path slot, and here it also DRAGS THE SEPARATOR "
+             "IN: a JSON null is one path named \"None\", not zero paths, so "
+             "`git log -- None` is what runs (exit 0, empty history -- a "
+             "silently empty answer rather than a complaint). Only [] and a "
+             "missing key mean 'no paths'"),
+            ("trap-path-bool-becomes-a-flag", "log", {"paths": True},
+             ["git", "log", "--paths"],
+             "the boolean carve-out is key-agnostic, so a path key given `true` "
+             "takes the flag branch too -- and unlike `refs`, `--paths` is not a "
+             "git flag on any subcommand, so git answers `error: unknown option "
+             "`paths''. No separator is emitted: there is no path"),
         ]:
             check(suite, drv, "C", cid, fn, params, argv=want, status=H.INFO,
                   note=note)
@@ -557,14 +604,102 @@ def run(opts=None):
         check(suite, drv, "D", "lsremote-flag-then-repo-alias", "ls-remote",
               {"tags": True, "repo": "origin"},
               argv=["git", "ls-remote", "--tags", "origin"])
-        check(suite, drv, "D", "rev-then-path", "log",
+        rev_first = check(suite, drv, "D", "rev-then-path", "log",
+                          {"range": "A..B", "path": "src/x.c"},
+                          argv=["git", "log", "A..B", "--", "src/x.c"],
+                          note="paths land behind a `--`: `git log <deleted "
+                               "file>` was exit 128 \"ambiguous argument ... "
+                               "unknown revision or path not in the working "
+                               "tree\", and git's own error text prescribes the "
+                               "separator (measured: with it, exit 0)")
+        # The cid used to read `path-then-rev-follows-param-order`, and the note
+        # used to say revisions and paths keep the caller's order with NO
+        # separator. That was the defect, not the contract: the SAME two values
+        # in the other key order produced a working command
+        # (`log A..B src/x.c`) and a broken one (`log src/x.c A..B` -> exit 128,
+        # measured), so correctness depended on JSON key order -- which nothing
+        # in the protocol preserves for a caller. It is a real assertion now,
+        # not INFO: the guarantee is that the key order buys nothing.
+        path_first = check(suite, drv, "D", "path-then-rev-same-argv", "log",
+                           {"path": "src/x.c", "range": "A..B"},
+                           argv=["git", "log", "A..B", "--", "src/x.c"],
+                           note="path written FIRST, still emitted last: the "
+                                "caller's dict order does NOT decide the "
+                                "outcome any more")
+        identity(suite, "D", "path-slot-independent-of-key-order",
+                 [rev_first["argv"], path_first["argv"]],
+                 "revision+path in BOTH key orders -> one argv")
+        check(suite, drv, "D", "path-only-gets-separator", "log",
+              {"path": "src/x.c"}, argv=["git", "log", "--", "src/x.c"],
+              note="no revision at all: the separator is what makes a path-only "
+                   "call mean 'this is a path'")
+        check(suite, drv, "D", "path-list-shares-one-separator", "log",
+              {"paths": ["a.c", "b.c", "src/dir"]},
+              argv=["git", "log", "--", "a.c", "b.c", "src/dir"],
+              note="ONE separator for the whole list, order preserved")
+        path_argvs = []
+        for key in PATH_ALIASES:
+            rep = check(suite, drv, "D", "path-alias-" + key, "log",
+                        {"range": "A..B", key: "src/x.c"},
+                        argv=["git", "log", "A..B", "--", "src/x.c"])
+            path_argvs.append(rep["argv"])
+        identity(suite, "D", "all-path-aliases-identical", path_argvs,
+                 "every documented path alias -> the same slot behind `--`")
+        # Pinned like _REVISION_KEYS and _REPO_KEYS are, and for a stronger
+        # reason than either: this set now decides which values get a `--` in
+        # front of them, so a key silently added to or dropped from it changes
+        # the argv shape rather than just a spelling.
+        pinned_set(suite, "D", "path-key-set", drv.mod._PATH_KEYS, PATH_ALIASES,
+                   "_PATH_KEYS")
+        check(suite, drv, "D", "caller-flags-stay-in-front-of-separator", "log",
+              {"paths": "x", "args": ["--oneline"]},
+              argv=["git", "log", "--oneline", "--", "x"],
+              note="why the append is LAST: behind a `--` every flag in "
+                   "params.args would become a pathspec")
+        check(suite, drv, "D", "existing-dashdash-not-doubled", "log",
+              {"paths": "b.c", "args": ["--", "a.c"]},
+              argv=["git", "log", "--", "a.c", "b.c"],
+              note="a SECOND separator is exit 128 on blame/annotate/"
+                   "hash-object; the paths join the pathspec section the caller "
+                   "opened")
+        check(suite, drv, "D", "dashdash-as-a-value-suppresses-the-separator",
+              "log", {"paths": "b.c", "args": ["--grep", "--"]},
+              argv=["git", "log", "--grep", "--", "b.c"], status=H.INFO,
+              note="the `\"--\" in args` test cannot tell a separator from a "
+                   "VALUE that happens to be `--`, so no separator is added and "
+                   "the path is unprotected. Harmless in practice: git refuses "
+                   "this argv on its own -- measured `fatal: Option '--grep' "
+                   "requires a value` (exit 128), because parse_options will "
+                   "not consume `--` as an option value")
+        check(suite, drv, "D", "revparse-gets-no-separator", "rev-parse",
+              {"path": "src/x.c"}, argv=["git", "rev-parse", "src/x.c"],
+              note="`git rev-parse` prints every `--` it receives as an OUTPUT "
+                   "LINE (measured: `rev-parse -- -S` -> \"--\\n-S\"), so the "
+                   "separator would arrive in the caller's answer as data")
+        check(suite, drv, "D", "revparse-rev-and-path-stay-adjacent",
+              "rev-parse", {"range": "HEAD", "path": "x"},
+              argv=["git", "rev-parse", "HEAD", "x"], status=H.INFO,
+              note="the carve-out's price: on rev-parse the two slots are still "
+                   "adjacent and unseparated -- the pre-change shape, kept "
+                   "deliberately because the alternative corrupts the output")
+        check(suite, drv, "D", "empty-path-list-emits-no-separator", "log",
+              {"range": "A..B", "paths": []}, argv=["git", "log", "A..B"],
+              note="a bare `--` with nothing behind it is exit 129 on "
+                   "blame/annotate (`usage: git blame ...`), so an empty list "
+                   "must add NOTHING -- not even the separator")
+        check(suite, drv, "D", "separator-renders-unquoted-in-echo", "log",
               {"range": "A..B", "path": "src/x.c"},
-              argv=["git", "log", "A..B", "src/x.c"])
-        check(suite, drv, "D", "path-then-rev-follows-param-order", "log",
-              {"path": "src/x.c", "range": "A..B"},
-              argv=["git", "log", "src/x.c", "A..B"], status=H.INFO,
-              note="revisions and paths keep the caller's order and get NO `--` "
-                   "separator; ambiguous names can be misread by git")
+              argv=["git", "log", "A..B", "--", "src/x.c"],
+              cmdline="git log A..B -- src/x.c",
+              note="`-` is in _quote_arg's shell-safe set and is not a leading "
+                   "expansion character, so the separator stays bare in the "
+                   "echoed line and the line remains copy-pasteable")
+        check(suite, drv, "D", "leading-dash-path-behind-separator", "log",
+              {"paths": "-S"}, argv=["git", "log", "--", "-S"],
+              note="paths are NOT screened for a leading dash (only revisions "
+                   "and repositories are) -- past a `--` they do not need to "
+                   "be: measured `git log -- -S` is exit 0, while `git log -S` "
+                   "is exit 129 \"switch `S' requires a value\"")
         check(suite, drv, "D", "two-revision-keys-keep-order", "merge-base",
               {"revision": "A", "ref": "B"}, argv=["git", "merge-base", "A", "B"])
         check(suite, drv, "D", "semantic-args-precede-params-args", "log",
@@ -709,6 +844,89 @@ def run(opts=None):
               {"args": ["v9.9"]}, error="would create a tag")
         check(suite, drv, "H", "hash-object-bundled-w-refused", "hash-object",
               {"args": ["-wt", "blob", "x"]}, error="bundled short options")
+        # THE security boundary of the separator's PLACEMENT. validate_hash_object
+        # scans for a bundled `w` and stops at the first `--` ("everything after
+        # -- is a path"), so a separator emitted in FRONT of the caller's own
+        # params.args truncates the scan on its first element and `-wt` -- the -w
+        # write this repo already paid for once -- goes through unseen.
+        #
+        # Measured by mutation, not assumed: with the separator moved ahead of
+        # params.args this case FAILS (the call is accepted), while the append's
+        # position relative to the VALIDATOR does not break it either way -- the
+        # paths land behind the caller's flags regardless, so the scan still reads
+        # them first. What the append order does decide is the POSITIONAL checks;
+        # see the guard block below.
+        check(suite, drv, "H", "hash-object-bundled-w-refused-with-path-key",
+              "hash-object", {"path": "x", "args": ["-wt", "blob"]},
+              error="bundled short options",
+              note="the separator lands AFTER `-wt`, so the guard still sees it; "
+                   "emit it in front of params.args and this call writes a blob")
+        check(suite, drv, "H", "hash-object-t-flag-then-path-behind-separator",
+              "hash-object", {"path": "x", "args": ["-t", "blob"]},
+              argv=["git", "hash-object", "-t", "blob", "--", "x"],
+              note="the allowed shape: measured `git hash-object -- f.txt` and "
+                   "`git hash-object f.txt` print the same OID, so the separator "
+                   "costs nothing here")
+
+        # ---- THE PATH KEY MUST REACH THE VALIDATOR: the guarded subcommands ----
+        # Every FILTERED_SUBCOMMANDS guard that counts POSITIONALS
+        # (validate_hash_object's "at least one file path", validate_branch's and
+        # validate_tag's "would create", validate_config's "<name> <value>",
+        # validate_remote's subcommand allowlist) can only judge an argv the paths
+        # have already joined. These five cases are that boundary, and they were
+        # written as the opposite -- pinned REGRESSIONS -- when the append still
+        # ran after the validator: `branch {"path": "newbranch"}` built
+        # `git branch -- newbranch`, which is exit 0 and a CREATED BRANCH
+        # (measured, git 2.39.2), `tag {"path": "v9.9"}` created the tag, and
+        # `config {"paths": ["user.name", "evil"]}` WROTE the value. Three
+        # mutations through a read-only server, each one refused when the same
+        # value was written into params.args. They are assertions now.
+        #
+        # DIRECTION, not just outcome: move the append back after the validator
+        # and all five fail -- the first as an unexpected refusal, the other four
+        # as accepted calls that should have been refused.
+        check(suite, drv, "H", "hash-object-path-key-alone-works",
+              "hash-object", {"path": "x"},
+              argv=["git", "hash-object", "--", "x"],
+              note="the spelling validate_hash_object's own error message "
+                   "recommends (params={\"path\":\"src/main.c\"}) and the one "
+                   "GIT_CALL_TOOL tells callers to prefer over args. It reaches "
+                   "the \"at least one file path\" check as a positional, so the "
+                   "check passes instead of refusing the documented call")
+        check(suite, drv, "H", "branch-path-key-refused-like-args", "branch",
+              {"path": "newbranch"}, error="would create a branch",
+              note="the path is a positional by the time validate_branch counts "
+                   "them, so the path key and the args spelling agree. The "
+                   "refusal IS the boundary: `git branch -- newbranch` exits 0 "
+                   "and creates the branch -- git strips the separator happily")
+        check(suite, drv, "H", "tag-path-key-refused-like-args", "tag",
+              {"path": "v9.9"}, error="would create a tag",
+              note="same shape as branch: measured `git tag -- v9.9` exits 0 and "
+                   "CREATES the tag, so nothing downstream would have caught it")
+        check(suite, drv, "H", "config-path-key-refused-like-args", "config",
+              {"paths": ["user.name", "evil"]}, error="mutates",
+              note="two paths are two positionals: validate_config reads them as "
+                   "`config <name> <value>` and refuses. Measured `git config -- "
+                   "user.mcpprobe evil` exits 0 and the value is readable "
+                   "afterwards -- a config WRITE through a read-only server")
+        check(suite, drv, "H", "remote-path-key-refused-by-our-validator",
+              "remote", {"paths": ["add", "p", "/tmp/none.git"]},
+              error="git remote subcommand 'add' not allowed",
+              note="this one used to be stopped by GIT and not by us: measured "
+                   "`git remote -- add p <url>` is exit 129 \"unknown "
+                   "subcommand: `add'\", which refused it by luck rather than by "
+                   "design. validate_remote now sees the positional and names "
+                   "the reason itself")
+        # A sixth case whose ONLY job is the direction of the guard, in a spelling
+        # none of the five uses: `pathspec` on hash-object, accepted with the
+        # separator. Move the append back after the validator and this dies with
+        # "needs at least one file path" -- it is the case the append-after
+        # mutant kills first, and it fails LOUDLY (a refusal where a spawn was
+        # expected) rather than by an argv diff.
+        check(suite, drv, "H", "append-runs-before-the-validator", "hash-object",
+              {"pathspec": "x"}, argv=["git", "hash-object", "--", "x"],
+              note="pinned as ORDER, not as argv: the validator must judge the "
+                   "argv git will actually receive, paths included")
         check(suite, drv, "H", "config-set-refused", "config",
               {"args": ["user.name", "x"]}, error="mutates")
         check(suite, drv, "H", "apply-without-check-refused", "apply",
@@ -882,6 +1100,31 @@ def run(opts=None):
               {"args": ["--", "-s"]},
               argv=["git", "status", "--porcelain=v1", "-b", "--", "-s"],
               note="a file literally named -s must not read as --short")
+        # The separator is appended AFTER the status injection, so the injection
+        # still sees the caller's real argv. If it were appended first, both
+        # `_status_format_chosen` and `_status_branch_flag_present` would stop at
+        # the `--` and read an empty flag list -- injecting into a call that
+        # already chose a format.
+        check(suite, drv, "J", "path-keeps-the-injected-format", "status",
+              {"paths": "x"},
+              argv=["git", "status", "--porcelain=v1", "-b", "--", "x"],
+              must=["_+ --porcelain=v1 -b_"],
+              note="injection intact and still disclosed, with the path behind "
+                   "the separator")
+        check(suite, drv, "J", "path-does-not-hide-a-chosen-format", "status",
+              {"paths": "x", "args": ["-s"]},
+              argv=["git", "status", "-s", "--", "x"], must_not=["_+ "],
+              note="-s is still DETECTED as the caller's format (nothing "
+                   "injected, nothing disclosed) and stays in front of the `--`")
+        check(suite, drv, "J", "path-named-like-a-format-is-not-a-format",
+              "status", {"paths": "-s"},
+              argv=["git", "status", "--porcelain=v1", "-b", "--", "-s"],
+              must=["_+ --porcelain=v1 -b_"],
+              note="the path-key twin of pathspec-after-dashdash-not-a-flag, and "
+                   "it only became reachable when the paths started joining the "
+                   "argv before the injection: the format scan meets the `--` "
+                   "first and stops, so a FILE named -s cannot masquerade as "
+                   "--short and suppress the default")
         for fn in ("log", "diff", "show"):
             check(suite, drv, "J", "no-leak-into-" + fn, fn, {},
                   argv=["git", fn], note="the default is status-only")

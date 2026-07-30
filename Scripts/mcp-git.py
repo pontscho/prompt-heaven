@@ -41,7 +41,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger("mcp-git")
 
@@ -476,8 +476,12 @@ def _check_not_option(value: str, key: str, what: str, example: str) -> None:
     exact-match blocklist would miss. Nothing else needs restricting: legitimate
     revisions contain spaces and colons (`HEAD@{2 days ago}`, `:/fix typo`) and
     may start with '^' (`^master`), and a repository may be a URL — none of which
-    git can read as an option. A `--` separator is deliberately NOT used: git
-    reads everything after `--` as a path, which would break every revision.
+    git can read as an option. A `--` separator cannot do this job for the slots
+    guarded here: git reads everything after `--` as a path, so a separator placed
+    in front of a revision or a repository would destroy it — which is why these
+    values are screened for a leading dash instead. Paths are the opposite case:
+    they WANT the separator and are given one, after everything else, by
+    _append_path_positionals.
     """
     stripped = value.strip()
     if not stripped:
@@ -501,19 +505,35 @@ def _check_repository(value: str, key: str) -> None:
     _check_not_option(value, key, "a remote name or URL", "origin")
 
 
-def _semantic_params_to_args(params: dict) -> List[str]:
+def _semantic_params_to_args(params: dict) -> Tuple[List[str], List[str]]:
     """Convert semantic parameter names to CLI args.
 
     Models sometimes pass named parameters (e.g. max_count=5, pretty="%h %s")
     instead of raw args lists.  This converts them to CLI flags so both
     calling styles work.
 
-    Keys in _POSITIONAL_KEYS become positional args after the flags. Order of the
-    emitted argv is: flags, then the repository, then revisions/pathspecs — git
-    spells it `git ls-remote [<options>] [<repository> [<refs>...]]`, so the
-    repository cannot simply follow the caller's param order. Revision and
-    repository values are checked for a leading dash. Every other key becomes a
-    `--key[=value]` flag, so an unknown key reaches git verbatim.
+    Returns (args, paths) — file paths come back SEPARATELY, they are not part of
+    the first list. Order within it is: flags, then the repository, then
+    revisions — git spells it `git ls-remote [<options>] [<repository>
+    [<refs>...]]`, so the repository cannot simply follow the caller's param
+    order. Revision and repository values are checked for a leading dash. Every
+    other key becomes a `--key[=value]` flag, so an unknown key reaches git
+    verbatim.
+
+    WHY PATHS LEAVE BY A SEPARATE DOOR. They belong after a `--`, and that
+    separator cannot be placed from here: it has to come after the caller's own
+    `params.args`, or every flag written there turns into a pathspec. That
+    concatenation happens in handle_git_call, so the caller of this function owns
+    the placement — see _append_path_positionals, which also explains why the
+    paths must reach the VALIDATORS, and why guessing that answer got it backwards.
+
+    Keeping them in one list was a defect on its own, independently of the
+    missing separator: revisions and paths were appended in the caller's dict
+    order, so `{"path": ..., "range": ...}` emitted the path FIRST and git read
+    the range as another path (`fatal: <range>: no such path in the working
+    tree`, exit 128, measured) while `{"range": ..., "path": ...}` — the same two
+    values, the other key order — worked. Correctness must not depend on JSON key
+    order, which nothing in the protocol preserves for a caller anyway.
 
     A positional key carrying a BOOLEAN SCALAR is emitted as a flag instead. That
     is not a special case for one key but the only reading that can be right: a
@@ -535,7 +555,8 @@ def _semantic_params_to_args(params: dict) -> List[str]:
     """
     flags: List[str] = []
     repos: List[str] = []
-    positionals: List[str] = []
+    revisions: List[str] = []
+    paths: List[str] = []
 
     for key, value in params.items():
         if key in _META_KEYS:
@@ -550,7 +571,12 @@ def _semantic_params_to_args(params: dict) -> List[str]:
         # in Python, so swapping them renders `{"refs": true}` as `--refs=True`,
         # which is exactly the exit-129 shape this key was fixed for.
         if key in _POSITIONAL_KEYS and not isinstance(value, bool):
-            target = repos if key in _REPO_KEYS else positionals
+            if key in _REPO_KEYS:
+                target = repos
+            elif key in _PATH_KEYS:
+                target = paths
+            else:
+                target = revisions
             values = value if isinstance(value, list) else [value]
             for v in values:
                 v = str(v)
@@ -576,7 +602,76 @@ def _semantic_params_to_args(params: dict) -> List[str]:
             for v in value:
                 flags.append(f"--{cli_key}={v}")
 
-    return flags + repos + positionals
+    return flags + repos + revisions, paths
+
+
+# Subcommands that must not receive a `--` even when a path was named. `git
+# rev-parse` prints every `--` it is handed as an OUTPUT LINE (measured), so the
+# separator would arrive in the caller's answer as data.
+_DASHDASH_ECHOED = {"rev-parse"}
+
+
+def _append_path_positionals(function: str, args: List[str],
+                             paths: List[str]) -> List[str]:
+    """Append file paths to *args*, behind a `--` where that is safe.
+
+    `--` is what tells git "everything after this is a path", and without it a
+    path that is not resolvable as a revision AND not present in the working tree
+    is fatal: `git log <deleted-file>` dies with "ambiguous argument ... unknown
+    revision or path not in the working tree" (exit 128, measured), and git's own
+    error text prescribes the separator. With it the same call answers exit 0 and
+    an empty history — which is the honest answer to "what happened to this file".
+    The history of a DELETED path is the main reason `git log -- <path>` exists,
+    so the slot was unusable for its primary purpose.
+
+    Three carve-outs, each measured rather than assumed:
+
+      * only when a path was actually named. A bare `--` with no path is exit 129
+        on blame/annotate (`usage: git blame ...`).
+      * only when the caller did not already write `--` in params.args. A SECOND
+        separator is exit 128 on blame, annotate and hash-object ("fatal: could
+        not open '--' for reading"). If the caller opened the pathspec section
+        themselves, the paths simply join it.
+      * never for _DASHDASH_ECHOED (see above).
+
+    There is deliberately NO per-subcommand pathspec whitelist, in keeping with
+    this module's rule that a key is merely meaningless where git takes no such
+    argument. It was measured for the whole allowlist: where there is no pathspec
+    slot, the separator changes nothing — describe/merge-base/show-branch/ls-remote
+    fail with exit 128 identically with and without it, count-objects and cat-file
+    reject the path at 129 either way, and name-rev/for-each-ref/show-ref misread
+    it silently in both spellings. So the gate would defend no working behaviour
+    while inventing the schema layer this server does without.
+
+    WHERE THIS IS CALLED FROM IS A SECURITY BOUNDARY, and the answer is the
+    opposite of the plausible one. The paths must join the argv BEFORE the
+    validators run, because the FILTERED_SUBCOMMANDS guards judge POSITIONALS:
+    validate_branch, validate_tag and validate_config each decide by what the
+    positional list holds. Appended after them, a path is a positional they never
+    saw — and git strips the `--` happily. Measured on the first attempt at this
+    change: `branch {"path": "newbranch"}` became `git branch -- newbranch` and
+    CREATED THE BRANCH (exit 0), `tag {"path": "v9.9"}` created the tag, and
+    `config {"paths": ["user.name", "evil"]}` WROTE THE CONFIG — three mutations
+    through a read-only server, while the same values in params.args stayed
+    correctly refused.
+
+    What is safe about this position — also measured, not reasoned — is that the
+    separator lands at the END of the argv, behind the caller's own flags. Every
+    flag scan here stops at a `--` (validate_hash_object, _status_format_chosen,
+    _status_branch_flag_present), but a left-to-right scan has already passed the
+    caller's flags by the time it reaches the tail, so nothing is truncated:
+    `hash-object {"path": "x", "args": ["-wt", "blob"]}` stays refused by the
+    bundled-option check this repo paid for once, and `status {"paths": "x",
+    "args": ["-s"]}` still has its `-s` recognised as a chosen format. The hazard
+    is the separator's position WITHIN argv, never the call site's order. Moving
+    it in front of params.args is what breaks both, and a mutant does exactly that
+    to keep the distinction honest.
+    """
+    if not paths:
+        return args
+    if function in _DASHDASH_ECHOED or "--" in args:
+        return args + paths
+    return args + ["--"] + paths
 
 
 _STATUS_FORMAT_FLAGS = ("--short", "--long", "--porcelain", "--no-short")
@@ -688,7 +783,7 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
         )}
 
     try:
-        semantic_args = _semantic_params_to_args(params)
+        semantic_args, semantic_paths = _semantic_params_to_args(params)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -702,6 +797,9 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
         return {"error": "params.args must be a list of strings"}
     args = [str(a) for a in args]
     args = semantic_args + args
+    # Paths join HERE, before the validator — it has to judge the argv git will
+    # actually get. See _append_path_positionals.
+    args = _append_path_positionals(function, args, semantic_paths)
 
     if validator is not None:
         try:
@@ -863,14 +961,18 @@ GIT_CALL_TOOL = {
         "  - strings/numbers -> --key=value: max_count=10 gives --max-count=10\n"
         "  - `_` becomes `-` in the flag name\n"
         "  - POSITIONAL slots each need a dedicated key. Emitted after the flags,\n"
-        "    repository first, then revisions/paths:\n"
+        "    repository first, then revisions, then paths behind a `--`:\n"
         "      revision or revision RANGE: `range` (canonical). Aliases:\n"
         "        revision_range, rev_range, rev, revs, revision, revisions, ref,\n"
         "        refs, commit, commits, object, tree_ish, treeish.\n"
         "      repository / remote name or URL: `remote` (canonical). Aliases:\n"
         "        repository, repo. git puts it BEFORE the refs\n"
         "        (git ls-remote [<options>] [<repository> [<refs>...]]).\n"
-        "      file paths: `path` / `paths` / `pathspec`.\n"
+        "      file paths: `path` / `paths` / `pathspec`. These are emitted LAST,\n"
+        "        after a `--`, so a path that no longer exists in the working tree\n"
+        "        still works (log of a DELETED file answers empty instead of\n"
+        "        'fatal: ambiguous argument'). Use these keys rather than writing\n"
+        "        the path into args, where git may read it as a revision.\n"
         "    Revision and repository values starting with '-' are refused (no\n"
         "    flag smuggling). Lists are allowed and checked per element.\n"
         "    A positional key given a BOOLEAN becomes a FLAG instead: refs=true\n"
@@ -884,6 +986,8 @@ GIT_CALL_TOOL = {
         "    -> git log --stat master..HEAD   (diffstat-annotated range log)\n"
         "  function=\"ls-remote\", params={\"remote\":\"origin\",\"heads\":true}\n"
         "    -> git ls-remote --heads origin\n"
+        "  function=\"log\", params={\"range\":\"master..HEAD\",\"paths\":\"src/x.c\"}\n"
+        "    -> git log master..HEAD -- src/x.c   (one file's history in a range)\n"
         "Call without 'function' for full allowlist."
     ),
     "inputSchema": {
