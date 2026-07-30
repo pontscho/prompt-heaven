@@ -44,6 +44,7 @@ docs/
   reference/<name>.md
   analysis/<name>.md
   concepts/<name>.md
+  specs/<name>.md
   runbooks/<name>.md
   adr/NNNN-<slug>.md    # append-only, never edited after acceptance
   glossary.md
@@ -54,9 +55,13 @@ docs/
 `SCHEMA.md` and `INDEX.md` are excluded from page processing.
 
 **Script location:** The wiki scripts (`freshness.py`, `reindex.py`) live in the
-skill directory at `~/.claude/skills/p/skills/wiki/scripts/`. All invocations MUST use
-the absolute path: `~/.claude/skills/p/skills/wiki/scripts/<script>.py`. Never
-assume they exist in the project's `scripts/` directory.
+skill directory at `~/.claude/skills/p/skills/wiki/scripts/` (a symlink into the
+repo's `ClaudeCode/skills/wiki/scripts/`). They are the **CI gate only**: a shell
+invocation MUST use that absolute path, and MUST never assume the scripts exist
+in the project's `scripts/` directory. **Agents do not shell out** — the janitor
+has no `Bash` tool. Every interactive freshness/index run goes through `wiki_call`
+(§7). Where an operation in §6 says "reindex" or "freshness", it means the
+`wiki_call` function, not the script.
 
 ## 2. Page types
 
@@ -156,7 +161,8 @@ A page's freshness is defined against its anchors:
   since last verification — flag for human review, do not silently rewrite.
 
 Division of labor: file-level freshness (`stale`, `orphaned-source`) is
-detected cheaply by `~/.claude/skills/p/skills/wiki/scripts/freshness.py` with git only. Symbol-level checks
+detected cheaply by `wiki_call` `freshness` (git only; the `freshness.py` CI gate
+runs the same logic). Symbol-level checks
 (`broken`, `drifted`) require the language MCP servers and happen during the
 LLM lint pass — never with grep/find.
 
@@ -218,7 +224,7 @@ MUST keep frontmatter within this subset:
    language MCP, bump `verified.commit` / `verified.date`, set `status: current`.
 4. If a changed file maps to no page and looks significant, **propose** a new
    page — do not create silently; list it for the human.
-5. Run `~/.claude/skills/p/skills/wiki/scripts/reindex.py` to refresh `INDEX.md`.
+5. Refresh `INDEX.md` via `wiki_call` `reindex`.
 
 ### Query (answer + write-back)
 1. Search pages first; fall back to code via clangd / luals / purity.
@@ -227,8 +233,8 @@ MUST keep frontmatter within this subset:
    it back into the right page.
 
 ### Lint (periodic audit, no code change required)
-1. Run `~/.claude/skills/p/skills/wiki/scripts/freshness.py` -> prose report listing stale / unverified / orphaned-source pages.
-2. Run `~/.claude/skills/p/skills/wiki/scripts/reindex.py --check` -> orphans, dup slugs, malformed frontmatter.
+1. `wiki_call` `freshness` -> report listing stale / unverified / orphaned-source pages, with a `gating:` count.
+2. `wiki_call` `reindex` with `check: true` -> dup slugs, malformed frontmatter, link-graph orphans; writes nothing. **Note the two senses of "orphan":** this one is *link-graph* orphan (nothing links to the page), while `freshness`'s `orphaned-source` means a `sources:` path no longer exists. A clean `reindex` audit does NOT imply a clean `freshness` — read both.
 3. **Only then** the LLM looks at the flagged pages: resolve inline symbol
    anchors with the language MCP, detect drift and contradictions, propose fixes.
 4. Never auto-delete. Fixes are proposed; the human approves.
@@ -237,12 +243,12 @@ MUST keep frontmatter within this subset:
 1. Create the `docs/` skeleton from section 1.
 2. Optionally copy this `SCHEMA.md` to `docs/SCHEMA.md` for customization.
 3. Generate `overview.md` from the repo's top-level structure.
-4. Run `~/.claude/skills/p/skills/wiki/scripts/reindex.py`.
+4. `wiki_call` `reindex`.
 
 ### Adopt (onboard an existing docs tree)
 For a repo that already has hand-written docs. Adopt **preserves the prose** and
 backfills the contract; it does not rewrite content.
-1. `~/.claude/skills/p/skills/wiki/scripts/reindex.py --check` -> the `malformed` list is the worklist.
+1. `wiki_call` `reindex` with `check: true` -> the `malformed` list is the worklist.
 2. Per doc, without touching its body: classify into a page type, infer
    `sources` anchors (locate the described code via the language MCP), add
    frontmatter with `verified.commit: <HEAD>` and `status: draft`.

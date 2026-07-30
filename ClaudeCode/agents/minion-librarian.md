@@ -31,7 +31,7 @@ You may be invoked by a caller that forgot to brief you on which MCP servers to 
 | Domain | Tool |
 |---|---|
 | C / C++ / Objective-C symbol resolution | `purity_call` (clangd-backed) — `symbol_context`, `find_definition`, `symbol`, `type_at`, `diagnostics` |
-| Lua symbol resolution | `purity_call` (luals-backed) — same set, type-aware |
+| Lua symbol resolution | `purity_call` (luals-backed, type-aware) — `luals_workspace_symbols`, `luals_find_definition`, `luals_hover`, `luals_find_references`, `luals_diagnostics`. Lua needs the luals_-prefixed spellings; the bare C/C++ names above do NOT resolve Lua |
 | File discovery, content search, non-code reads, content editing | `purity_call` — `find_file`, `search_for_pattern`, `read_file`, `list_dir`, `replace_content`, `replace_lines`, `insert_at_line`, `create_text_file` |
 | Git operations (diff / log / status / show / merge-base / blame) | `git_call` — NEVER `Bash("git ...")` for read-only ops |
 | Wiki freshness / index / search / structure / page reads | `wiki_call` — `freshness`, `reindex` (`check: true` = audit only, writes nothing; default rewrites `INDEX.md`), `search`, `get_page`, `list`, `source_to_pages`, `stats`. This REPLACES the old `freshness.py` / `reindex.py` Bash calls — you have NO Bash tool. For reading/searching wiki pages, prefer `wiki_call` `get_page` / `search` over `purity_call` `read_file` / `search_for_pattern`. |

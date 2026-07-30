@@ -6,8 +6,8 @@ title: Documentation Wiki Engine
 description: The p:wiki skill, mcp-wiki server, and librarian minion that maintain the docs/ wiki.
 sources:
   - Scripts/mcp-wiki.py
-  - ClaudeCode/skills/p:wiki
-  - ClaudeCode/agents/p/minion-librarian.md
+  - ClaudeCode/skills/wiki
+  - ClaudeCode/agents/minion-librarian.md
 verified:
   commit: 850c266
   date: 2026-07-16
@@ -27,12 +27,12 @@ factual claim about code carries an anchor a later lint pass can re-check.
 
 ## Parts
 
-- **`p:wiki` skill** `ClaudeCode/skills/p:wiki/SKILL.md` — the engine and
+- **`p:wiki` skill** `ClaudeCode/skills/wiki/SKILL.md` — the engine and
   mandate. Dispatches five operations (`ingest`, `lint`, `query`, `init`,
   `adopt`) and delegates each to the librarian. The wiki contract (page types,
   frontmatter subset, anchors, freshness model, anti-scope) lives in
-  `ClaudeCode/skills/p:wiki/SCHEMA.md`.
-- **`minion-librarian` (Dewey)** `ClaudeCode/agents/p/minion-librarian.md` —
+  `ClaudeCode/skills/wiki/SCHEMA.md`.
+- **`minion-librarian` (Dewey)** `ClaudeCode/agents/minion-librarian.md` —
   the executor. Runs every operation in its own sandbox using `wiki_call` and
   the language MCPs; applies non-destructive updates (frontmatter bumps, prose
   sync, INDEX regeneration) and surfaces destructive changes as proposals. It
@@ -59,7 +59,7 @@ when another process edited a page.
 - **search index** — the tokenized corpus, rebuilt lazily on the next `search`
   after any page changes on disk.
 
-The stdlib scripts `ClaudeCode/skills/p:wiki/scripts/freshness.py` and
-`ClaudeCode/skills/p:wiki/scripts/reindex.py` carry the same freshness/index
+The stdlib scripts `ClaudeCode/skills/wiki/scripts/freshness.py` and
+`ClaudeCode/skills/wiki/scripts/reindex.py` carry the same freshness/index
 logic and remain as a pre-PR CI gate (non-zero exit on stale pages, duplicate
 slugs, or malformed frontmatter); `wiki_call` is the interactive path.

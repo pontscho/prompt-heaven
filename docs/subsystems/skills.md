@@ -28,9 +28,9 @@ so skills now also carry the explicitly-invoked multi-step workflows — see
 
 ## Structure
 
-- **Minimal skill**: a single `SKILL.md` — e.g. `ClaudeCode/skills/p:mcp-clangd/SKILL.md`.
+- **Minimal skill**: a single `SKILL.md` — e.g. `ClaudeCode/skills/mcp-clangd/SKILL.md`.
 - **Extended skill**: `SKILL.md` + scripts + reference — e.g.
-  `ClaudeCode/skills/p:static-linking/` ships `SKILL.md`, `README.md`,
+  `ClaudeCode/skills/static-linking/` ships `SKILL.md`, `README.md`,
   `build-static.py`, `verify-static-linking.py`, `example-CMakeLists.txt`.
 
 Frontmatter is required: `name` (matching the `p:`-prefixed directory) and a

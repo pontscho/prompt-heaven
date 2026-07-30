@@ -6,10 +6,10 @@ title: Find-Verify-Synthesize refactor of p:code-review and p:branch-review
 description: Multi-agent 4-Step fan-out replacing the monolithic review skills with a shared lens fragment plus two single-purpose leaf minions.
 sources:
   - ClaudeCode/skills/_lib/code-review-lenses.md
-  - ClaudeCode/agents/p/minion-code-reviewer.md
-  - ClaudeCode/agents/p/minion-code-verifier.md
-  - ClaudeCode/skills/p:code-review/SKILL.md
-  - ClaudeCode/skills/p:branch-review/SKILL.md
+  - ClaudeCode/agents/minion-code-reviewer.md
+  - ClaudeCode/agents/minion-code-verifier.md
+  - ClaudeCode/skills/code-review/SKILL.md
+  - ClaudeCode/skills/branch-review/SKILL.md
   - ClaudeCode/skills/_lib/handoff-contracts.md
 verified:
   commit: 2787c7f
@@ -34,8 +34,8 @@ links:
 - **[FR-1]** Replace the monolithic single-pass body of `p:code-review` (file/dir scope) with a linear 4-Step fan-out pipeline (Step 1 Scope → Step 2 Find → Step 3 Verify → Step 4 Synthesize) orchestrated from the skill body, modeled on Claude Code's `/code-review` workflow (`.claude/tmp/cc/code-review.workflow.js`, minus the effort matrix and the Sweep phase — see Out of Scope).
 - **[FR-2]** Replace the monolithic single-pass body of `p:branch-review` (git-diff scope vs base `master` > `main` > `trunk`) with the same 4-Step fan-out, plus 2 additional git-specific lenses (commit-hygiene, breaking-change/API) defined IN the branch-review skill body (NOT in `_lib`).
 - **[FR-3]** Create a shared fragment `ClaudeCode/skills/_lib/code-review-lenses.md` as the single source of truth for: the 8 shared lens texts (5 correctness + 3 quality), the recall verdict-ladder, the cleanup-precedence rule, the candidate / verdict / output schemas, the lens→dimension map, and the scoring-derivation weights. **Zero shared-lens prose is duplicated into either skill or either minion.**
-- **[FR-4]** Create `ClaudeCode/agents/p/minion-code-reviewer.md` — the FINDER. Takes a single `LENS:` parameter (plain text, first line of prompt) + scope; surfaces up to 6 candidate findings `{file, line, summary, failure_scenario}`; MUST NOT self-censor half-believed candidates; returns a structured candidates block; does NOT verify or score.
-- **[FR-5]** Create `ClaudeCode/agents/p/minion-code-verifier.md` — the VERIFIER. Takes ONE candidate + scope; re-reads the code FRESH (anchoring-bias break); returns exactly one verdict (CONFIRMED / PLAUSIBLE / REFUTED) + evidence quoting/citing the line. Recall-biased ladder: PLAUSIBLE by default, REFUTED only when constructible from the code.
+- **[FR-4]** Create `ClaudeCode/agents/minion-code-reviewer.md` — the FINDER. Takes a single `LENS:` parameter (plain text, first line of prompt) + scope; surfaces up to 6 candidate findings `{file, line, summary, failure_scenario}`; MUST NOT self-censor half-believed candidates; returns a structured candidates block; does NOT verify or score.
+- **[FR-5]** Create `ClaudeCode/agents/minion-code-verifier.md` — the VERIFIER. Takes ONE candidate + scope; re-reads the code FRESH (anchoring-bias break); returns exactly one verdict (CONFIRMED / PLAUSIBLE / REFUTED) + evidence quoting/citing the line. Recall-biased ladder: PLAUSIBLE by default, REFUTED only when constructible from the code.
 - **[FR-6]** Step 4 Synthesize (skill body, no extra agent) dedups by root cause, ranks correctness > cleanup and CONFIRMED > PLAUSIBLE, caps at 12 findings, derives 1–8 dimension scores from the verified findings, and renders the HYBRID output (ranked findings list + 1–8 dimension scoring + ASCII bars + verdict).
 - **[FR-7]** Support flags: `--output console|markdown|both` (markdown writes `docs/reviews/<skill>-<name>-<date>.md`, mirroring the current path convention) and `--severity high|medium|low` (filters DISPLAYED findings only — score derivation uses ALL verified findings). Both skills are read-only. **Vocabulary migration (REQUIRED, decision #8):** both skills currently document `--severity critical|warning|info` (`p:code-review/SKILL.md:16`, `p:branch-review/SKILL.md:16`); the rewrite changes the canonical vocabulary to `high|medium|low`. To preserve input-side UX parity (NFR-8), each skill MUST accept the OLD values as **aliases** — `critical→high`, `warning→medium`, `info→low` — mapping them silently to the new bucket (preferred), OR, if aliasing is not implemented, MUST explicitly document the vocabulary change in its Parameters table. The alias approach is the chosen requirement; the documentation-only fallback is the secondary option, not an open question.
 - **[FR-8]** Preserve each skill's existing verdict vocabulary and ASCII-bar/verdict visual presentation: `p:code-review` → EXCELLENT/ACCEPTABLE/NEEDS IMPROVEMENT/POOR (from aggregate score); `p:branch-review` → APPROVED/CHANGES REQUESTED/REJECTED (from finding severity).
@@ -68,7 +68,7 @@ links:
 ### Assumptions
 
 - **[A-1]** Handoff between Steps is via `Agent` return values, NOT disk tmp files. Each finder returns a candidates block; each verifier returns a verdict block; the skill body holds the merged set in working memory. The verifier is still a *fresh context* that re-reads the code — freshness comes from being a separate Agent invocation, not from a disk round-trip. *(Verifier "fresh context" is enforced by prompt + invocation discipline, not infrastructure — see [Risk R-4].)*
-- **[A-2]** Synthesis runs in the skill body (main context), like `p:security-review` Step 4 Assemble (`ClaudeCode/skills/p:security-review/SKILL.md:338-340`). No extra synthesis Agent.
+- **[A-2]** Synthesis runs in the skill body (main context), like `p:security-review` Step 4 Assemble (`ClaudeCode/skills/security-review/SKILL.md:338-340`). No extra synthesis Agent.
 - **[A-3]** Skill frontmatter stays minimal (`name` + `description` only — skills inherit host tools including `Agent`), per `ClaudeCode/ARCHITECTURE.md:30-37`. Agent frontmatter follows the required-fields shape at `:41-52`.
 - **[A-4]** The two minions are single-purpose (NO `MODE` token) per LOCKED DECISION and `ClaudeCode/ARCHITECTURE.md:118`. The minion is lens-agnostic: the lens text arrives as a parameter, so a new lens is picked up with no minion change.
 - **[A-5]** Verify is 1-vote recall (a single non-REFUTED vote carries the finding), trivially upgradeable to a 3-vote panel later by fanning out 3 verifier Agents per candidate and majority-voting (see §5 Extensibility playbook).
@@ -88,9 +88,9 @@ links:
 
 | Subsystem | How it's affected | Key files |
 |---|---|---|
-| Skills layer (`skills/p:*`) | Two monolithic skill bodies fully rewritten into 4-Step fan-out orchestrators | `ClaudeCode/skills/p:code-review/SKILL.md`, `ClaudeCode/skills/p:branch-review/SKILL.md` |
+| Skills layer (`skills/p:*`) | Two monolithic skill bodies fully rewritten into 4-Step fan-out orchestrators | `ClaudeCode/skills/code-review/SKILL.md`, `ClaudeCode/skills/branch-review/SKILL.md` |
 | Fragment layer (`skills/_lib`) | New shared SSOT fragment for lens texts/ladder/schema/scoring; new handoff entries | `ClaudeCode/skills/_lib/code-review-lenses.md` (new), `ClaudeCode/skills/_lib/handoff-contracts.md` (modify) |
-| Agent layer (`agents/p`) | Two new single-purpose worker minions | `ClaudeCode/agents/p/minion-code-reviewer.md` (new), `ClaudeCode/agents/p/minion-code-verifier.md` (new) |
+| Agent layer (`agents/p`) | Two new single-purpose worker minions | `ClaudeCode/agents/minion-code-reviewer.md` (new), `ClaudeCode/agents/minion-code-verifier.md` (new) |
 | MCP routing | Both minions use `purity`/`clangd`/`luals` for symbol nav + `Read` for files + `git`/`forge`; no grep/sed/cat hacks | n/a (governed by the agent frontmatter `tools:` + `mcpServers:`) |
 | Output convention | New report path family under `docs/reviews/` | `docs/reviews/code-review-<name>-<date>.md`, `docs/reviews/branch-review-<date>.md` |
 
@@ -184,7 +184,7 @@ const rank = c => (c.kind === "cleanup" ? 2 : 0) + (c.verdict === "PLAUSIBLE" ? 
 ```
 → correctness-CONFIRMED (0) < correctness-PLAUSIBLE (1) < cleanup-CONFIRMED (2) < cleanup-PLAUSIBLE (3). Lower rank = higher priority = survives the cap. Assembler invariants (`:409-415`): no silent drops while there is room; the displayed primary is the synthesizer's chosen representative; verdict escalates to CONFIRMED if any merged member is CONFIRMED; the summary describes the report actually returned. Our skill-body synthesis (no JS runtime) restates these as prose rules + a worked example, reuses the rank fn for the cut, then derives scores from the surviving set.
 
-**P-6 — In-house skill-orchestrates-fan-out template (MIRROR the Step structure + compact messages).** `ClaudeCode/skills/p:security-review/SKILL.md` is the canonical in-house pattern: a skill running multi-Step fan-out from the skill body with fresh-context workers and ONE compact status message per Step. Key anchors:
+**P-6 — In-house skill-orchestrates-fan-out template (MIRROR the Step structure + compact messages).** `ClaudeCode/skills/security-review/SKILL.md` is the canonical in-house pattern: a skill running multi-Step fan-out from the skill body with fresh-context workers and ONE compact status message per Step. Key anchors:
 - Step 4 Assemble runs inline in host context, pure formatting, no analysis: `SKILL.md:338-340`.
 - `--severity` filters DISPLAYED findings but counts always report in full: `SKILL.md:349` ("Apply the `--severity` filter to the displayed-findings list. Always report counts in full.") — our skills mirror this exact behavior for score-vs-display independence ([SC-3]).
 - `--output markdown|both` writes `docs/reviews/...`, creating the dir if missing: `SKILL.md:351`.
@@ -411,7 +411,7 @@ This routing rule is documented ONCE in `_lib/code-review-lenses.md` § Lens→D
 
 ### Step 4: Create the FINDER minion `minion-code-reviewer.md`  **[MVP-CORE]**
 
-**Files**: `ClaudeCode/agents/p/minion-code-reviewer.md` (create)
+**Files**: `ClaudeCode/agents/minion-code-reviewer.md` (create)
 **Dependencies**: Step 2
 **Description**: Single-purpose FINDER. Frontmatter per `ARCHITECTURE.md:41-52` and decision #2:
 ```yaml
@@ -443,7 +443,7 @@ Body sections:
 
 ### Step 5: Create the VERIFIER minion `minion-code-verifier.md`  **[MVP-CORE]**
 
-**Files**: `ClaudeCode/agents/p/minion-code-verifier.md` (create)
+**Files**: `ClaudeCode/agents/minion-code-verifier.md` (create)
 **Dependencies**: Step 2
 **Description**: Single-purpose VERIFIER. Same frontmatter shape/tools/mcpServers as Step 4 (`name: p:minion-code-verifier`, model opus, color your choice — e.g. magenta; lists **neither `Agent` nor `Skill`** — `Agent` omission contract-mandated per `ARCHITECTURE.md:52`, `Skill` omitted by design). Body:
 - **ROLE** — "You are a code-review VERIFIER. You receive ONE candidate + the scope. You re-read the code FRESH (anchoring-bias break — you have no memory of how the finder reasoned) and return exactly one verdict."
@@ -460,7 +460,7 @@ Body sections:
 
 ### Step 6: Rewrite `p:code-review/SKILL.md` as a 4-Step fan-out (file/dir scope)  **[MVP-CORE for the skeleton + coarse verdict; the full hybrid scoring render is DEFERRED-POLISH]**
 
-**Files**: `ClaudeCode/skills/p:code-review/SKILL.md` (modify — full body rewrite, frontmatter preserved/trimmed to name+description per `ARCHITECTURE.md:30-37`)
+**Files**: `ClaudeCode/skills/code-review/SKILL.md` (modify — full body rewrite, frontmatter preserved/trimmed to name+description per `ARCHITECTURE.md:30-37`)
 **Dependencies**: Steps 2, 4, 5 for the MVP skeleton; Step 3 for the full hybrid scoring render
 **Description**: Keep the `Parameters` table (`target`, `--output`, `--severity` updated to `high|medium|low` per decision #8, `--depth` retained for dir scope). **`--severity` vocabulary migration (FR-7, REQUIRED):** the canonical values become `high|medium|low`; the skill MUST accept the prior `critical|warning|info` values as aliases (`critical→high`, `warning→medium`, `info→low`) so existing invocations keep working (NFR-8). If aliasing is omitted, the Parameters table MUST explicitly document the changed vocabulary — aliasing is the preferred outcome. Add a **Reference note**: "Lens texts, verdict ladder, schemas, and scoring weights live in `skills/_lib/code-review-lenses.md` (single source of truth). This skill references them; it does not restate them." Replace Steps 1–6 of the monolith with:
 - **Step 1 Scope (skill body):** resolve target (file/dir; if directory, list recursively up to `--depth`), apply the skip lists (P-10, `p:code-review/SKILL.md:25-30` + the test-skip list), detect language(s), gather applicable CLAUDE.md (user/repo-root/ancestor-dir per the Conventions lens), build the scope block (adapted SCOPE_SCHEMA, no diffCommand). Emit ONE compact status message (P-6).
@@ -477,7 +477,7 @@ Body sections:
 
 ### Step 7: Rewrite `p:branch-review/SKILL.md` as a 4-Step fan-out (+2 git lenses)  **[DEFERRED-POLISH]**
 
-**Files**: `ClaudeCode/skills/p:branch-review/SKILL.md` (modify — full body rewrite)
+**Files**: `ClaudeCode/skills/branch-review/SKILL.md` (modify — full body rewrite)
 **Dependencies**: Step 6 (reuse its 4-Step structure); Step 3 (full scoring)
 **Description**: Same 4-Step pipeline as Step 6, differing only in:
 - **Step 1 Scope:** detect base branch priority `master` > `main` > `trunk` (preserve `p:branch-review/SKILL.md:23`); if base provided, use it; verify current ≠ base. Materialize the diff via `git_call(function: "diff", params: {args: "--name-only <base>...HEAD"})` (verified shape, `minion-inspector-security-officer.md:156`); also gather the commit log via `git_call` for the git lenses. **NOT** inline `Bash("git ...")` + `sed` (the current `:33-48` violates MCP routing — P-9). Use the full SCOPE_SCHEMA (with `diffCommand`). Apply the skip lists (P-10).
@@ -511,10 +511,10 @@ Body sections:
 |---|---|---|
 | `.claude/tmp/code-review-acceptance.md` | Manual acceptance gauntlet (scratch, not committed; the only legitimate tmp file) | create (tmp, Step 1) |
 | `ClaudeCode/skills/_lib/code-review-lenses.md` | SSOT: 8 lens texts + recall ladder + cleanup-precedence + schemas + lens→dimension map + scoring-derivation weights | create (Step 2; scoring appended Step 3) |
-| `ClaudeCode/agents/p/minion-code-reviewer.md` | FINDER minion — one lens per invocation, ≤6 candidates, never self-censors | create (Step 4) |
-| `ClaudeCode/agents/p/minion-code-verifier.md` | VERIFIER minion — re-reads fresh, one verdict (CONFIRMED/PLAUSIBLE/REFUTED) + evidence | create (Step 5) |
-| `ClaudeCode/skills/p:code-review/SKILL.md` | 4-Step fan-out skill, file/dir scope, EXCELLENT/ACCEPTABLE/NEEDS IMPROVEMENT/POOR verdict | modify — full body rewrite (Step 6; full scoring Step 3) |
-| `ClaudeCode/skills/p:branch-review/SKILL.md` | 4-Step fan-out skill, git-diff scope, +2 git lenses, APPROVED/CHANGES REQUESTED/REJECTED verdict | modify — full body rewrite (Step 7) |
+| `ClaudeCode/agents/minion-code-reviewer.md` | FINDER minion — one lens per invocation, ≤6 candidates, never self-censors | create (Step 4) |
+| `ClaudeCode/agents/minion-code-verifier.md` | VERIFIER minion — re-reads fresh, one verdict (CONFIRMED/PLAUSIBLE/REFUTED) + evidence | create (Step 5) |
+| `ClaudeCode/skills/code-review/SKILL.md` | 4-Step fan-out skill, file/dir scope, EXCELLENT/ACCEPTABLE/NEEDS IMPROVEMENT/POOR verdict | modify — full body rewrite (Step 6; full scoring Step 3) |
+| `ClaudeCode/skills/branch-review/SKILL.md` | 4-Step fan-out skill, git-diff scope, +2 git lenses, APPROVED/CHANGES REQUESTED/REJECTED verdict | modify — full body rewrite (Step 7) |
 | `ClaudeCode/skills/_lib/handoff-contracts.md` | Add `### /p:code-review` and `### /p:branch-review` entries + intermediate-files rows | modify (Step 8) |
 
 ---

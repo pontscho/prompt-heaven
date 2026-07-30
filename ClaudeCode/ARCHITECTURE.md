@@ -6,8 +6,8 @@ This document is the **canonical rulebook** for how skills, agents, and fragment
 
 | Layer | Filesystem location | Runtime role | Tools it can have | How it gets invoked |
 |---|---|---|---|---|
-| **Skill** (= command) | `skills/p:<name>/SKILL.md` | Active orchestrator. Runs in the **main conversation context** (or in whatever context invoked it via the `Skill` tool). Can call sub-agents via the `Agent` tool. | All tools the host context has (incl. `Agent`, `Skill`, `Edit`, `Write`, MCPs). | User typed `/p:<name>` in the CLI, **or** another skill called `Skill(p:<name>, args=...)`. |
-| **Agent** (minion) | `agents/p/minion-<name>.md` | Worker. Runs in an **isolated sub-agent context**. Single-purpose. Two tiers: a **leaf worker** NEVER spawns sub-agents; an **executor minion** MAY spawn leaf workers (bounded — see below). | Only what the worker needs (`Read`, MCPs, etc.). Leaf workers: NEVER `Agent`. Executor minions: MAY list `Agent` (children must be leaf workers). `Skill` permitted for both (loads instructions into the current context; spawns nothing). | Via `Agent(p:minion-<name>, ...)` from a skill, the main context, or (leaf children only) an executor minion. |
+| **Skill** (= command) | `skills/<name>/SKILL.md` | Active orchestrator. Runs in the **main conversation context** (or in whatever context invoked it via the `Skill` tool). Can call sub-agents via the `Agent` tool. | All tools the host context has (incl. `Agent`, `Skill`, `Edit`, `Write`, MCPs). | User typed `/p:<name>` in the CLI, **or** another skill called `Skill(p:<name>, args=...)`. |
+| **Agent** (minion) | `agents/minion-<name>.md` | Worker. Runs in an **isolated sub-agent context**. Single-purpose. Two tiers: a **leaf worker** NEVER spawns sub-agents; an **executor minion** MAY spawn leaf workers (bounded — see below). | Only what the worker needs (`Read`, MCPs, etc.). Leaf workers: NEVER `Agent`. Executor minions: MAY list `Agent` (children must be leaf workers). `Skill` permitted for both (loads instructions into the current context; spawns nothing). | Via `Agent(p:minion-<name>, ...)` from a skill, the main context, or (leaf children only) an executor minion. |
 | **Fragment** (`_lib`) | `skills/_lib/<topic>.md` | Passive knowledge snippet. Not user-callable. | n/a | Other skills reference it textually: *"follow the pattern in `_lib/<topic>.md`"*. Loaded into context only when the skill that points to it is loaded. |
 
 **Bounded nesting (depth-2 max).** Sub-agent nesting was long treated as unsupported; it is now **verified working in this harness to ≥3 levels** (verified 2026-07, incl. a custom minion with an `Agent` grant spawning a leaf child). We nonetheless cap it deliberately. An **executor minion** — a worker that carries a unit of production work end-to-end, currently ONLY `p:minion-mason` — MAY spawn **leaf workers** to offload token-heavy sub-tasks (bug investigation, codebase exploration) and keep its own context lean. Its children MUST be leaf workers, so the chain is `main/skill → executor → leaf → (stop)`: a hard **depth-2 ceiling**. This bounds exactly the cost/context-opacity the original no-nesting rule guarded against. **Everything that is not a designated executor stays a leaf** — planners, inspectors, reviewers, verifiers, builder, runner, explorer, watson, and all other minions NEVER spawn sub-agents. Orchestration of *workflows* still lives in skill/main context, never inside a minion.
@@ -20,27 +20,27 @@ This document is the **canonical rulebook** for how skills, agents, and fragment
 
 ## Filesystem conventions
 
-- Skills: `ClaudeCode/skills/p:<name>/SKILL.md` (e.g. `skills/p:feature-plan/SKILL.md`). The `p:` prefix is part of the directory name and the `name:` in the frontmatter.
-- Agents: `ClaudeCode/agents/p/minion-<name>.md` (e.g. `agents/p/minion-explorer.md`). The `minion-` prefix marks workers.
+- Skills: `ClaudeCode/skills/<name>/SKILL.md` (e.g. `skills/feature-plan/SKILL.md`). The `p:` in the invocation name (`/p:feature-plan`) comes from the **plugin** (`ClaudeCode/.claude-plugin/plugin.json`, `name: p`) — it is NOT part of the directory name, nor of the frontmatter `name:`.
+- Agents: `ClaudeCode/agents/minion-<name>.md` (e.g. `agents/minion-explorer.md`). The `minion-` prefix marks workers; the `p:` in `Agent(p:minion-explorer, ...)` likewise comes from the plugin, not from the path.
 - Fragments: `ClaudeCode/skills/_lib/<topic>.md`. The `_lib/` directory is reserved and must NOT contain user-callable SKILL.md files.
-- The legacy `ClaudeCode/commands/` directory is **deprecated and will be removed** — all entries have been migrated to `skills/p:*/SKILL.md`.
+- The legacy `ClaudeCode/commands/` directory is **deprecated and will be removed** — all entries have been migrated to `skills/*/SKILL.md`.
 
 ## Skill frontmatter (required)
 
 ```yaml
 ---
-name: p:<name>
+name: <name>
 description: <one-paragraph description — what the skill does, how it's invoked, key args. The Skill router reads this to decide when to load the body. Be specific.>
 ---
 ```
 
-No other frontmatter keys are required. The `name:` field MUST match the skill's directory name exactly: the directory is `p:<name>/` and `name:` is `p:<name>`.
+No other frontmatter keys are required. The `name:` field MUST match the skill's directory name exactly: the directory is `<name>/` and `name:` is `<name>`. The plugin prepends `p:` at invocation time — never write it into the frontmatter.
 
 ## Agent frontmatter (required)
 
 ```yaml
 ---
-name: p:minion-<name>
+name: minion-<name>
 description: <when to use this minion, what it returns, what it does NOT do>
 model: opus | sonnet | haiku
 color: <visual hint>

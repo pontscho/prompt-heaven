@@ -278,7 +278,7 @@ explicitly. Silence is a violation.
 
 - [SCHEMA.md](SCHEMA.md) — layout, page types, frontmatter anatomy, anchors,
   freshness model, lint rules, verification routing, anti-scope.
-- `p:minion-librarian` (`ClaudeCode/agents/p/minion-librarian.md`) — the
+- `p:minion-librarian` (`ClaudeCode/agents/minion-librarian.md`) — the
   executor agent. Reads the schema, runs `wiki_call` (freshness / reindex /
   search), opens pages, verifies anchors via MCP, applies non-destructive
   updates, surfaces destructive

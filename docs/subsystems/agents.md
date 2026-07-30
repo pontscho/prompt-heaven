@@ -5,7 +5,7 @@ status: current
 title: Minion Agents
 description: Delegate-able sub-agents invoked via the Task tool to keep the main context clean.
 sources:
-  - ClaudeCode/agents/p
+  - ClaudeCode/agents
 verified:
   commit: d6659f7
   date: 2026-07-16
@@ -16,7 +16,7 @@ links:
 
 # Minion Agents
 
-The "minions" under `ClaudeCode/agents/p/` are delegate-able sub-agents invoked
+The "minions" under `ClaudeCode/agents/` are delegate-able sub-agents invoked
 via the Task tool. Each is a markdown file defining role, behavior, constraints,
 and MCP tool routing. They iterate in their own sandboxes and return clean
 reports, keeping the main context free of build/search/iteration noise — the

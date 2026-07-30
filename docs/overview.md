@@ -33,7 +33,7 @@ development target, `OpenCode/` mirrors a subset of it. All user-facing assets
 | Area | Path | Page |
 |------|------|------|
 | Skills (loadable knowledge packs + workflows) | `ClaudeCode/skills/` | [[skills]] |
-| Minion agents (delegate-able sub-agents) | `ClaudeCode/agents/p/` | [[agents]] |
+| Minion agents (delegate-able sub-agents) | `ClaudeCode/agents/` | [[agents]] |
 | Standalone scripts + MCP servers | `Scripts/` | [[scripts]] |
 | Post-edit / session hooks | `ClaudeCode/hooks/` | [[hooks]] |
 
