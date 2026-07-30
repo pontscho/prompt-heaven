@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Offline suite for the mcp-git params -> git argv conversion (166 cases, A-I).
+"""Offline suite for the mcp-git params -> git argv conversion (groups A-L).
+
+The case count is declared in ONE place, the SUITES table in tests/run.py, which
+asserts it against what this run reports -- so it is not repeated here.
 
 Drives `handle_git_call` from Scripts/mcp-git.py IN-PROCESS with the module's
 `subprocess` reference swapped for a stub, so:
@@ -67,7 +70,7 @@ SERVER = H.repo_path("Scripts", "mcp-git.py")
 
 # The documented alias list, in the order the tool description spells it out.
 RANGE_ALIASES = ["range", "revision_range", "rev_range", "rev", "revs",
-                 "revision", "revisions", "ref", "commit", "commits",
+                 "revision", "revisions", "ref", "refs", "commit", "commits",
                  "object", "tree_ish", "treeish"]
 REPO_ALIASES = ["remote", "repository", "repo"]
 
@@ -396,6 +399,35 @@ def run(opts=None):
               argv=["git", "log", "1234"],
               note="non-string positionals are str()-ed, not rejected")
 
+        # `refs` is the newest member of the set and the only one that also names
+        # a real git flag, so its POSITIONAL spelling gets cases of its own. The
+        # alias loop above already proves it reaches the slot one key at a time;
+        # these pin it with a repository present, as a list, and next to `ref` in
+        # the same call.
+        check(suite, drv, "A", "refs-string-after-repository", "ls-remote",
+              {"remote": "origin", "refs": "refs/heads/master"},
+              argv=["git", "ls-remote", "origin", "refs/heads/master"],
+              note="was: git ls-remote --refs=refs/heads/master origin -> exit "
+                   "129 \"error: option `refs' takes no value\"")
+        check(suite, drv, "A", "refs-list-two-positionals", "ls-remote",
+              {"remote": "origin", "refs": ["refs/heads/a", "refs/heads/b"]},
+              argv=["git", "ls-remote", "origin", "refs/heads/a",
+                    "refs/heads/b"],
+              note="git spells it [<repository> [<refs>...]] -- a list fills the "
+                   "refs slot in order")
+        check(suite, drv, "A", "refs-and-ref-share-one-slot", "ls-remote",
+              {"remote": "origin", "refs": "A", "ref": "B"},
+              argv=["git", "ls-remote", "origin", "A", "B"],
+              note="both spellings in ONE call: adjacent positionals, no flag -- "
+                   "`refs` is not a slot of its own")
+        check(suite, drv, "A", "refs-bool-inside-a-list-stays-positional",
+              "ls-remote", {"remote": ".", "refs": [True]},
+              argv=["git", "ls-remote", ".", "True"], status=H.INFO,
+              note="the boolean carve-out tests the VALUE, not list ELEMENTS: "
+                   "{\"refs\": true} is git's --refs flag, {\"refs\": [true]} is "
+                   "a ref literally named True. git errors either way, but the "
+                   "two spellings of the same intent disagree")
+
         # ============ B: leading-dash / empty refusal ============
         for cid, params in [
             ("rev-upload-pack", {"range": "--upload-pack=/tmp/x"}),
@@ -403,6 +435,10 @@ def run(opts=None):
             ("rev-bundled-short", {"range": "-wt"}),
             ("rev-looks-like-flag", {"range": "--stat"}),
             ("rev-key-ref", {"ref": "--upload-pack=/tmp/x"}),
+            # `refs` joined the revision slot, so it inherits the guard -- and
+            # per element, exactly like every other spelling in the set.
+            ("rev-key-refs", {"refs": "--upload-pack=/tmp/x"}),
+            ("rev-key-refs-list-2nd-element", {"refs": ["HEAD", "-S"]}),
             ("rev-key-object", {"object": "-x"}),
             ("rev-key-commit", {"commit": "--foo"}),
             ("rev-list-2nd-element", {"range": ["HEAD", "-S"]}),
@@ -457,6 +493,20 @@ def run(opts=None):
             ("trap-float-truncation", "log", {"max_count": 3.0},
              ["git", "log", "--max-count=3"],
              "a whole float is emitted as an int"),
+            ("trap-positional-bool-becomes-a-flag", "log", {"range": True},
+             ["git", "log", "--range"],
+             "the boolean carve-out is not refs-only: EVERY positional key given "
+             "a boolean now takes the flag branch. It used to emit the positional "
+             "\"True\". Both are caller errors and git refuses both loudly "
+             "(measured: `fatal: unrecognized argument: --range` vs an unknown "
+             "revision True) -- the flag form at least names the caller's own key"),
+            ("trap-positional-null-stays-positional", "ls-remote",
+             {"remote": ".", "refs": None},
+             ["git", "ls-remote", ".", "None"],
+             "the carve-out covers booleans ONLY: JSON null still reaches the "
+             "revision slot as the string \"None\", and _check_revision accepts "
+             "it -- no leading dash. True of every positional key, but NEW for "
+             "`refs`, which used to emit nothing at all"),
         ]:
             check(suite, drv, "C", cid, fn, params, argv=want, status=H.INFO,
                   note=note)
@@ -472,8 +522,14 @@ def run(opts=None):
              ["git", "log", "--pretty=%h %s"]),
             ("flag-list-repeats", "log", {"grep": ["a", "b"]},
              ["git", "log", "--grep=a", "--grep=b"]),
-            ("flag-refs-not-a-revision-key", "ls-remote", {"refs": True},
+            # `refs` IS a revision key -- what keeps these two on the flag branch
+            # is the BOOLEAN value, not the key. `--refs` is git's own ls-remote
+            # flag (do not show peeled tags), so the boolean spelling must keep
+            # working after the key was claimed as a positional.
+            ("flag-refs-boolean-stays-a-flag", "ls-remote", {"refs": True},
              ["git", "ls-remote", "--refs"]),
+            ("flag-refs-boolean-false-emits-nothing", "ls-remote",
+             {"remote": ".", "refs": False}, ["git", "ls-remote", "."]),
             ("flag-remotes-not-a-repo-key", "log", {"remotes": True},
              ["git", "log", "--remotes"]),
         ]:

@@ -426,9 +426,20 @@ _META_KEYS = {"args", "cwd", "timeout", "max_answer_chars"}
 # flag and git dies with "unrecognized argument". All of these address the same
 # slot; `range` is the canonical spelling, the rest are aliases so callers do not
 # have to guess.
+#
+# `refs` earns its entry twice over: git's own grammar names that slot
+# (`git ls-remote [<options>] [<repository> [<refs>...]]`), and the tool
+# description quotes that very line — so it is the spelling a caller reaches for,
+# while the alias list never offered it. It fell through to `--refs=master`,
+# which git refuses with "option `refs' takes no value" (exit 129, measured).
+# It is also the one key here whose BOOLEAN spelling names a working git flag:
+# `ls-remote --refs` hides peeled tags. (`path` reaches a real option too —
+# `cat-file --path` — but that one takes a value, so no boolean spelling of it can
+# quietly succeed.) That is why a boolean value is NOT a positional here — see the
+# isinstance(value, bool) carve-out in _semantic_params_to_args.
 _REVISION_KEYS = {
     "range", "revision_range", "rev_range", "rev", "revs",
-    "revision", "revisions", "ref", "commit", "commits",
+    "revision", "revisions", "ref", "refs", "commit", "commits",
     "object", "tree_ish", "treeish",
 }
 
@@ -504,6 +515,14 @@ def _semantic_params_to_args(params: dict) -> List[str]:
     repository values are checked for a leading dash. Every other key becomes a
     `--key[=value]` flag, so an unknown key reaches git verbatim.
 
+    A positional key carrying a BOOLEAN SCALAR is emitted as a flag instead. That
+    is not a special case for one key but the only reading that can be right: a
+    caller writing `true` cannot mean a revision by that name, while `refs=true`
+    IS a working git flag. A boolean inside a LIST is deliberately left alone and
+    becomes the positional "True" — a list means "several values for this slot",
+    and dropping an element there would answer a nonsensical request with silence
+    instead of with git's own complaint.
+
     There is no per-subcommand param schema: the whole key set is accepted for
     every function, and a key is simply meaningless where git takes no such
     argument (`log {"remote": "origin"}` hands git a revision named "origin").
@@ -521,7 +540,16 @@ def _semantic_params_to_args(params: dict) -> List[str]:
     for key, value in params.items():
         if key in _META_KEYS:
             continue
-        if key in _POSITIONAL_KEYS:
+        # A positional key carrying a BOOLEAN SCALAR falls through to the flag
+        # branch on purpose: `{"refs": true}` is git's own `ls-remote --refs`, and
+        # without this it would emit the positional "True" and git would hunt for a
+        # ref by that name. A bool inside a LIST is NOT filtered — see the
+        # docstring for why silence would be the worse answer there.
+        #
+        # The bool test below must stay AHEAD of the int test: bool subclasses int
+        # in Python, so swapping them renders `{"refs": true}` as `--refs=True`,
+        # which is exactly the exit-129 shape this key was fixed for.
+        if key in _POSITIONAL_KEYS and not isinstance(value, bool):
             target = repos if key in _REPO_KEYS else positionals
             values = value if isinstance(value, list) else [value]
             for v in values:
@@ -838,13 +866,16 @@ GIT_CALL_TOOL = {
         "    repository first, then revisions/paths:\n"
         "      revision or revision RANGE: `range` (canonical). Aliases:\n"
         "        revision_range, rev_range, rev, revs, revision, revisions, ref,\n"
-        "        commit, commits, object, tree_ish.\n"
+        "        refs, commit, commits, object, tree_ish, treeish.\n"
         "      repository / remote name or URL: `remote` (canonical). Aliases:\n"
         "        repository, repo. git puts it BEFORE the refs\n"
         "        (git ls-remote [<options>] [<repository> [<refs>...]]).\n"
         "      file paths: `path` / `paths` / `pathspec`.\n"
         "    Revision and repository values starting with '-' are refused (no\n"
         "    flag smuggling). Lists are allowed and checked per element.\n"
+        "    A positional key given a BOOLEAN becomes a FLAG instead: refs=true\n"
+        "    is git's own ls-remote --refs (hide peeled tags), not a ref named\n"
+        "    'true'.\n"
         "  - ANY OTHER key is forwarded verbatim as `--key[=value]`, so an\n"
         "    invented or misspelled param name reaches git as an unknown flag.\n\n"
         "Examples:\n"
