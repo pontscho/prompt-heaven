@@ -1272,10 +1272,28 @@ def _fn_search(params, project_root, wiki_root, strict):
         })
 
     results.sort(key=lambda r: r["score"], reverse=True)  # pure BM25F relevance
-    # The gate runs BEFORE `limit`: `best_cov` is then the true best of the whole
-    # corpus, so the "not good enough" message cannot be an artefact of truncation.
+    # The refusal quotes this number ("best coverage N%, need M%"), and it is the
+    # caller's only measure of HOW CLOSE the wiki came to answering. So it is the
+    # MAXIMUM, taken explicitly — not `results[0]`.
+    #
+    # Maximum over the pages the caller's filters ADMITTED, which for the common
+    # unfiltered call is the whole corpus. Under a type/status/path_prefix filter
+    # it is deliberately the admitted set: quoting a page the caller excluded
+    # would answer a question nobody asked. Said precisely here on purpose — the
+    # sentence being fixed below went wrong by claiming one word too many.
+    #
+    # `results[0]` was the top-SCORING page, which is a different page whenever
+    # score and coverage disagree, and the comment here used to call it "the true
+    # best of the whole corpus" while only being truncation-proof. Two guards are
+    # needed and only one was present: running the gate BEFORE `limit` stops the
+    # number being an artefact of truncation, and `max` stops it being an artefact
+    # of ORDER. W9 made the omission visible by changing which page scores
+    # highest: measured on the test fixture the same query reported "best coverage
+    # 37%" before the type signal and "best coverage 1%" after it, while no page's
+    # coverage moved at all — the reply understating the corpus by 36 points on a
+    # sentence whose entire job is to say how close it got.
     n_lexical = len(results)          # pages sharing at least one term with the query
-    best_cov = results[0]["coverage"] if results else 0.0
+    best_cov = max((r["coverage"] for r in results), default=0.0)
     results = [r for r in results if r["coverage"] >= min_cov][:limit]
     # The deferred classification (see the loop above): now that the gate and the
     # limit have run, this is the handful of pages the answer will actually show —

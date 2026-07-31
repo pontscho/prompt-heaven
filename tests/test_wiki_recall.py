@@ -166,10 +166,12 @@ Coverage by group:
      survives a leak moving both runs equally (every rendered coverage is
      recomputable from `_SEARCH_FIELDS` alone, and `unknown to the corpus` is
      still the prose-only df-0 set), the refusal to INVENT (a query of nothing
-     but type tokens comes back empty, byte for byte, either way), the direction
-     of the one number a type CAN move on screen (`best coverage N%` is the
-     top-SCORER's, so the signal moves it -- it may understate the corpus, never
-     overstate it), and the four curation rules on the token table itself: no
+     but type tokens comes back empty, byte for byte, either way), the ONE
+     coverage number a type could once move on screen (`best coverage N%` was
+     `results[0]`, the top-SCORER's, and the signal dragged it from 37% to 1%
+     while no page moved; it is a `max` now, and the case runs the query where
+     the two readings DISAGREE, so the old line cannot come back green), and the
+     four curation rules on the token table itself: no
      token names another type (by PREFIX, the way the scorer reads it), every
      token survives `_tokenize` whole, none is a query stopword, and no key is a
      type that does not exist
@@ -1997,12 +1999,15 @@ def run(opts=None):
                                   "dashboard")))],
                      text="")
 
-        silent_best = {}
+        silent_best, silent_leader = {}, {}
         problems = []
         for cid, query in SILENT:
             res = drv.search(query, min_coverage=0.0)
             best = max([h["cov"] for h in res["hits"]] or [0])
             silent_best[query] = best
+            # The top-SCORING page's coverage, kept only so the case below can say
+            # whether it COINCIDES with the maximum on this query -- see there.
+            silent_leader[query] = (res["hits"][0]["cov"] if res["hits"] else None)
             if best / 100.0 >= gate:
                 problems.append("%s: best coverage %d%% is NOT below the gate "
                                 "(%d%%) -- this query can no longer be silenced"
@@ -2076,19 +2081,38 @@ def run(opts=None):
         suite.note("  measured window: max silent %d%%  <  gate %d%%  <=  "
                    "thinnest answer %d%%" % (max_silent, gate_pct, min_answer))
 
+        # `best coverage N%` must be the MAXIMUM over the whole corpus, and two
+        # separate guards in `_fn_search` are what make it one: the gate runs
+        # BEFORE `limit`, so the number is no artefact of truncation, and
+        # `best_cov` is an explicit `max`, so it is no artefact of ORDER either.
+        # This case sees only the first.  On THIS query the top-scoring page also
+        # happens to hold the maximum (asserted below, so a drift is announced
+        # rather than assumed), which is precisely why the missing order-guard
+        # went unnoticed here for so long; group O's
+        # `refusal-quotes-the-corpus-best-not-the-leader` drives the query where
+        # the two disagree and is the only case that can fail for it.
         problems = []
         if near["best_pct"] != silent_best[Q_SILENT_NEAR]:
             problems.append("the gate message reports best coverage %r%% but the "
-                            "ungated run's best hit renders %d%% -- the message "
-                            "is an artefact of truncation, not the true best"
+                            "best hit of the ungated run renders %d%% -- the "
+                            "message is an artefact of truncation or of order, "
+                            "not the corpus maximum"
                             % (near["best_pct"], silent_best[Q_SILENT_NEAR]))
         suite.record("D", "pre-gate-best-matches-gate-message", problems,
                      detail=[_d("query", repr(Q_SILENT_NEAR)),
                              _d("gated", "best coverage %r%%" % near["best_pct"]),
-                             _d("ungated", "top hit cov %d%%"
-                                % silent_best[Q_SILENT_NEAR]),
-                             _d("why", "the gate runs BEFORE `limit`, so the "
-                                       "reported best must be the corpus best")],
+                             _d("ungated", "max cov %d%%, top-scoring page's cov "
+                                           "%r%%"
+                                % (silent_best[Q_SILENT_NEAR],
+                                   silent_leader[Q_SILENT_NEAR])),
+                             _d("scope", "the two coincide here (%r), so this case "
+                                         "pins the TRUNCATION guard only -- the "
+                                         "ORDER guard is group O's"
+                                % (silent_leader[Q_SILENT_NEAR]
+                                   == silent_best[Q_SILENT_NEAR])),
+                             _d("why", "the gate runs BEFORE `limit` and the "
+                                       "number is an explicit max, so no page "
+                                       "the corpus holds can go unquoted")],
                      text=near["text"])
 
         # ============ E: missed / unknown speak only when they must ==========
@@ -2954,14 +2978,21 @@ def run(opts=None):
                      text=only_on["text"])
 
         # ---- the one place a type can reach a coverage NUMBER on screen -----
-        # `best_cov` is `results[0]["coverage"]` and `results` is sorted by SCORE,
-        # so the refusal quotes the LEADER's coverage -- and the leader is exactly
-        # what W9 moves.  What must hold is the per-page truth (no coverage moved)
-        # and the direction of the error (a refusal may understate the corpus,
-        # never overstate it, or the sentence would contradict its own `need`).
-        # The divergence itself is MEASURED into the detail rather than asserted,
-        # because both readings of `best coverage` are live in this repo: group D
-        # calls it the corpus best, group L calls it the top-scoring survivor's.
+        # `best coverage N%` is the caller's only measure of HOW CLOSE the wiki
+        # came, so it is the MAXIMUM coverage in the corpus.  It used not to be:
+        # `best_cov` was `results[0]["coverage"]` and `results` is sorted by
+        # SCORE, so the sentence quoted the LEADER -- and the leader is exactly
+        # what a type signal moves.  Measured here before the fix: 37% without the
+        # signal, 1% with it, while no page's coverage moved at all.  Two guards
+        # are needed and only one existed -- the gate running BEFORE `limit` keeps
+        # the number off the TRUNCATION, `max` keeps it off the ORDER.
+        #
+        # So this case asserts the number IS the maximum, and asserts its own
+        # power to say so: at the shipped weight the top-SCORING page must NOT be
+        # one of the maximum-coverage pages, or `said == leader == max` collapses
+        # into a tautology that stays green with `results[0]["coverage"]` back.
+        # The weight-0 run is the control where the two readings DO coincide --
+        # which is why the defect survived group D and group L for so long.
         ref_off = ranked(sig, Q_TYPE_REFUSED, 0)
         ref_on = ranked(sig, Q_TYPE_REFUSED, weight)
         wide_off = ranked(sig, Q_TYPE_REFUSED, 0, min_coverage=0.0)
@@ -2970,6 +3001,8 @@ def run(opts=None):
         covs_on = [h["cov"] for h in wide_on["hits"]]
         best_off = max(covs_off or [0])
         best_on = max(covs_on or [0])
+        lead_off = wide_off["hits"][0]["cov"] if wide_off["hits"] else None
+        lead_on = wide_on["hits"][0]["cov"] if wide_on["hits"] else None
         problems = []
         for label, res in (("weight 0", ref_off), ("shipped", ref_on)):
             if res["hits"] or not res["has_gate_msg"]:
@@ -2977,50 +3010,57 @@ def run(opts=None):
                                 "this case needs the REFUSAL, which is where a "
                                 "coverage number is quoted"
                                 % (label, len(res["hits"]), res["has_gate_msg"]))
+        if lead_on == best_on:
+            problems.append("fixture drift: at the shipped weight the top-SCORING "
+                            "page (%s) already renders the corpus maximum %d%%, "
+                            "so 'the maximum, NOT the leader's' cannot fail here "
+                            "-- this case would stay green with the old "
+                            "`results[0][\"coverage\"]` restored"
+                            % (order(wide_on)[:1], best_on))
         if sorted(covs_off) != sorted(covs_on):
             problems.append("the corpus's own coverages moved with the signal "
                             "(%r -> %r): the per-page truth is not signal-blind"
                             % (sorted(covs_off), sorted(covs_on)))
-        for label, res, covs, best in (("weight 0", ref_off, covs_off, best_off),
-                                       ("shipped", ref_on, covs_on, best_on)):
+        for label, res, best, lead in (("weight 0", ref_off, best_off, lead_off),
+                                       ("shipped", ref_on, best_on, lead_on)):
             said = res["best_pct"]
             if said is None:
                 continue
-            if said > best:
-                problems.append("%s: the refusal claims best coverage %d%% while "
-                                "no page renders more than %d%% -- a refusal may "
-                                "understate the corpus, never overstate it"
-                                % (label, said, best))
-            if said not in covs:
-                problems.append("%s: the refusal quotes %d%%, which no page in "
-                                "the answer renders (%r) -- the number has to be "
-                                "some page's, not an artefact"
-                                % (label, said, sorted(covs)))
-        suite.record("O", "refusal-never-overstates-the-best-coverage", problems,
+            if said != best:
+                problems.append("%s: the refusal quotes best coverage %d%% while "
+                                "the corpus best is %d%% (the top-SCORING page "
+                                "renders %r%%) -- the sentence's whole job is to "
+                                "say how close the wiki came, and understating it "
+                                "by %d points sends the caller away from a page "
+                                "that is there"
+                                % (label, said, best, lead, best - said))
+        if ref_off["best_pct"] != ref_on["best_pct"]:
+            problems.append("the refusal reports %r%% without the type signal and "
+                            "%r%% with it although no page's coverage moved -- the "
+                            "number is an artefact of the ORDER, which is the one "
+                            "thing a ranking signal is allowed to change"
+                            % (ref_off["best_pct"], ref_on["best_pct"]))
+        suite.record("O", "refusal-quotes-the-corpus-best-not-the-leader", problems,
                      detail=[_d("query", repr(Q_TYPE_REFUSED)),
                              _d("refusal", "weight 0 says %r%%, weight %r says "
                                            "%r%%" % (ref_off["best_pct"], weight,
                                                      ref_on["best_pct"])),
-                             _d("corpus", "coverages %r (identical under both "
-                                          "weights)" % sorted(covs_on)),
-                             _d("leader", "weight 0 %r, weight %r %r"
-                                % (order(wide_off)[:1], weight,
-                                   order(wide_on)[:1])),
-                             _d("finding", "the sentence says `best coverage` and "
-                                           "reports the TOP-SCORING page's, so "
-                                           "the signal moves it: %r%% is quoted "
-                                           "while a page covers %d%%"
-                                % (ref_on["best_pct"], best_on)),
-                             _d("invariant", "no page's coverage moved, and "
-                                             "neither number overstates the "
-                                             "corpus")],
+                             _d("corpus", "coverages %r, max %d%% (identical under "
+                                          "both weights)"
+                                % (sorted(covs_on), best_on)),
+                             _d("leader", "weight 0 %s at %r%% (== the max, the "
+                                          "coincidence that hid this), weight %r "
+                                          "%s at %r%%"
+                                % (order(wide_off)[:1], lead_off, weight,
+                                   order(wide_on)[:1], lead_on)),
+                             _d("can fail", "the shipped run's leader covers %r%% "
+                                            "against a corpus best of %d%%, so "
+                                            "`max` and `results[0]` render "
+                                            "different sentences here"
+                                % (lead_on, best_on)),
+                             _d("contract", "the quoted number is the MAXIMUM, and "
+                                            "a ranking signal may not move it")],
                      text=ref_on["text"])
-        if ref_on["best_pct"] is not None and ref_on["best_pct"] < best_on:
-            suite.note("  W9 note: on %r the refusal quotes the top-SCORING "
-                       "page's %d%% under the words `best coverage`, while a page "
-                       "in the same corpus covers %d%% -- `best_cov` is "
-                       "results[0]['coverage'] and the sort key is the score"
-                       % (Q_TYPE_REFUSED, ref_on["best_pct"], best_on))
 
         # ---- the curation rules, mechanically -------------------------------
         # The table is prose, written by hand from the SCHEMA's type
@@ -5228,18 +5268,35 @@ def run(opts=None):
         # `status` used to be applied BEFORE the score was computed and is now
         # applied after it.  A surviving page's score, coverage and `missed:` are
         # functions of the GLOBAL corpus statistics alone, so the position cannot
-        # touch them -- and `best coverage N%` is the coverage of the top-scoring
-        # SURVIVOR, before and after, which this case pins in both directions.
+        # touch them -- and `best coverage N%` is the highest coverage among the
+        # SURVIVORS, before and after, which this case pins in both directions.
+        #
+        # SURVIVORS, not "the survivor that scored highest": the filter `continue`s
+        # inside the scoring loop, so an excluded page never reaches `results` and
+        # cannot be quoted -- but among those that do, the number is a `max` over
+        # COVERAGE and owes nothing to the ranking.  Which page the number comes
+        # from is not observable here (three pages tie at the maximum on this
+        # query, asserted below); group O's
+        # `refusal-quotes-the-corpus-best-not-the-leader` is where that lives.
         gated = ldrv.search(L_GATED_QUERY)
         ungated = ldrv.search(L_GATED_QUERY, min_coverage=0.0, limit=L_LIMIT)
         problems = []
         rows = []
         top = ungated["hits"][0] if ungated["hits"] else None
-        top_state = state_of(top) if top else ""
-        keep = ldrv.search(L_GATED_QUERY, status=top_state)
+        # The states the MAXIMUM coverage is held by.  Keeping one of them must
+        # leave the number alone; keeping a state that holds none of them must
+        # move it.  Derived from coverage rather than from rank, because coverage
+        # is what the number is a max of -- picking `drop_state` as "any state but
+        # the leader's" would silently pass a state that ties at the maximum and
+        # then fail for a reason that has nothing to do with the filter.
+        best_cov_pct = max([h["cov"] for h in ungated["hits"]] or [0])
+        best_states = {state_of(h) for h in ungated["hits"]
+                       if h["cov"] == best_cov_pct}
+        keep_state = state_of(top) if top else ""
+        keep = ldrv.search(L_GATED_QUERY, status=keep_state)
         keep_ungated = ldrv.search(L_GATED_QUERY, min_coverage=0.0,
-                                   status=top_state, limit=L_LIMIT)
-        drop_state = next((s for s in L_ALL_STATES if s != top_state
+                                   status=keep_state, limit=L_LIMIT)
+        drop_state = next((s for s in L_ALL_STATES if s not in best_states
                            and any(p[L_STATE] == s for p in L_PAGES)), "")
         drop = ldrv.search(L_GATED_QUERY, status=drop_state)
         if not ungated["hits"]:
@@ -5255,8 +5312,19 @@ def run(opts=None):
             problems.append("premise broken: status=%r removed nothing (%d of %d), "
                             "so 'the survivors kept their numbers' is not a claim "
                             "about a filtered run"
-                            % (top_state, len(keep_ungated["hits"]),
+                            % (keep_state, len(keep_ungated["hits"]),
                                len(ungated["hits"])))
+        if keep_state not in best_states:
+            problems.append("premise broken: status=%r keeps no page at the "
+                            "maximum coverage %d%% (held by %r), so 'the number "
+                            "did not move' would be a claim about a filter that "
+                            "removed the very page it quotes"
+                            % (keep_state, best_cov_pct, sorted(best_states)))
+        if drop_state in best_states or not drop_state:
+            problems.append("premise broken: no state is free of the maximum "
+                            "coverage %d%% (held by %r), so the other direction "
+                            "cannot be shown at all"
+                            % (best_cov_pct, sorted(best_states)))
         base_nums = {h["slug"]: (h["score"], h["cov"], tuple(h["missed"]))
                      for h in ungated["hits"]}
         for hit in keep_ungated["hits"]:
@@ -5269,32 +5337,43 @@ def run(opts=None):
                                 % (hit["slug"], base_nums.get(hit["slug"]), got))
         if top is not None and keep["best_pct"] != gated["best_pct"]:
             problems.append("the refusal reports best coverage %r%% with the "
-                            "filter and %r%% without it, although the top-scoring "
-                            "page (%s, state %r) survives BOTH"
-                            % (keep["best_pct"], gated["best_pct"], top["slug"],
-                               top_state))
+                            "filter and %r%% without it, although status=%r keeps "
+                            "a page at the maximum %d%% -- the filter moved a "
+                            "number nothing it removed was holding"
+                            % (keep["best_pct"], gated["best_pct"], keep_state,
+                               best_cov_pct))
         # The other direction, so the case states the real semantics rather than
-        # only the invariant half: a filter that removes the best page DOES move
-        # the number, and always has -- `best_cov` is the best SURVIVOR's.
+        # only the invariant half: a filter that removes every page holding the
+        # maximum DOES move the number, and must -- `best_cov` is a max over the
+        # SURVIVORS, and a survivor set is exactly what a filter chooses.
         if drop_state and drop["best_pct"] == gated["best_pct"]:
             problems.append("status=%r reports the same best coverage %r%% "
-                            "although it removes every page that scored that -- "
-                            "the number would then be an artefact, not the best "
-                            "survivor's" % (drop_state, drop["best_pct"]))
+                            "although no page it keeps covers that much -- the "
+                            "number would then be quoting a page the caller "
+                            "filtered away" % (drop_state, drop["best_pct"]))
         suite.record("L", "status-filter-does-not-perturb-score-or-best-coverage",
                      problems,
                      detail=[_d("query", repr(L_GATED_QUERY)),
                              _d("top", "%s [%s] cov %r%%"
-                                % (top["slug"] if top else None, top_state,
+                                % (top["slug"] if top else None, keep_state,
                                    top["cov"] if top else None)),
+                             _d("maximum", "%d%%, held by %r"
+                                % (best_cov_pct, sorted(best_states))),
                              _d("best cov", "no filter %r%%, status=%r %r%%, "
                                             "status=%r %r%%"
-                                % (gated["best_pct"], top_state,
+                                % (gated["best_pct"], keep_state,
                                    keep["best_pct"], drop_state,
                                    drop["best_pct"])),
                              _d("survivors", "%d of %d at min_coverage=0.0"
                                 % (len(keep_ungated["hits"]),
                                    len(ungated["hits"]))),
+                             _d("scope", "the FILTER's position. Whether the "
+                                         "number is the maximum or the leader's "
+                                         "cannot be seen here -- %d page(s) tie at "
+                                         "%d%% -- and is group O's"
+                                % (len([h for h in ungated["hits"]
+                                        if h["cov"] == best_cov_pct]),
+                                   best_cov_pct)),
                              _d("proof", "score and coverage are functions of the "
                                          "GLOBAL df/idf table, which is built "
                                          "before any filter runs -- so no filter, "
