@@ -213,7 +213,7 @@ SUITES = [
      "mcp-wiki search relevance gate: silence, measured calibration window, "
      "floored percentages, query-side stopwords, get_page section index, "
      "source_to_pages per-hit description, MEASURED state labels, "
-     "file-relative line windows", 87),
+     "file-relative line windows, the page type as a ranking signal", 99),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

@@ -14,7 +14,10 @@ one at a time.
 Functions:
   search           BM25F-ranked (prefix, per-field weighted) full-text search over
                    pages, behind a calibrated relevance gate so a query the wiki
-                   cannot answer gets silence instead of the best-scoring noise
+                   cannot answer gets silence instead of the best-scoring noise.
+                   A page's type is a ranking-only signal on top (genre words
+                   promote their own kind); it can reorder an answer but never
+                   changes what is claimed about a page's coverage
   source_to_pages  reverse lookup: a source file/anchor -> the pages that cover it
   get_page         read one page (whole, a single section, a window of file
                    lines, or — when the section misses or the body is declined —
@@ -72,6 +75,72 @@ SKIP_DIRS = {"sources", "plans", ".git", ".claude", ".cache"}
 # Search field weights — a term hit in the title counts far more than in the body.
 FIELD_WEIGHTS = {"name": 8, "title": 8, "anchor": 5, "description": 4,
                  "heading": 3, "body": 1}
+
+# W9 — the page TYPE as a ranking signal. Measured motivation: on `decision` the
+# spec scored 1.81 and the adr 1.77, i.e. the page whose whole genre IS a
+# decision record LOST to one that merely cites it ("...Decision recorded in adr
+# 0001." sits in the spec's description, weight 4, while `type: adr` carried
+# weight ZERO). The type was filterable and printable but never scored.
+#
+# RANKING ONLY — deliberately kept out of `_SEARCH_FIELDS`, and that exclusion is
+# the whole design. `df`, `hit_terms` and therefore `coverage` all derive from
+# _SEARCH_FIELDS (see `_fn_search`), so admitting a category signal there would
+# let `architecture decision record` report 100% coverage on a page that writes
+# not one line about those words — silently repealing the W8 gate's only claim
+# ("this page carries information about your terms"). The type can reorder an
+# answer; it can never change what we assert about a page's coverage.
+#
+# Tokens come from the SCHEMA's own type table (ClaudeCode/skills/wiki/SCHEMA.md
+# "Page types"), not from invented synonyms — `adr` is described there as "A
+# decision: what, why, alternatives, consequences", which is exactly the
+# vocabulary a caller asking for a decision uses. Two curation rules, both
+# mechanically checked by the suite:
+#   * a type's token set may never contain ANOTHER type's name (the SCHEMA
+#     describes `component` as "a single unit inside a subsystem", and inheriting
+#     `subsystem` there would promote components on every subsystem query);
+#   * function words are omitted — they are dropped from the query side by
+#     QUERY_STOPWORDS anyway, so carrying them here is dead weight that only
+#     inflates the field length;
+#   * every token must survive `_tokenize` unchanged. `_TOKEN_RE` splits on the
+#     hyphen, so the SCHEMA's "cross-cutting" and "how-to" would arrive as the
+#     function-word halves `cross`/`cutting` and `how`/`to` — a compound written
+#     here reads as one signal and silently scores as two weak ones.
+TYPE_SIGNAL_TOKENS = {
+    "overview":  ("overview", "project", "identity", "map"),
+    "subsystem": ("subsystem", "area", "cluster", "directory"),
+    "component": ("component", "unit", "module"),
+    "reference": ("reference", "api", "symbol"),
+    "analysis":  ("analysis", "performance", "network", "behavioral",
+                  "investigation", "measurement"),
+    "concept":   ("concept", "idea", "theme"),
+    "spec":      ("spec", "specification", "design", "plan", "implementation"),
+    "runbook":   ("runbook", "operational", "procedure", "recipe"),
+    "adr":       ("adr", "decision", "rationale", "alternatives",
+                  "consequences", "tradeoff"),
+    "glossary":  ("glossary", "terminology", "definition"),
+}
+# Weight of a type-signal hit, on the same scale as FIELD_WEIGHTS. CALIBRATED,
+# not chosen — `.claude/tmp/wiki-density/probe_w9.py` sweeps 0/2/3/4/6/8 over
+# eight queries. Unlike DEFAULT_MIN_COVERAGE this is NOT a separation threshold
+# with a window: raising it has no upper wall (collateral damage is ZERO through
+# 8 — four control queries keep their exact ranking and scores). The floor and
+# the ceiling come from different arguments:
+#
+#   * below 4 the ranking does not flip at all (`decision`: adr 1.77 vs spec
+#     1.81 at 0, still 1.81 vs 1.81 at 3);
+#   * at 4 it flips but the answer CONTRADICTS ITSELF ON SCREEN — on `clangd
+#     purity decision` both pages render as 3.78 while one is ranked above the
+#     other, the same defect [D57] floors the coverage percentages to avoid;
+#   * at 6 both target cases flip with a visible margin (1.84 vs 1.81, 3.80 vs
+#     3.78) and nothing else moves;
+#   * 8 buys almost nothing more (BM25 saturation) and equals the weight of the
+#     page TITLE, which a mere category label must not be worth.
+#
+# The saturation is a FEATURE here, not a limit worked around: because ftilde is
+# saturated once, the signal can only decide a close race — on `clangd purity
+# merge decision` the spec leads 6.53 to 3.74 and no weight up to 8 overturns it.
+# That is a tie-breaker's behaviour without a tie-breaker's discrete gap knob.
+TYPE_SIGNAL_WEIGHT = 6
 # Relevance gate for `search`: the share of the query's total idf mass a page
 # must actually carry to be reported at all. Without it the ONLY silencing
 # condition is "zero terms matched", which never fires on this corpus -- the
@@ -1015,7 +1084,11 @@ def _build_corpus(abs_root: str):
         for f in _SEARCH_FIELDS:
             len_sums[f] += field_len[f]
         corpus.append({"relpath": relpath, "fm": fm, "body": body,
-                       "headings": headings, "tokens": tokens, "field_len": field_len})
+                       "headings": headings, "tokens": tokens, "field_len": field_len,
+                       # Ranking-only signal, kept OUT of `tokens`/`field_len` so
+                       # no df, coverage or avg-length computation can reach it.
+                       "type_tokens": TYPE_SIGNAL_TOKENS.get(
+                           str(fm.get("type") or "").strip().lower(), ())})
     n = len(corpus)
     avgfl = {f: (len_sums[f] / n if n else 0.0) for f in _SEARCH_FIELDS}
     return corpus, avgfl, n
@@ -1141,8 +1214,19 @@ def _fn_search(params, project_root, wiki_root, strict):
                     continue
                 norm = (1.0 - b + b * (pd["field_len"][f] / avgfl[f])) if avgfl[f] > 0 else 1.0
                 ftilde += FIELD_WEIGHTS[f] * cnt / norm
+            # The COVERAGE verdict is settled HERE, on prose alone. `hit_terms` is
+            # the gate's numerator, so it must not learn about the type: a page
+            # whose genre matches still has to say something about the word.
             if ftilde > 0:
                 hit_terms.append(t)
+            # W9: the type signal joins the RANKING only, after that verdict.
+            # Unnormalized on purpose — the token set is a short closed list, not
+            # prose, and a type is not "thinner" because the SCHEMA spends more
+            # words describing it. A page matching NOTHING in prose is still
+            # dropped below (`if not hit_terms`), so the type promotes, never
+            # invents.
+            ftilde += TYPE_SIGNAL_WEIGHT * _prefix_count(pd["type_tokens"], t)
+            if ftilde > 0:
                 score += idf[t] * (ftilde * (k1 + 1.0)) / (ftilde + k1)
         if not hit_terms:
             continue
@@ -1684,6 +1768,13 @@ WIKI_CALL_TOOL = {
         "                   share of the query's idf mass or it is NOT reported,\n"
         "                   so an undocumented topic answers 'no page passes the\n"
         "                   relevance gate' instead of ranking noise; 0 disables)\n"
+        "                   A page's type is also a RANKING signal: genre words in\n"
+        "                   the query (decision, rationale, spec, runbook) promote\n"
+        "                   pages of that type, drawing on the SCHEMA's own type\n"
+        "                   table. It only REORDERS. Coverage, the missed list and\n"
+        "                   the gate verdict are computed from prose alone, and a\n"
+        "                   page matching nothing in prose is never pulled in by\n"
+        "                   its type — pass type for a hard filter instead.\n"
         "                   The state in each hit's [type/state] label is MEASURED\n"
         "                   against git (did a source anchor change since the page\n"
         "                   was last verified), not read from the frontmatter\n"

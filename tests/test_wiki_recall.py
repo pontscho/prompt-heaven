@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Mechanical suite for the `search` relevance gate, the `get_page` section
-index, the `source_to_pages` per-hit description and the MEASURED state in
-every recall reply's `[type/state]` label, in Scripts/mcp-wiki.py
-(73 cases, A-L).
+index, the `source_to_pages` per-hit description, the MEASURED state in every
+recall reply's `[type/state]` label and the page TYPE as a ranking signal, in
+Scripts/mcp-wiki.py (99 cases, A-O).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/.  Nothing is written outside
@@ -53,7 +53,12 @@ Everything numeric is DERIVED, never typed:
   * group F's exact coverages are recomputed from the server's OWN building
     blocks (`_tokenize`, `QUERY_STOPWORDS`, `_build_corpus_cached`,
     `_prefix_count`, the idf formula), so the floor-vs-round claim is checked
-    against a real float instead of a constant somebody once observed.
+    against a real float instead of a constant somebody once observed;
+  * group O reads `mod.TYPE_SIGNAL_WEIGHT`, `mod.TYPE_SIGNAL_TOKENS` and
+    `mod.TYPE_ORDER` live and toggles the weight ON THE MODULE, so "the signal
+    promoted this page" is a difference between two runs rather than a score
+    anybody typed -- and a case asserts the shipped weight is not 0, or the
+    whole group would pass by comparing an answer with itself.
 
 Coverage by group:
   A  the gate can be SILENT: a query whose discriminating term is unknown to
@@ -148,6 +153,26 @@ Coverage by group:
      precedence over `section` and `include_body` WITH the disclosure of which
      selector lost, and the index's advert for the window wherever it printed an
      L to point at
+  O  the page TYPE as a ranking signal, and the SEPARATION it is built on: it
+     may decide the ORDER and may never touch what the answer CLAIMS.  Every
+     case runs one query twice, with `TYPE_SIGNAL_WEIGHT` forced to 0 and with
+     the weight the module ships, on a driver of its own so the patch cannot
+     reach the groups above.  The group pins the promotion (at the DEFAULT gate:
+     the adr that IS a decision record overtakes the spec that merely mentions
+     one, at the very same coverage), the honesty of a promotion bought on genre
+     ALONE (rank 1 covers LESS than rank 2 and keeps saying `missed:` about the
+     word it was promoted on), the invariant in two sweeps (no rendered `cov` or
+     `missed:` row moves; the gate admits the same SET), an ABSOLUTE oracle that
+     survives a leak moving both runs equally (every rendered coverage is
+     recomputable from `_SEARCH_FIELDS` alone, and `unknown to the corpus` is
+     still the prose-only df-0 set), the refusal to INVENT (a query of nothing
+     but type tokens comes back empty, byte for byte, either way), the direction
+     of the one number a type CAN move on screen (`best coverage N%` is the
+     top-SCORER's, so the signal moves it -- it may understate the corpus, never
+     overstate it), and the four curation rules on the token table itself: no
+     token names another type (by PREFIX, the way the scorer reads it), every
+     token survives `_tokenize` whole, none is a query stopword, and no key is a
+     type that does not exist
 
 Group J runs on its OWN six-page fixture in a SECOND workspace (group N adds a
 SEVENTH page to that same workspace -- `get_page` resolves by slug, so a page
@@ -159,7 +184,9 @@ memo can be keyed).  That is not tidiness.  The six pages above ARE the
 calibration window group D measures: one more page moves `n_docs`, moves every
 term's idf, and shifts -- or closes -- the window, so a page added here for a
 `get_page` test would fail group D for a reason that has nothing to do with
-search.  The fixtures never mix.
+search.  The fixtures never mix.  Group O adds no fixture and no page at all: it
+re-runs those same six through a SECOND module instance, because what it toggles
+is a module ATTRIBUTE rather than a corpus.
 
 Usage:
   python3 tests/test_wiki_recall.py
@@ -460,6 +487,47 @@ Q_DECOY = "why did we cache the tokenizer signature"
 Q_KEEP = "search done"
 KEEP_WORDS = ("search", "done")
 
+# ---- group O: the page TYPE as a ranking signal ----------------------------
+# The signal's design is a SEPARATION -- it may decide the ORDER of an answer and
+# may never touch what the answer CLAIMS about a page -- so every query here is
+# run TWICE, once with `TYPE_SIGNAL_WEIGHT` forced to 0 and once with the weight
+# the module ships.  Nothing in this block adds a page: the six above are group
+# D's calibration window, and each of these queries is aimed at the types those
+# six already carry.
+#
+# Q_TYPE_FLIP is the motivating defect in miniature, and it flips at the DEFAULT
+# gate.  `decision` is a HEADING on the adr and a token of the `adr` type,
+# `boost` is the spec's own subject, `coverage` sits on both.  Pre-signal the
+# spec wins by 0.12 -- the page that merely mentions boosts outranks the page
+# whose whole GENRE is a decision record -- while the two answer exactly the same
+# share of the query (identical `cov`), so the type is the only thing left that
+# can order them.
+#
+# Q_TYPE_GENRE is the harder half.  `design` is prose on the DECOY ("the two
+# designs we tried") and prose nowhere else, while it is a token of `spec` -- so
+# the spec page is promoted over a page that really does write the word, on genre
+# ALONE.  It must still render `missed: design` and its own lower coverage: the
+# type bought rank, and the answer has to keep saying it bought nothing else.
+# Driven at min_coverage 0.0, like group I's ranking contest and for the same
+# reason: with the gate off the ORDER is the only thing under test.
+#
+# Q_TYPE_ONLY is three type tokens and nothing else -- one for a type each of
+# three fixture pages carries, and not one of them written on any page.  A genre
+# is not a statement, so this query has to come back EMPTY.
+#
+# Q_TYPE_REFUSED is gated out at the DEFAULT threshold AND re-ordered by the
+# signal: the one place a type can reach a coverage number on screen.
+Q_TYPE_FLIP = "decision coverage boost"
+Q_TYPE_GENRE = "design coverage"
+Q_TYPE_ONLY = "rationale module specification"
+Q_TYPE_REFUSED = "design mcp telemetry"
+# The sweep the two invariants run on: every population the suite already keeps,
+# plus the type-carrying queries above.  At least one member MUST re-order under
+# the signal, or the sweep is comparing a run with itself and proving nothing.
+TYPE_SWEEP = (Q_TYPE_FLIP, Q_TYPE_GENRE, Q_TYPE_ONLY, Q_TYPE_REFUSED,
+              Q_SILENT_NEAR, Q_SILENT_FAR, Q_GATE_ADR, Q_RANK_SPEC, Q_COMPONENT,
+              Q_SPARED, Q_FLOOR, Q_MIXED, Q_DECOY, Q_KEEP)
+
 # Every token whose df this fixture pins.  df is a per-term quantity, so one
 # probe query measures the entire table in a single corpus pass.
 PROBE_ALL = ("mcp the why did we replace pipeline coverage gate calibration "
@@ -702,6 +770,53 @@ def pct(value):
 def naive_round(value):
     """What a rounding implementation would have printed instead."""
     return math.floor(100 * value + 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Group O's instrument: the same query, twice, with the type signal off and on.
+# ---------------------------------------------------------------------------
+
+def ranked(drv, query, weight, **params):
+    """One `search` answer with the type signal FORCED to `weight`.
+
+    The module attribute is written and restored around the single call, so two
+    answers compared this way differ in that attribute and in NOTHING else --
+    which is what makes a re-ordering attributable to the signal rather than to
+    the query, the corpus or the cache.  Only the weight is touched:
+    `TYPE_SIGNAL_TOKENS` is baked into the cached corpus at build time while the
+    weight is read at scoring time, so the toggle needs no rebuild and cannot
+    invalidate what the other groups measured.
+    """
+    saved = drv.mod.TYPE_SIGNAL_WEIGHT
+    drv.mod.TYPE_SIGNAL_WEIGHT = weight
+    try:
+        return drv.search(query, **params)
+    finally:
+        drv.mod.TYPE_SIGNAL_WEIGHT = saved
+
+
+def claims(answer):
+    """What an answer CLAIMS about each page it returned: the coverage it renders
+    and the terms it admits missing.  Deliberately ORDER-FREE -- group O's whole
+    invariant is that the signal may permute the list and may not edit a row of
+    it, so the comparison must not be able to fail for the permutation."""
+    return {h["slug"]: (h["cov"], tuple(h["missed"])) for h in answer["hits"]}
+
+
+def order(answer):
+    """The ranking, as slugs -- the half the type signal IS allowed to move."""
+    return [h["slug"] for h in answer["hits"]]
+
+
+def type_terms(mod, page_type, terms):
+    """Which of `terms` the type signal answers for a page of `page_type`.
+
+    Prefix-counted through the module's own `_prefix_count`, because that is how
+    the scorer reads the table: a term is a type hit when SOME token of the type
+    begins with it, not when the table contains it verbatim.
+    """
+    tokens = mod.TYPE_SIGNAL_TOKENS.get(page_type, ())
+    return [t for t in terms if mod._prefix_count(tokens, t)]
 
 
 # ---------------------------------------------------------------------------
@@ -2489,6 +2604,507 @@ def run(opts=None):
                                             "stoplist' edit has to fail HERE, "
                                             "loudly")],
                      text=keep["text"])
+
+        # ============ O: the page TYPE as a ranking signal ============
+        # One claim, in two halves that must never meet: the type may decide the
+        # ORDER of an answer, and it may never touch what the answer CLAIMS about
+        # a page.  Every case below runs the SAME query twice -- once with
+        # `TYPE_SIGNAL_WEIGHT` forced to 0, once with the weight the module ships
+        # -- so a difference between the two answers is attributable to the
+        # signal and to nothing else.
+        #
+        # A SECOND driver on the SAME fixture, and that is not tidiness: `drv` is
+        # the module the eight groups above measured, and a patched attribute
+        # left on it would rewrite their evidence.  `Driver` hands out its own
+        # module instance for exactly this (see its docstring).  Not one page is
+        # added -- the six are group D's calibration window, and every query here
+        # is aimed at the types those six already carry.
+        sig = Driver(root, name="mcp_wiki_type_signal")
+        smod = sig.mod
+        weight = smod.TYPE_SIGNAL_WEIGHT
+        title_weight = smod.FIELD_WEIGHTS["title"]
+
+        problems = []
+        if not weight > 0:
+            problems.append("TYPE_SIGNAL_WEIGHT is %r: the signal is OFF, and "
+                            "every other case in this group would then be "
+                            "comparing an answer with itself -- the whole group "
+                            "would pass for saying nothing" % weight)
+        if not weight < title_weight:
+            problems.append("TYPE_SIGNAL_WEIGHT %r is not below "
+                            "FIELD_WEIGHTS['title'] %r -- a page's bare CATEGORY "
+                            "would be worth as much as the words of its own "
+                            "title, which is the ceiling the constant's own "
+                            "calibration note argues for"
+                            % (weight, title_weight))
+        suite.record("O", "type-signal-weight-is-live", problems,
+                     detail=[_d("weight", "%r (mod.TYPE_SIGNAL_WEIGHT)" % weight),
+                             _d("ceiling", "%r (mod.FIELD_WEIGHTS['title'])"
+                                % title_weight),
+                             _d("contract", "0 < TYPE_SIGNAL_WEIGHT < the title "
+                                            "weight -- both ends read off the "
+                                            "module, neither typed here")],
+                     text="")
+
+        # ---- the signal PROMOTES, at the default gate -----------------------
+        flip_off = ranked(sig, Q_TYPE_FLIP, 0)
+        flip_on = ranked(sig, Q_TYPE_FLIP, weight)
+        flip_terms = sig.measure(Q_TYPE_FLIP)["terms"]
+        demoted = flip_off["hits"][0] if flip_off["hits"] else None
+        promoted = flip_on["hits"][0] if flip_on["hits"] else None
+        runner_up = flip_on["hits"][1] if len(flip_on["hits"]) > 1 else None
+        signal_terms = (type_terms(smod, promoted["type"], flip_terms)
+                        if promoted else [])
+        rival_terms = (type_terms(smod, demoted["type"], flip_terms)
+                       if demoted else [])
+        problems = []
+        if not demoted or not promoted:
+            problems.append("the query answers nothing at the default gate "
+                            "(off=%r on=%r hit(s)), so there is no ranking to "
+                            "re-order" % (flip_off["header_hits"],
+                                          flip_on["header_hits"]))
+        elif promoted["slug"] == demoted["slug"]:
+            problems.append("rank 1 is %r either way: at weight %r the type "
+                            "signal moves NOTHING on this fixture. That is a "
+                            "finding about W9, not a detail of the fixture"
+                            % (promoted["slug"], weight))
+        else:
+            if not signal_terms:
+                problems.append("the promoted page %r is a [%s] and no query term "
+                                "is a token of that type, so whatever re-ordered "
+                                "the answer, it was not the TYPE"
+                                % (promoted["slug"], promoted["type"]))
+            if rival_terms:
+                problems.append("fixture drift: the demoted page %r [%s] answers "
+                                "the type signal too (%r), so this is no longer a "
+                                "contest between a genre and a non-genre"
+                                % (demoted["slug"], demoted["type"], rival_terms))
+            if promoted["cov"] != demoted["cov"]:
+                problems.append("fixture drift: the two pages render %d%% and "
+                                "%d%% coverage, so the winner could be argued "
+                                "from coverage alone; this case needs the pair "
+                                "that answers exactly as much of the query as "
+                                "each other" % (promoted["cov"], demoted["cov"]))
+            if runner_up and not promoted["score"] > runner_up["score"]:
+                problems.append("rank 1 renders score %.2f against rank 2's %.2f "
+                                "-- the answer contradicts itself on screen, "
+                                "which is the [D57] defect the floored "
+                                "percentages exist to avoid"
+                                % (promoted["score"], runner_up["score"]))
+        if sorted(order(flip_off)) != sorted(order(flip_on)):
+            problems.append("the signal changed WHO is in the answer (%r -> %r), "
+                            "not merely the order"
+                            % (order(flip_off), order(flip_on)))
+        suite.record("O", "type-signal-promotes-the-genre-page", problems,
+                     detail=[_d("query", repr(Q_TYPE_FLIP)),
+                             _d("min_coverage", "default (%.2f) -- this flip is "
+                                                "visible in production settings"
+                                % gate),
+                             _d("weight 0", "%r"
+                                % [(h["rank"], h["slug"], h["score"], h["cov"])
+                                   for h in flip_off["hits"]]),
+                             _d("weight %r" % weight, "%r"
+                                % [(h["rank"], h["slug"], h["score"], h["cov"])
+                                   for h in flip_on["hits"]]),
+                             _d("type terms", "%r, answered by [%s]'s token set"
+                                % (signal_terms,
+                                   promoted["type"] if promoted else "?")),
+                             _d("why", "the adr writes `# Decision` AND IS a "
+                                       "decision record; pre-signal it lost to a "
+                                       "page that merely mentions boosts, at the "
+                                       "very same coverage")],
+                     text=flip_on["text"])
+
+        # ---- and buys NOTHING but rank --------------------------------------
+        genre_off = ranked(sig, Q_TYPE_GENRE, 0, min_coverage=0.0)
+        genre_on = ranked(sig, Q_TYPE_GENRE, weight, min_coverage=0.0)
+        genre_probe = sig.measure(Q_TYPE_GENRE)
+        g_top = genre_on["hits"][0] if genre_on["hits"] else None
+        g_was = genre_off["hits"][0] if genre_off["hits"] else None
+        g_terms = (type_terms(smod, g_top["type"], genre_probe["terms"])
+                   if g_top else [])
+        g_prose = (genre_probe["hits"].get(SLUG_TO_REL.get(g_top["slug"], ""), [])
+                   if g_top else [])
+        before = claims(genre_off).get(g_top["slug"]) if g_top else None
+        after = claims(genre_on).get(g_top["slug"]) if g_top else None
+        overtaken = ([h for h in genre_on["hits"] if h["slug"] == g_was["slug"]]
+                     if g_was else [])
+        problems = []
+        if not g_top or not g_was:
+            problems.append("no ranking at min_coverage=0.0 (off=%d on=%d hits)"
+                            % (len(genre_off["hits"]), len(genre_on["hits"])))
+        elif g_top["slug"] == g_was["slug"]:
+            problems.append("the signal promoted nothing on %r, so there is no "
+                            "promotion here to hold to its word" % Q_TYPE_GENRE)
+        else:
+            if not g_terms:
+                problems.append("the promoted page %r [%s] answers no type term, "
+                                "so this is not a promotion on genre"
+                                % (g_top["slug"], g_top["type"]))
+            leaked = [t for t in g_terms if t in g_prose]
+            if leaked:
+                problems.append("fixture drift: the promoted page also WRITES %r, "
+                                "so the case no longer shows a promotion on genre "
+                                "ALONE" % leaked)
+            if before != after:
+                problems.append("the promotion edited the page's own claim: "
+                                "(cov, missed) %r -> %r" % (before, after))
+            unadmitted = [t for t in g_terms
+                          if t not in (after[1] if after else ())]
+            if unadmitted:
+                problems.append("promoted on %r and no longer admits missing it "
+                                "(missed: %r) -- a page cannot be ranked for a "
+                                "word it never writes AND drop that word from its "
+                                "own gap list"
+                                % (unadmitted, list(after[1]) if after else None))
+            if not overtaken:
+                problems.append("the page it overtook (%r) fell out of the answer "
+                                "entirely" % g_was["slug"])
+            elif not after[0] < overtaken[0]["cov"]:
+                problems.append("fixture drift: rank 1 renders %d%% against the "
+                                "overtaken page's %d%%; the point of this case is "
+                                "a winner that covers LESS and keeps saying so"
+                                % (after[0], overtaken[0]["cov"]))
+        suite.record("O", "promotion-does-not-buy-coverage", problems,
+                     detail=[_d("query", repr(Q_TYPE_GENRE)),
+                             _d("min_coverage", "0.0 (gate off: the ORDER is the "
+                                                "only thing under test)"),
+                             _d("promoted", "%r [%s] on %r"
+                                % (g_top["slug"] if g_top else None,
+                                   g_top["type"] if g_top else "?", g_terms)),
+                             _d("prose", "%r -- the page writes none of the type "
+                                         "terms" % g_prose),
+                             _d("claim", "(cov, missed) %r before, %r after"
+                                % (before, after)),
+                             _d("overtaken", "%r at cov %r%%"
+                                % (g_was["slug"] if g_was else None,
+                                   overtaken[0]["cov"] if overtaken else None)),
+                             _d("contract", "rank 1 covers LESS than rank 2 and "
+                                            "says `missed:` about the very word "
+                                            "it was promoted on")],
+                     text=genre_on["text"])
+
+        # ---- the two sweeps: nothing is EDITED, nobody is ADMITTED ----------
+        # Both settings in one loop, so the four answers per query are measured
+        # against one corpus state.
+        moved, flips, admitted, gate_bites = [], [], [], []
+        for query in TYPE_SWEEP:
+            raw_off = ranked(sig, query, 0, min_coverage=0.0)
+            raw_on = ranked(sig, query, weight, min_coverage=0.0)
+            gated_off = ranked(sig, query, 0)
+            gated_on = ranked(sig, query, weight)
+            if claims(raw_off) != claims(raw_on):
+                moved.append((query, claims(raw_off), claims(raw_on)))
+            if order(raw_off) != order(raw_on):
+                flips.append(query)
+            if (sorted(order(gated_off)) != sorted(order(gated_on))
+                    or gated_off["header_hits"] != gated_on["header_hits"]):
+                admitted.append((query, order(gated_off), order(gated_on)))
+            if len(gated_on["hits"]) < len(raw_on["hits"]):
+                gate_bites.append(query)
+
+        problems = []
+        for query, was, now in moved:
+            rows = sorted(set(was.items()) ^ set(now.items()))
+            problems.append("%r: a per-page claim moved with the signal -- %r"
+                            % (query, rows))
+        if not flips:
+            problems.append("not one of the %d sweep queries re-orders under the "
+                            "signal, so this case compares every answer with "
+                            "itself and would stay green with the feature deleted"
+                            % len(TYPE_SWEEP))
+        suite.record("O", "coverage-is-blind-to-the-type-signal", problems,
+                     detail=[_d("queries", "%d, at min_coverage=0.0"
+                                % len(TYPE_SWEEP)),
+                             _d("re-ordered", "%r" % flips),
+                             _d("rows moved", "%d" % len(moved)),
+                             _d("compared", "{slug: (cov, missed)} per query, "
+                                            "ORDER-free -- the permutation is the "
+                                            "half the signal is allowed to move"),
+                             _d("why", "`architecture decision record` must never "
+                                       "report 100% coverage on a page that "
+                                       "writes not one line about those words")],
+                     text="")
+
+        problems = []
+        for query, was, now in admitted:
+            problems.append("%r: the gate admitted %r without the signal and %r "
+                            "with it" % (query, was, now))
+        if not gate_bites:
+            problems.append("the default gate refuses nobody anywhere in the "
+                            "sweep, so 'it admits the same pages' is true for "
+                            "want of a gate rather than because of one")
+        suite.record("O", "the-gate-admits-the-same-pages-either-way", problems,
+                     detail=[_d("queries", "%d, at the default gate (%.2f)"
+                                % (len(TYPE_SWEEP), gate)),
+                             _d("gate bites", "%d of them lose at least one page "
+                                              "to the gate" % len(gate_bites)),
+                             _d("sets moved", "%d" % len(admitted)),
+                             _d("contract", "the admitted SET is a function of "
+                                            "coverage alone; the type may permute "
+                                            "it and may not open it")],
+                     text="")
+
+        # ---- an ABSOLUTE oracle, not a comparison of two runs ---------------
+        # `measure` recomputes coverage from `_SEARCH_FIELDS` alone -- it cannot
+        # see `type_tokens` at all -- so a rendered percentage that still matches
+        # it is a percentage the type never entered.  A leak that moved BOTH runs
+        # equally (a `type` field added to _SEARCH_FIELDS, say) is invisible to
+        # the sweeps above and dies here.
+        problems, oracle_rows, carried = [], [], {}
+        fixture_types = {typ for _f, _s, typ, _x in PAGES}
+        for query in (Q_TYPE_FLIP, Q_TYPE_GENRE, Q_TYPE_REFUSED):
+            probe = sig.measure(query)
+            live = ranked(sig, query, weight, min_coverage=0.0)
+            carried[query] = [t for t in probe["terms"]
+                              if any(type_terms(smod, typ, [t])
+                                     for typ in fixture_types)]
+            if not carried[query]:
+                problems.append("fixture drift: %r carries no term that any "
+                                "fixture page's TYPE answers, so nothing could "
+                                "have leaked into its numbers" % query)
+            for hit in live["hits"]:
+                rel = SLUG_TO_REL.get(hit["slug"], hit["slug"])
+                exact = probe["cov"].get(rel)
+                if exact is None:
+                    problems.append("%r: hit %r is not a fixture page"
+                                    % (query, hit["slug"]))
+                    continue
+                oracle_rows.append("%-24s %-22s rendered %3d prose-only %3d"
+                                   % (query, rel, hit["cov"], pct(exact)))
+                if hit["cov"] != pct(exact):
+                    problems.append("%r/%s: rendered cov %d%% against a prose-"
+                                    "only %d%% -- the type signal has reached the "
+                                    "coverage arithmetic"
+                                    % (query, rel, hit["cov"], pct(exact)))
+            want_unknown = [t for t in probe["terms"] if probe["df"][t] == 0]
+            if live["unknown"] != want_unknown:
+                problems.append("%r: `unknown to the corpus` names %r while the "
+                                "prose-only df 0 set is %r -- df is counting a "
+                                "type it must not be able to see"
+                                % (query, live["unknown"], want_unknown))
+        suite.record("O", "coverage-and-df-are-prose-only", problems,
+                     detail=[_d("queries", "%d" % len(carried)),
+                             _d("type terms", "%r" % carried),
+                             _d("oracle", "cov recomputed from _tokenize + "
+                                          "_SEARCH_FIELDS + _prefix_count + the "
+                                          "idf expression, none of which can "
+                                          "reach `type_tokens`")]
+                            + [_d("row", row) for row in oracle_rows],
+                     text="")
+
+        # ---- the type PROMOTES; it must never INVENT ------------------------
+        only_off = ranked(sig, Q_TYPE_ONLY, 0)
+        only_on = ranked(sig, Q_TYPE_ONLY, weight)
+        # ALSO at min_coverage 0.0, and that is the load-bearing half: a page let
+        # in on its category alone answers 0% of the query, so the coverage gate
+        # would hide it behind a DIFFERENT silence and the refusal would still
+        # read as a refusal.  With the gate off there is nothing left to hide it.
+        only_wide = ranked(sig, Q_TYPE_ONLY, weight, min_coverage=0.0)
+        only_probe = sig.measure(Q_TYPE_ONLY)
+        owners = {t: sorted(typ for typ in smod.TYPE_SIGNAL_TOKENS
+                            if type_terms(smod, typ, [t]))
+                  for t in only_probe["terms"]}
+        problems = []
+        for term in only_probe["terms"]:
+            if only_probe["df"][term]:
+                problems.append("fixture drift: %r has df %d, so some page WRITES "
+                                "it and this query no longer asks about a genre "
+                                "alone" % (term, only_probe["df"][term]))
+            if not set(owners[term]) & fixture_types:
+                problems.append("fixture drift: %r is a token of %r and this "
+                                "fixture carries no page of those types, so "
+                                "nothing could have been invented from it"
+                                % (term, owners[term]))
+        for label, res in (("default gate", only_on), ("min_coverage 0.0",
+                                                       only_wide)):
+            if res["hits"]:
+                problems.append("%s: %d hit(s) for a query no page writes a word "
+                                "of: %r. The type PROMOTES, it must never INVENT "
+                                "-- these pages entered the answer on their "
+                                "category"
+                                % (label, len(res["hits"]),
+                                   [(h["slug"], h["type"]) for h in res["hits"]]))
+        if not only_on["has_no_match_msg"]:
+            problems.append("missing %r" % NO_MATCH_MSG)
+        if only_on["has_gate_msg"]:
+            problems.append("claims %r, but nothing matched lexically -- the GATE "
+                            "is not what refused here" % GATE_MSG)
+        if only_on["text"] != only_off["text"]:
+            problems.append("the answer is not byte-identical with the signal off "
+                            "and on:\n  off %r\n  on  %r"
+                            % (only_off["text"], only_on["text"]))
+        suite.record("O", "type-alone-invents-no-hit", problems,
+                     detail=[_d("query", repr(Q_TYPE_ONLY)),
+                             _d("owners", "%r" % owners),
+                             _d("carried by", "%r"
+                                % sorted(fixture_types
+                                         & {t for v in owners.values()
+                                            for t in v})),
+                             _d("df", "%r" % only_probe["df"]),
+                             _d("silence", "no-match=%r gate=%r hits=%r"
+                                % (only_on["has_no_match_msg"],
+                                   only_on["has_gate_msg"],
+                                   only_on["header_hits"])),
+                             _d("gate off", "%r hit(s) at min_coverage=0.0"
+                                % only_wide["header_hits"]),
+                             _d("why", "`if not hit_terms: continue` runs on the "
+                                       "prose verdict, so a genre alone can never "
+                                       "put a page in an answer")],
+                     text=only_on["text"])
+
+        # ---- the one place a type can reach a coverage NUMBER on screen -----
+        # `best_cov` is `results[0]["coverage"]` and `results` is sorted by SCORE,
+        # so the refusal quotes the LEADER's coverage -- and the leader is exactly
+        # what W9 moves.  What must hold is the per-page truth (no coverage moved)
+        # and the direction of the error (a refusal may understate the corpus,
+        # never overstate it, or the sentence would contradict its own `need`).
+        # The divergence itself is MEASURED into the detail rather than asserted,
+        # because both readings of `best coverage` are live in this repo: group D
+        # calls it the corpus best, group L calls it the top-scoring survivor's.
+        ref_off = ranked(sig, Q_TYPE_REFUSED, 0)
+        ref_on = ranked(sig, Q_TYPE_REFUSED, weight)
+        wide_off = ranked(sig, Q_TYPE_REFUSED, 0, min_coverage=0.0)
+        wide_on = ranked(sig, Q_TYPE_REFUSED, weight, min_coverage=0.0)
+        covs_off = [h["cov"] for h in wide_off["hits"]]
+        covs_on = [h["cov"] for h in wide_on["hits"]]
+        best_off = max(covs_off or [0])
+        best_on = max(covs_on or [0])
+        problems = []
+        for label, res in (("weight 0", ref_off), ("shipped", ref_on)):
+            if res["hits"] or not res["has_gate_msg"]:
+                problems.append("premise broken: %s renders %d hit(s), gate=%r -- "
+                                "this case needs the REFUSAL, which is where a "
+                                "coverage number is quoted"
+                                % (label, len(res["hits"]), res["has_gate_msg"]))
+        if sorted(covs_off) != sorted(covs_on):
+            problems.append("the corpus's own coverages moved with the signal "
+                            "(%r -> %r): the per-page truth is not signal-blind"
+                            % (sorted(covs_off), sorted(covs_on)))
+        for label, res, covs, best in (("weight 0", ref_off, covs_off, best_off),
+                                       ("shipped", ref_on, covs_on, best_on)):
+            said = res["best_pct"]
+            if said is None:
+                continue
+            if said > best:
+                problems.append("%s: the refusal claims best coverage %d%% while "
+                                "no page renders more than %d%% -- a refusal may "
+                                "understate the corpus, never overstate it"
+                                % (label, said, best))
+            if said not in covs:
+                problems.append("%s: the refusal quotes %d%%, which no page in "
+                                "the answer renders (%r) -- the number has to be "
+                                "some page's, not an artefact"
+                                % (label, said, sorted(covs)))
+        suite.record("O", "refusal-never-overstates-the-best-coverage", problems,
+                     detail=[_d("query", repr(Q_TYPE_REFUSED)),
+                             _d("refusal", "weight 0 says %r%%, weight %r says "
+                                           "%r%%" % (ref_off["best_pct"], weight,
+                                                     ref_on["best_pct"])),
+                             _d("corpus", "coverages %r (identical under both "
+                                          "weights)" % sorted(covs_on)),
+                             _d("leader", "weight 0 %r, weight %r %r"
+                                % (order(wide_off)[:1], weight,
+                                   order(wide_on)[:1])),
+                             _d("finding", "the sentence says `best coverage` and "
+                                           "reports the TOP-SCORING page's, so "
+                                           "the signal moves it: %r%% is quoted "
+                                           "while a page covers %d%%"
+                                % (ref_on["best_pct"], best_on)),
+                             _d("invariant", "no page's coverage moved, and "
+                                             "neither number overstates the "
+                                             "corpus")],
+                     text=ref_on["text"])
+        if ref_on["best_pct"] is not None and ref_on["best_pct"] < best_on:
+            suite.note("  W9 note: on %r the refusal quotes the top-SCORING "
+                       "page's %d%% under the words `best coverage`, while a page "
+                       "in the same corpus covers %d%% -- `best_cov` is "
+                       "results[0]['coverage'] and the sort key is the score"
+                       % (Q_TYPE_REFUSED, ref_on["best_pct"], best_on))
+
+        # ---- the curation rules, mechanically -------------------------------
+        # The table is prose, written by hand from the SCHEMA's type
+        # descriptions, and each of these rules has a failure mode that is SILENT
+        # in production: the signal keeps working, it just works for the wrong
+        # pages.  So the gate enumerates its own holes.
+        table = smod.TYPE_SIGNAL_TOKENS
+        problems = []
+        for typ in sorted(table):
+            for other in sorted(table):
+                if other == typ:
+                    continue
+                for tok in table[typ]:
+                    if tok.startswith(other):
+                        problems.append("%r carries %r, which a query for the "
+                                        "type %r prefix-matches: every %s query "
+                                        "would promote every %s page"
+                                        % (typ, tok, other, other, typ))
+        suite.record("O", "no-type-token-names-another-type", problems,
+                     detail=[_d("types", "%d" % len(table)),
+                             _d("tokens", "%d"
+                                % sum(len(v) for v in table.values())),
+                             _d("rule", "PREFIX, not equality -- the scorer reads "
+                                        "this table with `_prefix_count`, so a "
+                                        "token merely beginning with another "
+                                        "type's name is the same collision"),
+                             _d("why", "the SCHEMA describes `component` as 'a "
+                                       "single unit inside a subsystem'; "
+                                       "inheriting the word `subsystem` there "
+                                       "promotes every component on every "
+                                       "subsystem query")],
+                     text="")
+
+        problems = []
+        for typ in sorted(table):
+            for tok in table[typ]:
+                got = smod._tokenize(tok)
+                if got != [tok]:
+                    problems.append("%r/%r tokenizes to %r: the query side can "
+                                    "never send this token, so the entry is dead "
+                                    "weight that reads as one signal and scores "
+                                    "as %d weaker ones" % (typ, tok, got, len(got)))
+        suite.record("O", "every-type-token-survives-the-tokenizer", problems,
+                     detail=[_d("checked", "%d token(s) through mod._tokenize"
+                                % sum(len(v) for v in table.values())),
+                             _d("rule", "_tokenize(tok) == [tok]"),
+                             _d("why", "_TOKEN_RE splits on the hyphen, so the "
+                                       "SCHEMA's 'cross-cutting' and 'how-to' "
+                                       "would arrive as the function-word halves "
+                                       "cross/cutting and how/to")],
+                     text="")
+
+        problems = []
+        for typ in sorted(table):
+            for tok in table[typ]:
+                if tok in smod.QUERY_STOPWORDS:
+                    problems.append("%r/%r is in QUERY_STOPWORDS: the query side "
+                                    "drops it before the corpus is walked, so "
+                                    "this half of the signal is dead on arrival"
+                                    % (typ, tok))
+        suite.record("O", "no-type-token-is-a-query-stopword", problems,
+                     detail=[_d("stoplist", "%d word(s), read live from "
+                                            "mod.QUERY_STOPWORDS"
+                                % len(smod.QUERY_STOPWORDS)),
+                             _d("why", "a signal the query side can never trigger "
+                                       "costs field length and buys nothing")],
+                     text="")
+
+        problems = []
+        unknown_types = sorted(set(table) - set(smod.TYPE_ORDER))
+        silent_types = sorted(set(smod.TYPE_ORDER) - set(table))
+        if unknown_types:
+            problems.append("TYPE_SIGNAL_TOKENS keys %r are not page types "
+                            "(mod.TYPE_ORDER): a type no page can carry scores "
+                            "for nobody, and the typo is invisible -- the lookup "
+                            "is a .get() with a () default" % unknown_types)
+        suite.record("O", "the-type-table-knows-only-declared-types", problems,
+                     detail=[_d("keys", "%d, TYPE_ORDER %d"
+                                % (len(table), len(smod.TYPE_ORDER))),
+                             _d("unknown", "%r" % unknown_types),
+                             _d("no tokens", "%r (silent, not wrong)"
+                                % silent_types),
+                             _d("fixture", "%r" % sorted(fixture_types))],
+                     text="")
     finally:
         work.cleanup()
 
