@@ -4,6 +4,8 @@ type: adr
 status: current
 title: Unify mcp-clangd and mcp-cuda into mcp-purity
 description: Decision to fold the clangd and cuda LSP servers into mcp-purity behind purity_call via a layered backend architecture.
+aliases:
+  - merge
 sources:
   - Scripts/mcp-purity.py
   - Scripts/mcp-purity.py:ClangdClient

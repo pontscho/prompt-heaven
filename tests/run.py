@@ -51,11 +51,17 @@ run):
                                                       -- plus `get_page`'s
                                                       section index,
                                                       `source_to_pages`' per-hit
-                                                      description, and the
+                                                      description, the
                                                       git-MEASURED state in
-                                                      every recall label, each
+                                                      every recall label, the
+                                                      page type as a ranking
+                                                      signal, and the
+                                                      frontmatter `aliases:`
+                                                      synonym field (the mirror
+                                                      of the type signal: it
+                                                      MUST reach coverage), each
                                                       on its own separate
-                                                      fixture (A-L)
+                                                      fixture (A-P)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -213,7 +219,8 @@ SUITES = [
      "mcp-wiki search relevance gate: silence, measured calibration window, "
      "floored percentages, query-side stopwords, get_page section index, "
      "source_to_pages per-hit description, MEASURED state labels, "
-     "file-relative line windows, the page type as a ranking signal", 99),
+     "file-relative line windows, the page type as a ranking signal, "
+     "the frontmatter aliases synonym field", 113),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

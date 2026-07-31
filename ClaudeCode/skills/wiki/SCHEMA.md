@@ -115,6 +115,33 @@ Frontmatter fields:
 | `targets`     | type-dep | Intended code anchors for not-yet-built code (`path` or `path:symbol`). The forward pair of `sources`. **NOT** freshness-verified. Promotes to `sources` once the code exists. |
 | `verified`    | type-dep | `commit` + `date` of last successful verification.             |
 | `links`       | no       | Related page slugs; also rendered inline as `[[slug]]`.        |
+| `aliases`     | no       | Alternative words a searcher would use for this page's topic, when the prose does not use them. **Indexed** as a weighted search field (weight 5, the anchor's), and it DOES count toward the relevance gate's coverage. Two hard rules below. |
+
+**`aliases:` — the synonym layer, and it has two rules that are not style.**
+
+The problem it solves, measured: `adr/0001-purity-server-unification` records a
+*merge* decision but its prose says `fold` / `unify` / `unification` throughout, so
+a searcher asking about `merge` lost the one page that answers — it sat at 38–54%
+coverage, below the 55% gate, and was deleted from the results. The document is
+written by whoever knows the answer; the question is asked by whoever does not.
+
+1. **An alias may never introduce a word the corpus does not already carry in
+   prose.** Measured: adding `merge` (which two other pages write) left the gate's
+   calibration window bit-identical; adding `verbosity` (which NO page writes)
+   *closed* it at a single word — a word no page carries earns the maximum idf, and
+   that is exactly what makes the search able to say "I don't know". An alias
+   RE-ROUTES vocabulary; it never invents it. Not machine-checked yet.
+2. **Aliases come from OBSERVATION, never from imagination.** Two channels
+   qualify: a **failed query** (a word someone actually searched for and got
+   nothing), or a **sibling page** anchoring the same source file that uses the
+   word about the same code. Guessing is measurably worthless — Furnas et al.
+   (CACM 1987) found expert authors' keywords "fared no better than average", and
+   that one person rarely produces more than a half dozen of the hundred names a
+   population would use. Three guessed aliases are worth about one good title.
+
+Note the asymmetry with `type`: a page's *type* only reorders results (a category
+is not a claim about content), while an alias *is* a claim about content and can
+therefore admit a page whose text never writes the word.
 
 `sources`/`verified` are required for `subsystem`, `component`, `reference`,
 `concept`, `runbook`. They are optional for `overview`, `analysis`, `adr`,
@@ -204,7 +231,7 @@ MUST keep frontmatter within this subset:
     commit: 0f7ddf7
     date: 2026-05-27
   ```
-- Block lists for `sources:`, `targets:`, and `links:`:
+- Block lists for `sources:`, `targets:`, `links:`, and `aliases:`:
   ```
   sources:
     - src/a.c

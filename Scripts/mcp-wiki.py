@@ -17,7 +17,11 @@ Functions:
                    cannot answer gets silence instead of the best-scoring noise.
                    A page's type is a ranking-only signal on top (genre words
                    promote their own kind); it can reorder an answer but never
-                   changes what is claimed about a page's coverage
+                   changes what is claimed about a page's coverage. A page's
+                   declared `aliases:` are the MIRROR of that: an alternative
+                   name IS a claim about content, so it is a full search field
+                   and does count toward coverage — that is how adr 0001 answers
+                   for `merge` while its prose only ever says `unify` / `fold`
   source_to_pages  reverse lookup: a source file/anchor -> the pages that cover it
   get_page         read one page (whole, a single section, a window of file
                    lines, or — when the section misses or the body is declined —
@@ -73,8 +77,12 @@ SKIP_FILES = {"INDEX.md", "SCHEMA.md"}
 SKIP_DIRS = {"sources", "plans", ".git", ".claude", ".cache"}
 
 # Search field weights — a term hit in the title counts far more than in the body.
-FIELD_WEIGHTS = {"name": 8, "title": 8, "anchor": 5, "description": 4,
-                 "heading": 3, "body": 1}
+# `aliases` sits at the anchor's weight: like `sources:`, it is DECLARED metadata
+# rather than prose, and it is deliberately BELOW name/title, because an alias is
+# not the page's canonical name — see the _SEARCH_FIELDS comment for the measured
+# case and the curation rule that keeps it from moving the calibration.
+FIELD_WEIGHTS = {"name": 8, "title": 8, "anchor": 5, "aliases": 5,
+                 "description": 4, "heading": 3, "body": 1}
 
 # W9 — the page TYPE as a ranking signal. Measured motivation: on `decision` the
 # spec scored 1.81 and the adr 1.77, i.e. the page whose whole genre IS a
@@ -1047,7 +1055,51 @@ def _resolve_root(params: dict, project_root: str, wiki_root: str, strict: bool)
 
 # Weighted fields, most-to-least discriminating. FIELD_WEIGHTS supplies the
 # BM25F per-field boost applied to the term frequency BEFORE global saturation.
-_SEARCH_FIELDS = ("name", "title", "description", "anchor", "heading", "body")
+#
+# `aliases` is the SYNONYM layer, and it belongs HERE — which is the exact
+# opposite of where the type signal belongs. Measured case: adr/0001 records a
+# MERGE decision, but its prose says `fold` / `unify` / `unification` throughout
+# and `merge` appears ZERO times on the page, while two other pages carry it
+# (df 2). So on `clangd purity merge decision` the page reports coverage 54% with
+# `missed: merge` and the 55% gate deletes the one right answer. Measured on both
+# failing queries, the intended page sits at 38% and 54% — BELOW the gate — so
+# the gate is not neutral about that page, it structurally excludes it.
+#
+# This is the mirror image of TYPE_SIGNAL_TOKENS. A category is not a claim about
+# content, so it may never reach `hit_terms`/`coverage`. An alias IS a claim about
+# content: saying "this page is also about `merge`" asserts the page answers for
+# that word. It therefore MUST count toward coverage — otherwise the gate keeps
+# deleting the page and the alias buys nothing. The W9 trick (score-only, isolated
+# from the gate) is unavailable here, and that asymmetry is the design.
+#
+# CURATION RULE, and it is the one thing here that can break the W8 calibration:
+# an alias may never introduce a word the corpus does not ALREADY carry in prose.
+# Measured on a temp copy of docs/ (.claude/tmp/synonym-triage/triage.py) with the
+# equivalence gate green on all six calibration queries:
+#   * `merge` (prose df 2) -> the window stays bit-identical at (49%, 59%], the
+#     0.55 gate stays inside it, and the intended page goes 38% -> 100%;
+#   * `verbosity` (prose df 0) -> the window CLOSES at k=1: (67%, 59%], the gate
+#     falls out, and a SILENT case starts answering. A df-0 term earns the maximum
+#     idf and is the sole reason that case is silent, so importing one repeals the
+#     abstention it was calibrated on. The leak is not even local: a page whose
+#     bytes did not change went 49% -> 58% because the shared denominator shrank.
+# Hence: every alias token must already appear in some page's NON-alias field. An
+# alias RE-ROUTES vocabulary; it never invents it. Neutral filler is harmless —
+# 15 invented tokens moved no page's coverage at all, only the 2nd decimal of the
+# score — so the risk is carried by the token's identity, never by their number.
+#
+# And the aliases themselves must come from OBSERVATION, not from imagination.
+# Furnas et al. (CACM 30(11), 1987 — verified against the paper, not recalled)
+# measured that expert authors' keywords "fared no better than average" and that
+# one person "rarely comes up with more than a half dozen names" out of the
+# hundred a population produces; three guessed aliases are worth about one
+# well-chosen title. Two channels qualify as evidence here: a FAILED query (the
+# word an actual asker used — `merge` came from one) and a SIBLING page anchoring
+# the same source file (spec-purity-unification says `merge` about the same code,
+# tf 8). A guessed alias list is not a cheap version of this; it is the thing that
+# was measured not to work.
+_SEARCH_FIELDS = ("name", "title", "description", "anchor", "aliases",
+                  "heading", "body")
 
 
 def _page_field_tokens(fm, body, headings) -> Dict[str, List[str]]:
@@ -1057,6 +1109,7 @@ def _page_field_tokens(fm, body, headings) -> Dict[str, List[str]]:
         "title": fm.get("title") or "",
         "description": fm.get("description") or "",
         "anchor": " ".join(str(a) for a in as_list(fm.get("sources")) + as_list(fm.get("targets"))),
+        "aliases": " ".join(str(a) for a in as_list(fm.get("aliases"))),
         "heading": " ".join(h[2] for h in headings),
         "body": body,
     }
@@ -1214,9 +1267,15 @@ def _fn_search(params, project_root, wiki_root, strict):
                     continue
                 norm = (1.0 - b + b * (pd["field_len"][f] / avgfl[f])) if avgfl[f] > 0 else 1.0
                 ftilde += FIELD_WEIGHTS[f] * cnt / norm
-            # The COVERAGE verdict is settled HERE, on prose alone. `hit_terms` is
-            # the gate's numerator, so it must not learn about the type: a page
+            # The COVERAGE verdict is settled HERE, over _SEARCH_FIELDS — which
+            # now includes the declared `aliases`, and that is the point: an alias
+            # IS a claim about content, so it has to be creditable, or the gate
+            # keeps deleting the page it was written for (see the _SEARCH_FIELDS
+            # note). What `hit_terms` must never learn about is the TYPE: a page
             # whose genre matches still has to say something about the word.
+            # Do NOT re-collapse the two into "prose alone" — that sentence stood
+            # here and became this repo's EIGHTH lying comment the moment the
+            # alias field landed one line above it.
             if ftilde > 0:
                 hit_terms.append(t)
             # W9: the type signal joins the RANKING only, after that verdict.
@@ -1789,10 +1848,16 @@ WIKI_CALL_TOOL = {
         "                   A page's type is also a RANKING signal: genre words in\n"
         "                   the query (decision, rationale, spec, runbook) promote\n"
         "                   pages of that type, drawing on the SCHEMA's own type\n"
-        "                   table. It only REORDERS. Coverage, the missed list and\n"
-        "                   the gate verdict are computed from prose alone, and a\n"
-        "                   page matching nothing in prose is never pulled in by\n"
-        "                   its type — pass type for a hard filter instead.\n"
+        "                   table. It only REORDERS: a page matching nothing in\n"
+        "                   the text is never pulled in by its type — pass type\n"
+        "                   for a hard filter instead. Coverage, the missed list\n"
+        "                   and the gate verdict are computed from the page's own\n"
+        "                   words PLUS the alternative names it declares in its\n"
+        "                   aliases frontmatter list. Unlike the type, an alias IS\n"
+        "                   a claim about content, so it DOES count toward\n"
+        "                   coverage and can admit a page whose prose never writes\n"
+        "                   the word (adr 0001 answers for merge that way, while\n"
+        "                   its text says unify and fold throughout).\n"
         "                   The state in each hit's [type/state] label is MEASURED\n"
         "                   against git (did a source anchor change since the page\n"
         "                   was last verified), not read from the frontmatter\n"

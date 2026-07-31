@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Mechanical suite for the `search` relevance gate, the `get_page` section
 index, the `source_to_pages` per-hit description, the MEASURED state in every
-recall reply's `[type/state]` label and the page TYPE as a ranking signal, in
-Scripts/mcp-wiki.py (99 cases, A-O).
+recall reply's `[type/state]` label, the page TYPE as a ranking signal and the
+frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (113 cases, A-P).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/.  Nothing is written outside
@@ -58,7 +58,12 @@ Everything numeric is DERIVED, never typed:
     `mod.TYPE_ORDER` live and toggles the weight ON THE MODULE, so "the signal
     promoted this page" is a difference between two runs rather than a score
     anybody typed -- and a case asserts the shipped weight is not 0, or the
-    whole group would pass by comparing an answer with itself.
+    whole group would pass by comparing an answer with itself;
+  * group P names ONE thing, the field `aliases`, and reads everything else off
+    the module: its membership in `_SEARCH_FIELDS` is ASSERTED (an edit dropping
+    it fails there, not silently), its weight comes from `FIELD_WEIGHTS`, its
+    prose-only oracle is `_SEARCH_FIELDS` MINUS that field, and its own
+    calibration window is measured with group D's instrument on group P's corpus.
 
 Coverage by group:
   A  the gate can be SILENT: a query whose discriminating term is unknown to
@@ -175,6 +180,33 @@ Coverage by group:
      token names another type (by PREFIX, the way the scorer reads it), every
      token survives `_tokenize` whole, none is a query stopword, and no key is a
      type that does not exist
+  P  the frontmatter `aliases:` field, and it is the MIRROR IMAGE of group O --
+     an alias MUST reach `hit_terms`/`coverage`, where a type must never.  The two
+     are not in conflict and the group says why in as many words: a category is
+     not a claim about content, while "this page is also about `merge`" is one, so
+     an alias that could not move coverage would leave the gate deleting the very
+     page it was written for.  Three corpora, six pages each, differing in ONE
+     frontmatter block on ONE page: no alias, an alias the corpus already WRITES
+     in prose, and an alias it does not.  The group pins the creation of a hit
+     (the page answers a word its prose never carries -- asserted through the
+     server's field tokenizer AND by a raw substring scan), the coverage credit
+     (`missed:` loses the word), the LIFT over the default gate (the shipped data
+     point: 38% -> 100% on the real wiki), the NON-LOCAL effect in three
+     directions (a page nobody edited crosses the gate, the winner's score falls
+     while its coverage holds, and the page whose only hit term was the aliased
+     word loses coverage), the curation rule as a MEASURED window (a prose-backed
+     alias leaves group P's own window bit-identical; a prose-absent one moves it
+     until the gate falls out and a silent case starts answering), the df reading
+     that explains both (`unknown to the corpus` loses a word a page merely
+     DECLARES), the preservation half (a query no alias answers renders a
+     byte-identical reply across all three corpora, the aliased page's own line
+     included), the new rendering path (a hit bought on an alias alone has no body
+     line to quote, so the snippet falls back to `description` and the anchor
+     degrades to the FILE), and the weight (0 < alias == anchor < name/title, all
+     read live) together with the coupling that makes `> 0` load-bearing: `df`
+     counts an alias regardless of the weight while `hit_terms` needs it, so
+     weight 0 leaves the word in every page's denominator and strips only the
+     declaring page's credit for it
 
 Group J runs on its OWN six-page fixture in a SECOND workspace (group N adds a
 SEVENTH page to that same workspace -- `get_page` resolves by slug, so a page
@@ -189,6 +221,14 @@ term's idf, and shifts -- or closes -- the window, so a page added here for a
 search.  The fixtures never mix.  Group O adds no fixture and no page at all: it
 re-runs those same six through a SECOND module instance, because what it toggles
 is a module ATTRIBUTE rather than a corpus.
+
+Group P takes THREE more workspaces (the EIGHTH, NINTH and TENTH), and here the
+reason is stronger than it was for `get_page`: `aliases` is IN `_SEARCH_FIELDS`,
+so an alias moves `df`, hence every idf, hence the coverage DENOMINATOR of every
+query carrying that term.  An alias written onto a calibration page would move --
+or CLOSE -- the very window group D derives, which is precisely the effect group P
+measures on a corpus of its own.  A group that shared the fixture would be
+measuring its own contamination.
 
 Usage:
   python3 tests/test_wiki_recall.py
@@ -580,6 +620,11 @@ def parse_answer(text):
         nxt = lines[i + 1] if i + 1 < len(lines) else ""
         meta = m.group("meta") or ""
         hits.append({
+            # The LINE INDEX, for the same reason `parse_sources` keeps one: the
+            # snippet belongs directly under its own hit, and a group-P case
+            # about a page matched on its alias ALONE has to read the line by
+            # position rather than search the whole answer for it.
+            "line_i": i,
             "rank": int(m.group("rank")),
             "title": m.group("title"),
             "slug": m.group("slug"),
@@ -707,7 +752,7 @@ class Driver:
         stop = self.mod.QUERY_STOPWORDS
         return ([t for t in raw if t in stop], [t for t in raw if t not in stop])
 
-    def measure(self, query, drop_stopwords=True):
+    def measure(self, query, drop_stopwords=True, fields=None):
         """Recompute df / idf / per-page coverage from the server's OWN parts.
 
         Not a second implementation of search: it reuses `_tokenize`,
@@ -722,8 +767,15 @@ class Driver:
         what the server actually computed.  Pass False for the RAW table: the
         small-corpus idf inversion lives entirely in terms the search now refuses
         to score, so group D can measure it nowhere else.
+
+        `fields` restricts the field set, and exists for group P: the alias field
+        is IN `_SEARCH_FIELDS`, so a run over `prose_fields(mod)` is the only way
+        to say "this page's PROSE carries none of that word" in the server's own
+        arithmetic.  Default None means the whole live tuple, i.e. exactly what
+        the handler counted.
         """
         mod = self.mod
+        fields = tuple(mod._SEARCH_FIELDS) if fields is None else tuple(fields)
         terms = list(dict.fromkeys(mod._tokenize(query)))
         if drop_stopwords:
             terms = [t for t in terms if t not in mod.QUERY_STOPWORDS]
@@ -733,7 +785,7 @@ class Driver:
             per_page[pd["relpath"]] = [
                 t for t in terms
                 if any(mod._prefix_count(pd["tokens"][f], t)
-                       for f in mod._SEARCH_FIELDS)]
+                       for f in fields)]
         df = {t: sum(1 for hs in per_page.values() if t in hs) for t in terms}
         idf = {t: math.log((n_docs - df[t] + 0.5) / (df[t] + 0.5) + 1.0)
                for t in terms}
@@ -1752,6 +1804,354 @@ def tool_paragraph(desc, name):
                 block.append(nxt)
             return "\n".join(block)
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Group P's fixture: the frontmatter `aliases:` field -- the SYNONYM layer.
+#
+# THREE workspaces holding the SAME six pages, differing in exactly one
+# frontmatter block on exactly one page, and that is the entire instrument:
+#
+#   base   no `aliases:` key anywhere
+#   good   the adr declares `aliases: [merge]`   -- a word the corpus WRITES
+#   bad    the adr declares `aliases: [verbosity]` -- a word it does not
+#
+# So `good` vs `base` isolates the FIELD, and `bad` vs `good` isolates the alias
+# TOKEN's identity while holding the field, the page and the count fixed.  That
+# separation is the point: the server's own curation note says the risk "is
+# carried by the token's identity, never by their number", and only a pair that
+# differs in nothing else can say so.
+#
+# NOT on the six-page calibration fixture, and the reason is sharper here than
+# it was for the type signal [D78]/[D116].  `aliases` is IN `_SEARCH_FIELDS`, so
+# an alias moves `df`, hence every idf, hence the coverage DENOMINATOR of every
+# query sharing that term -- i.e. an alias written on a calibration page would
+# move or CLOSE the derived window group D measures, which is precisely the
+# effect the window cases below exist to observe.  A fixture that could not
+# separate the two would be measuring its own contamination.
+#
+# The corpus is a miniature of the MEASURED case (adr/0001 records a merge
+# decision in the vocabulary `fold` / `unify` / `unification` and writes `merge`
+# nowhere, while two other pages carry it):
+#
+#   unified-runtime   the ADR, and the only page that ever carries an alias.  Its
+#                     prose says `fold`/`unify`/`unification` and contains the
+#                     substring `merge` NOWHERE -- asserted, not assumed, and
+#                     asserted twice: once through the server's own field
+#                     tokenizer and once by a raw substring scan of the file
+#                     text, which shares no code with the server at all.
+#   layered-backends  writes `merge` in prose, and is the query's winner in every
+#                     corpus.  It is also the curation rule's EVIDENCE: the alias
+#                     re-routes vocabulary the corpus already carries.
+#   router-notes      writes `merge` too, so the prose df is 2 exactly as it is on
+#                     the real wiki -- and it is the page whose coverage goes
+#                     DOWN when the alias makes the word cheaper.
+#   untouched-notes   carries `layered` and `backend`, never `merge`.  Not one
+#                     byte of it differs between the three corpora (asserted by
+#                     digest), and it crosses the gate anyway.
+#   layer-inventory   the fourth `layered` page, present to hold that df at 4.
+#   snapshot-notes    the thin ANSWER query's winner, and the only page carrying
+#                     `snapshot`.  Deliberately writes no `report`, so its winner
+#                     covers ~60% -- the upper edge of the measured window.
+#
+# Token placement, spelled out because it is the design (prose only -- the alias
+# field is what the cases MOVE):
+#
+#   df 6 : wiki, mcp (every `sources:` anchor names Scripts/mcp-wiki.py)
+#   df 4 : layered
+#   df 3 : backend
+#   df 2 : merge, report
+#   df 1 : snapshot
+#   df 0 : verbosity
+#
+# `wiki` is the load-bearing ubiquitous token, the same role `mcp` plays above:
+# it keeps every page LEXICALLY matching the should-be-silent query, so the
+# refusal has to be earned on coverage rather than taken on the
+# nothing-matched arm.  `merge` sits at df 2 and `verbosity` at df 0 because
+# that difference IS the curation rule: importing a df-0 word as an alias hands
+# it the maximum idf's worth of a page's coverage and repeals the abstention the
+# gate was calibrated on.
+# ---------------------------------------------------------------------------
+
+# The field under test.  Named ONCE, and everything else about it is read live:
+# its membership in `_SEARCH_FIELDS`, its weight in `FIELD_WEIGHTS` and its
+# presence in a real page's token dict are all ASSERTED against the module
+# [D65], so an edit that drops the field from the search fails here rather than
+# quietly turning the group into a tautology.  The frontmatter KEY and the search
+# FIELD are the same word, which is why one constant serves both.
+ALIAS_FIELD = "aliases"
+# The alias the corpus already writes in prose (df 2), and the one it does not
+# (df 0).  The curation rule is exactly this distinction.
+GOOD_ALIAS = "merge"
+BAD_ALIAS = "verbosity"
+# A second, deliberately INERT alias, carried by BOTH alias corpora so the two
+# differ in one token's identity and in nothing else -- their length included.
+# `unification` is the aliased page's own PROSE word (df 1, on that very page),
+# so it moves no df, no idf and no coverage anywhere; measured, it does not even
+# move a score, because with one aliased page `field_len / avgfl` is `n_docs`
+# whatever the list's length.  What it buys is that the alias LIST is a list:
+# without a second item, joining the values with no separator at all is an
+# EQUIVALENT mutation and nothing can pin the item boundary.  The multi-alias
+# shape is also the expected one -- the server's own note cites Furnas et al. on
+# one author rarely producing more than half a dozen names for a thing.
+INERT_ALIAS = "unification"
+GOOD_ALIASES = (GOOD_ALIAS, INERT_ALIAS)
+BAD_ALIASES = (BAD_ALIAS, INERT_ALIAS)
+
+# (filename, slug, title, type, status, description, sources, body)
+A_FILE, A_SLUG, A_TITLE, A_TYPE, A_STATUS, A_DESC, A_SRCS, A_BODY = range(8)
+
+A_PAGES = [
+    ("unified-runtime.md", "unified-runtime",
+     "ADR: one runtime for both layered backend halves", "adr", "accepted",
+     "Why the layered backend runtimes were folded into a single process.",
+     ["Scripts/mcp-wiki.py:_page_field_tokens",
+      "Scripts/mcp-wiki.py:_SEARCH_FIELDS"], """\
+# The choice
+
+Two runtimes served one purpose, so the layered backend was unified into one
+process and the second entry point was retired.
+
+# What was folded
+
+The unification kept both request paths and dropped one of the two schedulers.
+Nothing about the call surface changed for the caller.
+
+# What the caller sees
+
+One process to start, one log to read, and one report to file when a request
+fails.
+"""),
+    ("layered-backends.md", "layered-backends",
+     "The layered backend contract", "spec", "current",
+     "What each backend layer owes the one above it, and where a merge may "
+     "change that.",
+     ["Scripts/mcp-wiki.py:_build_corpus"], """\
+# Layers
+
+A layered backend keeps its transport, its parser and its renderer apart, so
+one of them can be replaced without a merge of the other two.
+
+# Merge rules
+
+A merge of two layers is allowed only where both sides already agree on the
+wire format. Anything else is a rewrite wearing a merge's clothes.
+"""),
+    ("router-notes.md", "router-notes",
+     "Notes on the request router", "analysis", "draft",
+     "What the router does with a request it cannot place, and what it writes "
+     "down about it.",
+     ["Scripts/mcp-wiki.py:_fn_search"], """\
+# Placement
+
+The router places a request by prefix, and a merge of two prefix tables is the
+only edit that can silently change where a request lands.
+
+# What it writes down
+
+Every unplaceable request lands in one report, together with the prefix table
+it was matched against.
+"""),
+    ("untouched-notes.md", "untouched-notes",
+     "The page nobody edited", "reference", "current",
+     "A layered backend walkthrough that no declared name in this corpus "
+     "mentions.",
+     ["Scripts/mcp-wiki.py:_prefix_count"], """\
+# Walkthrough
+
+The layered backend starts at the transport, ends at the renderer, and passes
+one dict between them.
+
+# Why it is here
+
+Not one byte of this page differs between the corpora of this group. Its
+coverage moves anyway.
+"""),
+    ("layer-inventory.md", "layer-inventory",
+     "An inventory of the layered indexes", "concept", "current",
+     "Every layered index this wiki keeps, and what invalidates each one.",
+     ["Scripts/mcp-wiki.py:_corpus_signature"], """\
+# The inventory
+
+Three layered indexes exist: the page list, the heading list and the token
+list. Each one is rebuilt from disk state alone.
+
+# Invalidation
+
+A layered index that outlives the file it came from is worse than no index at
+all.
+"""),
+    ("snapshot-notes.md", "snapshot-notes",
+     "What a snapshot of the token tables holds", "reference", "current",
+     "The stat only snapshot that keys the token cache, field by field.",
+     ["Scripts/mcp-wiki.py:_build_corpus_cached"], """\
+# Contents
+
+A snapshot holds one entry per page: the relative path, the modification time
+and the size. No page is opened to build a snapshot.
+
+# Staleness
+
+A snapshot is compared, never trusted. Any edit moves it.
+"""),
+]
+
+# Indexes into A_PAGES, by the ROLE each page plays -- a case that said
+# `A_PAGES[3]` would not survive an insertion.
+A_ADR, A_SPEC, A_ROUTER, A_UNTOUCHED, A_INDEX, A_SNAPSHOT = range(6)
+# The one page that ever carries an alias.  Every other page is the control.
+A_ALIASED = A_ADR
+A_SLUG_TO_REL = {p[A_SLUG]: p[A_FILE] for p in A_PAGES}
+
+# The query the shipped data point was measured on: its discriminating term is
+# the word the adr does not write.  Function words are left in, as everywhere in
+# this suite, so the effect co-exists with the `ignored function words:` line.
+Q_A_ALIAS = "why did we merge the layered backend"
+# The alias token ALONE.  Two things are only visible here: a page whose ONLY hit
+# is its alias (so the snippet has no body line to quote), and the plain fact
+# that such a page enters the answer at all.
+Q_A_ALIAS_ONLY = "merge"
+# Should be SILENT in `base` and in `good`: `verbosity` is unknown to the corpus
+# and takes the maximum idf, while `wiki` keeps all six pages in the candidate
+# set so the GATE is what refuses.  In `bad` it is the case that starts
+# answering -- the damage the curation rule prevents.
+Q_A_SILENT = "how does the wiki report verbosity"
+# The THIN answer: its winner carries the df-1 term and misses the df-2 one, so
+# it lands just above the gate and forms the window's upper edge.  It shares no
+# term with any alias in this group, which is what makes it the PRESERVATION
+# query.
+Q_A_THIN = "what does the snapshot report"
+A_SILENT = (Q_A_SILENT,)
+A_ANSWERS = (Q_A_ALIAS, Q_A_THIN)
+# Every token whose prose df this fixture pins, in one probe.
+A_PROBE = "wiki merge backend layered report snapshot verbosity"
+# The pinned prose df table.  MEASURED on every run (a drift is a named failure,
+# not silence) and never used as a source of truth for a coverage number: every
+# percentage in this group is parsed off a rendered line.
+A_PROSE_DF = {"wiki": 6, "layered": 4, "backend": 3, "merge": 2, "report": 2,
+              "snapshot": 1, "verbosity": 0}
+
+
+def alias_page_text(page, aliases=()):
+    """Render one group-P page, with or without its `aliases:` block.
+
+    The block is the ONLY difference between the three corpora, and the case
+    `fixture-differs-only-by-the-alias-block` asserts that byte for byte rather
+    than trusting this function to be honest about it.
+    """
+    out = ["---",
+           "name: %s" % page[A_SLUG],
+           "title: %s" % page[A_TITLE],
+           "type: %s" % page[A_TYPE],
+           "status: %s" % page[A_STATUS],
+           "description: %s" % page[A_DESC]]
+    if aliases:
+        out.append("%s:" % ALIAS_FIELD)
+        out += ["  - %s" % a for a in aliases]
+    out.append("sources:")
+    out += ["  - %s" % s for s in page[A_SRCS]]
+    out += ["---", "", page[A_BODY]]
+    return "\n".join(out)
+
+
+def as_alias_lines(text):
+    """The list items of a page text's `aliases:` block, verbatim."""
+    out, collecting = [], False
+    for line in text.split("\n"):
+        if line == "%s:" % ALIAS_FIELD:
+            collecting = True
+            continue
+        if collecting:
+            if line.startswith("  - "):
+                out.append(line[4:])
+                continue
+            break
+    return out
+
+
+def strip_alias_block(text):
+    """`text` with the `aliases:` key and its list items removed, and nothing
+    else touched -- the left-hand side of group P's fixture-identity claim."""
+    out, dropping = [], False
+    for line in text.split("\n"):
+        if line == "%s:" % ALIAS_FIELD:
+            dropping = True
+            continue
+        if dropping:
+            if line.startswith("  - "):
+                continue
+            dropping = False
+        out.append(line)
+    return "\n".join(out)
+
+
+def build_alias_fixture(work, aliases=()):
+    """Write group P's six pages; the alias block lands on the ADR alone.
+
+    realpath for the reason every builder here does it: `safe_path` compares the
+    RESOLVED wiki root against the project root it was handed.
+    """
+    for i, page in enumerate(A_PAGES):
+        work.write_text(os.path.join(WIKI_REL, page[A_FILE]),
+                        alias_page_text(page, aliases if i == A_ALIASED else ()))
+    return os.path.realpath(work.path)
+
+
+def prose_fields(mod):
+    """`_SEARCH_FIELDS` minus the alias field: group P's ABSOLUTE oracle.
+
+    DERIVED from the module, never listed here.  Two consequences, both wanted:
+    a field added to the search shows up in the prose side automatically, and an
+    edit that drops `aliases` from `_SEARCH_FIELDS` collapses this tuple onto the
+    whole one -- at which point "the alias answered a word the prose never
+    writes" cannot be true of anything and the cases fail instead of passing for
+    the wrong reason.
+    """
+    return tuple(f for f in mod._SEARCH_FIELDS if f != ALIAS_FIELD)
+
+
+def weighed(drv, query, weight, **params):
+    """One `search` answer with `FIELD_WEIGHTS[aliases]` forced to `weight`.
+
+    Same shape as `ranked` and for the same reason: the weight is read at SCORING
+    time while the token lists are baked into the cached corpus, so the toggle
+    needs no rebuild and two answers compared this way differ in that number and
+    in nothing else.  Restored in a `finally`, and the driver is group P's own,
+    so no other group can see the patch.
+    """
+    saved = drv.mod.FIELD_WEIGHTS[ALIAS_FIELD]
+    drv.mod.FIELD_WEIGHTS[ALIAS_FIELD] = weight
+    try:
+        return drv.search(query, **params)
+    finally:
+        drv.mod.FIELD_WEIGHTS[ALIAS_FIELD] = saved
+
+
+def alias_window(drv):
+    """Group P's own calibration window, MEASURED -- group D's instrument on a
+    different corpus.
+
+    Driven at `min_coverage: 0.0` so every candidate's raw coverage is visible,
+    and read off the rendered `cov N%` of the best hit per query.  Returns
+    (max_silent, min_answer, per_query), all floored percentages, none typed.
+
+    The upper edge is the BEST coverage each answer query can offer rather than a
+    named winner's: two pages sit at 100% on `Q_A_ALIAS` once the alias lands, so
+    pinning a slug there would make the window depend on a score comparison this
+    group is not about.
+    """
+    best = {}
+    for query in A_SILENT + A_ANSWERS:
+        res = drv.search(query, min_coverage=0.0)
+        best[query] = max([h["cov"] for h in res["hits"]] or [0])
+    return (max(best[q] for q in A_SILENT),
+            min(best[q] for q in A_ANSWERS), best)
+
+
+def hit_for(answer, slug):
+    """The one rendered hit line for `slug`, or None."""
+    found = [h for h in answer["hits"] if h["slug"] == slug]
+    return found[0] if found else None
 
 
 # ---------------------------------------------------------------------------
@@ -5538,6 +5938,798 @@ def run(opts=None):
                  detail=[_d("limit", "20 chars against a %d-char first line"
                             % len(HIT)),
                          _d("kept", "%r" % got.split("\n")[0][:40])])
+
+    # ============ P: the frontmatter `aliases:` field ============
+    # THREE workspaces holding the same six pages, differing in ONE frontmatter
+    # block on ONE page (see the fixture comment): `base` has no alias at all,
+    # `good` declares one the corpus already writes in prose, `bad` declares one
+    # it does not.  Every claim below is a difference between two of those three
+    # renderings, so nothing here rests on a number anybody typed.
+    #
+    # The group's spine is an ASYMMETRY, and it is the exact mirror of group O's:
+    #
+    #                     | type signal (W9)          | alias (this group)
+    #   hit_terms/coverage| NEVER touched             | MUST count
+    #   why               | a category is not a claim | "also about `merge`" IS
+    #   behaviour         | promotes, never creates   | CREATES a hit
+    #
+    # Both halves are pinned here, side by side and each saying what it proves,
+    # because a future reader of group O's `coverage-is-blind-to-the-type-signal`
+    # can very reasonably conclude that the alias must be score-only too.  It
+    # must not.  An alias that could not reach `coverage` would leave the gate
+    # deleting the page it was written for, i.e. it would buy nothing at all.
+    alias_base = H.TempWorkspace("ph-wiki-alias-base-", keep=opts.keep)
+    alias_good = H.TempWorkspace("ph-wiki-alias-good-", keep=opts.keep)
+    alias_bad = H.TempWorkspace("ph-wiki-alias-bad-", keep=opts.keep)
+    try:
+        base_root = build_alias_fixture(alias_base)
+        good_root = build_alias_fixture(alias_good, GOOD_ALIASES)
+        bad_root = build_alias_fixture(alias_bad, BAD_ALIASES)
+        pbase = Driver(base_root, name="mcp_wiki_alias_base")
+        pgood = Driver(good_root, name="mcp_wiki_alias_good")
+        pbad = Driver(bad_root, name="mcp_wiki_alias_bad")
+        amod = pgood.mod
+        adr = A_PAGES[A_ADR]
+        adr_slug, adr_rel = adr[A_SLUG], adr[A_FILE]
+        alias_gate = amod.DEFAULT_MIN_COVERAGE
+        alias_gate_pct = pct(alias_gate)
+
+        # ---- the fixture IS the instrument: one block, one page --------------
+        adr_texts = {"base": alias_page_text(adr),
+                     "good": alias_page_text(adr, GOOD_ALIASES),
+                     "bad": alias_page_text(adr, BAD_ALIASES)}
+        digests = {label: H.file_digests(os.path.join(root, WIKI_REL))
+                   for label, root in (("base", base_root), ("good", good_root),
+                                       ("bad", bad_root))}
+        moved_pages = sorted(name for name in digests["base"]
+                             if len({digests[l][name] for l in digests}) != 1)
+        problems = []
+        for label in ("good", "bad"):
+            if strip_alias_block(adr_texts[label]) != adr_texts["base"]:
+                problems.append("the %s corpus's aliased page is not the base page "
+                                "plus an `%s:` block -- with the block removed it "
+                                "still differs from base, so every 'only the alias "
+                                "changed' claim below is unsupported"
+                                % (label, ALIAS_FIELD))
+        if moved_pages != [adr_rel]:
+            problems.append("pages differing between the three corpora: %r, want "
+                            "exactly [%r] -- a second moving page would make the "
+                            "non-local case unattributable"
+                            % (moved_pages, adr_rel))
+        if adr_texts["good"] == adr_texts["bad"]:
+            problems.append("the good and bad corpora write the SAME alias, so the "
+                            "curation cases below compare a corpus with itself")
+        if len(as_alias_lines(adr_texts["good"])) != len(
+                as_alias_lines(adr_texts["bad"])):
+            problems.append("the good and bad aliases differ in COUNT (%r vs %r): "
+                            "the server's own note says the risk is carried by a "
+                            "token's identity and never by their number, and this "
+                            "pair has to hold the number fixed to say so"
+                            % (as_alias_lines(adr_texts["good"]),
+                               as_alias_lines(adr_texts["bad"])))
+        suite.record("P", "fixture-differs-only-by-the-alias-block", problems,
+                     detail=[_d("pages", "%d, one per corpus x 3" % len(A_PAGES)),
+                             _d("moved", "%r (sha256 over the wiki dir)"
+                                % moved_pages),
+                             _d("good", "%r" % as_alias_lines(adr_texts["good"])),
+                             _d("bad", "%r" % as_alias_lines(adr_texts["bad"])),
+                             _d("identity", "strip_alias_block(good) == base == "
+                                            "strip_alias_block(bad), byte for "
+                                            "byte")],
+                     text="")
+
+        # ---- the df table, and the two arms of the curation rule ------------
+        prose = pbase.measure(A_PROBE, fields=prose_fields(amod))
+        prose_good = pgood.measure(A_PROBE, fields=prose_fields(amod))
+        live_good = pgood.measure(A_PROBE)
+        a_types = {p[A_TYPE] for p in A_PAGES}
+        type_leak = {}
+        for query in (Q_A_ALIAS, Q_A_ALIAS_ONLY, Q_A_SILENT, Q_A_THIN):
+            terms = pbase.measure(query)["terms"]
+            answered = sorted({t for typ in a_types
+                               for t in type_terms(amod, typ, terms)})
+            if answered:
+                type_leak[query] = answered
+        problems = []
+        for token, want_df in sorted(A_PROSE_DF.items()):
+            if prose["df"].get(token) != want_df:
+                problems.append("prose df[%r]=%r, want %d"
+                                % (token, prose["df"].get(token), want_df))
+        if prose["df"].get("wiki") != prose["n_docs"]:
+            problems.append("`wiki` is on %r of %d pages: the ubiquitous token is "
+                            "what keeps a should-be-silent query LEXICALLY "
+                            "matching, so the refusal is the GATE's and not the "
+                            "nothing-matched arm's"
+                            % (prose["df"].get("wiki"), prose["n_docs"]))
+        if prose["df"] != prose_good["df"]:
+            problems.append("the PROSE df table moved between base and good (%r vs "
+                            "%r) although only a frontmatter block was added"
+                            % (prose["df"], prose_good["df"]))
+        # The curation rule, over EVERY alias the good corpus declares and not
+        # only the interesting one: "every alias token must already appear in
+        # some page's NON-alias field".  Measured through the same prose-only
+        # oracle, so a fixture that drifted into an invented alias fails here
+        # instead of quietly moving the window three cases below.
+        curation = {tok: pbase.measure(tok,
+                                       fields=prose_fields(amod))["df"].get(tok)
+                    for tok in GOOD_ALIASES}
+        offenders = sorted(tok for tok, n in curation.items() if not n)
+        if offenders:
+            problems.append("alias(es) %r are written in NO page's prose (%r): the "
+                            "rule is that an alias RE-ROUTES vocabulary and never "
+                            "invents it, and this corpus is supposed to obey it"
+                            % (offenders, curation))
+        if prose["df"].get(BAD_ALIAS, -1) != 0:
+            problems.append("the counter-example alias %r has prose df %r: it must "
+                            "be a word the corpus never writes, or the window case "
+                            "below measures nothing"
+                            % (BAD_ALIAS, prose["df"].get(BAD_ALIAS)))
+        if GOOD_ALIAS in prose["hits"].get(adr_rel, []):
+            problems.append("%s's own PROSE carries %r, so the alias has nothing "
+                            "left to add on that page" % (adr_rel, GOOD_ALIAS))
+        if GOOD_ALIAS in strip_alias_block(adr_texts["good"]).lower():
+            problems.append("the substring %r appears in the aliased page's file "
+                            "text outside its alias block -- an INDEPENDENT oracle "
+                            "(no server code) says the page does write the word"
+                            % GOOD_ALIAS)
+        if live_good["df"].get(GOOD_ALIAS) != prose["df"].get(GOOD_ALIAS, 0) + 1:
+            problems.append("live df[%r]=%r against a prose df of %r: the alias "
+                            "did not add exactly one document to that term"
+                            % (GOOD_ALIAS, live_good["df"].get(GOOD_ALIAS),
+                               prose["df"].get(GOOD_ALIAS)))
+        if type_leak:
+            problems.append("query term(s) answered by a fixture page's TYPE: %r. "
+                            "This group must be blind to W9, or a promotion could "
+                            "be read as an alias effect" % type_leak)
+        suite.record("P", "fixture-df-table-and-both-arms-of-the-rule", problems,
+                     detail=[_d("n_docs", prose["n_docs"]),
+                             _d("prose df", "%s" % ", ".join(
+                                 "%s=%d" % (t, prose["df"][t])
+                                 for t in sorted(A_PROSE_DF))),
+                             _d("good arm", "%r -- every declared alias has prose "
+                                            "df >= 1 elsewhere" % (curation,)),
+                             _d("bad arm", "%r prose df %d (the rule's violation)"
+                                % (BAD_ALIAS, prose["df"].get(BAD_ALIAS, -1))),
+                             _d("aliased", "%s prose hits %r -- %r absent"
+                                % (adr_rel, sorted(prose["hits"].get(adr_rel, [])),
+                                   GOOD_ALIAS)),
+                             _d("live df", "%r -> %d with the alias"
+                                % (GOOD_ALIAS, live_good["df"].get(GOOD_ALIAS, -1))),
+                             _d("type", "no query term is answered by any of %r"
+                                % sorted(a_types))],
+                     text="")
+
+        # ---- the field itself, read off the module ---------------------------
+        corpus_good, _avg_good, _n_good = amod._build_corpus_cached(
+            pgood.abs_wiki)
+        alias_tokens = {pd["relpath"]: pd["tokens"].get(ALIAS_FIELD)
+                        for pd in corpus_good}
+        token_keys = sorted({k for pd in corpus_good for k in pd["tokens"]})
+        problems = []
+        if ALIAS_FIELD not in amod._SEARCH_FIELDS:
+            problems.append("%r is not in mod._SEARCH_FIELDS (%r): `df`, "
+                            "`hit_terms` and therefore `coverage` all derive from "
+                            "that tuple, so an alias outside it is score-only -- "
+                            "which is the W9 design and the exact OPPOSITE of what "
+                            "this field is for"
+                            % (ALIAS_FIELD, list(amod._SEARCH_FIELDS)))
+        if ALIAS_FIELD not in amod.FIELD_WEIGHTS:
+            problems.append("%r has no entry in mod.FIELD_WEIGHTS, so the scoring "
+                            "loop raises KeyError on the first page that has one"
+                            % ALIAS_FIELD)
+        if sorted(amod._SEARCH_FIELDS) != sorted(amod.FIELD_WEIGHTS):
+            problems.append("_SEARCH_FIELDS %r and FIELD_WEIGHTS %r disagree: the "
+                            "scorer indexes the second by the first, so any field "
+                            "in one and not the other is either a KeyError or dead "
+                            "weight" % (sorted(amod._SEARCH_FIELDS),
+                                        sorted(amod.FIELD_WEIGHTS)))
+        if token_keys != sorted(amod._SEARCH_FIELDS):
+            problems.append("`_page_field_tokens` produces %r while the search "
+                            "walks %r -- a searched field with no tokenizer is a "
+                            "KeyError per page"
+                            % (token_keys, sorted(amod._SEARCH_FIELDS)))
+        if alias_tokens.get(adr_rel) != list(GOOD_ALIASES):
+            problems.append("%s tokenizes its alias block to %r, want %r -- the "
+                            "field is a LIST, and a renderer that joined the items "
+                            "without a separator would produce one token nobody "
+                            "can query for"
+                            % (adr_rel, alias_tokens.get(adr_rel),
+                               list(GOOD_ALIASES)))
+        stray = {rel: toks for rel, toks in alias_tokens.items()
+                 if rel != adr_rel and toks}
+        if stray:
+            problems.append("pages with no `%s:` key produced alias tokens %r"
+                            % (ALIAS_FIELD, stray))
+        suite.record("P", "the-alias-field-is-searched-and-tokenized", problems,
+                     detail=[_d("search", "%r" % list(amod._SEARCH_FIELDS)),
+                             _d("weights", "%r" % sorted(amod.FIELD_WEIGHTS)),
+                             _d("tokenized", "%r" % token_keys),
+                             _d("aliased", "%s -> %r"
+                                % (adr_rel, alias_tokens.get(adr_rel))),
+                             _d("others", "%d page(s), all empty"
+                                % (len(alias_tokens) - 1)),
+                             _d("contract", "all three tables agree key for key, "
+                                            "and the field is read from the module "
+                                            "-- an edit removing it from the search "
+                                            "fails HERE, not silently")],
+                     text="")
+
+        alias_weight = amod.FIELD_WEIGHTS[ALIAS_FIELD]
+        problems = []
+        if not alias_weight > 0:
+            problems.append("FIELD_WEIGHTS[%r] is %r: `hit_terms` is appended from "
+                            "the WEIGHTED sum, so a zero weight silently strips the "
+                            "field's coverage contribution while `df` keeps "
+                            "counting it -- see "
+                            "`the-alias-weight-carries-the-coverage-claim`"
+                            % (ALIAS_FIELD, alias_weight))
+        if alias_weight != amod.FIELD_WEIGHTS["anchor"]:
+            problems.append("FIELD_WEIGHTS[%r]=%r against anchor's %r: an alias is "
+                            "DECLARED metadata exactly like a `sources:` anchor, "
+                            "and the constant's own comment argues for that shelf"
+                            % (ALIAS_FIELD, alias_weight,
+                               amod.FIELD_WEIGHTS["anchor"]))
+        for canonical in ("name", "title"):
+            if not alias_weight < amod.FIELD_WEIGHTS[canonical]:
+                problems.append("FIELD_WEIGHTS[%r]=%r is not below %r's %r -- an "
+                                "alias is not the page's canonical name, and a "
+                                "corpus where the two weigh the same lets a "
+                                "declared nickname outrank a real title"
+                                % (ALIAS_FIELD, alias_weight, canonical,
+                                   amod.FIELD_WEIGHTS[canonical]))
+        suite.record("P", "the-alias-weight-is-metadata-not-a-name", problems,
+                     detail=[_d("alias", "%r (mod.FIELD_WEIGHTS[%r])"
+                                % (alias_weight, ALIAS_FIELD)),
+                             _d("anchor", "%r (equal by design)"
+                                % amod.FIELD_WEIGHTS["anchor"]),
+                             _d("ceiling", "name %r, title %r"
+                                % (amod.FIELD_WEIGHTS["name"],
+                                   amod.FIELD_WEIGHTS["title"])),
+                             _d("contract", "0 < alias == anchor < name/title, "
+                                            "every number read off the module")],
+                     text="")
+
+        # ---- it CREATES a hit: the word the prose never writes ---------------
+        only_base = pbase.search(Q_A_ALIAS_ONLY)
+        only_good = pgood.search(Q_A_ALIAS_ONLY)
+        only_probe = pgood.measure(Q_A_ALIAS_ONLY,
+                                   fields=prose_fields(amod))
+        only_hit = hit_for(only_good, adr_slug)
+        problems = []
+        if hit_for(only_base, adr_slug) is not None:
+            problems.append("without the alias the page is ALREADY in the answer "
+                            "for %r, so the alias creates nothing here"
+                            % Q_A_ALIAS_ONLY)
+        if only_hit is None:
+            problems.append("with `%s: [%s]` the page is still absent from the "
+                            "answer for %r (%d hit(s): %r) -- a declared name that "
+                            "cannot be searched for is not a name"
+                            % (ALIAS_FIELD, GOOD_ALIAS, Q_A_ALIAS_ONLY,
+                               len(only_good["hits"]), order(only_good)))
+        else:
+            if only_hit["missed"]:
+                problems.append("the single-term query still reports missed %r on "
+                                "the aliased page" % only_hit["missed"])
+            if only_hit["cov"] != 100:
+                problems.append("cov %d%% on a one-term query the alias answers "
+                                "in full" % only_hit["cov"])
+        if only_probe["hits"].get(adr_rel):
+            problems.append("the PROSE-only oracle says %s answers %r for this "
+                            "query, so the hit is not the alias's doing"
+                            % (adr_rel, only_probe["hits"].get(adr_rel)))
+        if len(only_good["hits"]) != len(only_base["hits"]) + 1:
+            problems.append("%d hit(s) with the alias against %d without: the "
+                            "alias must add its page and no other"
+                            % (len(only_good["hits"]), len(only_base["hits"])))
+        suite.record("P", "an-alias-answers-a-word-the-prose-never-writes",
+                     problems,
+                     detail=[_d("query", repr(Q_A_ALIAS_ONLY)),
+                             _d("base", "%d hit(s) %r"
+                                % (len(only_base["hits"]), order(only_base))),
+                             _d("good", "%d hit(s) %r"
+                                % (len(only_good["hits"]), order(only_good))),
+                             _d("prose", "%s answers %r of this query"
+                                % (adr_rel, only_probe["hits"].get(adr_rel, []))),
+                             _d("why", "the asker used the git word, the author "
+                                       "wrote the architecture word; the page is "
+                                       "the right answer either way and only the "
+                                       "declared name bridges them")],
+                     text=only_good["text"])
+
+        # ---- it COUNTS toward coverage, and that is NOT group O's contract ---
+        wide_base = pbase.search(Q_A_ALIAS, min_coverage=0.0)
+        wide_good = pgood.search(Q_A_ALIAS, min_coverage=0.0)
+        adr_base = hit_for(wide_base, adr_slug)
+        adr_good = hit_for(wide_good, adr_slug)
+        prose_alias_q = pbase.measure(Q_A_ALIAS, fields=prose_fields(amod))
+        live_alias_q = pgood.measure(Q_A_ALIAS)
+        problems = []
+        if adr_base is None or adr_good is None:
+            problems.append("the aliased page is missing from an ungated answer "
+                            "(base=%r good=%r)" % (adr_base, adr_good))
+        else:
+            if GOOD_ALIAS not in adr_base["missed"]:
+                problems.append("without the alias the page does NOT report "
+                                "missed %r (%r), so there is no gap for the alias "
+                                "to close" % (GOOD_ALIAS, adr_base["missed"]))
+            if GOOD_ALIAS in adr_good["missed"]:
+                problems.append("with the alias the page STILL reports missed %r: "
+                                "the declaration did not reach `hit_terms`, so the "
+                                "gate goes on deleting the page and the alias buys "
+                                "nothing" % GOOD_ALIAS)
+            if not adr_good["cov"] > adr_base["cov"]:
+                problems.append("coverage %d%% -> %d%%: an alias that does not "
+                                "raise the page's own coverage cannot lift it over "
+                                "the gate" % (adr_base["cov"], adr_good["cov"]))
+            want_hits = sorted(prose_alias_q["hits"].get(adr_rel, [])
+                               + [GOOD_ALIAS])
+            got_hits = sorted(live_alias_q["hits"].get(adr_rel, []))
+            if got_hits != want_hits:
+                problems.append("the page's hit set is %r, want its prose set plus "
+                                "exactly %r (%r) -- the coverage rise has to be the "
+                                "alias term itself, not a denominator artefact"
+                                % (got_hits, GOOD_ALIAS, want_hits))
+        suite.record("P", "the-alias-counts-toward-coverage", problems,
+                     detail=[_d("query", repr(Q_A_ALIAS)),
+                             _d("min_coverage", "0.0 (the gate is off: this case is "
+                                                "about the NUMBER, not admission)"),
+                             _d("base", "cov %r%% missed %r"
+                                % (adr_base["cov"] if adr_base else None,
+                                   adr_base["missed"] if adr_base else None)),
+                             _d("good", "cov %r%% missed %r"
+                                % (adr_good["cov"] if adr_good else None,
+                                   adr_good["missed"] if adr_good else None)),
+                             _d("hit set", "%r (prose %r + the alias)"
+                                % (sorted(live_alias_q["hits"].get(adr_rel, [])),
+                                   sorted(prose_alias_q["hits"].get(adr_rel, [])))),
+                             _d("NOT O", "group O pins the exact opposite for the "
+                                         "TYPE, and the two are consistent: a "
+                                         "category is not a statement about "
+                                         "content, an alias IS. `this page is also "
+                                         "about %r` claims the page answers for "
+                                         "that word, so it must reach coverage -- "
+                                         "the W9 trick (score-only, isolated from "
+                                         "the gate) is unavailable here BY DESIGN"
+                                % GOOD_ALIAS)],
+                     text=wide_good["text"])
+
+        # ---- the alias ALONE lifts the page over the gate --------------------
+        gated_base = pbase.search(Q_A_ALIAS)
+        gated_good = pgood.search(Q_A_ALIAS)
+        problems = []
+        if hit_for(gated_base, adr_slug) is not None:
+            problems.append("the page passes the default gate WITHOUT the alias, "
+                            "so this case is not measuring the lift")
+        if adr_base and adr_base["cov"] / 100.0 >= alias_gate:
+            problems.append("its ungated coverage is already %d%% against a %d%% "
+                            "gate: the shipped data point is a page the gate "
+                            "STRUCTURALLY excluded, and this fixture no longer "
+                            "reproduces it" % (adr_base["cov"], alias_gate_pct))
+        lifted = hit_for(gated_good, adr_slug)
+        if lifted is None:
+            problems.append("with the alias the page is still refused at the "
+                            "default gate (%d hit(s): %r)"
+                            % (len(gated_good["hits"]), order(gated_good)))
+        elif lifted["cov"] < alias_gate_pct:
+            problems.append("the page renders cov %d%% below the gate's %d%% and "
+                            "was shown anyway" % (lifted["cov"], alias_gate_pct))
+        elif GOOD_ALIAS in lifted["missed"]:
+            # An alias has TWO independent routes over the gate and only one of
+            # them is this case's: the CREDIT (the word joins `hit_terms`, the
+            # numerator grows) and the DISCOUNT (df rose, so idf and with it
+            # everybody's denominator fell -- which is what carries the untouched
+            # page in the next case).  A page admitted while still printing
+            # `missed: merge` came in on the discount, i.e. the declaration bought
+            # it nothing and the reply says so on screen.  Measured: a mutant that
+            # keeps the alias out of `hit_terms` lifts this page to 62% anyway, so
+            # without this arm the case passes on the wrong mechanism.
+            problems.append("the page passes the gate but still reports missed %r: "
+                            "it crossed on the DISCOUNT (df rose, so every page's "
+                            "denominator fell), not on the credit for the word it "
+                            "declared -- the alias bought rank for a claim the "
+                            "answer still denies" % GOOD_ALIAS)
+        if not len(gated_good["hits"]) > len(gated_base["hits"]):
+            problems.append("the answer did not grow (%d -> %d hits)"
+                            % (len(gated_base["hits"]),
+                               len(gated_good["hits"])))
+        suite.record("P", "the-alias-alone-lifts-a-page-over-the-gate", problems,
+                     detail=[_d("query", repr(Q_A_ALIAS)),
+                             _d("gate", "%d%% (mod.DEFAULT_MIN_COVERAGE=%r)"
+                                % (alias_gate_pct, alias_gate)),
+                             _d("base", "%d hit(s) %r; the page sits at %r%% "
+                                        "ungated"
+                                % (len(gated_base["hits"]), order(gated_base),
+                                   adr_base["cov"] if adr_base else None)),
+                             _d("good", "%d hit(s) %r; the page renders %r%%"
+                                % (len(gated_good["hits"]), order(gated_good),
+                                   lifted["cov"] if lifted else None)),
+                             _d("shipped", "this IS the measured case: on the real "
+                                           "wiki the intended page went 38% -> "
+                                           "100% and the query 2 -> 4 hits"),
+                             _d("why", "one word decided whether the right answer "
+                                       "was visible at all")],
+                     text=gated_good["text"])
+
+        # ---- and it moves pages NOBODY edited --------------------------------
+        # The complement of `an-alias-is-invisible-to-an-unrelated-query` below:
+        # on a query the alias DOES answer, the alias moves `df`, hence the idf,
+        # hence the shared coverage DENOMINATOR -- so a page whose bytes are
+        # identical changes what the answer says about it.  Easiest property of
+        # this field to forget, and the one that makes an alias on a calibration
+        # page unsafe.
+        untouched = A_PAGES[A_UNTOUCHED]
+        spec, router = A_PAGES[A_SPEC], A_PAGES[A_ROUTER]
+        u_base = hit_for(wide_base, untouched[A_SLUG])
+        u_good = hit_for(wide_good, untouched[A_SLUG])
+        s_base = hit_for(wide_base, spec[A_SLUG])
+        s_good = hit_for(wide_good, spec[A_SLUG])
+        r_base = hit_for(wide_base, router[A_SLUG])
+        r_good = hit_for(wide_good, router[A_SLUG])
+        u_prose_base = prose_alias_q["hits"].get(untouched[A_FILE], [])
+        u_prose_good = pgood.measure(Q_A_ALIAS, fields=prose_fields(amod))[
+            "hits"].get(untouched[A_FILE], [])
+        problems = []
+        if digests["base"][untouched[A_FILE]] != digests["good"][untouched[A_FILE]]:
+            problems.append("premise broken: %s is not byte-identical across the "
+                            "two corpora" % untouched[A_FILE])
+        if sorted(u_prose_base) != sorted(u_prose_good):
+            problems.append("premise broken: %s answers %r in base and %r in good"
+                            % (untouched[A_FILE], sorted(u_prose_base),
+                               sorted(u_prose_good)))
+        if None in (u_base, u_good, s_base, s_good, r_base, r_good):
+            problems.append("a fixture page fell out of the ungated answer")
+        else:
+            if u_good["cov"] <= u_base["cov"]:
+                problems.append("%s renders %d%% -> %d%%: the untouched page did "
+                                "NOT move, so the effect looks local when it is not"
+                                % (untouched[A_FILE], u_base["cov"],
+                                   u_good["cov"]))
+            if not (u_base["cov"] < alias_gate_pct <= u_good["cov"]):
+                problems.append("%s went %d%% -> %d%% around a %d%% gate: this case "
+                                "needs the page to CROSS, not merely to drift, or "
+                                "'somebody else's alias changed my page's verdict' "
+                                "stays invisible"
+                                % (untouched[A_FILE], u_base["cov"],
+                                   u_good["cov"], alias_gate_pct))
+            if u_good["missed"] != u_base["missed"]:
+                problems.append("%s reports missed %r -> %r: the untouched page "
+                                "must gain no hit term, only a smaller denominator"
+                                % (untouched[A_FILE], u_base["missed"],
+                                   u_good["missed"]))
+            if s_good["cov"] != s_base["cov"] or not s_good["score"] < s_base["score"]:
+                problems.append("the winner %s went cov %d%%->%d%% score "
+                                "%.2f->%.2f; want the coverage to hold and the "
+                                "SCORE to fall, because a term the corpus carries "
+                                "on one more page is worth less idf to everybody"
+                                % (spec[A_FILE], s_base["cov"], s_good["cov"],
+                                   s_base["score"], s_good["score"]))
+            if not r_good["cov"] < r_base["cov"]:
+                problems.append("%s went %d%% -> %d%%: the page whose ONLY hit term "
+                                "is the aliased word must lose coverage, so the "
+                                "non-local effect is shown to have both signs"
+                                % (router[A_FILE], r_base["cov"], r_good["cov"]))
+        suite.record("P", "an-alias-moves-pages-nobody-edited", problems,
+                     detail=[_d("query", repr(Q_A_ALIAS)),
+                             _d("untouched", "%s %r%% -> %r%% (gate %d%%), bytes "
+                                             "identical, missed %r either way"
+                                % (untouched[A_FILE],
+                                   u_base["cov"] if u_base else None,
+                                   u_good["cov"] if u_good else None,
+                                   alias_gate_pct,
+                                   u_base["missed"] if u_base else None)),
+                             _d("winner", "%s cov %r%% held, score %r -> %r"
+                                % (spec[A_FILE],
+                                   s_good["cov"] if s_good else None,
+                                   s_base["score"] if s_base else None,
+                                   s_good["score"] if s_good else None)),
+                             _d("downward", "%s %r%% -> %r%%"
+                                % (router[A_FILE],
+                                   r_base["cov"] if r_base else None,
+                                   r_good["cov"] if r_good else None)),
+                             _d("mechanism", "df[%r] %d -> %d, so idf falls and the "
+                                             "coverage denominator every page "
+                                             "shares falls with it"
+                                % (GOOD_ALIAS, prose["df"].get(GOOD_ALIAS, -1),
+                                   live_good["df"].get(GOOD_ALIAS, -1))),
+                             _d("measured", "the same shape on the real wiki: a "
+                                            "page whose bytes did not change went "
+                                            "44% -> 61% and crossed the gate")],
+                     text=wide_good["text"])
+
+        # ---- the window: the whole reason the curation rule exists -----------
+        w_base = alias_window(pbase)
+        w_good = alias_window(pgood)
+        w_bad = alias_window(pbad)
+        problems = []
+        if not (w_base[0] < alias_gate_pct <= w_base[1]):
+            problems.append("premise broken: this group's own window is (%d%%, "
+                            "%d%%] and the gate is %d%% -- the baseline has to be "
+                            "separable before an alias can be shown to spoil it"
+                            % (w_base[0], w_base[1], alias_gate_pct))
+        if w_good[:2] != w_base[:2]:
+            problems.append("the window moved from (%d%%, %d%%] to (%d%%, %d%%] on "
+                            "an alias the corpus ALREADY writes: the term's idf "
+                            "changed, so a query that does not carry the word must "
+                            "not have moved -- and one of them did (%r vs %r)"
+                            % (w_base[0], w_base[1], w_good[0], w_good[1],
+                               w_base[2], w_good[2]))
+        if not (w_good[0] < alias_gate_pct <= w_good[1]):
+            problems.append("the gate %d%% fell out of (%d%%, %d%%]"
+                            % (alias_gate_pct, w_good[0], w_good[1]))
+        suite.record("P", "a-prose-backed-alias-leaves-the-window-alone",
+                     problems,
+                     detail=[_d("base", "(%d%%, %d%%]" % w_base[:2]),
+                             _d("good", "(%d%%, %d%%]" % w_good[:2]),
+                             _d("gate", "%d%% (inside both)" % alias_gate_pct),
+                             _d("per query", "%r" % (w_good[2],)),
+                             _d("derived", "group D's instrument on group P's "
+                                           "corpus: every number parsed off `cov "
+                                           "N%` at min_coverage=0.0"),
+                             _d("measured", "the same on the real docs/: `merge` "
+                                            "(prose df 2) left the window "
+                                            "bit-identical at (49%, 59%] with "
+                                            "the 0.55 gate inside it")],
+                     text="")
+
+        closed = w_bad[0] >= w_bad[1]
+        gate_out = not (w_bad[0] < alias_gate_pct <= w_bad[1])
+        silent_bad = pbad.search(Q_A_SILENT)
+        silent_base = pbase.search(Q_A_SILENT)
+        problems = []
+        if w_bad[:2] == w_base[:2]:
+            problems.append("the window is (%d%%, %d%%] with AND without a df-0 "
+                            "alias: a word no page writes takes the maximum idf, "
+                            "so importing one has to move the separation -- if it "
+                            "does not, this fixture cannot demonstrate the curation "
+                            "rule at all" % w_bad[:2])
+        if not gate_out:
+            problems.append("the gate %d%% is still inside (%d%%, %d%%] after a "
+                            "df-0 alias, so the rule looks like taste rather than "
+                            "measurement" % (alias_gate_pct, w_bad[0], w_bad[1]))
+        if not silent_base["has_gate_msg"] or silent_base["hits"]:
+            problems.append("premise broken: %r is not silenced in the base corpus "
+                            "(%d hit(s), gate msg %r)"
+                            % (Q_A_SILENT, len(silent_base["hits"]),
+                               silent_base["has_gate_msg"]))
+        if not silent_bad["hits"]:
+            problems.append("the should-be-silent query is STILL silent with the "
+                            "df-0 alias, so the window moved for some other reason")
+        elif hit_for(silent_bad, adr_slug) is None:
+            problems.append("the query started answering, but not with the aliased "
+                            "page (%r) -- then the alias is not what repealed the "
+                            "abstention" % order(silent_bad))
+        suite.record("P", "a-prose-absent-alias-moves-the-window", problems,
+                     detail=[_d("base", "(%d%%, %d%%]" % w_base[:2]),
+                             _d("bad", "(%d%%, %d%%]%s"
+                                % (w_bad[0], w_bad[1],
+                                   "  CLOSED" if closed else "")),
+                             _d("gate", "%d%%, inside base=%r inside bad=%r"
+                                % (alias_gate_pct,
+                                   w_base[0] < alias_gate_pct <= w_base[1],
+                                   not gate_out)),
+                             _d("silent", "%r: %d hit(s) in base, %d in bad %r"
+                                % (Q_A_SILENT, len(silent_base["hits"]),
+                                   len(silent_bad["hits"]),
+                                   order(silent_bad))),
+                             _d("rule", "every alias token must ALREADY appear in "
+                                        "some page's non-alias field. An alias "
+                                        "RE-ROUTES vocabulary; it never invents "
+                                        "it"),
+                             _d("why", "a df-0 term earns the MAXIMUM idf and is "
+                                       "the sole reason that case is silent, so "
+                                       "declaring it repeals the abstention the "
+                                       "gate was calibrated on -- measured "
+                                       "identically on docs/: (49%,59%] -> "
+                                       "(67%,59%] at k=1")],
+                     text=silent_bad["text"])
+
+        # ---- an alias is a `df` claim, not a rendering -----------------------
+        prose_silent = pbad.measure(Q_A_SILENT, fields=prose_fields(amod))
+        live_silent = pbad.measure(Q_A_SILENT)
+        problems = []
+        if BAD_ALIAS not in silent_base["unknown"]:
+            problems.append("premise broken: the base corpus does not report %r "
+                            "unknown (%r)" % (BAD_ALIAS, silent_base["unknown"]))
+        if BAD_ALIAS in silent_bad["unknown"]:
+            problems.append("`%s` still names %r although a page now DECLARES it: "
+                            "df is what that line reads, and the alias field is "
+                            "inside the df walk"
+                            % (UNKNOWN_MSG, BAD_ALIAS))
+        if prose_silent["df"].get(BAD_ALIAS) != 0:
+            problems.append("premise broken: %r has prose df %r in the bad corpus "
+                            "-- no page was supposed to WRITE it"
+                            % (BAD_ALIAS, prose_silent["df"].get(BAD_ALIAS)))
+        if live_silent["df"].get(BAD_ALIAS) != 1:
+            problems.append("live df[%r]=%r, want 1: exactly one page declares it"
+                            % (BAD_ALIAS, live_silent["df"].get(BAD_ALIAS)))
+        suite.record("P", "an-alias-is-a-df-claim-so-a-word-stops-being-unknown",
+                     problems,
+                     detail=[_d("query", repr(Q_A_SILENT)),
+                             _d("base", "unknown %r" % silent_base["unknown"]),
+                             _d("bad", "unknown %r" % silent_bad["unknown"]),
+                             _d("df", "prose %r, live %r"
+                                % (prose_silent["df"].get(BAD_ALIAS),
+                                   live_silent["df"].get(BAD_ALIAS))),
+                             _d("contract", "`unknown to the corpus` means no page "
+                                            "CLAIMS the word, not no page prints "
+                                            "it -- which is the same reading that "
+                                            "makes coverage countable, and the "
+                                            "reason the rule is a rule and not a "
+                                            "safety net")],
+                     text=silent_bad["text"])
+
+        # ---- and it is invisible to a query it does not answer ---------------
+        thin_terms = pbase.measure(Q_A_THIN)["terms"]
+        thin_reach = {token: [t for t in thin_terms
+                              if amod._prefix_count([token], t)]
+                      for token in set(GOOD_ALIASES) | set(BAD_ALIASES)}
+        thin_reach = {tok: hit for tok, hit in thin_reach.items() if hit}
+        thin_texts = {label: drv.search(Q_A_THIN, min_coverage=0.0)["text"]
+                      for label, drv in (("base", pbase), ("good", pgood),
+                                         ("bad", pbad))}
+        thin_base = pbase.search(Q_A_THIN, min_coverage=0.0)
+        fm_others = {p[A_FILE]: pgood.frontmatter(p[A_FILE])
+                     for i, p in enumerate(A_PAGES) if i != A_ALIASED}
+        with_key = sorted(rel for rel, fm in fm_others.items()
+                          if ALIAS_FIELD in fm)
+        problems = []
+        for token, reached in thin_reach.items():
+            problems.append("premise broken: the alias %r answers %r of this "
+                            "query, so the query is not unrelated to it"
+                            % (token, reached))
+        if with_key:
+            problems.append("premise broken: page(s) %r carry an `%s:` key, read "
+                            "back through the server's own parser -- the control "
+                            "group has to be alias-free" % (with_key, ALIAS_FIELD))
+        if hit_for(thin_base, adr_slug) is None:
+            problems.append("the ALIASED page is not among the compared hits, so "
+                            "byte-identity says nothing about the page that "
+                            "actually carries a declared name")
+        for label in ("good", "bad"):
+            if thin_texts[label] != thin_texts["base"]:
+                problems.append("the %s corpus renders a DIFFERENT answer for a "
+                                "query its alias does not answer:\n  base %r\n  %s "
+                                "%r" % (label, thin_texts["base"], label,
+                                        thin_texts[label]))
+        suite.record("P", "an-alias-is-invisible-to-an-unrelated-query", problems,
+                     detail=[_d("query", repr(Q_A_THIN)),
+                             _d("terms", "%r, none of them answered by any alias "
+                                         "in %r"
+                                % (thin_terms,
+                                   sorted(set(GOOD_ALIASES) | set(BAD_ALIASES)))),
+                             _d("compared", "the whole rendered answer at "
+                                            "min_coverage=0.0, base vs good vs bad, "
+                                            "byte for byte"),
+                             _d("scope", "%d hit(s), the aliased page among them at "
+                                         "cov %r%% -- so the identity covers the "
+                                         "very page the alias sits on"
+                                % (len(thin_base["hits"]),
+                                   (hit_for(thin_base, adr_slug) or {}).get("cov"))),
+                             _d("premise", "no other page has an `%s:` key at all"
+                                % ALIAS_FIELD),
+                             _d("both ways", "the prohibition AND the preservation: "
+                                             "the complement is "
+                                             "`an-alias-moves-pages-nobody-edited`, "
+                                             "which is the same mechanism on a "
+                                             "query the alias DOES answer")],
+                     text=thin_texts["good"])
+
+        # ---- a page matched on its alias alone still renders a line ----------
+        # A new way to match brings a new way to have nothing to quote:
+        # `_best_snippet` scans BODY LINES for the term, so an alias-only hit
+        # finds none and falls through to the `description`.  The anchor degrades
+        # with it -- to the FILE, because no section carries the word either.
+        adr_fm = pgood.frontmatter(adr_rel)
+        only_lines = only_good["text"].split("\n")
+        snippet_line = (only_lines[only_hit["line_i"] + 1]
+                        if only_hit and only_hit["line_i"] + 1 < len(only_lines)
+                        else "")
+        body_carriers = [ln for ln in adr[A_BODY].split("\n")
+                         if GOOD_ALIAS in ln.lower()]
+        problems = []
+        if body_carriers:
+            problems.append("premise broken: %d body line(s) of the aliased page "
+                            "contain %r, so `_best_snippet` has a line to quote "
+                            "and this case is not about the fallback"
+                            % (len(body_carriers), GOOD_ALIAS))
+        if only_hit is None:
+            problems.append("no hit line to read a snippet under")
+        else:
+            want = "   %s" % adr_fm.get("description")
+            if snippet_line != want:
+                problems.append("the line under the hit is %r, want the page's own "
+                                "`description:` %r -- an alias-only hit has no body "
+                                "line to quote, and an empty line there is a hit "
+                                "the caller cannot judge"
+                                % (snippet_line, want))
+            if "#" in only_hit["anchor"]:
+                problems.append("the anchor is %r: no SECTION carries the word "
+                                "either, so a heading anchor here would point at a "
+                                "slice that does not answer for it"
+                                % only_hit["anchor"])
+            if only_hit["anchor"] != adr_rel:
+                problems.append("the anchor is %r, want the page path %r"
+                                % (only_hit["anchor"], adr_rel))
+        suite.record("P", "a-page-matched-on-its-alias-alone-still-renders-a-line",
+                     problems,
+                     detail=[_d("query", repr(Q_A_ALIAS_ONLY)),
+                             _d("body", "%d line(s) carry %r"
+                                % (len(body_carriers), GOOD_ALIAS)),
+                             _d("snippet", "%r" % snippet_line),
+                             _d("anchor", "%r (the file, not a section)"
+                                % (only_hit["anchor"] if only_hit else None)),
+                             _d("why", "the frontmatter fallback already existed "
+                                       "for header-only matches; the alias field "
+                                       "makes it the COMMON path rather than an "
+                                       "edge, so it is pinned here")],
+                     text=only_good["text"])
+
+        # ---- the weight is what carries the coverage claim -------------------
+        # `hit_terms` is appended when the WEIGHTED per-field sum is positive, so
+        # the weight and the coverage are coupled -- while `df` is counted by
+        # `_prefix_count` alone and is blind to it.  A zero weight therefore does
+        # NOT restore the base corpus: the word stays in every page's denominator
+        # (df 3) and only the declaring page loses its credit for it.  That state
+        # is strictly worse than not having the field, which is why the weight
+        # case above asserts `> 0` rather than merely `is a number`.
+        off = weighed(pgood, Q_A_ALIAS, 0, min_coverage=0.0)
+        on = weighed(pgood, Q_A_ALIAS, alias_weight, min_coverage=0.0)
+        off_adr, on_adr = hit_for(off, adr_slug), hit_for(on, adr_slug)
+        off_u = hit_for(off, untouched[A_SLUG])
+        problems = []
+        if None in (off_adr, on_adr, off_u):
+            problems.append("a fixture page fell out of the ungated answer")
+        else:
+            if GOOD_ALIAS in on_adr["missed"]:
+                problems.append("at the shipped weight the page still misses %r"
+                                % GOOD_ALIAS)
+            if GOOD_ALIAS not in off_adr["missed"]:
+                problems.append("at weight 0 the page does NOT report missed %r: "
+                                "`hit_terms` is fed from the weighted sum, so a "
+                                "zero-weight field cannot be creditable"
+                                % GOOD_ALIAS)
+            if not off_adr["cov"] < on_adr["cov"]:
+                problems.append("coverage %d%% at weight 0 against %d%% at %r -- "
+                                "the weight is not what buys the coverage"
+                                % (off_adr["cov"], on_adr["cov"], alias_weight))
+            if off_adr["cov"] == (adr_base["cov"] if adr_base else None):
+                problems.append("weight 0 renders %d%%, exactly the alias-free "
+                                "corpus's number: then `df` did NOT count the "
+                                "declaration, and the coupling this case exists to "
+                                "record is not there" % off_adr["cov"])
+            if off_u["cov"] != (u_good["cov"] if u_good else None):
+                problems.append("the untouched page renders %d%% at weight 0 "
+                                "against %r%% at the shipped weight: df must be "
+                                "blind to FIELD_WEIGHTS, so the denominator cannot "
+                                "move with it"
+                                % (off_u["cov"],
+                                   u_good["cov"] if u_good else None))
+        suite.record("P", "the-alias-weight-carries-the-coverage-claim", problems,
+                     detail=[_d("query", repr(Q_A_ALIAS)),
+                             _d("weight 0", "aliased page cov %r%% missed %r"
+                                % (off_adr["cov"] if off_adr else None,
+                                   off_adr["missed"] if off_adr else None)),
+                             _d("weight %r" % alias_weight,
+                                "aliased page cov %r%% missed %r"
+                                % (on_adr["cov"] if on_adr else None,
+                                   on_adr["missed"] if on_adr else None)),
+                             _d("no alias", "cov %r%% in the base corpus"
+                                % (adr_base["cov"] if adr_base else None)),
+                             _d("denominator", "the untouched page renders %r%% at "
+                                               "BOTH weights, i.e. df counted the "
+                                               "declaration either way"
+                                % (off_u["cov"] if off_u else None)),
+                             _d("finding", "weight 0 is not 'the field is off': the "
+                                           "word stays in every page's denominator "
+                                           "and only the declaring page loses "
+                                           "credit for it, so 0 is strictly worse "
+                                           "than dropping the field from "
+                                           "_SEARCH_FIELDS")],
+                     text=off["text"])
+    finally:
+        alias_base.cleanup()
+        alias_good.cleanup()
+        alias_bad.cleanup()
 
     # ============ H: hygiene ============
     pyc_after = H.pycache_snapshot()
