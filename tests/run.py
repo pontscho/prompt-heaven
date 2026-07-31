@@ -220,7 +220,7 @@ SUITES = [
      "floored percentages, query-side stopwords, get_page section index, "
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
-     "the frontmatter aliases synonym field", 113),
+     "the frontmatter aliases synonym field", 112),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

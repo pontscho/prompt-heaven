@@ -1,7 +1,7 @@
 ---
 name: spec-purity-unification
 type: spec
-status: current
+status: active
 title: 'Implementation Plan: Unify mcp-clangd + mcp-cuda into mcp-purity (Phase 0)'
 description: Phase 0 implementation plan for folding clangd + cuda into mcp-purity behind purity_call. Decision recorded in adr 0001.
 sources:

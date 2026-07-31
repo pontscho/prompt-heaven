@@ -67,6 +67,15 @@ DEFAULT_WIKI_ROOT = "docs"
 TYPE_ORDER = ["overview", "subsystem", "component", "reference", "analysis",
               "concept", "spec", "runbook", "adr", "glossary"]
 
+# Frontmatter `status:` is editorial intent, never freshness (SCHEMA.md §3).
+# `active` is the unmarked normal state, so INDEX.md labels only a deliberate
+# `draft` or `deprecated`. `current`/`stale` are rejected: they are two of the
+# eight git-measured states below, and a hand-written field borrowing HEAD's
+# vocabulary is what made the index print `[current]` for all ten pages while
+# git measured nine of them stale.
+INDEX_LABELLED = ("draft", "deprecated")
+STATUS_FORBIDDEN = ("current", "stale")
+
 # Freshness statuses listed page-by-page; everything else is summarized.
 DETAIL_STATUSES = ["stale", "orphaned-source", "unverified", "promotable"]
 # Page types not bound to code sources and never freshness-tracked.
@@ -955,6 +964,9 @@ def reindex_collect(root: str):
             issues.append("missing name")
         if not typ:
             issues.append("missing type")
+        if entry["status"] in STATUS_FORBIDDEN:
+            issues.append("status `%s` is a git-measured state, not editorial"
+                          " intent (use draft/active/deprecated)" % entry["status"])
         if issues:
             malformed.append({"path": relpath, "issues": issues})
         if name:
@@ -979,7 +991,7 @@ def render_index(entries) -> str:
         lines.append("## %s" % typ)
         for entry in sorted(bucket, key=lambda e: e["title"].lower()):
             desc = (" — " + entry["description"]) if entry["description"] else ""
-            status = (" `[%s]`" % entry["status"]) if entry["status"] else ""
+            status = (" `[%s]`" % entry["status"]) if entry["status"] in INDEX_LABELLED else ""
             lines.append("- [%s](%s)%s%s" % (entry["title"], entry["path"], desc, status))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -1323,7 +1335,6 @@ def _fn_search(params, project_root, wiki_root, strict):
             "slug": fm.get("name") or relpath,
             "type": fm.get("type") or "",
             "status": state["status"] if state else None,
-            "fm_status": fm.get("status") or "",
             "anchor": anchor, "snippet": snippet,
             "score": score, "coverage": coverage,
             "missed": [t for t in terms if t not in hit_terms],
@@ -1372,18 +1383,13 @@ def _fn_search(params, project_root, wiki_root, strict):
         lines.append("ignored function words: %s" % ", ".join(dropped))
     if unknown:
         lines.append("unknown to the corpus: %s" % ", ".join(unknown))
-    # The frontmatter `status:` disagreeing with the measured state is ONE fact
-    # about how the wiki is kept, not per-hit news — so it is said once, not
-    # appended to every label. Measured justification for the placement: the field
-    # reads `current` on all ten pages of this corpus, i.e. its variance is ZERO,
-    # so per hit it carries no information at all; that it is unmaintained is a
-    # corpus-level fact and belongs with the other header notes.
-    fm_disagree = sum(1 for r in results
-                      if r["fm_status"] and r["fm_status"] != r["status"])
-    if fm_disagree:
-        lines.append("frontmatter status: disagrees on %d of %d hit(s) — the labels "
-                     "below are measured against git, the field is hand-written"
-                     % (fm_disagree, len(results)))
+    # No frontmatter-vs-measured disagreement notice here, deliberately: the two
+    # stopped being comparable. `status:` now carries the DISJOINT editorial enum
+    # `draft|active|deprecated` (adr 0002), so it can never equal a measured state
+    # and the check would fire on every reply forever — a warning with zero
+    # variance is noise, which is the same argument that once justified printing
+    # this one. The drift it guarded against is now caught upstream instead:
+    # `current`/`stale` in that field is a `reindex --check` error.
     if not results:
         # TWO different silences, and the difference is the caller's next move:
         # nothing matched at all (rephrase / wrong wiki) versus matches that were
@@ -1397,7 +1403,7 @@ def _fn_search(params, project_root, wiki_root, strict):
                      "no page passes the relevance gate "
                      "(best coverage %d%%, need %d%%)"
                      % (math.floor(100 * best_cov), math.floor(100 * min_cov)))
-    elif unknown or dropped or fm_disagree:
+    elif unknown or dropped:
         lines.append("")              # keep the notes clear of the ranking
     for i, r in enumerate(results, 1):
         meta = "/".join(x for x in [r["type"], r["status"]] if x)
@@ -1452,7 +1458,6 @@ def _fn_source_to_pages(params, project_root, wiki_root, strict):
                 "title": fm.get("title") or fm.get("name") or relpath,
                 "slug": fm.get("name") or relpath, "path": relpath,
                 "type": fm.get("type") or "", "status": state["status"],
-                "fm_status": fm.get("status") or "",
                 "description": fm.get("description") or "",
                 "sources": matched_sources, "targets": matched_targets,
             })
@@ -1460,12 +1465,7 @@ def _fn_source_to_pages(params, project_root, wiki_root, strict):
     lines = ["# source_to_pages: %s — %d page(s) in %s/" % (source, len(hits), rel_root), ""]
     if not hits:
         lines.append("no page references this source")
-    fm_disagree = sum(1 for h in hits if h["fm_status"] and h["fm_status"] != h["status"])
-    if fm_disagree:
-        lines.append("frontmatter status: disagrees on %d of %d page(s) — the labels "
-                     "below are measured against git, the field is hand-written"
-                     % (fm_disagree, len(hits)))
-        lines.append("")
+    # No fm-vs-measured notice — the two enums are disjoint now; see _fn_search.
     for h in hits:
         meta = "/".join(x for x in [h["type"], h["status"]] if x)
         meta = (" [%s]" % meta) if meta else ""

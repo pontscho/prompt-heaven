@@ -87,7 +87,7 @@ scripts, the frontmatter MUST use the constrained subset described in section 5.
 ---
 name: stream-proxy
 type: component
-status: current
+status: active
 title: RTMP stream proxy
 description: One-line summary used in INDEX.md.
 sources:
@@ -108,7 +108,7 @@ Frontmatter fields:
 |---------------|----------|----------------------------------------------------------------|
 | `name`        | yes      | Unique kebab slug; matches filename (without `.md`).           |
 | `type`        | yes      | One of section 2.                                              |
-| `status`      | yes      | `current` / `draft` / `stale` / `deprecated`.                  |
+| `status`      | yes      | `draft` / `active` / `deprecated`. Editorial intent only, never freshness — two hard rules below. |
 | `title`       | yes      | Human title for INDEX.md.                                      |
 | `description` | yes      | One-line summary for INDEX.md.                                 |
 | `sources`     | type-dep | Code anchors the page derives from (paths or `path:symbol`).   |
@@ -116,6 +116,25 @@ Frontmatter fields:
 | `verified`    | type-dep | `commit` + `date` of last successful verification.             |
 | `links`       | no       | Related page slugs; also rendered inline as `[[slug]]`.        |
 | `aliases`     | no       | Alternative words a searcher would use for this page's topic, when the prose does not use them. **Indexed** as a weighted search field (weight 5, the anchor's), and it DOES count toward the relevance gate's coverage. Two hard rules below. |
+
+**`status:` — editorial intent, and it may never claim freshness.**
+
+It answers *"is this page finished, and does it still describe a live design?"* —
+`draft` (being written, or awaiting promotion), `active` (promoted), `deprecated`
+(describes a design that is gone). Only a human can know any of the three.
+Freshness is a **different axis**, measured against git per query by `freshness` /
+`search` (§4), and it is never hand-written here.
+
+1. **`current` and `stale` are forbidden values.** They collide word-for-word
+   with two of the eight measured states, and that collision is not theoretical:
+   `INDEX.md` printed `` `[current]` `` for all ten pages while git measured nine
+   of them stale. A hand-written field cannot track HEAD, so it must not use
+   HEAD's vocabulary.
+2. **`INDEX.md` renders this field only when it is `draft` or `deprecated`.** An
+   `active` page carries no label at all — the index is a catalogue of *what
+   exists*, and it makes no claim a reader could mistake for a freshness
+   measurement. Ask `search` or `freshness` for that; both label every page
+   against git at the moment you ask.
 
 **`aliases:` — the synonym layer, and it has two rules that are not style.**
 
@@ -153,7 +172,7 @@ exist *before* its code does. Its anchor requirements depend on `status`
 (documentation-only — no script enforces these; they are a curation rule):
 
 - `status: draft` → `targets:` required; `sources:`/`verified:` absent or optional.
-- `status: current` → `sources:` + `verified:` required (like a subsystem/component);
+- `status: active` → `sources:` + `verified:` required (like a subsystem/component);
   `targets:` only for the parts not yet built.
 - **Invariant**: any `spec` that carries `sources:` MUST also carry `verified:`
   (otherwise `freshness.py` gates it as `unverified`).
@@ -204,7 +223,7 @@ code lands, so a code-scoped search can find the design via its target path.
 When a `targets:` path **materializes** (the file appears in the tree),
 `freshness.py` reports the page as `promotable`. Promotion is then a manual
 curation step: move the anchor `targets:` → `sources:`, set
-`verified.commit`/`verified.date`, and flip `draft → current`.
+`verified.commit`/`verified.date`, and flip `draft → active`.
 
 `freshness.py` adds two non-gating statuses for forward specs:
 
@@ -248,7 +267,7 @@ MUST keep frontmatter within this subset:
 1. Take a git diff (changed file list), e.g. `git diff --name-only <base>..HEAD`.
 2. Map changed files -> affected pages via frontmatter `sources`.
 3. For each affected page: update the prose, re-verify inline anchors with the
-   language MCP, bump `verified.commit` / `verified.date`, set `status: current`.
+   language MCP, bump `verified.commit` / `verified.date`, set `status: active`.
 4. If a changed file maps to no page and looks significant, **propose** a new
    page — do not create silently; list it for the human.
 5. Refresh `INDEX.md` via `wiki_call` `reindex`.
@@ -280,7 +299,7 @@ backfills the contract; it does not rewrite content.
    `sources` anchors (locate the described code via the language MCP), add
    frontmatter with `verified.commit: <HEAD>` and `status: draft`.
 3. Verify pass: check each adopted page's claims against the code. Only on
-   success flip `draft -> current`; a hand-written doc may already be stale, so
+   success flip `draft -> active`; a hand-written doc may already be stale, so
    `verified.commit = HEAD` is an *assertion* until verified.
 4. Propose splits for docs spanning multiple types; never auto-split.
 5. Reindex and re-check.

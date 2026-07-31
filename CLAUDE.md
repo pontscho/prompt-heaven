@@ -36,8 +36,7 @@ no rule had ever named it.
 
 @docs/INDEX.md
 
-**Treat the `[current]` labels above as UNVERIFIED.** They copy the hand-written
-frontmatter `status:` field, and that field is measurably wrong — git says 9 of the
-10 pages are stale while the index prints `[current]` for all 10. For the real,
-git-measured state use `wiki_call search` (it labels every hit against git) or
-`wiki_call freshness`; never this file.
+**The index says what exists, not how fresh it is** — by design: a generated file
+cannot track HEAD, so it makes no freshness claim you could mistake for one
+(`docs/adr/0002-index-claims-no-freshness.md`). For the git-measured state ask
+`wiki_call search` (it labels every hit against git) or `wiki_call freshness`.

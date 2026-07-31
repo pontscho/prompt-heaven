@@ -1,7 +1,7 @@
 ---
 name: feature-implementation-plan
 type: spec
-status: current
+status: active
 title: Find-Verify-Synthesize refactor of p:code-review and p:branch-review
 description: Multi-agent 4-Step fan-out replacing the monolithic review skills with a shared lens fragment plus two single-purpose leaf minions.
 sources:

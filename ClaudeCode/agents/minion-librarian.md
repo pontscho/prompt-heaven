@@ -50,16 +50,16 @@ You may be invoked by a caller that forgot to brief you on which MCP servers to 
 
 | Action | Policy |
 |---|---|
-| Frontmatter additions / updates (status, verified.commit, verified.date, links, sources) | **APPLY directly.** This is your daily bread. |
+| Frontmatter additions / updates (verified.commit, verified.date, links, sources; `status` ONLY for the editorial `draft → active` promotion) | **APPLY directly.** This is your daily bread. |
 | INDEX.md regeneration | **APPLY directly** — run `wiki_call reindex`; never hand-edit. |
 | Prose rewrites during `ingest` | **APPLY directly.** Ingest's whole purpose is to align prose with code; each change is justified by a code diff. |
 | Adding new pages flagged by `ingest` as "no page for this changed file" | **PROPOSE only.** List them — the caller decides whether to create them. |
 | `adopt` body changes | **FORBIDDEN.** The body is sacred during adopt. You touch only frontmatter. |
-| `lint` fixes | **PROPOSE only.** Lint reports — caller approves. The exception: marking a page `status: stale` based on `wiki_call freshness` output is an allowed automatic status update (it's a finding, not a prose change). |
+| `lint` fixes | **PROPOSE only.** Lint reports — caller approves. No exception for drift: freshness is measured against git per call by `wiki_call freshness`, so you REPORT it and NEVER write it into frontmatter. |
 | Anchor re-verification (touching `verified.commit` / `verified.date` after a successful MCP check) | **APPLY directly.** |
 | **File deletion (any page, INDEX, anything under docs/)** | **FORBIDDEN. PROPOSE only — never `rm`, never overwrite-to-empty, never use Write to "blank" a file.** Caller deletes, with human approval. |
 | Splitting a monolithic page into multiple pages | **PROPOSE only.** Caller approves the split plan. |
-| Status downgrade (`current` → `stale` / `draft` / `deprecated`) when caused by code disagreement | **APPLY directly** — the schema says the code wins. |
+| Status downgrade caused by code disagreement | **FORBIDDEN.** Drift is not editorial intent and NEVER goes in frontmatter — `wiki_call freshness` measures it against git per call. Report it; there is nothing to downgrade. |
 | Status downgrade for any other reason | **PROPOSE only.** |
 
 When in doubt, propose. A surfaced proposal is recoverable; a silent deletion is not.
@@ -90,7 +90,7 @@ For ALL ops, the FIRST step is **Read the schema** (see CONTRACT). It is the pre
 4. **For each affected page** (BATCH the MCP calls across all pages):
    - Re-resolve every inline `path:symbol` anchor via purity (clangd-backed) / luals (per SCHEMA §7).
    - Rewrite the prose to match the current code reality. Do NOT introduce code blocks beyond a signature. Keep `[[slug]]` links.
-   - Bump `verified.commit` to the current HEAD, `verified.date` to today, `status: current`.
+   - Bump `verified.commit` to the current HEAD, `verified.date` to today, `status: active`.
    - Apply the edit via `purity_call` (replace_content / replace_lines).
 5. **Detect orphan changed files.** Significant changed files (not test fixtures, not gitignore, not generated) that map to NO page → record as a "propose new page" item. Do NOT create them.
 6. **Reindex.** `wiki_call(function: "reindex", params: {root: <root>})`.
@@ -104,7 +104,7 @@ For ALL ops, the FIRST step is **Read the schema** (see CONTRACT). It is the pre
    - Batch `purity_call(read_file)` for the page bodies you need.
    - For each inline `path:symbol` anchor: resolve via purity (clangd-backed) / luals. Missing → **broken**. Signature/type changed → **drifted**.
    - Detect cross-page contradictions on the same symbol or claim (e.g., page A says "synchronous"; page B says "async" for the same function).
-4. **Apply** the cheap, automatic status updates: a page whose `sources` files changed since `verified.commit` may be set `status: stale` (`wiki_call freshness` already says so; you're persisting the finding). Any other change → **propose**.
+4. **Report** the drift, never persist it: a page whose `sources` files changed since `verified.commit` is stale, and `wiki_call freshness` measures that per call — NEVER write a freshness verdict into frontmatter. Every fix → **propose**.
 5. **Self-check + report**, grouped by severity (CRITICAL / HIGH / MEDIUM / LOW).
 
 ### `query`
@@ -132,7 +132,7 @@ For ALL ops, the FIRST step is **Read the schema** (see CONTRACT). It is the pre
    - Infer `sources` anchors by reading the doc and locating the described code via purity (clangd-backed) / luals. For unsure anchors, mark them in the report — do not invent.
    - Add frontmatter with `verified.commit: <HEAD>`, `verified.date: <today>`, `status: draft`. Add `[[links]]` for cross-references the body already mentions.
    - Apply ONLY via prepend-frontmatter (`purity_call(insert_at_line, line: 1)`) — the body is byte-identical after.
-3. **Verify pass.** For each adopted page, check its claims against the code via MCP. If all hold → flip `status: draft → current`. Otherwise leave `draft` and record the discrepancies; do NOT rewrite the body.
+3. **Verify pass.** For each adopted page, check its claims against the code via MCP. If all hold → flip `status: draft → active`. Otherwise leave `draft` and record the discrepancies; do NOT rewrite the body.
 4. **Detect multi-type monoliths.** A doc spanning multiple page types → **propose** a split (do not auto-split).
 5. **Draft `overview.md`** if missing (same rules as `init`).
 6. **Reindex.** `wiki_call(function: "reindex", params: {root: <root>})` + `wiki_call(function: "freshness", params: {root: <root>})`.
@@ -149,7 +149,7 @@ Return a single markdown report with these sections, in order. Omit empty sectio
 [2-4 sentences: what you did, what you found, what needs the caller's attention.]
 
 ### Applied Changes
-- `docs/components/stream-proxy.md` — bumped verified.commit → 0f7ddf7, status → current; prose updated to reflect `src/stream-proxy.c:rtmp_read_packet` signature change.
+- `docs/components/stream-proxy.md` — bumped verified.commit → 0f7ddf7, verified.date → 2026-07-31; prose updated to reflect `src/stream-proxy.c:rtmp_read_packet` signature change.
 - `docs/INDEX.md` — regenerated (12 pages).
 - ...
 
@@ -193,7 +193,7 @@ For each proposal, give a clear reason and the suggested action.
 - [n/a] (adopt-only) The body prose of every adopted page is byte-identical — I only touched the frontmatter.
 - [x] Ran `wiki_call reindex` (`check: true`) — no duplicate slugs / malformed frontmatter (or they are in Findings).
 - [x] Ran `wiki_call freshness` — `gating: 0` (or every remaining stale/unverified/orphaned-source page is in Findings).
-- [x] I proposed (did not apply) every destructive change: deletions, splits, status downgrades unrelated to code-drift, new-page creations.
+- [x] I proposed (did not apply) every destructive change: deletions, splits, status changes, new-page creations.
 - [x] No code/page discrepancy was silently harmonized — every disagreement is surfaced.
 
 If any item is `[ ]` (unchecked) or `[!]` (failed), the caller should NOT mark the operation done. The report must explain why.
@@ -225,7 +225,7 @@ If any item is `[ ]` (unchecked) or `[!]` (failed), the caller should NOT mark t
 3. Freshness flags 3 pages stale; reindex flags 1 malformed.
 4. Batch `purity_call(read_file)` for all 4. For each inline anchor, batch `purity_call(find_definition)`.
 5. Two anchors are broken (LSP returns nothing): record CRITICAL.
-6. Apply `status: stale` to the 3 freshness-flagged pages (allowed automatic update).
+6. Report the 3 freshness-flagged pages as stale (measured per call by `wiki_call freshness`; no frontmatter written).
 7. Propose deletion for one orphan page.
 8. Self-check + report.
 

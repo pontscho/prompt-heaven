@@ -28,6 +28,15 @@ import _wikilib as w  # noqa: E402
 TYPE_ORDER = ["overview", "subsystem", "component", "reference", "analysis",
 	"concept", "spec", "runbook", "adr", "glossary"]
 
+# Frontmatter `status:` is editorial intent, never freshness (SCHEMA.md §3).
+# `active` is the unmarked normal state, so INDEX.md labels only a deliberate
+# `draft` or `deprecated`. `current`/`stale` are rejected: they are two of the
+# eight git-measured states, and a hand-written field borrowing HEAD's
+# vocabulary is what made the index print `[current]` for all ten pages while
+# git measured nine of them stale.
+INDEX_LABELLED = ("draft", "deprecated")
+STATUS_FORBIDDEN = ("current", "stale")
+
 
 def collect(root: str):
 	entries = []
@@ -53,6 +62,9 @@ def collect(root: str):
 			issues.append("missing name")
 		if not typ:
 			issues.append("missing type")
+		if entry["status"] in STATUS_FORBIDDEN:
+			issues.append("status `%s` is a git-measured state, not editorial"
+				" intent (use draft/active/deprecated)" % entry["status"])
 		if issues:
 			malformed.append({"path": relpath, "issues": issues})
 		if name:
@@ -78,7 +90,7 @@ def render_index(entries) -> str:
 		lines.append("## %s" % typ)
 		for entry in sorted(bucket, key=lambda e: e["title"].lower()):
 			desc = (" — " + entry["description"]) if entry["description"] else ""
-			status = (" `[%s]`" % entry["status"]) if entry["status"] else ""
+			status = (" `[%s]`" % entry["status"]) if entry["status"] in INDEX_LABELLED else ""
 			lines.append("- [%s](%s)%s%s" % (entry["title"], entry["path"], desc, status))
 		lines.append("")
 	return "\n".join(lines).rstrip() + "\n"

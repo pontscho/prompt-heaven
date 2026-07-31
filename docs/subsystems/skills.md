@@ -1,7 +1,7 @@
 ---
 name: skills
 type: subsystem
-status: current
+status: active
 title: Skills
 description: Loadable knowledge packs activated on-demand or via Skill permissions.
 sources:

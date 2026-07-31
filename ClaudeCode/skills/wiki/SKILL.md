@@ -126,7 +126,7 @@ Delegate with `op=ingest`, `base=<base-ref>` (default: merge-base with main, or
 The janitor will: diff against base; map changed files to pages via
 frontmatter `sources`; for each affected page rewrite the prose, re-verify
 inline `path:symbol` anchors via MCP, bump `verified.commit` / `verified.date`,
-set `status: current`; reindex. Significant changed files mapping to NO page
+set `status: active`; reindex. Significant changed files mapping to NO page
 are surfaced as `[PROPOSE-NEW-PAGE]` items — your job to confirm with the
 human and create them.
 
@@ -140,8 +140,9 @@ orphaned-source report) and `wiki_call reindex` with `check: true` (orphans,
 dup slugs, malformed frontmatter);
 open only flagged pages; resolve every inline anchor via MCP (missing →
 **broken**; signature changed → **drifted**); detect cross-page contradictions.
-It applies the automatic `status: stale` flip for code-drift cases, and
-surfaces every other fix (including deletions) as a proposal.
+It writes no frontmatter status for code drift — freshness is measured per
+call by `wiki_call freshness` — and surfaces every fix (including deletions)
+as a proposal.
 
 ### `/p:wiki query "<question>"`
 Answer from the wiki, fall back to code.
@@ -178,7 +179,7 @@ Delegate with `op=adopt`, `root=<dir>`, optional `batch_size=<n>`.
 The janitor will: run `wiki_call reindex` (`check: true`) to find malformed docs; for each
 doc, without changing its body, classify into a page type, infer `sources`
 anchors via MCP, add frontmatter with `verified.commit: <HEAD>` and
-`status: draft`. Then verify pass: where claims hold, flip `draft → current`;
+`status: draft`. Then verify pass: where claims hold, flip `draft → active`;
 otherwise leave `draft` and record discrepancies. Multi-type monoliths are
 surfaced as `[PROPOSE-SPLIT]` items. If `overview.md` is missing, the janitor
 drafts one (as in `init`). Reindex + freshness confirm a clean structure.

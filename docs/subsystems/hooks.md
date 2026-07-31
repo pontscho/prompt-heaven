@@ -1,7 +1,7 @@
 ---
 name: hooks
 type: subsystem
-status: current
+status: active
 title: Post-edit Hooks
 description: Claude Code hooks that auto-run after edits to enforce quality and tool routing.
 sources:

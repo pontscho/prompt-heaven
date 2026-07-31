@@ -1,7 +1,7 @@
 ---
 name: overview
 type: overview
-status: current
+status: active
 title: prompt-heaven Overview
 description: What prompt-heaven is and a map to the documentation wiki.
 sources:

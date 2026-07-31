@@ -1,7 +1,7 @@
 ---
 name: 0001-purity-server-unification
 type: adr
-status: current
+status: active
 title: Unify mcp-clangd and mcp-cuda into mcp-purity
 description: Decision to fold the clangd and cuda LSP servers into mcp-purity behind purity_call via a layered backend architecture.
 aliases:

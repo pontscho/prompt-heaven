@@ -1,7 +1,7 @@
 ---
 name: spec-ddg
 type: concept
-status: current
+status: active
 title: DuckDuckGo Bot Detection Research
 description: Why DDG blocks Python HTTP clients, and the DDG-first/Bing-fallback strategy used by the search script.
 sources:

@@ -315,7 +315,7 @@ Skill(p:wiki, args="ingest <base-ref>")
 ```
 
 - `<base-ref>` is the **SAME base** you used to scope the Section-4 fan-out target — the merge-base / branch base this implementation's diff is measured against (resolve via `git_call`). This tells the librarian exactly which changed files to map onto pages.
-- The librarian will: diff against the base, map changed files → pages via each page's `sources` frontmatter, rewrite affected prose, re-verify inline `path:symbol` anchors via the language MCP, bump `verified.commit` / `verified.date`, set `status: current`, and reindex — all in its own sandbox.
+- The librarian will: diff against the base, map changed files → pages via each page's `sources` frontmatter, rewrite affected prose, re-verify inline `path:symbol` anchors via the language MCP, bump `verified.commit` / `verified.date`, set `status: active`, and reindex — all in its own sandbox.
 
 ### c. Handle the librarian's proposals
 

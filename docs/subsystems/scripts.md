@@ -1,7 +1,7 @@
 ---
 name: scripts
 type: subsystem
-status: current
+status: active
 title: Scripts & MCP Servers
 description: Standalone Python scripts -- MCP servers and requirements.yaml task utilities.
 sources:

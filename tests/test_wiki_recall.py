@@ -2,7 +2,7 @@
 """Mechanical suite for the `search` relevance gate, the `get_page` section
 index, the `source_to_pages` per-hit description, the MEASURED state in every
 recall reply's `[type/state]` label, the page TYPE as a ranking signal and the
-frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (113 cases, A-P).
+frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (112 cases, A-P).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/.  Nothing is written outside
@@ -5281,100 +5281,90 @@ def run(opts=None):
                             + ["        " + r for r in rows],
                      text=run_all["text"])
 
-        # ---- the disclosure: once, with the right N of M ---------------------
-        # The expected count comes from the FIXTURE TABLE, not from the server's
-        # own `fm_status` bookkeeping: a page counts only if it wrote a status AND
-        # that status differs from the state the rule assigns it.
-        want_n = sum(1 for h in run_all["hits"]
-                     for p in [L_BY_SLUG[h["slug"]]]
-                     if p[L_STATUS] is not None and p[L_STATUS] != p[L_STATE])
-        want_m = len(run_all["hits"])
-        found = _FM_DISAGREE_RE.findall(run_all["text"])
-        agreeing = [p[L_SLUG] for p in L_PAGES if p[L_STATUS] == p[L_STATE]]
-        silent = [p[L_SLUG] for p in L_PAGES if p[L_STATUS] is None]
-        problems = []
-        if want_m != len(L_PAGES):
-            problems.append("fixture drift: %d of %d page(s) in the answer, so N "
-                            "of M is not being read against the whole corpus"
-                            % (want_m, len(L_PAGES)))
-        if not agreeing:
-            problems.append("fixture drift: every page disagrees, so 'the "
-                            "agreeing page is not counted' is vacuous")
-        if not silent:
-            problems.append("fixture drift: every page writes a status, so 'a "
-                            "page with no field is not counted' is vacuous")
-        if len(found) != 1:
-            problems.append("%d disclosure line(s), want exactly 1 -- it is ONE "
-                            "fact about how the wiki is kept, not per-hit news"
-                            % len(found))
-        elif (int(found[0][0]), int(found[0][1])) != (want_n, want_m):
-            problems.append("says %s of %s, want %d of %d"
-                            % (found[0][0], found[0][1], want_n, want_m))
-        if run_all["text"].count(FM_DISAGREE_SENTINEL) != 1:
-            problems.append("the phrase %r appears %d time(s) in the answer"
-                            % (FM_DISAGREE_SENTINEL,
-                               run_all["text"].count(FM_DISAGREE_SENTINEL)))
-        for slug in agreeing + silent:
-            if slug not in by_slug:
-                problems.append("%s is not rendered, so it cannot be counted in "
-                                "M either" % slug)
-        if want_n >= want_m:
-            problems.append("fixture drift: N (%d) is not strictly below M (%d), "
-                            "so a server that printed 'all of them' would pass"
-                            % (want_n, want_m))
-        suite.record("L", "disagreement-is-disclosed-once-with-the-right-count",
-                     problems,
-                     detail=[_d("rendered", "%r" % found),
-                             _d("oracle", "%d of %d, counted off the fixture table"
-                                % (want_n, want_m)),
-                             _d("excluded", "agreeing %r, no status field %r"
-                                % (agreeing, silent)),
-                             _d("why", "a page with no hand-written status has no "
-                                       "claim to disagree WITH -- and one whose "
-                                       "claim happens to be right is not evidence "
-                                       "the field is unmaintained")],
-                     text=run_all["text"])
-
-        # ---- the control: frontmatter that AGREES says nothing ---------------
+        # ---- the disclosure is unreachable, so it is never printed -----------
+        # Both handlers used to open with `frontmatter status: disagrees on N of
+        # M hit(s) -- ...` whenever the hand-written field contradicted the
+        # measured label.  It could be earned because the two vocabularies
+        # OVERLAPPED: the field's enum was `current|draft|stale|deprecated` and
+        # two of those words are git-measured states.  adr 0002 renamed it to the
+        # disjoint editorial set `draft|active|deprecated`, and a comparison
+        # between two disjoint sets has one answer forever -- so the notice would
+        # have fired on every single reply, and a warning with zero variance is
+        # noise.  It was deleted.  This case is what keeps it deleted, and it is
+        # run against the corpus that used to EARN it: these fixtures still write
+        # the old colliding word (`status: current` on nearly every page) and
+        # still disagree with the measurement, so the input is the strongest one
+        # available and the silence is not an accident of a tame corpus.
+        s2p_all = ldrv.sources(L_SRC_CLEAN)
         agree_run = adrv.search(L_SHARED_TERM, limit=L_LIMIT)
+        disagreeing = [p[L_SLUG] for p in L_PAGES
+                       if p[L_STATUS] is not None and p[L_STATUS] != p[L_STATE]]
+        # Both callers that used to print the line, plus the agreeing control --
+        # which costs one search and keeps the second corpus consumed.
+        probes = (("search", run_all["text"], len(run_all["hits"])),
+                  ("source_to_pages", s2p_all["text"], len(s2p_all["hits"])),
+                  ("search/control", agree_run["text"], len(agree_run["hits"])))
         problems = []
-        mismatched = []
-        for hit in agree_run["hits"]:
-            fm = adrv.frontmatter(L_BY_SLUG[hit["slug"]][L_FILE])
-            if fm.get("status") and fm.get("status") != state_of(hit):
-                mismatched.append((hit["slug"], fm.get("status"),
-                                   state_of(hit)))
-        if len(agree_run["hits"]) != len(L_PAGES):
-            problems.append("%d hit(s), want %d -- the control corpus must render "
-                            "the same pages as the other one"
-                            % (len(agree_run["hits"]), len(L_PAGES)))
-        if mismatched:
-            problems.append("premise broken: %r still disagree in the control "
-                            "corpus, so its silence proves nothing" % mismatched)
-        if _FM_DISAGREE_RE.search(agree_run["text"]):
-            problems.append("the disclosure fired although every field matches "
-                            "its measured state")
-        if FM_DISAGREE_SENTINEL in agree_run["text"]:
-            problems.append("the phrase %r appears anyway, in some other shape"
-                            % FM_DISAGREE_SENTINEL)
-        if not _FM_DISAGREE_RE.search(run_all["text"]):
-            problems.append("premise broken: the DISAGREEING corpus prints no "
-                            "disclosure either, so this silence is unconditional "
-                            "rather than earned")
-        suite.record("L", "agreeing-frontmatter-earns-no-disclosure", problems,
-                     detail=[_d("control", "the same ten pages with `status:` "
-                                           "written to the measured state"),
-                             _d("hits", "%d, all agreeing"
-                                % len(agree_run["hits"])),
-                             _d("line", "present=%r (the other corpus: %r)"
-                                % (bool(_FM_DISAGREE_RE.search(
-                                    agree_run["text"])),
-                                   bool(_FM_DISAGREE_RE.search(
-                                       run_all["text"])))),
-                             _d("contract", "silence when there is nothing to "
-                                            "report -- a maintained wiki pays "
-                                            "nothing for the disclosure")],
-                     text=agree_run["text"])
+        rows = []
+        if len(disagreeing) < 2:
+            problems.append("fixture drift: %d page(s) write a status their own "
+                            "measurement contradicts, so this is no longer the "
+                            "input that used to print the line and its silence "
+                            "proves nothing" % len(disagreeing))
+        for label, text, n_hits in probes:
+            shaped = _FM_DISAGREE_RE.findall(text)
+            seen = text.count(FM_DISAGREE_SENTINEL)
+            rows.append("%-16s %2d hit(s)  matches=%-6r sentinel=%d"
+                        % (label, n_hits, shaped, seen))
+            if not n_hits:
+                problems.append("%s rendered no hit at all, so its silence is "
+                                "silence about nothing" % label)
+            if shaped:
+                problems.append("%s prints the disclosure again, %r of %r -- the "
+                                "field carries the editorial enum "
+                                "draft|active|deprecated and the label carries "
+                                "one of eight git-measured states, two sets adr "
+                                "0002 made DISJOINT, so the two can never be "
+                                "compared: either the notice was re-added, and "
+                                "it now fires on every reply forever, or the "
+                                "field is borrowing HEAD's vocabulary a second "
+                                "time and the collision is back"
+                                % (label, shaped[0][0], shaped[0][1]))
+            elif seen:
+                problems.append("%s carries the phrase %r %d time(s) in some "
+                                "other shape -- the same defect, harder to see: "
+                                "a reworded line is still a comparison between "
+                                "editorial intent and a measurement, and adr "
+                                "0002 left nothing for it to report"
+                                % (label, FM_DISAGREE_SENTINEL, seen))
+        suite.record("L", "no-corpus-earns-a-frontmatter-disclosure", problems,
+                     detail=[_d("corpora", "the disagreeing fixture (%d of %d "
+                                           "page(s) write a status the "
+                                           "measurement contradicts) and the "
+                                           "agreeing control"
+                                % (len(disagreeing), len(L_PAGES))),
+                             _d("probes", "search, source_to_pages %r, and the "
+                                          "control corpus's search"
+                                % L_SRC_CLEAN),
+                             _d("oracle", "%r, and the bare phrase %r for a "
+                                          "reworded one"
+                                % (_FM_DISAGREE_RE.pattern,
+                                   FM_DISAGREE_SENTINEL)),
+                             _d("why", "the notice was removed BECAUSE it can no "
+                                       "longer vary, not because the drift "
+                                       "stopped mattering: a header on every "
+                                       "reply is a header nobody reads, and it "
+                                       "would have been the first line of each "
+                                       "one"),
+                             _d("upstream", "the drift it used to report is "
+                                            "caught earlier now -- `current` or "
+                                            "`stale` in that field is a `reindex "
+                                            "--check` error, a lint rather than a "
+                                            "per-reply header, which is why this "
+                                            "corpus may still carry the old "
+                                            "words")]
+                            + ["        " + r for r in rows],
+                     text=run_all["text"])
 
         # ---- the status filter selects on the MEASURED state -----------------
         problems = []
@@ -5457,11 +5447,6 @@ def run(opts=None):
             problems.append("fixture drift: every hit renders %r, so a server "
                             "that printed one constant would pass"
                             % sorted(set(s2p_states.values())))
-        if not _FM_DISAGREE_RE.search(s2p["text"]):
-            problems.append("the reverse lookup prints no disclosure although "
-                            "%d of its hits disagree with their own field"
-                            % sum(1 for p, s in s2p_states.items()
-                                  if (L_BY_FILE[p][L_STATUS] or "") not in ("", s)))
         suite.record("L", "source-to-pages-renders-the-same-state-as-search",
                      problems,
                      detail=[_d("call", "source_to_pages %r" % L_SRC_CLEAN),

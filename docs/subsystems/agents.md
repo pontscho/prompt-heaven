@@ -1,7 +1,7 @@
 ---
 name: agents
 type: subsystem
-status: current
+status: active
 title: Minion Agents
 description: Delegate-able sub-agents invoked via the Task tool to keep the main context clean.
 sources:
