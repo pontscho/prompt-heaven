@@ -9,8 +9,8 @@ sources:
   - ClaudeCode/skills/wiki
   - ClaudeCode/agents/minion-librarian.md
 verified:
-  commit: 850c266
-  date: 2026-07-16
+  commit: 26200d1
+  date: 2026-07-31
 links:
   - scripts
   - skills
