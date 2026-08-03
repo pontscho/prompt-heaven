@@ -16,6 +16,7 @@ links:
   - skills
   - agents
   - 0002-index-claims-no-freshness
+  - 0003-the-trigger-travels-with-the-tool
 ---
 
 # Documentation Wiki Engine
