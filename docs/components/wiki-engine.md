@@ -9,8 +9,8 @@ sources:
   - ClaudeCode/skills/wiki
   - ClaudeCode/agents/minion-librarian.md
 verified:
-  commit: 26200d1
-  date: 2026-07-31
+  commit: e4cdd48
+  date: 2026-08-03
 links:
   - scripts
   - skills
@@ -50,6 +50,21 @@ the pages that document it (used by `ingest`). Search ranking is BM25F:
 per-field weighted pseudo-TF with per-field length normalization, a single
 global saturation, and global IDF, with prefix token matching and tunable
 `k1`/`b` `Scripts/mcp-wiki.py:_fn_search`.
+
+## The trigger ships with the tool
+
+The tool description carries a **TRIGGER** clause, not just routing: it names
+the classes of question that oblige a `search` before answering — a WHY
+question, a design decision inside a subsystem that already exists, or
+reconstructing intent from source or `git log`
+`Scripts/mcp-wiki.py:WIKI_CALL_TOOL`. It is phrased as a class of question
+rather than a Bash prohibition, because the failure it addresses is reaching
+for *no* tool rather than the wrong one — which is also why it does not replace
+the older `PREFER THIS over Bash grep/find` routing clause beside it: routing
+cannot fire on a task that was never framed as a docs task. Living in the
+description rather than a project `CLAUDE.md` is what makes it travel to every
+project the plugin is installed in; the reasoning, and the one question left
+open, are in [[0003-the-trigger-travels-with-the-tool]].
 
 ## The search corpus: lazy, whole, and never evicted
 

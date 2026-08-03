@@ -11,8 +11,8 @@ sources:
   - ClaudeCode/agents/minion-librarian.md
   - Scripts/mcp-wiki.py
 verified:
-  commit: 26200d1
-  date: 2026-07-31
+  commit: e4cdd48
+  date: 2026-08-03
 links:
   - wiki-engine
   - scripts

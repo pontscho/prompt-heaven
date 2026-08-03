@@ -7,8 +7,8 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 26200d1
-  date: 2026-07-31
+  commit: e4cdd48
+  date: 2026-08-03
 links:
   - overview
   - 0001-purity-server-unification

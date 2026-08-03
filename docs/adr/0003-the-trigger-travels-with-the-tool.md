@@ -8,7 +8,7 @@ sources:
   - Scripts/mcp-wiki.py
   - CLAUDE.md
 verified:
-  commit: 6128080
+  commit: e4cdd48
   date: 2026-08-03
 links:
   - wiki-engine
@@ -66,8 +66,8 @@ it is reaching for no tool at all.
 
 `CLAUDE.md` keeps only what a tool description cannot know: that `docs/` is
 *this* repo's wiki, the `@docs/INDEX.md` catalogue, and the note that the index
-claims no freshness ([[0002-index-claims-no-freshness]]). It drops from 44 lines
-to 16.
+claims no freshness ([[0002-index-claims-no-freshness]]). It drops from 42 lines
+to 22.
 
 ## Alternatives Evaluated
 
@@ -96,11 +96,20 @@ project-specific and belongs in the project file.
   specified.
 - **Paid for, not added:** the description grew 4340 → 5448 chars (+1108). The
   same change deleted 18 decorative rule lines — twelve in `forge_call`, six in
-  `purity_call`, two in the new banner itself — 1440 characters of repeated `=`
-  and `═` carrying no information. Net fleet change: **−188 chars**, for a
-  trigger that did not previously exist anywhere. The `chars/4` token estimate
-  understates the saving: the purity rules are U+2550, three bytes each, and box
-  glyphs do not compress the way an ASCII run does.
+  `purity_call` — 1296 characters of repeated `=` and `═` carrying no
+  information. Net fleet change: **−188 chars**, for a trigger that did not
+  previously exist anywhere. The `chars/4` token estimate understates the
+  saving: the purity rules are U+2550, three bytes each, and box glyphs do not
+  compress the way an ASCII run does.
+- **Two numbers in `e4cdd48`'s commit message are wrong**, and are corrected
+  here rather than left to be quoted as fact: it says CLAUDE.md dropped "44 ->
+  16" lines (measured: 42 → 22, cross-checked against the hunk header
+  `@@ -1,36 +1,16 @@` plus a six-line unchanged tail), and it prices the rule
+  deletion at "1440 characters" while enumerating twelve plus six plus two —
+  eighteen lines were deleted, twenty were counted. The two rules written into
+  the new banner were taken out again before it shipped, so they never reached
+  the tree. Both errors are the same shape as the one this work removed: a
+  hand-written number that reads as a measurement.
 - **Unresolved, and stated rather than hidden:** it is not known whether the
   CLAUDE.md copy was load-bearing. Removing it may weaken the trigger in this
   repo even as it strengthens it everywhere else. No cheap measurement exists —
