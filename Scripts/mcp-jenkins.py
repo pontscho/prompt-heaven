@@ -2292,6 +2292,7 @@ HANDLERS: Dict[str, Callable[[dict], dict]] = {
     "get_build_status": handle_get_build_status,
     "build_status": handle_get_build_status,
     "status_build": handle_get_build_status,
+    "get_build": handle_get_build_status,
     "get_build_log": handle_get_build_log,
     "build_log": handle_get_build_log,
     "log": handle_get_build_log,

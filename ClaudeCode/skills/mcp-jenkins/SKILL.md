@@ -123,7 +123,7 @@ Job metadata, parameter definitions, recent builds.
 
 Returns name/fullName/url/buildable/description, a `parameters` table (name, type, default, choices, description — this is how you learn what `start_build` accepts), and a `recent builds (N of M)` table. A build URL is `<job url><number>/`.
 
-### `get_build_status` (`build_status`, `status_build`)
+### `get_build_status` (`build_status`, `status_build`, `get_build`)
 One build.
 
 * `job_path` — **required**.
@@ -237,7 +237,7 @@ Returns contentType, contentLength, `encoding` for base64, and the content in a 
 | `status` | `config`, `info` |
 | `list_jobs` | `list`, `ls` |
 | `get_job_info` | `job_info`, `job` |
-| `get_build_status` | `build_status`, `status_build` |
+| `get_build_status` | `build_status`, `status_build`, `get_build` |
 | `get_build_log` | `build_log`, `log`, `console` |
 | `get_test_report` | `test_report`, `tests`, `junit` |
 | `start_build` | `build`, `trigger` |
