@@ -73,12 +73,13 @@ Resolves a package or product name to a Context7-compatible library ID. Call thi
 
 Both parameters are **required**.
 
-Returns a formatted list of matching libraries, each with:
+Returns a formatted list of matching libraries. A field is omitted entirely when
+the upstream record does not carry it, so do not expect every line on every hit:
 - `Context7-compatible library ID` — use this in `context7_query_docs`
 - `Title` — library name
 - `Description` — short summary
 - `Code Snippets` — count of available examples (higher=better coverage)
-- `Source Reputation` — `High` / `Medium` / `Low` / `Unknown`
+- `Source Reputation` — `High` / `Medium` / `Low`
 - `Benchmark Score` — quality indicator, 100 is highest
 - `Versions` — available version IDs (use as `/org/project/version` format)
 

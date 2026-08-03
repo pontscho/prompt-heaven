@@ -273,8 +273,14 @@ def _format_search_result(result: dict) -> str:
     if total_snippets is not None and total_snippets != -1:
         lines.append(f"- Code Snippets: {total_snippets}")
 
+    # Guarded like every other optional field above and below. Unguarded, a
+    # record with no trustScore carried "- Source Reputation: Unknown" -- 28
+    # characters stating that we know nothing, on every such hit. The helper
+    # already owns the definition of unknown, so ask it instead of repeating
+    # the None/negative test here and letting the two drift apart.
     reputation = _get_source_reputation_label(result.get("trustScore"))
-    lines.append(f"- Source Reputation: {reputation}")
+    if reputation != "Unknown":
+        lines.append(f"- Source Reputation: {reputation}")
 
     benchmark_score = result.get("benchmarkScore")
     if benchmark_score is not None and benchmark_score > 0:
