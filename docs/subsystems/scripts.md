@@ -7,7 +7,7 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: e4cdd48
+  commit: 5523dc6
   date: 2026-08-03
 links:
   - overview
@@ -30,15 +30,22 @@ The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 | Script | Server | Domain |
 |--------|--------|--------|
 | `Scripts/mcp-purity.py` | mcp-purity | File ops: list, search, read, write |
-| `Scripts/mcp-clangd.py` | mcp-clangd | C/C++ LSP intelligence |
-| `Scripts/mcp-lua-lsp.py` | mcp-luals | Lua LSP intelligence |
-| `Scripts/mcp-cuda.py` | mcp-cuda | CUDA symbol navigation |
 | `Scripts/mcp-forge.py` | mcp-forge | `project-forge.yaml` build targets |
 | `Scripts/mcp-git.py` | mcp-git | Git operations |
 | `Scripts/mcp-lldb.py` | mcp-lldb | LLDB debugger integration |
-| `Scripts/mcp-webfetch.py` | mcp-webfetch | Browser-emulated URL fetching |
 | `Scripts/mcp-context7.py` | mcp-context7 | Context7 documentation lookup |
 | `Scripts/mcp-wiki.py` | mcp-wiki | Wiki freshness / reindex / search / page reads over `docs/` |
+| `Scripts/mcp-inspect.py` | mcp-inspect | Read-only host/process/network inspection, file digests, syntax validation |
+
+Superseded, not registered — their capabilities were folded into `purity_call`,
+which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`
+(Lua, via the `luals_*` functions) and `mcp-cuda.py` (CUDA). The tools
+`clangd_call`, `luals_call` and `cuda_call` are not registered and cannot be
+called `Scripts/_mcp_smoke_test.py`; see [[0001-purity-server-unification]].
+
+Present but not registered: `mcp-webfetch.py` `Scripts/_mcp_smoke_test.py`. It
+still speaks the protocol but is not wired into Claude Code, and no decision on
+record explains why.
 
 Other servers: `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`,
 `mcp-postgres.py`.
