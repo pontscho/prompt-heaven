@@ -10,8 +10,8 @@ routes to internal handlers via the 'function' parameter. Every handler is
 READ-ONLY — it inspects live system state (processes, process tree, open files,
 sockets, network interfaces/routes, memory, disk, mounts, file metadata,
 services, resource limits, toolchain versions, host, environment) or the FORMAL
-well-formedness of a file (json, python, yaml, toml, xml, ini, csv, tsv, plist),
-and NEVER mutates anything. There is no way
+well-formedness of a file (json, python, yaml, toml, xml, ini, csv, tsv, plist,
+javascript), and NEVER mutates anything. There is no way
 to pass a raw shell string: each function builds a fixed argv (shell=False),
 filters are applied in Python, and numeric params (pid/port) are int-validated,
 so there is no shell-injection surface.
@@ -20,12 +20,16 @@ Purpose: let the model run the common non-invasive `ps` / `lsof` / `netstat` /
 `ss` / `df` / `du` / `free` / `env` / `stat` / `ifconfig` / `pstree` / `ulimit` /
 `launchctl` / `<tool> --version` / `shasum` / `md5sum` inspections — and the
 `python3 -c "import ast; ast.parse(...)"` / `py_compile` / `json.tool` / `jq .` /
-`xmllint --noout` validation one-liners — through a single pre-approved MCP tool
-instead of per-call Bash prompts. Validators run in-process (stdlib parsers), so
-nothing is written: `py_compile` in particular would leave a __pycache__/*.pyc.
+`xmllint --noout` / `node --check` validation one-liners — through a single
+pre-approved MCP tool instead of per-call Bash prompts. Validators run in-process
+(stdlib parsers), so nothing is written: `py_compile` in particular would leave a
+__pycache__/*.pyc. JavaScript is the one format with no stdlib parser: it spawns
+`node --check`, which PARSES ONLY — never `-e`/`-p`/require/import, so the code
+under validation is never executed, and nothing is written there either.
 
-The one execution-shaped function, `versions`, probes only an ALLOW-LISTED set of
-binary NAMES (_VERSION_TOOLS) with fixed flags; the caller can never supply argv.
+The execution-shaped functions are `versions`, which probes only an ALLOW-LISTED
+set of binary NAMES (_VERSION_TOOLS) with fixed flags, and the javascript
+validator's fixed `node --check` argv; the caller can never supply argv.
 
 Cross-platform: macOS (Darwin) and Linux. Commands are selected per platform;
 missing underlying binaries degrade to a clear error, never a crash.
@@ -173,18 +177,29 @@ def _fold_kv(text: str) -> List[str]:
     return out
 
 
-def _run(cmd: List[str], timeout: int = 15) -> Tuple[int, str, str]:
+def _run(cmd: List[str], timeout: int = 15,
+         stdin_text: Optional[str] = None) -> Tuple[int, str, str]:
     """Run an argv (shell=False) read-only. Never raises; returns (rc, out, err).
 
-    stdin=DEVNULL, always: this server's stdin is the JSON-RPC stream, and
+    stdin=DEVNULL by default: this server's stdin is the JSON-RPC stream, and
     capture_output only redirects stdout/stderr -- stdin would be INHERITED.
     A child that reads it (any of these tools when a flag makes it wait on
-    input) would silently swallow protocol messages. Every probe below is
+    input) would silently swallow protocol messages. Almost every probe below is
     read-only and takes no input, so DEVNULL costs nothing here.
+
+    `stdin_text` is the one exception: `node --check` reads a script from stdin,
+    which is how inline `content` is validated without writing a temp file. It
+    goes through `input=` because subprocess.run refuses `input=` and `stdin=`
+    together, so the two forms are spelled out rather than built as kwargs --
+    the stdin choice stays visible AT the call.
     """
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           stdin=subprocess.DEVNULL)
+        if stdin_text is None:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=timeout, stdin=subprocess.DEVNULL)
+        else:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=timeout, input=stdin_text)
         return r.returncode, r.stdout or "", r.stderr or ""
     except FileNotFoundError:
         return 127, "", f"{cmd[0]}: not found in PATH"
@@ -1130,7 +1145,7 @@ def h_md5(p: dict) -> str:
 # Validation runs IN-PROCESS with stdlib parsers instead of shelling out to
 # `python3 -c "import ast; ast.parse(...)"`, `python3 -m json.tool`, `jq .` or
 # `xmllint --noout`: each of those costs a Bash permission prompt, differs per
-# platform, and its output has to be re-parsed. Two deliberate choices:
+# platform, and its output has to be re-parsed. Three deliberate choices:
 #   * Python is compiled with compile() IN MEMORY — NEVER py_compile, which
 #     writes __pycache__/*.pyc and would make this read-only server mutate the
 #     tree. compile() is also strictly stronger than ast.parse: it runs the
@@ -1138,6 +1153,11 @@ def h_md5(p: dict) -> str:
 #     function and module-level `nonlocal` are caught too.
 #   * XML entity declarations are refused (XXE + billion-laughs guard), so the
 #     validator is safe on untrusted input.
+#   * JavaScript is the ONE format with no stdlib parser, so it is the one that
+#     does shell out — to `node --check`, which parses and stops. `node -e` /
+#     `--eval` / `-p` / requiring the file would EXECUTE it, which is why none
+#     of them appear here, and why no temp file is written for `content` either
+#     (stdin carries it instead).
 # This is FORMAL well-formedness (does it parse), NOT schema validation.
 # Verdict vocabulary matches the p:verify skill: OK / FAIL / LIMITED / SKIP.
 
@@ -1147,7 +1167,7 @@ _V_LIMITED = "LIMITED"
 _V_SKIP = "SKIP"
 
 # extension -> format. Parity with ClaudeCode/skills/verify/scripts/validate.py,
-# plus .py/.pyi which that script does not cover.
+# plus .py/.pyi and the .js/.mjs/.cjs trio which that script does not cover.
 _VALIDATE_EXT = {
     ".json": "json",
     ".yaml": "yaml", ".yml": "yaml",
@@ -1158,6 +1178,10 @@ _VALIDATE_EXT = {
     ".csv": "csv",
     ".tsv": "tsv",
     ".py": "python", ".pyi": "python",
+    # .js/.mjs/.cjs ONLY. `node --check` parses neither JSX nor TypeScript, so
+    # .jsx/.ts/.tsx/.mts/.cts stay unmapped on purpose: an honest "unknown
+    # format for this extension" SKIP beats a bogus FAIL on a file that is fine.
+    ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
 }
 
 _VALIDATE_MAX_MB = 32        # parsers build a full in-memory tree; the server
@@ -1401,6 +1425,86 @@ def _v_yaml(data: bytes, name: str) -> _VResult:
     return _v_ok("valid YAML (PyYAML safe_load_all)")
 
 
+def _v_node_error(err: str, target: str, rc: int) -> _VResult:
+    """node's stderr -> a FAIL row. Its stack trace is dropped, not reported.
+
+    node prints `<file>:<line>`, the offending source line, a caret line, then
+    `SyntaxError: ...` and eight frames of its own loader. Only the position and
+    the one-line message say anything about the validated file.
+    """
+    if rc == 127:               # _run's own code: node vanished after which()
+        return _v_fail(" ".join(err.split()) or "node: not found in PATH")
+    if rc == 124:               # ditto: timed out, so nothing was checked
+        return _v_limited(" ".join(err.split()) or "node --check timed out")
+    lines = err.splitlines()
+    line: Optional[int] = None
+    col: Optional[int] = None
+    # matched on the basename so a realpath'd/symlinked target still lands, and
+    # anchored so a `(node:123) Warning:` preamble cannot be mistaken for it
+    head = re.compile(r"^.*" + re.escape(os.path.basename(target)) + r":(\d+)$")
+    for i, ln in enumerate(lines):
+        m = head.match(ln)
+        if not m:
+            continue
+        line = int(m.group(1))
+        for cand in lines[i + 1:i + 4]:
+            if "^" in cand and not cand.strip("^ "):   # spaces + carets only
+                col = cand.index("^") + 1
+                break
+        break
+    msg = ""
+    for ln in lines:
+        if re.match(r"^\w*Error\b", ln):     # SyntaxError, and nothing indented
+            msg = " ".join(ln.split())
+            break
+    if not msg:
+        msg = next((" ".join(ln.split()) for ln in lines if ln.strip()),
+                   f"node --check failed (rc={rc})")
+    return _v_fail(msg, line, col)
+
+
+def _v_javascript(data: bytes, name: str) -> _VResult:
+    node = shutil.which("node")
+    if node is None:
+        # FAIL, not the SKIP a missing PyYAML/tomllib gets. The asymmetry is
+        # deliberate -- do NOT harmonise it: those two are optional PARSERS, and
+        # SKIP/LIMITED still leaves the batch verdict PASSED, which is honest for
+        # "this host's Python cannot read TOML". Here the caller asked whether a
+        # JS file parses and got NO answer at all; a SKIP row in a batch reads as
+        # "nothing to see here" and would let **PASSED** stand over an unchecked
+        # file. FAIL is the only rung that cannot be mistaken for success.
+        return _v_fail("no `node` in PATH (install Node.js to validate "
+                       "JavaScript)")
+    if name != "<content>":
+        # A PATH, so node decides script-vs-module itself -- extension, nearest
+        # package.json "type", and on newer node its own syntax detection --
+        # exactly what it does when running the file. Not re-implemented here.
+        # --check NEVER executes the code (no -e/-p/require/import).
+        path = os.path.abspath(name)
+        rc, _out, err = _run([node, "--check", path], 15)
+        if rc == 0:
+            return _v_ok("valid JavaScript syntax (node --check)")
+        return _v_node_error(err, path, rc)
+    # Inline content has no path and no extension. `node --check` also reads a
+    # script from STDIN, which is the only way to check it here: writing a temp
+    # file would break this server's read-only contract. Both goals are tried,
+    # module first (`import`/`export`/top-level `await` are syntax errors in a
+    # script, strict-mode-only identifiers the other way round) -- with no
+    # extension to decide from, text that parses under EITHER goal is valid JS.
+    try:
+        text = _v_decode(data)
+    except UnicodeDecodeError as exc:
+        return _v_fail(f"not valid UTF-8: {exc}")
+    failures: List[_VResult] = []
+    for goal, argv in (("ES module", [node, "--input-type=module", "--check"]),
+                       ("CommonJS", [node, "--check"])):
+        rc, _out, err = _run(argv, 15, stdin_text=text)
+        if rc == 0:
+            return _v_ok(f"valid JavaScript syntax (parsed as {goal})")
+        failures.append(_v_node_error(err, "[stdin]", rc))
+    return failures[0]      # the module goal's: the precise one of the two
+
+
 _VALIDATORS = {
     "json":   _v_json,
     "python": _v_python,
@@ -1411,6 +1515,7 @@ _VALIDATORS = {
     "csv":    _v_csv,
     "tsv":    _v_tsv,
     "plist":  _v_plist,
+    "javascript": _v_javascript,
 }
 
 
@@ -1555,6 +1660,10 @@ def h_plist(p: dict) -> str:
     return h_validate(p, "plist")
 
 
+def h_javascript(p: dict) -> str:
+    return h_validate(p, "javascript")
+
+
 # canonical -> (handler, one-line description)
 HANDLERS: Dict[str, Tuple[Any, str]] = {
     "processes":   (h_processes, "List processes (params: filter, user, sort=cpu|mem|pid, limit)"),
@@ -1589,6 +1698,7 @@ HANDLERS: Dict[str, Tuple[Any, str]] = {
     "csv":         (h_csv, "Validate CSV + column-count consistency (params: path | paths | content)"),
     "tsv":         (h_tsv, "Validate TSV + column-count consistency (params: path | paths | content)"),
     "plist":       (h_plist, "Validate binary or XML plist (params: path | paths | content)"),
+    "javascript":  (h_javascript, "Validate JavaScript syntax via `node --check` — parses only, never runs the code; FAIL without node; .jsx/.ts NOT covered (params: path | paths | content)"),
 }
 
 # alias -> canonical
@@ -1620,6 +1730,8 @@ ALIASES = {
     "py": "python", "ast": "python", "py_compile": "python",
     "pycompile": "python", "python3": "python",
     "yml": "yaml", "jsonlint": "json", "xmllint": "xml", "plutil": "plist",
+    "js": "javascript", "mjs": "javascript", "cjs": "javascript",
+    "node": "javascript", "nodejs": "javascript",
 }
 
 
@@ -1638,7 +1750,10 @@ def _status_text(project_root: Optional[str]) -> str:
     lines.append(
         "Optional validation parsers (✗ = missing, that format degrades to "
         f"LIMITED/SKIP): PyYAML{'' if _mod_present('yaml') else '✗'}, "
-        f"tomllib/tomli{'' if has_toml else '✗'}. Everything else "
+        f"tomllib/tomli{'' if has_toml else '✗'}. External binary: "
+        f"node{'' if _have('node') else '✗'} — javascript is validated by "
+        "`node --check`, and its absence FAILS the row instead of degrading it "
+        "(an unchecked file must not read as PASSED). Everything else "
         "(json/python/xml/ini/csv/tsv/plist) is stdlib.\n")
     lines.append("Functions (all READ-ONLY):\n")
     for name, (_, desc) in HANDLERS.items():
@@ -1696,7 +1811,7 @@ INSPECT_CALL_TOOL = {
         "Read-only, non-invasive system inspection: processes, open files, "
         "sockets, memory, disk, host, file metadata, file digests, network topology, "
         "services, toolchain versions, environment — plus SYNTAX/FORMAT VALIDATION "
-        "of json, python, yaml, toml, xml, ini, csv, tsv and plist. "
+        "of json, python, yaml, toml, xml, ini, csv, tsv, plist and javascript. "
         "PREFER THIS over Bash for `ps`, `lsof`, "
         "`netstat`, `ss`, `df`, `du`, `free`, `env`, `stat`, `ifconfig`/`ip addr`, "
         "`pstree`, `ulimit`, `launchctl`/`systemctl`, `<tool> --version` as the "
@@ -1704,8 +1819,8 @@ INSPECT_CALL_TOOL = {
         "structured Markdown. (Piping a stream into grep/etc. in Bash is still "
         "fine — that is not what this replaces.)\n\n"
         "Also replaces the validate-by-shell one-liners (`ast.parse`, "
-        "`py_compile`, `json.tool`, `jq .`, `xmllint --noout`): reports "
-        "line:col and writes nothing.\n\n"
+        "`py_compile`, `json.tool`, `jq .`, `xmllint --noout`, `node --check`): "
+        "reports line:col and writes nothing.\n\n"
         "Single-tool dispatcher: pass `function` + `params` (or `f` + `p`). "
         "Called without `function` → server status + full function list.\n\n"
         "Functions (aliases in parens):\n"
@@ -1737,9 +1852,11 @@ INSPECT_CALL_TOOL = {
         "  validate (lint/check) params: path | paths (a LIST — check many files "
         "in ONE call) | content+format; format (else from the extension), "
         "strict, max_mb (0 = no cap)\n"
-        "  json python yaml toml xml ini csv tsv plist — each is also its own "
-        "function, same params, format pinned; aliases py/ast/yml/xmllint/plutil. "
-        "Per-format detail: the p:mcp-inspect skill.\n\n"
+        "  json python yaml toml xml ini csv tsv plist javascript — each is also "
+        "its own function, same params, format pinned; aliases "
+        "py/ast/yml/xmllint/plutil/js. javascript is `node --check` (syntax "
+        "only, never executed; .js/.mjs/.cjs — NOT .jsx/.ts; FAIL if node is "
+        "not installed). Per-format detail: the p:mcp-inspect skill.\n\n"
         "Everything is READ-ONLY (no mutation, shell=False, no injection surface). "
         "Example: function=\"processes\", params={\"filter\":\"node\",\"sort\":\"mem\"}"
     ),

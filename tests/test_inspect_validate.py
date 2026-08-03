@@ -495,6 +495,10 @@ def run(opts=None):
             "json": "thin wrapper over `validate`", "python": "ditto",
             "yaml": "ditto", "toml": "ditto", "xml": "ditto", "ini": "ditto",
             "csv": "ditto", "tsv": "ditto", "plist": "ditto",
+            "javascript": "thin wrapper over `validate`, and the only one that "
+                          "needs an external binary: without `node` it FAILs by "
+                          "design, and this suite cannot assume node is "
+                          "installed",
         }
         for fn, params in gate:
             err, t = cli.call_tool(fn, params)

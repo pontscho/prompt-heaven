@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Suite for ClaudeCode/hooks/mcp-first-guard.py, the PreToolUse Bash guard
-(groups A-M).
+(groups A-N).
 
 The case COUNT is deliberately absent from this docstring: it is written down
 once, in the SUITES table in tests/run.py, which checks it against the run. A
@@ -41,6 +41,11 @@ Coverage by group:
      Also the MAX_DEPTH budget the fold spends, the invariants that must survive
      inside a folded payload, and the false-positive probes (mixed case, a file
      literally named BASH, `VAR=val` prefixes, `$BASH`)
+  N  `node --check` / `node -c` -> inspect_call(function=javascript), including
+     every wrapper form and the short-cluster reading -- plus the probes that
+     must stay ALLOW (`node file.js`, `-e`, `-p`, `-pc`, `--version`, npm/npx,
+     a `--check` past the script operand). The rule is GATED on node being
+     installed, so on a host without node the DENY rows assert the gate instead
 
 The hook is never imported in the default run -- only `--whitebox` imports it,
 and then only via a loader that cannot write __pycache__ into the repo.
@@ -54,6 +59,7 @@ Exit code 0 iff every non-informational case passes.
 
 import json
 import os
+import shutil
 import sys
 
 sys.dont_write_bytecode = True
@@ -789,6 +795,96 @@ CASES += [
               "this group closes without being blocked by it"),
 ]
 
+# ---------------------------------------------------------------------------
+# `node --check` -> inspect_call(function=javascript).
+#
+# The MODE has an MCP equivalent, the BINARY does not: `node file.js` RUNS the
+# file and no tool here does that, so only `--check` / `-c` is redirected.  The
+# rule is additionally gated on node being INSTALLED -- without node the steer
+# would point at a validator that FAILs for the same missing binary.
+#
+# That gate makes the expectation environment-dependent, which is why NODE_PRESENT
+# is computed here and the DENY cases flip to ALLOW when node is absent: the suite
+# then asserts the OTHER half of the same rule (the guard stays out of the way)
+# instead of failing for a reason that is not a defect.  The false-positive probes
+# are unconditional -- `node file.js` must be allowed either way.
+# ---------------------------------------------------------------------------
+
+NODE_PRESENT = shutil.which("node") is not None
+NODE_EXPECT = DENY if NODE_PRESENT else ALLOW
+NODE_MUST = [only("node --check"), "inspect_call(function=javascript"] \
+    if NODE_PRESENT else []
+GATE = ("node is installed, so the rule fires"
+        if NODE_PRESENT else
+        "node is NOT installed on this host: the rule is gated off, so the "
+        "guard must stay out of the way")
+
+N_GROUP = "N. `node --check` -> inspect_call(javascript), gated on node"
+CASES += [
+    # -- the syntax-check form (DENY only when node exists) ------------------
+    case(N_GROUP, "node --check f.js", "node --check f.js", NODE_EXPECT,
+         must=NODE_MUST, note=GATE),
+    case(N_GROUP, "node -c f.js (short spelling)", "node -c f.js", NODE_EXPECT,
+         must=NODE_MUST, note=GATE),
+    case(N_GROUP, "node --check on stdin (no file)", "node --check", NODE_EXPECT,
+         must=NODE_MUST, note="the mode, not the operand, is what is redirected"),
+    case(N_GROUP, "flag before --check", "node --no-warnings --check f.js",
+         NODE_EXPECT, must=NODE_MUST),
+    case(N_GROUP, "cluster `-ce`", "node -ce 'x'", NODE_EXPECT, must=NODE_MUST,
+         note="letterwise: the `c` is read before `e` ends the cluster"),
+    case(N_GROUP, "absolute path `/usr/local/bin/node --check f.js`",
+         "/usr/local/bin/node --check f.js", NODE_EXPECT, must=NODE_MUST,
+         note="the basename is what is matched"),
+    case(N_GROUP, "ALL-CAPS `NODE --check f.js`", "NODE --check f.js", NODE_EXPECT,
+         must=NODE_MUST,
+         note="NODE resolves to the same inode on a case-insensitive filesystem, "
+              "so has_opinion() folds it like BASH/CAT"),
+    case(N_GROUP, "inside a `bash -c` payload", "bash -c 'node --check f.js'",
+         NODE_EXPECT, must=NODE_MUST),
+    case(N_GROUP, "inside a substitution", "echo $(node --check f.js)",
+         NODE_EXPECT, must=NODE_MUST),
+    case(N_GROUP, "sudo node --check f.js", "sudo node --check f.js", NODE_EXPECT,
+         must=NODE_MUST, note="wrapper peeled first, like every other rule"),
+    case(N_GROUP, "with a blocked sibling", "node --check f.js && ls", DENY,
+         must=[only("ls", "node --check")] if NODE_PRESENT else [only("ls")],
+         note="two labels coexist in one reason, sorted — and `ls` denies "
+              "regardless of the node gate"),
+    case(N_GROUP, "dedup: two check runs named once",
+         "node --check a.js; node -c b.js", NODE_EXPECT, must=NODE_MUST),
+    # -- false-positive probes: unconditional, node gate or not --------------
+    case(N_GROUP, "`node script.js` RUNS the file -> ALLOW", "node script.js",
+         ALLOW, note="execution has no MCP equivalent; only the check mode does"),
+    case(N_GROUP, "`node --version` -> ALLOW", "node --version", ALLOW),
+    case(N_GROUP, "`node -v` -> ALLOW", "node -v", ALLOW,
+         note="`v` is not `c`, and it takes no argument"),
+    case(N_GROUP, "`node -e 'code'` -> ALLOW", "node -e 'console.log(1)'", ALLOW,
+         note="execution, deliberately out of scope"),
+    case(N_GROUP, "`node -p 'expr'` -> ALLOW", "node -p '1+1'", ALLOW),
+    case(N_GROUP, "`node -pc` is `-p c` -> ALLOW", "node -pc", ALLOW,
+         note="an argument-taking letter ends the cluster, so this `c` is `-p`'s "
+              "ARGUMENT — the mirror of python's `-Bcm py_compile` probe"),
+    case(N_GROUP, "`node` alone (REPL) -> ALLOW", "node", ALLOW),
+    case(N_GROUP, "`npm run build` -> ALLOW", "npm run build", ALLOW,
+         note="npm/npx are not node; the rule reads argv[0]"),
+    case(N_GROUP, "`npx tsc --check` -> ALLOW", "npx tsc --check", ALLOW),
+    case(N_GROUP, "`--check` AFTER the script is the SCRIPT's",
+         "node tool.js --check", ALLOW,
+         note="node's option region ends at the script operand — the mirror of "
+              "`python3 tool.py -m py_compile`"),
+    case(N_GROUP, "`--` ends the option region", "node -- --check", ALLOW),
+    case(N_GROUP, "`--check` as a quoted argument to echo",
+         "echo 'node --check f.js'", ALLOW,
+         note="a quoted argument is not a command — `echo` is the primary"),
+    case(N_GROUP, "node --check inside a heredoc BODY stays data",
+         "git commit -F - <<'EOF'\nnode --check f.js\nEOF", ALLOW,
+         note="heredoc bodies are DATA, like every other rule"),
+    case(N_GROUP, "downstream node --check stage not inspected",
+         "foo | node --check f.js", ALLOW,
+         note="only stage 0 is the primary command — same asymmetry as py_compile"),
+    case(N_GROUP, "a file literally named `--check` passed to a runner",
+         "git show node", ALLOW, note="an operand is not a command name"),
+]
+
 
 # ---------------------------------------------------------------------------
 # execution
@@ -870,13 +966,27 @@ def whitebox():
               "ASH -c 'ls'", "BASH -lc 'cat f'", "/bin/BASH -c 'cat f'",
               "Bash -c 'cat f'", "bAsH -c 'cat f'", "BASH=/bin/bash echo hi",
               "$BASH -c 'cat f'", "BASH script.sh", "cat BASH", "CAT f",
-              "PYTHON3 -m compileall ."]:
+              "PYTHON3 -m compileall .", "NODE --check f.js", "Node --check f.js"]:
         name, argv = g.primary(s)
         print(f"  {s!r:30s} -> name={name!r} opinion={g.has_opinion(name or '')} "
               f"payload={g.dash_c_payload(argv)!r}")
-    print("  fold domain: %d BLOCKED + %d SHELL_C + PY_INTERP_RE"
+    print("  fold domain: %d BLOCKED + %d SHELL_C + PY_INTERP_RE + node"
           % (len(g.BLOCKED), len(g.SHELL_C)))
     print("  SHELL_C = %r" % sorted(g.SHELL_C))
+    # `node --check` is a MODE, so a DENY reason cannot show whether the flag was
+    # read letterwise or the operand boundary respected. node_check_mode()'s own
+    # return value is the only thing that does -- and NODE_PRESENT states which
+    # half of the gated rule this host exercised.
+    print("--- white-box: node_check_mode() (NODE_PRESENT=%s) ---"
+          % g.NODE_PRESENT)
+    for s in ["node --check f.js", "node -c f.js", "node --check",
+              "node --no-warnings --check f.js", "node -ce 'x'", "node -pc",
+              "node -p '1+1'", "node -e 'x'", "node -v", "node --version",
+              "node script.js", "node tool.js --check", "node -- --check",
+              "node", "npm run build", "npx tsc --check", "NODE --check f.js"]:
+        name, argv = g.primary(s)
+        print(f"  {s!r:34s} -> name={name!r} check_mode={g.node_check_mode(argv)} "
+              f"hits={g.scan(s)}")
 
 
 def run(opts=None):

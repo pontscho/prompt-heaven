@@ -16,7 +16,10 @@ Usage:
 Format is auto-detected from the extension; override with --format. Use '-' as a
 path to read from stdin (then --format is required).
 
-Coverage with the Python 3.9 standard library ONLY:
+Coverage. No pip dependencies: every format below is validated with the Python 3.9
+standard library alone, EXCEPT javascript -- nothing in the stdlib parses
+JavaScript, so that one runs the external `node` BINARY via `subprocess` (stdlib
+itself; the binary is not, and its absence FAILS rather than skips).
     json   -> json                full parse
     python -> compile()           syntax + symtable, IN MEMORY (never py_compile,
                                   which would write __pycache__/*.pyc)
@@ -29,6 +32,10 @@ Coverage with the Python 3.9 standard library ONLY:
     yaml   -> PyYAML if importable (full); else a stdlib STRUCTURAL PRE-CHECK
               (UTF-8, no tab indentation, balanced flow collections) that is
               explicitly NOT a full parse -- install PyYAML for real validation.
+    javascript -> `node --check`  SYNTAX ONLY, and the code is never executed.
+                                  .js/.mjs/.cjs -- NOT .jsx/.ts/.tsx (node parses
+                                  neither JSX nor TypeScript). FAILED, not
+                                  skipped, when `node` is not in PATH.
 
 Output: one line per file. Exit code 0 when nothing FAILED; non-zero if any file
 FAILED (and, with --strict, if any file was LIMITED or SKIPPED). Usable as a
@@ -91,10 +98,16 @@ EXT_MAP = {
 	".csv": "csv",
 	".tsv": "tsv",
 	".py": "python", ".pyi": "python",
+	# .js/.mjs/.cjs ONLY. `node --check` parses neither JSX nor TypeScript, so
+	# .jsx/.ts/.tsx/.mts/.cts stay unmapped on purpose: an honest "unknown format"
+	# SKIP beats a bogus FAIL on a file that is perfectly fine.
+	".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
 }
 
+# Same set the mcp-inspect server exposes, so `--list-formats` and that server's
+# function list cannot drift apart.
 KNOWN_FORMATS = ["json", "python", "yaml", "toml", "xml", "ini", "csv", "tsv",
-	"plist"]
+	"plist", "javascript"]
 
 
 def detect_format(path: str) -> Optional[str]:
@@ -401,6 +414,116 @@ def _yaml_precheck(text: str) -> Result:
 		"install PyYAML for real YAML validation" % ", ".join(checks))
 
 
+# --- JavaScript: the one format with no stdlib parser (external `node`) -------
+
+def _run_node(argv: List[str], stdin_text: Optional[str] = None):
+	"""(returncode, stderr) for a fixed argv. Never raises. shell=False.
+
+	`stdin=` / `input=` is always passed explicitly: the two are mutually
+	exclusive in subprocess.run, so the choice is spelled out per branch rather
+	than assembled as kwargs.
+	"""
+	import subprocess
+
+	try:
+		if stdin_text is None:
+			r = subprocess.run(argv, capture_output=True, text=True, timeout=15,
+				stdin=subprocess.DEVNULL)
+		else:
+			r = subprocess.run(argv, capture_output=True, text=True, timeout=15,
+				input=stdin_text)
+		return r.returncode, r.stderr or ""
+	except FileNotFoundError:
+		return 127, "%s: not found in PATH" % argv[0]
+	except subprocess.TimeoutExpired:
+		return 124, "%s: timed out after 15s" % argv[0]
+	except OSError as e:
+		return 1, "%s: %s" % (argv[0], e)
+
+
+def _node_error(err: str, target: str, rc: int) -> Result:
+	"""node's stderr -> a FAIL result. Its stack trace is dropped, not reported.
+
+	node prints `<file>:<line>`, the offending source line, a caret line, then
+	`SyntaxError: ...` and eight frames of its own loader. Only the position and
+	the one-line message say anything about the validated file.
+	"""
+	import re
+
+	if rc == 127:  # node vanished between which() and the spawn
+		return fail(" ".join(err.split()) or "node: not found in PATH")
+	if rc == 124:  # timed out, so nothing was actually checked
+		return limited(" ".join(err.split()) or "node --check timed out")
+	lines = err.splitlines()
+	line = col = None
+	# matched on the basename so a realpath'd target still lands, and anchored so
+	# a `(node:123) Warning:` preamble cannot be mistaken for the header
+	head = re.compile(r"^.*" + re.escape(os.path.basename(target)) + r":(\d+)$")
+	for i, ln in enumerate(lines):
+		m = head.match(ln)
+		if not m:
+			continue
+		line = int(m.group(1))
+		for cand in lines[i + 1:i + 4]:
+			if "^" in cand and not cand.strip("^ "):  # spaces + carets only
+				col = cand.index("^") + 1
+				break
+		break
+	msg = ""
+	for ln in lines:
+		if re.match(r"^\w*Error\b", ln):  # SyntaxError, and nothing indented
+			msg = " ".join(ln.split())
+			break
+	if not msg:
+		msg = next((" ".join(ln.split()) for ln in lines if ln.strip()),
+			"node --check failed (rc=%d)" % rc)
+	return fail(msg, line=line, col=col)
+
+
+def v_javascript(data: bytes, path: Optional[str] = None) -> Result:
+	"""`node --check` -- a PARSE, and never an execution.
+
+	The one validator that shells out, because no stdlib module parses
+	JavaScript. `--check` only: `node -e`/`--eval`/`-p`, or requiring/importing
+	the file, would RUN it, so none of them appear here -- and no temp file is
+	written for stdin input either.
+
+	A missing `node` is a FAIL, not the SKIP a missing tomllib/PyYAML gets. The
+	asymmetry is deliberate: those are optional PARSERS whose absence is a
+	property of this interpreter, and a SKIP still exits 0. Here the caller asked
+	whether a JS file parses and got no answer at all, so a skip would read as
+	success. The mcp-inspect server draws the same line for the same reason.
+	"""
+	import shutil
+
+	node = shutil.which("node")
+	if node is None:
+		return fail("no `node` in PATH (install Node.js to validate JavaScript)")
+	if path is not None:
+		# node decides script-vs-module ITSELF -- extension, nearest package.json
+		# "type", and on newer node its own syntax detection. Not re-implemented.
+		target = os.path.abspath(path)
+		rc, err = _run_node([node, "--check", target])
+		if rc == 0:
+			return ok("valid JavaScript syntax (node --check)")
+		return _node_error(err, target, rc)
+	# stdin, so there is no extension to decide from: try the module goal and
+	# then the script goal -- text that parses under EITHER is valid JavaScript.
+	try:
+		text = decode_text(data)
+	except UnicodeDecodeError as e:
+		return fail("not valid UTF-8: %s" % e)
+	first = None
+	for goal, argv in (("ES module", [node, "--input-type=module", "--check"]),
+			("CommonJS", [node, "--check"])):
+		rc, err = _run_node(argv, text)
+		if rc == 0:
+			return ok("valid JavaScript syntax (parsed as %s)" % goal)
+		if first is None:
+			first = _node_error(err, "[stdin]", rc)  # the module goal's: precise
+	return first
+
+
 VALIDATORS = {
 	"json": v_json,
 	"python": v_python,
@@ -411,6 +534,7 @@ VALIDATORS = {
 	"plist": v_plist,
 	"toml": v_toml,
 	"yaml": v_yaml,
+	"javascript": v_javascript,
 }
 
 
@@ -435,6 +559,11 @@ def validate_one(path: str, fmt: Optional[str]) -> Result:
 		data = read_bytes(path)
 	except OSError as e:
 		return fail("cannot read: %s" % e)
+	if resolved == "javascript":
+		# The only validator that needs the PATH and not just the bytes: node
+		# reads the extension and the nearest package.json to pick script vs
+		# module. Stdin ('-') has neither, and node --check reads stdin too.
+		return v_javascript(data, None if path == "-" else path)
 	return VALIDATORS[resolved](data)
 
 

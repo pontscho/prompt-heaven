@@ -12,10 +12,14 @@ allowed even as the primary command (see ALLOW_FLAGS: `tail -f`).
 
 Specific INVOCATIONS are denied too, even when the binary itself is innocent:
 `python3 -m py_compile` writes __pycache__/*.pyc into the tree as a side effect
-of a mere syntax check, and `python3 -m compileall` does exactly that across a
-whole directory tree (see BLOCKED_FORMS).  Deliberately NOT generalised to
-`python3 -c` or `python3 -m json.tool`: those are read-only and have far too
-much legitimate use to pay the false-positive price.
+of a mere syntax check, `python3 -m compileall` does exactly that across a
+whole directory tree, and `node --check` / `node -c` is a syntax check with an
+exact MCP equivalent (see BLOCKED_FORMS).  Deliberately NOT generalised to
+`python3 -c`, `python3 -m json.tool` or a plain `node file.js`: the first two are
+read-only and have far too much legitimate use to pay the false-positive price,
+and the third RUNS the file, which no MCP tool here does.  The node rule also
+fires ONLY when `node` is installed — with no node there is nothing to redirect
+to either, since that validator FAILs without it.
 
 WRAPPERS are peeled before the check, because the primary command can hide one
 layer down:
@@ -45,6 +49,7 @@ fails OPEN on any error, so it can never brick the Bash tool.
 import json
 import os
 import re
+import shutil
 import sys
 
 # basename -> suggested MCP replacement
@@ -105,6 +110,12 @@ BLOCKED_FORMS = {
         "__pycache__/*.pyc across an ENTIRE directory tree — the py_compile side "
         "effect, only broader"
     ),
+    "node --check": (
+        "inspect_call(function=javascript, params={path: <file>}), which runs the "
+        "very same `node --check` and reports status + line:col (a LIST of files "
+        "in one call via params.paths). Only the SYNTAX-CHECK mode is redirected: "
+        "`node file.js`, `node -e`, `npm`/`npx` and `node --version` are untouched"
+    ),
 }
 
 # `python -m MODULE` values that map onto a BLOCKED_FORMS label. Every entry
@@ -135,6 +146,16 @@ PY_ARG_LETTERS = "cmWXQ"
 
 # python long options that consume the NEXT word
 PY_ARG_OPTS = {"--check-hash-based-pycs"}
+
+# node short options that take an ARGUMENT (`-e CODE`, `-p EXPR`, `-r MODULE`).
+# Read letterwise like python's, so `-pc` is `-p c` and carries no `-c`.
+NODE_ARG_LETTERS = "epr"
+
+# The `node --check` rule fires ONLY when node is installed. Without it there is
+# no working inspect_call(function=javascript) to steer to either — that
+# validator FAILs with no node — so a deny would trade one dead end for another.
+# Resolved once per process: this hook is spawned per Bash call and exits.
+NODE_PRESENT = shutil.which("node") is not None
 
 # longest-first, so `&&` is consumed before the bare `&` (and `||` before `|`)
 STMT_SEPS = ["&&", "||", ";", "\n", "&"]
@@ -237,28 +258,31 @@ def has_opinion(name):
     """True if this guard treats the lower-case `name` specially AT ALL.
 
     The one place the guard's whole vocabulary is stated, and the sole gate on
-    the ALL-CAPS fold in primary(). Three sets, one per thing the guard does
-    with a command name:
+    the ALL-CAPS fold in primary(). Four things the guard does with a command
+    name:
 
         BLOCKED       the name is denied outright as a primary command
         SHELL_C       the name's `-c STRING` payload is unwrapped and re-scanned
         PY_INTERP_RE  the name's `-m MODULE` is checked against BLOCKED_MODULES
+        node          its `--check`/`-c` MODE is denied (node_check_mode)
 
-    Written as a predicate over all three rather than as a chain of special
+    Written as a predicate over all four rather than as a chain of special
     cases, because that is what makes the fold's safety argument a single
     sentence: folding can only ever reach a name the guard was already going to
     act on, so it cannot change the meaning of anything else. Measured on this
     host (macOS, 15 PATH dirs, 3 of them non-existent): every PATH dir was
     enumerated and NOT ONE ships a file whose name is the ALL-CAPS spelling of
-    any name in these three sets, so nothing real is shadowed. Of the shells,
+    any of these names, so nothing real is shadowed. Of the shells,
     BASH/SH/ZSH/DASH/KSH each resolve to the SAME inode as their lower-case
     spelling (`which("BASH") -> /usr/local/bin/BASH`), while `mksh` and `ash`
     are not installed at all -- folding those two is inert today and correct the
-    day someone installs them.
+    day someone installs them. `NODE` resolves to that same inode too, so
+    `NODE --check f.js` really is a syntax check and folds like the rest.
     """
     return (name in BLOCKED
             or name in SHELL_C
-            or bool(PY_INTERP_RE.match(name)))
+            or bool(PY_INTERP_RE.match(name))
+            or name == "node")
 
 
 def primary(stage):
@@ -369,6 +393,32 @@ def python_module(argv):
             break  # an argument-taking letter ends the cluster either way
         i += step
     return None
+
+
+def node_check_mode(argv):
+    """True if this node argv selects `--check` / `-c`, the syntax-check mode.
+
+    The MODE is what has an MCP equivalent, not the binary: `node file.js` RUNS
+    the file and must stay allowed. Options are read letterwise inside short
+    clusters, the same rule python_module() follows and for the same reason —
+    `-c` bundles (`node -ce 'x'`), while an argument-taking letter ends the
+    cluster, so the `c` of `-pc` is `-p`'s ARGUMENT and names no check.
+    Scanning stops at the first operand, because past the script name a `--check`
+    belongs to the SCRIPT (`node tool.js --check` is not a node syntax check).
+    """
+    for tok in argv:
+        if tok == "--" or not tok.startswith("-") or tok == "-":
+            break  # operand (or the end-of-options marker): node's region is over
+        if tok.startswith("--"):
+            if tok.split("=", 1)[0] == "--check":
+                return True
+            continue
+        for letter in tok[1:]:
+            if letter == "c":
+                return True
+            if letter in NODE_ARG_LETTERS:
+                break  # this letter's argument follows; the cluster ends here
+    return False
 
 
 # The lookarounds keep a HERESTRING (`cmd <<<WORD`) from being read as a
@@ -499,6 +549,8 @@ def scan(cmd, depth=0):
             label = BLOCKED_MODULES.get(python_module(argv))
             if label:
                 hits.append(label)
+        if name == "node" and NODE_PRESENT and node_check_mode(argv):
+            hits.append("node --check")
     if depth < MAX_DEPTH:
         for text in substitutions(cmd) + [p for p in payloads if p]:
             hits += scan(text, depth + 1)
@@ -523,7 +575,7 @@ def main():
         "MCP-first routing violation: "
         + ", ".join(f"`{h}`" for h in uniq)
         + " is forbidden as a primary file-search / listing / read / dir-creation /"
-        " inspection / tree-mutating command via Bash. Use instead: "
+        " inspection / syntax-check / tree-mutating command via Bash. Use instead: "
         + mapping
         + ". (Piping INTO these to filter another command's stdout is allowed; this "
         "blocks them only as the primary file operation. Hiding one in a subshell, "

@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Validate that a file is FORMALLY well-formed (parses) for its format — JSON, Python, YAML, TOML, XML, INI/.cfg, CSV/TSV, plist. Use when asked "is this valid JSON/YAML/Python", to check a config/data file or script before committing or deploying, to verify a file you just wrote or generated, or as a pre-commit/CI format gate. Bundles a Python 3.9 stdlib-first validator at scripts/validate.py for shell and CI use; inside a Claude session prefer the pre-approved MCP tool inspect_call (function validate/json/python/yaml/...), which costs no permission prompt. This is FORMAT/structural validation (does it parse), NOT schema validation (does it match an expected shape).
+description: Validate that a file is FORMALLY well-formed (parses) for its format — JSON, Python, YAML, TOML, XML, INI/.cfg, CSV/TSV, plist, JavaScript. Use when asked "is this valid JSON/YAML/Python/JavaScript", to check a config/data file or script before committing or deploying, to verify a file you just wrote or generated, or as a pre-commit/CI format gate. Bundles a Python 3.9 stdlib-first validator at scripts/validate.py for shell and CI use (JavaScript additionally needs the node binary — syntax check only, never executed); inside a Claude session prefer the pre-approved MCP tool inspect_call (function validate/json/python/yaml/...), which costs no permission prompt. This is FORMAT/structural validation (does it parse), NOT schema validation (does it match an expected shape).
 ---
 
 # Verify — structural/format validation for data files and Python sources
@@ -13,25 +13,29 @@ format. For schema checks, see *When NOT to use* below.
 
 ## Quick start — if you are an agent with MCP access, THIS is the way
 
-All nine formats are exposed by the pre-approved `mcp-inspect` server: no
-permission prompt, a Markdown table back, and a batch of files in one call.
+All ten formats are exposed by the pre-approved `mcp-inspect` server: no
+permission prompt, a Markdown table back, and a batch of files in one call. Both
+paths cover the same ten — the tenth, JavaScript, needs the `node` **binary** in
+PATH (`node --check`, syntax only) and FAILS rather than skips without it.
 
 ```
 inspect_call {function: "validate", params: {path: "settings.json"}}          # auto-detect
 inspect_call {function: "python",   params: {path: "hooks/guard.py"}}
 inspect_call {function: "validate", params: {paths: ["a.json", "b.yaml"]}}    # batch: ONE call
 inspect_call {function: "json",     params: {content: "{\"a\":1}"}}           # inline, no file
+inspect_call {function: "javascript", params: {path: "web/app.mjs"}}         # node --check
 ```
 
 Reach for Bash **only** when MCP is genuinely unavailable. Never validate by
 shelling out to `python3 -c "import ast; ast.parse(...)"`, `python3 -m py_compile`,
-`python3 -m json.tool`, `jq .` or `xmllint --noout` — the first two are weaker or
-dirtier than what this skill does (see the Python row below), and all of them cost
-a prompt. See the `p:mcp-inspect` skill for the full function reference.
+`python3 -m json.tool`, `jq .`, `xmllint --noout` or `node --check` — the first two
+are weaker or dirtier than what this skill does (see the Python row below), and all
+of them cost a prompt (a guard denies several outright). See the `p:mcp-inspect`
+skill for the full function reference.
 
 ## Quick start — shell and CI
 
-The bundled script covers the same nine formats for pre-commit hooks, `make`
+The bundled script covers the same ten formats for pre-commit hooks, `make`
 targets and humans at a terminal:
 
 ```bash
@@ -65,13 +69,17 @@ pre-commit / CI gate.
 | Status    | Meaning |
 |-----------|---------|
 | `OK`      | Parses cleanly — formally valid for its format. |
-| `FAIL`    | Does not parse. Message + `line:col` of the first error. |
-| `LIMITED` | YAML checked by the stdlib pre-check only (no PyYAML). Either a real defect was found (with a line) or only the conservative checks passed — **not a full parse.** |
+| `FAIL`    | Does not parse. Message + `line:col` of the first error. **Also**: JavaScript was asked for and `node` is not in PATH. |
+| `LIMITED` | YAML checked by the stdlib pre-check only (no PyYAML), or a `node --check` that timed out. Either a real defect was found (with a line) or only the conservative checks passed — **not a full parse.** |
 | `SKIP`    | Could not validate: unknown extension (pass `--format`), or no TOML parser present. |
 
-## Coverage with the Python 3.9 standard library ONLY
+A missing TOML/YAML parser degrades (`SKIP`/`LIMITED`, exit 0 without `--strict`);
+a missing `node` **fails**. Deliberate: those two are optional *parsers*, whereas a
+skipped `.js` would let an unchecked file pass a gate.
 
-| Format     | stdlib module        | Completeness |
+## Coverage — stdlib only, plus the external `node` binary for JavaScript
+
+| Format     | module / tool        | Completeness |
 |------------|----------------------|--------------|
 | JSON       | `json`               | **Full** parse, with `line:col` on error. |
 | Python     | `compile()`          | **Syntax + symtable**, compiled **in memory**. Two deliberate choices: it is *stronger* than `ast.parse` (the codegen pass also rejects `break` outside a loop, `return` outside a function, module-level `nonlocal`), and it never writes anything — `python3 -m py_compile` would leave a `__pycache__/*.pyc` behind. `SyntaxWarning`s (invalid escape sequence, `assert (x, y)`, `is` with a literal) are reported alongside an `OK`. Grammar is that of the *running* interpreter, which the message states. |
@@ -81,6 +89,7 @@ pre-commit / CI gate.
 | plist      | `plistlib`           | **Full** parse — both binary and XML plist. |
 | TOML       | `tomllib` (3.11+) or `tomli` | **Full** parse when a parser is importable; otherwise **SKIPPED** — there is no TOML parser in the 3.9/3.10 stdlib (`tomllib` landed in 3.11). `pip install tomli` to validate TOML on older interpreters. |
 | YAML       | PyYAML if importable | **Full** parse via `yaml.safe_load_all` when PyYAML is present. **PyYAML is NOT stdlib.** Without it, the script falls back to a conservative stdlib **pre-check** (see below). |
+| JavaScript | `node --check` (external binary) | **Syntax only** — not type checking, not linting. The code is **never executed**: `--check` parses and stops, and `node -e`/`-p`/require are never used, nor is a temp file ever written. `.js`/`.mjs`/`.cjs` auto-detect; `.jsx`/`.ts`/`.tsx`/`.mts`/`.cts` deliberately do **not** (node parses neither JSX nor TypeScript, so they would FAIL bogusly). With a path, node picks script-vs-module itself (extension, nearest `package.json` `"type"`, its own detection on Node ≥22); on stdin it is tried as an ES module and then as CommonJS. **No `node` in PATH → `FAIL`.** |
 
 ### The YAML caveat — read this
 
@@ -126,6 +135,11 @@ entity-expansion attacks. For Python, prefer `compile()` over
 `python3 -m py_compile`: py_compile writes a `.pyc` into `__pycache__/`, and
 `ast.parse` alone accepts code that cannot actually run.
 
+JavaScript has no stdlib equivalent at all — by hand it is `node --check file.js`
+(exit 0 = parses). Never `node -e`/`-p` or a require: those would *run* the file.
+Inside a session use `inspect_call {function: "javascript"}` instead; a guard denies
+the Bash form when node is installed.
+
 ## When NOT to use this skill
 
 - **Schema / shape validation** ("does this JSON have the required fields", "does
@@ -138,10 +152,12 @@ entity-expansion attacks. For Python, prefer `compile()` over
 
 ## Notes
 
-- `--list-formats` prints the supported formats.
+- `--list-formats` prints the supported formats — the same ten `inspect_call`
+  exposes.
 - The script is dependency-free on JSON/Python/XML/INI/CSV/plist. TOML needs a
-  parser (stdlib on 3.11+); YAML is best with PyYAML.
-- `.py` and `.pyi` auto-detect as Python; force it elsewhere with
-  `--format python`.
+  parser (stdlib on 3.11+); YAML is best with PyYAML; JavaScript needs the `node`
+  binary. No pip dependency in any case.
+- `.py` and `.pyi` auto-detect as Python, `.js`/`.mjs`/`.cjs` as JavaScript; force
+  a format elsewhere with `--format python` / `--format javascript`.
 - Tabs, not spaces, in `scripts/validate.py` (matches the repo's helper-script
   convention).

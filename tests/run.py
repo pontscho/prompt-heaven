@@ -9,7 +9,7 @@ run):
                                                       family (A-O)
   mcp_first_guard    tests/test_mcp_first_guard.py    ClaudeCode/hooks/
                                                       mcp-first-guard.py PreToolUse
-                                                      Bash guard (A-M)
+                                                      Bash guard (A-N)
   purity_lsp         tests/test_purity_lsp.py         purity_call semantic
                                                       navigation vs the retired
                                                       mcp-clangd / mcp-luals
@@ -203,7 +203,7 @@ SUITES = [
     ("inspect_validate", run_inspect_validate,
      "mcp-inspect VALIDATION family", 119),
     ("mcp_first_guard", run_mcp_first_guard,
-     "mcp-first-guard PreToolUse Bash hook", 308),
+     "mcp-first-guard PreToolUse Bash hook", 335),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 152),
     ("mcp_git_params", run_mcp_git_params,

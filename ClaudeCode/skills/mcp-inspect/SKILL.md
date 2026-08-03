@@ -5,15 +5,16 @@ description: >-
   `netstat`, `ss`, `df`, `du`, `free`, `env`, `stat`, `ifconfig`/`ip addr`, `pstree`,
   `ulimit`, `launchctl`/`systemctl`, `<tool> --version`, `shasum`/`md5sum` — and every
   "is this file valid" one-liner (`python3 -c "import ast; ast.parse(...)"`,
-  `python3 -m py_compile`, `python3 -m json.tool`, `jq .`, `xmllint --noout`) — are
+  `python3 -m py_compile`, `python3 -m json.tool`, `jq .`, `xmllint --noout`,
+  `node --check`) — are
   DEPRECATED as primary Bash commands. Use `inspect_call` instead: it is pre-approved
   (no permission prompt), read-only, shell=False, and returns structured Markdown.
   Full API reference for the mcp-inspect MCP server. The server exposes ONE tool in
-  tools/list: `inspect_call` (universal dispatcher). All 32 functions are invoked
+  tools/list: `inspect_call` (universal dispatcher). All 33 functions are invoked
   through it. Called with no `function`, it returns server status + the live function
   list. Covers system/process/network inspection, file metadata, file digests, and
-  FORMAL well-formedness validation of json, python, yaml, toml, xml, ini, csv, tsv
-  and plist.
+  FORMAL well-formedness validation of json, python, yaml, toml, xml, ini, csv, tsv,
+  plist and javascript.
 triggers:
   - mcp-inspect
   - inspect_call
@@ -36,6 +37,8 @@ triggers:
   - py_compile
   - json.tool
   - xmllint
+  - node --check
+  - is this valid JavaScript
 ---
 
 # mcp-inspect — read-only inspection + format validation
@@ -43,11 +46,14 @@ triggers:
 Two capability families behind **one** MCP tool:
 
 1. **System inspection** — live process/network/disk/host state, file metadata, digests.
-2. **Validation** — does a file *parse* for its format (9 formats, Python included).
+2. **Validation** — does a file *parse* for its format (10 formats, Python and
+   JavaScript included).
 
 Everything is READ-ONLY: no mutation, `shell=False`, fixed argv per function, no way
 to pass a raw shell string, numeric params int-validated. There is no injection
-surface and nothing on disk is ever written or touched.
+surface and nothing on disk is ever written or touched. JavaScript is the one format
+validated by a subprocess (`node --check`), and `--check` **parses only** — never
+`node -e`/`-p`, never a require/import of the file, so validating a file cannot run it.
 
 ## The rule
 
@@ -78,6 +84,7 @@ If you are about to type any of these as the **primary** Bash command, STOP and 
 | `python3 -m py_compile f.py` | `inspect_call {function:"python", params:{path:"f.py"}}` |
 | `python3 -m json.tool f.json`, `jq . f.json` | `inspect_call {function:"json", params:{path:"f.json"}}` |
 | `xmllint --noout f.xml` | `inspect_call {function:"xml", params:{path:"f.xml"}}` |
+| `node --check f.js` | `inspect_call {function:"javascript", params:{path:"f.js"}}` |
 | "is this YAML valid?" | `inspect_call {function:"yaml", params:{path:"f.yaml"}}` |
 
 **Still fine in Bash:** piping a stream into a filter (`python3 x.py | grep foo`) — the
@@ -103,7 +110,7 @@ function, missing binary). Unknown/typo'd params are **silently ignored** — th
 accepted-params table on this server, so `{pdi: 123}` behaves like `{}`. Re-read the
 signature if a filter seems to have had no effect.
 
-## Function index (32)
+## Function index (33)
 
 **Processes / network**
 `processes` (ps, proc, procs) · `process` · `ports` (netstat, ss, listening, port) ·
@@ -125,7 +132,8 @@ daemons) · `interfaces` (ifconfig, ip, interface, nics, addr) ·
 **Validation**
 `validate` (lint, check, verify, syntax, parse, wellformed) · `json` (jsonlint) ·
 `python` (py, ast, py_compile, pycompile, python3) · `yaml` (yml) · `toml` ·
-`xml` (xmllint) · `ini` · `csv` · `tsv` · `plist` (plutil)
+`xml` (xmllint) · `ini` · `csv` · `tsv` · `plist` (plutil) ·
+`javascript` (js, mjs, cjs, node, nodejs)
 
 ---
 
@@ -147,10 +155,14 @@ params:{content: "{\"a\":1}", format: "json"}       # inline text, no file neede
 - `content` **requires** `format` — there is no filename to detect from.
 - With `validate`, `format` is optional and auto-detected from the extension:
   `.json` · `.yaml`/`.yml` · `.toml` · `.xml`/`.svg`/`.xsd`/`.rss` · `.plist` ·
-  `.ini`/`.cfg` · `.csv` · `.tsv` · `.py`/`.pyi`. An unknown extension yields `SKIP`
-  — pass `format` explicitly to force it (that is how you validate a `.txt` holding
-  JSON, or a `.jsonc`-style file you know is plain JSON).
-- The 9 format-named functions are thin wrappers that pin `format`; everything else is
+  `.ini`/`.cfg` · `.csv` · `.tsv` · `.py`/`.pyi` · `.js`/`.mjs`/`.cjs`. An unknown
+  extension yields `SKIP` — pass `format` explicitly to force it (that is how you
+  validate a `.txt` holding JSON, or a `.jsonc`-style file you know is plain JSON).
+  **`.jsx`/`.ts`/`.tsx`/`.mts`/`.cts` are deliberately NOT mapped**: `node --check`
+  parses neither JSX nor TypeScript, so they `SKIP` rather than report a bogus `FAIL`.
+  Forcing `format:"javascript"` on one of them will fail on the first type
+  annotation or tag — that is the tool's limit, not a defect in the file.
+- The 10 format-named functions are thin wrappers that pin `format`; everything else is
   identical. Use them when you already know the format, `validate` when you do not.
 
 **Optional params:** `format`, `strict` (bool, default false), `max_mb` (default 32;
@@ -164,9 +176,14 @@ the first error, plus one overall verdict line and a count summary.
 | Status | Meaning |
 |---|---|
 | `OK` | Parses cleanly. |
-| `FAIL` | Does not parse (or cannot be read). `at` carries the position. |
-| `LIMITED` | Only a partial check ran because a parser is absent (YAML without PyYAML). **Not a guarantee.** |
+| `FAIL` | Does not parse (or cannot be read) — **or JavaScript was asked for and `node` is not installed**. `at` carries the position. |
+| `LIMITED` | Only a partial check ran because a parser is absent (YAML without PyYAML), or `node --check` timed out. **Not a guarantee.** |
 | `SKIP` | Not validated: unknown extension, a directory, over `max_mb`, or no TOML parser. |
+
+**Missing PyYAML/tomllib degrades to `LIMITED`/`SKIP`; missing `node` FAILs.** That
+asymmetry is deliberate: those two are optional *parsers* and their absence is a
+property of this host's Python, while a `SKIP`ped `.js` would leave the batch verdict
+at `**PASSED**` over a file nobody ever checked.
 
 | Verdict | When |
 |---|---|
@@ -188,9 +205,10 @@ Use `strict:true` whenever a `LIMITED`/`SKIP` must not quietly read as success.
 | `ini` | `configparser(strict=True)` | Full parse of the INI flavour configparser accepts, **including duplicate section/key detection**. Not every `.ini` dialect. |
 | `csv` / `tsv` | `csv` | Parse **plus column-count consistency** against row 1; reports the offending row. Fixed delimiter (`,` / tab) — no dialect sniffing. Empty file is `OK`. |
 | `plist` | `plistlib` | Full parse, binary and XML plist. |
+| `javascript` | `node --check` (subprocess) | **Syntax only** — not type checking, not linting, and TypeScript/JSX are not JavaScript (see the extension note above). `--check` parses and stops: the file is never executed. With a `path`, node picks script-vs-module itself — extension, nearest `package.json` `"type"`, plus its own module-syntax detection on Node ≥22 — so ESM passes in a `.mjs`, in a `"type":"module"` package, and (on a recent node) in a plain `.js`. With `content` there is no extension, so it is checked as an ES module and, failing that, as CommonJS — valid under either goal is `OK`. **`FAIL` when `node` is not in PATH** (not `SKIP` — see the status table). |
 
-Call `inspect_call` with no `function` to see whether PyYAML and tomllib/tomli are
-actually present on this host before trusting a YAML/TOML verdict.
+Call `inspect_call` with no `function` to see whether PyYAML, tomllib/tomli and `node`
+are actually present on this host before trusting a YAML/TOML/JavaScript verdict.
 
 ## Examples
 
@@ -200,6 +218,9 @@ inspect_call {function:"json", params:{path:".claude/settings.local.json"}}
 
 # a hook you just edited — syntax + SyntaxWarnings, writes no .pyc
 inspect_call {function:"python", params:{path:"ClaudeCode/hooks/mcp-first-guard.py"}}
+
+# a .js/.mjs/.cjs you just wrote — `node --check` parses it, never runs it
+inspect_call {function:"javascript", params:{path:"web/app.mjs"}}
 
 # everything you touched, in one call
 inspect_call {function:"validate", params:{paths:["a.json","b.yaml","c.py"], strict:true}}
