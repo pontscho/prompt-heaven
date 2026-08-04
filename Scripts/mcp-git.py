@@ -69,7 +69,7 @@ SAFE_SUBCOMMANDS = {
     "reflog", "shortlog", "whatchanged", "describe",
     "rev-parse", "rev-list", "merge-base", "name-rev",
     "show-ref", "show-branch", "cat-file", "count-objects",
-    "ls-files", "ls-tree", "for-each-ref", "grep",
+    "ls-files", "ls-tree", "for-each-ref", "grep", "check-ignore",
     "ls-remote", "version", "help",
 }
 
@@ -256,6 +256,7 @@ SUBCOMMAND_DESCRIPTIONS = {
     "ls-tree":        "List tree object contents",
     "for-each-ref":   "Iterate refs with formatting",
     "grep":           "Search tracked files",
+    "check-ignore":   "Which ignore rule excludes a path (-v/-n/--no-index; no match: exit 1, -n prints it)",
     "ls-remote":      "List references on remote (network)",
     "version":        "Print git version",
     "help":           "Show git help",
@@ -916,6 +917,7 @@ GIT_CALL_TOOL = {
         "  Bash(\"git grep ...\")       -> function=\"grep\"\n"
         "  Bash(\"git describe ...\")   -> function=\"describe\"\n"
         "  Bash(\"git merge-base ...\") -> function=\"merge-base\"\n"
+        "  Bash(\"git check-ignore ...\")                     -> function=\"check-ignore\"\n"
         "  Bash(\"git branch -l/-a/--contains/--merged ...\") -> function=\"branch\"\n"
         "  Bash(\"git tag -l/--contains/--merged ...\")       -> function=\"tag\"\n"
         "  Bash(\"git remote / git remote show / get-url\")  -> function=\"remote\"\n"
