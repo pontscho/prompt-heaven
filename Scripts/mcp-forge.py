@@ -1414,6 +1414,31 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
 	return value
 
 
+def _ensure_filter(value: Any) -> Any:
+	"""Coerce a call-level 'filter' to the mapping form _merge_filter expects.
+
+	A bare string is the shape callers reach for first, so it means grep:
+	filter="cases:" behaves as filter={"grep": "cases:"}. A JSON-encoded object
+	string is decoded by _ensure_dict rather than a second decoder. Falsy values
+	pass through untouched — _execute_target reads those as "drop the filter".
+	Anything else is a caller mistake and gets the accepted shapes named, not the
+	AttributeError _resolve_aliases raises on a non-mapping.
+	"""
+	if not value or isinstance(value, dict):
+		return value
+	if isinstance(value, str):
+		try:
+			return _ensure_dict(value, "filter")
+		except ValueError:
+			return {"grep": value}
+	raise ValueError(
+		f"'filter' must be a mapping, a bare string (shorthand for "
+		f"{{\"grep\": ...}}), or a JSON-encoded object string; "
+		f"got {type(value).__name__}. "
+		f"Accepted keys: grep, grep_context, invert_grep, head, tail."
+	)
+
+
 def handle_forge_call(arguments: dict,
                       project_root: str,
                       cfg_path: str) -> dict:
@@ -1422,6 +1447,8 @@ def handle_forge_call(arguments: dict,
 	raw_params = arguments.get("params") or arguments.get("p") or {}
 	try:
 		params = _resolve_aliases(_ensure_dict(raw_params, "params"), PARAM_ALIASES)
+		if "filter" in params:
+			params["filter"] = _ensure_filter(params["filter"])
 	except ValueError as exc:
 		return {"error": str(exc)}
 
@@ -1566,6 +1593,10 @@ FORGE_CALL_TOOL = {
 		"  test      -> run test target(s); auto_build=true by default builds requires first\n"
 		"  clean     -> run clean target(s) ({targets, filter?})\n\n"
 		"Filter: {grep, grep_context, invert_grep, head, tail} -- applied as grep then head/tail.\n"
+		"  grep is a case-insensitive regex; grep_context = lines of context, head/tail = int.\n"
+		"  A bare string means grep: filter=\"cases:|FAIL\" == filter={\"grep\":\"cases:|FAIL\"}.\n"
+		"  filter key aliases: pattern/regex->grep, context->grep_context, invert->invert_grep.\n"
+		"  filter=\"\" (any empty value) drops the target's YAML filter and shows all output.\n"
 		"Aliases: target/t->targets, e->env, f->filter, j->ncpu, ab->auto_build, k/type->kind.\n\n"
 		"Example: function=\"test\", "
 		"params={\"targets\":[\"unit\"],\"env\":{\"JEST_FILTER\":\"rtmp\"}}\n"
@@ -1591,6 +1622,8 @@ FORGE_CALL_TOOL = {
 				"description": (
 					"Function parameters -- all args go here, NOT at top level. "
 					"build/test/clean: {targets, env?, filter?, ncpu?, timeout?, cwd?, auto_build?}. "
+					"filter is {grep, grep_context, invert_grep, head, tail}, or a bare string "
+					"meaning grep. "
 					"list: {kind?}. describe: {target?} (omit target to list all). validate: {path?}. "
 					"Alias: 'p'."
 				),

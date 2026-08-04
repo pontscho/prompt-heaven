@@ -657,4 +657,7 @@ When you create or edit `project-forge.yaml`:
 # build with env override   forge_call(function="build", params={"targets":["X"],"env":{"K":"V"}})
 # build with filter         forge_call(function="build", params={"targets":["X"],"filter":{"grep":"error"}})
 # build with head limit     forge_call(function="build", params={"targets":["X"],"filter":{"head":50}})
+# filter shorthand          forge_call(function="build", params={"targets":["X"],"filter":"error"})
 ```
+
+`filter` keys: `grep` (case-insensitive regex), `grep_context`, `invert_grep`, `head`, `tail` — plus the key aliases `pattern`/`regex` → `grep`, `context` → `grep_context`, `invert` → `invert_grep`. A bare string is shorthand for `{"grep": "<string>"}`, and an empty filter drops the target's own YAML filter so the full output comes through.
