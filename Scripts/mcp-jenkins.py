@@ -2289,6 +2289,7 @@ HANDLERS: Dict[str, Callable[[dict], dict]] = {
     "get_job_info": handle_get_job_info,
     "job_info": handle_get_job_info,
     "job": handle_get_job_info,
+    "list_builds": handle_get_job_info,
     "get_build_status": handle_get_build_status,
     "build_status": handle_get_build_status,
     "status_build": handle_get_build_status,
