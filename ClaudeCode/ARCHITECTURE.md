@@ -45,9 +45,10 @@ description: <when to use this minion, what it returns, what it does NOT do>
 model: opus | sonnet | haiku
 color: <visual hint>
 tools: <comma-separated tool list — only what the worker needs>
-mcpServers: [<list of required MCPs>]
 ---
 ```
+
+There is deliberately no `mcpServers:` key above, and adding one is a defect rather than an omission. Claude Code **ignores** `mcpServers:`, `hooks:` and `permissionMode:` in a plugin-shipped agent at load time, for security reasons — so such a key confers NOTHING while reading exactly like a granted capability, which is worse than leaving it out. An MCP tool is granted in `tools:` like any other tool, spelled `mcp__<server>__<tool>` (e.g. `mcp__mcp-purity__purity_call`). The name-existence suite fails this pattern on purpose; see its Direction 3, rule 3d.
 
 **Leaf-worker** agents MUST NOT list `Agent` in their `tools:`. Only a designated **executor minion** may list `Agent`, and then ONLY to spawn leaf workers from a declared allowlist (see the bounded-nesting rule above) — currently `p:minion-mason` is the sole executor (allowlist: `p:minion-watson`, `p:minion-explorer`). `Skill` is permitted for any minion because the `Skill` tool only loads instructions into the *current* context (no new sub-agent is spawned), so it does not breach the nesting rule — a minion may legitimately invoke a passive instruction skill to specialize its own behavior. Use sparingly.
 

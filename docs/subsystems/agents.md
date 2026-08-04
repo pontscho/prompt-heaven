@@ -7,8 +7,8 @@ description: Delegate-able sub-agents invoked via the Task tool to keep the main
 sources:
   - ClaudeCode/agents
 verified:
-  commit: 26200d1
-  date: 2026-07-31
+  commit: bbcbede
+  date: 2026-08-04
 links:
   - overview
   - skills
@@ -21,6 +21,21 @@ via the Task tool. Each is a markdown file defining role, behavior, constraints,
 and MCP tool routing. They iterate in their own sandboxes and return clean
 reports, keeping the main context free of build/search/iteration noise — the
 core principle stated in `ClaudeCode/CLAUDE.md`.
+
+That routing is granted in each file's `tools:` list, and `tools:` is the only
+place it can be granted: the four web-facing minions — `minion-web-explorer`,
+`minion-deep-researcher`, `minion-watson` and
+`minion-inspector-security-officer` — each list
+`mcp__mcp-webfetch__webfetch_call` there and keep the built-in `WebFetch` as an
+explicit fallback, because the impersonating dispatcher gets through the
+Cloudflare/Akamai-style bot detection the built-in cannot (see [[scripts]])
+`ClaudeCode/agents/minion-web-explorer.md`. **An `mcpServers:` key grants
+nothing** — a plugin agent's frontmatter ignores it at load time, so it reads as
+a declared capability while conferring none; no file here has one, and the agent
+suite treats writing one as a defect. And `webfetch` is not a tool name: the
+dispatcher is `webfetch_call`, routed by `function="fetch"` — the only function
+this fleet's prose may name, because it is the one the server advertises when it
+refuses an unknown one.
 
 ## Roster
 
