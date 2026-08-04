@@ -321,8 +321,17 @@ def tok(chars):
     return round(chars / 4)
 
 
-def probe_argv(path, args, sandbox):
+def probe_argv(path, args, sandbox, prefix):
     """Child command line for one server: recorded, `-B`, sandbox-rooted.
+
+    `prefix` comes from the launch table's own `launch_prefix(cfg, ("-B",))`:
+    this interpreter plus `-B` for a normal server, or the entry's `launcher`
+    (mcp-webfetch.py: `uv run --script`, whose PEP-723 deps no bare python3 can
+    import).  A launcher runs no interpreter of ours, so it carries no `-B` and
+    leans on `H.child_env()`'s PYTHONDONTWRITEBYTECODE alone; and when the
+    launcher binary is missing, launch_prefix() hands back this interpreter and
+    the server's import death is recorded as this server's measurement reason,
+    exactly as it was before uv was used at all.
 
     Two invariants group G later asserts:
       * `-B` on top of `H.child_env()`'s PYTHONDONTWRITEBYTECODE=1, so a probed
@@ -332,7 +341,7 @@ def probe_argv(path, args, sandbox):
         shared system temp dir.  The sandbox holds a minimal
         `project-forge.yaml`, which is also what makes mcp-forge answer.
     """
-    argv = [sys.executable, "-B", path] + list(args)
+    argv = list(prefix) + [path] + list(args)
     for idx, token in enumerate(argv[:-1]):
         if token == "--project-root":
             argv[idx + 1] = sandbox
@@ -340,7 +349,7 @@ def probe_argv(path, args, sandbox):
     return argv
 
 
-def measure_server(cfg, sandbox):
+def measure_server(cfg, sandbox, prefix):
     """Spawn one server, hand-shake, measure `tools/list`, then probe once.
 
     Never raises.  A missing file, an immediate death, a closed stdin or a
@@ -354,7 +363,7 @@ def measure_server(cfg, sandbox):
         return foot
 
     os.makedirs(sandbox, exist_ok=True)
-    argv = probe_argv(path, cfg["args"], sandbox)
+    argv = probe_argv(path, cfg["args"], sandbox, prefix)
     client = None
     try:
         try:
@@ -2018,7 +2027,9 @@ def run(opts=None):
         sandbox = os.path.join(fixture_root, "server-root")
         write_text(os.path.join(sandbox, "project-forge.yaml"), "version: 1\n")
 
-        feet = [measure_server(cfg, sandbox) for cfg in servers]
+        feet = [measure_server(cfg, sandbox,
+                               smoke.launch_prefix(cfg, ("-B",)))
+                for cfg in servers]
         feet_by_file = {f.file: f for f in feet}
         live = [f for f in feet if f.registered]
         inert = [f for f in feet if not f.registered]

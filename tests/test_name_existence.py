@@ -24,8 +24,10 @@ TWO CORPORA, because a prompt is a prompt wherever it is stored:
     Registration decides the severity, and that distinction is the whole point:
       - inside a REGISTERED server -> the text IS rendered -> FAIL
       - inside an unregistered one -> nothing ever reads it -> INFO (inert)
-    `mcp-clangd`, `mcp-cuda`, `mcp-lua-lsp` and `mcp-webfetch` are retired /
-    unregistered today, so their routing text is inert by definition.
+    `mcp-clangd`, `mcp-cuda` and `mcp-lua-lsp` are retired / unregistered
+    today, so their routing text is inert by definition.  `mcp-webfetch` is
+    NOT: it is registered in ~/.claude.json (launched with `uv run --script`),
+    so its description text is live instruction and lands in group E.
 
 Three directions, deliberately asymmetric:
 
@@ -175,15 +177,20 @@ server-text scan additionally picks up any `Scripts/mcp-*.py` on disk the table
 has not caught up with yet.
 
 Per server, two enumeration probes, cheapest-reliable first:
-  1. `tools/call` the dispatcher with a bogus function name.  13 of 15 servers
-     answer `Unknown function: X. Available: a, b, c` -- one uniform, exact,
-     alias-inclusive list, no output-format guessing.  (mcp-forge only answers
-     once a parseable `project-forge.yaml` exists, so the probe is retried
-     against a throwaway root holding a minimal `version: 1` config.)
+  1. `tools/call` the dispatcher with a bogus function name.  14 of 15 servers
+     answer `Unknown function: X. Available: a, b, c` -- one uniform, exact
+     list, no output-format guessing.  It is the server's OWN advertisement, so
+     it is as alias-inclusive as that server chooses to be: mcp-webfetch names
+     its primaries only (`fetch`), keeping `get`/`wget`/`curl` out of the
+     inventory.  (mcp-forge only answers once a parseable `project-forge.yaml`
+     exists, so the probe is retried against a throwaway root holding a minimal
+     `version: 1` config.)
   2. `--list` (mcp-git: an allowlist server, it never says "Available"), parsed
      as `^  <name>  <description>` indented rows.
-A server that answers neither is recorded SKIP, never silently passed
-(mcp-webfetch cannot even start here: no bs4 installed).
+A server that answers neither is recorded SKIP, never silently passed.  Nothing
+is in that state today: mcp-webfetch was, because a bare python3 cannot import
+the PEP-723 deps it declares, and the launch table now starts it the way
+~/.claude.json does -- `uv run --script` (`launcher`, see SERVERS).
 
 Server SOURCES are never imported, only `ast.parse`d -- so an un-importable
 server is still scanned, and no import side effect can touch the repo.
@@ -511,8 +518,16 @@ def _rpc_probe(argv, tool):
             client.close()
 
 
-def probe_argv(path, args, sandbox):
+def probe_argv(path, args, sandbox, prefix):
     """Child command line for one server, recorded and sandboxed.
+
+    `prefix` comes from the launch table's own `launch_prefix(cfg, ("-B",))`:
+    this interpreter plus `-B` for a normal server, or the entry's `launcher`
+    (mcp-webfetch.py: `uv run --script`, whose PEP-723 deps no bare python3 can
+    import).  A launcher runs no interpreter of ours, so it carries no `-B` and
+    leans on H.child_env()'s PYTHONDONTWRITEBYTECODE alone; and when the
+    launcher binary is missing, launch_prefix() hands back this interpreter, the
+    server dies at import, and the probe records SKIP exactly as it used to.
 
     Two invariants, both asserted later by the group-B sandbox cases:
       * `-B` on top of H.child_env()'s PYTHONDONTWRITEBYTECODE=1, so a probed
@@ -522,7 +537,7 @@ def probe_argv(path, args, sandbox):
         touch the shared system temp dir either.  The sandbox holds a minimal
         `project-forge.yaml`, which is also what makes mcp-forge enumerable.
     """
-    argv = [sys.executable, "-B", path] + list(args)
+    argv = list(prefix) + [path] + list(args)
     for idx, token in enumerate(argv[:-1]):
         if token == "--project-root":
             argv[idx + 1] = sandbox
@@ -530,7 +545,7 @@ def probe_argv(path, args, sandbox):
     return argv
 
 
-def probe_server(cfg, sandbox):
+def probe_server(cfg, sandbox, prefix):
     """Enumerate one server: bogus-function probe, then `--list`."""
     inv = ServerInventory(cfg["file"], cfg["tool"])
     path = os.path.join(SCRIPTS_DIR, cfg["file"])
@@ -539,7 +554,7 @@ def probe_server(cfg, sandbox):
         return inv
 
     os.makedirs(sandbox, exist_ok=True)     # also the children's cwd
-    argv = probe_argv(path, cfg["args"], sandbox)
+    argv = probe_argv(path, cfg["args"], sandbox, prefix)
     text, err = _rpc_probe(argv, cfg["tool"])
     names = _parse_available(text)
     if names:
@@ -564,7 +579,8 @@ def build_inventory():
     smoke = H.load_module_from_path("ph_smoke_table", SMOKE_PATH)
     sandbox = os.path.join(FIXTURE_ROOT, "server-root")
     write_text(os.path.join(sandbox, "project-forge.yaml"), "version: 1\n")
-    return [probe_server(cfg, sandbox) for cfg in smoke.SERVERS]
+    return [probe_server(cfg, sandbox, smoke.launch_prefix(cfg, ("-B",)))
+            for cfg in smoke.SERVERS]
 
 
 def load_registration():

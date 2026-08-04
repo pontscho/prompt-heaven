@@ -25,6 +25,7 @@ Exit code 0 iff every non-skipped server passes every check.
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import time
@@ -47,13 +48,22 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # only, reports the rest separately, and cross-checks these flags against the
 # live ~/.claude.json.  This smoke harness itself ignores the flag on purpose:
 # its job is that every server file still speaks the protocol, registered or not.
+#
+# `launcher` is the OPTIONAL argv prefix a server must be started with, and it
+# exists because `[sys.executable, <path>]` is not universal: mcp-webfetch.py
+# declares its third-party deps in a PEP-723 `# /// script` block and imports
+# bs4 at module scope, so a bare python3 kills it at import -- which is why
+# every harness used to report it SKIP.  ~/.claude.json launches it as
+# `uv run --script <path>`, and so does the table, so what is tested is what
+# runs.  Absent -> this interpreter, as before.  See launch_prefix().
 SERVERS = [
     {"file": "mcp-forge.py",    "tool": "forge_call",    "args": ["--project-root", "/tmp"], "registered": True},
     {"file": "mcp-git.py",      "tool": "git_call",      "args": ["--project-root", "/tmp"], "registered": True},
     {"file": "mcp-purity.py",   "tool": "purity_call",   "args": ["--project-root", "/tmp"], "registered": True},
     {"file": "mcp-jenkins.py",  "tool": "jenkins_call",  "args": ["--endpoint", "http://127.0.0.1:1", "--username", "x", "--token", "y"], "registered": True},
     {"file": "mcp-tshark.py",   "tool": "tshark_call",   "args": ["--project-root", "/tmp"], "registered": True},
-    {"file": "mcp-webfetch.py", "tool": "webfetch_call", "args": [], "registered": False},
+    {"file": "mcp-webfetch.py", "tool": "webfetch_call", "args": [], "registered": True,
+     "launcher": ["uv", "run", "--script"]},
     {"file": "mcp-context7.py", "tool": "context7_call", "args": [], "registered": True},
     {"file": "mcp-lldb.py",     "tool": "lldb_call",     "args": [], "registered": True},
     {"file": "mcp-gdc.py",      "tool": "gdc_call",      "args": [], "registered": True},
@@ -68,6 +78,24 @@ SERVERS = [
 READ_TIMEOUT = 8.0  # seconds to wait for a single response line
 
 
+def launch_prefix(cfg, python_flags=()):
+    """Argv prefix for one SERVERS entry: its `launcher`, else this interpreter.
+
+    A `launcher` whose binary is NOT on PATH falls back to the interpreter, so a
+    host without `uv` degrades to exactly the old behaviour -- the server dies at
+    import and the harness records SKIP with the stderr tail -- instead of the
+    run dying on FileNotFoundError from Popen.
+
+    `python_flags` (e.g. `-B`) only apply to the interpreter form; the uv form
+    relies on PYTHONDONTWRITEBYTECODE, which the test harnesses set for every
+    child anyway.
+    """
+    launcher = cfg.get("launcher")
+    if launcher and shutil.which(launcher[0]):
+        return list(launcher)
+    return [sys.executable] + list(python_flags)
+
+
 class Server:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -76,7 +104,7 @@ class Server:
     def start(self):
         path = os.path.join(SCRIPT_DIR, self.cfg["file"])
         self.proc = subprocess.Popen(
-            [sys.executable, path] + self.cfg["args"],
+            launch_prefix(self.cfg) + [path] + self.cfg["args"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
