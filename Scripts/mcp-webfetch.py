@@ -872,8 +872,21 @@ def handle_webfetch_call(arguments: dict, project_root: str) -> dict:
 
 	handler = HANDLERS.get(function)
 	if not handler:
-		primary = ", ".join(sorted(_PRIMARY_FUNCTIONS))
-		return {"error": f"Unknown function: {function}. Available: {primary}"}
+		# EVERY callable name, aliases included — deliberately wider than the
+		# status reply above and than `--list`. Those two answer "what does this
+		# server DO", where four spellings of one fetch are four times the same
+		# answer, so they keep the primary/alias distinction. This line answers
+		# "what MAY I call" after a miss, and an alias is exactly as callable as
+		# its primary — omitting them made `get`/`wget`/`curl` read as
+		# nonexistent. Not an inconsistency to be tidied away: two surfaces, two
+		# questions.
+		# FORMAT IS LOAD-BEARING: plain names, comma-separated, on ONE line.
+		# tests/test_name_existence.py::_parse_available reads this list as the
+		# live inventory, cutting at the first quote/brace/newline and keeping
+		# only the FIRST token of each comma chunk — so a `(alias)` marker or a
+		# line break here would silently drop names from the inventory.
+		available = ", ".join(sorted(HANDLERS))
+		return {"error": f"Unknown function: {function}. Available: {available}"}
 
 	# Reject unknown params up-front. Silently dropping one means the handler
 	# runs with a surprising default — an ignored max_bytes or offset reads as

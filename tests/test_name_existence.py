@@ -180,9 +180,15 @@ Per server, two enumeration probes, cheapest-reliable first:
   1. `tools/call` the dispatcher with a bogus function name.  14 of 15 servers
      answer `Unknown function: X. Available: a, b, c` -- one uniform, exact
      list, no output-format guessing.  It is the server's OWN advertisement, so
-     it is as alias-inclusive as that server chooses to be: mcp-webfetch names
-     its primaries only (`fetch`), keeping `get`/`wget`/`curl` out of the
-     inventory.  (mcp-forge only answers once a parseable `project-forge.yaml`
+     it is as alias-inclusive as that server chooses to be, and they differ:
+     mcp-webfetch and mcp-jenkins answer with every callable name, aliases
+     included (`curl, fetch, get, wget`; 46 for jenkins), because that reply
+     answers "what may I call".  Their status reply and `--list` keep the
+     canonical/alias distinction -- two surfaces, two questions.  Others still
+     advertise primaries only, so ~150 aliases across mcp-inspect, mcp-wiki,
+     mcp-postgres and mcp-tshark remain outside the inventory: a prompt naming
+     one of those would read as a nonexistent name here.  Nothing does today.
+     (mcp-forge only answers once a parseable `project-forge.yaml`
      exists, so the probe is retried against a throwaway root holding a minimal
      `version: 1` config.)
   2. `--list` (mcp-git: an allowlist server, it never says "Available"), parsed
