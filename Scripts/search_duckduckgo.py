@@ -14,9 +14,9 @@ Environment:
   CHROME_CDP_URL  — Chrome debug endpoint for CDP backend (default: http://localhost:9222)
 
 Platform-aware backend selection:
-  - Linux: primp (chrome_133 + impersonate_os="linux") with a manual Linux
-    Chrome 133 header dict. primp 0.15.0 does not auto-inject browser
-    headers over HTTP/2, so we supply them ourselves.
+  - Linux: primp with impersonate="chrome" (a bare alias — primp picks and
+    rotates the Chrome major itself) + impersonate_os="linux". primp 1.3.1
+    auto-injects the browser headers, so none are supplied by hand.
   - macOS / Windows / other: curl_cffi (chrome146 etc.) — auto-generates all
     browser headers when impersonate= is set. Do NOT override User-Agent,
     Sec-CH-UA, Sec-Fetch-*, Accept, Accept-Encoding on curl_cffi sessions
@@ -37,10 +37,17 @@ from lxml.html import document_fromstring
 
 # ---------------------------------------------------------------------------
 # Impersonation profiles — platform-aware backend selection
-# Linux: primp + manual Linux Chrome 133 header dict (primp does not auto-inject)
-# macOS / Windows / other: curl_cffi (auto-injects everything via impersonate=)
+# Linux: primp with impersonate_os="linux" (curl_cffi has no OS knob and its
+#        chrome profile claims macOS, which contradicts a Linux host's real
+#        network stack under passive OS fingerprinting — see docs/spec-ddg.md §2.7)
+# macOS / Windows / other: curl_cffi
 # ---------------------------------------------------------------------------
 
+# These four are VALID in curl_cffi 0.16.0 (verified 2026-08-04) and are the
+# configuration the ~80% DDG pass-through was measured with, so they stay. A pin
+# is tolerable here because curl_cffi rots LOUDLY: an unknown name raises
+# ImpersonateError at request time. The bare aliases ("chrome", "safari") are
+# the maintenance-free alternative if this list is ever re-measured.
 CURL_CFFI_PROFILES = [
 	"chrome146",
 	"chrome145",
@@ -48,42 +55,30 @@ CURL_CFFI_PROFILES = [
 	"safari260",
 ]
 
-# Linux Chrome HTTP/2 header set factory. primp 0.15.0 does NOT auto-inject
-# these over HTTP/2 (verified vs tls.peet.ws on 2026-05-24) so we supply them
-# manually. Order and values mirror real Chrome on Linux x86_64; the major
-# version is parameterized so it stays coherent with the rotating TLS profile.
-def _linux_chrome_headers(major):
-	return {
-		"sec-ch-ua": f'"Not(A:Brand";v="99", "Google Chrome";v="{major}", "Chromium";v="{major}"',
-		"sec-ch-ua-mobile": "?0",
-		"sec-ch-ua-platform": '"Linux"',
-		"upgrade-insecure-requests": "1",
-		"user-agent": (
-			"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-			f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
-		),
-		"accept": (
-			"text/html,application/xhtml+xml,application/xml;q=0.9,"
-			"image/avif,image/webp,image/apng,*/*;q=0.8,"
-			"application/signed-exchange;v=b3;q=0.7"
-		),
-		"sec-fetch-site": "none",
-		"sec-fetch-mode": "navigate",
-		"sec-fetch-user": "?1",
-		"sec-fetch-dest": "document",
-		"accept-encoding": "gzip, deflate, br, zstd",
-		"accept-language": "en-US,en;q=0.9",
-		"priority": "u=0, i",
-	}
+# primp is the opposite: it rots SILENTLY. An unknown impersonate name prints
+# one line to stderr and substitutes a RANDOM browser. This file pinned
+# chrome_133/131/130/128 until 2026-08-04, and primp 1.3.1 had dropped every
+# name below chrome_144 — so the Linux path had been putting an arbitrary
+# fingerprint on the wire (a macOS Safari 26.3 UA in one measured run) while a
+# hand-built dict announced Linux Chrome 133. Only aliases are accepted: primp
+# offers no way to enumerate its valid names, and its Client.impersonate property
+# merely echoes the input back — measured, it reports a name that does not exist
+# while impersonating something else entirely.
+PRIMP_ALIASES = frozenset({"chrome", "firefox", "edge", "safari", "opera", "random"})
 
-
-# primp profile + matching Chrome major for HTTP header coherence.
-PRIMP_LINUX_BUNDLES = [
-	("chrome_133", 133),
-	("chrome_131", 131),
-	("chrome_130", 130),
-	("chrome_128", 128),
-]
+# The hand-built _linux_chrome_headers() dict that used to live here is GONE, and
+# docs/spec-ddg.md still refers to it by name. Measured against primp 1.3.1 on
+# 2026-08-04: primp auto-injects all 13 of those keys, 11 with character-identical
+# values, INCLUDING the two the spec records as load-bearing for DDG
+# (upgrade-insecure-requests: 1 and sec-fetch-user: ?1). Client-level headers=
+# loses every conflict against impersonate=, so re-measured with sentinel values
+# both of those overrides were ignored outright — the dict was already inert.
+# One difference shows up on the wire, and it is NOT ours to fix: primp stages
+# `accept-encoding: gzip, deflate, br, zstd` — character-identical to the old
+# dict — and then its transport rewrites the outgoing value to `gzip, br` to match
+# what it can actually decode. No header we set can change that. Note also that
+# header ORDER is itself a fingerprint and an echo endpoint cannot reveal it: if
+# DDG throughput regresses, order or that rewrite is the suspect, not a missing key.
 
 ROTATE_EVERY = 4
 
@@ -227,15 +222,13 @@ def parse_bing_results(html_text):
 def create_session(imp=None):
 	if platform.system() == "Linux":
 		import primp
-		if imp is None:
-			profile, major = random.choice(PRIMP_LINUX_BUNDLES)
-		else:
-			match = next((b for b in PRIMP_LINUX_BUNDLES if b[0] == imp), None)
-			profile, major = match if match else (imp, 133)
+		# "chrome" rotates the Chrome major on its own across whatever majors the
+		# installed primp supports (measured: 145/146/147/148 across fresh
+		# clients), which is exactly what the pinned bundle list was reaching for.
+		profile = imp if imp in PRIMP_ALIASES else "chrome"
 		session = primp.Client(
 			impersonate=profile,
 			impersonate_os="linux",
-			headers=_linux_chrome_headers(major),
 			timeout=20,
 		)
 		return session, profile
