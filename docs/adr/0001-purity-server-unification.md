@@ -6,13 +6,6 @@ title: Unify mcp-clangd and mcp-cuda into mcp-purity
 description: Decision to fold the clangd and cuda LSP servers into mcp-purity behind purity_call via a layered backend architecture.
 aliases:
   - merge
-sources:
-  - Scripts/mcp-purity.py
-  - Scripts/mcp-purity.py:ClangdClient
-  - Scripts/mcp-purity.py:_resolve_aliases
-verified:
-  commit: 2787c7f
-  date: 2026-07-16
 links:
   - scripts
   - spec-purity-unification
