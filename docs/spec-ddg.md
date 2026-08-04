@@ -7,8 +7,8 @@ description: Why DDG blocks Python HTTP clients, and the DDG-first/Bing-fallback
 sources:
   - Scripts/search_duckduckgo.py
 verified:
-  commit: 51dd5f3
-  date: 2026-05-27
+  commit: 1bade65
+  date: 2026-08-04
 links:
   - scripts
 ---
@@ -323,7 +323,13 @@ A real Chrome on macOS would have TCP TTL=64 (same as Linux) but different TCP o
 - TCP options order (different per OS)
 - Initial window size (we documented this is different)
 
-The simplest mitigation: configure curl_cffi to use a Linux Chrome User-Agent (`X11; Linux x86_64`), making UA consistent with the underlying OS. Our script's `PROFILES` should be updated.
+The mitigation is why the Linux branch exists at all: curl_cffi has no OS knob, so
+Linux switches to primp with `impersonate_os="linux"` `Scripts/search_duckduckgo.py:create_session`.
+That reasoning is unchanged — only the mechanism moved. As of 2026-08-04 that one
+argument is the *whole* mechanism: primp derives the `X11; Linux x86_64` UA and the
+matching `sec-ch-ua-platform` from it, and the script supplies no UA and no headers
+by hand. Previously the coherence was hand-built — a pinned Chrome major plus a
+matching Linux Chrome header dict — and both are gone (see §2.8).
 
 ##### 🟢 Issue 4: sec-ch-ua brand string format
 
@@ -352,7 +358,8 @@ This is a **per-version GREASE pattern** that curl_cffi's chrome146 profile may 
 
 1. **PRIMARY (done)**: Switch DDG POST headers to the Chrome XHR pattern — `cors` / `empty` / `*/*` / `u=1`. See §2.8.
 2. **Secondary (done)**: Override `Sec-Fetch-Site: same-origin` and Referer to a same-origin URL on the same POST (subsumed by #1).
-3. **Done**: Use a Linux Chrome User-Agent on Linux hosts via primp Linux mode.
+3. **Done**: On Linux hosts the Linux Chrome UA comes from primp's `impersonate_os="linux"`
+   — nothing is supplied by hand `Scripts/search_duckduckgo.py:create_session`.
 4. **Optional**: Add DNS HTTPS query for real ECHConfig (complex, may need patches to curl_cffi).
 
 ### 2.8 Breakthrough: `sec-fetch-mode: navigate` vs `cors` — The Real Discriminator
@@ -399,12 +406,23 @@ headers={
 
 #### Remaining Coherence Gaps (Empirically Resolved: Keep the Leak)
 
-Two navigation-only headers leak from the session-level dict into the XHR POST because primp does not delete session-level headers via per-request override:
+Two navigation-only headers ride along into the XHR POST, because a per-request override cannot *delete* a header the session level already carries:
 
 - `upgrade-insecure-requests: 1` — Chrome XHR omits this entirely (UIR is a navigation-only directive).
 - `sec-fetch-user: ?1` — only emitted on user-initiated top-level navigation.
 
-**Empirical finding (2026-05-24)**: removing both headers from `_linux_chrome_headers()` was tested and **degraded** the DDG success rate from the post-fix ~80% baseline. The committed code (256c6ae) keeps them. Likely mechanism: the warmup `GET https://lite.duckduckgo.com/lite/` is a top-level navigation — there a real Chrome would emit UIR + sec-fetch-user, so their absence in the warmup phase becomes a *worse* coherence violation than their unwanted presence on the subsequent XHR POST. Conclusion: in this script's two-request pattern (nav warmup → XHR POST), the navigation-mode session-level dict is the right default and the per-request XHR override on the POST is the right shape.
+**Empirical finding (2026-05-24)**: removing both was tested and **degraded** the DDG success rate from the post-fix ~80% baseline, so the committed code (256c6ae) kept them. Likely mechanism: the warmup `GET https://lite.duckduckgo.com/lite/` is a top-level navigation — there a real Chrome would emit UIR + sec-fetch-user, so their absence in the warmup phase becomes a *worse* coherence violation than their unwanted presence on the subsequent XHR POST. Conclusion: in this script's two-request pattern (nav warmup → XHR POST), navigation-mode defaults at the session level plus a per-request XHR override on the POST is the right shape.
+
+#### Where Those Two Headers Come From Now (2026-08-04)
+
+**The measurement above still stands and both headers are still on the wire.** What changed is their source: the hand-written `_linux_chrome_headers()` dict that the 2026-05-24 test edited **no longer exists** in any of the three impersonating files `Scripts/search_duckduckgo.py` `Scripts/search_github.py` `Scripts/mcp-webfetch.py`. Read every mention of that identifier above as history, not as live code. It was deleted for being redundant and inert — *not* for being unwanted:
+
+- **Redundant**: measured against primp 1.3.1, primp auto-injects all 13 of the dict's keys, 11 of them character-identical — *including* these two. The dict's stated premise ("primp does not auto-inject over HTTP/2") is false for 1.3.1, which injects a complete navigation set plus `sec-ch-ua-platform` derived from `impersonate_os`.
+- **Inert**: re-measured with sentinel values, client-level `headers=` loses *every* conflict against `impersonate=`. Neither override reached the wire even before the deletion. So the 2026-05-24 degradation was never evidence that our dict *supplied* those headers — only that primp's navigation defaults, which the dict happened to duplicate, are load-bearing for DDG `Scripts/search_duckduckgo.py:create_session`.
+
+One staged value is rewritten in flight and it is **not ours to fix**: primp stages `accept-encoding: gzip, deflate, br, zstd` (character-identical to the old dict) and its transport then rewrites the outgoing value to `gzip, br`, matching what it can actually decode. No header we set changes that.
+
+**If DDG throughput ever regresses, suspect these two before suspecting a missing key**: that `accept-encoding` rewrite, and header **order** — order is itself a fingerprint, and an echo endpoint cannot reveal it, so "11 of 13 character-identical" says nothing about the sequence DDG sees them in.
 
 
 ---
@@ -639,19 +657,28 @@ Three backends with auto-fallback:
 └──────────────────┘
 ```
 
-### 7.2 curl_cffi Configuration (Minimal Headers)
+### 7.2 Impersonation Configuration (Minimal Headers)
 
-```python
-IMPERSONATIONS = ["chrome146", "chrome145", "chrome136", "safari260"]
+One factory picks the backend by platform `Scripts/search_duckduckgo.py:create_session`:
 
-session = requests.Session(impersonate=random.choice(IMPERSONATIONS))
-# ONLY set Accept-Language — curl_cffi handles everything else
-session.headers["Accept-Language"] = "en-US,en;q=0.9"
+- **non-Linux** — `curl_cffi.requests.Session(impersonate=...)` with a name drawn at
+  random from a four-entry pinned list (`chrome146`, `chrome145`, `chrome136`,
+  `safari260`) `Scripts/search_duckduckgo.py:CURL_CFFI_PROFILES`. That list is the
+  exact configuration the ~80% pass-through of §2.8 was measured with, which is why
+  it stays pinned. Only `Accept-Language` is set by hand — overriding anything else
+  breaks the fingerprint (§3.6) — and `Referer` goes per-request, never on the session.
+- **Linux** — `primp.Client(impersonate="chrome", impersonate_os="linux")` with a
+  *bare alias*, never a pinned major, validated against a whitelist
+  `Scripts/search_duckduckgo.py:PRIMP_ALIASES`. No headers are supplied at all (§2.8).
 
-# Per-request Referer (not session-level)
-resp = session.post(url, data=payload,
-    headers={"Referer": "https://lite.duckduckgo.com/lite/"})
-```
+A pin is tolerable on curl_cffi and forbidden on primp, and the asymmetry is
+deliberate: curl_cffi raises `ImpersonateError` on an unknown name, whereas primp
+prints one line to stderr and silently substitutes a **random** browser — so a rotted
+pin there produces an arbitrary fingerprint rather than an error. Session rotation
+every few queries is unchanged `Scripts/search_duckduckgo.py:ROTATE_EVERY`.
+
+The same two-branch shape, for the same reason, is used by
+`Scripts/mcp-webfetch.py:_create_session`.
 
 ### 7.3 CDP Backend Implementation
 
@@ -721,10 +748,3 @@ href = base64.urlsafe_b64decode(u_param[2:] + padding).decode()
 | Cloudflare JA4 docs | https://developers.cloudflare.com/bots/additional-configurations/ja3-ja4-fingerprint/ |
 | TLS fingerprint comparison tool | https://tls.peet.ws/api/all |
 | DDG scraping methods guide | https://roundproxies.com/blog/scrape-duckduckgo/ |
-
-## Appendix B: Commit History
-
-| Hash | Description |
-|------|-------------|
-| `383f298` | Add Bing fallback + CDP backend, fix header override issue |
-| `a77aff7` | Fix CDP backend — skip devtools pages, remove Page.navigate |
