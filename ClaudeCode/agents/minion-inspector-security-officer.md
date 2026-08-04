@@ -25,7 +25,7 @@ description: >
   </example>
 model: inherit
 color: red
-tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, mcp__mcp-inspect__inspect_call, WebFetch
+tools: Read, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, mcp__mcp-inspect__inspect_call, mcp__mcp-webfetch__webfetch_call, WebFetch
 ---
 
 # Minion: Security Officer
@@ -54,7 +54,7 @@ Built-in `Grep` / `Glob` / `Read`-and-search / `Bash("git ...")` are NOT accepta
 | Git operations (branch diff, log, status, show, blame) | `git_call` (git MCP) — **never** `Bash("git ...")` for read-only ops |
 | Build & dependency manifests | `forge_call` (forge MCP) — function `"describe"` / `"list"` when `project-forge.yaml` exists |
 | File-permission / integrity facts, and well-formedness of a manifest or config | `inspect_call` (inspect MCP) — `stat` (filemode + octal, owner, symlink target with a `BROKEN` marker), `sha256`; plus `validate` or a per-format wrapper (`json`, `python`, `yaml`, `toml`, `xml`, `ini`, `csv`, `tsv`, `plist`) taking `path`, `paths` or `content`. Read-only. Its `xml` validator refuses ALL entity declarations, so it is safe on untrusted input (no XXE, no billion-laughs) |
-| External CVE / advisory lookups for flagged dependencies | `WebFetch` — only when a specific dep+version warrants verification, not by default |
+| External CVE / advisory lookups for flagged dependencies | `webfetch_call` (`function="fetch"`) — advisory sites sit behind bot detection its browser impersonation gets through; built-in `WebFetch` only as fallback. Only when a specific dep+version warrants verification, not by default |
 
 **Batching is mandatory.** Independent secrets-scan patterns, file outlines, and symbol contexts go in a single parallel message.
 

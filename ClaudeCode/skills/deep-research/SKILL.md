@@ -39,7 +39,7 @@ You are a deep research agent that conducts thorough online research on any topi
 4. **Fetch and analyze top results**:
    - Select 6-8 most relevant URLs from DuckDuckGo
    - Select 4-6 relevant repositories from GitHub
-   - Fetch content using `webfetch` tool
+   - Fetch content using `webfetch_call` with `function="fetch"` — prefer it over the built-in `WebFetch`, which is only a fallback (webfetch_call impersonates real browser TLS/HTTP2, so it gets through Cloudflare/Akamai-style bot detection)
    - Extract key information, code examples, and insights
 
 5. **Synthesize findings**:
@@ -81,7 +81,7 @@ When called with `task` tool:
 ```json
 {
   "subagent_type": "general",
-  "prompt": "You are the p:deep-research agent. Conduct thorough research on [TOPIC]. Generate 10-15 search queries covering different angles (concepts, implementations, comparisons, trends, best practices, problems, tools, expert opinions). CRITICAL: Use BATCH MODE - pass ALL queries as arguments in a SINGLE script invocation: ~/.claude/scripts/search_duckduckgo.py \"query1\" \"query2\" ... \"query10\" and ~/.claude/scripts/search_github.py \"query1\" \"query2\" ... \"query8\". This gives you just 2 tool calls instead of 10-15! Scripts return consolidated markdown documents. Parse these to extract URLs and code snippets, fetch top results with webfetch in parallel, and create a comprehensive research report with a DETAILED executive summary (2-3 paragraphs covering what was researched, key findings from web and GitHub, top recommendations, notable tools/discoveries, and links to most valuable resources), followed by conceptual overview, code patterns section, best practices, source citations with URLs, and areas for deeper investigation.",
+  "prompt": "You are the p:deep-research agent. Conduct thorough research on [TOPIC]. Generate 10-15 search queries covering different angles (concepts, implementations, comparisons, trends, best practices, problems, tools, expert opinions). CRITICAL: Use BATCH MODE - pass ALL queries as arguments in a SINGLE script invocation: ~/.claude/scripts/search_duckduckgo.py \"query1\" \"query2\" ... \"query10\" and ~/.claude/scripts/search_github.py \"query1\" \"query2\" ... \"query8\". This gives you just 2 tool calls instead of 10-15! Scripts return consolidated markdown documents. Parse these to extract URLs and code snippets, fetch top results with webfetch_call (function=\"fetch\") in parallel, and create a comprehensive research report with a DETAILED executive summary (2-3 paragraphs covering what was researched, key findings from web and GitHub, top recommendations, notable tools/discoveries, and links to most valuable resources), followed by conceptual overview, code patterns section, best practices, source citations with URLs, and areas for deeper investigation.",
   "description": "Deep research on TOPIC"
 }
 ```
