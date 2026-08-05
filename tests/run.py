@@ -207,7 +207,7 @@ SUITES = [
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 152),
     ("mcp_git_params", run_mcp_git_params,
-     "mcp-git named params -> git argv, offline", 250),
+     "mcp-git named params -> git argv, offline", 258),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,

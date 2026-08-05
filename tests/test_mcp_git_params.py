@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline suite for the mcp-git params -> git argv conversion (groups A-L).
+"""Offline suite for the mcp-git params -> git argv conversion (groups A-M).
 
 The case count is declared in ONE place, the SUITES table in tests/run.py, which
 asserts it against what this run reports -- so it is not repeated here.
@@ -1306,6 +1306,54 @@ def run(opts=None):
                      detail=["input       : '```\\n\\na\\n\\n```'",
                              "offenders   : %r" % planted,
                              "both edges must be reported, not just one"])
+
+        # ====== M: camelCase key normalization ======
+        # Every param key is normalized camelCase -> snake_case at the very top
+        # of the conversion loop, BEFORE the meta check and before any membership
+        # test, so `maxCount` reaches the same slot as `max_count`. The sets stay
+        # snake_case; the normalization happens on the way in. See _camel_to_snake.
+        check(suite, drv, "M", "camel-maxCount-becomes-max-count-flag", "log",
+              {"maxCount": 3}, argv=["git", "log", "--max-count=3"],
+              cmdline="git log --max-count=3",
+              note="maxCount -> max_count -> --max-count=3, same as the snake key")
+        check(suite, drv, "M", "camel-noMerges-becomes-bare-flag", "log",
+              {"noMerges": True}, argv=["git", "log", "--no-merges"],
+              cmdline="git log --no-merges",
+              note="a boolean camelCase key is a bare flag after normalization")
+        check(suite, drv, "M", "camel-revRange-is-positional-not-a-flag", "log",
+              {"revRange": "A..B"}, argv=["git", "log", "A..B"],
+              cmdline="git log A..B",
+              must_not=["--revRange", "--rev-range"],
+              note="revRange -> rev_range (a _REVISION_KEYS member), so it lands "
+                   "as a POSITIONAL and is NOT emitted as --revRange=A..B")
+        check(suite, drv, "M", "camel-treeIsh-is-positional", "show",
+              {"treeIsh": "HEAD"}, argv=["git", "show", "HEAD"],
+              cmdline="git show HEAD",
+              must_not=["--treeIsh", "--tree-ish"],
+              note="treeIsh -> tree_ish, also a _REVISION_KEYS member -> positional")
+        check(suite, drv, "M", "camel-maxAnswerChars-is-meta-stripped", "log",
+              {"maxAnswerChars": 500, "stat": True},
+              argv=["git", "log", "--stat"],
+              note="maxAnswerChars -> max_answer_chars, caught by the meta check "
+                   "BEFORE the flag fall-through, exactly like max_answer_chars; "
+                   "only stat reaches git")
+        # Regression: normalization is an IDENTITY on already-snake / all-lowercase
+        # keys, so the group-C traps do NOT shift. Mirrors trap-remote_name,
+        # trap-reference and trap-revison-typo, framed here as the untouched half
+        # of the camelCase contract.
+        check(suite, drv, "M", "snake-remote_name-untouched", "ls-remote",
+              {"remote_name": "github"},
+              argv=["git", "ls-remote", "--remote-name=github"],
+              note="all-lowercase-with-underscore returned unchanged: still the "
+                   "--remote-name near-miss of the `remote` positional key")
+        check(suite, drv, "M", "snake-reference-untouched", "log",
+              {"reference": "HEAD"}, argv=["git", "log", "--reference=HEAD"],
+              note="`reference` is not a revision alias and normalization does "
+                   "not make it one")
+        check(suite, drv, "M", "snake-revison-typo-untouched", "log",
+              {"revison": "HEAD"}, argv=["git", "log", "--revison=HEAD"],
+              note="the `revison` typo has no uppercase, so it stays a bogus flag "
+                   "exactly as before -- one typo, one bogus flag")
 
         stub_ok = drv.mod.subprocess is drv.stub
         non_git = [c for c in drv.stub.calls if not c or c[0] != "git"]

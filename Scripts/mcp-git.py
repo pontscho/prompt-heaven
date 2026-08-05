@@ -466,6 +466,26 @@ _REPO_KEYS = {"remote", "repository", "repo"}
 _POSITIONAL_KEYS = _REVISION_KEYS | _PATH_KEYS | _REPO_KEYS
 
 
+def _camel_to_snake(key: str) -> str:
+    """Normalize a camelCase param key to its snake_case spelling.
+
+    Applied to EVERY key at the top of the conversion loop, BEFORE the meta
+    check and before any membership test, so a caller who writes `maxCount`,
+    `noMerges`, `revRange` or `maxAnswerChars` reaches exactly the same slot as
+    the snake_case spelling every set here is written in. Placing it ahead of the
+    `_META_KEYS` test is deliberate: it makes `maxAnswerChars` recognized as meta
+    and camelCase positional aliases (`revRange` -> `rev_range`, `treeIsh` ->
+    `tree_ish`) match the snake_case membership sets at the positional test.
+
+    The sets stay snake_case: the normalization happens on the way IN, not on the
+    sets. An already-snake or all-lowercase key is returned unchanged (identity),
+    so no existing `--key=value` fall-through shifts -- `remote_name`, `reference`
+    and the `revison` typo still become `--remote-name`, `--reference` and
+    `--revison`.
+    """
+    return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', key).lower()
+
+
 def _check_not_option(value: str, key: str, what: str, example: str) -> None:
     """Reject a positional value that git's option parser would read as a flag.
 
@@ -560,6 +580,10 @@ def _semantic_params_to_args(params: dict) -> Tuple[List[str], List[str]]:
     paths: List[str] = []
 
     for key, value in params.items():
+        # camelCase -> snake_case, before the meta check and before any set
+        # membership test, so `maxAnswerChars` is caught as meta and camelCase
+        # positional aliases match the snake_case sets. See _camel_to_snake.
+        key = _camel_to_snake(key)
         if key in _META_KEYS:
             continue
         # A positional key carrying a BOOLEAN SCALAR falls through to the flag
