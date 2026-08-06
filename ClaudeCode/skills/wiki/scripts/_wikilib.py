@@ -2,7 +2,7 @@
 
 stdlib-only, Python 3.9+. No third-party dependencies, no LLM calls.
 Implements a deliberately minimal frontmatter parser covering only the subset
-documented in SCHEMA.md section 5:
+documented in the p:wiki schema (SKILL.md §5):
   - top-level `key: scalar`
   - one level of nesting (block `key:` then indented `subkey: value`)
   - block lists (`key:` then indented `- item`)
@@ -17,7 +17,7 @@ import subprocess
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 # Files and directories that are not wiki pages.
-SKIP_FILES = {"INDEX.md", "SCHEMA.md"}
+SKIP_FILES = {"INDEX.md"}
 SKIP_DIRS = {"sources", "plans", ".git", ".claude", ".cache"}
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
@@ -164,7 +164,7 @@ def read_page(path: str) -> Tuple[Dict[str, Any], str]:
 def iter_pages(root: str) -> Iterator[Tuple[str, Dict[str, Any], str]]:
 	"""Yield (relpath_from_root, frontmatter, body) for every wiki page.
 
-	Skips INDEX.md, SCHEMA.md, and the raw `sources/` layer.
+	Skips INDEX.md and the raw `sources/` layer.
 	"""
 	for dirpath, dirnames, filenames in os.walk(root):
 		dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)

@@ -9,8 +9,8 @@ sources:
   - ClaudeCode/skills/wiki
   - ClaudeCode/agents/minion-librarian.md
 verified:
-  commit: e4cdd48
-  date: 2026-08-03
+  commit: 546f145
+  date: 2026-08-06
 links:
   - scripts
   - skills
@@ -32,8 +32,9 @@ factual claim about code carries an anchor a later lint pass can re-check.
 - **`p:wiki` skill** `ClaudeCode/skills/wiki/SKILL.md` — the engine and
   mandate. Dispatches five operations (`ingest`, `lint`, `query`, `init`,
   `adopt`) and delegates each to the librarian. The wiki contract (page types,
-  frontmatter subset, anchors, freshness model, anti-scope) lives in
-  `ClaudeCode/skills/wiki/SCHEMA.md`.
+  frontmatter subset, anchors, freshness model, anti-scope) is the `## Schema`
+  section of that same `ClaudeCode/skills/wiki/SKILL.md`, inlined so it ships and
+  loads with the skill — there is no separate schema file to open.
 - **`minion-librarian` (Dewey)** `ClaudeCode/agents/minion-librarian.md` —
   the executor. Runs every operation in its own sandbox using `wiki_call` and
   the language MCPs; applies non-destructive updates (frontmatter bumps, prose
@@ -78,8 +79,8 @@ for the whole corpus and every later one pays nothing.
 Invalidation is by disk state alone — a stat-only walk over
 `(relpath, mtime_ns, size)` `Scripts/mcp-wiki.py:_corpus_signature`. No
 write-path hook is needed and the memo stays correct when a *different* process
-edits a page; `INDEX.md` and `SCHEMA.md` are skipped, so a reindex never
-invalidates it spuriously. The memoization is keyed on the root and nothing
+edits a page; only `INDEX.md` is skipped `Scripts/mcp-wiki.py:SKIP_FILES`, so a
+reindex never invalidates it spuriously. The memoization is keyed on the root and nothing
 else: no HEAD, no TTL, no eviction, so a long-lived server holds one tokenized
 copy of every root it has ever searched.
 

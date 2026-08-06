@@ -5,14 +5,13 @@ status: active
 title: The index claims no freshness; frontmatter carries only editorial intent
 description: Decision to rename the hand-written status value current to active, suppress it in INDEX.md, and forbid the two values that collide with git-measured freshness states.
 sources:
-  - ClaudeCode/skills/wiki/SCHEMA.md
   - ClaudeCode/skills/wiki/SKILL.md
   - ClaudeCode/skills/wiki/scripts/reindex.py
   - ClaudeCode/agents/minion-librarian.md
   - Scripts/mcp-wiki.py
 verified:
-  commit: e4cdd48
-  date: 2026-08-03
+  commit: 546f145
+  date: 2026-08-06
 links:
   - wiki-engine
   - scripts

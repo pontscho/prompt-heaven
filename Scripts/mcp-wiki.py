@@ -32,7 +32,7 @@ Functions:
   stats            page counts by type/status + dup/orphan/malformed audit
 
 The stdlib-only frontmatter parser is vendored from the p:wiki `_wikilib.py`
-(kept in sync by hand — the SCHEMA.md section-5 parseable subset is the contract).
+(kept in sync by hand — the p:wiki schema's §5 parseable subset is the contract).
 Symbol-level anchor verification (broken/drifted) is deliberately NOT done here;
 that stays with the LLM (p:minion-librarian) via the language MCP servers.
 
@@ -67,7 +67,7 @@ DEFAULT_WIKI_ROOT = "docs"
 TYPE_ORDER = ["overview", "subsystem", "component", "reference", "analysis",
               "concept", "spec", "runbook", "adr", "glossary"]
 
-# Frontmatter `status:` is editorial intent, never freshness (SCHEMA.md §3).
+# Frontmatter `status:` is editorial intent, never freshness (p:wiki schema §3).
 # `active` is the unmarked normal state, so INDEX.md labels only a deliberate
 # `draft` or `deprecated`. `current`/`stale` are rejected: they are two of the
 # eight git-measured states below, and a hand-written field borrowing HEAD's
@@ -82,7 +82,7 @@ DETAIL_STATUSES = ["stale", "orphaned-source", "unverified", "promotable"]
 UNTRACKED_TYPES = {"overview", "adr", "glossary"}
 
 # Files / dirs that are not wiki pages (mirrors _wikilib.py).
-SKIP_FILES = {"INDEX.md", "SCHEMA.md"}
+SKIP_FILES = {"INDEX.md"}
 SKIP_DIRS = {"sources", "plans", ".git", ".claude", ".cache"}
 
 # Search field weights — a term hit in the title counts far more than in the body.
@@ -107,8 +107,8 @@ FIELD_WEIGHTS = {"name": 8, "title": 8, "anchor": 5, "aliases": 5,
 # ("this page carries information about your terms"). The type can reorder an
 # answer; it can never change what we assert about a page's coverage.
 #
-# Tokens come from the SCHEMA's own type table (ClaudeCode/skills/wiki/SCHEMA.md
-# "Page types"), not from invented synonyms — `adr` is described there as "A
+# Tokens come from the SCHEMA's own type table (ClaudeCode/skills/wiki/SKILL.md
+# Schema §2 "Page types"), not from invented synonyms — `adr` is described there as "A
 # decision: what, why, alternatives, consequences", which is exactly the
 # vocabulary a caller asking for a decision uses. Two curation rules, both
 # mechanically checked by the suite:
@@ -233,7 +233,7 @@ def safe_path(project_root: str, relative_path: str, strict: bool = False) -> st
 
 # ---------------------------------------------------------------------------
 # Vendored wiki helpers (from p:wiki/scripts/_wikilib.py; tabs -> 4 spaces).
-# Keep in sync with SCHEMA.md section 5 (the stdlib-parseable frontmatter subset).
+# Keep in sync with the p:wiki schema §5 (the stdlib-parseable frontmatter subset).
 # ---------------------------------------------------------------------------
 
 def git(args: List[str], cwd: str) -> Tuple[int, str, str]:
@@ -1169,7 +1169,7 @@ _CORPUS_CACHE: Dict[str, tuple] = {}
 def _corpus_signature(abs_root: str) -> tuple:
     """Stat-only walk (NO read/parse) mirroring iter_pages' skip rules; returns
     a hashable of sorted (relpath, mtime_ns, size). Rebuilds trigger on any
-    page add/remove/edit; INDEX.md/SCHEMA.md are skipped so a reindex never
+    page add/remove/edit; INDEX.md is skipped so a reindex never
     spuriously invalidates the search cache."""
     entries = []
     for dirpath, dirnames, filenames in os.walk(abs_root):

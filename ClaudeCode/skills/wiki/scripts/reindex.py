@@ -28,7 +28,7 @@ import _wikilib as w  # noqa: E402
 TYPE_ORDER = ["overview", "subsystem", "component", "reference", "analysis",
 	"concept", "spec", "runbook", "adr", "glossary"]
 
-# Frontmatter `status:` is editorial intent, never freshness (SCHEMA.md §3).
+# Frontmatter `status:` is editorial intent, never freshness (p:wiki schema §3).
 # `active` is the unmarked normal state, so INDEX.md labels only a deliberate
 # `draft` or `deprecated`. `current`/`stale` are rejected: they are two of the
 # eight git-measured states, and a hand-written field borrowing HEAD's
