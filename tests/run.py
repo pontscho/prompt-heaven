@@ -134,6 +134,10 @@ def run_mcp_first_guard(opts):
     return run_python_suite("test_mcp_first_guard", opts)
 
 
+def run_sbx_gate(opts):
+    return run_python_suite("test_sbx_gate", opts)
+
+
 def run_purity_lsp(opts):
     return run_python_suite("test_purity_lsp", opts)
 
@@ -204,6 +208,8 @@ SUITES = [
      "mcp-inspect VALIDATION family", 119),
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 335),
+    ("sbx_gate", run_sbx_gate,
+     "sbx PreToolUse grant-only gate", 77),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 152),
     ("mcp_git_params", run_mcp_git_params,

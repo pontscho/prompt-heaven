@@ -7,8 +7,8 @@ description: Claude Code hooks that auto-run after edits to enforce quality and 
 sources:
   - ClaudeCode/hooks
 verified:
-  commit: d6659f7
-  date: 2026-07-16
+  commit: e242624
+  date: 2026-08-08
 links:
   - overview
 ---
@@ -26,6 +26,8 @@ identity).
 | Hook | Lang | Trigger | Action |
 |------|------|---------|--------|
 | `attention-reminder.py` | Python | PreToolUse / UserPromptSubmit | Emits a per-token-bucket reminder listing the active MCP servers |
+| `mcp-first-guard.py` | Python | PreToolUse / matcher `Bash` | MCP-first routing guard: denies file-search / read / listing / inspection binaries as a *primary* Bash command, steering to the purity/inspect MCP equivalents; sees through wrappers and command substitution (`deny`\|empty polarity) |
+| `sbx-gate.py` | Python | PreToolUse / matcher `Bash` | Grant-only gate: auto-allows a clean, contained, single `sbx` invocation (canonical-path identity, metacharacter-rejecting) and stays silent otherwise (`allow`\|empty polarity — disjoint from `mcp-first-guard.py`, so their order is safe either way) |
 | `post-edit-clang-format.sh` | Bash | edit `.c/.cpp/.h/.hpp` | Auto-formats via clang-format |
 | `post-edit-clang-tidy.sh` | Bash | edit `.c/.cpp/.h/.hpp` | Runs clang-tidy; blocks on warnings |
 | `post-edit-json-lint.sh` | Bash | edit `.json/.jsonc/...` | Validates JSON syntax |

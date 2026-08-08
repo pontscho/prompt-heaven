@@ -1,1067 +1,1185 @@
-original_request: "Continue the mcp-purity consolidation: implement Phase 1 — fold luals (lua-language-server) into Scripts/mcp-purity.py as a second LspBackend behind the shared abstract interface."
-
-goal: >-
-  Eliminate duplicated LSP-core code by extracting a shared concrete base
-  BaseLspClient(LspBackend) in Scripts/mcp-purity.py, re-basing the existing
-  ClangdClient onto it, and adding a LuaLsClient(BaseLspClient) that folds the
-  reusable lua-language-server core from Scripts/mcp-lua-lsp.py. Per-language
-  divergence is expressed as a small set of polymorphic hooks/attributes on the
-  backend, consulted by the existing module-level semantic helpers — keeping the
-  10 canonical handlers backend-agnostic. After this phase a purity_call that
-  targets a .lua file (or uses a luals_* function name) is served in-process by a
-  lua-language-server backend, while the standalone mcp-lua-lsp.py stays
-  registered and byte-unchanged. C/C++/CUDA behavior must be regression-free.
-
+original_request: |
+  A sandbox-run skill + a stdlib-only sbx sandbox helper (macOS Seatbelt / Linux
+  bwrap) + a grant-only PreToolUse gate sbx-gate.py that auto-allows ONLY a clean,
+  contained, single sbx invocation and prompts on everything else. Trust-boundary
+  shift: approve the ONE wrapper, not each command.
+goal: |
+  Ship the "approve-the-wrapper-not-the-command" trust-boundary shift as three
+  coordinated artifacts: (1) a stdlib-only sbx sandbox helper built pure-pieces-first
+  / execvp-last over macOS Seatbelt and Linux bwrap with a fail-closed platform
+  registry, default-deny writes, no network, secret read+write denial, and rlimits;
+  (2) a grant-only, metacharacter-REJECTING PreToolUse(Bash) gate sbx-gate.py that
+  auto-allows only a single clean sbx invocation verified by canonical-path IDENTITY
+  (never basename) with scope inside the project and no --net, and stays silent
+  (normal prompt) on all doubt; (3) the mandatory gate contract suite with a
+  cross-file parity test plus a folded offline pure-builder containment group, the
+  live self-test probe, the SKILL.md, and the wiki/ADR sync. Faithful mechanical
+  translation of the LOCKED feature-implementation-plan.md (commit e242624); no
+  locked decision is re-litigated.
 complete: true
-
 implementation_complete: true
-implementation_date: "2026-06-19"
+implementation_date: "2026-08-08"
 inspector_verdict: COMPLETE
-inspector_iterations: 1
 security_verdict: APPROVE
-security_iterations: 5
-implementation_notes: >-
-  All 12 tasks implemented and verified: py_compile clean, hermetic smoke test pass
-  (incl. new luals dispatch asserts), and a live end-to-end run 16/16 against real
-  lua-language-server + clangd (luals def/refs+grep-supplement/outline/diagnostics/
-  hover/symbol-fallback/partial-change-impact/alias-routing; clangd regression 4/4).
-  Phase A completeness (p:minion-inspector-implementation): COMPLETE, 12/12 tasks and
-  11/11 success_criteria, all 7 key invariants hold; 1 iteration. Phase B security
-  (p:security-review code-mode, user-authorized full hardening): converged to APPROVE
-  over 5 iterations. Standalone mcp-lua-lsp.py and mcp-clangd.py remain byte-identical.
-implementation_security_hardening:
-  - "safe_path absolute-path containment regardless of --strict (+ internal root realpath)"
-  - "open_document + _prime_index + walk loops + _lsp_path_in_root: full file-symlink/URI containment family across every read site"
-  - "_resolve_lsp_binary + --clangd-path/--luals-path: absolute validated LSP binary resolution (CWE-426)"
-  - "_filter_exec_flags + _expand_rsp_file containment + nesting guard: neutralize compile_commands -fplugin/-load forwarding and response-file arbitrary read"
-  - "_find_cuda_sdk realpath validation; cache-dir write symlink guard"
-  - "_backend reserved-key strip; _sanitize_log CR/LF; caller-regex length cap + scan deadlines; 64MB LSP Content-Length cap"
-implementation_security_open_items:
-  - owasp: "A05/A06"
-    cwe: "CWE-426"
-    file: "Scripts/mcp-purity.py (_resolve_lsp_binary shutil.which fallback)"
-    description: "Without --clangd-path/--luals-path, LSP binaries are resolved via shutil.which which honors PATH ordering. Mitigation: pin absolute paths via the CLI overrides in untrusted-PATH environments. Accepted residual under the local single-user threat model."
-    severity: low
-
+validation_fan_out_rounds: 1
+implementation_notes: |
+  Faithful mechanical build of the LOCKED plan (commit e242624). All 12 code/test
+  tasks completed; forge test all green (10 suites, 0 fail, no count drift; the
+  sbx_gate suite grew 71 -> 73 cases across the two live-validation fixes below;
+  mcp_first_guard 335 with no regression).
+  Live containment PROVEN on BOTH target platforms:
+    - macOS Seatbelt (this host): selftest_probe a=ok b=blocked c=blocked d=blocked
+      e_secret_write=blocked -- the M2 secret-READ boundary (~/.ssh/id_rsa under
+      --write .) holds; SBPL last-match-wins confirmed LIVE (was UNVERIFIED in-repo).
+    - Linux bwrap (host `para`, bubblewrap 0.6.1): sbx functional; b/c/e blocked,
+      ~/.ssh masked to an empty tmpfs (host's real authorized_keys inaccessible in
+      the sandbox), .git/config read denied (planted secret not exposed), R20
+      fail-closed (exit 3, target never ran), happy-path runs.
+  The LIVE Linux validation caught TWO real Linux-only defects that the offline
+  string assertions AND the macOS live test both missed -- each fixed and re-validated:
+    1. bwrap `--tmpfs` over the `.git/config` regular FILE would ENOTDIR-abort
+       (dead-on-arrival in any git repo). Fix: mask regular-FILE secrets with
+       `--ro-bind /dev/null <file>` (read-empty + write-denied), keep `--tmpfs` for
+       directory secrets. Seatbelt unaffected (subpath deny works on a file path).
+    2. secret_paths returned nonexistent home secrets (e.g. absent ~/.aws)
+       unconditionally; bwrap cannot create a mountpoint for a nonexistent path under
+       a read-only root -> "Read-only file system" abort. Fix: existence-filter
+       secret_paths (a nonexistent secret has nothing to protect; macOS deny of a
+       nonexistent path is a no-op, so filtering is cross-platform-safe). Offline
+       regression guards added (absent secret NOT masked; configless .git NOT in set).
+  Completeness lane (inspector-implementation) = COMPLETE, every load-bearing
+  invariant verified in code line-by-line. Security lane triage = source-verified
+  (one MEDIUM Linux-correctness issue found + fixed; no CRITICAL/HIGH). The full
+  static Skill(p:security-review) deep-review was consciously WAIVED by the user
+  after live containment proof on both platforms -- its marginal value was low, as
+  the real defects were runtime bwrap behaviors that static review would not catch.
+implementation_open_items:
+  - "Probe (d) reports 'inconclusive' (not 'blocked') on Linux: secret DIRECTORIES are masked via an empty --tmpfs (files vanish -> ENOENT) rather than EPERM, so the probe finds no readable candidate. Containment is nonetheless proven -- verify manually with `sbx --write . -- ls -a ~/.ssh` (empty). macOS probe (d) = blocked (EPERM) directly. Documented, not a defect."
+  - "Linux bwrap path is now live-verified on host `para`; it remains host-dependent (needs bubblewrap + unprivileged userns). macOS Seatbelt is the primary live-proven path on this workstation."
+implementation_security_open_items: []
+documentation_updated: true
+documentation_pages_touched:
+  - hooks
+  - skills
+  - 0005-approve-the-wrapper-not-the-command
+  - INDEX
+documentation_open_items:
+  - "ADR 0005 is a link-graph orphan (no page links INTO it yet); non-gating (reindex --check exits 0, it is in INDEX.md and links out to hooks/skills/feature-implementation-plan). A future page referencing it, or a post-commit /p:wiki lint, closes it."
+  - "The three touched pages (hooks, skills, adr/0005) carry verified.commit: e242624 as a PLACEHOLDER -- the sbx feature files are currently UNTRACKED, so e242624 (current HEAD) predates them. When the feature is committed, re-bump verified.commit on these pages to the landing commit (a /p:wiki lint pass will flag them)."
+  - "Pre-existing (NOT introduced by this work): docs/subsystems/skills.md intro prose (~:20-21, :36) still claims skill directories are named p:<name>; on-disk they are bare (e.g. sandbox-run/), the p: is plugin-applied at invocation. Left untouched per I2; a separate prose-correction pass is warranted."
 requirements:
-  - category: architecture
-    question: "Q1 — How should the second backend be structured relative to the committed ClangdClient?"
-    answer: >-
-      [D17] Option 2: extract a shared concrete base class BaseLspClient(LspBackend)
-      holding the byte-identical LSP machinery currently in ClangdClient; both
-      ClangdClient and LuaLsClient inherit from it. This is the only structure
-      consistent with the de-dup mission. The cost — re-basing the committed
-      ClangdClient — is mitigated by the Phase 0 live clangd test + smoke.
-    details:
-      - "Class hierarchy: LspBackend (abstract, unchanged @1259) -> BaseLspClient (NEW, shared machinery + divergence hooks) -> {ClangdClient (start + CUDA + RETAINS call-hierarchy), LuaLsClient (start + lua _language_id + reader hooks + luals divergence hooks; NO call-hierarchy)}."
-      - "Rejected Option 1 (separate LuaLsClient(LspBackend), no base): duplicates ~90% byte-identical machinery, contradicts the mission."
-      - "Rejected Option 3 (central capability registry): more machinery; returns errors where standalone luals returns degraded-but-useful results."
-    options:
-      - "Option 1: separate LuaLsClient(LspBackend), no shared base"
-      - "Option 2: extract shared BaseLspClient(LspBackend) — CHOSEN"
-      - "Option 3: central capability registry + explicit not-supported errors"
-    status: answered
-
-  - category: architecture
-    question: "Q2 — How should per-language capability gaps (call-hierarchy, hover type inference, grep supplement, fallback extensions) be expressed?"
-    answer: >-
-      [D18] A SMALL set of polymorphic hooks/attributes ON THE BACKEND, consulted
-      by the EXISTING module-level semantic helpers. NOT a central capability
-      registry, NOT overriding a references() method. The 10 handlers delegate to
-      module-level helpers that already take a `client` argument, so divergence
-      flows through hooks those helpers consult — keeping handlers/helpers
-      backend-agnostic (the Phase 0 invariant).
-    details:
-      - "Hooks on BaseLspClient: supports_call_hierarchy: bool = True; fallback_extensions: tuple = _FALLBACK_EXTS (12-ext); prime_extensions: tuple = clangd's 8-ext prime set; _language_id(path) -> str; infer_type(text) -> str; async supplemental_references(symbol_name, seen, remaining, preferred_path=None) -> list (no-op [] default)."
-      - "LuaLsClient overrides: supports_call_hierarchy=False, fallback_extensions=(\".lua\",), prime_extensions=(\".lua\",), _language_id->\"lua\", infer_type->raw text.strip(), supplemental_references->folded _lua_text_references."
-      - "supports_call_hierarchy is consulted at the HANDLER (handle_symbol_change_impact @2583), not inside the backend."
-    options:
-      - "Hooks/attributes on the backend consulted by module-level helpers — CHOSEN"
-      - "Central capability registry"
-      - "Override a references() method per backend"
-    status: answered
-
-  - category: dependencies
-    question: "Q3 — How should the luals backend discover its Lua config (.luarc.json)?"
-    answer: >-
-      [D19] Option 1: clean cwd auto-discovery only — no upward .luarc.json walk.
-      LuaLsClient.start(project_root) defaults config_path=None and spawns
-      lua-language-server with cwd=project_root, letting luals auto-discover
-      relative to its cwd. This matches the standalone luals server exactly, so
-      there is no behavior regression for Lua users. An optional --configpath is
-      supported by start() but not passed by default.
-    details:
-      - "No --configpath passed by default; the binary's own cwd discovery is relied upon."
-      - "An upward .luarc.json discovery walk is explicitly OUT OF SCOPE."
-    options:
-      - "Option 1: cwd auto-discovery only — CHOSEN"
-      - "Option 2: upward .luarc.json walk from the queried path"
-    status: answered
-
-  - category: implementation
-    question: "Q4 — What is the committed test scope, given the smoke harness drives the server as a subprocess and cannot import it?"
-    answer: >-
-      [D20] Option 3 (Phase 0 mirror): hermetic JSON-RPC dispatch-smoke assertions
-      in _mcp_smoke_test.py (committed, observable-only — the harness drives the
-      server as a subprocess and does NOT import the module) PLUS a SEPARATE live
-      luals verification via p:minion-runner during /p:implement (NOT committed).
-      Introspection asserts (_detect_language, _route_filetype, class flags) belong
-      to the live runner step because the smoke harness cannot import the module.
-    details:
-      - "Committed smoke asserts ONLY: inventory lists luals_* names; luals_find_definition + a representative subset dispatch (NOT \"unknown function\"); luals_bogus -> \"unknown function\"."
-      - "Live (NOT committed): in-process import asserts (_detect_language(\".lua\")==\"lua\", _route_filetype(\"lua\")==\"luals\", LuaLsClient.supports_call_hierarchy is False, ClangdClient.supports_call_hierarchy is True, LuaLsClient.fallback_extensions==(\".lua\",)) + a real lua-language-server run on a fixture .lua workspace + a Phase 0 clangd regression re-run."
-    options:
-      - "Option 1: in-process import-based unit file"
-      - "Option 2: live-only verification, no committed smoke"
-      - "Option 3: hermetic JSON-RPC smoke (committed) + separate live runner (uncommitted) — CHOSEN"
-    status: answered
-
   - category: interface
-    question: "Q5 — How do path-less luals_* calls and the handle_symbol \"cpp\" hardcode route to the luals backend without changing handler signatures?"
-    answer: >-
-      [D21] Option 1: a dispatch-level reserved params[\"_backend\"] hint derived
-      from the luals_ function-name prefix, plus a _select_filetype(params, abs_path)
-      helper. Path-based calls auto-detect via _detect_language; path-less calls use
-      the hint; path-less calls with neither keep the \"cpp\" default. This single,
-      signature-preserving mechanism generically fixes the handle_symbol \"cpp\"
-      hardcode (@2487) too. The reserved _backend key is dispatcher-internal and is
-      stripped from unknown-params reporting.
+    question: What is the final sbx command-line interface and how is the target argv separated from sbx flags?
+    answer: |
+      sbx [--write DIR]... [--net] [--ro] -- <cmd> [args...]. The helper MANUALLY
+      slices argv at the first bare "--" (NOT argparse.REMAINDER): the left side is
+      fed to argparse, the right side is kept verbatim as the target argv and passed
+      to os.execvp as argv list elements, never through a shell. --write is
+      action="append" (repeatable); --ro denies all writes incl. the scratch default;
+      --net enables network. A --dry-run mode prints the resolved plan and runs
+      NOTHING. Missing "--" or empty target argv -> non-zero usage error.
     details:
-      - "_PREFIX_BACKEND={\"luals_\":\"lua\"}; _backend_hint(function) returns the mapped filetype or None; _select_filetype(params, abs_path) returns params.get(\"_backend\") or (_detect_language(abs_path) if abs_path else \"cpp\")."
-      - "In handle_purity_call, after _resolve_aliases and before the handler call: hint=_backend_hint(function); if hint: params[\"_backend\"]=hint."
-      - "Path-less-capable handlers (handle_symbol, the name-branches of find_definition/find_references/symbol_context/symbol_change_impact) acquire the backend via _ensure_backend(_select_filetype(params, abs_path), project_root); handle_symbol passes abs_path=\"\"."
-      - "Unknown-params validation (@2803-2811) excludes _backend: set(params.keys()) - accepted - {\"_backend\"}."
-    options:
-      - "Option 1: reserved params[\"_backend\"] dispatch hint + _select_filetype — CHOSEN"
-      - "Option 2: new explicit backend argument on every handler signature"
-    status: answered
-
-  - category: data
-    question: "D3 — What is the canonical path key for purity_call params?"
-    answer: >-
-      [D3] The canonical path key is `relative_path` (NOT clangd's `path`). The
-      purity_call {function, params} envelope and the relative_path key MUST NOT
-      change in this phase.
-    details:
-      - "Handlers read params.get(\"relative_path\", \"\"); _resolve_aliases canonicalizes path->relative_path (last-wins)."
+      - FR-2 / FR-3 / Step 1
+      - The wrapper is invoked and auto-allowed ONLY by its absolute deployed path ~/.claude/skills/p/skills/sandbox-run/scripts/sbx (H2 invocation contract).
     options: []
     status: answered
-
+  - category: architecture
+    question: How is the sandbox helper structured across platforms and how does it fail when a platform or binary is unavailable?
+    answer: |
+      A fail-closed registry BACKENDS = {"darwin": _seatbelt_argv, "linux": _bwrap_argv}
+      keyed on a sys.platform prefix; builder = BACKENDS.get(platform_key). If builder
+      is None (unknown platform) OR shutil.which cannot find the engine binary
+      (sandbox-exec / bwrap) -> one-line reason to stderr + sys.exit(non-zero) WITHOUT
+      ever constructing or running a target. There is NO unsandboxed fallback ever.
+      No class hierarchy (ARCHITECTURE.md forbids speculative abstraction) - two pure
+      Scope->argv builder functions plus a dict. Adding a third OS later = one function
+      + one dict entry; seccomp is an OFF-by-default `if scope.seccomp:` branch inside
+      _bwrap_argv.
+    details:
+      - NFR-1 / NFR-2 / NFR-9 / KD-3 / R20
+    options: []
+    status: answered
+  - category: security
+    question: How does the gate decide auto-allow versus prompt, and what is its safe direction on any doubt?
+    answer: |
+      Grant-only PreToolUse(Bash) gate. Auto-allow IFF the command is provably a
+      single, clean, un-wrapped invocation of the ONE deployed sbx wrapper - verified
+      by canonical-path IDENTITY (canonicalize toks[0] and require == WRAPPER_PATH,
+      NEVER os.path.basename == "sbx") - with NO shell metacharacter anywhere, its
+      declared scope inside the project, and --net absent. Under ANY doubt (a
+      metacharacter, a parse ambiguity, an unknown field/flag, missing cwd, or a first
+      token that does not canonicalize to WRAPPER_PATH) it emits EMPTY stdout and the
+      normal prompt runs. Fail-safe == fail-to-prompt, never fail-to-allow. The gate
+      only ever emits "allow" or silence; it NEVER emits "deny". It copies ONLY the
+      ~10-line JSON envelope + main() skeleton from mcp-first-guard.py, imports nothing,
+      and REJECTS metacharacters rather than seeing through them (inverted safety model).
+    details:
+      - FR-5 / FR-7 / KD-1 / KD-6 / P3 / GRAFT 1
+    options: []
+    status: answered
+  - category: security
+    question: Which secrets are protected and how is the deny set produced single-source?
+    answer: |
+      Secrets are denied BOTH read and write even when inside an otherwise-allowed
+      scope. The set is produced ONCE by a pure, import-side-effect-free FUNCTION
+      secret_paths(cwd) -> tuple[str, ...] in the helper (a FUNCTION, not a
+      module-level constant, because the .git/config entries are cwd-derived - M-A).
+      It returns the home-anchored ~/.ssh, ~/.aws, ~/.gnupg, ~/.config/gh, ~/.claude
+      (expanduser, cwd-independent) PLUS os.path.join(d, ".git", "config") for EVERY
+      ancestor d of cwd (inclusive) whose <d>/.git exists, walking from cwd up to the
+      filesystem root (sec-MED-2) - so a planted nested .git cannot un-protect the real
+      repo-root .git/config. Each backend translates the tuple to its own deny syntax
+      (policy single-source, expression per-backend, KD-2).
+    details:
+      - FR-6 / KD-2 / KD-8 / R16 / R17 / R22 / R22b / sec-MED-2
+    options: []
+    status: answered
   - category: implementation
-    question: "D5 — Should RuntimeError stay in the dispatcher clean-catch tuple?"
-    answer: >-
-      [D5] Yes. RuntimeError stays in the dispatcher clean-catch tuple
-      (ValueError, FileNotFoundError, OSError, RuntimeError) @2802 — honest errors.
-      luals initialize failure raises RuntimeError, surfaced through the 90s shield.
+    question: How is drift between the gate and helper prevented given the gate imports nothing?
+    answer: |
+      resolve_scope (KD-7: realpath(join(base, expanduser(dir))) with base==cwd),
+      project_root (KD-8: nearest .git-bearing ancestor of cwd, else cwd), and the
+      separator-safe containment test (commonpath, NOT str.startswith - sec-MED-1) are
+      ONE logical contract but - because the gate imports nothing and is deployed in a
+      different tree (P8) - are DELIBERATELY DUPLICATED as two physical copies (one in
+      the gate, one in the helper) that MUST produce byte-identical output. A mandatory
+      cross-file PARITY TEST in tests/test_sbx_gate.py imports BOTH copies (gate via
+      harness load_module_from_path; helper via importlib.machinery.SourceFileLoader -
+      the helper is extension-less, H3) and asserts byte-identical output over ~, .,
+      /etc, a relative ../sibling, and a temp symlink. A one-sided edit == a containment
+      escape, which the parity test is the enforcement against.
     details:
-      - "A missing lua-language-server binary is guarded by shutil.which in the luals init branch for an honest error + 30s backoff, not a hang."
+      - NFR-8 / H-A / KD-7 / KD-8 / H1
     options: []
     status: answered
-
+  - category: data
+    question: How is the write-scope resolved and injection-checked?
+    answer: |
+      Default sole writable scope is <cwd>/.claude/tmp (created at runtime dispatch via
+      os.makedirs(exist_ok=True), never a shell mkdir). Each --write DIR adds
+      canonicalize(DIR) = resolve_scope(DIR, cwd) then REJECT (fail-closed exit non-zero)
+      any raw-or-resolved path containing " ' ( ) backslash or newline (R14). --ro
+      overrides to an empty writable set (R21). Containment ("is this --write inside the
+      project?") uses the separator-safe commonpath test in BOTH gate and helper
+      (inside_project), never str.startswith.
+    details:
+      - FR-3 / KD-7 / NFR-4 / R14 / R21 / sec-MED-1
+    options: []
+    status: answered
+  - category: implementation
+    question: Where do the offline helper containment assertions live - a standalone test_sbx.py or folded into the gate suite?
+    answer: |
+      RESOLVED (locked minimum). There is NO standalone tests/test_sbx.py, NO run_sbx
+      wrapper in tests/run.py, and NO separate sbx forge test target. Step 9's offline
+      pure-builder containment assertions (a)-(d), the H3 SourceFileLoader import of the
+      extension-less sbx helper, the setrlimit-before-execvp structural check, and the
+      M3 import-side-effect-free proof are all FOLDED INTO tests/test_sbx_gate.py as a
+      SECOND GROUP. Only tests/test_sbx_gate.py (create), one run_sbx_gate wrapper + one
+      SUITES row in tests/run.py, and one sbx_gate forge test target exist for tests.
+      In reference lists, tests/test_mcp_first_guard.py is the mirror reference.
+    details:
+      - Step 9 "Flag" (the locked minimum alternative) / FR-8
+    options: []
+    status: answered
+  - category: dependencies
+    question: What external dependencies does this feature introduce?
+    answer: |
+      None. Python 3 stdlib only (house style verified checkpoint.py:1-16,
+      reindex.py:1-27). The plugin ships NO hooks block; there is no installer and no
+      self-check; the user registers the gate manually in ~/.claude/settings.json
+      (locked decision c). macOS relies on the deprecated-but-present sandbox-exec;
+      Linux relies on bwrap; any missing binary -> fail-closed.
+    details:
+      - NFR-3 / locked decision c
+    options: []
+    status: answered
 constraints:
   - type: technical
-    description: "stdlib-only, single-file-per-server fleet convention — no new third-party dependencies."
-    impact: "No imports beyond the stdlib; lua-language-server is an existing external runtime spawned the same way as the standalone server. Smoke stays hermetic."
+    description: |
+      The PreToolUse contract is rigid: the gate must ALWAYS sys.exit(0); AUTOALLOW is
+      the "allow" JSON on stdout; PROMPT is literally NO stdout; stderr must be empty;
+      the hookSpecificOutput JSON shape is fixed (mcp-first-guard.py:585-599).
+    impact: |
+      Breaking any of these breaks the hook silently. The Step-8 suite pins the exact
+      envelope and the rc==0 / stderr-empty invariants (mirror test_mcp_first_guard.py:1002-1005).
   - type: technical
-    description: "The purity_call {function, params} envelope and the canonical relative_path path key ([D3]) must not change."
-    impact: "All routing/backend selection must happen inside the dispatcher and helpers, not via new wire fields. The reserved _backend params key is dispatcher-internal and stripped from unknown-params reporting."
-  - type: technical
-    description: "RuntimeError stays in the dispatcher clean-catch tuple ([D5])."
-    impact: "luals init/handshake failures surface as clean {\"error\": ...} responses, not internal -32603 crashes."
-  - type: technical
-    description: "Folded luals core is COPIED, not imported; mcp-lua-lsp.py is NOT modified."
-    impact: "The standalone mcp-lua-lsp.py must remain byte-for-byte unchanged and still launch (luals_call registered). Each backend owns its own child process; clangd and luals never share a process."
-  - type: technical
-    description: "No build system; verification is python3 -m py_compile + python3 Scripts/_mcp_smoke_test.py Scripts/mcp-purity.py + a one-shot live p:minion-runner run (live run in /p:implement, NOT committed)."
-    impact: "No forge/pytest target exists. The committed test surface is the JSON-RPC smoke harness only; introspection asserts move to the uncommitted live runner."
+    description: |
+      The tree must stay bytecode-free and stdlib-only: no .pyc may leak. Test loaders
+      set sys.dont_write_bytecode; forge runs under PYTHONDONTWRITEBYTECODE=1
+      (project-forge.yaml:19-20); the forge clean pycache target is the backstop.
+    impact: |
+      Every whitebox/SourceFileLoader import in the folded group must be wrapped so no
+      __pycache__ appears; forge clean pycache must leave zero .pyc.
   - type: security
-    description: "No new external input surface beyond Phase 0; path params confined under --project-root via safe_path; luals child spawned without a shell, cwd=project_root."
-    impact: "The reserved _backend key is dispatcher-internal and never trusted for paths. _route_filetype returning None still raises ValueError."
-
+    description: |
+      No unsandboxed fallback EVER. Unknown platform or missing sandbox binary -> the
+      helper exits non-zero and never runs the command raw; the gate under any doubt ->
+      empty stdout (prompt).
+    impact: |
+      BACKENDS.get(...) must have a fail-closed default; shutil.which must gate the
+      engine binary before any target is constructed (NFR-1, R20).
+  - type: technical
+    description: |
+      The sbx helper is intentionally extension-less (the CLI name is "sbx", NOT
+      "sbx.py"). The forge `syntax` target globs *.py under Scripts/tests/ClaudeCode/hooks
+      only, so it compile-checks sbx-gate.py and test_sbx_gate.py but does NOT cover the
+      sbx helper (wrong tree + no .py extension).
+    impact: |
+      The folded offline group MUST import the helper via importlib.machinery.SourceFileLoader,
+      NOT the harness spec_from_file_location-based load_module_from_path (which crashes
+      on a suffix-less path - H3). The helper must NOT be renamed to sbx.py.
+  - type: business
+    description: |
+      Registration is the USER's responsibility; the plugin ships no hooks block and no
+      installer (locked decision c). Two PreToolUse(Bash) hooks (mcp-first-guard.py +
+      sbx-gate.py) coexist with disjoint polarities (deny|empty vs allow|empty).
+    impact: |
+      An un-registered hook degrades to a normal prompt (safe). Claude Code's multi-hook
+      aggregation semantics are NOT verified in-repo and must be confirmed empirically at
+      registration time; SKILL.md must document the manual PascalCase registration.
+  - type: security
+    description: |
+      The macOS secret-READ boundary rests on SBPL last-match-wins ordering, which is
+      UNVERIFIED in-repo (no existing SBPL). The PreToolUse `cwd` payload field is also
+      unexercised anywhere in this repo.
+    impact: |
+      The boundary is probe-verified, NOT CI-verified: the live self-test probe (d) is
+      the only proof and is deliberately kept OUT of portable CI; the ADR must record
+      this residual risk (M2/A05/CWE-696). The gate must fail-safe (prompt) if cwd is
+      absent, so the cwd assumption can never cause a false-allow.
 success_criteria:
-  - "purity_call(function=\"luals_find_definition\", ...) and the other luals_* aliases resolve and return correct results against a live lua-language-server."
-  - "A canonical handler called on a .lua path (find_definition, find_references, outline, diagnostics, ...) routes to the luals backend via _detect_language -> _route_filetype -> \"luals\"."
-  - "Path-less luals calls (luals_workspace_symbols; name-based luals_find_definition/find_references/symbol_context/symbol_change_impact) reach the luals backend via the dispatcher backend-hint, not the \"cpp\" default."
-  - "Name-based find_references on Lua includes the dynamic-dispatch text-grep supplement, deduped against LSP hits on uri:line and capped (parity with the standalone luals server). Positional (_at) Lua references are LSP-only (parity)."
-  - "symbol on Lua uses a .lua documentSymbol fallback (parity with standalone luals)."
-  - "symbol_change_impact on Lua returns definition + references WITHOUT a call_hierarchy (partial: true) and does NOT error."
-  - "type_at on Lua returns hover-derived text (degraded, no C++-style clean type string) and does NOT error."
-  - "The standalone mcp-lua-lsp.py server is byte-for-byte unchanged and still launches (luals_call remains registered and working)."
-  - "C/C++/CUDA behavior is regression-free: the Phase 0 live clangd test (find_definition/find_references/outline/type_at) still passes 4/4."
-  - "python3 Scripts/_mcp_smoke_test.py Scripts/mcp-purity.py passes, including the new luals dispatch assertions."
-  - "python3 -m py_compile Scripts/mcp-purity.py Scripts/_mcp_smoke_test.py is clean."
-
+  - Every adversarial gate case in the Risk Mitigation matrix (R1-R13, +R6b/R10b/R12b/R12c) that represents a containment escape resolves to PROMPT (empty stdout), proven by tests/test_sbx_gate.py (SC-1).
+  - The live self-test passes in ZERO iterations - scratch write OK, out-of-scope write BLOCKED, network BLOCKED, secret-READ BLOCKED under --write . (probe d) - plus a faked-missing-sandbox run that fail-closes (SC-2).
+  - A secret file (e.g. ~/.ssh/id_rsa) is unreadable inside the sandbox even with --write . (SC-3).
+  - forge test all passes with the new sbx_gate suite registered and its declared case count matching the run; no existing suite regresses (mcp_first_guard declared 335, run.py:205-206); reindex.py --check passes after the doc updates (SC-4).
 context_summary:
-  error_handling: >-
-    Semantic handlers return {"error": "..."} on validation/lookup failure.
-    _ensure_backend (@2115) raises ValueError for an unroutable filetype
-    (_route_filetype -> None) and records init failures into _backend_init_failed
-    with a 30s backoff (_INIT_FAILURE_BACKOFF), plus a 90s asyncio.shield+wait_for
-    init shield. The dispatcher clean-catch tuple is
-    (ValueError, FileNotFoundError, OSError, RuntimeError) @2802 -> {"error": str(exc)};
-    any other exception becomes an internal -32603. luals start() raises RuntimeError
-    on an initialize error; add a shutil.which("lua-language-server") guard in the
-    luals init branch for an honest missing-binary error + backoff (not a hang).
-  memory_management: >-
-    Each backend owns its child process + background reader task; created lazily on
-    first semantic call, stored in _backends[backend_type] (keyed "clangd"/"luals"),
-    and stopped via the inherited stop(). luals and clangd never share a process;
-    cost is one extra LSP child when a .lua file is first touched. The folded luals
-    core is COPIED into mcp-purity.py, never imported from mcp-lua-lsp.py.
-  logging_pattern: >-
-    log.debug("Backend '%s' init: %s", backend_type, msg) in _init_backend (@2111);
-    luals start() logs init/indexing milestones via log.debug(f"..."). Use %-style
-    lazy formatting for the backend-init line (matching the existing call) and f-strings
-    where the existing folded luals code already uses them.
-  naming_conventions: >-
-    snake_case module-level helper functions that take a `client` argument
-    (_infer_type, _def_by_name, _refs_by_name, _fallback_workspace_symbols,
-    _symbol_to_location, _collect_call_hierarchy, _find_files_with_word);
-    leading-underscore _FOO for private module functions/attributes; UPPER_CASE for
-    module constants (_FALLBACK_EXTS, _CLANGD_FILETYPES, _LUALS_FILETYPES,
-    _PREFIX_BACKEND, _INIT_FAILURE_BACKOFF). Backend classes are CapWords.
+  error_handling: |
+    Two opposite polarities. The helper fail-CLOSED: on unknown platform, missing
+    sandbox binary, or an injection-tainted --write path it writes a one-line reason to
+    stderr and exits non-zero, NEVER running the command unsandboxed. The gate fail-SAFE:
+    any parse error, malformed payload, missing cwd, metacharacter, unknown flag, or
+    non-matching wrapper identity is a bare return -> empty stdout -> normal permission
+    prompt, and it ALWAYS exits 0 (try/except: pass around main()).
+  memory_management: |
+    Not applicable in the C/RAII sense (Python stdlib). The only resource concern is
+    resource.setrlimit on RLIMIT_AS / RLIMIT_CPU / RLIMIT_NPROC set in-process BEFORE
+    os.execvp (limits survive exec - KD-4), with the RLIMIT_NPROC per-UID caveat
+    documented (it counts all of the user's processes; leave headroom for the engine to
+    fork its target).
+  logging_pattern: |
+    The gate emits ONLY the allow JSON on stdout or nothing (never logs, stderr stays
+    empty - a test invariant). The helper writes a single one-line reason to stderr only
+    on the fail-closed path; otherwise it exec-replaces its own image so the target owns
+    stdout/stderr.
+  naming_conventions: |
+    Stdlib-only Python; shebang #!/usr/bin/env python3; module docstring with a Usage:
+    line (P4); snake_case; pure per-backend builders named _seatbelt_argv / _bwrap_argv;
+    shared-contract functions resolve_scope / project_root / inside_project /
+    secret_paths / canonicalize. Skill directory bare "sandbox-run" and frontmatter
+    name: sandbox-run (no p: prefix - the plugin applies p: at invocation time).
   key_patterns:
-    - "Semantic logic is MODULE-LEVEL helpers taking `client`, NOT polymorphic methods. Per-language divergence therefore flows through a small set of hooks/attributes the helpers consult — NOT a references() override or a capability registry."
-    - "prime_extensions (clangd's 8-ext prime set: .c .cpp .cc .cxx .h .hpp .cu .cuh) is DISTINCT from fallback_extensions (the 12-ext grep set _FALLBACK_EXTS incl. .m/.mm/.hh/.hxx). Reusing the grep set for priming would silently make clangd prime ObjC/extra headers — keep them separate."
-    - "THREE distinct skip-dir sets exist and must not be conflated: _FALLBACK_SKIP_DIRS (@1794, grep walk), the clangd prime skip-check {build,out,dist,.git}, and the standalone luals skip set {build,out,dist,.git,node_modules,vendor}. Minor walk drift is accepted for Phase 1 (inspector M-D)."
-    - "luals init silent-hang traps: the reader loop MUST answer the workspace/configuration server->client REQUEST with [None]*len(items), AND start() MUST send BOTH the initializationOptions.Lua push and the single workspace/didChangeConfiguration re-push. Drop any and luals stalls until the 90s timeout."
-    - "The smoke harness drives the server as a subprocess over JSON-RPC and does NOT import the module — committed asserts are observable-only (dispatch-resolves / unknown-function). Introspection asserts move to the uncommitted live p:minion-runner step."
-    - "The dispatcher looks up the RAW function name via HANDLERS.get(function) (@2792), so luals_* legacy names are DIRECT HANDLERS keys (like clangd_*/cuda_*). The unknown-params check in the except branch is keyed on canonical_func and MUST exclude the reserved _backend key."
-    - "_refs_by_name's per-ref dedup is keyed uri:line:character (@2244); the cross-source grep supplement must dedup on a 2-part uri:line line_seen and respect remaining = max_results - len(all_refs) (uncapped when max_results <= 0), matching the standalone (mcp-lua-lsp.py:1087,1131-1133)."
-
+    - "(1) The gate copies ONLY the ~10-line PreToolUse envelope, imports nothing, and REJECTS a metacharacter blocklist rather than seeing through obfuscation (KD-1 / GRAFT 1 / inverted safety model)."
+    - "(2) The gate authorizes wrapper IDENTITY (canonicalized toks[0] == WRAPPER_PATH), NEVER os.path.basename == 'sbx' (KD-6 / C1 / CWE-290) - a basename match is a forbidden false-allow."
+    - "(3) ONE path-resolution rule (resolve_scope / project_root / separator-safe containment) DUPLICATED across gate+helper because the gate imports nothing (P8), pinned by the mandatory cross-file parity test (H-A / NFR-8)."
+    - "(4) All side effects (argparse dispatch, scratch makedirs, setrlimit, execvp) live behind `if __name__ == \"__main__\":`; the module top level defines only pure objects so the offline suite can import and call the builders (M3)."
+    - "(5) secret_paths(cwd) is a pure FUNCTION (not a module-level constant) that walks EVERY ancestor .git from cwd to the filesystem root (M-A / sec-MED-2)."
+    - "(6) Containment uses os.path.commonpath separator-safe test, not str.startswith, so /x/repo-evil is not a false sibling of /x/repo (sec-MED-1)."
+    - "(7) resource.setrlimit runs in-process BEFORE os.execvp so the limits survive exec (KD-4)."
+    - "(8) PreToolUse invariants: rc==0 always; AUTOALLOW == parsed permissionDecision:'allow'; PROMPT == literally no stdout; stderr empty (mirror test_mcp_first_guard.py:1002-1005)."
 implementation_plan:
-  total_effort: xl
+  total_effort: xxl
   effort_breakdown:
-    ss: 2
-    s: 3
-    m: 5
-    l: 2
-    xl: 0
+    ss: 0
+    s: 1
+    m: 6
+    l: 4
+    xl: 1
     xxl: 0
   affected_files:
-    - "Scripts/mcp-purity.py"
-    - "Scripts/_mcp_smoke_test.py"
-  new_files: []
+    - /Users/zoltan.ponekker/Code/prompt-heaven/tests/run.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/project-forge.yaml
+    - /Users/zoltan.ponekker/Code/prompt-heaven/docs/subsystems/hooks.md
+    - /Users/zoltan.ponekker/Code/prompt-heaven/docs/subsystems/skills.md
+    - /Users/zoltan.ponekker/Code/prompt-heaven/docs/INDEX.md
+  new_files:
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/sbx
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/hooks/sbx-gate.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/tests/test_sbx_gate.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/selftest_probe.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/SKILL.md
+    - /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0005-approve-the-wrapper-not-the-command.md
   reference_files:
-    - "Scripts/mcp-lua-lsp.py"
-    - "Scripts/mcp-clangd.py"
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/hooks/mcp-first-guard.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/checkpoint/scripts/checkpoint.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/wiki/scripts/reindex.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/checkpoint/SKILL.md
+    - /Users/zoltan.ponekker/Code/prompt-heaven/tests/test_mcp_first_guard.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/tests/_harness.py
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/README.md
+    - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/ARCHITECTURE.md
+    - /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0003-the-trigger-travels-with-the-tool.md
   tasks:
-    - task_id: "task-001"
-      description: "Extract BaseLspClient(LspBackend) before ClangdClient: move the byte-identical LSP machinery (state, transport, refactored reader loop with no-op hooks, the 7 LSP wrappers, get_diagnostics, open_document via self._language_id, stop, _abs_uri/_abs_path, a base _prime_index over self.prime_extensions) and add the divergence layer (hooks/attributes)."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "BaseLspClient"
+    - task_id: task-001
+      description: "sbx helper skeleton: shebang + Usage docstring, argparse for [--write DIR]... [--net] [--ro], MANUAL argv slice at the first bare --, Scope object, --dry-run that runs nothing."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/sbx
+      function_name: "main / _split_argv / Scope"
       type: create
       status: completed
-      size: l
-      size_rationale: "Largest structural change: relocates ~250 lines of machinery into a new class, refactors _reader_loop's else-slot into two protected hooks, and introduces 6 divergence members. ~100-300 lines moved/added; the class itself is new so type=create."
-      implementation_details: >-
-        Insert `class BaseLspClient(LspBackend):` directly before ClangdClient (@1316).
-        MOVE to it (verified clangd @1584-1647 == luals @500-572): the __init__ state block
-        (@1322-1335 minus the clangd-only cuda_path/cuda_arch fields); _send (@1537), _request
-        (@1544), _notify (@1557); _reader_loop refactored so its final `else: log.debug("Unhandled
-        notification: ...")` slot (@1534-1535) and any non-result server REQUEST dispatch to two
-        protected no-op hooks `_handle_server_request(msg)` and `_handle_unknown_notification(msg)`
-        (the existing window/workDoneProgress/create reply @1507-1511 proves the request-reply
-        pattern; the $/progress @1513-1522 and publishDiagnostics @1524-1532 branches stay shared);
-        the seven LSP wrappers workspace_symbol/document_symbol/definition/references/implementation/
-        hover/inlay_hints (@1584-1647); get_diagnostics (@1669); open_document (@1560) changed to use
-        `self._language_id(str(abs_path))` instead of `_detect_language(...)` (@1578); stop; _abs_uri
-        (@1681); _abs_path (@1687). Add a base `_prime_index` that globs `self.prime_extensions` and
-        keeps clangd's existing prime skip-check {build,out,dist,.git} over Path(root).parts (a THIRD
-        skip set, NOT _FALLBACK_SKIP_DIRS). Add the divergence layer EXACTLY as in the plan:
-        `supports_call_hierarchy: bool = True`; `fallback_extensions: tuple = _FALLBACK_EXTS`;
-        `prime_extensions: tuple = (".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".cu", ".cuh")`;
-        `_language_id(self, path) -> str: return _detect_language(path)`;
-        `infer_type(self, text) -> str: return _infer_type(text)`;
-        `async supplemental_references(self, symbol_name, seen, remaining, preferred_path=None) -> List[dict]: return []`.
-        The reader-loop refactor is the only risky bit; if it proves fragile, LuaLsClient MAY override
-        _reader_loop wholesale (inspector I-A fallback). Add docstrings on the class and each hook.
+      size: m
+      size_rationale: "New stdlib executable skeleton: argparse setup, manual -- split, a small Scope dataclass, and a --dry-run branch. ~40-80 lines, one coherent module skeleton."
+      implementation_details: |
+        Create the Python 3 stdlib-only executable ClaudeCode/skills/sandbox-run/scripts/sbx
+        (extension-less on purpose - the CLI name is "sbx"; do NOT name it sbx.py).
+        - `#!/usr/bin/env python3` + a module docstring whose first line is a `Usage:` line
+          matching P4 house style: `Usage: sbx [--write DIR]... [--net] [--ro] -- <cmd> [args...]`.
+        - MANUALLY slice sys.argv at the FIRST bare `--` token (do NOT use argparse.REMAINDER -
+          it is brittle): left side -> argparse, right side kept verbatim as the target argv.
+          If there is no `--` OR the right side is empty -> print a usage error to stderr and
+          exit non-zero.
+        - argparse: `--write` action="append" default=[] (repeatable), `--net` store_true,
+          `--ro` store_true, plus a `--dry-run` store_true.
+        - Build a tiny `Scope` (dataclass or namedtuple) carrying writes: list[str], net: bool,
+          ro: bool, argv: list[str] (the post-`--` target) - the resolved secret_paths and the
+          canonicalized writes are filled in by later steps.
+        - `--dry-run`: print the fully-resolved plan (writes, net, ro, argv) and exit 0 running
+          NOTHING, so the whole arg surface is testable with zero risk.
+        - Keep the module TOP LEVEL pure; the actual dispatch/side effects arrive in Step 6
+          behind `if __name__ == "__main__":`. For now the skeleton may parse args inside a
+          main() that is only called from the __main__ guard.
       code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "ClangdClient._reader_loop"
-          note: "The else-slot at 1534-1535 is the _handle_unknown_notification hook point; the window/workDoneProgress/create reply at 1507-1511 is the template for _handle_server_request. $/progress and publishDiagnostics branches stay in the shared base."
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/checkpoint/scripts/checkpoint.py
+          function: "module header (P4 house style)"
+          note: "Shebang + Usage-line docstring + stdlib argparse imports - the exact house style to mirror for the sbx helper header."
           pattern_excerpt: |
-            elif method == "window/workDoneProgress/create":
-                token = msg.get("params", {}).get("token", "")
-                if token:
-                    self._active_progress.add(token)
-                await self._send({"jsonrpc": "2.0", "id": msg_id, "result": None})
+            #!/usr/bin/env python3
+            """
+            Read sections out of a checkpoint markdown file by markdown header structure.
+            Usage: checkpoint.py {next-number|latest|mission|list|session <ID>} [--file PATH]
 
-            elif method == "$/progress":
-                token = msg.get("params", {}).get("token", "")
-                kind = msg.get("params", {}).get("value", {}).get("kind", "")
-                if kind == "begin":
-                    self._active_progress.add(token)
-                elif kind == "end":
-                    self._active_progress.discard(token)
-                    if not self._active_progress:
-                        log.debug("All progress tokens finished - indexing done")
-                        self._indexing_done.set()
+            The parser keys entirely off markdown header level (`## `) plus a prefix token
+            (SESSION / MISSION); it never regexes arbitrary body content. ...
+            """
 
-            elif method == "textDocument/publishDiagnostics":
-                params = msg.get("params", {})
-                uri = params.get("uri", "")
-                diags = params.get("diagnostics", [])
-                self._diagnostics[uri] = diags
-                ev = self._diag_events.get(uri)
-                if ev:
-                    ev.set()
-                log.debug(f"Diagnostics for {uri}: {len(diags)} items")
+            import argparse
+            import re
+            import sys
+            import os
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/wiki/scripts/reindex.py
+          function: "module header (P4 house style)"
+          note: "Second P4 exemplar: stdlib-only, `from __future__ import annotations`, docstring with a Usage: block, non-zero exit on error."
+          pattern_excerpt: |
+            #!/usr/bin/env python3
+            """reindex.py -- regenerate docs/INDEX.md and audit the wiki structure.
 
-            else:
-                log.debug(f"Unhandled notification: {method}")
-        - file: "Scripts/mcp-purity.py"
-          function: "ClangdClient.open_document"
-          note: "Move to base; change the languageId line (1578) from _detect_language(str(abs_path)) to self._language_id(str(abs_path)) so LuaLsClient can override to \"lua\"."
-          pattern_excerpt: |
-            self._opened_files.add(uri)
-            await self._notify("textDocument/didOpen", {
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": _detect_language(str(abs_path)),
-                    "version": 1,
-                    "text": content,
-                }
-            })
-        - file: "Scripts/mcp-purity.py"
-          function: "ClangdClient.__init__"
-          note: "Move this state block to BaseLspClient.__init__, minus the clangd-only cuda_path/cuda_arch fields which stay in ClangdClient.__init__ (calling super().__init__())."
-          pattern_excerpt: |
-            def __init__(self) -> None:
-                self.project_root: str = ""
-                self.cuda_path: str = ""
-                self.cuda_arch: str = ""
-                self.process: Optional[asyncio.subprocess.Process] = None
-                self._next_id: int = 1
-                self._pending: Dict[int, asyncio.Future] = {}
-                self._diagnostics: Dict[str, List] = {}       # uri -> list[diagnostic]
-                self._diag_events: Dict[str, asyncio.Event] = {}
-                self._opened_files: set = set()
-                self._reader_task: Optional[asyncio.Task] = None
-                self._indexing_done: asyncio.Event = asyncio.Event()
-                self._active_progress: set = set()   # tokens with begin but no end yet
-                self._send_lock = asyncio.Lock()
-        - file: "Scripts/mcp-purity.py"
-          function: "LspBackend"
-          note: "The abstract interface (1259) is unchanged; BaseLspClient inherits it. Docstring already anticipates 'luals for Lua, Phase 1'."
-          pattern_excerpt: |
-            class LspBackend:
-                """Abstract interface the semantic dispatcher depends on.
+            Deterministic, stdlib-only, no LLM. ...
 
-                The dispatcher and semantic handlers only use the methods/attributes
-                declared here; ClangdClient is the first (Phase 0) implementation. A second
-                implementation (e.g. luals for Lua, Phase 1) can be slotted into the backend
-                map without touching the handlers. Methods raise NotImplementedError so a
-                half-built backend fails loudly rather than silently mis-answering.
-                """
-        - file: "Scripts/mcp-purity.py"
-          function: "_FALLBACK_EXTS / prime set"
-          note: "fallback_extensions default = _FALLBACK_EXTS (12-ext, @1793). prime_extensions is the DISTINCT 8-ext clangd prime set — do NOT reuse _FALLBACK_EXTS for priming."
-          pattern_excerpt: |
-            _FALLBACK_EXTS = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".m", ".mm", ".cu", ".cuh")
-            _FALLBACK_SKIP_DIRS = {
-                "build", "vendor", "third_party", "third-party", "node_modules",
-                ".git", ".cache", ".clangd", ".ccache", "_deps",
-            }
+            Usage:
+                python scripts/reindex.py --root docs            # regenerate INDEX.md + audit
+                python scripts/reindex.py --root docs --check     # audit only, write nothing
+
+            Exits non-zero if duplicate slugs or malformed frontmatter are found.
+            """
+            from __future__ import annotations
+
+            import argparse
+            import os
+            import sys
       api_references:
-        - "docs/feature-implementation-plan.md (Step 2; Backend divergence layer; Step-step plan lines 285)"
-      test_requirements: >-
-        Covered indirectly: py_compile clean; the Phase 0 live clangd test (4/4) must still pass
-        (re-base parity) during the live runner step. No committed unit asserts (smoke cannot import).
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        Offline (folded group in tests/test_sbx_gate.py) and live selftest: `sbx --write . -- echo hi`
+        under --dry-run prints a plan whose writes include the repo root and whose argv == ["echo","hi"];
+        `sbx -- ` with no target exits non-zero and runs nothing. Importing the module must have no side effects.
       dependencies: []
-
-    - task_id: "task-002"
-      description: "Re-base ClangdClient onto BaseLspClient: delete the now-inherited machinery (transport, reader loop, 7 wrappers, get_diagnostics, open_document, stop, _abs_uri/_abs_path), keep start()+CUDA and the three call-hierarchy methods, and inherit the C++ hook defaults."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "ClangdClient"
+    - task_id: task-002
+      description: "sbx helper: fail-closed BACKENDS registry keyed on a sys.platform prefix with a fail-closed default, plus shutil.which binary-presence gating - no unsandboxed fallback ever."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/sbx
+      function_name: "BACKENDS / _platform_key / dispatch (fail-closed detection)"
       type: modify
       status: completed
       size: m
-      size_rationale: "Mechanical deletion of inherited members plus a slim __init__ delegating to super(); retains start()+CUDA and 3 call-hierarchy methods. ~20-100 lines net removed/adjusted."
-      implementation_details: >-
-        Change the declaration to `class ClangdClient(BaseLspClient):`. Reduce __init__ to set only
-        the clangd-specific cuda_path/cuda_arch (call super().__init__() first, then set them). DELETE
-        the members now provided by the base: _send/_request/_notify, _reader_loop, the seven LSP
-        wrappers (@1584-1647), get_diagnostics (@1669), open_document (@1560), stop, _abs_uri (@1681),
-        _abs_path (@1687), and the existing prime walk (now provided by the base _prime_index over
-        prime_extensions). KEEP start() (@1337) including the CUDA config path, and RETAIN the three
-        call-hierarchy methods prepare_call_hierarchy (@1649), call_hierarchy_incoming (@1661),
-        call_hierarchy_outgoing (@1665) — LuaLsClient deliberately lacks them. ClangdClient inherits
-        supports_call_hierarchy=True, fallback_extensions=_FALLBACK_EXTS, prime_extensions (8-ext),
-        _language_id->_detect_language, infer_type->_infer_type, supplemental_references->[] unchanged.
-        The diff must be mechanical; behavior parity is proved by the Phase 0 live clangd test.
+      size_rationale: "A module-level registry dict, a small platform-key helper, shutil.which gating, and a fail-closed exit branch. ~25-45 lines but security-load-bearing."
+      implementation_details: |
+        Add the platform seam (KD-3). Module top level:
+        - `BACKENDS = {"darwin": _seatbelt_argv, "linux": _bwrap_argv}` (the two builder names
+          are forward references filled by Steps 4/5; the dict itself is pure and import-safe).
+        - `_platform_key(platform: str) -> str | None` maps a sys.platform prefix ("darwin",
+          "linux") to a key; anything else -> None.
+        Runtime dispatch (this logic runs behind __main__ in Step 6, but define the resolution
+        helper now):
+        - `builder = BACKENDS.get(_platform_key(sys.platform))`. If `builder is None` (unknown
+          platform) -> write a one-line reason to stderr and `sys.exit(<non-zero>)` WITHOUT
+          constructing or running any target.
+        - Resolve the engine binary with `shutil.which("sandbox-exec")` (darwin) /
+          `shutil.which("bwrap")` (linux). If the binary is not found -> one-line stderr reason
+          + non-zero exit, again WITHOUT ever running the target.
+        - There is NO unsandboxed fallback, ever (NFR-1, R20). Record the resolved engine on the
+          Scope so the builder can reference it.
+        No class hierarchy - just the dict + two functions + the fail-closed default (NFR-9).
       code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "ClangdClient call-hierarchy methods (RETAIN)"
-          note: "These three stay in ClangdClient (1649/1661/1665). LuaLsClient does NOT get them; the sole caller is guarded by supports_call_hierarchy."
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/hooks/mcp-first-guard.py
+          function: "NODE_PRESENT (shutil.which presence gating)"
+          note: "The repo's established shutil.which presence-gate idiom resolved once per short-lived process - mirror it for sandbox-exec/bwrap. Also shows SKIP_WRAPPERS, reused by task-007's R6 matrix."
           pattern_excerpt: |
-            async def prepare_call_hierarchy(self, path: str, line: int, char: int) -> List[dict]:
-                await self.open_document(path)
-                uri = self._abs_uri(path)
-                resp = await self._request("textDocument/prepareCallHierarchy", {
-                    "textDocument": {"uri": uri},
-                    "position": {"line": line, "character": char},
-                }, timeout=10.0)
-                result = resp.get("result")
-                if result is None:
-                    return []
-                return result if isinstance(result, list) else [result]
-
-            async def call_hierarchy_incoming(self, item: dict) -> List[dict]:
-                resp = await self._request("callHierarchy/incomingCalls", {"item": item}, timeout=10.0)
-                return resp.get("result") or []
-
-            async def call_hierarchy_outgoing(self, item: dict) -> List[dict]:
-                resp = await self._request("callHierarchy/outgoingCalls", {"item": item}, timeout=10.0)
-                return resp.get("result") or []
-        - file: "Scripts/mcp-purity.py"
-          function: "ClangdClient.start"
-          note: "KEEP start() and its CUDA config path (1337+). Only the leading 'already initialized' guard + state-reset reuse base fields."
-          pattern_excerpt: |
-            async def start(self, project_root: str, clangd_path: str = "clangd",
-                            compile_commands_dir: Optional[str] = None,
-                            cuda_path: Optional[str] = None,
-                            cuda_arch: Optional[str] = None) -> str:
-                if self.process is not None:
-                    return "already initialized"
-                self.project_root = str(pathlib.Path(project_root).resolve())
-                self._indexing_done.clear()
+            # leading tokens that wrap the real command — skip them to find the true cmd
+            SKIP_WRAPPERS = {"sudo", "command", "env", "nice", "nohup", "time", "builtin", "exec", "xargs"}
+            ...
+            # The `node --check` rule fires ONLY when node is installed. ...
+            # Resolved once per process: this hook is spawned per Bash call and exits.
+            NODE_PRESENT = shutil.which("node") is not None
       api_references:
-        - "docs/feature-implementation-plan.md (Step 3; Implementation Strategy hierarchy)"
-      test_requirements: >-
-        Phase 0 live clangd test (find_definition/find_references/outline/type_at) must pass 4/4 to
-        prove the re-base is regression-free (live runner step). py_compile clean.
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        Offline group + live selftest: with PATH doctored so the engine binary is not found,
+        `sbx -- echo hi` exits non-zero, prints nothing to stdout, and runs no target (the
+        faked-missing case, R20); an unknown platform key exits non-zero. BACKENDS.get(...) has
+        a fail-closed default proven by the offline builder group.
       dependencies:
-        - "task-001"
-
-    - task_id: "task-003"
-      description: "Add LuaLsClient(BaseLspClient): fold the luals start() handshake (binary, optional --configpath, the initializationOptions.Lua push + single workspace/didChangeConfiguration re-push, indexing wait, prime), the reader-loop hooks, and the divergence overrides. Do NOT fold type_definition."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "LuaLsClient"
+        - task-001
+    - task_id: task-003
+      description: "sbx helper pure guard layer: project_root (KD-8), resolve_scope (KD-7), secret_paths (M-A/sec-MED-2 ancestor-.git walk), canonicalize (R14 reject), writable-set computation, separator-safe inside_project - all pure and import-side-effect-free (M3)."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/sbx
+      function_name: "project_root / resolve_scope / secret_paths / canonicalize / inside_project"
+      type: modify
+      status: completed
+      size: l
+      size_rationale: "Six interlocking pure functions with subtle, security-load-bearing semantics (expanduser-then-join ordering, ancestor .git walk, commonpath separator safety, injection rejection). This is the shared-contract core, ~100-160 lines, and one copy of it is pinned byte-for-byte against the gate by the parity test."
+      implementation_details: |
+        Implement the pure, unit-testable, import-side-effect-free guard layer. NO exec, NO
+        filesystem MUTATION at import; secret_paths may READ .git existence only when CALLED.
+        - `project_root(cwd) -> str` (KD-8): walk up from cwd to the nearest ancestor directory
+          containing a `.git` entry; fall back to cwd if none. Never assume cwd is the repo root.
+          Used by inside_project and as the parity-test target; does NOT feed secret_paths.
+        - `resolve_scope(dir_arg, base) -> str` (KD-7): return
+          `os.path.realpath(os.path.join(base, os.path.expanduser(dir_arg)))` - expanduser FIRST
+          (so "~" -> $HOME), then join (join drops base when the expanded arg is absolute), then
+          realpath. This is BYTE-FOR-BYTE the rule the gate applies to --write and the wrapper
+          token (H1); the two copies must never diverge.
+        - `secret_paths(cwd) -> tuple[str, ...]` (M-A, KD-2, sec-MED-2): a pure FUNCTION (NOT a
+          module-level constant). Returns the home-anchored os.path.expanduser of ~/.ssh, ~/.aws,
+          ~/.gnupg, ~/.config/gh, ~/.claude (cwd-independent) PLUS `os.path.join(d, ".git",
+          "config")` for EVERY ancestor d of cwd (inclusive) whose `<d>/.git` exists, walking
+          from cwd up to the filesystem root - NOT only project_root(cwd). Import-side-effect-free
+          (M3): reads the filesystem only when called, never mutates.
+        - `canonicalize(dir_arg, cwd) -> str` (R14): a thin wrapper over resolve_scope(dir_arg,
+          cwd), then REJECT (fail-closed exit non-zero) any raw-or-resolved path containing " ' (
+          ) backslash or a newline. Performs NO makedirs.
+        - Writable-set computation (pure): with no --write, the sole writable scope is
+          `<cwd>/.claude/tmp`; each --write DIR adds canonicalize(DIR, cwd); --ro overrides to an
+          empty set (R21). The scratch dir is only NAMED here; it is CREATED at runtime dispatch
+          (Step 6, behind __main__).
+        - `inside_project(path, root) -> bool` (KD-8/sec-MED-1): the SEPARATOR-SAFE test
+          `os.path.commonpath([path, root]) == root` (root itself allowed), NOT a bare
+          str.startswith (which false-allows a /x/repo-evil sibling of /x/repo). This is the SAME
+          test the gate's scope-containment applies - part of the duplicated shared contract.
+        Keep every function referentially transparent so the folded offline group can call them.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+          function: "Section 3 Shared resolution rules KD-6/KD-7/KD-8 + Type Definitions"
+          note: "The canonical text of resolve_scope, project_root, the separator-safe containment test, and the secret_paths(cwd) ancestor-.git-walk contract. The plan gives resolve_scope verbatim - copy its semantics exactly on both sides."
+          pattern_excerpt: |
+            def resolve_scope(dir_arg: str, base: str) -> str:
+                # expanduser FIRST (so "~" -> $HOME), then join against base (join drops base
+                # when the expanded arg is absolute), then realpath. IDENTICAL on both sides.
+                return os.path.realpath(os.path.join(base, os.path.expanduser(dir_arg)))
+            # KD-8 containment (sec-MED-1): NOT str.startswith - a raw prefix test false-allows
+            #   a sibling: with root == /x/repo, --write ../repo-evil resolves to /x/repo-evil and
+            #   "/x/repo-evil".startswith("/x/repo") is True. Use:
+            #   os.path.commonpath([resolve_scope(DIR, cwd), project_root(cwd)]) == project_root(cwd)
+      api_references:
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        Folded offline group + cross-file parity test: canonicalize("/tmp/a(b") exits non-zero
+        (paren rejected, R14); with no flags the writable set is exactly [<cwd>/.claude/tmp];
+        --ro yields an empty writable set; --write /etc and --write ~ are both classified
+        outside-project (the ~ case must match the gate byte-for-byte - H1);
+        inside_project("/x/repo-evil", "/x/repo") is False (separator-safe, sec-MED-1);
+        secret_paths for a temp tree root/.git + root/sub/.git with cwd=root/sub includes BOTH
+        .git/config paths (sec-MED-2); importing the module runs no makedirs.
+      dependencies:
+        - task-001
+    - task_id: task-004
+      description: "sbx helper pure macOS Seatbelt builder _seatbelt_argv(scope) -> list[str]: inline SBPL in last-match-wins order (deny default; allow exec/fork; permissive read; per-scope write-allow unless --ro; per-secret read+write deny LAST; deny network unless --net)."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/sbx
+      function_name: _seatbelt_argv
+      type: modify
+      status: completed
+      size: m
+      size_rationale: "One pure function building an inline SBPL string in a fixed ordering and returning an argv list; ~30-60 lines, no I/O."
+      implementation_details: |
+        Implement `_seatbelt_argv(scope) -> list[str]` returning
+        `["sandbox-exec", "-p", <profile>, *scope.argv]` where <profile> is an inline SBPL string
+        built in LAST-MATCH-WINS order (SBPL evaluation order is UNVERIFIED in-repo - see the §2
+        constraint; probe d is the verification gate):
+        - `(version 1)`
+        - `(deny default)`
+        - allow process-exec/fork and the minimal ops a normal program needs
+        - `(allow file-read* (subpath "/"))`  # permissive reads
+        - for each writable scope: `(allow file-write* (subpath "<canonical>"))` UNLESS scope.ro
+          (then emit none)
+        - LAST, so they win: for EVERY secret_paths(cwd) entry emit
+          `(deny file-read* (subpath "<secret>"))` and `(deny file-write* (subpath "<secret>"))`
+          (R16, R17, R22, R22b)
+        - `(deny network*)` UNLESS scope.net (R18)
+        Because task-003 already rejected quotes/parens/backslash/newline, every embedded path is
+        a safe SBPL string literal. Pure - no I/O - so the offline group can assert the profile.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+          function: "Section 6 Step 4 (Seatbelt SBPL ordering) + R16/R17/R18/R22/R22b"
+          note: "Authoritative SBPL rule ordering (deny-default, permissive read, write-allow, secret-deny LAST, network-deny). No in-repo SBPL exists to mirror; the plan is the source of truth and probe d verifies ordering live."
+          pattern_excerpt: |
+            # last-match-wins: secret denies MUST be emitted AFTER the permissive read-allow.
+            # (version 1) / (deny default) / allow exec+fork /
+            # (allow file-read* (subpath "/")) /
+            # per writable scope: (allow file-write* (subpath "<canonical>")) unless --ro /
+            # LAST: per secret: (deny file-read* ...) + (deny file-write* ...) /
+            # (deny network*) unless --net
+      api_references:
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        Folded offline group (platform-independent string assertions): a default Scope profile
+        contains (deny default), a write-allow for .../.claude/tmp, secret denies AFTER the
+        read-allow, and (deny network*); --ro has NO file-write* allow; --net has NO (deny
+        network*); every secret_paths entry (incl. the nested-.git tree) is denied read+write.
+      dependencies:
+        - task-002
+        - task-003
+    - task_id: task-005
+      description: "sbx helper pure Linux bwrap builder _bwrap_argv(scope) -> list[str]: --ro-bind / /; per-scope --bind unless --ro; per-secret mask layered AFTER binds; --unshare-net unless --net; --die-with-parent; OFF-by-default seccomp `if scope.seccomp:` branch."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/sbx
+      function_name: _bwrap_argv
+      type: modify
+      status: completed
+      size: m
+      size_rationale: "One pure function assembling a bwrap argv list in bind/mask/net order plus an OFF-by-default seccomp branch; ~30-55 lines, no I/O."
+      implementation_details: |
+        Implement `_bwrap_argv(scope) -> list[str]` returning the bwrap argv (never a shell string):
+        - `--ro-bind / /` (read-all host)
+        - for each writable scope: `--bind <canonical> <canonical>` UNLESS scope.ro (then none)
+        - for EACH secret_paths(cwd) entry: a mask (`--tmpfs <secret>` or an empty `--ro-bind`
+          over it) layered AFTER the binds so the mask WINS (R16, R17, R22, R22b)
+        - `--unshare-net` UNLESS scope.net (R18)
+        - `--die-with-parent`
+        - the argv terminator, then `*scope.argv`
+        seccomp is an OFF-by-default `if scope.seccomp:` branch INSIDE this function (locked
+        decision 8) - localized, not a new code path and not a class hierarchy (NFR-9). argv-as-list
+        is the injection-safe construction. Pure - no I/O - so the offline group can assert the argv.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+          function: "Section 6 Step 5 (bwrap argv order) + Rejected: nsjail (§4)"
+          note: "Authoritative bwrap flag order: --ro-bind / /, per-scope --bind, per-secret mask AFTER binds, --unshare-net, --die-with-parent. No in-repo bwrap exists; the plan is the source of truth."
+          pattern_excerpt: |
+            # bwrap argv (list, never a shell string):
+            #   --ro-bind / /
+            #   per writable scope: --bind <canonical> <canonical>   (omit under --ro)
+            #   per secret_paths entry: --tmpfs <secret>  (mask AFTER binds so it wins)
+            #   --unshare-net    (omit under --net)
+            #   --die-with-parent
+            #   <terminator> *scope.argv
+            # seccomp: OFF-by-default `if scope.seccomp:` branch INSIDE this function.
+      api_references:
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        Folded offline group: default argv contains --ro-bind / /, a --bind for scratch, a mask
+        per secret, --unshare-net, and --die-with-parent; --net omits --unshare-net; --ro omits
+        every writable --bind; every secret_paths entry (incl. the nested-.git tree) is masked.
+      dependencies:
+        - task-002
+        - task-003
+    - task_id: task-006
+      description: "sbx helper: the SINGLE setrlimit + execvp wiring. All side effects (dispatch, scratch makedirs, setrlimit, execvp) behind `if __name__ == \"__main__\":` (M3); rlimits set BEFORE execvp (KD-4); RLIMIT_NPROC per-UID caveat in a comment."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/sbx
+      function_name: "main / __main__ dispatch (setrlimit + os.execvp)"
+      type: modify
+      status: completed
+      size: m
+      size_rationale: "The only side-effecting wiring: three setrlimit calls, one makedirs, the backend dispatch, and one execvp, all inside the __main__ guard. ~30-50 lines, but the ordering (setrlimit BEFORE execvp) and the M3 guard are subtle correctness points."
+      implementation_details: |
+        Wire the FIRST and ONLY point at which sbx runs a child, consuming only already-guarded,
+        already-tested inputs. ALL of this lives behind `if __name__ == "__main__":` (M3), or in a
+        main() called only from it:
+        - Run the fail-closed platform/binary detection from task-002 (unreachable target if the
+          engine could not be resolved).
+        - Create the scratch dir with `os.makedirs(<cwd>/.claude/tmp, exist_ok=True)` (never a
+          shell mkdir) - runtime only.
+        - Resolve the Scope (writes canonicalized via task-003, secret_paths(cwd) attached),
+          select the builder from BACKENDS, and build the argv.
+        - Apply `resource.setrlimit` for RLIMIT_AS, RLIMIT_CPU, RLIMIT_NPROC with sane ceilings,
+          then `os.execvp(argv[0], argv)`. Pin the setrlimit-BEFORE-execvp ordering in a code
+          comment (KD-4: os.execvp replaces the process image, same PID, and rlimits survive exec,
+          so the target runs under the limits and its exit code passes straight through - no
+          fork/waitpid wrapper, NFR-6).
+        - Add a comment recording the RLIMIT_NPROC per-UID caveat (it counts ALL of the user's
+          processes; tune to a modest headroom above the current process count and leave headroom
+          for the engine to fork its target).
+        The module TOP LEVEL must define ONLY pure objects (secret_paths, resolve_scope,
+        project_root, canonicalize, inside_project, _seatbelt_argv, _bwrap_argv, BACKENDS) so
+        importing sbx runs NO exec/setrlimit/makedirs.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/hooks/mcp-first-guard.py
+          function: "__main__ guard"
+          note: "The repo's __main__-guard idiom (all side effects behind it, module top level import-safe) - mirror the guard shape; sbx's guard additionally holds setrlimit + execvp."
+          pattern_excerpt: |
+            if __name__ == "__main__":
+                try:
+                    main()
+                except Exception:
+                    pass  # fail open — never brick Bash
+                sys.exit(0)
+      api_references:
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        Folded offline group: a structural/whitebox check asserts setrlimit runs BEFORE execvp
+        (KD-4), and that importing the module executes NO child, sets NO rlimit, and creates NO
+        directory (the M3 __main__-guard proof). The live selftest (task-009) exercises the real
+        exec path.
+      dependencies:
+        - task-004
+        - task-005
+    - task_id: task-007
+      description: "Grant-only PreToolUse(Bash) gate sbx-gate.py: copy ONLY the ~10-line envelope from mcp-first-guard.py (import nothing), self-contained is_clean_sbx with metachar blocklist, wrapper IDENTITY (KD-6, never basename), argparse-grammar flag parse incl. --write=DIR (M-B), separator-safe containment, and the mandated top-of-file docstring."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/hooks/sbx-gate.py
+      function_name: "main / is_clean_sbx / WRAPPER_PATH"
       type: create
       status: completed
       size: l
-      size_rationale: "Folds the ~100-line start() handshake plus reader hooks, the ~50-line _lua_text_references grep, and 6 divergence overrides. ~100-300 lines of new (copied/adapted) code; type=create."
-      implementation_details: >-
-        Insert `class LuaLsClient(BaseLspClient):` after ClangdClient. __init__: call
-        super().__init__() (no extra clangd fields). Fold start() from mcp-lua-lsp.py:235-333 verbatim
-        in spirit: signature start(self, project_root, luals_path="lua-language-server", config_path=None);
-        the 'already initialized' guard; spawn via asyncio.create_subprocess_exec(*args, cwd=project_root,
-        no shell), args=[luals_path] + (["--configpath", resolved] if config_path else []); create the
-        reader task; send the initialize params block (processId=os.getpid(), rootUri, workspaceFolders,
-        initializationOptions.Lua.{hint,diagnostics,workspace} @264-277, capabilities @278-296),
-        timeout=30.0, raise RuntimeError on error; notify "initialized"; send the single
-        workspace/didChangeConfiguration re-push @306-321; wait _indexing_done up to 60s; then call the
-        inherited _prime_index (which now globs self.prime_extensions=(".lua",)). Override:
-        `_language_id(self, path) -> str: return "lua"`; `_handle_server_request(self, msg)` answering
-        workspace/configuration with {"jsonrpc":"2.0","id":msg.get("id"),"result":[None]*len(items)}
-        (@439-442); `_handle_unknown_notification(self, msg)` dropping $/status/report|refresh|click
-        (@445); class attrs supports_call_hierarchy=False, fallback_extensions=(".lua",),
-        prime_extensions=(".lua",); `infer_type(self, text) -> str: return text.strip()` (raw hover);
-        `async supplemental_references(self, symbol_name, seen, remaining, preferred_path=None)`
-        returning `await self._lua_text_references(symbol_name, seen, remaining)`. Fold
-        _find_text_references_lua (mcp-lua-lsp.py:1003-1052) as a method `_lua_text_references` keyed
-        uri:line @1038, accepting seen(existing_keys)+remaining(max_remaining), skip set {build,out,dist,
-        .git,node_modules,vendor} @1015. The missing-binary guard (shutil.which) lives in _init_backend
-        (task-008), not here. Do NOT fold type_definition (L-B). Add docstrings + inline degradation notes.
+      size_rationale: "A self-contained ~120-160 line hook: envelope + main(), the ~50-line is_clean_sbx classifier with identity canonicalization and an argparse-faithful flag loop, the duplicated resolve_scope/project_root/containment copies, and a load-bearing multi-paragraph docstring that must be exact."
+      implementation_details: |
+        Create ClaudeCode/hooks/sbx-gate.py realizing KD-1 / P3. Copy ONLY the ~10-line I/O
+        envelope + main() skeleton from mcp-first-guard.py:560-599 (stdin JSON read;
+        tool_name=="Bash" self-gate; tool_input.command read; empty-command early return; the
+        try/except: pass + sys.exit(0) fail-open). IMPORT NOTHING from mcp-first-guard.py; do NOT
+        reuse split_top / _tokens / primary / substitutions / _strip_heredocs.
+        Additionally read `cwd` from the payload; if cwd is None -> bare return.
+        Self-contained `is_clean_sbx(cmd, cwd) -> tuple[bool, str]`:
+        - Reject (empty stdout) if cwd is None, if the stripped command is empty or starts with
+          `#`, or if it contains ANY blocklisted metacharacter:
+          `METACHARS = set(";&|$`()<>{}\n'\"\\*?")`. NOTE: NO `~` in METACHARS (L1) - the
+          documented invocation form starts with `~/.claude/...`; `~`-as-a-write-target is caught
+          below by KD-7/KD-8, not by the blocklist.
+        - Wrapper IDENTITY, NEVER basename (KD-6/C1/CWE-290): whitespace-split; canonicalize
+          toks[0] - a `/`- or `~`-bearing form via the DUPLICATED resolve_scope(toks[0], cwd)
+          (KD-7 copy), a bare name via `shutil.which` + `os.path.realpath` - and require it to
+          equal `WRAPPER_PATH = os.path.realpath(os.path.expanduser("~/.claude/skills/p/skills/sandbox-run/scripts/sbx"))`
+          EXACTLY. Never `os.path.basename(toks[0]) == "sbx"`.
+        - Parse sbx's own flags up to `--`, MATCHING argparse's grammar (M-B): recognize --net,
+          --ro, --write DIR AND the equals-form --write=DIR (split on the FIRST `=` like argparse).
+          Refuse on --net (R11). For each --write (space- or equals-form) require the SEPARATOR-SAFE
+          containment (KD-8/sec-MED-1): `os.path.commonpath([resolve_scope(DIR, cwd),
+          project_root(cwd)]) == project_root(cwd)` (root itself allowed), the SAME KD-7/KD-8 rules
+          the helper uses (H1), NOT str.startswith (R12c). Treat ANY unrecognized token before `--`
+          (unknown flag OR unhandled equals-form) as a HARD PROMPT (bare return), NEVER skip it (R12b).
+        - On success emit the `allow` JSON (P2) with a short reason; on ANY failure/doubt -> bare return.
+        Physically DUPLICATE resolve_scope and project_root and the containment test as copies in
+        this file (the gate imports nothing - P8); they MUST stay byte-identical to the helper's
+        (pinned by task-008's parity test).
+        The top-of-file docstring MUST record (a) why fail-open is fail-safe for a grant-only gate,
+        (b) the inverted safety model + why this file copies-not-imports and shares no parser, and
+        (c) the KD-6 identity rule (basename matching is a forbidden false-allow), so no future
+        edit reverts it. Requires only `import os, shutil, json, sys`.
       code_references:
-        - file: "Scripts/mcp-lua-lsp.py"
-          function: "LuaLsClient.start (config pushes — silent-hang traps)"
-          note: "Fold both pushes: the initializationOptions.Lua block (264-277) AND the single workspace/didChangeConfiguration re-push (306-321). Dropping either stalls luals to the 90s timeout."
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/hooks/mcp-first-guard.py
+          function: "main + __main__ (the ONLY thing copied)"
+          note: "Copy this envelope shape ONLY: stdin JSON read, tool_name=='Bash' self-gate, tool_input.command read, empty-command return, the hookSpecificOutput print, and the fail-open try/except: pass + sys.exit(0). For the gate, permissionDecision becomes 'allow' (never 'deny') and every non-clean path is a bare return."
           pattern_excerpt: |
-            response = await self._request("initialize", init_params, timeout=30.0)
-            if "error" in response:
-                raise RuntimeError(f"lua-language-server initialize failed: {response['error']}")
-
-            await self._notify("initialized", {})
-
-            # Push hint configuration in case initializationOptions was not honoured
-            await self._notify("workspace/didChangeConfiguration", {
-                "settings": {
-                    "Lua": {
-                        "hint": {
-                            "enable": True, "paramName": "All", "paramType": True,
-                            "setType": True, "arrayIndex": "Auto", "await": True,
-                        },
-                        "diagnostics": {"enable": True},
-                        "workspace": {"checkThirdParty": False},
-                    }
-                }
-            })
-
-            log.debug("Waiting for lua-language-server background indexing...")
-            try:
-                await asyncio.wait_for(self._indexing_done.wait(), timeout=60.0)
-            except asyncio.TimeoutError:
-                log.debug("Indexing wait timed out - priming index by opening source files...")
-            await self._prime_index()
-        - file: "Scripts/mcp-lua-lsp.py"
-          function: "LuaLsClient._reader_loop (workspace/configuration reply + $/status drop)"
-          note: "Fold into the _handle_server_request / _handle_unknown_notification overrides. The reply must be [None]*len(items)."
-          pattern_excerpt: |
-            # luals requests configuration — respond with empty settings per item
-            elif method == "workspace/configuration":
-                req_id = msg.get("id")
-                items = msg.get("params", {}).get("items", [])
-                await self._send({"jsonrpc": "2.0", "id": req_id, "result": [None] * len(items)})
-
-            # Status bar notifications — ignore
-            elif method in ("$/status/report", "$/status/refresh", "$/status/click"):
-                pass
-        - file: "Scripts/mcp-lua-lsp.py"
-          function: "_find_text_references_lua"
-          note: "Fold as the _lua_text_references method; seen key uri:line (1038), skip set (1015), accepts existing_keys+max_remaining. Backing for supplemental_references."
-          pattern_excerpt: |
-            def _find_text_references_lua(project_root, symbol_name, existing_keys, max_remaining):
-                pattern = re.compile(rf"\b{re.escape(symbol_name)}\b")
-                results = []
-                skip_dirs = {"build", "out", "dist", ".git", "node_modules", "vendor"}
-                for root, dirs, files in os.walk(project_root):
-                    dirs[:] = [d for d in dirs if not d.startswith(".") and d not in skip_dirs]
-                    for fname in files:
-                        if not fname.endswith(".lua"):
-                            continue
-                        abs_path = os.path.join(root, fname)
-                        ...
-                        uri = pathlib.Path(abs_path).as_uri()
-                        for lineno, line_text in enumerate(content.splitlines()):
-                            match = pattern.search(line_text)
-                            if not match:
-                                continue
-                            stripped = line_text.lstrip()
-                            if stripped.startswith("--") and not stripped.startswith("---"):
-                                continue
-                            key = f"{uri}:{lineno}"
-                            if key in existing_keys:
-                                continue
-                            col = match.start()
-                            results.append({"uri": uri, "range": {...}})
-                            if max_remaining > 0 and len(results) >= max_remaining:
-                                return results
-                return results
-        - file: "Scripts/mcp-lua-lsp.py"
-          function: "LuaLsClient.open_document (languageId)"
-          note: "luals hard-codes languageId=\"lua\" (492). In the base this becomes self._language_id(path); LuaLsClient._language_id returns \"lua\"."
-          pattern_excerpt: |
-            await self._notify("textDocument/didOpen", {
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": "lua",
-                    "version": 1,
-                    "text": content,
-                }
-            })
-      api_references:
-        - "docs/feature-implementation-plan.md (Step 4; luals core section; Backend divergence layer; Potential Challenges)"
-      test_requirements: >-
-        Live runner step: spawn a real lua-language-server on a fixture .lua workspace, exercise
-        find_definition, name-based find_references (grep supplement + uri:line dedup), outline,
-        diagnostics, hover/type_at, symbol (.lua fallback), graceful symbol_change_impact. Verify the
-        init handshake (workspace/configuration reply + double config push) against the live server.
-        py_compile clean.
-      dependencies:
-        - "task-001"
-
-    - task_id: "task-004"
-      description: "Edit the module-level semantic helpers and handlers to consult the backend divergence hooks: handle_type_at (client.infer_type), _refs_by_name (merge client.supplemental_references with uri:line dedup + remaining cap), _fallback_workspace_symbols + _symbol_to_location Tier 3 (client.fallback_extensions), handle_symbol_change_impact (guard call-hierarchy on client.supports_call_hierarchy)."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "_refs_by_name"
-      type: modify
-      status: completed
-      size: m
-      size_rationale: "Five focused edits across handlers/helpers, the largest being the _refs_by_name cross-source merge (build line_seen, compute remaining, append deduped text hits). ~20-100 lines total."
-      implementation_details: >-
-        (1) handle_type_at @2402: change `deduced = _infer_type(raw_text)` to
-        `deduced = client.infer_type(raw_text)`. (2) _refs_by_name @2222: after the `for sym` loop and
-        before `return`, build a 2-part `line_seen = {f"{loc['uri']}:{loc['range']['start']['line']}"
-        for ... in all_refs}` (from the LSP refs already collected — the per-ref `seen` is keyed
-        uri:line:character @2244, so build a separate uri:line set), compute
-        `remaining = max_results - len(all_refs)` when max_results > 0 else 0 (uncapped — matching the
-        standalone's max_remaining > 0 gate), then
-        `extra = await client.supplemental_references(symbol_name, line_seen, remaining, preferred_path)`
-        and append each text hit whose uri:line is NOT already in line_seen, formatting via
-        _location_from_payload + extract_surrounding_code identically to LSP refs, respecting the cap.
-        Base returns [] so clangd is unaffected. Name-based only; _refs_at (positional, @2263) stays
-        LSP-only. (3) _fallback_workspace_symbols @1843: pass
-        `exts=client.fallback_extensions` into _find_files_with_word. (4) _symbol_to_location Tier 3
-        @1959: pass `exts=client.fallback_extensions` into _find_files_with_word. (5)
-        handle_symbol_change_impact @2583: change `if isinstance(definition, list):` to
-        `if isinstance(definition, list) and client.supports_call_hierarchy:` (the
-        `"partial": not call_hierarchies` @2614 handles the empty Lua case).
-      code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "_refs_by_name"
-          note: "Merge point is AFTER the for-sym loop, BEFORE return (2260). Per-ref seen is uri:line:character (2244); build a separate 2-part uri:line line_seen for the cross-source dedup."
-          pattern_excerpt: |
-            for sym in symbols:
+            def main():
+                data = json.loads(sys.stdin.read())
+                if data.get("tool_name") != "Bash":
+                    return
+                cmd = (data.get("tool_input") or {}).get("command") or ""
+                if not cmd.strip():
+                    return
                 ...
-                for ref in refs:
-                    if max_results > 0 and len(all_refs) >= max_results:
-                        break
-                    ref_uri = ref.get("uri", "")
-                    ref_start = ref.get("range", {}).get("start", {})
-                    key = f"{ref_uri}:{ref_start.get('line')}:{ref_start.get('character')}"
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    location = _location_from_payload(ref, client.project_root)
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                }))
+
+            if __name__ == "__main__":
+                try:
+                    main()
+                except Exception:
+                    pass  # fail open — never brick Bash
+                sys.exit(0)
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+          function: "Section 3 P3 (is_clean_sbx sketch) + KD-6 canonicalization"
+          note: "The ~50-line self-contained classifier sketch with METACHARS, WRAPPER_PATH identity, and the argparse-grammar flag loop. Copy its structure; do NOT import the see-through parser."
+          pattern_excerpt: |
+            METACHARS = set(";&|$`()<>{}\n'\"\\*?")   # SAFETY FLOOR (note: no "~" — see L1)
+            WRAPPER_PATH = os.path.realpath(
+                os.path.expanduser("~/.claude/skills/p/skills/sandbox-run/scripts/sbx"))
+            def is_clean_sbx(cmd, cwd):
+                if cwd is None: return (False, "")
+                s = cmd.strip()
+                if not s or s[0] == "#": return (False, "")
+                if any(ch in METACHARS for ch in s): return (False, "")
+                toks = s.split()
+                if "/" in toks[0] or toks[0].startswith("~"):
+                    cand = resolve_scope(toks[0], cwd)
+                else:
+                    w = shutil.which(toks[0]); cand = os.path.realpath(w) if w else None
+                if cand != WRAPPER_PATH: return (False, "")
+                # parse --net/--ro/--write DIR and --write=DIR up to '--'; refuse --net;
+                # each --write separator-safe-contained; any unknown token -> bare return
+                ...
+                return (True, "clean single sbx invocation, scope inside project, no --net")
+      api_references:
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        Covered by task-008: a clean contained sbx payload invoking the deployed absolute path
+        (whitebox WRAPPER_PATH monkeypatch) -> permissionDecision:"allow"; the full R1-R13
+        (+R6b/R10b/R12b/R12c) adversarial matrix -> each empty stdout + rc 0 + no stderr.
+      dependencies:
+        - task-001
+    - task_id: task-008
+      description: "Gate contract suite tests/test_sbx_gate.py (create) mirroring test_mcp_first_guard.py with INVERTED classify, the full R1-R13 adversarial matrix, whitebox AUTOALLOW cases, the MANDATORY cross-file parity test, and the FOLDED offline pure-builder containment group; plus run.py registration (run_sbx_gate + one SUITES row) and a sbx_gate forge test target."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/tests/test_sbx_gate.py
+      function_name: "case / classify / run / parity + folded offline group"
+      type: create
+      status: completed
+      size: xl
+      size_rationale: "The single largest task: it mirrors a 1000+ line suite, encodes the entire R1-R13 (+R6b/R10b/R12b/R12c) adversarial matrix as PROMPT cases, adds whitebox AUTOALLOW cases with WRAPPER_PATH monkeypatching, the mandatory cross-file parity test loading BOTH copies, AND the folded offline builder group (assertions a-d + setrlimit ordering + M3 import proof). It also edits run.py and project-forge.yaml. Deliberately absorbs Step 9."
+      implementation_details: |
+        Create tests/test_sbx_gate.py mirroring tests/test_mcp_first_guard.py (P9):
+        - `HOOK = H.repo_path("ClaudeCode","hooks","sbx-gate.py")`; `sys.dont_write_bytecode = True`.
+        - Extend the case() builder to inject an OPTIONAL `cwd` field into the payload JSON.
+        - INVERT classify(): empty stdout == PROMPT (the safe outcome); parsed
+          permissionDecision=="allow" == AUTOALLOW; a malformed/other shape is a test failure
+          (BADJSON/BADSHAPE). Keep the invariants rc==0 and stderr empty. Expose run(opts) -> Suite.
+        - Encode the FULL adversarial matrix as PROMPT cases: chaining (R1), pipe (R2),
+          substitutions (R3), heredoc (R4), redirection (R5), wrappers (R6: one per SKIP_WRAPPERS
+          member from mcp-first-guard.py:134), planted look-alike named sbx (R6b/C1: ./sbx,
+          /tmp/x/sbx, PATH-shadowed bare sbx), assignment prefix (R7), subshell/brace (R8),
+          bash -c (R9), ALL-CAPS (R10), quoted-metachar (R10b - documented intentionally-safe
+          under-allow), --net (R11), --write outside project incl. --write ~ (R12/H1), equals-form
+          + unknown-flag (R12b: --write=/etc and --frobnicate), sibling-prefix (R12c:
+          --write ../<root-basename>-evil), and plumbing/fail-safe (R13: non-Bash, null/missing
+          command, missing cwd, malformed JSON via raw()).
+        - AUTOALLOW cases via the gated WHITEBOX import (P9): import is_clean_sbx, monkeypatch the
+          module's WRAPPER_PATH to a temp fixture the test creates, invoke that same fixture path
+          in <WRAPPER>, assert (True, reason) and the exact reason string. Do NOT add a production
+          env override. Cases: `<WRAPPER> -- echo hi` (cwd=/repo), `<WRAPPER> --write . -- touch f`,
+          `<WRAPPER> --ro -- true`.
+        - MANDATORY cross-file PARITY TEST (H-A): import BOTH copies - the gate's via harness
+          load_module_from_path (_harness.py:394-405; the gate has a .py extension) and the
+          helper's resolve_scope/project_root via importlib.machinery.SourceFileLoader("sbx",
+          H.repo_path("ClaudeCode","skills","sandbox-run","scripts","sbx")).load_module() (H3, the
+          helper is extension-less) with sys.dont_write_bytecode set - and assert BYTE-IDENTICAL
+          output over ~, ., /etc, a relative ../sibling, and a temp symlink; assert the
+          separator-safe containment verdict agrees on both sides for ../<root-basename>-evil.
+        - FOLDED offline builder group (absorbs Step 9): import the pure _seatbelt_argv /
+          _bwrap_argv / guard layer via the SAME SourceFileLoader and assert (a) every
+          secret_paths entry denied read+write incl. the nested-.git tree (root/.git + root/sub/.git,
+          cwd=root/sub -> both configs); (b) net unshared/denied unless --net; (c) writes confined
+          and --ro yields zero writable scopes; (d) injected metachar/`..` in --write rejected;
+          plus the setrlimit-before-execvp structural check and the M3 import-runs-no-exec/setrlimit/
+          makedirs proof.
+        Registration:
+        - tests/run.py: add `run_sbx_gate(opts)` mirroring run_mcp_first_guard (:133-134) and ONE
+          SUITES tuple `("sbx_gate", run_sbx_gate, "sbx PreToolUse grant-only gate", <N>)` with the
+          EXACT case count <N> (a stale count is a hard failure at :260-261,284-290).
+        - project-forge.yaml: add a `sbx_gate` TEST target mirroring the mcp_first_guard target
+          (:51-57) with `requires: [syntax]`.
+        Do NOT create tests/test_sbx.py, a run_sbx wrapper, or a separate sbx forge target
+        (folded-into-gate decision). The syntax build target already compile-checks this file.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/tests/test_mcp_first_guard.py
+          function: "case / raw / only + HOOK path + dont_write_bytecode"
+          note: "Mirror the case()/raw()/only() builders and the HOOK/dont_write_bytecode header. Extend case() to inject an optional cwd; adapt only() so an AUTOALLOW case can assert its exact reason string."
+          pattern_excerpt: |
+            sys.dont_write_bytecode = True
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import _harness as H  # noqa: E402
+            NAME = "mcp_first_guard"
+            HOOK = H.repo_path("ClaudeCode", "hooks", "mcp-first-guard.py")
+
+            def case(group, name, cmd, expect, must=(), must_not=(), note=""):
+                return {
+                    "group": group, "name": name, "expect": expect,
+                    "payload": json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}),
+                    "must": list(must), "must_not": list(must_not), "note": note,
+                }
+
+            def raw(group, name, payload, expect, note=""):
+                return {"group": group, "name": name, "expect": expect, "payload": payload,
+                        "must": [], "must_not": [], "note": note}
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/tests/test_mcp_first_guard.py
+          function: "run_hook / classify"
+          note: "INVERT this classify for the gate: empty stdout -> PROMPT (safe), permissionDecision=='allow' -> AUTOALLOW, other shape -> BADSHAPE. run_hook runs the hook as a subprocess per case."
+          pattern_excerpt: |
+            def run_hook(payload):
+                return H.run_process([sys.executable, HOOK], stdin_text=payload, timeout=20)
+
+            def classify(stdout):
+                s = stdout.strip()
+                if not s:
+                    return ALLOW, ""
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return "BADJSON", s
+                if not isinstance(obj, dict):
+                    return "BADJSON", s
+                hso = obj.get("hookSpecificOutput") or {}
+                if hso.get("permissionDecision") == "deny":
+                    if hso.get("hookEventName") != "PreToolUse":
+                        return "BADSHAPE", s
                     ...
-                    all_refs.append({...})
-                if max_results > 0 and len(all_refs) >= max_results:
-                    break
-            # <-- INSERT cross-source merge here:
-            #   line_seen = {f"{r['location']['uri']}:{r['location']['range']['start']['line']}" for r in all_refs}
-            #   remaining = (max_results - len(all_refs)) if max_results > 0 else 0
-            #   extra = await client.supplemental_references(symbol_name, line_seen, remaining, preferred_path)
-            #   append each hit whose uri:line not in line_seen, honoring remaining
-            return {"symbol": symbol_name, "count": len(all_refs), "references": all_refs}
-        - file: "Scripts/mcp-lua-lsp.py"
-          function: "handle_find_references (standalone merge contract to mirror)"
-          note: "The standalone builds seen keyed uri:line (1087) and passes seen+remaining into the grep (1129-1133); remaining=(max_results-len(all_refs)) when max_results>0 else 0. Mirror this exactly."
+                    return DENY, hso.get("permissionDecisionReason") or ""
+                return "OTHER", s
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/tests/test_mcp_first_guard.py
+          function: "run (suite driver + invariants)"
+          note: "Mirror the run() driver: build the Suite, iterate CASES, run_hook per case, classify, and assert rc==0 + stderr empty on EVERY case (these invariants are preserved verbatim, :1002-1005)."
           pattern_excerpt: |
-            lsp_count = len(all_refs)
-            # Text-grep fallback for references LSP misses (Lua dynamic dispatch).
-            if include_text_fallback and (max_results <= 0 or len(all_refs) < max_results):
-                remaining = (max_results - len(all_refs)) if max_results > 0 else 0
-                text_hits = _find_text_references_lua(
-                    client.project_root, symbol_name, seen, remaining
-                )
-                for hit in text_hits:
-                    _try_add_ref(hit["uri"], hit["range"], "text")
-                    if max_results > 0 and len(all_refs) >= max_results:
-                        break
-        - file: "Scripts/mcp-purity.py"
-          function: "handle_symbol_change_impact (call-hierarchy guard)"
-          note: "Guard the list-branch on client.supports_call_hierarchy (2583); the partial flag at 2614 already covers the empty Lua case."
+            def run(opts=None):
+                opts = opts or H.Options()
+                suite = H.Suite(NAME, title="mcp-first-guard PreToolUse Bash hook",
+                                opts=opts, mode="grouped")
+                for c in CASES:
+                    rc, out, err = run_hook(c["payload"])
+                    actual, reason = classify(out)
+                    problems = []
+                    if rc != 0:
+                        problems.append(f"exit code {rc} (must be 0)")
+                    if err.strip():
+                        problems.append(f"stderr not empty: {err.strip()[:200]}")
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/tests/_harness.py
+          function: load_module_from_path
+          note: "Use this to import the GATE copy (it has a .py extension). It is spec_from_file_location-based and will CRASH on the extension-less helper - so the HELPER copy must instead be loaded via importlib.machinery.SourceFileLoader (H3)."
           pattern_excerpt: |
-            call_hierarchies = []
-            if isinstance(definition, list):
-                seen_roots = set()
-                for defn in definition:
-                    ...
-                    hier = await _collect_call_hierarchy(client, uri_to_path(uri), line, char, depth)
-                    if hier:
-                        call_hierarchies.append(hier)
+            def load_module_from_path(name, path):
+                """Import a loose .py file WITHOUT letting it write a __pycache__ entry."""
+                import importlib.util
+                previous = sys.dont_write_bytecode
+                sys.dont_write_bytecode = True
+                try:
+                    spec = importlib.util.spec_from_file_location(name, path)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    return module
+                finally:
+                    sys.dont_write_bytecode = previous
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/tests/run.py
+          function: "run_mcp_first_guard + SUITES"
+          note: "Add run_sbx_gate mirroring run_mcp_first_guard, and one SUITES tuple with the exact declared count. The runner cross-checks the count and treats drift as a hard failure."
+          pattern_excerpt: |
+            def run_mcp_first_guard(opts):
+                return run_python_suite("test_mcp_first_guard", opts)
             ...
-                "call_hierarchy": call_hierarchies,
-                "partial": not call_hierarchies,
-        - file: "Scripts/mcp-purity.py"
-          function: "_fallback_workspace_symbols / _symbol_to_location Tier 3"
-          note: "Both call _find_files_with_word; pass exts=client.fallback_extensions (1843 and 1959). _find_files_with_word already accepts an exts kwarg (1800)."
+            SUITES = [
+                ("inspect_validate", run_inspect_validate,
+                 "mcp-inspect VALIDATION family", 119),
+                ("mcp_first_guard", run_mcp_first_guard,
+                 "mcp-first-guard PreToolUse Bash hook", 335),
+                ...
+            ]
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/project-forge.yaml
+          function: "test.mcp_first_guard target"
+          note: "Mirror this test target for sbx_gate: requires: [syntax], a single python3 tests/run.py sbx_gate command, and the same grep filter."
           pattern_excerpt: |
-            # _fallback_workspace_symbols @1843:
-            candidates = _find_files_with_word(client.project_root, query, limit=20)
-            # ...becomes exts=client.fallback_extensions
-            # _symbol_to_location Tier 3 @1959:
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol_name):
-                candidates = _find_files_with_word(client.project_root, symbol_name, limit=10)
-                # ...becomes exts=client.fallback_extensions
-        - file: "Scripts/mcp-purity.py"
-          function: "handle_type_at"
-          note: "Single line: _infer_type(raw_text) -> client.infer_type(raw_text) at 2402."
-          pattern_excerpt: |
-            contents = result.get("contents")
-            raw_text = _flatten_hover(contents).strip()
-            deduced = _infer_type(raw_text)      # -> client.infer_type(raw_text)
+            mcp_first_guard:
+              description: "The PreToolUse Bash guard. For split_top/heredoc internals use RUN_ARGS=--whitebox on the all target."
+              requires: [syntax]
+              commands:
+                - python3 tests/run.py mcp_first_guard
+              filter:
+                grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
       api_references:
-        - "docs/feature-implementation-plan.md (Step 0 helper inventory; Module-level helper edits; Step 5)"
-      test_requirements: >-
-        Live runner: name-based find_references on Lua emits no uri:line duplicates across LSP+grep and
-        respects the cap; symbol on Lua uses the .lua fallback; symbol_change_impact on Lua returns
-        partial:true with no call_hierarchy and does not error; type_at on Lua returns raw hover text.
-        C++ paths unchanged (base hooks are no-ops/defaults). py_compile clean.
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        `forge test sbx_gate` passes; the declared count matches the run (no drift);
+        `forge test all` shows no existing suite regression (mcp_first_guard still 335);
+        `forge clean pycache` leaves no .pyc. Every containment-escape class R1-R13 has a
+        PROMPT case; the parity test asserts byte-identical gate/helper resolution; the folded
+        offline group asserts (a)-(d) + setrlimit ordering + the M3 import proof.
       dependencies:
-        - "task-001"
-        - "task-003"
-
-    - task_id: "task-005"
-      description: "Add the .lua branch to _detect_language so a .lua path maps to languageId \"lua\"."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "_detect_language"
-      type: modify
-      status: completed
-      size: ss
-      size_rationale: "A single if-branch (2 lines) inserted before the cpp fallthrough."
-      implementation_details: >-
-        In _detect_language (@936-943), add `if suffix == ".lua": return "lua"` before the final
-        `return "cpp"` fallthrough (after the .c branch). This makes a .lua path route through
-        _route_filetype to the luals backend.
-      code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "_detect_language"
-          note: "Insert the .lua branch before the trailing return \"cpp\" (943)."
-          pattern_excerpt: |
-            def _detect_language(file_path: str) -> str:
-                """Map a source path to its LSP languageId (CUDA-superset of clangd's)."""
-                suffix = pathlib.Path(file_path).suffix.lower()
-                if suffix in (".cu", ".cuh"):
-                    return "cuda"
-                if suffix == ".c":
-                    return "c"
-                # if suffix == ".lua": return "lua"   <-- INSERT
-                return "cpp"
-      api_references:
-        - "docs/feature-implementation-plan.md (Step 6)"
-      test_requirements: >-
-        Live runner in-process assert: _detect_language(\".lua\") == \"lua\". py_compile clean.
-      dependencies:
-        - "task-003"
-
-    - task_id: "task-006"
-      description: "Add _LUALS_FILETYPES={\"lua\"} and extend _route_filetype with a \"luals\" branch so the \"lua\" filetype maps to the luals backend type."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "_route_filetype"
-      type: modify
-      status: completed
-      size: ss
-      size_rationale: "One new constant + one if-branch in _route_filetype (~3 lines)."
-      implementation_details: >-
-        After `_CLANGD_FILETYPES = {"c", "cpp", "cuda"}` (@2070) add
-        `_LUALS_FILETYPES = {"lua"}`. In _route_filetype (@2073-2077) add
-        `if filetype in _LUALS_FILETYPES: return "luals"` before the trailing `return None`.
-      code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "_route_filetype"
-          note: "Add the _LUALS_FILETYPES constant after _CLANGD_FILETYPES (2070) and the luals branch in _route_filetype (2073-2077)."
-          pattern_excerpt: |
-            _CLANGD_FILETYPES = {"c", "cpp", "cuda"}
-            # _LUALS_FILETYPES = {"lua"}   <-- INSERT
-
-
-            def _route_filetype(filetype: str) -> Optional[str]:
-                """Map a languageId (_detect_language output) to a backend TYPE, or None."""
-                if filetype in _CLANGD_FILETYPES:
-                    return "clangd"
-                # if filetype in _LUALS_FILETYPES: return "luals"   <-- INSERT
-                return None
-      api_references:
-        - "docs/feature-implementation-plan.md (Step 7; Constants and Configuration)"
-      test_requirements: >-
-        Live runner in-process assert: _route_filetype(\"lua\") == \"luals\". py_compile clean.
-      dependencies:
-        - "task-003"
-
-    - task_id: "task-007"
-      description: "Widen the backend registry + helper/accessor annotations from ClangdClient to LspBackend (runtime-neutral, inspector L1)."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "_backends"
-      type: modify
-      status: completed
-      size: s
-      size_rationale: "Annotation-only edits at ~10 sites (no runtime change). 5-20 lines touched."
-      implementation_details: >-
-        Change `_backends: Dict[str, ClangdClient]` (@2066) to `Dict[str, LspBackend]`. Update the
-        return annotations of _require_backend (@2080), _init_backend (@2095, -> Optional[LspBackend]),
-        _ensure_backend (@2115). Update the `client: ClangdClient` parameter annotations on the
-        module-level helpers: _fallback_workspace_symbols (@1837), _symbol_to_location (@1881),
-        _collect_call_hierarchy (@1980), _expand_hierarchy_item (@1999), _def_by_name (@2178),
-        _def_at (@2202), _refs_by_name (@2222), _refs_at (@2263). All runtime-neutral.
-      code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "_backends / _require_backend / _ensure_backend"
-          note: "Registry + accessor annotations to widen to LspBackend (2066, 2080, 2095, 2115)."
-          pattern_excerpt: |
-            _backends: Dict[str, ClangdClient] = {}            # -> Dict[str, LspBackend]
-            ...
-            def _require_backend(filetype: str) -> ClangdClient:        # -> LspBackend
-            ...
-            async def _init_backend(backend_type, project_root) -> Optional[ClangdClient]:  # -> Optional[LspBackend]
-            ...
-            async def _ensure_backend(filetype, project_root) -> ClangdClient:  # -> LspBackend
-        - file: "Scripts/mcp-purity.py"
-          function: "module-level helpers client param"
-          note: "Each takes client: ClangdClient -> widen to LspBackend (1837/1881/1980/1999/2178/2202/2222/2263)."
-          pattern_excerpt: |
-            async def _fallback_workspace_symbols(client: ClangdClient, query: str, limit: int = 50)
-            async def _symbol_to_location(client: ClangdClient, symbol_name: str, ...)
-            async def _refs_by_name(client: ClangdClient, symbol_name: str, ...)
-            # ...all widen ClangdClient -> LspBackend
-      api_references:
-        - "docs/feature-implementation-plan.md (Annotation widening / inspector L1)"
-      test_requirements: "py_compile clean; no behavior change."
-      dependencies:
-        - "task-001"
-
-    - task_id: "task-008"
-      description: "Split _init_backend into an if/elif backend_type branch: keep the existing clangd+CUDA path under \"clangd\", add a \"luals\" branch (with a shutil.which(\"lua-language-server\") guard) that creates LuaLsClient() and awaits start(project_root)."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "_init_backend"
-      type: modify
+        - task-006
+        - task-007
+    - task_id: task-009
+      description: "Live self-test probe fixture selftest_probe.py: (a) scratch write SUCCEEDS; (b) out-of-project write BLOCKED; (c) network BLOCKED; (d) MANDATORY secret-READ under --write . BLOCKED (M2). On-demand, explicitly NOT in portable CI."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/scripts/selftest_probe.py
+      function_name: "main (probes a/b/c/d)"
+      type: create
       status: completed
       size: m
-      size_rationale: "Wraps the existing unconditional clangd init (2099-2110) into an if-branch and adds a parallel luals branch with the missing-binary guard. ~20-40 lines."
-      implementation_details: >-
-        In _init_backend (@2095-2112, currently UNCONDITIONAL ClangdClient() @2099), introduce a branch:
-        `if backend_type == "clangd":` containing the existing clangd path
-        (ClangdClient(), CUDA detection @2104-2109, `msg = await client.start(...)`, log, `return client`);
-        `elif backend_type == "luals":` -> guard `if shutil.which("lua-language-server") is None: raise
-        RuntimeError("lua-language-server binary not found on PATH")` (honest error + 30s backoff via the
-        _ensure_backend catch), then `client = LuaLsClient(); msg = await client.start(project_root);
-        log.debug("Backend '%s' init: %s", backend_type, msg); return client`. Ensure `shutil` is
-        imported (add the import if absent). Keep the existing log.debug("Backend '%s' init: %s", ...)
-        line for both branches.
+      size_rationale: "A single stdlib probe script attempting four actions and reporting each outcome; ~40-70 lines. Small, but the secret-READ probe (d) is the load-bearing proof of the macOS SBPL boundary."
+      implementation_details: |
+        Create ClaudeCode/skills/sandbox-run/scripts/selftest_probe.py (a clearly-named fixture,
+        NOT foo.py) that attempts and reports:
+        - (a) write to `<cwd>/.claude/tmp/probe.out` - must SUCCEED (scratch).
+        - (b) write to a path OUTSIDE the project, e.g. os.path.expanduser("~/sbx_probe_escape")
+          - must be BLOCKED.
+        - (c) open a network socket / urllib fetch - must be BLOCKED.
+        - (d) MANDATORY (M2/A05/CWE-696): attempt to READ a real secret path (e.g.
+          os.path.expanduser("~/.ssh/id_rsa"), or any existing file under ~/.ssh) while running
+          under --write . (the project itself writable), and assert the READ is BLOCKED. This is
+          the ONLY proof that SBPL last-match-wins secret-deny actually takes effect on macOS.
+        The skill's self-test runs `sbx --write . -- python3 selftest_probe.py` and asserts
+        a==ok, b==blocked, c==blocked, d==blocked (validated live, zero iterations - SC-2/SC-3).
+        stdlib-only. Because it needs a real sandbox-exec/bwrap and is platform-specific, it stays
+        an on-demand skill probe, explicitly NOT part of forge test all (carry a one-line rationale
+        in SKILL.md). Delegate the actual run-fix loop to p:minion-builder / p:minion-runner at
+        implement time.
       code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "_init_backend"
-          note: "Currently unconditional ClangdClient() at 2099. Wrap in if backend_type==\"clangd\" and add elif \"luals\" with the shutil.which guard."
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+          function: "Section 6 Step 10 (probe a/b/c/d) + §5 macOS secret-boundary caveat"
+          note: "Probe (d) is mandatory and is the only proof of the SBPL secret boundary; probes must report ok/blocked/blocked/blocked. static-linking/ verify-script is the bundled-probe precedent."
           pattern_excerpt: |
-            async def _init_backend(backend_type: str, project_root: str) -> Optional[ClangdClient]:
-                client = ClangdClient()
-                cuda_path = None
-                cuda_arch = None
-                if _has_cuda_sources(project_root):
-                    cuda_path = _find_cuda_sdk(project_root=project_root)
-                    if cuda_path:
-                        cuda_arch = _detect_cuda_arch(project_root=project_root) or "sm_86"
-                    else:
-                        log.debug("CUDA sources present but no SDK found - starting clangd in plain mode")
-                msg = await client.start(project_root, cuda_path=cuda_path, cuda_arch=cuda_arch)
-                log.debug("Backend '%s' init: %s", backend_type, msg)
-                return client
-        - file: "Scripts/mcp-purity.py"
-          function: "_ensure_backend (backoff path the guard feeds)"
-          note: "A RuntimeError from the luals branch is caught here, recording _backend_init_failed (30s backoff) and re-raised as a clean error — not a hang."
-          pattern_excerpt: |
-            try:
-                client = await asyncio.wait_for(asyncio.shield(task), timeout=90.0)
-            except asyncio.TimeoutError:
-                raise RuntimeError(f"LSP backend '{backend_type}' init timed out (90s)")
-            except Exception as exc:
-                _backend_init_failed[backend_type] = loop.time()
-                _backend_init_tasks.pop(backend_type, None)
-                raise RuntimeError(f"LSP backend '{backend_type}' init failed: {exc}")
+            # selftest_probe.py (NOT foo.py) run as: sbx --write . -- python3 selftest_probe.py
+            # (a) write <cwd>/.claude/tmp/probe.out            -> must SUCCEED
+            # (b) write os.path.expanduser("~/sbx_probe_escape") -> must be BLOCKED
+            # (c) open a socket / urllib fetch                  -> must be BLOCKED
+            # (d) read os.path.expanduser("~/.ssh/id_rsa") under --write . -> must be BLOCKED (M2)
       api_references:
-        - "docs/feature-implementation-plan.md (Step 8; Error Handling Pattern; inspector L-A)"
-      test_requirements: >-
-        Live runner: a .lua call spins up the luals backend; a missing binary yields an honest error +
-        backoff (not a hang). py_compile clean.
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        On the host OS, probes (a)-(d) report ok/blocked/blocked/blocked and the faked-missing
+        probe (PATH stripped of sandbox-exec/bwrap) fails closed (helper exits non-zero, command
+        not run). Deliberately NOT wired into forge test all.
       dependencies:
-        - "task-003"
-        - "task-006"
-        - "task-007"
-
-    - task_id: "task-009"
-      description: "Add the dispatcher backend-hint: _PREFIX_BACKEND, _backend_hint, _select_filetype; inject params[\"_backend\"] in handle_purity_call before the handler call; switch the path-less-capable handlers to _select_filetype; exclude _backend from the unknown-params check."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "handle_purity_call"
-      type: modify
+        - task-006
+    - task_id: task-010
+      description: "sandbox-run/SKILL.md: frontmatter name: sandbox-run (bare, no p:), Usage fenced block (absolute deployed path), Invocation contract (H2, same words as gate), Trust boundary (KD-5), Registration (PascalCase PreToolUse matcher Bash + camelCase-README warning + disjoint-polarity/multi-hook caveat + USER responsibility), Platforms matrix, Self-test section (probe d), RLIMIT_NPROC caveat."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/sandbox-run/SKILL.md
+      function_name: null
+      type: create
       status: completed
-      size: m
-      size_rationale: "Two new module helpers + a constant, one dispatcher injection line, the unknown-params exclusion, plus switching ~5 handler backend-acquisition sites from _detect_language/\"cpp\" to _select_filetype. ~20-60 lines."
-      implementation_details: >-
-        Add near the routing constants: `_PREFIX_BACKEND = {"luals_": "lua"}`; a `_backend_hint(function)`
-        that returns the mapped filetype for a matching prefix else None; and
-        `def _select_filetype(params, abs_path) -> str: return params.get("_backend") or
-        (_detect_language(abs_path) if abs_path else "cpp")`. In handle_purity_call (@2772), AFTER
-        `params = _resolve_aliases(...)` (@2784) and BEFORE the `handler(...)` call (@2799/2801), add
-        `hint = _backend_hint(function); if hint: params["_backend"] = hint`. Switch the path-less-capable
-        handlers to acquire the backend via `_ensure_backend(_select_filetype(params, abs_path), project_root)`:
-        handle_symbol @2487 (`_ensure_backend("cpp", ...)` -> `_select_filetype(params, "")`),
-        handle_symbol_context @2521-2522 and handle_symbol_change_impact @2576-2577 (`ft = _detect_language(abs_path)
-        if abs_path else "cpp"` -> `ft = _select_filetype(params, abs_path or "")`), and the name-branch
-        backend acquisitions of handle_find_definition (@2325 region) and handle_find_references (@2355 region)
-        analogously. In the except-block unknown-params check (@2806) change
-        `set(params.keys()) - accepted` to `set(params.keys()) - accepted - {"_backend"}` so the reserved
-        key is not reported. Path-based luals calls need no hint (the .lua path auto-detects once
-        _route_filetype knows "lua").
+      size: l
+      size_rationale: "A full extended-skill SKILL.md with many mandated sections (Usage, Invocation contract, Trust boundary, Registration, Platforms, Self-test) each carrying load-bearing wording that must intersect the gate exactly; ~120-220 lines of prose."
+      implementation_details: |
+        Create ClaudeCode/skills/sandbox-run/SKILL.md.
+        - Frontmatter: `name: sandbox-run` (MUST equal the directory name, no p: prefix - P6/
+          ARCHITECTURE.md:37), a specific `description`, optional `model`.
+        - `## Usage` fenced block showing `sbx [--write DIR]... [--net] [--ro] -- <cmd>` invoked via
+          the ABSOLUTE deployed path `~/.claude/skills/p/skills/sandbox-run/scripts/sbx` (P5); a
+          `### Step 1 — Parse arguments` prose section (no $ARGUMENTS substitution).
+        - `## Invocation contract` (H2): state, in the SAME words as the gate (task-007), the single
+          coherent contract - the wrapper is invoked AND auto-allowed by sbx-gate.py ONLY by that
+          absolute deployed path, matched by canonical-path IDENTITY (KD-6), never by filename; a
+          program merely named sbx elsewhere gets no auto-allow.
+        - `## Trust boundary` (KD-5): the gate and helper are independent and neither trusts the
+          other; the gate is bypassable ON PURPOSE because the helper is the enforcement boundary.
+        - `## Registration`: the PascalCase `PreToolUse` / matcher "Bash" settings.json snippet
+          (P10), an EXPLICIT camelCase-README warning (README.md uses camelCase "postToolUse" - a
+          trap), a note that the two Bash hooks have disjoint polarities and are order-independent
+          WITH the caveat that Claude Code's multi-hook aggregation semantics should be confirmed
+          empirically at registration time, and that registration is the USER's responsibility with
+          no installer (locked decision c).
+        - `## Platforms` matrix: macOS Seatbelt FULL / Linux bwrap FULL / unknown -> fail-closed,
+          with the seccomp optional-extra note.
+        - `## Self-test` section documenting selftest_probe.py probes (incl. the mandatory
+          secret-READ probe d, M2) as on-demand/platform-specific and explicitly NOT in portable CI,
+          and stating the macOS secret boundary is probe-verified NOT CI-verified.
+        - The RLIMIT_NPROC per-UID caveat.
       code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "handle_purity_call (injection point + unknown-params check)"
-          note: "Inject the hint after _resolve_aliases (2784) and before the handler call (2799). The unknown-params subtraction at 2806 must also subtract {\"_backend\"}."
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/skills/checkpoint/SKILL.md
+          function: "helper-script section + ## Usage (P5)"
+          note: "P5 bundled-script SKILL.md shape: reference the bundled script by its absolute deployed ~/.claude/skills/p/skills/<name>/scripts/... path inside a fenced block; a ## Usage block and a ### Step 1 prose section, no $ARGUMENTS."
           pattern_excerpt: |
-            try:
-                params = _resolve_aliases(raw_params, canonical_func)
-            except ValueError as exc:
-                return {"error": str(exc)}
-            # hint = _backend_hint(function); if hint: params["_backend"] = hint   <-- INSERT
+            ## The helper script -- ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py
+
+            Stdlib-only markdown section reader. ... Commands:
+
+            ```
+            python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py next-number
+            python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py latest
+            ```
             ...
-            handler = HANDLERS.get(function)
+            ## Usage
+
+            ```
+            /p:checkpoint                # prepend a new session block to the top
+            ```
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/README.md
+          function: "Settings Configuration (P10 camelCase trap)"
+          note: "The README example uses camelCase postToolUse - a trap. SKILL.md MUST use PascalCase PreToolUse with matcher 'Bash' and explicitly warn about this discrepancy."
+          pattern_excerpt: |
+            ```json
+            {
+              "hooks": {
+                "postToolUse": [
+                  {
+                    "matcher": "Edit|MultiEdit|Write",
+                    "command": "/path/to/ClaudeCode/hooks/post-edit-clang-format.sh"
+                  },
+                  ...
+                ]
+              }
+            }
+            ```
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/ARCHITECTURE.md
+          function: "Skill frontmatter (P6)"
+          note: "Required frontmatter keys name (== directory name, never p:-prefixed) and description; the plugin prepends p: at invocation time."
+          pattern_excerpt: |
+            ```yaml
+            ---
+            name: <name>
+            description: <one-paragraph description ...>
+            ---
+            ```
+
+            No other frontmatter keys are required. The `name:` field MUST match the skill's
+            directory name exactly ... The plugin prepends `p:` at invocation time — never write
+            it into the frontmatter.
+      api_references:
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+        - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/README.md
+        - /Users/zoltan.ponekker/Code/prompt-heaven/ClaudeCode/ARCHITECTURE.md
+      test_requirements: |
+        Frontmatter `name` equals the directory name (sandbox-run); any embedded JSON snippet
+        parses (inspect_call validate). The Invocation contract wording must intersect the gate's
+        accept-set (H2). No forge suite covers SKILL.md directly; correctness is by review + JSON validation.
+      dependencies:
+        - task-006
+        - task-007
+    - task_id: task-011
+      description: "Wiki sync: hooks.md (add BOTH mcp-first-guard.py stale-missing AND sbx-gate.py rows + bump verified), skills.md (add p:sandbox-run row + bump verified, I2 bare-dir wording), regenerate docs/INDEX.md (reindex --check must pass), and create ADR 0005 capturing the WHY. scripts.md intentionally UNTOUCHED (GRAFT 3)."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0005-approve-the-wrapper-not-the-command.md
+      function_name: null
+      type: create
+      status: pending
+      size: l
+      size_rationale: "Four coordinated doc changes: two roster-table edits + verified bumps, an INDEX regeneration/audit, and a full new ADR carrying the trust-boundary rationale, residual-risk record, and accepted-assumption note. The ADR alone is substantial WHY prose."
+      implementation_details: |
+        - docs/subsystems/hooks.md: add TWO rows to the roster table (which currently lists
+          attention-reminder.py and the post-edit-* scripts but OMITS mcp-first-guard.py): the
+          pre-existing-but-undocumented mcp-first-guard.py (PreToolUse / Bash / MCP-first routing
+          guard) AND the new sbx-gate.py (PreToolUse / Bash / auto-allow contained sbx invocations).
+          Bump the `verified:` frontmatter (currently commit d6659f7, date 2026-07-16) to the
+          landing commit/date.
+        - docs/subsystems/skills.md: add a `p:sandbox-run` row to the Notable-skills table; bump
+          `verified:` (currently commit 26200d1, date 2026-07-31). I2: the invocation name is
+          p:sandbox-run but the on-disk DIRECTORY is bare sandbox-run and the frontmatter name: is
+          bare sandbox-run; do NOT copy the stale ":21/:36" p:<name>-directory prose into the new
+          row, and do NOT create a p:sandbox-run/ directory. That stale prose is out of scope here.
+        - docs/INDEX.md: regenerate/audit via reindex.py --check (must pass). The feature adds no
+          new wiki PAGE (the feature-implementation-plan slug already exists), only rows; the audit
+          is the gate.
+        - docs/adr/0005-approve-the-wrapper-not-the-command.md: create following the ADR
+          frontmatter/body format (mirror 0003; next free number is 0005). Capture the WHY: the
+          trust boundary shifts from a per-command allowlist to one audited containment wrapper; the
+          load-bearing invariant (gate never false-allows); why fail-open is fail-safe for a
+          grant-only gate; the inverted safety model (gate REJECTS metacharacters and
+          copies-not-imports the parser); why the gate authorizes wrapper IDENTITY (canonical
+          path == WRAPPER_PATH) and NOT filename (C1/A01/CWE-290); the rejected alternatives.
+          Residual-risk record (M2/A05/CWE-696): the macOS secret boundary rests on SBPL
+          last-match-wins ordering UNVERIFIED in-repo and proven ONLY by the live self-test probe
+          (Step 10 probe d), deliberately NOT in portable CI - so it is probe-verified, NOT
+          CI-verified. Accepted-assumption note (INFO): the realpath->exec TOCTOU on the wrapper
+          token is OUT of the §0 adversary model - recorded as an accepted assumption, not a
+          defense.
+        - docs/subsystems/scripts.md: INTENTIONALLY NOT edited (GRAFT 3) - its sources: is Scripts
+          and it covers top-level MCP servers + task utilities; the sbx helper is skill-bundled.
+      code_references:
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0003-the-trigger-travels-with-the-tool.md
+          function: "ADR frontmatter + body format"
+          note: "Mirror this ADR frontmatter (name/type: adr/status: active/title/description/sources/verified/links) and the 'Status: accepted (implemented). Append-only' body opener; ADR 0005 records the WHY the source cannot carry."
+          pattern_excerpt: |
+            ---
+            name: 0003-the-trigger-travels-with-the-tool
+            type: adr
+            status: active
+            title: The wiki trigger lives in the tool description, not in CLAUDE.md
+            description: Decision to move the wiki-consultation trigger into the wiki_call tool ...
+            sources:
+              - Scripts/mcp-wiki.py
+              - CLAUDE.md
+            verified:
+              commit: e4cdd48
+              date: 2026-08-03
+            links:
+              - wiki-engine
+            ---
+
+            # ADR 0003: The trigger travels with the tool
+
+            **Status:** accepted (implemented). Append-only — the WHY is frozen here; ...
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/docs/subsystems/hooks.md
+          function: "Roster table + verified frontmatter"
+          note: "Add mcp-first-guard.py (stale-missing) AND sbx-gate.py rows in this exact table format; bump the verified commit/date (currently d6659f7 / 2026-07-16)."
+          pattern_excerpt: |
+            verified:
+              commit: d6659f7
+              date: 2026-07-16
             ...
-            except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
-                err = str(exc)
-                accepted = HANDLER_ACCEPTED_PARAMS.get(canonical_func)
-                if accepted:
-                    unknown = sorted(set(params.keys()) - accepted)   # - {"_backend"}
-        - file: "Scripts/mcp-purity.py"
-          function: "handle_symbol (cpp hardcode to fix)"
-          note: "Replace _ensure_backend(\"cpp\", project_root) (2487) with _ensure_backend(_select_filetype(params, \"\"), project_root) — handle_symbol has no path variable."
+            ## Roster
+
+            | Hook | Lang | Trigger | Action |
+            |------|------|---------|--------|
+            | `attention-reminder.py` | Python | PreToolUse / UserPromptSubmit | Emits a per-token-bucket reminder ... |
+            | `post-edit-clang-format.sh` | Bash | edit `.c/.cpp/.h/.hpp` | Auto-formats via clang-format |
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/docs/subsystems/skills.md
+          function: "Notable skills table + verified frontmatter"
+          note: "Add a p:sandbox-run row to this table; bump verified (currently 26200d1 / 2026-07-31). Do NOT copy the stale p:<name>-directory prose (I2)."
           pattern_excerpt: |
-            disable_fallback = _bool_param(params.get("strict"), default=False)
-            client = await _ensure_backend("cpp", project_root)    # -> _select_filetype(params, "")
-        - file: "Scripts/mcp-purity.py"
-          function: "handle_symbol_context / handle_symbol_change_impact (path-less ft)"
-          note: "Both compute ft = _detect_language(abs_path) if abs_path else \"cpp\" (2521, 2576). Replace with ft = _select_filetype(params, abs_path or \"\")."
-          pattern_excerpt: |
-            abs_path = safe_path(project_root, path, strict) if path else None
-            ft = _detect_language(abs_path) if abs_path else "cpp"   # -> _select_filetype(params, abs_path or "")
-            client = await _ensure_backend(ft, project_root)
+            ## Notable skills
+
+            | Skill | Purpose |
+            |-------|---------|
+            | `p:mcp-clangd` / `p:mcp-luals` / `p:mcp-cuda` | LSP code-intelligence routing for C/C++, Lua, CUDA |
+            | `p:mcp-purity` | File ops (search/glob/edit) routing |
+            | `p:feature-plan` / `p:task-plan` / `p:implement` | Migrated `/p:` workflow chain ... |
       api_references:
-        - "docs/feature-implementation-plan.md (Step 9; Dispatcher backend-hint; Edge Cases)"
-      test_requirements: >-
-        Live runner: path-less luals_workspace_symbols / name-based luals_find_definition reach the
-        luals backend (not \"cpp\"); a bare canonical symbol with no path/prefix stays \"cpp\"; the
-        _backend key is absent from any Unknown-params error. py_compile clean.
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/subsystems/hooks.md
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/subsystems/skills.md
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/INDEX.md
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0003-the-trigger-travels-with-the-tool.md
+      test_requirements: |
+        reindex.py --check passes (no dup slugs / malformed frontmatter / orphans); both hook rows
+        and the skill row present; the ADR frontmatter is well-formed; docs/subsystems/scripts.md is
+        untouched (GRAFT 3).
       dependencies:
-        - "task-004"
-        - "task-005"
-        - "task-006"
-
-    - task_id: "task-010"
-      description: "Register the luals_* legacy alias keys in HANDLERS (both bare and _at variants, mirroring clangd_*/cuda_*), dropping luals_find_type_definition_at (out of scope)."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "HANDLERS"
-      type: modify
-      status: completed
-      size: s
-      size_rationale: "13 direct dict entries appended after the cuda_* block; purely declarative. 5-20 lines."
-      implementation_details: >-
-        After the cuda_* alias block (@2689, before the closing `}`), add the luals_* DIRECT HANDLERS
-        keys exactly as the plan lists: luals_find_definition/_at -> handle_find_definition;
-        luals_find_references/_at -> handle_find_references; luals_find_implementations_at ->
-        handle_find_implementations; luals_workspace_symbols -> handle_symbol; luals_document_outline ->
-        handle_outline; luals_symbol_context -> handle_symbol_context; luals_symbol_change_impact ->
-        handle_symbol_change_impact; luals_inlay_hints -> handle_inlay_hints; luals_hover ->
-        handle_type_at; luals_diagnostics -> handle_diagnostics; luals_init -> handle_lsp_init_noop. Do
-        NOT add luals_find_type_definition_at (no canonical handler; out of scope, inspector M3/L-B).
-        These rely on the task-009 backend-hint (_PREFIX_BACKEND maps the luals_ prefix to "lua").
-      code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "HANDLERS cuda_* block (mirror)"
-          note: "Append the luals_* block immediately after cuda_init (2689). Mirror the clangd_*/cuda_* shape; the dispatcher looks up the RAW name (2792)."
-          pattern_excerpt: |
-            # --- legacy cuda_* names as DIRECT keys ---
-            "cuda_find_definition": handle_find_definition,
-            "cuda_find_definition_at": handle_find_definition,
-            "cuda_find_references": handle_find_references,
-            "cuda_find_references_at": handle_find_references,
-            "cuda_find_implementations_at": handle_find_implementations,
-            "cuda_workspace_symbols": handle_symbol,
-            "cuda_document_outline": handle_outline,
-            "cuda_symbol_context": handle_symbol_context,
-            "cuda_inlay_hints": handle_inlay_hints,
-            "cuda_symbol_change_impact": handle_symbol_change_impact,
-            "cuda_hover": handle_type_at,
-            "cuda_diagnostics": handle_diagnostics,
-            "cuda_deduced_type_at": handle_type_at,
-            "cuda_init": handle_lsp_init_noop,
-            # --- INSERT luals_* block here (both bare + _at; NO type_definition) ---
-        - file: "docs/feature-implementation-plan.md"
-          function: "luals_* alias list"
-          note: "Authoritative list of the 13 luals_* keys (plan lines 195-208)."
-          pattern_excerpt: |
-            "luals_find_definition": handle_find_definition,
-            "luals_find_definition_at": handle_find_definition,
-            "luals_find_references": handle_find_references,
-            "luals_find_references_at": handle_find_references,
-            "luals_find_implementations_at": handle_find_implementations,
-            "luals_workspace_symbols": handle_symbol,
-            "luals_document_outline": handle_outline,
-            "luals_symbol_context": handle_symbol_context,
-            "luals_symbol_change_impact": handle_symbol_change_impact,
-            "luals_inlay_hints": handle_inlay_hints,
-            "luals_hover": handle_type_at,
-            "luals_diagnostics": handle_diagnostics,
-            "luals_init": handle_lsp_init_noop,
-            # luals_find_type_definition_at: OUT OF SCOPE (no canonical handler)
-      api_references:
-        - "docs/feature-implementation-plan.md (Step 10; luals_* alias keys; inspector M1/M3)"
-      test_requirements: >-
-        Smoke (committed): inventory lists the luals_* names; luals_find_definition dispatches; luals_bogus
-        is unknown (task-012). Live runner: luals_* aliases resolve against a live luals. py_compile clean.
-      dependencies:
-        - "task-009"
-
-    - task_id: "task-011"
-      description: "Update the PURITY_CALL_TOOL description to advertise the in-process luals backend (.lua / luals_* served in-process)."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/mcp-purity.py"
-      function_name: "PURITY_CALL_TOOL"
-      type: modify
-      status: completed
-      size: s
-      size_rationale: "Edit a couple of description string lines (notably the 'Lua symbols -> mcp-luals' note at 2865 and the semantic-nav language list). 5-20 lines of prose."
-      implementation_details: >-
-        Update the PURITY_CALL_TOOL description (@2822). In the SEMANTIC CODE NAVIGATION section, note
-        that symbol navigation now also covers Lua in-process (.lua paths and luals_* names). Reconcile
-        the "When NOT to use purity: Lua symbols -> mcp-luals (luals_call)" line (@2865): the standalone
-        luals_call still exists and runs in parallel, but luals_* names and .lua paths are ALSO accepted
-        here in-process (mirror the existing clangd_*/cuda_* "still exist and run in parallel; accepted
-        here as aliases" wording @2860-2862). Keep the message accurate and concise; do not change the
-        envelope or any other tool field.
-      code_references:
-        - file: "Scripts/mcp-purity.py"
-          function: "PURITY_CALL_TOOL description (clangd/cuda alias wording + Lua note)"
-          note: "Mirror the clangd_*/cuda_* parallel-and-aliased wording (2860-2862) for luals; reconcile the 'Lua symbols -> mcp-luals' line (2865)."
-          pattern_excerpt: |
-            "you want text, not a symbol. The standalone clangd_call / cuda_call tools\n"
-            "still exist and run in parallel; the legacy clangd_*/cuda_* function names\n"
-            "are accepted here as aliases.\n\n"
-            "When NOT to use purity:\n"
-            "  - Plain reading        -> built-in Read (less MCP overhead).\n"
-            "  - Lua symbols          -> mcp-luals (luals_call).\n"
-      api_references:
-        - "docs/feature-implementation-plan.md (Step 11; External Documentation)"
-      test_requirements: "py_compile clean; tools/list still returns exactly one tool named purity_call (smoke)."
-      dependencies: []
-
-    - task_id: "task-012"
-      description: "Extend _mcp_smoke_test.py with the hermetic JSON-RPC luals dispatch assertions: inventory lists luals_* names; luals_find_definition + a representative subset dispatch (NOT \"unknown function\"); luals_bogus -> \"unknown function\"."
-      file_path: "/Users/zoltan.ponekker/Code/prompt-heaven/Scripts/_mcp_smoke_test.py"
-      function_name: "purity_semantic_checks"
+        - task-007
+        - task-010
+    - task_id: task-012
+      description: "Full-suite regression (verification only, delegated to p:minion-builder at implement time): forge test all passes with the new sbx_gate suite, declared counts match, no existing suite regresses (mcp_first_guard 335); forge build syntax green; forge clean pycache leaves no .pyc."
+      file_path: /Users/zoltan.ponekker/Code/prompt-heaven/tests/run.py
+      function_name: null
       type: test
       status: completed
-      size: m
-      size_rationale: "Add a luals subset list + a luals-dispatch loop + an inventory-list assertion + a bogus-name negative control inside the existing purity_semantic_checks. ~20-50 lines, observable-only."
-      implementation_details: >-
-        Extend purity_semantic_checks (@149) — the harness drives the server as a subprocess over
-        JSON-RPC and does NOT import the module, so assert ONLY observable behavior. (1) Add a luals
-        subset constant, e.g. `LUALS_DISPATCH = ["luals_find_definition", "luals_find_references",
-        "luals_workspace_symbols", "luals_document_outline", "luals_symbol_change_impact", "luals_init"]`.
-        (2) Loop them through `_purity_call(srv, cid, fn)` and assert none returns "Unknown function"
-        (dispatch resolves; a backend/init error is acceptable and distinguishable). (3) Assert the
-        empty-function inventory response lists the luals_* names: send `_purity_call(srv, cid, "")`
-        (or a tools/call with an empty function) and check the returned text contains representative
-        luals_* names. (4) Negative control: `luals_bogus` returns "Unknown function". Use new cid
-        values so they do not collide with the existing 100+ sequence. Do NOT add any in-process import
-        assert — those belong to the uncommitted live runner. Keep py_compile clean.
+      size: s
+      size_rationale: "No file authored - a verification pass running the whole suite and confirming no drift/regression. Small effort, delegated to the builder minion, but a required gate."
+      implementation_details: |
+        Verification-only (no file written by this task). Delegate the run-fix loop to
+        p:minion-builder per CLAUDE.md. Confirm:
+        - `forge test all` exits 0 with the new sbx_gate suite registered and its declared case
+          count matching the run (no case-count drift).
+        - No existing suite regresses (e.g. mcp_first_guard still declares/runs 335,
+          tests/run.py:205-206).
+        - `forge build syntax` is green (it compile-checks sbx-gate.py and test_sbx_gate.py; it
+          does NOT cover the extension-less sbx helper - that is exercised only by the folded
+          offline group + live probe).
+        - `forge clean pycache` shows no leaked .pyc.
       code_references:
-        - file: "Scripts/_mcp_smoke_test.py"
-          function: "purity_semantic_checks (extension point)"
-          note: "Mirror the existing legacy-dispatch loop (168-178) and the bogus-name control (181-184) for luals_*. cid is a running counter."
+        - file: /Users/zoltan.ponekker/Code/prompt-heaven/tests/run.py
+          function: "SUITES drift check"
+          note: "The runner cross-checks each declared count and prints CASE COUNT DRIFT as a hard failure; the regression must show zero drift and no failing suite."
           pattern_excerpt: |
-            # (b) legacy clangd_*/cuda_* names dispatch (direct HANDLERS keys [C1])
-            legacy = ["clangd_find_definition", "cuda_find_definition",
-                      "clangd_workspace_symbols", "cuda_document_outline", "clangd_init"]
-            undispatched_legacy = []
-            for fn in legacy:
-                text, _ = _purity_call(srv, cid, fn)
-                cid += 1
-                if "Unknown function" in text:
-                    undispatched_legacy.append(fn)
-            checks.append(check("purity: legacy clangd_/cuda_ names dispatch",
-                                not undispatched_legacy, "undispatched=%r" % undispatched_legacy))
-
-            # (c) negative control: a bogus name IS reported unknown
-            text, _ = _purity_call(srv, cid, "totally_bogus_fn")
-            cid += 1
-            checks.append(check("purity: bogus name -> Unknown function",
-                                "Unknown function" in text, text[:80]))
-        - file: "Scripts/_mcp_smoke_test.py"
-          function: "_purity_call helper"
-          note: "Reuse the existing _purity_call(srv, call_id, function, params=None) -> (text, raw_response) (130-138). Empty function returns the inventory text."
-          pattern_excerpt: |
-            def _purity_call(srv, call_id, function, params=None):
-                """Send a purity_call tools/call and return (text, raw_response)."""
-                srv.send({"jsonrpc": "2.0", "id": call_id, "method": "tools/call",
-                          "params": {"name": "purity_call",
-                                     "arguments": {"function": function, "params": params or {}}}})
-                resp = srv.read() or {}
-                content = resp.get("result", {}).get("content", [])
-                text = content[0].get("text", "") if content else ""
-                return text, resp
+            if declared is not None and report.count != declared:
+                drift.append((name, declared, report.count))
+            ...
+            if drift:
+                print("\nCASE COUNT DRIFT -- a declared count no longer matches the run:")
+                for name, declared, actual in drift:
+                    print("  %-18s declared %d, ran %d" % (name, declared, actual))
       api_references:
-        - "docs/feature-implementation-plan.md (Step 12; Test Pattern; Testing Strategy/Smoke; inspector H2)"
-      test_requirements: >-
-        python3 Scripts/_mcp_smoke_test.py Scripts/mcp-purity.py passes with the new luals assertions;
-        python3 -m py_compile Scripts/_mcp_smoke_test.py clean. Observable-only (no module import).
+        - /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
+      test_requirements: |
+        forge test all exits 0; no case-count drift; mcp_first_guard unchanged at 335; forge build
+        syntax green; forge clean pycache leaves no .pyc.
       dependencies:
-        - "task-010"
+        - task-001
+        - task-002
+        - task-003
+        - task-004
+        - task-005
+        - task-006
+        - task-007
+        - task-008
+        - task-009
+        - task-010
+        - task-011

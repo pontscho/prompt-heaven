@@ -56,6 +56,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
+  sbx_gate:
+    description: "The grant-only PreToolUse Bash gate for the sbx sandbox wrapper: inverted classify, R1-R13 adversarial matrix, cross-file parity, folded offline containment."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py sbx_gate
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
   purity_lsp:
     description: "purity_call semantic navigation against live clangd + lua-language-server. The slow one, ~45s."
     requires: [syntax]

@@ -1,0 +1,606 @@
+#!/usr/bin/env python3
+"""
+sbx -- run a command inside an OS sandbox (default-deny writes, no network).
+Usage: sbx [--write DIR]... [--net] [--ro] -- <cmd> [args...]
+
+Everything after the FIRST bare `--` is the target command. It is handed to
+os.execvp as argv LIST ELEMENTS, never through a shell, so it can never inject
+into the sandbox profile. `--write DIR` (repeatable) adds a writable scope
+(`--write .` opts into the repo), `--net` allows the network, `--ro` denies ALL
+writes including the default scratch scope, and `--dry-run` prints the resolved
+plan and runs NOTHING.
+
+This feature is a SECURITY BOUNDARY, so the helper is built pure-pieces-first /
+execvp-last. This file is the SKELETON (task-001): the argument model, the manual
+`--` split, the Scope object, and `--dry-run`. The real containment lands in later
+tasks, each layered behind the same __main__ guard:
+  - task-002: fail-closed platform + sandbox-binary detection (BACKENDS registry);
+  - task-003: the pure injection/secret/realpath guard layer + secret_paths();
+  - task-004/005: the Seatbelt (SBPL) and bwrap pure argv builders;
+  - task-006: the single resource.setrlimit + os.execvp site (the ONLY child run).
+
+Every side effect (argparse dispatch, scratch makedirs, setrlimit, execvp) MUST
+live behind `if __name__ == "__main__":` -- via a main() called only from it. The
+module TOP LEVEL stays import-side-effect-free so the offline suite can import the
+module and call the pure pieces WITHOUT triggering any exec/setrlimit/makedirs (M3).
+
+Python 3, standard library only.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import resource
+import shutil
+import sys
+from dataclasses import dataclass
+
+USAGE = "Usage: sbx [--write DIR]... [--net] [--ro] -- <cmd> [args...]"
+
+
+@dataclass
+class Scope:
+    """The resolved sandbox request -- pure data. Later tasks turn a Scope into a
+    backend argv (task-004/005) and exec it (task-006); nothing here runs a child.
+
+    Fields:
+      writes       resolved writable scopes (absolute paths), computed by
+                   compute_writes (task-003): each --write DIR canonicalize()'d
+                   (KD-7 + R14 injection reject), or the default
+                   <cwd>/.claude/tmp scratch scope, or an empty set under --ro.
+      net          allow network access (denied by default).
+      ro           deny all writes (including the scratch default).
+      argv         the target command after `--`, kept verbatim for os.execvp.
+      secret_paths the read+write deny set produced by secret_paths(cwd)
+                   (task-003, M-A / sec-MED-2 ancestor-.git walk).
+      engine       the resolved sandbox-engine binary path -- filled by the
+                   fail-closed detection in task-002 (BACKENDS + shutil.which);
+                   None until a backend is resolved.
+      seccomp      OFF-by-default, dormant Linux syscall-filter seam consumed by
+                   _bwrap_argv (locked decision 8 / NFR-9). No sbx flag ever sets
+                   it True, so the `if scope.seccomp:` branch is never taken; it
+                   exists so a future seccomp layer plugs in without a new code
+                   path or a class hierarchy.
+    """
+    writes: list
+    net: bool
+    ro: bool
+    argv: list
+    secret_paths: tuple = None
+    engine: str = None
+    seccomp: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Backend registry + fail-closed platform/binary detection (task-002).
+#
+# This is a SECURITY BOUNDARY (KD-3, NFR-1, NFR-2, R20): sbx selects an OS
+# sandbox backend from a registry keyed on a sys.platform PREFIX, with a
+# FAIL-CLOSED default. An unknown platform -- or a supported platform whose
+# sandbox binary is absent from PATH -- makes sbx write a one-line reason to
+# stderr and exit non-zero WITHOUT ever constructing or running a target. There
+# is NO unsandboxed fallback, EVER.
+#
+# The registry and the two builder stubs are PURE module-level definitions (no
+# I/O at import, M3). Detection itself (_detect_engine) performs a shutil.which
+# read only when CALLED from main() behind the __main__ guard -- never at import.
+
+
+def _seatbelt_argv(scope):
+    """Pure macOS Seatbelt builder (task-004): a Scope -> ["sandbox-exec", "-p",
+    <profile>, *scope.argv] with <profile> an INLINE SBPL string (no temp .sb file).
+
+    The rule order is LAST-MATCH-WINS and it is LOAD-BEARING (SBPL evaluation order
+    is UNVERIFIED in-repo -- see the §2 constraint; probe d is the live gate): the
+    secret denies MUST be emitted AFTER the permissive read-allow or they never take
+    effect. Order:
+      (version 1) / (deny default) / allow the minimal ops a CLI needs (exec, fork,
+      self-signal, sysctl-read) / (allow file-read* (subpath "/")) permissive reads /
+      per writable scope (allow file-write* (subpath "<canonical>")) UNLESS scope.ro
+      (R21: then none) / LAST so they win, per secret_paths entry BOTH
+      (deny file-read* ...) and (deny file-write* ...) (R16/R17/R22/R22b) /
+      (deny network*) UNLESS scope.net (R18).
+
+    Pure: no I/O. Because canonicalize (task-003) already rejected quotes, parens,
+    backslash and newline, every embedded path is a safe SBPL string literal -- do
+    NOT re-quote or re-escape. The pre-resolved deny set is read off
+    scope.secret_paths (secret_paths(cwd) was called ONCE in main()), keeping this
+    builder side-effect-free.
+    """
+    lines = [
+        "(version 1)",
+        "(deny default)",
+        # the minimal ops a normal program needs to start and run
+        "(allow process-exec)",
+        "(allow process-fork)",
+        "(allow signal (target self))",
+        "(allow sysctl-read)",
+        # permissive reads; secrets are carved back out LAST, below
+        '(allow file-read* (subpath "/"))',
+    ]
+    # per writable scope: allow writes -- UNLESS --ro, which emits NO write-allow at
+    # all so even the scratch default is denied (R21).
+    if not scope.ro:
+        for path in scope.writes:
+            lines.append('(allow file-write* (subpath "%s"))' % path)
+    # LAST, so last-match-wins makes them win over the permissive read-allow: deny
+    # BOTH read and write for every secret, even inside an allowed write scope
+    # (R16, R17, R22, R22b).
+    for secret in scope.secret_paths or ():
+        lines.append('(deny file-read* (subpath "%s"))' % secret)
+        lines.append('(deny file-write* (subpath "%s"))' % secret)
+    # network denied by default; --net omits this line (R18).
+    if not scope.net:
+        lines.append("(deny network*)")
+    profile = "\n".join(lines)
+    return ["sandbox-exec", "-p", profile, *scope.argv]
+
+
+def _bwrap_argv(scope):
+    """Pure Linux bwrap builder (task-005): a Scope -> the bwrap argv LIST (never a
+    shell string -- argv-as-list is the injection-safe construction). Order:
+      --ro-bind / /  (read-all host) / per writable scope --bind <canonical>
+      <canonical> UNLESS scope.ro (R21: then no writable bind) / per secret_paths
+      entry a mask layered AFTER the binds so it WINS over the ro-bind of /
+      (R16/R17/R22/R22b) -- the mask PRIMITIVE is chosen by STRUCTURE: a DIRECTORY
+      secret gets --tmpfs <p>, a regular-FILE secret (the .git/config entries) gets
+      --ro-bind /dev/null <p> because --tmpfs needs a directory mountpoint (a file ->
+      bwrap ensure_dir() ENOTDIR -> die() BEFORE exec) / --unshare-net UNLESS
+      scope.net (R18) / --die-with-parent / the `--` end-of-options terminator /
+      then *scope.argv.
+
+    seccomp is an OFF-by-default `if scope.seccomp:` branch INSIDE this function
+    (locked decision 8 / NFR-9): a dormant, documented seam that no sbx flag ever
+    enables, so it is never taken; it marks WHERE a future BPF syscall-filter would
+    plug in without a new code path. Pure: no I/O. The deny set is read off
+    scope.secret_paths (resolved ONCE in main()), so this builder is side-effect-free.
+    """
+    argv = ["bwrap", "--ro-bind", "/", "/"]
+    # per writable scope: read-write bind -- UNLESS --ro, which emits NO writable
+    # bind at all so even the scratch default is denied (R21).
+    if not scope.ro:
+        for path in scope.writes:
+            argv += ["--bind", path, path]
+    # per secret: a mask layered AFTER the binds so it WINS over the ro-bind of /
+    # -- hides the secret from both read and write even inside an allowed write
+    # scope (R16, R17, R22, R22b). The mask PRIMITIVE is chosen by the secret's
+    # STRUCTURE (pure -- no I/O; the builder already knows which entries are files):
+    #   * a DIRECTORY secret (the five home-anchored ~/.ssh .. ~/.claude) -> --tmpfs
+    #     <p>, which is the correct primitive only for a directory mountpoint.
+    #   * a regular-FILE secret (the .git/config of every ancestor repo, recognized
+    #     structurally as a path ending in <sep>.git<sep>config) -> --ro-bind
+    #     /dev/null <p>. --tmpfs on a regular file makes bwrap's ensure_dir() return
+    #     ENOTDIR and die() BEFORE exec -- which would make EVERY Linux run inside a
+    #     git repo dead-on-arrival. A read-only bind of /dev/null masks a file
+    #     correctly: reads return empty (secret content hidden) and writes are DENIED
+    #     by the read-only mount (R17/R22 preserved). It also creates a missing
+    #     mountpoint, so it is robust to a .git/config that does not exist on disk.
+    git_config = os.path.join(".git", "config")
+    for secret in scope.secret_paths or ():
+        if secret.endswith(git_config):
+            argv += ["--ro-bind", "/dev/null", secret]
+        else:
+            argv += ["--tmpfs", secret]
+    # network unshared by default; --net omits this (R18).
+    if not scope.net:
+        argv.append("--unshare-net")
+    argv.append("--die-with-parent")
+    # seccomp: a DORMANT, OFF-by-default syscall-filter seam (locked decision 8 /
+    # NFR-9). No sbx flag sets scope.seccomp, so this branch is never taken; it is a
+    # documented plug-in point for a future compiled BPF program (bwrap consumes it
+    # as `--seccomp FD`). Until such a program is wired there is nothing to pass, so
+    # the seam refuses rather than silently running without the promised filtering.
+    if scope.seccomp:
+        raise NotImplementedError(
+            "seccomp syscall filtering is a documented but unimplemented seam "
+            "(locked decision 8); no BPF filter program is wired")
+    argv.append("--")             # end-of-options terminator (bubblewrap honors "--")
+    argv += scope.argv
+    return argv
+
+
+# platform key (a sys.platform PREFIX) -> pure argv builder (KD-3, NFR-2). The
+# two builder bodies are filled by tasks 004/005; the dict itself is pure and
+# import-safe. BACKENDS.get(<unknown key>) is the fail-closed default (None).
+BACKENDS = {
+    "darwin": _seatbelt_argv,
+    "linux": _bwrap_argv,
+}
+
+# platform key -> the sandbox engine binary whose presence is REQUIRED. Adding a
+# third OS later touches this map, BACKENDS, and one builder -- nothing else
+# (NFR-9, localized platform extension).
+ENGINE_BINARY = {
+    "darwin": "sandbox-exec",
+    "linux": "bwrap",
+}
+
+
+def _platform_key(platform):
+    """Map a sys.platform string to a BACKENDS key by PREFIX, or None if unknown.
+
+    "darwin" -> "darwin"; "linux"/"linux2" -> "linux"; "win32" and anything else
+    -> None. None is the fail-closed default: BACKENDS.get(None) is None, so an
+    unknown platform resolves no backend and is refused by _detect_engine.
+    """
+    for key in BACKENDS:
+        if platform.startswith(key):
+            return key
+    return None
+
+
+def _detect_engine():
+    """Resolve (builder, binary_path) FAIL-CLOSED (KD-3, NFR-1, R20).
+
+    On an unknown platform (no BACKENDS entry) OR when the required sandbox
+    binary is not found on PATH, write a one-line reason to stderr and
+    sys.exit(non-zero) WITHOUT constructing or running any target. There is NO
+    unsandboxed fallback, ever. Runs only from main() (behind __main__), never at
+    import, so the module stays import-side-effect-free (M3).
+    """
+    key = _platform_key(sys.platform)
+    builder = BACKENDS.get(key)
+    if builder is None:
+        sys.stderr.write(
+            "sbx: error: no sandbox backend for platform %r; "
+            "refusing to run unsandboxed (fail-closed)\n" % (sys.platform,))
+        sys.exit(3)
+    binary = ENGINE_BINARY[key]
+    path = shutil.which(binary)
+    if path is None:
+        sys.stderr.write(
+            "sbx: error: sandbox binary %r not found on PATH; "
+            "refusing to run unsandboxed (fail-closed)\n" % (binary,))
+        sys.exit(3)
+    return builder, path
+
+
+def _split_argv(argv):
+    """Slice `argv` at the FIRST bare `--` ourselves (argparse.REMAINDER is brittle).
+
+    Returns (left, target): `left` is fed to argparse; `target` is kept verbatim as
+    the command to run. `target` is None when there is no `--` at all, and [] when
+    `--` is present but nothing follows it -- both are usage errors for the caller.
+    """
+    for i, tok in enumerate(argv):
+        if tok == "--":
+            return argv[:i], argv[i + 1:]
+    return argv, None
+
+
+def _build_parser():
+    """The sbx flag grammar (everything LEFT of the first bare `--`)."""
+    p = argparse.ArgumentParser(
+        prog="sbx",
+        usage=USAGE,
+        description="Run <cmd> inside an OS sandbox (default-deny writes, no network).",
+    )
+    p.add_argument("--write", action="append", default=[], metavar="DIR",
+                   help="add a writable scope (repeatable); '.' opts into the repo")
+    p.add_argument("--net", action="store_true",
+                   help="allow network access (denied by default)")
+    p.add_argument("--ro", action="store_true",
+                   help="deny ALL writes, including the default scratch scope")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the resolved plan and exit WITHOUT running anything")
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Pure injection / secret / realpath guard layer (task-003).
+#
+# This is the SHARED-CONTRACT core and a SECURITY BOUNDARY. resolve_scope and
+# project_root are BYTE-FOR-BYTE the rules the gate (ClaudeCode/hooks/sbx-gate.py)
+# applies -- the gate imports NOTHING (P8), so the two copies are DELIBERATELY
+# DUPLICATED, not shared, and task-008's cross-file parity test pins them: a
+# one-sided edit reintroduces the H1 gate/helper divergence == a containment
+# escape (H-A / NFR-8). Do NOT try to import from the gate or share a module.
+#
+# Every definition here is PURE and import-side-effect-free (M3): no exec, no
+# setrlimit, no makedirs, no filesystem MUTATION at import. secret_paths reads
+# the filesystem (to test `.git` existence) ONLY when CALLED at runtime.
+
+
+def resolve_scope(dir_arg, base):
+    """KD-7 shared rule -- byte-identical copy of the gate's resolve_scope (P8).
+
+    expanduser FIRST (so "~" -> $HOME), then join against `base` (join drops
+    `base` when the expanded arg is absolute), then realpath. `base` is always
+    `cwd`. IDENTICAL on both sides -- the gate imports nothing, so this is
+    duplicated, not shared (parity test, task-008).
+    """
+    return os.path.realpath(os.path.join(base, os.path.expanduser(dir_arg)))
+
+
+def project_root(start):
+    """KD-8 shared rule -- byte-identical copy of the gate's project_root (P8).
+
+    Nearest ancestor of `start` (inclusive) that contains a `.git` entry; if none
+    is found walking up to the filesystem root, `start` itself. `start` is always
+    `cwd`; `cwd` is NOT assumed to be the repo root (a Bash cwd may be any
+    subdirectory). Feeds inside_project containment; does NOT feed secret_paths --
+    sec-MED-2's ancestor-.git walk owns the .git/config deny.
+    """
+    cur = os.path.realpath(start)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:            # reached the filesystem root
+            return os.path.realpath(start)
+        cur = parent
+
+
+def inside_project(path, root):
+    """Separator-safe KD-8 containment (sec-MED-1 / A04): is `path` inside `root`?
+
+    Uses os.path.commonpath (root itself allowed), NEVER a bare str.startswith --
+    a raw prefix test false-allows a `/x/repo-evil` sibling of `/x/repo`
+    ("/x/repo-evil".startswith("/x/repo") is True). This is the SAME test the
+    gate's scope-containment applies (H1); part of the duplicated shared contract.
+    Both `path` and `root` are expected to be realpath-resolved absolutes.
+    """
+    return os.path.commonpath([path, root]) == root
+
+
+def secret_paths(cwd):
+    """The single, pure, import-side-effect-free deny set (M-A / KD-2 / sec-MED-2).
+
+    A FUNCTION, not a module-level constant, because the `.git/config` entries are
+    cwd-derived and a module-level tuple evaluated at import has no `cwd`. Returns
+    read+write-deny targets: the home-anchored `~/.ssh`, `~/.aws`, `~/.gnupg`,
+    `~/.config/gh`, `~/.claude` (expanduser, cwd-independent) PLUS the `.git/config`
+    of EVERY ancestor directory of `cwd` (inclusive) whose `<d>/.git/config` exists,
+    walking from `cwd` up to the filesystem root -- NOT only project_root(cwd), so
+    a decoy `cwd/.git` planted by a prior `--write .` run cannot relocate the
+    anchor and un-protect the REAL repo-root `.git/config` (git remote creds).
+
+    EXISTENCE-FILTERED, cross-platform-SAFE: only paths that EXIST at call time are
+    returned. A secret that does not exist has NOTHING to protect (no file/dir to
+    read), AND bwrap cannot create a mountpoint for a nonexistent path under its
+    read-only `--ro-bind / /` root -- it dies "Can't mkdir <p>: Read-only file
+    system" at setup, BEFORE exec, making sbx dead-on-arrival on Linux whenever a
+    home secret (e.g. ~/.aws) or a walked `.git/config` is absent. macOS Seatbelt
+    deny of a nonexistent path is a harmless no-op, so filtering removes NO real
+    protection on either OS. The filter is the same runtime-only I/O the ancestor
+    walk already performs, so M-A/M3 hold.
+
+    Import-side-effect-free (M3): reads the filesystem (os.path.exists) ONLY when
+    CALLED at runtime, never at import, and never mutates.
+    """
+    home = [
+        os.path.expanduser("~/.ssh"),
+        os.path.expanduser("~/.aws"),
+        os.path.expanduser("~/.gnupg"),
+        os.path.expanduser("~/.config/gh"),
+        os.path.expanduser("~/.claude"),
+    ]
+    paths = [p for p in home if os.path.exists(p)]   # existence filter (see above)
+    cur = os.path.realpath(cwd)
+    while True:                      # every ancestor .git, not just project_root
+        config = os.path.join(cur, ".git", "config")
+        if os.path.exists(config):   # a .git dir with no config file has nothing to
+            paths.append(config)     # protect (and bwrap can't mkdir it) -> skip it
+        parent = os.path.dirname(cur)
+        if parent == cur:            # reached the filesystem root
+            break
+        cur = parent
+    return tuple(paths)
+
+
+# The R14 injection floor: a raw-or-resolved scope carrying any of these could
+# break out of the SBPL profile string or the bwrap argv, so canonicalize refuses
+# it fail-closed. (The gate rejects the same class upstream via its METACHARS.)
+_INJECT_CHARS = frozenset("\"'()\\\n")
+
+
+def canonicalize(dir_arg, cwd=None):
+    """Resolve a `--write` scope via the shared KD-7 resolve_scope, then REJECT
+    (fail-closed, sys.exit non-zero) any raw OR resolved path containing " ' ( )
+    backslash or a newline (R14 / NFR-4). Performs NO makedirs. `cwd` defaults to
+    os.getcwd() so the pure layer can be exercised with a single argument.
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+    resolved = resolve_scope(dir_arg, cwd)
+    for candidate in (dir_arg, resolved):
+        if any(ch in _INJECT_CHARS for ch in candidate):
+            sys.stderr.write(
+                "sbx: error: refusing --write scope %r: it contains a shell/SBPL "
+                "metacharacter (one of \" ' ( ) \\ newline)\n" % (dir_arg,))
+            sys.exit(2)
+    return resolved
+
+
+def scratch_scope(cwd):
+    """The default writable scratch scope, NAMED but not created here (M3): it is
+    <cwd>/.claude/tmp. task-006's runtime dispatch creates it with
+    os.makedirs(..., exist_ok=True) behind __main__ -- never a shell mkdir, never
+    at import.
+    """
+    return os.path.join(cwd, ".claude", "tmp")
+
+
+def compute_writes(raw_writes, ro, cwd):
+    """Pure writable-set computation (R21). `--ro` overrides everything to an EMPTY
+    set (no scratch); with no `--write` the sole scope is the scratch default;
+    otherwise each `--write DIR` is canonicalize()'d (KD-7 resolution + R14
+    injection reject). NO makedirs here -- the pure layer only NAMES scopes (M3).
+    """
+    if ro:
+        return []
+    if not raw_writes:
+        return [scratch_scope(cwd)]
+    return [canonicalize(d, cwd) for d in raw_writes]
+
+
+def _format_plan(scope):
+    """Human-readable dump of the resolved Scope for --dry-run."""
+    return "\n".join([
+        "sbx plan -- resolved request (no child executed)",
+        "  engine      : %r" % (scope.engine,),
+        "  writes      : %r" % (scope.writes,),
+        "  net         : %r" % (scope.net,),
+        "  ro          : %r" % (scope.ro,),
+        "  argv        : %r" % (scope.argv,),
+        "  secret_paths: %r" % (scope.secret_paths,),
+    ])
+
+
+def _usage_error(msg):
+    """Write a one-line reason + usage to stderr and exit non-zero (P4 house style)."""
+    sys.stderr.write("sbx: error: %s\n%s\n" % (msg, USAGE))
+    sys.exit(2)
+
+
+# ---------------------------------------------------------------------------
+# Bounded blast radius (task-006 / R19 / NFR-5): the resource limits' SINGLE
+# source (KD-2). These ceilings are applied to THIS process immediately BEFORE
+# os.execvp (KD-4) so the exec-replaced target inherits them. They are pure
+# module-level constants -- no I/O at import (M3); the setrlimit calls that read
+# them happen only at runtime, from _apply_rlimits(), behind the __main__ guard.
+_RLIMIT_AS_BYTES = 8 * 1024 ** 3        # 8 GiB of address space per process
+_RLIMIT_CPU_SECONDS = 900               # 15 minutes of CPU time
+# RLIMIT_NPROC is PER-UID (see the caveat in _apply_rlimits): when NO per-UID
+# ceiling exists at all (RLIM_INFINITY) we impose this generous headroom rather
+# than a small absolute cap that would spuriously fail an innocent command.
+_RLIMIT_NPROC_HEADROOM = 512
+
+
+def _apply_rlimits():
+    """Set RLIMIT_AS / RLIMIT_CPU / RLIMIT_NPROC on THIS process -- called ONLY
+    from main()'s real-run path, immediately BEFORE os.execvp.
+
+    *** ORDERING IS LOAD-BEARING (KD-4): setrlimit MUST run BEFORE os.execvp. ***
+    os.execvp replaces the process IMAGE but keeps the SAME PID, and resource
+    limits SURVIVE exec, so the sandboxed target inherits every limit set here.
+    After execvp this code never runs, so the limits are established here,
+    immediately before the exec -- never after (there is no "after").
+
+    Best-effort / non-raising: the soft limit is clamped to the current hard
+    limit (an unprivileged process may only LOWER a hard limit) and the hard
+    limit is preserved; a limit the platform rejects is skipped rather than
+    bricking an already OS-sandboxed run. rlimits are a robustness backstop
+    against a runaway (fork/mem bomb, R19), NOT the containment boundary -- the
+    OS sandbox is.
+    """
+    def _lower_to(which, desired):
+        try:
+            _soft, hard = resource.getrlimit(which)
+        except (OSError, ValueError):
+            return
+        if hard != resource.RLIM_INFINITY:
+            desired = min(desired, hard)     # never RAISE the existing hard cap
+        try:
+            resource.setrlimit(which, (desired, hard))
+        except (OSError, ValueError):
+            pass                             # platform refused it; skip, don't brick
+
+    for name, desired in (("RLIMIT_AS", _RLIMIT_AS_BYTES),
+                          ("RLIMIT_CPU", _RLIMIT_CPU_SECONDS)):
+        which = getattr(resource, name, None)
+        if which is not None:
+            _lower_to(which, desired)
+
+    # RLIMIT_NPROC PER-UID CAVEAT: RLIMIT_NPROC counts ALL of the invoking user's
+    # processes, not merely this sandbox's descendants. A small ABSOLUTE cap (say
+    # 64) would spuriously fail an innocent command the instant the user's
+    # EXISTING process count already exceeds it -- so we never impose a small
+    # absolute number. The ideal is a modest HEADROOM above the current process
+    # count (leaving room for the engine to fork its target), but the stdlib has
+    # no portable per-UID process count, so we do NOT tighten below the working
+    # per-UID soft cap (which already bounds a fork bomb and under which every
+    # innocent command already runs); we merely keep it FINITE, imposing a
+    # generous headroom only when there is no ceiling at all. This is a
+    # ROBUSTNESS caveat, NOT a containment hole -- the OS sandbox is the boundary;
+    # NPROC only blunts a fork bomb (R19).
+    nproc = getattr(resource, "RLIMIT_NPROC", None)
+    if nproc is None:
+        return
+    try:
+        soft, hard = resource.getrlimit(nproc)
+    except (OSError, ValueError):
+        return
+    target = _RLIMIT_NPROC_HEADROOM if soft == resource.RLIM_INFINITY else soft
+    try:
+        resource.setrlimit(nproc, (target, hard))
+    except (OSError, ValueError):
+        pass
+
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+
+    left, target = _split_argv(argv)
+    if target is None:
+        _usage_error("missing '--' separator before the target command")
+    if not target:
+        _usage_error("no command given after '--'")
+
+    args = _build_parser().parse_args(left)
+
+    cwd = os.getcwd()
+    scope = Scope(
+        writes=compute_writes(args.write, args.ro, cwd),   # KD-7 + R14 + --ro (R21)
+        net=args.net,
+        ro=args.ro,
+        argv=target,
+        secret_paths=secret_paths(cwd),   # M-A / sec-MED-2 ancestor-.git deny set
+    )
+
+    # --dry-run previews the resolved plan and runs NOTHING. Engine resolution
+    # here is best-effort DISPLAY only and NEVER fail-closes -- a preview must
+    # work on any host, even one without a sandbox binary installed. (A key of
+    # None short-circuits before ENGINE_BINARY is indexed, so this never raises.)
+    if args.dry_run:
+        key = _platform_key(sys.platform)
+        if BACKENDS.get(key) is not None:
+            scope.engine = shutil.which(ENGINE_BINARY[key])
+        print(_format_plan(scope))
+        return 0
+
+    # Real path: FAIL-CLOSED platform + sandbox-binary detection FIRST (task-002,
+    # KD-3, NFR-1, R20). On an unknown platform or a missing sandbox binary this
+    # exits non-zero WITHOUT ever constructing or running a target -- there is no
+    # unsandboxed fallback, EVER.
+    builder, engine = _detect_engine()
+    scope.engine = engine
+
+    # Build the OS-sandbox invocation from the fully-validated Scope via the
+    # platform's pure builder (task-004 Seatbelt / task-005 bwrap). argv is a
+    # LIST: the target cmd/args are argv ELEMENTS, never a shell string, so they
+    # can never inject into the profile (NFR-4).
+    argv = builder(scope)
+
+    # Create ONLY the default scratch scope, and only when it is actually in the
+    # writable set (no flags -> [<cwd>/.claude/tmp]; --ro -> [] so nothing is
+    # made; an explicit --write DIR target is the user's responsibility and is
+    # assumed to exist). This is the deferred makedirs the pure layer refused to
+    # do (M3): a real side effect, behind __main__, and NEVER a shell mkdir.
+    scratch = scratch_scope(cwd)
+    if scratch in scope.writes:
+        os.makedirs(scratch, exist_ok=True)
+
+    # *** ORDERING IS LOAD-BEARING (KD-4): setrlimit BEFORE os.execvp. ***
+    # os.execvp replaces this process image but keeps the SAME PID, and resource
+    # limits SURVIVE exec, so the sandboxed target inherits every limit set here.
+    # After execvp this code never runs -- so the limits MUST be set first.
+    _apply_rlimits()
+
+    # The FIRST and ONLY point at which sbx runs a child. os.execvp REPLACES this
+    # process with the sandbox engine -- no fork/waitpid wrapper -- so the
+    # target's exit status passes straight through as sbx's own (NFR-6). execvp
+    # returns ONLY on failure; if it does, NOTHING ran (this is not an
+    # unsandboxed run), so we fail-closed with a one-line reason (NFR-1 spirit).
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as exc:
+        sys.stderr.write(
+            "sbx: error: failed to exec sandbox engine %r: %s\n" % (argv[0], exc))
+        return 3
+    return 0  # unreachable: execvp either replaced the image or raised above
+
+
+if __name__ == "__main__":
+    sys.exit(main())
