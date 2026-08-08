@@ -9,7 +9,7 @@ sources:
   - ClaudeCode/skills/sandbox-run/scripts/sbx
   - ClaudeCode/skills/sandbox-run/scripts/selftest_probe.py
 verified:
-  commit: e242624
+  commit: 1446acb
   date: 2026-08-08
 links:
   - feature-implementation-plan

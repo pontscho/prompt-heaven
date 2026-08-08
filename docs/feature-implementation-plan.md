@@ -5,13 +5,19 @@ status: active
 title: Sandboxed CLI Runner — sandbox-run skill + sbx helper + PreToolUse gate
 description: Approve-the-wrapper-not-the-command trust-boundary shift — a stdlib-only sbx sandbox helper (Seatbelt/bwrap) plus a grant-only PreToolUse gate that auto-allows only a clean, contained, single sbx invocation and prompts on everything else.
 sources:
+  - ClaudeCode/skills/sandbox-run/SKILL.md
+  - ClaudeCode/skills/sandbox-run/scripts/sbx
+  - ClaudeCode/skills/sandbox-run/scripts/selftest_probe.py
+  - ClaudeCode/hooks/sbx-gate.py
+  - tests/test_sbx_gate.py
+  - tests/run.py
+  - project-forge.yaml
   - ClaudeCode/hooks/mcp-first-guard.py
   - ClaudeCode/skills/checkpoint/SKILL.md
   - tests/test_mcp_first_guard.py
-  - project-forge.yaml
 verified:
-  commit: e242624
-  date: 2026-08-07
+  commit: 1446acb
+  date: 2026-08-08
 links:
   - hooks
   - skills

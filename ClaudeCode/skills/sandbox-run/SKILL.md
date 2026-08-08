@@ -131,11 +131,13 @@ Before `os.execvp`, `sbx` applies `resource.setrlimit` on `RLIMIT_AS`, `RLIMIT_C
 
 ## Self-test
 
-The bundled fixture `~/.claude/skills/p/skills/sandbox-run/scripts/selftest_probe.py` is a clearly-named probe (NOT `foo.py`) that exercises the live boundary. Run it under the sandbox with the project writable:
+The bundled fixture `selftest_probe.py` is a clearly-named probe (NOT `foo.py`) that exercises the live boundary. Run it under the sandbox with the project writable, giving the probe's path **inside the repo** (see the deployed-path trap below):
 
 ```
-~/.claude/skills/p/skills/sandbox-run/scripts/sbx --write . -- python3 ~/.claude/skills/p/skills/sandbox-run/scripts/selftest_probe.py
+~/.claude/skills/p/skills/sandbox-run/scripts/sbx --write . -- python3 ClaudeCode/skills/sandbox-run/scripts/selftest_probe.py
 ```
+
+**Deployed-path trap -- do NOT invoke the probe via `~/.claude/...`.** `~/.claude` is itself in the secret deny set, so a target running *inside* the sandbox cannot read anything under it: `sbx --write . -- python3 ~/.claude/skills/p/skills/sandbox-run/scripts/selftest_probe.py` fails with `can't open file ...: [Errno 1] Operation not permitted` before the probe ever starts. This is the sandbox working as designed, not a bug. Note the asymmetry: the WRAPPER may live under `~/.claude` (it reads itself and builds the profile *before* applying the sandbox, then `execvp`s), but its TARGET may not -- the target is already contained. The same applies to any script you wrap: if it lives under a denied path (`~/.claude`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`), invoke it from a copy outside those paths.
 
 It attempts four actions and reports each outcome; a healthy sandbox yields **ok / blocked / blocked / blocked**:
 

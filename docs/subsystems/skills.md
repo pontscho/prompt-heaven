@@ -7,7 +7,7 @@ description: Loadable knowledge packs activated on-demand or via Skill permissio
 sources:
   - ClaudeCode/skills
 verified:
-  commit: e242624
+  commit: 1446acb
   date: 2026-08-08
 links:
   - overview
