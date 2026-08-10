@@ -59,7 +59,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 - Existing `requirements.yaml` (if updating, not creating from scratch)
 
 **Outputs:**
-- `requirements.yaml` — YAML, schema documented in `~/.claude/scripts/task-plan.py`. MUST contain:
+- `requirements.yaml` — YAML, schema documented in the `p:task-plan` SKILL.md. MUST contain:
   - `complete: true` (when task-planning is finished)
   - `context_summary` block (captured from the plan: error_handling, memory_management, logging_pattern, naming_conventions, etc.)
   - `success_criteria` array
@@ -166,7 +166,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 |---|---|---|---|
 | `.claude/tmp/plan-perspective-<slug>.md` | `/p:feature-plan` round-0 fan-out (`p:minion-feature-planner`, perspective mode) | `/p:feature-plan` (judge + synthesis), then deleted after synthesis | markdown, per the planner's plan structure |
 | `docs/feature-implementation-plan.md` | `/p:feature-plan` → `p:minion-feature-planner` (canonical mode) | `/p:task-plan`, `/p:implement` (reads for context), `/p:security-review mode=plan` | markdown, structured |
-| `requirements.yaml` | `/p:task-plan` | `/p:implement` | YAML, schema in `~/.claude/scripts/task-plan.py` |
+| `requirements.yaml` | `/p:task-plan` | `/p:implement` | YAML, schema in the `p:task-plan` SKILL.md |
 | `.claude/tmp/security-findings-<ts>-<lane>.md` | `p:minion-inspector-security-officer PHASE: find` (one per lane, parallel) | `/p:security-review` Step 2 merge/dedup barrier → deduped findings then passed INLINE to `PHASE: verify` | markdown, `[Fn]` ID format |
 | `docs/reviews/security-review-<ts>.md` | `/p:security-review` Step 4 | end-user (audit trail) | markdown, full report |
 | `docs/reviews/code-review-<name>-<date>.md` | `/p:code-review` Step 4 (Synthesize) | end-user (audit trail) | markdown, full report — only when `--output` includes markdown |

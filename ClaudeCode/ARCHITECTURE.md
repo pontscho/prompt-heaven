@@ -23,7 +23,6 @@ This document is the **canonical rulebook** for how skills, agents, and fragment
 - Skills: `ClaudeCode/skills/<name>/SKILL.md` (e.g. `skills/feature-plan/SKILL.md`). The `p:` in the invocation name (`/p:feature-plan`) comes from the **plugin** (`ClaudeCode/.claude-plugin/plugin.json`, `name: p`) — it is NOT part of the directory name, nor of the frontmatter `name:`.
 - Agents: `ClaudeCode/agents/minion-<name>.md` (e.g. `agents/minion-explorer.md`). The `minion-` prefix marks workers; the `p:` in `Agent(p:minion-explorer, ...)` likewise comes from the plugin, not from the path.
 - Fragments: `ClaudeCode/skills/_lib/<topic>.md`. The `_lib/` directory is reserved and must NOT contain user-callable SKILL.md files.
-- The legacy `ClaudeCode/commands/` directory is **deprecated and will be removed** — all entries have been migrated to `skills/*/SKILL.md`.
 
 ## Skill frontmatter (required)
 
