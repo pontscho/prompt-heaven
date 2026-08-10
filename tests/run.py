@@ -220,7 +220,7 @@ SUITES = [
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 335),
     ("sbx_gate", run_sbx_gate,
-     "sbx PreToolUse grant-only gate", 77),
+     "sbx PreToolUse grant-only gate", 91),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 152),
     ("purity_file_ops", run_purity_file_ops,

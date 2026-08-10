@@ -15,7 +15,9 @@ execvp-last. This file is the SKELETON (task-001): the argument model, the manua
 `--` split, the Scope object, and `--dry-run`. The real containment lands in later
 tasks, each layered behind the same __main__ guard:
   - task-002: fail-closed platform + sandbox-binary detection (BACKENDS registry);
-  - task-003: the pure injection/secret/realpath guard layer + secret_paths();
+  - task-003: the pure injection/secret/realpath guard layer + secret_paths()
+    (its read-only counterpart carveout_paths(), and the write-only
+    shadow_write_denies() that closes the name divergence the carve-out opens);
   - task-004/005: the Seatbelt (SBPL) and bwrap pure argv builders;
   - task-006: the single resource.setrlimit + os.execvp site (the ONLY child run).
 
@@ -52,7 +54,26 @@ class Scope:
       ro           deny all writes (including the scratch default).
       argv         the target command after `--`, kept verbatim for os.execvp.
       secret_paths the read+write deny set produced by secret_paths(cwd)
-                   (task-003, M-A / sec-MED-2 ancestor-.git walk).
+                   (task-003, M-A / sec-MED-2 ancestor-.git walk), as
+                   `(path, is_dir)` PAIRS. The is_dir bit is resolved THERE, in
+                   the one function that already performs the existence I/O, so
+                   _bwrap_argv can pick the correct mask primitive (tmpfs for a
+                   directory, ro-bind /dev/null for a file) while staying PURE.
+      carveouts    the read-ONLY carve-out set produced by carveout_paths(): the
+                   named subtrees of a denied secret that must stay READABLE
+                   (~/.claude/skills, ~/.claude/scripts -- this repo's own
+                   tooling). They are emitted AFTER the secret masks so they win
+                   back READ, and they never gain WRITE: ~/.claude as a whole
+                   stays write-denied, which is the feature's whole point.
+      shadow_write_denies
+                   the WRITE-only deny set produced by shadow_write_denies():
+                   the realpath TARGETS of the symlinks that lead out of
+                   ~/.claude. The ~/.claude deny is spelled `~/.claude`, so a
+                   command that reaches the SAME inode through the other
+                   spelling (a repo path) was never covered by it -- measured
+                   live, see the function. These are emitted after EVERY
+                   write-allow so they win, and they are WRITE-ONLY: adding a
+                   read-deny would re-close exactly what `carveouts` opened.
       engine       the resolved sandbox-engine binary path -- filled by the
                    fail-closed detection in task-002 (BACKENDS + shutil.which);
                    None until a backend is resolved.
@@ -67,6 +88,8 @@ class Scope:
     ro: bool
     argv: list
     secret_paths: tuple = None
+    carveouts: tuple = None
+    shadow_write_denies: tuple = None
     engine: str = None
     seccomp: bool = False
 
@@ -97,15 +120,42 @@ def _seatbelt_argv(scope):
       (version 1) / (deny default) / allow the minimal ops a CLI needs (exec, fork,
       self-signal, sysctl-read) / (allow file-read* (subpath "/")) permissive reads /
       per writable scope (allow file-write* (subpath "<canonical>")) UNLESS scope.ro
-      (R21: then none) / LAST so they win, per secret_paths entry BOTH
-      (deny file-read* ...) and (deny file-write* ...) (R16/R17/R22/R22b) /
-      (deny network*) UNLESS scope.net (R18).
+      (R21: then none) / so they win, per secret_paths entry BOTH
+      (deny file-read* ...) and (deny file-write* ...) (R16/R17/R22/R22b) / per
+      scope.carveouts entry (allow file-read* (subpath "<p>")) -- read ONLY, so
+      last-match-wins hands the READ back for that subtree while the secret's WRITE
+      deny above it still stands / LAST of the file rules, per
+      scope.shadow_write_denies entry (deny file-write* (subpath "<realpath>")) --
+      write ONLY, closing the name divergence / (allow network*) if scope.net, else
+      (deny network*) (R18).
+
+    The carve-out lines MUST come after the secret denies for the same reason the
+    denies must come after the permissive read-allow: last match wins. Emitting
+    them earlier would make them dead rules. They deliberately carry NO
+    file-write* allow -- ~/.claude must stay write-denied (a sandboxed command
+    that could write it would be rewriting its own gate).
+
+    The shadow write-denies come LAST of all the file rules, which is a stronger
+    placement than they strictly need (anywhere after the write-allow block would
+    do). Last is deliberate: the FINAL word on file writes is a DENY, so no allow
+    added to this builder later can silently undo them. They are WRITE-only on
+    purpose -- a read-deny on the repo spelling of ~/.claude/skills/p would re-hide
+    exactly the plugin tree the carve-out above exists to open, and would hide the
+    repo itself.
+
+    Network is emitted EXPLICITLY in both directions. The profile opens with
+    (deny default), so OMITTING (deny network*) under --net does NOT grant the
+    network -- it leaves the default-deny standing, which made --net inert on macOS
+    (measured). (allow network*) is the rule that actually grants it. Fail-closed is
+    unchanged: without --net the (deny network*) line is emitted as before, on top of
+    a default that already denies.
 
     Pure: no I/O. Because canonicalize (task-003) already rejected quotes, parens,
     backslash and newline, every embedded path is a safe SBPL string literal -- do
-    NOT re-quote or re-escape. The pre-resolved deny set is read off
-    scope.secret_paths (secret_paths(cwd) was called ONCE in main()), keeping this
-    builder side-effect-free.
+    NOT re-quote or re-escape. The pre-resolved deny set (as (path, is_dir) pairs;
+    this builder ignores the bit, only bwrap needs it) and carve-out set are read
+    off scope.secret_paths / scope.carveouts, both resolved ONCE in main(), keeping
+    this builder side-effect-free.
     """
     lines = [
         "(version 1)",
@@ -126,11 +176,37 @@ def _seatbelt_argv(scope):
     # LAST, so last-match-wins makes them win over the permissive read-allow: deny
     # BOTH read and write for every secret, even inside an allowed write scope
     # (R16, R17, R22, R22b).
-    for secret in scope.secret_paths or ():
+    for secret, _is_dir in scope.secret_paths or ():
         lines.append('(deny file-read* (subpath "%s"))' % secret)
         lines.append('(deny file-write* (subpath "%s"))' % secret)
-    # network denied by default; --net omits this line (R18).
-    if not scope.net:
+    # LAST of the file rules, so last-match-wins hands READ back for these named
+    # subtrees of an otherwise-denied secret (this repo's own tooling under
+    # ~/.claude). READ ONLY -- no file-write* allow is emitted, so the ~/.claude
+    # write-deny above is untouched and everything NOT named here (projects,
+    # settings*.json, .credentials.json, todos, history.jsonl, and anything added
+    # under ~/.claude later) stays hidden: the carve-out is fail-closed by
+    # enumeration.
+    for path in scope.carveouts or ():
+        lines.append('(allow file-read* (subpath "%s"))' % path)
+    # THE LAST file rules, and every one of them is a DENY: the write-only shadow
+    # set. ~/.claude is denied under the spelling `~/.claude`, but on a host where
+    # ~/.claude/hooks is a SYMLINK into a repo, the SAME directory is also spelled
+    # <repo>/ClaudeCode/hooks -- and that spelling contains no `.claude` component,
+    # so the deny above never matched it. Under `--write .` the repo spelling was
+    # WRITABLE while the ~/.claude spelling was denied: a sandboxed command could
+    # rewrite its own PreToolUse gate through the back door (measured live). These
+    # lines deny file-write* on the realpath TARGETS, which is the spelling the
+    # kernel actually checks for the repo-side path. WRITE only -- no file-read*
+    # deny is emitted, because the targets are the plugin tree and the repo itself,
+    # which must stay readable (that is what carveouts above is for).
+    for path in scope.shadow_write_denies or ():
+        lines.append('(deny file-write* (subpath "%s"))' % path)
+    # Network: EXPLICIT in both directions. (deny default) at the top already denies
+    # the network, so merely omitting (deny network*) under --net left the flag inert
+    # on macOS -- only (allow network*) actually grants it (R18).
+    if scope.net:
+        lines.append("(allow network*)")
+    else:
         lines.append("(deny network*)")
     profile = "\n".join(lines)
     return ["sandbox-exec", "-p", profile, *scope.argv]
@@ -142,18 +218,45 @@ def _bwrap_argv(scope):
       --ro-bind / /  (read-all host) / per writable scope --bind <canonical>
       <canonical> UNLESS scope.ro (R21: then no writable bind) / per secret_paths
       entry a mask layered AFTER the binds so it WINS over the ro-bind of /
-      (R16/R17/R22/R22b) -- the mask PRIMITIVE is chosen by STRUCTURE: a DIRECTORY
-      secret gets --tmpfs <p>, a regular-FILE secret (the .git/config entries) gets
-      --ro-bind /dev/null <p> because --tmpfs needs a directory mountpoint (a file ->
-      bwrap ensure_dir() ENOTDIR -> die() BEFORE exec) / --unshare-net UNLESS
-      scope.net (R18) / --die-with-parent / the `--` end-of-options terminator /
-      then *scope.argv.
+      (R16/R17/R22/R22b) -- the mask PRIMITIVE is chosen by the entry's own
+      `is_dir` BIT: a DIRECTORY secret gets --tmpfs <p>, a regular-FILE secret (the
+      .git/config entries) gets --ro-bind /dev/null <p> because --tmpfs needs a
+      directory mountpoint (a file -> bwrap ensure_dir() ENOTDIR -> die() BEFORE
+      exec) / per scope.carveouts entry --ro-bind <p> <p> layered AFTER the masks so
+      the LATER mount wins and the subtree is readable again (read-only, so it gains
+      no write) / per scope.shadow_write_denies entry --ro-bind <realpath> <realpath>
+      layered LAST of the mounts, re-mounting the divergent spelling read-only /
+      --unshare-pid + --proc /proc / --unshare-net UNLESS scope.net (R18) /
+      --die-with-parent / the `--` end-of-options terminator / then *scope.argv.
+
+    Mount ORDER is load-bearing in every direction here: bwrap applies filesystem
+    operations strictly in argv order and a LATER operation on the same path wins, so
+    a mask must come after the binds to hide a secret inside a writable scope, a
+    carve-out must come after the masks or the --tmpfs over ~/.claude would bury it
+    again, and a shadow write-deny must come after the writable --bind whose spelling
+    it is revoking. (Only the SOURCE of a bind is resolved in the pre-pivot
+    filesystem; the DEST is resolved in the new root, which is why re-binding a path
+    onto ITSELF read-only is the correct way to drop write access to it.)
+
+    --unshare-pid + --proc /proc are one unit and a CONTAINMENT rule, not hygiene.
+    `--ro-bind / /` imports the HOST /proc recursively, and /proc/<pid>/root/<any>
+    resolves in the host mount namespace -- so every --tmpfs mask above can be walked
+    around through it, and /proc/<pid>/environ leaks other processes' secrets. A
+    fresh procfs is the fix, and the kernel only yields one to a process that owns
+    its PID namespace, which is why --unshare-pid comes with it rather than being
+    optional. --unshare-pid does NOT make the target PID 1: bwrap keeps that role
+    itself and reaps, so an ordinary build/test command is unaffected. Namespace
+    flags are order-insensitive (they are applied before any mount); --proc is a
+    MOUNT and is therefore emitted after every bind and mask, so nothing can re-mount
+    the host /proc over it.
 
     seccomp is an OFF-by-default `if scope.seccomp:` branch INSIDE this function
     (locked decision 8 / NFR-9): a dormant, documented seam that no sbx flag ever
     enables, so it is never taken; it marks WHERE a future BPF syscall-filter would
-    plug in without a new code path. Pure: no I/O. The deny set is read off
-    scope.secret_paths (resolved ONCE in main()), so this builder is side-effect-free.
+    plug in without a new code path. Pure: no I/O -- the is_dir bit rides in on the
+    secret set instead of being stat'ed here. The deny set and the carve-out set are
+    read off scope.secret_paths / scope.carveouts (both resolved ONCE in main()), so
+    this builder is side-effect-free.
     """
     argv = ["bwrap", "--ro-bind", "/", "/"]
     # per writable scope: read-write bind -- UNLESS --ro, which emits NO writable
@@ -163,24 +266,54 @@ def _bwrap_argv(scope):
             argv += ["--bind", path, path]
     # per secret: a mask layered AFTER the binds so it WINS over the ro-bind of /
     # -- hides the secret from both read and write even inside an allowed write
-    # scope (R16, R17, R22, R22b). The mask PRIMITIVE is chosen by the secret's
-    # STRUCTURE (pure -- no I/O; the builder already knows which entries are files):
-    #   * a DIRECTORY secret (the five home-anchored ~/.ssh .. ~/.claude) -> --tmpfs
-    #     <p>, which is the correct primitive only for a directory mountpoint.
-    #   * a regular-FILE secret (the .git/config of every ancestor repo, recognized
-    #     structurally as a path ending in <sep>.git<sep>config) -> --ro-bind
+    # scope (R16, R17, R22, R22b). The mask PRIMITIVE is chosen by the entry's own
+    # `is_dir` BIT, resolved by secret_paths() at the one place that already stats
+    # the path, so this builder stays pure (no I/O):
+    #   * a DIRECTORY secret (the home-anchored ~/.ssh .. ~/.claude) -> --tmpfs <p>,
+    #     which is the correct primitive only for a directory mountpoint.
+    #   * a regular-FILE secret (the .git/config of every ancestor repo) -> --ro-bind
     #     /dev/null <p>. --tmpfs on a regular file makes bwrap's ensure_dir() return
     #     ENOTDIR and die() BEFORE exec -- which would make EVERY Linux run inside a
     #     git repo dead-on-arrival. A read-only bind of /dev/null masks a file
     #     correctly: reads return empty (secret content hidden) and writes are DENIED
-    #     by the read-only mount (R17/R22 preserved). It also creates a missing
-    #     mountpoint, so it is robust to a .git/config that does not exist on disk.
-    git_config = os.path.join(".git", "config")
-    for secret in scope.secret_paths or ():
-        if secret.endswith(git_config):
-            argv += ["--ro-bind", "/dev/null", secret]
-        else:
+    #     by the read-only mount (R17/R22 preserved).
+    # The bit replaces the old `endswith(".git/config")` name heuristic outright:
+    # STRUCTURE is now read from the filesystem once, not guessed from a suffix.
+    for secret, is_dir in scope.secret_paths or ():
+        if is_dir:
             argv += ["--tmpfs", secret]
+        else:
+            argv += ["--ro-bind", "/dev/null", secret]
+    # per carve-out: a READ-ONLY bind layered AFTER the masks, because the LATER
+    # mount wins -- this is what makes the named subtrees of ~/.claude (this repo's
+    # own tooling) readable again after the --tmpfs above buried them. --ro-bind is
+    # exactly the wanted semantics: readable, NOT writable, so ~/.claude keeps its
+    # write-deny and every unnamed path under it stays masked (fail-closed by
+    # enumeration). Each carve-out EXISTS (carveout_paths() filters), so bwrap never
+    # has to mkdir a mountpoint under the read-only root.
+    for path in scope.carveouts or ():
+        argv += ["--ro-bind", path, path]
+    # per shadow target: re-bind the path ONTO ITSELF read-only, LAST of the mounts
+    # so the later mount wins over the writable --bind above. ~/.claude is masked
+    # under the ~/.claude spelling, but on a host where ~/.claude/hooks is a symlink
+    # into a repo the same directory is ALSO spelled <repo>/ClaudeCode/hooks, and a
+    # `--bind <repo> <repo>` makes that spelling writable -- the sandboxed command
+    # can then rewrite its own gate. A read-only bind is exactly the semantics wanted
+    # here: still READABLE (unlike --tmpfs, which would bury the repo and the plugin
+    # tree the carve-out just reopened), no longer WRITABLE. Each target EXISTS
+    # (shadow_write_denies() filters), so bwrap never has to mkdir a mountpoint under
+    # the read-only root.
+    for path in scope.shadow_write_denies or ():
+        argv += ["--ro-bind", path, path]
+    # A FRESH procfs in a PID namespace we own. Without this, `--ro-bind / /` above
+    # imports the HOST /proc, and /proc/<pid>/root/<path> resolves in the HOST mount
+    # namespace -- which walks around every --tmpfs mask emitted above -- while
+    # /proc/<pid>/environ leaks other processes' environments. --proc is a mount, so
+    # it is emitted after every bind and mask (last mount wins); --unshare-pid is a
+    # namespace flag, order-insensitive, and is REQUIRED for the mount: the kernel
+    # only grants a fresh procfs to a process in its own PID namespace. bwrap itself
+    # stays PID 1 and reaps, so the target is an ordinary child process.
+    argv += ["--unshare-pid", "--proc", "/proc"]
     # network unshared by default; --net omits this (R18).
     if not scope.net:
         argv.append("--unshare-net")
@@ -297,8 +430,11 @@ def _build_parser():
 # escape (H-A / NFR-8). Do NOT try to import from the gate or share a module.
 #
 # Every definition here is PURE and import-side-effect-free (M3): no exec, no
-# setrlimit, no makedirs, no filesystem MUTATION at import. secret_paths reads
-# the filesystem (to test `.git` existence) ONLY when CALLED at runtime.
+# setrlimit, no makedirs, no filesystem MUTATION at import. secret_paths,
+# carveout_paths and shadow_write_denies read the filesystem (existence, the is_dir
+# bit the bwrap builder needs, and the symlink realpaths) ONLY when CALLED at
+# runtime. They are the ONLY readers: both backend builders are pure functions of
+# what these three return.
 
 
 def resolve_scope(dir_arg, base):
@@ -355,6 +491,15 @@ def secret_paths(cwd):
     a decoy `cwd/.git` planted by a prior `--write .` run cannot relocate the
     anchor and un-protect the REAL repo-root `.git/config` (git remote creds).
 
+    Each entry is a `(path, is_dir)` PAIR, not a bare string. The bit is resolved
+    here because this function is ALREADY the one place that touches the filesystem
+    (the existence filter below), and it is what keeps _bwrap_argv PURE: bwrap needs
+    a DIRECTORY mountpoint for --tmpfs and a FILE mountpoint for --ro-bind
+    /dev/null, and the builder used to guess which was which from the path ending in
+    `<sep>.git<sep>config`. That name heuristic is GONE -- structure is measured, not
+    inferred, so a future file-shaped secret cannot be silently mis-masked into a
+    pre-exec bwrap die().
+
     EXISTENCE-FILTERED, cross-platform-SAFE: only paths that EXIST at call time are
     returned. A secret that does not exist has NOTHING to protect (no file/dir to
     read), AND bwrap cannot create a mountpoint for a nonexistent path under its
@@ -365,8 +510,10 @@ def secret_paths(cwd):
     protection on either OS. The filter is the same runtime-only I/O the ancestor
     walk already performs, so M-A/M3 hold.
 
-    Import-side-effect-free (M3): reads the filesystem (os.path.exists) ONLY when
-    CALLED at runtime, never at import, and never mutates.
+    Import-side-effect-free (M3): reads the filesystem (os.path.exists /
+    os.path.isdir) ONLY when CALLED at runtime, never at import, and never mutates.
+    ALL of the deny set's I/O lives here -- the two backend builders that consume the
+    result perform none, which is the invariant that makes them offline-testable.
     """
     home = [
         os.path.expanduser("~/.ssh"),
@@ -375,17 +522,128 @@ def secret_paths(cwd):
         os.path.expanduser("~/.config/gh"),
         os.path.expanduser("~/.claude"),
     ]
-    paths = [p for p in home if os.path.exists(p)]   # existence filter (see above)
+    # existence filter (see above) + the is_dir bit the bwrap builder needs
+    paths = [(p, os.path.isdir(p)) for p in home if os.path.exists(p)]
     cur = os.path.realpath(cwd)
     while True:                      # every ancestor .git, not just project_root
         config = os.path.join(cur, ".git", "config")
         if os.path.exists(config):   # a .git dir with no config file has nothing to
-            paths.append(config)     # protect (and bwrap can't mkdir it) -> skip it
+            paths.append(            # protect (and bwrap can't mkdir it) -> skip it
+                (config, os.path.isdir(config)))
         parent = os.path.dirname(cur)
         if parent == cur:            # reached the filesystem root
             break
         cur = parent
     return tuple(paths)
+
+
+def carveout_paths():
+    """The read-ONLY carve-out set: the named subtrees of a DENIED secret that must
+    stay READABLE inside the sandbox.
+
+    `~/.claude` is a secret (it holds credentials, session transcripts, todos and --
+    critically -- the hooks and settings that gate this very tool), so the deny set
+    hides ALL of it. That also hid this repo's OWN tooling, which lives under it:
+    `~/.claude/scripts/*.py` and `~/.claude/skills/**/scripts/*.py`. Measured live:
+    every such script died with "Operation not permitted" under sbx. Splitting the
+    two concerns -- deny the secret, carve the tooling back out for READ -- is what
+    makes the sandbox usable for the scripts it was built to contain.
+
+    The carve-out is READ-ONLY and FAIL-CLOSED BY ENUMERATION. Only these two named
+    subdirectories open, and only for reading:
+      * `~/.claude/skills`   the deployed skill trees (their scripts/ helpers)
+      * `~/.claude/scripts`  the deployed standalone tooling
+    Everything else under `~/.claude` stays unreadable -- `projects/`,
+    `settings*.json`, `.credentials.json`, `todos/`, `history.jsonl`, and anything a
+    future Claude Code version drops there, which is the point of enumerating what
+    OPENS rather than what closes. And no carve-out ever grants WRITE: a sandboxed
+    command that could write `~/.claude` could rewrite `settings.json` or `hooks/`,
+    i.e. its own gate, which is the threat this whole feature exists to stop.
+
+    EXISTENCE-FILTERED for the same reason secret_paths is: bwrap binds each entry as
+    a mountpoint under a read-only `/`, and a nonexistent one makes it die at setup
+    BEFORE exec. `expanduser` WITHOUT realpath, consistent with secret_paths -- the
+    two sets must agree on how a path is spelled or a carve-out could fail to line up
+    with the mask it is carving out of.
+
+    Import-side-effect-free (M3): the filesystem read happens only when CALLED.
+    """
+    paths = [
+        os.path.expanduser("~/.claude/skills"),
+        os.path.expanduser("~/.claude/scripts"),
+    ]
+    return tuple(p for p in paths if os.path.exists(p))
+
+
+def shadow_write_denies():
+    """The WRITE-only deny set: the realpath TARGETS of every symlink that leads OUT
+    of `~/.claude`. This closes NAME DIVERGENCE -- the containment escape that a
+    path-spelling deny cannot see.
+
+    MEASURED LIVE on this host, and reproducible with .claude/tmp/write-probe.py:
+    `~/.claude/hooks` is a SYMLINK to `<repo>/ClaudeCode/hooks`, and settings.json
+    registers the PreToolUse hooks under the `~/.claude/hooks/...` spelling. Under
+    `sbx --write .` the deny on `~/.claude` matched the `.claude` spelling and denied
+    it -- while the repo spelling of the SAME directory, which contains no `.claude`
+    component at all, stayed WRITABLE. The probe wrote a marker into
+    `<repo>/ClaudeCode/hooks/`, was refused at `~/.claude/hooks/`, and opened the
+    live gate `<repo>/ClaudeCode/hooks/sbx-gate.py` for append. A sandboxed command
+    that can rewrite its own gate is not sandboxed. Both Seatbelt subpath rules and
+    bwrap mounts key on the path SPELLING, not the inode, so the only fix is to deny
+    the other spelling too -- which means resolving it and naming it explicitly.
+
+    WHAT IS WALKED: the DIRECT children of `~/.claude` and of each carve-out
+    (`~/.claude/skills`, `~/.claude/scripts` -- taken from carveout_paths() so the
+    two sets cannot drift apart; the carve-outs are precisely the subtrees the
+    sandbox deliberately opens, hence precisely where a symlink out is dangerous).
+    One level, not a recursive walk: a deployment farm links whole trees at the top,
+    and an unbounded walk of ~/.claude would stat a session-transcript archive on
+    every single sbx run.
+
+    WHAT IS KEPT: only a symlink whose realpath LEAVES `~/.claude` (separator-safe
+    containment via inside_project, against the REALPATH of ~/.claude since the
+    target is itself realpath-resolved). A symlink that stays inside is no
+    divergence -- the `~/.claude` deny already covers it under a spelling it matches.
+    EXISTENCE-FILTERED like the other two sets: a broken link has nothing to protect,
+    and bwrap cannot mkdir a mountpoint for it under the read-only root.
+
+    WRITE-ONLY, NEVER READ. The targets here are the plugin tree and the repo itself
+    (`<repo>/ClaudeCode`, `<repo>/Scripts`). A read-deny on them would re-hide
+    exactly what carveout_paths() exists to open and would blind the sandbox to the
+    repo it is running in. The consequence is intended and worth naming: under
+    `sbx --write .` the linked trees become READ-ONLY. They are executable
+    configuration -- hooks, MCP servers, skill scripts -- that a sandboxed command
+    has no business rewriting.
+
+    No injection filter is applied to the resolved targets, deliberately. If one ever
+    contained an SBPL metacharacter, sandbox-exec would refuse to parse the profile
+    and sbx would fail to start -- fail-CLOSED. Dropping the entry instead would be
+    fail-open: a silently missing deny.
+
+    Import-side-effect-free (M3): the listdir/lstat/realpath reads happen only when
+    CALLED, never at import, and nothing is mutated. All of this set's I/O lives
+    here, so both backend builders stay pure functions of what it returns.
+    """
+    claude = os.path.expanduser("~/.claude")
+    claude_real = os.path.realpath(claude)
+    targets = []
+    for root in (claude,) + carveout_paths():
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue                       # absent or unreadable: nothing to enumerate
+        for name in names:
+            entry = os.path.join(root, name)
+            if not os.path.islink(entry):
+                continue                   # only a LINK can spell the same inode twice
+            target = os.path.realpath(entry)
+            if not os.path.exists(target):
+                continue                   # broken link: no inode to protect
+            if inside_project(target, claude_real):
+                continue                   # stays inside; the ~/.claude deny covers it
+            if target not in targets:      # a farm can link one tree under two names
+                targets.append(target)
+    return tuple(targets)
 
 
 # The R14 injection floor: a raw-or-resolved scope carrying any of these could
@@ -444,6 +702,8 @@ def _format_plan(scope):
         "  ro          : %r" % (scope.ro,),
         "  argv        : %r" % (scope.argv,),
         "  secret_paths: %r" % (scope.secret_paths,),
+        "  carveouts   : %r" % (scope.carveouts,),
+        "  shadow_write_denies: %r" % (scope.shadow_write_denies,),
     ])
 
 
@@ -547,6 +807,9 @@ def main(argv=None):
         ro=args.ro,
         argv=target,
         secret_paths=secret_paths(cwd),   # M-A / sec-MED-2 ancestor-.git deny set
+        carveouts=carveout_paths(),       # read-ONLY holes in the ~/.claude deny
+        # write-ONLY deny on the OTHER spelling of ~/.claude's symlinked-out trees
+        shadow_write_denies=shadow_write_denies(),
     )
 
     # --dry-run previews the resolved plan and runs NOTHING. Engine resolution
