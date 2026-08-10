@@ -438,6 +438,18 @@ therefore admit a page whose text never writes the word.
 `glossary`. Analysis pages are investigative captures (network traces,
 performance measurements) typically not tied to specific source files.
 
+**The sources⇒verified invariant is type-agnostic.** Any page of ANY type that
+carries `sources:` MUST also carry `verified:`. `freshness` gates such a page as
+`unverified` the moment `verified.commit` is absent, regardless of type — the
+`overview` / `adr` / `glossary` exemption in `UNTRACKED_TYPES` is only reached by
+a page carrying NEITHER `sources:` nor `targets:`
+(`ClaudeCode/skills/wiki/scripts/freshness.py`). So "optional" above means
+*optional to carry sources at all*, never *optional to verify the sources you
+did carry*. Where a page's sources genuinely cannot be verified yet — the code
+exists only in an uncommitted working tree, so any `verified.commit` would be a
+false claim — the correct expression is `status: draft` (§3, "awaiting
+promotion"), not an omitted `verified:` under `status: active`.
+
 A `spec` page is the same genre as a `subsystem`/`component` design, but it may
 exist *before* its code does. Its anchor requirements depend on `status`
 (documentation-only — no script enforces these; they are a curation rule):

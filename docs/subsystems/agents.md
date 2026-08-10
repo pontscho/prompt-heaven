@@ -56,6 +56,7 @@ refuses an unknown one.
 | `minion-code-reviewer.md` | Single-lens code-review finder — surfaces candidate findings through one lens (Statler) |
 | `minion-code-verifier.md` | Single-candidate code-review verifier — CONFIRMED/PLAUSIBLE/REFUTED on a fresh read (Waldorf) |
 | `minion-librarian.md` | Executor for the `p:wiki` skill — ingest/lint/query/init/adopt against the `docs/` wiki (Dewey) |
+| `minion-bug-hunter.md` | Autonomous bug-closing executor — symptom in, reproduced/diagnosed/fixed/proven out (Quint) |
 
 ## When each is used
 
@@ -67,5 +68,19 @@ then `minion-inspector-security-officer`; implementation finished ->
 planning chain is written by `minion-feature-planner` (implementation plan) then
 `minion-task-planner` (`requirements.yaml`); the `p:code-review` / `p:branch-review`
 pipeline fans out `minion-code-reviewer` (one per lens) into `minion-code-verifier`
-(one per candidate); and `minion-librarian` maintains the `docs/` wiki. Skills that
-author these files are covered in [[skills]] (`p:writer-agent`).
+(one per candidate); and `minion-librarian` maintains the `docs/` wiki.
+
+A *reported* bug — one with a symptom attached — goes to `minion-bug-hunter`, the
+fleet's second executor `ClaudeCode/ARCHITECTURE.md`, where `minion-watson`
+diagnoses and stops. It reproduces the symptom, employs `minion-watson` for the
+root cause rather than re-deriving it, and fixes only a *contained* change: no
+public API or signature change, no new dependency, no schema, protocol, or
+on-disk-format change, no module-boundary refactor, no data mutation
+`ClaudeCode/agents/minion-bug-hunter.md`. Anything past that boundary is reported
+as a diagnosis with no code touched. Its evidence gate is a reproduction that
+fails before the fix and passes after — promoted into the project's test tree as
+a regression test; when no reproduction can be built, `minion-code-verifier` must
+judge the root-cause claim before any edit, and no-reproduction plus
+not-contained stops the run outright.
+
+Skills that author these files are covered in [[skills]] (`p:writer-agent`).

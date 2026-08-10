@@ -58,8 +58,9 @@ An agent definition makes TWO typed claims that must agree:
   * its body              -- the tools the agent is told to call (the PRESCRIPTION)
 
   3a  dead grant     (FAIL) a `tools:` entry naming an MCP tool the live
-                     inventory does not have.  Inert at runtime (verified: all
-                     15 agents load with a bogus entry present) but misleading,
+                     inventory does not have.  Inert at runtime (verified once
+                     against the 15-agent corpus of the time: all loaded with a
+                     bogus entry present; the corpus has grown since) but misleading,
                      and a 21-file manual sweep already cleaned these once.
   3b  missing grant  (FAIL / INFO) the body prescribes a tool that EXISTS, is
                      REGISTERED, and is absent from this agent's `tools:`.
@@ -143,8 +144,9 @@ agents shipped inside a PLUGIN do not support the `hooks:`, `mcpServers:` or
 `permissionMode:` frontmatter fields: they are IGNORED at load time, for
 security reasons.  `ClaudeCode/` IS a plugin -- `.claude-plugin/plugin.json`,
 plugin name `p`, installed via a skills-dir symlink -- so every `mcpServers:`
-key in this corpus was inert.  Runtime evidence agrees: 4 of the 15 agents never
-carried the key and work fine, and all 15 load with it gone.
+key in this corpus was inert.  Runtime evidence agrees: measured against the
+15-agent corpus of the time, 4 never carried the key and worked fine, and all 15
+loaded with it gone.  The corpus has grown since; the finding has not been re-measured.
 
 SEVERITY: FAIL.  The defence is in `Checker.check_mcpservers_key`, which is
 where a future reader will be standing when they want to argue with it.  The
