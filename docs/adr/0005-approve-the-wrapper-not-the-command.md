@@ -15,6 +15,7 @@ links:
   - feature-implementation-plan
   - hooks
   - skills
+  - 0007-a-path-spelled-deny-protects-the-spelling
 ---
 
 # ADR 0005: Approve the wrapper, not the command
