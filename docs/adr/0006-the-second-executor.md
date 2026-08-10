@@ -7,6 +7,9 @@ description: Decision to add a second executor minion (Quint) that carries a rep
 sources:
   - ClaudeCode/agents/minion-bug-hunter.md
   - ClaudeCode/ARCHITECTURE.md
+verified:
+  commit: 535bf1d
+  date: 2026-08-10
 links:
   - agents
   - layer-contract

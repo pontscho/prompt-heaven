@@ -1,11 +1,14 @@
 ---
 name: layer-contract
 type: concept
-status: draft
+status: active
 title: The ClaudeCode layer contract
 description: Why skills, agents and fragments are three non-overlapping layers, what an executor minion is, and why sub-agent nesting is capped below what the harness can actually do.
 sources:
   - ClaudeCode/ARCHITECTURE.md
+verified:
+  commit: 535bf1d
+  date: 2026-08-10
 links:
   - agents
   - skills

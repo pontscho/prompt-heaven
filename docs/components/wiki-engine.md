@@ -9,8 +9,8 @@ sources:
   - ClaudeCode/skills/wiki
   - ClaudeCode/agents/minion-librarian.md
 verified:
-  commit: 546f145
-  date: 2026-08-06
+  commit: 9eeb66c
+  date: 2026-08-10
 links:
   - scripts
   - skills
@@ -106,6 +106,14 @@ audit and the per-hit labels on `search` / `source_to_pages`
 `current` means "compared against HEAD and clean" — `unverified`, `promotable`,
 `planned`, `untracked` and `no-sources` all mean *not checkable*, which is not
 the same as fresh.
+
+Which pages are *checkable at all* is decided by anchors, not by type. Any page
+carrying `sources:` must also carry `verified:` or it is gated `unverified`
+whatever its type; the `overview` / `adr` / `glossary` exemption is only reached
+by a page carrying neither `sources:` nor `targets:`
+`ClaudeCode/skills/wiki/scripts/freshness.py:UNTRACKED_TYPES`. So an `adr` that
+anchors real files is freshness-tracked like any component — the append-only
+rule freezes its body, not its verification record.
 
 ## `status:` is editorial intent, never freshness
 

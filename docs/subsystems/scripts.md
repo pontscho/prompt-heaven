@@ -11,6 +11,7 @@ verified:
   date: 2026-08-10
 links:
   - overview
+  - requirements-yaml
   - 0001-purity-server-unification
   - 0004-never-pin-a-browser-impersonation-version
 ---
@@ -143,7 +144,9 @@ Operate on the `requirements.yaml` workflow (see [[overview]]):
 `Scripts/task-plan.py` (status + dependency analysis), `task-update.py`,
 `task-show-all.py`, `task-show-details.py`, `task-batch-planner.py`,
 `task-implementation-plan.py` (token-efficient plan extraction), and
-`task-validator.py` (requirements.yaml schema validation).
+`task-validator.py` (requirements.yaml schema validation). What the file they all
+operate on is *for*, and why the plan-to-implement handoff needs a validated task
+graph beside the prose plan, is [[requirements-yaml]].
 
 ## Search
 

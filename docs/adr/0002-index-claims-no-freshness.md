@@ -10,8 +10,8 @@ sources:
   - ClaudeCode/agents/minion-librarian.md
   - Scripts/mcp-wiki.py
 verified:
-  commit: 546f145
-  date: 2026-08-06
+  commit: 9eeb66c
+  date: 2026-08-10
 links:
   - wiki-engine
   - scripts

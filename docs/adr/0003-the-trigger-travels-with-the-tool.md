@@ -8,8 +8,8 @@ sources:
   - Scripts/mcp-wiki.py
   - CLAUDE.md
 verified:
-  commit: e4cdd48
-  date: 2026-08-03
+  commit: 9eeb66c
+  date: 2026-08-10
 links:
   - wiki-engine
 ---
