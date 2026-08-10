@@ -6,17 +6,21 @@ title: 'Implementation Plan: Unify mcp-clangd + mcp-cuda into mcp-purity (Phase 
 description: Phase 0 implementation plan for folding clangd + cuda into mcp-purity behind purity_call. Decision recorded in adr 0001.
 sources:
   - Scripts/mcp-purity.py
+  - Scripts/mcp-purity.py:LspBackend
   - Scripts/mcp-purity.py:ClangdClient
+  - Scripts/mcp-purity.py:_route_filetype
   - Scripts/mcp-purity.py:_resolve_aliases
   - Scripts/mcp-purity.py:handle_find_definition
+  - Scripts/_mcp_smoke_test.py:purity_semantic_checks
   - Scripts/mcp-clangd.py
   - Scripts/mcp-cuda.py
 verified:
-  commit: 2787c7f
-  date: 2026-07-16
+  commit: c6af014
+  date: 2026-08-10
 links:
   - scripts
   - 0001-purity-server-unification
+  - spec-purity-luals-phase1
 ---
 
 # Implementation Plan: Unify `mcp-clangd` + `mcp-cuda` into `mcp-purity` (Phase 0 — the skeleton)
@@ -87,18 +91,18 @@ This is **Phase 0** — the *skeleton*. It establishes the abstract backend inte
 - **Scalability**: one project per server; the backend map allows N LSP-backend types within that one project (clangd now, luals later).
 - **Accessibility**: N/A (developer tooling, no UI).
 
-## Architecture Analysis
+## Architecture Analysis (pre-Phase-0 snapshot)
 
-All three servers are single-file Python 3.9 stdlib scripts under `Scripts/`, each registering exactly one MCP tool that dispatches to internal functions.
+This section and the one after it describe the three servers **as they were before Phase 0 was implemented** — the state the plan was written against. They are kept verbatim as the planning record; the line numbers throughout are archival and are not current positions. At the time of writing, all three servers were single-file Python 3.9 stdlib scripts under `Scripts/`, each registering exactly one MCP tool that dispatched to internal functions.
 
-**Current `mcp-purity.py` (the reference architecture):**
+**`mcp-purity.py`, as it stood before Phase 0 (the reference architecture):**
 - Dispatch is a **dict table** `HANDLERS` (`mcp-purity.py:776-790`), not an if/elif chain. Aliases (`ls`, `glob`, `grep`, `search`) appear *directly as keys* in `HANDLERS` **and** in a separate `FUNCTION_ALIASES` dict (`mcp-purity.py:118-123`) — redundant but not broken.
 - Parameter aliasing has two layers: `PARAM_ALIASES` (global, `mcp-purity.py:68-93`) and `PARAM_ALIASES_BY_FUNC` (per-function, `mcp-purity.py:99-113`), resolved by `_resolve_aliases` (`mcp-purity.py:145-177`), which is **first-wins** (`if canonical not in resolved`, line 175).
 - The dispatcher `handle_purity_call` (`mcp-purity.py:840-878`) is **sync**; all file handlers are sync `def`.
 - The MCP loop `McpServer.run()` is **async** (`mcp-purity.py:980`) but only `await`s the blocking stdin read via `run_in_executor` (`mcp-purity.py:985`); `_handle_message` and the `tools/call` path (`mcp-purity.py:1000`, `1043`, `1063`) are sync. Entry: `asyncio.run(server.run())` (`mcp-purity.py:1135`).
 - `tools/list` returns one tool `PURITY_CALL_TOOL` (`mcp-purity.py:1035`); only `initialize`, `ping`, `tools/list`, `tools/call` are handled.
 
-**Current `mcp-clangd.py` (the LSP reference):**
+**`mcp-clangd.py`, as it stood before Phase 0 (the LSP reference):**
 - `ClangdClient` (`mcp-clangd.py:263-394`) owns the full LSP lifecycle: `start()` (subprocess + reader loop + `initialize` handshake + indexing wait + `_prime_index`), `stop()`, `_reader_loop()`, `_send()`, `_request()`.
 - JSON-RPC framing: `encode_lsp_message` (`mcp-clangd.py:107-112`), `read_lsp_message` (`mcp-clangd.py:115-148`) — Content-Length header + UTF-8 body.
 - Request/response correlation via integer id + `loop.create_future()` stored in `_pending`, awaited with `asyncio.wait_for` (`mcp-clangd.py:455-466`).
@@ -107,7 +111,7 @@ All three servers are single-file Python 3.9 stdlib scripts under `Scripts/`, ea
 - Fallback: `_find_files_with_word` (`mcp-clangd.py:726-748`), `_fallback_workspace_symbols` (`mcp-clangd.py:762-801`), `_symbol_to_location` 3-tier cascade (`mcp-clangd.py:808-901`).
 - `_resolve_aliases` is **last-wins** (`mcp-clangd.py:74`).
 
-**Current `mcp-cuda.py`:**
+**`mcp-cuda.py`, as it stood before Phase 0:**
 - The entire common LSP core is **byte-for-byte copy-paste** from clangd (framing `mcp-cuda.py:457-495`, helpers `502-575`, `ClangdClient` body, fallback). The only functional divergence is the **truncated** `_symbol_to_location` (`mcp-cuda.py:1130-1187`) — it lacks tiers 2 and 3 of the clangd cascade.
 - CUDA-specific layer (the abstraction boundary): `_find_cuda_sdk` (`mcp-cuda.py:117-193`), `_detect_cuda_arch` (`196-226`), `NVCC_STRIP_FLAGS/PREFIXES` (`233-251`), `_expand_rsp_file` (`254-264`), `_translate_compile_commands` (`267-346`), `_prepare_compile_commands` (`349-395`), `_generate_minimal_compile_commands` (`398-427`), `_has_cuda_sources` (`430-450`), CUDA `ClangdClient.start` extras (`608-682`), CUDA `_prime_index` (`684-703`), CUDA `handle_init` (`1194-1242`, skip at `1228-1230`).
 - `_detect_language` differs: clangd (`mcp-clangd.py:236-240`) `.c`→"c" else "cpp"; cuda (`mcp-cuda.py:578-584`) `.cu`/`.cuh`→"cuda", `.c`→"c", else "cpp".
@@ -118,9 +122,9 @@ All three servers are single-file Python 3.9 stdlib scripts under `Scripts/`, ea
 
 **Logging**: `logging` module, stderr (clangd writes clangd stderr through to `sys.stderr`).
 
-## Captured Information (for implementation phase)
+## Captured Information (pre-Phase-0 snapshot, for the implementation phase)
 
-**CRITICAL**: This section carries the concrete code so the implementation agent need not re-read the source files.
+**ARCHIVED SNAPSHOT — this is the pre-Phase-0 state.** This section carried the concrete code so the implementation agent need not re-read the source files. Every line number below refers to the files **as they stood before Phase 0 was implemented**; it is preserved as the historical planning record and does NOT describe current positions. For where this code lives today, use the frontmatter `sources:` anchors.
 
 ### File Locations
 | Purpose | File Path | Location/Line |

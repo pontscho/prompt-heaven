@@ -7,8 +7,8 @@ description: Loadable knowledge packs activated on-demand or via Skill permissio
 sources:
   - ClaudeCode/skills
 verified:
-  commit: 1446acb
-  date: 2026-08-08
+  commit: c6af014
+  date: 2026-08-10
 links:
   - overview
   - agents
@@ -18,8 +18,10 @@ links:
 # Skills
 
 Skills are loadable knowledge packs under `ClaudeCode/skills/`. Each skill is a
-directory named `p:<name>` containing at minimum a `SKILL.md`; some bundle
-helper scripts and reference files. A skill defines *rules and patterns* (how to
+bare-named directory `<name>/` containing at minimum a `SKILL.md`; some bundle
+helper scripts and reference files. The `p:` in `/p:<name>` is not part of the
+directory name; the plugin prepends it at invocation time
+`ClaudeCode/ARCHITECTURE.md`. A skill defines *rules and patterns* (how to
 use a tool, a language convention, a workflow); the former `/p:` slash-commands
 (`p:analyze`, `p:feature-plan`, `p:task-plan`, `p:implement`, `p:deep-research`,
 `p:project-explore`, `p:checkpoint`, `p:spec-design`) were migrated into skills,
@@ -33,8 +35,9 @@ so skills now also carry the explicitly-invoked multi-step workflows — see
   `ClaudeCode/skills/static-linking/` ships `SKILL.md`, `README.md`,
   `build-static.py`, `verify-static-linking.py`, `example-CMakeLists.txt`.
 
-Frontmatter is required: `name` (matching the `p:`-prefixed directory) and a
-`description` carrying both *what it does* and *when to trigger*. The
+Frontmatter is required: `name` and a `description` carrying both *what it does*
+and *when to trigger*. The `name` must match the bare directory name exactly, and
+the `p:` prefix is never written into it `ClaudeCode/ARCHITECTURE.md`. The
 description is what Claude matches against to auto-activate the skill.
 
 ## Notable skills
