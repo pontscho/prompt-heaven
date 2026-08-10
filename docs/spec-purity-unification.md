@@ -15,7 +15,7 @@ sources:
   - Scripts/mcp-clangd.py
   - Scripts/mcp-cuda.py
 verified:
-  commit: c6af014
+  commit: 095db60
   date: 2026-08-10
 links:
   - scripts

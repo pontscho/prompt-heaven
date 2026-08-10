@@ -17,7 +17,7 @@ sources:
   - Scripts/mcp-purity.py:HANDLERS
   - Scripts/_mcp_smoke_test.py:purity_semantic_checks
 verified:
-  commit: c6af014
+  commit: 095db60
   date: 2026-08-10
 links:
   - spec-purity-unification

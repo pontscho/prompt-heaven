@@ -16,7 +16,7 @@ sources:
   - ClaudeCode/skills/checkpoint/SKILL.md
   - tests/test_mcp_first_guard.py
 verified:
-  commit: c6af014
+  commit: 095db60
   date: 2026-08-10
 links:
   - hooks
