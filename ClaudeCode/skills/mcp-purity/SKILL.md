@@ -60,7 +60,7 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 |-|-|-|-|-|
 |`relative_path`|string|no|"."|Directory to list|
 |`recursive`|bool|no|false|Scan subdirectories|
-|`skip_ignored_files`|bool|no|false|Skip gitignored files|
+|`skip_ignored_files`|bool|no|false|Skip gitignored files — except `.claude/tmp`, never skipped|
 |`max_answer_chars`|int|no|-1|Character limit|
 
 ```json
@@ -142,12 +142,28 @@ Existing content at `line` shifts down. Does not replace.
 |`context_lines_after`|int|no|0|Context lines after match|
 |`paths_include_glob`|string|no|""|Glob to include files|
 |`paths_exclude_glob`|string|no|""|Glob to exclude files|
-|`relative_path`|string|no|""|Restrict to subdirectory|
+|`relative_path`|string|no|""|Restrict to a subdirectory **or a single file**|
+|`skip_ignored_files`|bool|no|true|Skip gitignored files — except `.claude/tmp`, never skipped|
 |`max_answer_chars`|int|no|-1|Character limit|
 
 ```json
 {"f":"search_for_pattern","p":{"substring_pattern":"TODO|FIXME","context_lines_after":1,"paths_include_glob":"**/*.py"}}
 ```
+
+`regex` and `line_numbers` are accepted as ripgrep-compatibility **no-ops**:
+`substring_pattern` is always a regex and `content` rows always carry
+`path:line:`, so passing them `true` changes nothing. Passing `false` is a hard
+error — purity has no literal-match mode, and silently regex-matching a pattern
+meant literally is the failure that would follow. For rows without line numbers
+use `output_mode: "files_with_matches"` or `"count"`.
+
+**The gitignore filter never hides `.claude/tmp`.** The scratch area is
+gitignored on purpose but is exactly where the fleet's working files land, so a
+search that skipped it would hide the artifacts a minion wrote seconds earlier.
+Applies to `search_for_pattern` and `list_dir` alike; `find_file` never
+ignore-filters at all. The exemption is *narrow*: if `.claude` itself is
+gitignored, only `.claude/tmp` comes back — the rest of the ignored subtree stays
+ignored.
 
 ## Parameter aliases
 
@@ -179,6 +195,7 @@ canonical name is what error messages reference.
 | `create_text_file`  | `new_content` | `content` |
 | `replace_lines`     | `new_content` | `content` |
 | `insert_at_line`    | `new_content` | `content` |
+| `search_for_pattern` | `query` | `substring_pattern` *(global table cannot carry it — `symbol` owns `query` as its own canonical param)* |
 
 ### Function-name aliases
 

@@ -14,6 +14,13 @@ run):
                                                       navigation vs the retired
                                                       mcp-clangd / mcp-luals
                                                       servers (A-J)
+  purity_file_ops    tests/test_purity_file_ops.py    purity_call's gitignore-
+                                                      aware file handlers: the
+                                                      `.claude/tmp` exemption,
+                                                      the inheritance rule that
+                                                      keeps it narrow, and the
+                                                      search parameter contract
+                                                      (A-F)
   mcp_git_params     tests/test_mcp_git_params.py     mcp-git named params ->
                                                       git argv, fully offline
                                                       (A-L)
@@ -142,6 +149,10 @@ def run_purity_lsp(opts):
     return run_python_suite("test_purity_lsp", opts)
 
 
+def run_purity_file_ops(opts):
+    return run_python_suite("test_purity_file_ops", opts)
+
+
 def run_mcp_git_params(opts):
     return run_python_suite("test_mcp_git_params", opts)
 
@@ -212,6 +223,10 @@ SUITES = [
      "sbx PreToolUse grant-only gate", 77),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 152),
+    ("purity_file_ops", run_purity_file_ops,
+     "purity_call file handlers: the .claude/tmp ignore exemption, the "
+     "inheritance rule that keeps it narrow, and the search param contract",
+     31),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 258),
     ("name_existence", run_name_existence,

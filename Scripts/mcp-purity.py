@@ -190,6 +190,11 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     "list_dir": {
         "long_format": "long",
     },
+    # `query` cannot go in the global table: `symbol` takes `query` as its own
+    # canonical param, so a global alias would rewrite it out from under it.
+    "search_for_pattern": {
+        "query": "substring_pattern",
+    },
 }
 
 # Function-name aliases — handler registry exposes several aliases (ls, glob,
@@ -604,6 +609,62 @@ def _is_ignored(rel: str, patterns: List[str]) -> bool:
     return False
 
 
+# Project-root-relative subtrees the ignore filter must NEVER skip. `.claude/tmp`
+# is the fleet's scratch area: it is gitignored ON PURPOSE — it must never be
+# committed — but it is also where every minion drops the artifacts a follow-up
+# search or listing is looking for. Honouring the ignore rule there means the
+# tooling silently hides files the caller created seconds earlier, and an empty
+# result that should have had hits costs far more to diagnose than the skipped
+# scan ever saved. Not a hole in the sandbox: safe_path / _path_within_root are
+# untouched, only the "would git commit this" question is answered differently.
+IGNORE_EXEMPT_PATHS = (".claude/tmp",)
+
+
+def _ignore_exempt(rel: str) -> bool:
+    """True if *rel* (project-root-relative) is inside an exempt subtree — or is
+    an ancestor of one, because os.walk PRUNES: if `.claude` itself matched an
+    ignore pattern, the walk would never descend far enough to ask about
+    `.claude/tmp`."""
+    rel = os.path.normpath(rel).replace(os.sep, "/")
+    for exempt in IGNORE_EXEMPT_PATHS:
+        if rel == exempt or rel.startswith(exempt + "/") or exempt.startswith(rel + "/"):
+            return True
+    return False
+
+
+def _ignore_inherited(rel: str, patterns: List[str]) -> bool:
+    """True if an ANCESTOR directory of *rel* is itself gitignored.
+
+    Purity has no inheritance of its own: an ignored directory is enforced by
+    PRUNING the walk, and everything below it vanishes as a side effect. The
+    exemption un-prunes the way IN — and without this check that hands out the
+    un-pruned ancestor's OTHER children too: an ignored `.claude` would start
+    surfacing `.claude/agents/**` merely because `.claude/tmp` is exempt. Only
+    paths that actually descend through an exempt subtree's ancestor pay for the
+    walk up the component list; everything else answers on the first cheap test.
+    """
+    parts = os.path.normpath(rel).replace(os.sep, "/").split("/")
+    if len(parts) < 2 or not _ignore_exempt(parts[0]):
+        return False
+    return any(_is_ignored(part, patterns) for part in parts[:-1])
+
+
+def _ignore_skips(match_on: str, rel: str, patterns: List[str]) -> bool:
+    """Should the gitignore filter skip this entry?
+
+    *match_on* is what the patterns are tested against, preserving each call
+    site's existing target: a bare name where the walk prunes, the root-relative
+    path for list_dir's entries. The two genuinely differ, and widening the
+    bare-name sites to full paths would silently start honouring slash-bearing
+    patterns that have never applied here — a change in results nobody asked for.
+    *rel* is always root-relative and only LOCATES the entry, for the exemption
+    and the inherited-ignore rule.
+    """
+    if _ignore_exempt(rel):
+        return False
+    return _is_ignored(match_on, patterns) or _ignore_inherited(rel, patterns)
+
+
 # ---------------------------------------------------------------------------
 # File handlers
 # ---------------------------------------------------------------------------
@@ -782,9 +843,11 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     if recursive:
         for dirpath, dirnames, filenames in os.walk(path):
             if skip_ignored:
+                dir_rel = os.path.relpath(dirpath, project_root)
                 dirnames[:] = [
                     d for d in dirnames
-                    if not _is_ignored(d, ignore_patterns) and d != ".git"
+                    if d != ".git"
+                    and not _ignore_skips(d, os.path.join(dir_rel, d), ignore_patterns)
                 ]
             else:
                 dirnames[:] = [d for d in dirnames if d != ".git"]
@@ -794,24 +857,25 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
                 if not _accept_name(name, True):
                     continue
                 entry_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
-                if skip_ignored and _is_ignored(entry_rel, ignore_patterns):
+                if skip_ignored and _ignore_skips(entry_rel, entry_rel, ignore_patterns):
                     continue
                 raw.append((entry_rel, True, os.path.join(dirpath, name)))
             for name in sorted(filenames):
                 if not _accept_name(name, False):
                     continue
                 entry_rel = os.path.relpath(os.path.join(dirpath, name), project_root)
-                if skip_ignored and _is_ignored(entry_rel, ignore_patterns):
+                if skip_ignored and _ignore_skips(entry_rel, entry_rel, ignore_patterns):
                     continue
                 raw.append((entry_rel, False, os.path.join(dirpath, name)))
     else:
         for name in sorted(os.listdir(path)):
-            if skip_ignored and (_is_ignored(name, ignore_patterns) or name == ".git"):
-                continue
-            if not _accept_name(name, os.path.isdir(os.path.join(path, name))):
-                continue
             full = os.path.join(path, name)
             entry_rel = os.path.relpath(full, project_root)
+            if skip_ignored and (name == ".git"
+                                 or _ignore_skips(name, entry_rel, ignore_patterns)):
+                continue
+            if not _accept_name(name, os.path.isdir(full)):
+                continue
             raw.append((entry_rel, os.path.isdir(full), full))
 
     if long_format:
@@ -1214,6 +1278,27 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     if output_mode not in ("files_with_matches", "content", "count"):
         raise ValueError("Parameter 'output_mode' must be 'files_with_matches', 'content', or 'count'")
 
+    # ripgrep/Grep-style flags callers reach for. Both are unconditionally TRUE
+    # here already — the pattern is always regex-compiled, and `content` rows are
+    # always `path:line: text` — so accepting them costs nothing, while rejecting
+    # them cost a whole round trip on a call that asked for what it was getting.
+    # Passing FALSE is a different question: it asks for behaviour purity does not
+    # have, and silently ignoring THAT is how a literal search quietly becomes a
+    # regex one. So: tolerated as a no-op, never silently disobeyed.
+    if "regex" in params and not _bool_param(params["regex"], True):
+        raise ValueError(
+            "Parameter 'regex' cannot be false: substring_pattern is ALWAYS compiled "
+            "as a regex; there is no literal mode. Escape the metacharacters in the "
+            "pattern instead."
+        )
+    if (output_mode == "content" and "line_numbers" in params
+            and not _bool_param(params["line_numbers"], True)):
+        raise ValueError(
+            "Parameter 'line_numbers' cannot be false in content mode: rows are always "
+            "emitted as 'path:line: text'. Use output_mode 'files_with_matches' or "
+            "'count' for a payload without line numbers."
+        )
+
     max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
     skip_ignored = _bool_param(params.get("skip_ignored_files", True))
     # Serena-compat: when true, restrict the scan to source-code files
@@ -1265,13 +1350,18 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
         if not search_single_file:
             dirnames[:] = [d for d in dirnames if d != ".git"]
             if skip_ignored:
-                dirnames[:] = [d for d in dirnames if not _is_ignored(d, ignore_patterns)]
+                dir_rel = os.path.relpath(dirpath, project_root)
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not _ignore_skips(d, os.path.join(dir_rel, d), ignore_patterns)
+                ]
         for name in filenames:
-            if not search_single_file and skip_ignored and _is_ignored(name, ignore_patterns):
-                continue
-
             full = os.path.join(dirpath, name)
             file_rel = os.path.relpath(full, project_root)
+
+            if (not search_single_file and skip_ignored
+                    and _ignore_skips(name, file_rel, ignore_patterns)):
+                continue
 
             # Deadline check between files
             if time.monotonic() > _deadline:
@@ -5211,6 +5301,9 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         "paths_include_glob", "paths_exclude_glob", "relative_path",
         "max_answer_chars", "head_limit", "offset", "output_mode",
         "max_file_size", "skip_ignored_files", "restrict_search_to_code_files",
+        # Tolerated ripgrep-style no-ops; the handler rejects them only when set
+        # to false, which would be a request purity cannot honour.
+        "regex", "line_numbers",
     },
     # --- semantic (LSP) functions: POST-alias canonical param names ---
     "find_definition": {

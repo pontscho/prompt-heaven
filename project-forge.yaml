@@ -73,6 +73,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|timing'
 
+  purity_file_ops:
+    description: "purity_call gitignore-aware file handlers: the .claude/tmp exemption, the inheritance rule keeping it narrow, list_dir both branches, the search param contract. No binary, ~2s."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py purity_file_ops
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
   mcp_git_params:
     description: "mcp-git named params to git argv, fully offline (subprocess stubbed)"
     requires: [syntax]
