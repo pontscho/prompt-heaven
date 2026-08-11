@@ -7,13 +7,14 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 095db60
-  date: 2026-08-10
+  commit: 24bd1a5
+  date: 2026-08-11
 links:
   - overview
   - requirements-yaml
   - 0001-purity-server-unification
   - 0004-never-pin-a-browser-impersonation-version
+  - 0007-a-path-spelled-deny-protects-the-spelling
 ---
 
 # Scripts & MCP Servers
@@ -89,6 +90,69 @@ Two things about that launch line are deliberate, not incidental:
 
 Other servers: `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`,
 `mcp-postgres.py`.
+
+### webfetch's reply shape: `raw`, `show_headers`, `save_to`
+
+The default reply is a markdown report — url, status, a selected header block, a
+paged body. Three parameters reshape it and a fourth guards one of them. All four
+are presentation decisions, so they are resolved once in `handle_fetch` and handed
+to the formatter as a single `view` dict rather than re-derived at each of its
+three call sites — a cached entry, a revalidated one, a fresh response
+`Scripts/mcp-webfetch.py:_format_response`.
+
+`raw=true` drops the envelope: the reply becomes the body alone. It also flips the
+*default* conversion to `html` — unprocessed — which an explicit `output` still
+overrides, because raw is about the wrapper, not the conversion
+`Scripts/mcp-webfetch.py:handle_fetch`. What it does **not** drop is the line-based
+ceiling or the trailing `[showing rows …; offset=N]` note: both are emitted by the
+pager that the report and the raw reply now share
+`Scripts/mcp-webfetch.py:_paged_reply`, because a silently severed body is
+indistinguishable from a complete one, and an uncapped 5 MB document would cost
+more context than a whole session's tool descriptions.
+
+`show_headers=true` widens the header block from the seven
+`Scripts/mcp-webfetch.py:_NOTABLE_HEADERS` to every header the response carried;
+`response_headers` is an alias `Scripts/mcp-webfetch.py:PARAM_ALIASES`. The
+load-bearing detail is that `headers` is now **polymorphic**, and deliberately so:
+the obvious spelling for "show me the response headers" was already taken by the
+request-header dict, so a **bool** now means the former while a **dict** still
+means the latter `Scripts/mcp-webfetch.py:handle_fetch`. The two cannot collide,
+because nobody expresses a request-header dict by writing `true`. Combined with
+`raw` the reply is wire-shaped, like `curl -i` — status line, headers, blank line,
+body.
+
+`save_to=PATH` writes the WHOLE converted document to disk, never the paged
+window, byte-exact with no trailing newline appended
+`Scripts/mcp-webfetch.py:_save_body` — a saved artefact that stopped at
+`max_answer_chars` would carry nothing to say its tail is missing. Containment is
+the part that matters: the path is model-authored while the process runs as the
+developer, which is the SSRF guard's confused-deputy reasoning pointed at the disk
+instead of the network `Scripts/mcp-webfetch.py:_resolve_save_path`. It judges the
+**resolved** target rather than the spelling, so a writable in-tree symlink cannot
+smuggle an out-of-tree write past an in-tree-looking path — and collapsing `..`
+textually with `normpath` would have been unsound here, because `a/..` is not the
+parent of `a` when `a` is a link. That is the second surface in this repo to reach
+the same conclusion: [[0007-a-path-spelled-deny-protects-the-spelling]] froze it for
+the sandbox profile's write denies, where the file to protect and the name used to
+reach it had diverged. Here it governs a write DESTINATION rather than a deny rule —
+same principle, opposite direction. The path is resolved twice on purpose: once
+before the fetch, so a destination outside the tree costs no round trip and does
+not read as a network failure, and again at write time. A non-2xx status and an
+empty body are both refused rather than written, since an error page where a
+document was expected is worse than no file at all. `overwrite=true` is required to
+replace an existing file, enforced by an exclusive `open(..., "x")` rather than an
+`exists()` check — the same guard without the window between looking and writing.
+
+`--test` now exits **1** on a refusal, where it used to print the error and exit 0
+`Scripts/mcp-webfetch.py:main`. `save_to` is what made that load-bearing: a shell
+caller whose write was refused saw a success exit and went on to read a file that
+was never written.
+
+**Measured** over nine cases through the `--test` CLI (the evidence is a CLI run,
+not a suite — this server has none): all nine passed, including the containment
+case, where a save to `.claude/tmp/webfetch-verify/outlink/escaped.md` was refused
+because it resolved to `/private/tmp/escaped.md`. Nothing was written outside the
+project root.
 
 ### What `purity_call`'s ignore filter will and will not hide
 
