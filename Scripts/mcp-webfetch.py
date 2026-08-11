@@ -30,6 +30,12 @@ Browser impersonation — NEVER a pinned version:
     Other:  curl_cffi with a bare alias, resolved via its REAL_TARGET_MAP.
     Pinned majors rot, and they rot SILENTLY on primp (see _create_session).
 
+Reply shape: a markdown report (url, status, selected headers, paged body) by
+default; `raw=true` emits the body alone, `show_headers=true` widens the header
+block to every header the response carried, and `save_to` puts the WHOLE
+converted document on disk — contained inside the project root, because the
+path is model-authored and the process runs as the developer (_save_body).
+
 Cache: file-based disk cache under <project_root>/.cache/webfetch/, keyed by
 SHA256(method + url + request-affecting headers). Default TTL 900s (15 min);
 cache_ttl=0 bypasses it entirely. A stale entry is revalidated with
@@ -473,6 +479,84 @@ def _cap_text(text: str, limit: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# save_to — the document to disk, contained in the project tree
+# ---------------------------------------------------------------------------
+
+def _resolve_save_path(project_root: str, save_to: str) -> str:
+	"""Absolute, symlink-resolved destination — refused unless it lands in the tree.
+
+	The same confused-deputy reasoning as the SSRF guard, pointed at the disk
+	instead of the network: the path is model-authored, the process runs as the
+	developer, and `~/.ssh/authorized_keys` is one plausible-looking string away.
+	Containment is the project tree.
+
+	realpath, not normpath: it resolves the symlinks of the path's EXISTING
+	prefix and appends the not-yet-existing tail verbatim, which is exactly this
+	path's shape — so a writable `.claude/tmp/out -> ~/.ssh` cannot turn an
+	in-tree-looking string into an out-of-tree write. Collapsing `..` textually
+	instead would be unsound, because `a/..` is not the parent of `a` when `a`
+	is a link. Resolve-then-open is not TOCTOU-proof, same as the DNS check.
+	"""
+	root = os.path.realpath(project_root)
+	target = os.path.expanduser(save_to.strip())
+	if not target:
+		raise ValueError("save_to is empty")
+	if not os.path.isabs(target):
+		target = os.path.join(root, target)
+	path = os.path.realpath(target)
+	if path != root and not path.startswith(root + os.sep):
+		raise ValueError(
+			f"save_to resolves to {path}, outside the project root {root}. "
+			f"Refusing: a URL-driven fetcher writing anywhere on the filesystem "
+			f"is the confused-deputy case. Pick a path inside the project."
+		)
+	if os.path.isdir(path):
+		raise ValueError(f"save_to {path} is a directory, not a file")
+	return path
+
+
+def _save_body(view: dict, content: str, status: int, final_url: str) -> str:
+	"""Write the WHOLE converted document to disk. Returns a one-line report.
+
+	Raises ValueError for every refusal, which the caller surfaces as the tool's
+	error — a save that silently did not happen is the one outcome worth ruling
+	out, since the caller's next step is to read the file.
+	"""
+	if not (200 <= status < 300):
+		raise ValueError(
+			f"refusing to save a status-{status} body to {view['save_to']!r} "
+			f"({final_url}): an error page written where a document was expected "
+			f"is worse than no file at all. Re-run without save_to to read it — "
+			f"the response is cached, so that costs no round trip."
+		)
+	if not content:
+		raise ValueError(
+			f"nothing to save to {view['save_to']!r}: the converted body is empty "
+			f"(a HEAD request carries none — use method=GET)."
+		)
+	path = _resolve_save_path(view["project_root"], view["save_to"])
+	# Written byte-exact, with no trailing newline appended: `output=html` is
+	# meant to be the document the server sent, and a caller comparing a digest
+	# against the origin would find a one-byte difference impossible to explain.
+	try:
+		parent = os.path.dirname(path)
+		if parent:
+			os.makedirs(parent, exist_ok=True)
+		# "x" and not an exists() check: exclusive create is the same guard
+		# without the window between looking and writing.
+		with open(path, "w" if view["overwrite"] else "x", encoding="utf-8") as fh:
+			fh.write(content)
+	except FileExistsError:
+		raise ValueError(
+			f"save_to {path} already exists. Pass overwrite=true to replace it."
+		)
+	except OSError as exc:
+		raise ValueError(f"could not write {path}: {type(exc).__name__}: {exc}")
+	rel = os.path.relpath(path, os.path.realpath(view["project_root"]))
+	return f"{rel} ({len(content.encode('utf-8'))} bytes, {view['output']})"
+
+
+# ---------------------------------------------------------------------------
 # fetch handler
 # ---------------------------------------------------------------------------
 
@@ -504,6 +588,7 @@ DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 ACCEPTED_FETCH_PARAMS = frozenset({
 	"url", "method", "output", "timeout", "max_answer_chars", "offset",
 	"cache_ttl", "profile", "headers", "max_bytes", "allow_private",
+	"raw", "show_headers", "save_to", "overwrite",
 })
 
 # max_chars is the name two siblings alias away (mcp-tshark.py, mcp-wiki.py);
@@ -514,6 +599,8 @@ PARAM_ALIASES = {
 	"skip": "offset",
 	"ttl": "cache_ttl",
 	"impersonate": "profile",
+	"response_headers": "show_headers",
+	"save": "save_to",
 }
 
 OUTPUT_MODES = ("markdown", "markdown_full", "text", "text_full", "html")
@@ -563,13 +650,20 @@ def _format_response(
 	final_url: str,
 	resp_headers: dict,
 	body: str,
-	output: str,
-	max_answer_chars: int,
-	offset: int,
+	view: dict,
 	profile: Optional[str],
 	cached: str,
 	attempts: Optional[List[str]] = None,
 ) -> dict:
+	"""Convert, optionally save, then page the body into the tool's reply.
+
+	*view* carries the presentation decisions made once in handle_fetch (output
+	mode, budget, offset, raw, show_headers, save_to, overwrite, project_root),
+	because all three call sites below make the same ones over different data —
+	a cached entry, a revalidated one, and a fresh response.
+	"""
+	output = view["output"]
+	max_answer_chars = view["max_answer_chars"]
 	extract = not output.endswith("_full")
 	if output.startswith("markdown"):
 		content = _to_markdown(body, extract)
@@ -578,26 +672,62 @@ def _format_response(
 	else:  # html
 		content = body or ""
 
+	# The FILE gets the whole converted document, never the paged window: a
+	# saved artefact that stops at max_answer_chars carries nothing to say the
+	# tail is missing, and the caller asked for a document, not a page of one.
+	saved = ""
+	if view["save_to"]:
+		try:
+			saved = _save_body(view, content, status, final_url)
+		except ValueError as exc:
+			return {"error": str(exc)}
+
 	lower = {k.lower(): v for k, v in resp_headers.items()}
-	notable = [f"  {k}: {lower[k]}" for k in _NOTABLE_HEADERS if k in lower]
-	if not notable:
-		notable = ["  (no notable headers)"]
+
+	if view["raw"]:
+		# raw: the body and nothing else — no report to parse back out. With
+		# show_headers it becomes wire-shaped (`curl -i`): status line, headers,
+		# blank line, body. The paging note still appears when the window is
+		# short of the whole document; a silently severed body would be a lie,
+		# and it is the one line whose job is to say how to get the rest.
+		head = ""
+		if view["show_headers"]:
+			head = (f"HTTP {status}\n"
+			        + "".join(f"{k}: {lower[k]}\n" for k in sorted(lower))
+			        + "\n")
+		return _paged_reply(head, content, view["offset"], max_answer_chars)
+
+	if view["show_headers"]:
+		names, title = sorted(lower), "all"
+	else:
+		names, title = [k for k in _NOTABLE_HEADERS if k in lower], "selected"
+	shown = [f"  {k}: {lower[k]}" for k in names] or [f"  (no {title} headers)"]
 
 	cache_tag = f" ({cached})" if cached else ""
 	profile_tag = f" via `{profile}`" if profile else ""
 	ladder_tag = ""
 	if attempts and len(attempts) > 1:
 		ladder_tag = f"\n**retries**: {' → '.join(attempts)}"
+	saved_tag = f"\n**saved**: {saved}" if saved else ""
 
 	head = (
 		f"# webfetch — `{final_url}`{cache_tag}\n\n"
-		f"**status**: {status}{profile_tag}{ladder_tag}\n"
+		f"**status**: {status}{profile_tag}{ladder_tag}{saved_tag}\n"
 		f"**output**: {output}\n\n"
-		f"## Response headers (selected)\n\n"
-		f"```\n" + "\n".join(notable) + "\n```\n\n"
+		f"## Response headers ({title})\n\n"
+		f"```\n" + "\n".join(shown) + "\n```\n\n"
 		f"## Body ({output})\n\n"
 	)
+	return _paged_reply(head, content, view["offset"], max_answer_chars)
 
+
+def _paged_reply(head: str, content: str, offset: int, max_answer_chars: int) -> dict:
+	"""*head* plus as much of *content* as the budget allows, and where to resume.
+
+	Shared by the report and the raw reply, so `raw=true` drops the envelope
+	without also dropping the ceiling: an uncapped 5 MB document would cost more
+	context than the whole session's tool descriptions.
+	"""
 	# The cap covers the WHOLE emitted text. Budgeting the body alone and then
 	# prepending the header block — what this function used to do — meant the
 	# result always overshot the number the caller asked for.
@@ -698,7 +828,12 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 	if method not in ("GET", "HEAD"):
 		return {"error": f"method {method} not supported yet (GET, HEAD only)"}
 
-	output = (params.get("output") or "markdown").lower()
+	raw = _bool_param(params.get("raw"))
+	# raw means "do not process it, just pour it out", so the default CONVERSION
+	# goes away with the envelope: html is the body as it arrived. An explicit
+	# output= still wins — raw is about the wrapper, and asking for unwrapped
+	# markdown is a coherent thing to want.
+	output = (params.get("output") or ("html" if raw else "markdown")).lower()
 	if output not in OUTPUT_MODES:
 		return {"error": f"output must be one of {', '.join(OUTPUT_MODES)} (got {output!r})"}
 
@@ -709,9 +844,43 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 	max_bytes = _int_param(params.get("max_bytes"), DEFAULT_MAX_BYTES)
 	allow_private = _bool_param(params.get("allow_private"))
 	profile = params.get("profile") or None
-	extra_headers = params.get("headers") or {}
+	save_to = (params.get("save_to") or "").strip()
+	overwrite = _bool_param(params.get("overwrite"))
+	show_headers = _bool_param(params.get("show_headers"))
+
+	# `headers` is polymorphic, and deliberately: it was already taken by the
+	# REQUEST header dict when `headers: true` became the obvious spelling for
+	# "show me the response headers". A bool means the latter (the canonical name
+	# is show_headers), a dict still means the former — the two cannot collide,
+	# because nobody sends a request header dict by writing `true`.
+	raw_headers = params.get("headers")
+	if isinstance(raw_headers, bool):
+		show_headers = show_headers or raw_headers
+		extra_headers: Dict[str, str] = {}
+	else:
+		extra_headers = raw_headers or {}
 	if not isinstance(extra_headers, dict):
-		return {"error": "headers must be a dict"}
+		return {"error": "headers must be a dict of request headers, or true to show the response headers"}
+
+	view = {
+		"output": output,
+		"max_answer_chars": max_answer_chars,
+		"offset": offset,
+		"raw": raw,
+		"show_headers": show_headers,
+		"save_to": save_to,
+		"overwrite": overwrite,
+		"project_root": project_root,
+	}
+
+	# Refused before the fetch, not after it: a destination outside the tree, or
+	# a directory, is a caller mistake that a round trip cannot fix, and finding
+	# out after the download wastes the request and looks like a network failure.
+	if save_to:
+		try:
+			_resolve_save_path(project_root, save_to)
+		except ValueError as exc:
+			return {"error": str(exc)}
 
 	# The guard runs BEFORE the cache read, not after it. "You may not fetch this
 	# URL" and "here is that URL's content off the disk" are the same act from the
@@ -741,8 +910,7 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 		return _format_response(
 			entry.get("status", 0), entry.get("final_url", url),
 			entry.get("headers", {}), entry.get("body", ""),
-			output, max_answer_chars, offset,
-			profile=entry.get("profile"), cached="cached",
+			view, profile=entry.get("profile"), cached="cached",
 		)
 
 	# A stale entry still earns its keep: revalidating costs one round trip and
@@ -781,8 +949,7 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 		return _format_response(
 			entry.get("status", 200), entry.get("final_url", url),
 			entry.get("headers", {}), entry.get("body", ""),
-			output, max_answer_chars, offset,
-			profile=result.get("profile"), cached="revalidated",
+			view, profile=result.get("profile"), cached="revalidated",
 			attempts=attempts,
 		)
 
@@ -807,8 +974,7 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 
 	return _format_response(
 		status, result["final_url"], result["headers"], result["body"],
-		output, max_answer_chars, offset,
-		profile=result["profile"], cached="", attempts=attempts,
+		view, profile=result["profile"], cached="", attempts=attempts,
 	)
 
 
@@ -945,6 +1111,20 @@ WEBFETCH_CALL_TOOL = {
 		"Long pages are paged by LINE, not truncated mid-structure: the last line "
 		"reports `[showing rows 1-N of M; offset=N for more]` — pass that `offset` "
 		"back to continue.\n\n"
+		"`raw=true` drops the report envelope: the reply is the body alone (and, "
+		"when the window is short of the whole document, the paging note). It also "
+		"switches the default output to `html` — unprocessed — which an explicit "
+		"`output` overrides. The line ceiling still applies.\n\n"
+		"`show_headers=true` reports EVERY response header instead of the 7 notable "
+		"ones (`headers: true` is accepted as the same request; a `headers` DICT "
+		"still means extra request headers). Combined with `raw` the reply is "
+		"wire-shaped, like `curl -i`.\n\n"
+		"`save_to=PATH` writes the WHOLE converted document to a file — never the "
+		"paged window — byte-exact, with no trailing newline added. The path must "
+		"resolve INSIDE the project root (symlinks resolved; a fetcher writing "
+		"anywhere on disk is the confused-deputy case), missing parents are created, "
+		"and an existing file is refused unless `overwrite=true`. A non-2xx status "
+		"or an empty body is refused rather than saved.\n\n"
 		"Non-textual content-types (PDF, images, archives) are REFUSED rather than "
 		"converted, because decoding a binary body yields replacement-character "
 		"mojibake instead of content.\n\n"
@@ -961,7 +1141,11 @@ WEBFETCH_CALL_TOOL = {
 		"ladder), headers (dict of extra request headers), max_bytes (ceiling on the "
 		"raw response body in bytes, default 5242880 — a larger document is REFUSED, "
 		"not silently truncated), allow_private (bool, default false — loopback/"
-		"private/link-local targets are refused as a confused-deputy risk)."
+		"private/link-local targets are refused as a confused-deputy risk), raw "
+		"(bool, default false — body only, no envelope), show_headers (bool, default "
+		"false; alias response_headers), save_to (path inside the project; alias "
+		"save), overwrite (bool, default false — required to replace an existing "
+		"save_to)."
 	),
 	"inputSchema": {
 		"type": "object",
@@ -1123,8 +1307,11 @@ def main() -> None:
 	                    help="List handlers and exit")
 	parser.add_argument("--test", metavar="URL",
 	                    help="One-shot test fetch; print formatted result and exit")
-	parser.add_argument("--output", default="markdown",
-	                    help=f"Output mode for --test ({'/'.join(OUTPUT_MODES)}). Default: markdown.")
+	# Empty, not "markdown": a hardcoded default here would win over --raw's
+	# implicit html and silently re-enable the conversion raw exists to skip.
+	parser.add_argument("--output", default="",
+	                    help=f"Output mode for --test ({'/'.join(OUTPUT_MODES)}). "
+	                         f"Default: markdown, or html with --raw.")
 	parser.add_argument("--max-chars", type=int, default=5000,
 	                    help="Max chars for --test output. Default: 5000.")
 	parser.add_argument("--profile", default="",
@@ -1134,6 +1321,14 @@ def main() -> None:
 	                         "otherwise reports success while the live fetch is broken.")
 	parser.add_argument("--allow-private", action="store_true",
 	                    help="Allow --test against loopback/private/link-local hosts.")
+	parser.add_argument("--raw", action="store_true",
+	                    help="Body only, no report envelope (default output: html).")
+	parser.add_argument("--headers", action="store_true",
+	                    help="Show every response header, not just the notable ones.")
+	parser.add_argument("--save-to", default="",
+	                    help="Write the whole converted document here (inside the project root).")
+	parser.add_argument("--overwrite", action="store_true",
+	                    help="Allow --save-to to replace an existing file.")
 	parser.add_argument("--log-file", default="",
 	                    help="Log to file instead of stderr.")
 	parser.add_argument("--debug", "-v", "--verbose", dest="debug",
@@ -1163,6 +1358,10 @@ def main() -> None:
 			"output": args.output,
 			"max_answer_chars": args.max_chars,
 			"allow_private": args.allow_private,
+			"raw": args.raw,
+			"show_headers": args.headers,
+			"save_to": args.save_to,
+			"overwrite": args.overwrite,
 		}
 		if args.no_cache:
 			params["cache_ttl"] = 0
@@ -1178,6 +1377,11 @@ def main() -> None:
 		except (ValueError, FileNotFoundError, OSError) as exc:
 			result = {"error": str(exc)}
 		print(result.get("__raw_text__") or result.get("error", "no output"))
+		# Non-zero on a refusal. save_to is what made this load-bearing: a shell
+		# caller whose write was refused (containment, overwrite, non-2xx) saw
+		# exit 0 and went on to read a file that was never written.
+		if "error" in result:
+			sys.exit(1)
 		return
 
 	asyncio.run(McpServer(args.project_root).run())
