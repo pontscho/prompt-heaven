@@ -41,6 +41,15 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      ladder that must fire on 429/5xx and NEVER on another 4xx.
   G  issue-key validation -- a local, unambiguous error instead of a round trip
      that comes back as an ambiguous 404.
+  J  the attachment upload, which is the ONE request in this client whose body
+     is not JSON.  Four failures live here and none of them announces itself:
+     an LF-only multipart body that some proxies drop, a boundary that also
+     occurs inside the file (the server stops reading there and calls the
+     truncated upload a success), a missing X-Atlassian-Token: no-check (Jira's
+     CSRF gate refuses every multipart request without it and never says so),
+     and a `--name` carrying a path.  The byte layout is therefore pinned
+     byte-for-byte against a hand-written expectation, and the outgoing headers
+     are read off a transport that records the RAW body.
 
 NEGATIVE CONTROL (group H) -- mandatory, explicit, named
 --------------------------------------------------------
@@ -65,6 +74,7 @@ Groups:
   G  issue-key validation
   H  negative control
   I  hygiene
+  J  attachment upload: the one non-JSON request body
 
 Usage:
   python3 tests/test_jira_cli.py
@@ -98,6 +108,7 @@ GF = "F. error mapping"
 GG = "G. issue key validation"
 GH = "H. negative control"
 GI = "I. hygiene"
+GJ = "J. attachment upload"
 
 # Every environment variable the CLI reads, in both spellings.  Cleared before
 # each config case: a developer machine with a real JIRA_URL exported would
@@ -1397,6 +1408,287 @@ def group_h(suite, mod):
 
 
 # ---------------------------------------------------------------------------
+# J. attachment upload -- the one request body in this client that is not JSON
+# ---------------------------------------------------------------------------
+
+BOUND = "BOUNDARYbeef"
+HEAD_END = b"\r\n\r\n"
+
+
+class RawTransport:
+    """Like FakeTransport, but keeps the body as BYTES.
+
+    FakeTransport json.loads() every body, which is right for eight of the nine
+    subcommands and impossible for the ninth: a multipart body is binary and
+    decoding it would either raise or silently corrupt what the case measures.
+    """
+
+    def __init__(self, script=()):
+        self.script = list(script)
+        self.calls = []
+
+    def __call__(self, method, url, body, headers):
+        self.calls.append(Call(method, url, body, dict(headers)))
+        if not self.script:
+            raise AssertionError("unscripted request: %s %s" % (method, url))
+        item = self.script.pop(0)
+        return item(method, url) if callable(item) else item
+
+
+def raw_client(mod, script, url=BASE_DC):
+    mod.reset_deployment_cache()
+    mod._DEPLOYMENT_CACHE = mod.SERVER
+    transport = RawTransport(script)
+    return mod.Jira(make_cfg(mod, url=url), fetch=transport,
+                    sleep=lambda _seconds: None), transport
+
+
+def check_multipart(encode_fn):
+    """Problems for an `encode(field, filename, data, boundary) -> (bytes, ct)`.
+
+    Shared by the live rows and by the control below, so a row that passes here
+    is passing an oracle that has been shown to reject a broken encoder.
+    """
+    problems = []
+    body, ctype = encode_fn("file", "a.txt", b"DATA", boundary=BOUND)
+    if not isinstance(body, bytes):
+        return ["the encoder returned %s, not bytes" % type(body).__name__]
+    head = body.split(HEAD_END, 1)[0]
+    if b"\n" in head.replace(b"\r\n", b""):
+        problems.append("a bare LF survives in the header section, which the "
+                        "proxies in front of some Jira installs drop")
+    if not body.startswith(("--%s\r\n" % BOUND).encode()):
+        problems.append("the body does not open with the CRLF-terminated "
+                        "opening boundary")
+    if not body.endswith(("\r\n--%s--\r\n" % BOUND).encode()):
+        problems.append("the body does not end with the closing boundary")
+    if b'filename="a.txt"' not in body:
+        problems.append("the filename is missing from Content-Disposition")
+    if ("boundary=%s" % BOUND) not in ctype:
+        problems.append("the returned Content-Type omits the boundary")
+    return problems
+
+
+def group_j(suite, mod, workspace):
+    encode = mod.encode_multipart_file
+
+    expected = (
+        ("--%s\r\n" % BOUND).encode()
+        + b'Content-Disposition: form-data; name="file"; '
+          b'filename="a.txt"\r\n'
+        + b"Content-Type: application/octet-stream\r\n\r\n"
+        + b"DATA"
+        + ("\r\n--%s--\r\n" % BOUND).encode())
+    body, ctype = encode("file", "a.txt", b"DATA", boundary=BOUND)
+    suite.record(GJ, "multipart-exact-bytes",
+                 problem_if(body != expected,
+                            "the encoded body does not match the pinned "
+                            "expectation"),
+                 detail=["got     : %r" % body, "expected: %r" % expected])
+
+    head = body.split(HEAD_END, 1)[0]
+    suite.record(GJ, "multipart-no-bare-lf-in-header",
+                 problem_if(b"\n" in head.replace(b"\r\n", b""),
+                            "a bare LF survives in the header section"),
+                 detail=["RFC 2046 wants CRLF; an LF-only body is accepted by "
+                         "some servers and dropped by other proxies, so the "
+                         "failure is environment-dependent"])
+
+    blob = b"\x00\xff\r\nnot-a-boundary\x00"
+    raw, _ = encode("file", "b.bin", blob, boundary=BOUND)
+    start = len(raw) - len(("\r\n--%s--\r\n" % BOUND).encode()) - len(blob)
+    suite.record(GJ, "multipart-binary-passthrough",
+                 problem_if(raw[start:start + len(blob)] != blob,
+                            "the payload bytes were altered in transit "
+                            "through the encoder"),
+                 detail=["an attachment is not text; a decode/encode round "
+                         "trip would corrupt every binary file"])
+
+    suite.record(GJ, "multipart-content-type-value",
+                 problem_if(ctype != "multipart/form-data; boundary=%s" % BOUND,
+                            "unexpected Content-Type: %s" % ctype),
+                 detail=["Content-Type: %s" % ctype])
+
+    _, ct1 = encode("file", "a.txt", b"x")
+    _, ct2 = encode("file", "a.txt", b"x")
+    b1 = ct1.split("boundary=", 1)[1]
+    b2 = ct2.split("boundary=", 1)[1]
+    suite.record(GJ, "multipart-generated-boundary-shape",
+                 problem_if(len(b1) != 32
+                            or any(c not in "0123456789abcdef" for c in b1),
+                            "a generated boundary is not 32 hex chars: %r" % b1),
+                 detail=["length is the whole defence: nothing here can "
+                         "rewrite the payload if the boundary collides"])
+    suite.record(GJ, "multipart-generated-boundary-differs",
+                 problem_if(b1 == b2,
+                            "two calls produced the same boundary, so it is "
+                            "not coming from the CSPRNG"))
+
+    collided = ("--%s" % BOUND).encode()
+    try:
+        encode("file", "a.txt", b"before" + collided + b"after", boundary=BOUND)
+        collision = ["the encoder accepted data containing its own boundary"]
+    except mod.SetupError:
+        collision = []
+    suite.record(GJ, "multipart-boundary-collision-refused", collision,
+                 detail=["the server stops reading at the first boundary it "
+                         "sees, so a collision truncates the file and reports "
+                         "SUCCESS -- the worst available failure mode"])
+
+    quoted, _ = encode("file", 'we"ird.txt', b"x", boundary=BOUND)
+    suite.record(GJ, "multipart-quote-in-filename-sanitised",
+                 problem_if(b'filename="we_ird.txt"' not in quoted,
+                            "a double quote survived into "
+                            "Content-Disposition"),
+                 detail=['a `"` closes the parameter early and the remainder '
+                         "is parsed as header syntax"])
+
+    try:
+        encode("file", "", b"x", boundary=BOUND)
+        empty_name = ["an empty filename was accepted"]
+    except mod.SetupError:
+        empty_name = []
+    suite.record(GJ, "multipart-empty-filename-refused", empty_name)
+
+    # -- the upload method: headers are the subject --------------------------
+
+    created = [{"id": "4201", "filename": "spec.md", "size": 4}]
+    client, transport = raw_client(mod, [response(mod, 200, created)])
+    returned = client.upload_attachment("STR-7", "spec.md", b"DATA")
+    call = transport.calls[0]
+
+    suite.record(GJ, "upload-csrf-header-present",
+                 problem_if(call.headers.get("X-Atlassian-Token") != "no-check",
+                            "X-Atlassian-Token: no-check is missing"),
+                 detail=["Jira's CSRF gate refuses EVERY multipart request "
+                         "without it, on Cloud and on Server/DC, and the "
+                         "rejection never mentions the header"])
+    suite.record(GJ, "upload-content-type-is-multipart",
+                 problem_if(not str(call.headers.get("Content-Type", "")
+                                    ).startswith("multipart/form-data; "
+                                                 "boundary="),
+                            "Content-Type is %r"
+                            % call.headers.get("Content-Type")))
+    suite.record(GJ, "upload-authorization-unchanged-from-json-path",
+                 problem_if(call.headers.get("Authorization")
+                            != "Bearer " + TOKEN,
+                            "the multipart path built a different "
+                            "Authorization header"),
+                 detail=["it comes from the same _headers() helper as every "
+                         "other call, so it cannot drift on this one path"])
+    suite.record(GJ, "upload-form-field-is-file",
+                 problem_if(b'name="file"' not in call.body,
+                            "the form field is not named `file`"),
+                 detail=["Jira looks for that exact name and answers a "
+                         "request without it with an unhelpful 500"])
+    suite.record(GJ, "upload-array-response-returned",
+                 problem_if(returned != created,
+                            "the JSON array response was not returned "
+                            "verbatim: %r" % (returned,)),
+                 detail=["this endpoint answers with an ARRAY, not an object"])
+
+    client, _ = raw_client(mod, [response(mod, 200, {"not": "a list"})])
+    suite.record(GJ, "upload-non-list-response-is-empty",
+                 problem_if(client.upload_attachment("STR-7", "a", b"x") != [],
+                            "a non-list response did not collapse to []"),
+                 detail=["an unexpected shape must not raise out of a write "
+                         "that already succeeded server-side"])
+
+    # -- main()-level: the guards -------------------------------------------
+
+    good = os.path.join(workspace, "spec.md")
+    with open(good, "wb") as handle:
+        handle.write(b"hello attachment")
+    empty = os.path.join(workspace, "empty.md")
+    with open(empty, "wb") as handle:
+        handle.write(b"")
+
+    def attach_main(argv, env=None, responder=None):
+        with EnvSandbox(**(env or {})):
+            with NetworkGuard(mod, responder) as guard:
+                with captured() as (out, err):
+                    code = mod.main(connected(argv))
+        return code, out.getvalue(), err.getvalue(), guard.calls
+
+    code, out, _err, calls = attach_main(
+        ["attach", "STR-7", good, "--name", "../../evil.md", "--dry-run"])
+    suite.record(GJ, "attach-explicit-name-reduced-to-basename",
+                 problem_if("evil.md" not in out or ".." in out,
+                            "an explicit --name kept its path component"),
+                 detail=["stdout: %r" % out,
+                         "basename() runs on --name too, not only on the "
+                         "name derived from the path"])
+
+    code, _out, err, calls = attach_main(
+        ["attach", "STR-7", os.path.join(workspace, "nope.md")])
+    suite.record(GJ, "attach-missing-file-exit-2-and-no-request",
+                 problem_if(code != 2 or calls != 0,
+                            "exit %d after %d request(s); wanted exit 2 and 0"
+                            % (code, calls)),
+                 detail=["stderr: %r" % err.strip(),
+                         "the file is read BEFORE anything is sent, so a "
+                         "mistyped path costs no round trip"])
+
+    code, _out, err, calls = attach_main(["attach", "STR-7", empty])
+    suite.record(GJ, "attach-empty-file-exit-2",
+                 problem_if(code != 2 or calls != 0,
+                            "exit %d after %d request(s)" % (code, calls)),
+                 detail=["stderr: %r" % err.strip(),
+                         "Jira accepts a zero-byte attachment and lists it "
+                         "like any other, so the mistake would surface as a "
+                         "file nobody can open"])
+
+    code, out, _err, calls = attach_main(
+        ["attach", "STR-7", good, "--dry-run"])
+    suite.record(GJ, "attach-dry-run-sends-nothing",
+                 problem_if(code != 0 or calls != 0,
+                            "exit %d after %d request(s)" % (code, calls)),
+                 detail=["stdout: %r" % out])
+    suite.record(GJ, "attach-dry-run-withholds-file-bytes",
+                 problem_if("hello attachment" in out,
+                            "the dry run printed the FILE CONTENT"),
+                 detail=["a dry run of a binary attachment would otherwise "
+                         "dump the file into the terminal",
+                         "it reports the name and the byte count instead"])
+
+    code, _out, err, calls = attach_main(["attach", "STR-7", good],
+                                        env={"JIRA_READ_ONLY": "1"})
+    suite.record(GJ, "attach-read-only-blocked",
+                 problem_if(code != 2 or calls != 0,
+                            "exit %d after %d request(s)" % (code, calls)),
+                 detail=["stderr: %r" % err.strip(),
+                         "attach is in WRITE_COMMANDS, so the refusal fires "
+                         "before the file is even read"])
+
+    # -- the negative control for THIS group --------------------------------
+
+    def lf_encoder(field_name, filename, data, boundary=None):
+        """A plausible encoder that uses LF where the format demands CRLF."""
+        boundary = boundary or BOUND
+        head = ("--%s\n"
+                "Content-Disposition: form-data; name=\"%s\"; "
+                "filename=\"%s\"\n"
+                "Content-Type: application/octet-stream\n"
+                "\n" % (boundary, field_name, filename))
+        return (head.encode() + data
+                + ("\n--%s--\n" % boundary).encode(),
+                "multipart/form-data; boundary=%s" % boundary)
+
+    suite.record(GJ, "control-multipart-oracle-rejects-lf-encoder",
+                 problem_if(not check_multipart(lf_encoder),
+                            "the oracle ACCEPTED an LF-only encoder, so it is "
+                            "not protecting the CRLF requirement"),
+                 detail=["mutant: CRLF replaced by LF throughout",
+                         "rejected with: %s"
+                         % ("; ".join(check_multipart(lf_encoder)) or "NOTHING")])
+
+    # The mirror. Without it, an oracle that rejected EVERYTHING would satisfy
+    # the row above and prove nothing.
+    suite.record(GJ, "control-real-encoder-passes-the-same-oracle",
+                 check_multipart(encode))
+
+
+# ---------------------------------------------------------------------------
 # I. hygiene
 # ---------------------------------------------------------------------------
 
@@ -1484,6 +1776,7 @@ def run(opts=None):
             group_f(suite, mod)
             group_g(suite, mod)
             group_h(suite, mod)
+            group_j(suite, mod, workspace.path)
         finally:
             mod.reset_deployment_cache()
         group_i(suite, before, pyc_before, workspace.path)

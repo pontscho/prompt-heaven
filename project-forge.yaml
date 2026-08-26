@@ -123,7 +123,7 @@ test:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|window|gate'
 
   jira_cli:
-    description: "The Jira CLI, fully offline (transport injected): auth mode, context-path URL join, lazy deployment probe, both paging models behind one iterator, JIRA_READ_ONLY, --dry-run, error mapping."
+    description: "The Jira CLI, fully offline (transport injected): auth mode, context-path URL join, lazy deployment probe, both paging models behind one iterator, JIRA_READ_ONLY, --dry-run, error mapping, and the byte-pinned multipart attachment body."
     requires: [syntax]
     commands:
       - python3 tests/run.py jira_cli

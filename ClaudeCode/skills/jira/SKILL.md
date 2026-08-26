@@ -3,20 +3,22 @@ name: jira
 description: >-
   Read from and write to Jira from the terminal via the bundled stdlib-only Python CLI at
   scripts/jira.py — search by JQL, read an issue with its comments and changelog, list a
-  project's fields, then add a comment, move an issue through a transition, or log work.
+  project's fields, then add a comment, move an issue through a transition, log work, or
+  upload a file as an attachment.
   Works against BOTH Jira Cloud and Jira Server/Data Center; the deployment is detected at
   runtime and the two search APIs are hidden behind one iterator. Auth is a Personal Access
   Token (Data Center) or an email plus API token (Cloud), always from the environment, never
   a flag value baked into a command. Use whenever a task mentions a Jira issue key such as
-  STR-1234, asks what a ticket says, needs a JQL query run, or needs a comment, status change
-  or worklog written back. Deliberately does NOT create, delete or field-edit issues.
+  STR-1234, asks what a ticket says, needs a JQL query run, or needs a comment, status change,
+  worklog or attachment written back. Deliberately does NOT create, delete or field-edit
+  issues.
 ---
 
 # Jira
 
 A thin, auditable Jira client: one Python file, standard library only, no MCP server and no
-dependency tree. It covers reading and the three writes that are safe to hand an agent —
-comment, transition, worklog.
+dependency tree. It covers reading and the four writes that are safe to hand an agent —
+comment, transition, worklog, attach.
 
 ## Quick start
 
@@ -97,6 +99,7 @@ Each write honours `JIRA_READ_ONLY` and accepts `--dry-run`.
 | `comment <KEY> <TEXT>` | Adds a comment. `TEXT` may be `-`, meaning read the body from stdin. |
 | `transition <KEY> <ID-OR-NAME>` | Moves the issue. A name is resolved to its numeric ID by reading the transition list first; if the name is unknown or ambiguous the legal transitions are printed and the command exits 1. `--comment TEXT` attaches a comment to the transition. |
 | `worklog <KEY> <TIMESPENT>` | Logs work, e.g. `'3h 20m'`. `--comment TEXT`, `--started ISO`. |
+| `attach <KEY> <FILE>` | Uploads a file as an attachment. `--name NAME` overrides the displayed filename; it is reduced to a basename either way, so a path cannot be smuggled into it. |
 
 **Out of scope on purpose**: creating issues, deleting anything, and editing arbitrary
 fields. Those need `editmeta` round-trips and per-field value shapes that differ between
@@ -154,8 +157,13 @@ issue fetch comes back as an unparseable Java `toString` blob with the real name
 **Relationship to other skills.** This skill is the *access layer* — primitives, one call
 each. A multi-step workflow that happens to touch Jira (bootstrap a ticket, brainstorm, open
 a branch, attach a document) is a separate skill that calls these commands; it does not
-belong here. Attachment upload is not implemented; it needs multipart encoding and the
-`X-Atlassian-Token: no-check` header, and is the obvious first addition if a workflow needs it.
+belong here.
+
+**On the CSRF header.** `attach` is the only command sending `multipart/form-data`, and Jira
+blocks every such request that arrives without `X-Atlassian-Token: no-check` — on both
+deployments, and without saying that is why. The header is set automatically; it is
+documented here only because a hand-rolled `curl` upload that omits it fails in a way that
+reads like an authentication problem.
 
 **Do not reach for the Atlassian Rovo MCP server as a substitute.** It is Cloud-only and
 cannot see a Data Center instance at all.

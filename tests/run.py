@@ -249,8 +249,8 @@ SUITES = [
     ("jira_cli", run_jira_cli,
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "
-     "iterator, config precedence, JIRA_READ_ONLY, --dry-run, and the five "
-     "error mappings", 98),
+     "iterator, config precedence, JIRA_READ_ONLY, --dry-run, the five "
+     "error mappings, and the multipart attachment body", 121),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

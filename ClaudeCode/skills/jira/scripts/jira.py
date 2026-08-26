@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """jira.py -- a read-mostly Jira CLI over REST API v2, stdlib only, no ADF.
 
-Six read subcommands and three write ones, aimed at the two deployments that
+Six read subcommands and four write ones, aimed at the two deployments that
 actually exist in the wild -- Atlassian Cloud and Server/Data Center -- out of
 ONE code path.
 
@@ -47,6 +47,7 @@ Usage:
     jira.py transition PROJ-1234 'In Progress' --comment 'picking this up'
     jira.py transition PROJ-1234 31 --dry-run
     jira.py worklog PROJ-1234 '3h 20m' --comment 'pairing' --started 2026-08-26T09:00:00.000+0000
+    jira.py attach PROJ-1234 ./build.log --name failing-build.log
 
 Every flag below is also an environment variable, and the flag wins.
 
@@ -85,6 +86,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import ssl
 import sys
 import time
@@ -123,7 +125,7 @@ DEFAULT_FIELDS = ["summary", "status", "assignee", "reporter", "issuetype",
 
 TRUTHY = ("1", "true", "yes")
 
-WRITE_COMMANDS = ("comment", "transition", "worklog")
+WRITE_COMMANDS = ("attach", "comment", "transition", "worklog")
 
 # `PROJ-1234`: at least two leading uppercase alphanumerics (the project key),
 # a hyphen, then digits.  Checked locally because Jira answers a nonexistent
@@ -354,6 +356,47 @@ def urllib_fetch(method: str, url: str, body: Optional[bytes],
 
 
 # ---------------------------------------------------------------------------
+# multipart: the one request body in this file that is not JSON
+# ---------------------------------------------------------------------------
+
+def encode_multipart_file(field_name: str, filename: str, data: bytes,
+		boundary: Optional[str] = None) -> Tuple[bytes, str]:
+	"""Encode ONE file part; return (body, the Content-Type value to send).
+
+	`boundary` is a parameter only so a test can pin the exact bytes -- a
+	caller in production passes None and gets a fresh random one.
+	"""
+	if boundary is None:
+		# 32 hex chars from the CSPRNG. The length is the whole defence: the
+		# boundary must not occur inside the payload, and nothing here can
+		# rewrite the payload if it does.
+		boundary = secrets.token_hex(16)
+	# A `"` would close the Content-Disposition parameter early and the rest of
+	# the name would be parsed as header syntax, so it is replaced outright.
+	safe_name = filename.replace('"', "_")
+	if not safe_name:
+		raise SetupError("refusing to upload with an empty filename")
+	if boundary.encode("utf-8") in data:
+		# The server stops reading at the first boundary it finds, so a
+		# collision truncates the file and reports success -- with a random
+		# 32-hex boundary this cannot realistically happen, which is exactly
+		# why it is checked rather than assumed.
+		raise SetupError("the multipart boundary %s occurs inside the file "
+			"data, which would truncate the upload" % boundary)
+	# CRLF everywhere, per RFC 2046: an LF-only multipart body is accepted by
+	# some servers and silently rejected by the proxies in front of others.
+	head = ("--%s\r\n"
+		"Content-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n"
+		"Content-Type: application/octet-stream\r\n"
+		"\r\n" % (boundary, field_name, safe_name))
+	tail = "\r\n--%s--\r\n" % boundary
+	# `data` is spliced in as raw bytes and never decoded: an attachment is not
+	# text, and a decode/encode round trip would corrupt every binary file.
+	body = head.encode("utf-8") + data + tail.encode("utf-8")
+	return body, "multipart/form-data; boundary=%s" % boundary
+
+
+# ---------------------------------------------------------------------------
 # the client
 # ---------------------------------------------------------------------------
 
@@ -405,14 +448,23 @@ class Jira:
 		if body is not None:
 			payload = json.dumps(body).encode("utf-8")
 		headers = self._headers(payload is not None)
+		return self._send(method, url, payload, headers, subject or path)
 
+	def _send(self, method: str, url: str, payload: Optional[bytes],
+			headers: Dict[str, str], subject: str) -> Any:
+		"""The retry ladder and the decode, for a body of ANY content type.
+
+		Split out of request() so the multipart upload shares this error
+		handling instead of owning a second copy of it -- a copy is a place for
+		the 429/5xx ladder to drift out of step.
+		"""
 		response = None
 		for attempt in range(1, MAX_ATTEMPTS + 1):
 			response = self._fetch(method, url, payload, headers)
 			if not _is_retryable(response.status) or attempt == MAX_ATTEMPTS:
 				break
 			self._sleep(_retry_delay(response, attempt))
-		return self._decode(response, method, url, subject or path)
+		return self._decode(response, method, url, subject)
 
 	def _decode(self, response: HttpResponse, method: str, url: str,
 			subject: str) -> Any:
@@ -629,6 +681,25 @@ class Jira:
 		payload = self.request("GET", API + "/issue/%s/transitions" % key,
 			query={"expand": "transitions.fields"}, subject=key) or {}
 		return list(payload.get("transitions") or [])
+
+	# -- attachments: the one write whose body is not JSON ----------------
+
+	def upload_attachment(self, key: str, filename: str, data: bytes) -> list:
+		"""Upload one file. The answer is a JSON ARRAY, not an object."""
+		url = api_url(self.cfg.base_url, API + "/issue/%s/attachments" % key)
+		# The form field is named `file` because Jira looks for that name and
+		# answers a request without it with an unhelpful 500.
+		body, content_type = encode_multipart_file("file", filename, data)
+		# Built from the SAME helper as every other call, so Accept,
+		# Authorization and User-Agent cannot drift on this one path.
+		headers = self._headers(has_body=False)
+		headers["Content-Type"] = content_type
+		# Jira's CSRF gate rejects every multipart/form-data request that
+		# arrives without this header, on Cloud AND on Server/DC, and the
+		# rejection does not mention the header.
+		headers["X-Atlassian-Token"] = "no-check"
+		result = self._send("POST", url, body, headers, key)
+		return list(result) if isinstance(result, list) else []
 
 
 def _is_retryable(status: int) -> bool:
@@ -918,6 +989,24 @@ def _body_text(raw: str) -> str:
 	return raw
 
 
+def _read_upload(path: str) -> bytes:
+	"""The whole file as bytes, or a SetupError -- exit 2, never a finding."""
+	if not os.path.isfile(path):
+		# isfile, not exists: a directory or a device node would otherwise fail
+		# later inside open()/read() as an obscure OSError.
+		raise SetupError("file not found or not a regular file: %s" % path)
+	try:
+		with open(path, "rb") as handle:
+			data = handle.read()
+	except OSError as exc:
+		raise SetupError("cannot read %s: %s" % (path, exc))
+	if not data:
+		# Jira accepts a zero-byte attachment and lists it like any other, so
+		# the mistake surfaces as a file nobody can open rather than an error.
+		raise SetupError("refusing to upload an empty file: %s" % path)
+	return data
+
+
 def cmd_comment(args: argparse.Namespace, client: Jira) -> int:
 	_validate_issue_key(args.key)
 	text = _body_text(args.text)
@@ -1007,6 +1096,40 @@ def cmd_worklog(args: argparse.Namespace, client: Jira) -> int:
 	return OK
 
 
+def cmd_attach(args: argparse.Namespace, client: Jira) -> int:
+	_validate_issue_key(args.key)
+	# basename() runs even on an explicit --name, not only on the derived one:
+	# `--name ../../evil.md` must reduce to `evil.md` rather than smuggle a
+	# path into the name the server stores.
+	upload_name = os.path.basename(args.name or os.path.basename(args.path))
+	# Read BEFORE anything is sent, so a mistyped path costs no round trip and
+	# fails as exit 2 instead of a server-side error.
+	data = _read_upload(args.path)
+	if args.dry_run:
+		# _dry_run() is not reused here: it prints a JSON body, and printing
+		# one for a multipart request would describe bytes that never go out.
+		print("%s %s" % ("POST", api_url(client.cfg.base_url,
+			API + "/issue/%s/attachments" % args.key)))
+		# The NAME and the COUNT, never the content: a dry run of a binary
+		# attachment would otherwise dump the file into the terminal.
+		print("%-12s %s" % ("name", upload_name))
+		print("%-12s %d" % ("bytes", len(data)))
+		summary("dry run: nothing was sent")
+		return OK
+	created = client.upload_attachment(args.key, upload_name, data)
+	if args.json:
+		emit_json(created)
+	else:
+		for item in created:
+			print("%-12s %-40.40s %s" % (
+				_text(item.get("id")),
+				_flat(item.get("filename"), upload_name),
+				_text(item.get("size"))))
+	summary("%s attached to %s as %s (%d attachment(s) created)"
+		% (args.path, args.key, upload_name, len(created)))
+	return OK
+
+
 HANDLERS = {
 	"whoami": cmd_whoami,
 	"search": cmd_search,
@@ -1017,6 +1140,7 @@ HANDLERS = {
 	"comment": cmd_comment,
 	"transition": cmd_transition,
 	"worklog": cmd_worklog,
+	"attach": cmd_attach,
 }
 
 
@@ -1101,6 +1225,13 @@ def build_parser() -> argparse.ArgumentParser:
 	worklog.add_argument("--started", help="start time as "
 		"%%Y-%%m-%%dT%%H:%%M:%%S.%%f%%z -- milliseconds and a +0000-style "
 		"offset with NO colon, e.g. 2026-08-26T09:00:00.000+0000")
+
+	attach = sub.add_parser("attach", parents=[common, dry],
+		help="upload a local file as an attachment (multipart/form-data)")
+	attach.add_argument("key", help="issue key, e.g. PROJ-1234")
+	attach.add_argument("path", help="path to the local file to upload")
+	attach.add_argument("--name", help="name to store the attachment under "
+		"(default: the file's basename); any directory part is stripped")
 
 	return parser
 
