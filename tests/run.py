@@ -173,6 +173,10 @@ def run_wiki_recall(opts):
     return run_python_suite("test_wiki_recall", opts)
 
 
+def run_jira_cli(opts):
+    return run_python_suite("test_jira_cli", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -242,6 +246,11 @@ SUITES = [
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
      "the frontmatter aliases synonym field", 112),
+    ("jira_cli", run_jira_cli,
+     "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
+     "probe, the Cloud token pager and the DC offset pager behind one "
+     "iterator, config precedence, JIRA_READ_ONLY, --dry-run, and the five "
+     "error mappings", 98),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

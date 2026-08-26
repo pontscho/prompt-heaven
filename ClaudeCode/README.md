@@ -35,6 +35,30 @@ claude plugin validate ~/.claude/skills/p --strict     # manifest + every agent 
 
 In a session the fleet appears as `p:minion-*` (Agent tool `subagent_type`) and each skill as `p:<name>` (`/p:feature-plan`, `p:wiki`, …). A lone warning about a root `CLAUDE.md` under `--strict` is benign.
 
+### Skills with external prerequisites
+
+Everything in this plugin works straight after the symlink except one skill, which talks to a server and therefore needs credentials in the environment.
+
+**`p:jira`** — a stdlib-only Jira CLI at `skills/jira/scripts/jira.py`, covering both Jira Cloud and Jira Server/Data Center from one code path.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `JIRA_URL` | yes | Base URL. A context path (`https://jira.example.com/jira`) is preserved. |
+| `JIRA_TOKEN` | yes | Data Center: a Personal Access Token (*Profile → Personal Access Tokens*). Cloud: an API token from <https://id.atlassian.com/manage/api-tokens>. |
+| `JIRA_EMAIL` | Cloud only | **Its mere presence switches auth to Cloud Basic.** Leave it unset for Server/Data Center, which uses Bearer. |
+| `JIRA_READ_ONLY` | no | Truthy makes `comment`, `transition` and `worklog` refuse with exit 2 before sending anything. Set it when handing the plugin to an autonomous agent. |
+
+```bash
+export JIRA_URL=https://jira.example.com
+export JIRA_TOKEN=<personal access token>
+
+~/.claude/skills/p/skills/jira/scripts/jira.py whoami
+```
+
+**Run `whoami` first, always.** Jira sends no authentication challenge and permits anonymous access, so a rejected token frequently comes back as a *successful* response containing only public data rather than a 401. `whoami` reports the detected deployment, the resolved URL, the auth mode, and the account the server thinks you are — and fails loudly on the anonymous fallthrough that a plain read would silently hide.
+
+Pass the token through the environment, not the `--token` flag: a flag value lands in shell history and in the session transcript. There is deliberately no switch to disable TLS verification — for a private CA, point `SSL_CERT_FILE` at it.
+
 ### Authoring rules that bite
 
 - **No colon in a `name`.** A `:` in an agent/skill frontmatter `name:` field — or in a skill directory name — breaks loading. Keep names bare; the namespace adds `p:`.
@@ -44,7 +68,7 @@ In a session the fleet appears as `p:minion-*` (Agent tool `subagent_type`) and 
 
 ## TL;DR
 
-1. **/p:feature-plan** → Discuss requirements interactively with ClaudeCode and save the plan to a markdown file
+1. **`/p:feature-plan`** → Discuss requirements interactively with ClaudeCode and save the plan to a markdown file
 2. **`/p:task-plan`** → Generates `requirements.yaml` (REQUIRED - this is the input for implementation)
 3. **`/p:implement`** → Executes tasks autonomously from `requirements.yaml`, then syncs the `docs/` wiki with the shipped code (via `/p:wiki ingest`) as its final step
 4. **Token exhausted?** → `/p:implement --continue` to resume

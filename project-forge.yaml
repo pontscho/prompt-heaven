@@ -122,6 +122,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|window|gate'
 
+  jira_cli:
+    description: "The Jira CLI, fully offline (transport injected): auth mode, context-path URL join, lazy deployment probe, both paging models behind one iterator, JIRA_READ_ONLY, --dry-run, error mapping."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py jira_cli
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]
