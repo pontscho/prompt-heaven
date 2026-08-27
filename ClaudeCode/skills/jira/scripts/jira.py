@@ -68,9 +68,14 @@ Environment variables
     accepted as a fallback.
 
 Output
-    Human-readable plain text on stdout, one line per item, aligned; the summary
-    line goes to stderr, so a pipeline gets rows and a human still gets a count.
-    --json switches stdout to a single JSON document.
+    Markdown on stdout -- headings, fenced blocks and GitHub-flavoured tables,
+    the same shape this project's MCP servers emit, so an answer can be pasted
+    into an issue or a wiki page without being reformatted first.  Each piece of
+    information appears exactly ONCE: `get` puts the key and the summary in the
+    document heading and never repeats them in the table underneath.
+    The one-line summary still goes to STDERR, so a pipeline gets the document
+    and a human still gets the count; it is not part of the document.
+    --json switches stdout to a single JSON document instead.
 
 Exit codes
     0  the command did what it says
@@ -120,8 +125,18 @@ BACKOFF_SECONDS = 1.0
 # `reporter` is here because `get` RENDERS it: a rendered row whose field was
 # never requested prints a dash forever and reads as "this issue has no
 # reporter" rather than "nobody asked for it".
-DEFAULT_FIELDS = ["summary", "status", "assignee", "reporter", "issuetype",
+SEARCH_FIELDS = ["summary", "status", "assignee", "reporter", "issuetype",
 	"priority", "updated"]
+
+# `search` and `get` get SEPARATE lists, and the split is a bug fix rather than
+# tidying.  One shared list has to compromise in both directions at once:
+# `description` cannot be in it, because a 500-row search would then carry 500
+# issue descriptions for a column the table does not even render -- and because
+# `get` silently inherited that same search-shaped list, every field only `get`
+# needs was simply never requested.  That is exactly how `components` went
+# missing from a rendered issue: nobody removed it, nobody ever asked for it.
+ISSUE_FIELDS = SEARCH_FIELDS + ["description", "components", "labels",
+	"resolution", "created", "fixVersions"]
 
 TRUTHY = ("1", "true", "yes")
 
@@ -570,7 +585,7 @@ class Jira:
 		optional and may change it between pages, and a caller who could read
 		one would come to rely on it.
 		"""
-		chosen = list(fields) if fields else list(DEFAULT_FIELDS)
+		chosen = list(fields) if fields else list(SEARCH_FIELDS)
 		if limit <= 0:
 			return
 		if self._deployment() == CLOUD:
@@ -741,14 +756,89 @@ def _flat(value: Any, default: str = "-") -> str:
 	return " ".join(_text(value, default).split()) or default
 
 
-def issue_row(issue: dict) -> str:
+def _names(value: Any) -> str:
+	"""An ARRAY field -- components, labels, fixVersions -- as one cell.
+
+	Each element goes through _text(), which is what lets one helper serve all
+	three: components and fixVersions are arrays of OBJECTS carrying a `name`,
+	while `labels` is an array of bare STRINGS, and printing either one raw puts
+	`[{'name': 'api'}]` in front of a human.
+	"""
+	if not isinstance(value, list):
+		return _text(value, "")
+	return ", ".join(item for item in (_text(v, "") for v in value) if item)
+
+
+# -- Markdown.  Four helpers, deliberately not a templating engine. ----------
+
+def md_escape(text: str) -> str:
+	"""Make one value safe to sit inside a Markdown table cell.
+
+	This is the load-bearing one.  A `|` anywhere in a Jira summary opens a new
+	COLUMN: the row grows a cell, stops matching its header, and every
+	downstream Markdown parser renders the rest of the table wrong -- silently,
+	because the output is still valid Markdown, just not the table that was
+	meant.  A newline ends the row outright, which is why it collapses to a
+	space rather than being escaped.
+	"""
+	return " ".join(str(text).splitlines()).replace("|", "\\|")
+
+
+def md_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
+	"""A GitHub-flavoured table, or `_(none)_` when there is nothing to show.
+
+	The empty case is not politeness: a header row and a delimiter row with NO
+	body rows is not a table in GFM, and renders as two stray lines of pipes.
+	"""
+	if not rows:
+		return "_(none)_"
+	out = ["| " + " | ".join(md_escape(h) for h in headers) + " |",
+		"| " + " | ".join("---" for _ in headers) + " |"]
+	for row in rows:
+		out.append("| " + " | ".join(
+			md_escape("" if cell is None else str(cell)) for cell in row) + " |")
+	return "\n".join(out)
+
+
+def md_kv(pairs: Sequence[Tuple[str, Any]]) -> str:
+	"""A two-column table, with the EMPTY pairs left out rather than dashed.
+
+	A field the server did not return says nothing about the issue, and a row of
+	dashes for each one buries the half that does say something.
+	"""
+	rows = [[label, value] for label, value in pairs
+		if value is not None and str(value).strip()]
+	return md_table(("Field", "Value"), rows)
+
+
+def md_heading(level: int, text: str) -> str:
+	"""`#` repeated, clamped to the six levels Markdown actually has."""
+	return "%s %s" % ("#" * max(1, min(6, int(level))), text)
+
+
+def issue_row(issue: dict) -> List[str]:
+	"""One search-table row, still UNESCAPED -- md_table() does the escaping."""
 	fields = issue.get("fields") or {}
-	return "%-14s %-13.13s %-11.11s %-18.18s %s" % (
+	return [
 		_text(issue.get("key")),
 		_text(fields.get("status")),
 		_text(fields.get("issuetype")),
 		_text(fields.get("assignee")),
-		_flat(fields.get("summary")))
+		_flat(fields.get("summary")),
+	]
+
+
+def strip_envelope(issue: dict) -> dict:
+	"""A copy of one issue without the two keys that carry no information.
+
+	`expand` is a list of what COULD have been expanded on this resource -- the
+	same list for every issue in the response, saying nothing about any of them.
+	`renderedFields` is null unless the request expanded it explicitly, and
+	nothing here ever does, so it is a null key in every response we ask for.
+	`self`, `key`, `id` and `fields` ARE the issue and are kept.
+	"""
+	return {name: value for name, value in (issue or {}).items()
+		if name not in ("expand", "renderedFields")}
 
 
 def emit_json(payload: Any) -> None:
@@ -791,14 +881,16 @@ def cmd_whoami(args: argparse.Namespace, client: Jira) -> int:
 			"token": {"source": cfg.sources["token"], "length": len(cfg.token)},
 		})
 	else:
-		rows = [
+		print(md_heading(2, "Jira connection"))
+		print("")
+		print(md_kv([
 			("deployment", deployment),
 			("base url", cfg.base_url),
 			("auth", cfg.auth_mode),
 			("account", account),
 			("account id", _text(me.get("accountId") or me.get("key")
-				or me.get("name"))),
-			("email", _text(me.get("emailAddress"))),
+				or me.get("name"), "")),
+			("email", _text(me.get("emailAddress"), "")),
 			("read-only", "yes (%s)" % cfg.sources["read_only"]
 				if cfg.read_only else "no"),
 			("url source", cfg.sources["url"]),
@@ -807,18 +899,23 @@ def cmd_whoami(args: argparse.Namespace, client: Jira) -> int:
 			("token source", "%s (%d chars, value never printed)"
 				% (cfg.sources["token"], len(cfg.token))),
 			("email source", cfg.sources["email"]),
-		]
-		for label, value in rows:
-			print("%-14s %s" % (label, value))
+		]))
 	summary("ok: %s on %s as %s" % (cfg.auth_mode.split(" ")[0], deployment,
 		account))
 	return OK
 
 
-def _field_list(raw: Optional[str], extra: Sequence[str] = ()) -> List[str]:
+def _field_list(raw: Optional[str], default: Sequence[str],
+		extra: Sequence[str] = ()) -> List[str]:
+	"""The caller's --fields, or the default THAT CALLER named.
+
+	`default` is a parameter rather than a module constant read from in here,
+	because `search` and `get` do not want the same list -- and a constant baked
+	in at this line is precisely how `get` came to inherit the search list.
+	"""
 	fields = [f.strip() for f in (raw or "").split(",") if f.strip()]
 	if not fields:
-		fields = list(DEFAULT_FIELDS)
+		fields = list(default)
 	for name in extra:
 		if name not in fields and "*all" not in fields:
 			fields.append(name)
@@ -826,18 +923,33 @@ def _field_list(raw: Optional[str], extra: Sequence[str] = ()) -> List[str]:
 
 
 def cmd_search(args: argparse.Namespace, client: Jira) -> int:
-	fields = _field_list(args.fields)
+	fields = _field_list(args.fields, SEARCH_FIELDS)
 	issues = client.search_issues(args.jql, fields, args.limit)
 	count = 0
 	if args.json:
-		rows = list(issues)
+		# strip_envelope per issue, not once over the payload: `expand` and
+		# `renderedFields` ride on EVERY issue, so here they are noise
+		# multiplied by the row count.
+		rows = [strip_envelope(issue) for issue in issues]
 		count = len(rows)
 		emit_json({"jql": args.jql, "fields": fields, "limit": args.limit,
 			"count": count, "issues": rows})
 	else:
+		# A table cannot be streamed a row at a time the way the old aligned
+		# output was -- md_table needs the whole body to decide whether there is
+		# one at all -- but the ITERATOR is still lazy, so paging stops at
+		# --limit exactly as before.
+		table = []
 		for issue in issues:
-			print(issue_row(issue))
+			table.append(issue_row(issue))
 			count += 1
+		print(md_heading(2, "Search"))
+		print("")
+		print("```jql")
+		print(_flat(args.jql))
+		print("```")
+		print("")
+		print(md_table(("Key", "Status", "Type", "Assignee", "Summary"), table))
 	summary("%d issue(s) for: %s" % (count, _flat(args.jql)))
 	if count == 0 and args.fail_empty:
 		sys.stderr.write("%s: no issue matched and --fail-empty was given\n"
@@ -846,60 +958,100 @@ def cmd_search(args: argparse.Namespace, client: Jira) -> int:
 	return OK
 
 
+def _render_body(text: str) -> None:
+	"""A Jira body, fenced and VERBATIM.
+
+	Jira Server answers v2 with wiki markup (`h2.`, `{code}`, `*bold*`), not
+	Markdown and not ADF.  Reformatting it here would mean guessing at somebody
+	else's markup and being wrong silently; a fenced block shows exactly what
+	the server holds.
+	"""
+	print("```")
+	print(text)
+	print("```")
+
+
 def _render_comments(payload: Any) -> None:
 	comments = (payload or {}).get("comments") or []
 	print("")
-	print("comments (%d)" % len(comments))
-	for comment in comments:
-		print("  %-12s %-24.24s %s" % (
-			_text(comment.get("id")),
-			_text(comment.get("author")),
-			_text(comment.get("created"))))
-		for line in str(comment.get("body") or "").splitlines() or [""]:
-			print("      %s" % line)
+	print(md_heading(2, "Comments (%d)" % len(comments)))
+	print("")
+	if not comments:
+		print("_(none)_")
+		return
+	for index, comment in enumerate(comments):
+		if index:
+			print("")
+		print(md_heading(3, "%s — %s" % (_text(comment.get("author")),
+			_text(comment.get("created")))))
+		print("")
+		_render_body(str(comment.get("body") or ""))
 
 
 def _render_changelog(payload: Any) -> None:
 	histories = (payload or {}).get("histories") or []
-	print("")
-	print("changelog (%d)" % len(histories))
+	rows = []
 	for entry in histories:
-		print("  %-24.24s %s" % (_text(entry.get("author")),
-			_text(entry.get("created"))))
+		# One ROW PER ITEM, not per history: a single edit that touched three
+		# fields is three changes, and a table cell holding all three is a cell
+		# nobody can sort, filter or read.
+		when = _text(entry.get("created"))
+		who = _text(entry.get("author"))
 		for item in entry.get("items") or []:
-			print("      %-18.18s %s -> %s" % (
-				_text(item.get("field")),
+			rows.append([when, who, _text(item.get("field")),
 				_flat(item.get("fromString") or item.get("from")),
-				_flat(item.get("toString") or item.get("to"))))
+				_flat(item.get("toString") or item.get("to"))])
+	print("")
+	print(md_heading(2, "Changelog (%d)" % len(histories)))
+	print("")
+	print(md_table(("When", "Who", "Field", "From", "To"), rows))
 
 
 def cmd_get(args: argparse.Namespace, client: Jira) -> int:
 	_validate_issue_key(args.key)
 	extra = ["comment"] if args.comments else []
-	fields = _field_list(args.fields, extra)
+	fields = _field_list(args.fields, ISSUE_FIELDS, extra)
 	query = {"fields": ",".join(fields)}
 	if args.changelog:
 		query["expand"] = "changelog"
 	issue = client.request("GET", API + "/issue/%s" % args.key, query=query,
 		subject=args.key) or {}
 	if args.json:
-		emit_json(issue)
+		emit_json(strip_envelope(issue))
 		summary("%s" % _text(issue.get("key"), args.key))
 		return OK
 
 	fields_payload = issue.get("fields") or {}
-	rows = [
-		("key", _text(issue.get("key"), args.key)),
-		("summary", _flat(fields_payload.get("summary"))),
-		("status", _text(fields_payload.get("status"))),
-		("type", _text(fields_payload.get("issuetype"))),
-		("priority", _text(fields_payload.get("priority"))),
-		("assignee", _text(fields_payload.get("assignee"))),
-		("reporter", _text(fields_payload.get("reporter"))),
-		("updated", _text(fields_payload.get("updated"))),
-	]
-	for label, value in rows:
-		print("%-12s %s" % (label, value))
+	key = _text(issue.get("key"), args.key)
+	title = _flat(fields_payload.get("summary"), "")
+	# The key and the summary live in the heading and NOWHERE else.  Repeating
+	# them as table rows underneath is the duplication this rendering exists to
+	# remove: a reader who has the title does not need it again two lines down.
+	print(md_heading(1, "%s — %s" % (key, title) if title else key))
+	print("")
+	print(md_kv([
+		("status", _text(fields_payload.get("status"), "")),
+		("type", _text(fields_payload.get("issuetype"), "")),
+		("priority", _text(fields_payload.get("priority"), "")),
+		("resolution", _text(fields_payload.get("resolution"), "")),
+		("assignee", _text(fields_payload.get("assignee"), "")),
+		("reporter", _text(fields_payload.get("reporter"), "")),
+		("components", _names(fields_payload.get("components"))),
+		("labels", _names(fields_payload.get("labels"))),
+		("fix versions", _names(fields_payload.get("fixVersions"))),
+		("created", _text(fields_payload.get("created"), "")),
+		("updated", _text(fields_payload.get("updated"), "")),
+		("self", _text(issue.get("self"), "")),
+	]))
+	description = str(fields_payload.get("description") or "").strip()
+	if description:
+		# Omitted entirely when there is none: an empty `## Description` reads
+		# as "the description is blank", which is a different claim from "this
+		# issue has no description field in the response".
+		print("")
+		print(md_heading(2, "Description"))
+		print("")
+		_render_body(description)
 	if args.comments:
 		_render_comments(fields_payload.get("comment"))
 	if args.changelog:
@@ -910,6 +1062,18 @@ def cmd_get(args: argparse.Namespace, client: Jira) -> int:
 
 def _transition_target(transition: dict) -> str:
 	return _text((transition.get("to") or {}).get("name"))
+
+
+def _transitions_document(available: Sequence[dict]) -> str:
+	"""The transition table, shared by `transitions` and by the failed lookup.
+
+	`transition` prints this same table when a name resolves to nothing, and a
+	second copy of the rendering here is a second place for the two to drift.
+	"""
+	return "%s\n\n%s" % (md_heading(2, "Transitions"),
+		md_table(("Id", "Name", "To"),
+			[[_text(t.get("id")), _text(t.get("name")), _transition_target(t)]
+				for t in available]))
 
 
 def cmd_transitions(args: argparse.Namespace, client: Jira) -> int:
@@ -924,11 +1088,7 @@ def cmd_transitions(args: argparse.Namespace, client: Jira) -> int:
 	if args.json:
 		emit_json({"key": args.key, "transitions": available})
 	else:
-		for transition in available:
-			print("%-8s %-28.28s -> %s" % (
-				_text(transition.get("id")),
-				_text(transition.get("name")),
-				_transition_target(transition)))
+		print(_transitions_document(available))
 	summary("%d transition(s) for %s" % (len(available), args.key))
 	return OK
 
@@ -938,11 +1098,11 @@ def cmd_projects(args: argparse.Namespace, client: Jira) -> int:
 	if args.json:
 		emit_json({"count": len(projects), "projects": projects})
 	else:
-		for project in projects:
-			print("%-14s %-10s %s" % (
-				_text(project.get("key")),
-				_text(project.get("id")),
-				_flat(project.get("name"))))
+		print(md_heading(2, "Projects"))
+		print("")
+		print(md_table(("Key", "Id", "Name"),
+			[[_text(p.get("key")), _text(p.get("id")), _flat(p.get("name"))]
+				for p in projects]))
 	summary("%d project(s)" % len(projects))
 	return OK
 
@@ -959,11 +1119,11 @@ def cmd_fields(args: argparse.Namespace, client: Jira) -> int:
 		emit_json({"count": len(fields), "grep": args.grep or None,
 			"fields": fields})
 	else:
-		for field in fields:
-			print("%-22s %-10s %s" % (
-				_text(field.get("id")),
-				"custom" if field.get("custom") else "system",
-				_flat(field.get("name"))))
+		print(md_heading(2, "Fields"))
+		print("")
+		print(md_table(("Id", "Kind", "Name"),
+			[[_text(f.get("id")), "custom" if f.get("custom") else "system",
+				_flat(f.get("name"))] for f in fields]))
 	summary("%d field(s)%s" % (len(fields),
 		" matching %r" % args.grep if needle else ""))
 	return OK
@@ -975,9 +1135,19 @@ def cmd_fields(args: argparse.Namespace, client: Jira) -> int:
 
 def _dry_run(method: str, base_url: str, path: str, body: Any) -> int:
 	"""Print exactly what WOULD be sent, send nothing, exit 0."""
+	print(md_heading(2, "Dry run"))
+	print("")
+	# Fenced, not tabled: a request line and a JSON body are code, and a table
+	# cell would mangle both -- the body's own braces and quotes survive a fence
+	# untouched, which is the entire point of showing them.
+	print("```")
 	print("%s %s" % (method, api_url(base_url, path)))
+	print("```")
 	if body is not None:
+		print("")
+		print("```json")
 		print(json.dumps(body, indent=2, sort_keys=True, ensure_ascii=False))
+		print("```")
 	summary("dry run: nothing was sent")
 	return OK
 
@@ -1019,8 +1189,13 @@ def cmd_comment(args: argparse.Namespace, client: Jira) -> int:
 	if args.json:
 		emit_json(created)
 	else:
-		print("%-12s %-24.24s %s" % (_text(created.get("id")),
-			_text(created.get("author")), _text(created.get("created"))))
+		print(md_heading(2, "Comment added"))
+		print("")
+		print(md_kv([
+			("id", _text(created.get("id"), "")),
+			("author", _text(created.get("author"), "")),
+			("created", _text(created.get("created"), "")),
+		]))
 	summary("comment %s added to %s" % (_text(created.get("id")), args.key))
 	return OK
 
@@ -1049,11 +1224,7 @@ def cmd_transition(args: argparse.Namespace, client: Jira) -> int:
 	if transition_id is None:
 		sys.stderr.write("%s: no single transition named %r on %s\n"
 			% (PROG, args.target, args.key))
-		for transition in available:
-			print("%-8s %-28.28s -> %s" % (
-				_text(transition.get("id")),
-				_text(transition.get("name")),
-				_transition_target(transition)))
+		print(_transitions_document(available))
 		summary("%d transition(s) available on %s; the set depends on the "
 			"current status" % (len(available), args.key))
 		return FINDING
@@ -1070,7 +1241,10 @@ def cmd_transition(args: argparse.Namespace, client: Jira) -> int:
 		emit_json({"key": args.key, "transition": str(transition_id),
 			"applied": True})
 	else:
-		print("%-14s transition %s applied" % (args.key, transition_id))
+		print(md_heading(2, "Transition applied"))
+		print("")
+		print(md_kv([("key", args.key),
+			("transition id", str(transition_id))]))
 	summary("%s transitioned via %s" % (args.key, transition_id))
 	return OK
 
@@ -1089,9 +1263,13 @@ def cmd_worklog(args: argparse.Namespace, client: Jira) -> int:
 	if args.json:
 		emit_json(logged)
 	else:
-		print("%-12s %-14s %s" % (_text(logged.get("id")),
-			_text(logged.get("timeSpent"), args.timespent),
-			_text(logged.get("started"))))
+		print(md_heading(2, "Worklog added"))
+		print("")
+		print(md_kv([
+			("id", _text(logged.get("id"), "")),
+			("time spent", _text(logged.get("timeSpent"), args.timespent)),
+			("started", _text(logged.get("started"), "")),
+		]))
 	summary("worklog %s added to %s" % (_text(logged.get("id")), args.key))
 	return OK
 
@@ -1108,23 +1286,27 @@ def cmd_attach(args: argparse.Namespace, client: Jira) -> int:
 	if args.dry_run:
 		# _dry_run() is not reused here: it prints a JSON body, and printing
 		# one for a multipart request would describe bytes that never go out.
+		print(md_heading(2, "Dry run"))
+		print("")
+		print("```")
 		print("%s %s" % ("POST", api_url(client.cfg.base_url,
 			API + "/issue/%s/attachments" % args.key)))
+		print("```")
+		print("")
 		# The NAME and the COUNT, never the content: a dry run of a binary
 		# attachment would otherwise dump the file into the terminal.
-		print("%-12s %s" % ("name", upload_name))
-		print("%-12s %d" % ("bytes", len(data)))
+		print(md_kv([("name", upload_name), ("bytes", len(data))]))
 		summary("dry run: nothing was sent")
 		return OK
 	created = client.upload_attachment(args.key, upload_name, data)
 	if args.json:
 		emit_json(created)
 	else:
-		for item in created:
-			print("%-12s %-40.40s %s" % (
-				_text(item.get("id")),
-				_flat(item.get("filename"), upload_name),
-				_text(item.get("size"))))
+		print(md_heading(2, "Attached"))
+		print("")
+		print(md_table(("Id", "Filename", "Size"),
+			[[_text(item.get("id")), _flat(item.get("filename"), upload_name),
+				_text(item.get("size"))] for item in created]))
 	summary("%s attached to %s as %s (%d attachment(s) created)"
 		% (args.path, args.key, upload_name, len(created)))
 	return OK
@@ -1160,7 +1342,7 @@ def build_parser() -> argparse.ArgumentParser:
 	common.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
 		help="HTTP timeout in seconds (default: %(default)s)")
 	common.add_argument("--json", action="store_true",
-		help="emit one JSON document on stdout instead of aligned text")
+		help="emit one JSON document on stdout instead of the Markdown one")
 
 	dry = argparse.ArgumentParser(add_help=False)
 	dry.add_argument("--dry-run", action="store_true",
@@ -1178,7 +1360,7 @@ def build_parser() -> argparse.ArgumentParser:
 		help="run a JQL query (POST on both deployments)")
 	search.add_argument("jql", help="the JQL query")
 	search.add_argument("--fields", help="comma-separated field list "
-		"(default: %s); pass '*all' to opt out" % ",".join(DEFAULT_FIELDS))
+		"(default: %s); pass '*all' to opt out" % ",".join(SEARCH_FIELDS))
 	search.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
 		help="total issues across pages (default: %(default)s)")
 	search.add_argument("--fail-empty", action="store_true",
@@ -1186,7 +1368,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 	get = sub.add_parser("get", parents=[common], help="fetch one issue")
 	get.add_argument("key", help="issue key, e.g. PROJ-1234")
-	get.add_argument("--fields", help="comma-separated field list")
+	get.add_argument("--fields", help="comma-separated field list "
+		"(default: %s); pass '*all' to opt out" % ",".join(ISSUE_FIELDS))
 	get.add_argument("--comments", action="store_true",
 		help="request and render the comment thread")
 	get.add_argument("--changelog", action="store_true",

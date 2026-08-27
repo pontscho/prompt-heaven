@@ -39,9 +39,11 @@ python3 $J transition STR-1234 'In Progress'
 python3 $J worklog STR-1234 '2h 30m' --comment 'Root-caused the reconnect stall.'
 ```
 
-Add `--json` to any command to get one JSON document on stdout instead of the aligned text
-rendering — that is the form to parse. Add `--dry-run` to any **write** to print the exact
-method, URL and body and send nothing.
+**Every command writes Markdown to stdout** — headings and GitHub-flavoured tables, the same
+shape this project's MCP servers reply in — so a result can be pasted into a document or a
+comment unchanged. The one-line count goes to stderr instead, which keeps a pipeline's stdout
+clean. Add `--json` for the machine-readable form, and `--dry-run` to any **write** to print
+the exact method, URL and body while sending nothing.
 
 ## Setup
 
@@ -84,11 +86,14 @@ interceptable channel carrying a Personal Access Token.
 | `projects` | Every project you can see. |
 | `fields` | Every field, with its ID and whether it is custom. `--grep TEXT` filters by name — this is how you map a display name onto its `customfield_NNNNN` ID. |
 
-`search` defaults to a small explicit field list
-(`summary,status,assignee,reporter,issuetype,priority,updated`) rather than whatever the
-server's default happens to be. That is not an optimisation: Data
-Center's search defaults to `*navigable` while its get-issue defaults to `*all`, so being
-explicit is the only behaviour that is the same on both deployments. `--fields '*all'` opts out.
+`search` and `get` carry **separate** default field lists, and that separation is deliberate.
+`search` asks for a compact set (`summary,status,assignee,reporter,issuetype,priority,updated`)
+because a description fetched for five hundred rows multiplies the payload for a column no
+table renders. `get` asks for that set plus `description`, `components`, `labels`,
+`resolution`, `created` and `fixVersions`. Neither defaults to whatever the server would
+choose, and that part is not an optimisation: Data Center's search defaults to `*navigable`
+while its get-issue defaults to `*all`, so naming the fields is the only behaviour that means
+the same thing on both deployments. `--fields '*all'` opts out of either list.
 
 ### Writing
 

@@ -50,6 +50,15 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      and a `--name` carrying a path.  The byte layout is therefore pinned
      byte-for-byte against a hand-written expectation, and the outgoing headers
      are read off a transport that records the RAW body.
+  K  Markdown rendering.  The output is a DOCUMENT now, and a document has
+     failure modes aligned text did not have.  A summary containing `|` opens a
+     column its header does not have, and every row after it renders wrong --
+     silently, because the result is still valid Markdown, just not the table
+     that was meant.  A header row with no body rows is not a table in GFM at
+     all.  And a field rendered twice is a field that can disagree with itself,
+     which is why `get` is asserted with a COUNT of the key and the summary
+     rather than a presence check.  The group also pins the two field lists
+     apart in the direction that put `components` back into a rendered issue.
 
 NEGATIVE CONTROL (group H) -- mandatory, explicit, named
 --------------------------------------------------------
@@ -60,6 +69,8 @@ built on urljoin, a pager that over-fetches, a pager that ignores an empty page,
 a key validator that accepts anything -- and FAILS if any of them is accepted.
 The mirror assertion (the real implementations pass those same oracles) is
 recorded alongside, so a control that silently stopped running is visible.
+Groups J and K carry their own controls for the same reason, against the two
+oracles that are local to them: the multipart encoder and the cell escaper.
 
 Fixtures, such as they are, live in a `tempfile.mkdtemp()` workspace; group I
 asserts the repo tree is untouched and that ZERO bytecode was written.
@@ -75,6 +86,7 @@ Groups:
   H  negative control
   I  hygiene
   J  attachment upload: the one non-JSON request body
+  K  Markdown rendering: cell escaping, empty tables, and no duplicated fields
 
 Usage:
   python3 tests/test_jira_cli.py
@@ -109,6 +121,7 @@ GG = "G. issue key validation"
 GH = "H. negative control"
 GI = "I. hygiene"
 GJ = "J. attachment upload"
+GK = "K. markdown rendering"
 
 # Every environment variable the CLI reads, in both spellings.  Cleared before
 # each config case: a developer machine with a real JIRA_URL exported would
@@ -295,6 +308,35 @@ def missing_tokens(text, tokens):
     return [t for t in tokens if t not in text]
 
 
+def fenced_block(text, language=""):
+    """The contents of the first ```<language> fence in `text`, or ""."""
+    opener = "```" + language + "\n"
+    if opener not in text:
+        return ""
+    body = text.split(opener, 1)[1]
+    return body.split("```", 1)[0] if "```" in body else body
+
+
+def unescaped_pipes(line):
+    """`|` characters that still act as a COLUMN SEPARATOR in a table row.
+
+    An escaped `\\|` is counted by str.count("|") too, so it is subtracted back
+    out -- which is the whole difference between "this cell contains a pipe"
+    and "this row has an extra column".
+    """
+    return line.count("|") - line.count("\\|")
+
+
+def table_rows(text):
+    """Every line of `text` that looks like a Markdown table row."""
+    return [line for line in text.splitlines() if line.strip().startswith("|")]
+
+
+def has_heading(text, heading):
+    """True iff `heading` appears as a whole line (not as a substring)."""
+    return heading in [line.strip() for line in text.splitlines()]
+
+
 # ---------------------------------------------------------------------------
 # the ORACLES -- shared by the live groups and by the negative control
 # ---------------------------------------------------------------------------
@@ -379,6 +421,35 @@ def check_pages(got, calls, want_keys, want_requests):
     if len(calls) != want_requests:
         problems.append("made %d request(s), want %d" % (len(calls),
                                                          want_requests))
+    return problems
+
+
+# The real shape of the defect: a Jira summary is free text and pipes turn up
+# in it constantly ("parse|render", "A|B testing", "500|502 on deploy").
+PIPED = "parse|render crashes on boot"
+
+
+def check_escaper(fn):
+    """Problems for an `md_escape(text) -> str` implementation.
+
+    Shared by the live row and by the control below, so the row that blesses
+    the real escaper is passing an oracle that has been SHOWN to reject one
+    which lets a pipe through.
+    """
+    problems = []
+    got = fn(PIPED)
+    if "\\|" not in got:
+        problems.append("the pipe was not escaped as \\|: %r" % got)
+    if unescaped_pipes(got) != 0:
+        problems.append("%d separator pipe(s) survived in a cell value: %r"
+                        % (unescaped_pipes(got), got))
+    got = fn("two\nlines")
+    if "\n" in got:
+        problems.append("a newline survived, which ends the table row: %r"
+                        % got)
+    if fn("plain value") != "plain value":
+        problems.append("a value with nothing to escape was rewritten: %r"
+                        % fn("plain value"))
     return problems
 
 
@@ -743,11 +814,13 @@ def group_c(suite, mod):
     list(client.search_issues("project = DC", limit=10))
     got = (transport.calls[0].body or {}).get("fields")
     suite.record(GC, "default-fields-are-named-explicitly",
-                 problem_if(got != mod.DEFAULT_FIELDS,
-                            "sent %r, want %r" % (got, mod.DEFAULT_FIELDS)),
+                 problem_if(got != mod.SEARCH_FIELDS,
+                            "sent %r, want %r" % (got, mod.SEARCH_FIELDS)),
                  detail=["DC's search defaults to *navigable while get-issue "
                          "defaults to *all, so naming them is the only "
                          "portable behaviour",
+                         "the constant is SEARCH_FIELDS, not one list shared "
+                         "with `get`: group K pins the split itself",
                          "sent: %r" % (got,)])
 
     client, transport = client_with(mod, [
@@ -1019,12 +1092,17 @@ def group_e(suite, mod):
         if BASE_DC + path not in text:
             problems.append("the exact URL is not printed (want %s)"
                             % (BASE_DC + path))
-        body_text = text[text.index("{"):] if "{" in text else ""
+        # The body now lives inside a fenced ```json block, so it is read out
+        # of the fence rather than from the first brace onwards: taking the
+        # remainder of the document would swallow the closing fence and the
+        # case would fail on the RENDERING instead of on the body.
+        body_text = fenced_block(text, "json")
         try:
             printed = json.loads(body_text)
         except ValueError:
             printed = None
-            problems.append("the printed body is not JSON: %r" % body_text)
+            problems.append("the body is not a fenced ```json block that "
+                            "parses: %r" % body_text)
         if printed is not None and printed != want_body:
             problems.append("body %r, want %r" % (printed, want_body))
         suite.record(GE, "dry-run-%s-prints-and-sends-nothing" % name, problems,
@@ -1689,6 +1767,487 @@ def group_j(suite, mod, workspace):
 
 
 # ---------------------------------------------------------------------------
+# K. Markdown rendering
+# ---------------------------------------------------------------------------
+
+# `self` deliberately carries the NUMERIC id, the way Jira builds it, and not
+# the key: the "appears exactly once" rows below are about the RENDERING, and a
+# fixture whose URL happened to spell the key would make them unprovable.
+#
+# The summary carries a `|` because that is the defect, and `description` is
+# wiki markup whose second and third lines start with `#` -- outside a fence
+# those are Markdown headings, which is the second reason the body is fenced.
+SUMMARY_FRAGMENT = "crashes on boot"
+DESCRIPTION = "h2. Steps\n# boot the service\n# watch it fall over"
+
+GET_ISSUE = {
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog",
+    "id": "10042",
+    "self": BASE_DC + "/rest/api/2/issue/10042",
+    "key": "STR-7",
+    "renderedFields": None,
+    "fields": {
+        "summary": PIPED,
+        "status": {"name": "In Progress"},
+        "issuetype": {"name": "Bug"},
+        "priority": {"name": "High"},
+        "resolution": None,
+        "assignee": {"displayName": "A Person"},
+        "reporter": {"displayName": "B Person"},
+        "components": [{"name": "parser"}, {"name": "renderer"}],
+        # An array of BARE STRINGS, unlike the two beside it: Jira does not
+        # wrap a label in an object, and one flattener has to survive both.
+        "labels": ["regression"],
+        "fixVersions": [{"name": "2026.9.0"}],
+        "created": "2026-08-20T09:15:00.000+0000",
+        "updated": "2026-08-26T11:02:00.000+0000",
+        "description": DESCRIPTION,
+    },
+}
+
+# The same issue with every optional field empty: what the renderer does with
+# ABSENCE is a separate question from what it does with data.
+GET_BARE = {
+    "id": "10043",
+    "self": BASE_DC + "/rest/api/2/issue/10043",
+    "key": "STR-8",
+    "fields": {
+        "summary": "a quiet issue",
+        "status": {"name": "Open"},
+        "issuetype": {"name": "Task"},
+        "description": None,
+        "components": [],
+        "labels": [],
+        "fixVersions": [],
+    },
+}
+
+
+def render_get(mod, issue, tail=()):
+    """cmd_get over a scripted transport -> (exit code, stdout, stderr)."""
+    client, _transport = client_with(mod, [response(mod, 200, issue)],
+                                     deployment="Server")
+    args = parse_args(mod, connected(["get", issue["key"]] + list(tail)))
+    with captured() as (out, err):
+        code = mod.cmd_get(args, client)
+    return code, out.getvalue(), err.getvalue()
+
+
+def group_k(suite, mod):
+    # -- the escaper: the one helper the whole document rests on ----------
+    suite.record(GK, "escape-pipe-and-newline", check_escaper(mod.md_escape),
+                 detail=["md_escape(%r)" % PIPED,
+                         "     -> %r" % mod.md_escape(PIPED),
+                         "a `|` in a summary is not exotic -- parse|render, "
+                         "A|B test, 500|502 on deploy -- and it opens a column "
+                         "the header does not have"])
+
+    table = mod.md_table(("Key", "Summary"), [["STR-7", PIPED]])
+    lines = table.splitlines()
+    problems = []
+    if len(lines) != 3:
+        problems.append("a 1-row table rendered %d line(s)" % len(lines))
+    else:
+        want = unescaped_pipes(lines[0])
+        for index, line in enumerate(lines):
+            if unescaped_pipes(line) != want:
+                problems.append("line %d has %d separator pipe(s), the header "
+                                "has %d: %r"
+                                % (index, unescaped_pipes(line), want, line))
+    suite.record(GK, "escaped-cell-does-not-add-a-column", problems,
+                 detail=lines
+                 + ["every row must carry the same number of SEPARATOR pipes "
+                    "as the header, however many pipes the values contain"])
+
+    empty = mod.md_table(("Id", "Name", "To"), [])
+    problems = []
+    if empty.strip() != "_(none)_":
+        problems.append("rendered %r, want _(none)_" % empty)
+    if "|" in empty:
+        problems.append("a bare header survived into the empty case: %r"
+                        % empty)
+    suite.record(GK, "empty-table-is-the-none-marker", problems,
+                 detail=["got: %r" % empty,
+                         "a header row plus a delimiter row with NO body rows "
+                         "is not a table in GFM; it renders as two stray lines "
+                         "of pipes"])
+
+    one = mod.md_table(("Id", "Name"), [["31", "In Progress"]])
+    lines = one.splitlines()
+    problems = []
+    if len(lines) != 3:
+        problems.append("a 1-row table rendered %r" % (lines,))
+    else:
+        if "Id" not in lines[0] or "Name" not in lines[0]:
+            problems.append("no header row: %r" % lines[0])
+        if set(lines[1].replace("|", "").replace(" ", "")) != set("-"):
+            problems.append("no GFM delimiter row: %r" % lines[1])
+        if "In Progress" not in lines[2]:
+            problems.append("the body row is missing: %r" % lines[2])
+    suite.record(GK, "non-empty-table-has-header-and-delimiter", problems,
+                 detail=lines
+                 + ["ANTI-VACUITY: the row above would pass just as well if "
+                    "md_table returned _(none)_ for EVERYTHING"])
+
+    kv = mod.md_kv([("kept", "yes"), ("blank", ""), ("absent", None),
+                    ("spaces", "   "), ("zero", 0)])
+    problems = []
+    problems += ["%r was rendered although its value is empty" % label
+                 for label in ("blank", "absent", "spaces") if label in kv]
+    problems += ["%r was dropped although it has a value" % label
+                 for label in ("kept", "zero") if label not in kv]
+    suite.record(GK, "kv-omits-empty-values-but-not-falsey-ones", problems,
+                 detail=kv.splitlines()
+                 + ["a field the server did not return says nothing, and a "
+                    "row of dashes for each one buries the half that does",
+                    "0 is a VALUE, not an absence, so it stays -- an emptiness "
+                    "test written as `if not value` would drop it"])
+
+    got = mod.md_kv([("a", ""), ("b", None)])
+    suite.record(GK, "kv-with-nothing-left-is-the-none-marker",
+                 problem_if(got.strip() != "_(none)_", "got %r" % got),
+                 detail=["md_kv is md_table underneath, so the all-empty case "
+                         "has to fall through to the same marker rather than "
+                         "emit a two-line header"])
+
+    problems = []
+    for level, want in ((1, "# T"), (3, "### T"), (9, "###### T")):
+        if mod.md_heading(level, "T") != want:
+            problems.append("level %d -> %r, want %r"
+                            % (level, mod.md_heading(level, "T"), want))
+    suite.record(GK, "heading-levels-clamp-at-six", problems,
+                 detail=["Markdown has six levels; a seventh `#` renders as a "
+                         "paragraph that starts with hashes"])
+
+    # -- get: the subcommand item 2 was actually about --------------------
+    code, out, _err = render_get(mod, GET_ISSUE)
+    first = out.splitlines()[0] if out.strip() else ""
+    problems = []
+    if code != 0:
+        problems.append("cmd_get exited %r" % code)
+    if first != "# %s — %s" % (GET_ISSUE["key"], PIPED):
+        problems.append("heading is %r" % first)
+    suite.record(GK, "get-heading-is-key-em-dash-summary", problems,
+                 detail=[first,
+                         "the heading is NOT a table cell, so the summary is "
+                         "reproduced there exactly as Jira holds it"])
+
+    key_hits = out.count(GET_ISSUE["key"])
+    verbatim_hits = out.count(PIPED)
+    fragment_hits = out.count(SUMMARY_FRAGMENT)
+    problems = []
+    if key_hits != 1:
+        problems.append("the key appears %d time(s), want exactly 1"
+                        % key_hits)
+    if verbatim_hits != 1:
+        problems.append("the unescaped summary appears %d time(s), want 1"
+                        % verbatim_hits)
+    if fragment_hits != 1:
+        problems.append("%r appears %d time(s), want 1"
+                        % (SUMMARY_FRAGMENT, fragment_hits))
+    suite.record(GK, "get-key-and-summary-appear-exactly-once", problems,
+                 detail=["key %r: %d hit(s)" % (GET_ISSUE["key"], key_hits),
+                         "summary verbatim: %d hit(s); pipe-free fragment "
+                         "%r: %d hit(s)" % (verbatim_hits, SUMMARY_FRAGMENT,
+                                            fragment_hits),
+                         "a COUNT, not a presence: the old rendering printed "
+                         "both in a row AND nowhere else, and two copies of a "
+                         "field are two things that can disagree",
+                         "the FRAGMENT is counted too because a second, "
+                         "ESCAPED copy in a table cell would not match the "
+                         "verbatim summary and would slip through",
+                         "the stderr summary line carries the key as well and "
+                         "is deliberately not counted -- it is not part of the "
+                         "document"])
+
+    problems = []
+    if not has_heading(out, "## Description"):
+        problems.append("the Description section is missing")
+    if "```" not in out:
+        problems.append("the description body is not fenced")
+    suite.record(GK, "get-description-section-is-present", problems,
+                 detail=["headings: %r" % [ln for ln in out.splitlines()
+                                           if ln.startswith("#")]])
+
+    body = fenced_block(out).rstrip("\n")
+    suite.record(GK, "get-description-body-is-verbatim",
+                 problem_if(body != DESCRIPTION,
+                            "body %r, want %r" % (body, DESCRIPTION)),
+                 detail=["Jira Server answers v2 with WIKI MARKUP -- `h2.`, "
+                         "`{code}`, `*bold*` -- not Markdown and not ADF",
+                         "reformatting it means guessing at somebody else's "
+                         "markup and being wrong silently, so it is fenced and "
+                         "left exactly as it came",
+                         "two of its lines start with `#`: unfenced, they "
+                         "would become headings of this document"])
+
+    code, bare, _err = render_get(mod, GET_BARE)
+    problems = []
+    if code != 0:
+        problems.append("cmd_get exited %r" % code)
+    if has_heading(bare, "## Description"):
+        problems.append("an issue with no description still got the section")
+    if "```" in bare:
+        problems.append("an empty fenced block was emitted anyway")
+    suite.record(GK, "get-description-section-is-absent-without-one", problems,
+                 detail=bare.splitlines()
+                 + ["an empty `## Description` claims the description is "
+                    "BLANK, which is a different statement from 'there is "
+                    "none'"])
+
+    joined = "\n".join(table_rows(out))
+    problems = []
+    for label, want in (("components", "parser, renderer"),
+                        ("labels", "regression"),
+                        ("fix versions", "2026.9.0")):
+        if "| %s | %s |" % (label, want) not in joined:
+            problems.append("no `| %s | %s |` row" % (label, want))
+    if "{" in joined or "'name'" in joined:
+        problems.append("a raw object reached a table cell: %r" % joined)
+    suite.record(GK, "get-arrays-are-flattened-to-their-names", problems,
+                 detail=table_rows(out)
+                 + ["components and fixVersions are arrays of OBJECTS, labels "
+                    "is an array of STRINGS, and all three have to come out as "
+                    "names rather than as [{'name': ...}]"])
+
+    problems = []
+    if "resolution" in out:
+        problems.append("an unresolved issue got a `resolution` row anyway")
+    problems += ["an empty %s array still produced a row" % label
+                 for label in ("components", "labels", "fix versions")
+                 if label in bare]
+    suite.record(GK, "get-absent-fields-produce-no-row", problems,
+                 detail=table_rows(bare)
+                 + ["resolution is null on the full fixture and all three "
+                    "arrays are empty on the bare one; none of them may become "
+                    "a row of dashes"])
+
+    # -- --json payload hygiene -------------------------------------------
+    stripped = mod.strip_envelope(GET_ISSUE)
+    suite.record(GK, "strip-envelope-drops-expand-and-renderedFields",
+                 [("%r survived" % noise) for noise in
+                  ("expand", "renderedFields") if noise in stripped],
+                 detail=["kept: %r" % sorted(stripped),
+                         "`expand` lists what COULD have been expanded on the "
+                         "resource -- the same list for every issue, saying "
+                         "nothing about any one of them",
+                         "`renderedFields` is null unless the request expanded "
+                         "it, and nothing here ever does"])
+
+    problems = [("%r was dropped" % kept) for kept in
+                ("self", "key", "id", "fields") if kept not in stripped]
+    if stripped.get("fields") != GET_ISSUE["fields"]:
+        problems.append("the fields payload was altered")
+    if stripped.get("self") != GET_ISSUE["self"]:
+        problems.append("self was altered: %r" % stripped.get("self"))
+    suite.record(GK, "strip-envelope-preserves-self-key-id-fields", problems,
+                 detail=["ANTI-VACUITY: a stripper that returned {} would "
+                         "satisfy the row above perfectly"])
+
+    suite.record(GK, "strip-envelope-returns-a-copy",
+                 problem_if("expand" not in GET_ISSUE
+                            or "renderedFields" not in GET_ISSUE,
+                            "strip_envelope MUTATED its argument"),
+                 detail=["cmd_search calls it once per issue while walking an "
+                         "iterator; an in-place pop would edit the caller's "
+                         "own data on the way past"])
+
+    code, json_out, _err = render_get(mod, GET_ISSUE, tail=["--json"])
+    try:
+        payload = json.loads(json_out)
+    except ValueError:
+        payload = None
+    problems = []
+    if code != 0:
+        problems.append("cmd_get --json exited %r" % code)
+    if payload is None:
+        problems.append("stdout is not one JSON document: %r" % json_out[:120])
+    else:
+        problems += ["%r reached the --json payload" % noise
+                     for noise in ("expand", "renderedFields")
+                     if noise in payload]
+        problems += ["%r is missing from the --json payload" % kept
+                     for kept in ("self", "key", "fields")
+                     if kept not in payload]
+    suite.record(GK, "get-json-payload-is-stripped", problems,
+                 detail=["keys: %r" % (sorted(payload) if payload else None)])
+
+    page = {"issues": [dict(GET_ISSUE, key="STR-7"),
+                       dict(GET_ISSUE, key="STR-8")],
+            "startAt": 0, "total": 2}
+    client, _t = client_with(mod, [response(mod, 200, page)],
+                             deployment="Server")
+    args = parse_args(mod, connected(["search", "project = STR", "--json"]))
+    with captured() as (out_json, _err):
+        code = mod.cmd_search(args, client)
+    try:
+        payload = json.loads(out_json.getvalue())
+    except ValueError:
+        payload = None
+    rows = (payload or {}).get("issues") or []
+    problems = []
+    if code != 0:
+        problems.append("cmd_search --json exited %r" % code)
+    if len(rows) != 2:
+        problems.append("%d issue(s) in the payload, want 2" % len(rows))
+    for row in rows:
+        problems += ["%r reached issue %r" % (noise, row.get("key"))
+                     for noise in ("expand", "renderedFields") if noise in row]
+        problems += ["issue %r lost %r" % (row.get("key"), kept)
+                     for kept in ("self", "fields") if kept not in row]
+    suite.record(GK, "search-json-issues-are-stripped", problems,
+                 detail=["issue keys: %r" % keys_of(rows),
+                         "the two noise keys ride on EVERY issue, so here they "
+                         "are not one wasted key but one per row"])
+
+    # -- the field-list split ---------------------------------------------
+    suite.record(GK, "search-fields-excludes-description",
+                 problem_if("description" in mod.SEARCH_FIELDS,
+                            "SEARCH_FIELDS carries description"),
+                 detail=["SEARCH_FIELDS: %r" % (mod.SEARCH_FIELDS,),
+                         "a 500-row search would otherwise carry 500 issue "
+                         "descriptions for a column the table does not render"])
+
+    suite.record(GK, "issue-fields-includes-components",
+                 problem_if("components" not in mod.ISSUE_FIELDS,
+                            "ISSUE_FIELDS is missing components"),
+                 detail=["ISSUE_FIELDS: %r" % (mod.ISSUE_FIELDS,),
+                         "`get` inheriting the SEARCH list is exactly how "
+                         "components went missing: nobody removed it, nobody "
+                         "ever asked for it"])
+
+    lost = [f for f in mod.SEARCH_FIELDS if f not in mod.ISSUE_FIELDS]
+    suite.record(GK, "issue-fields-extends-rather-than-replaces",
+                 problem_if(lost, "get would lose %r" % lost),
+                 detail=["splitting the list must not cost `get` a column it "
+                         "already rendered"])
+
+    client, transport = client_with(mod, [response(mod, 200, GET_ISSUE)],
+                                    deployment="Server")
+    args = parse_args(mod, connected(["get", "STR-7"]))
+    with captured() as (_out, _err):
+        mod.cmd_get(args, client)
+    query = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(transport.calls[0].url).query)
+    sent = (query.get("fields") or [""])[0].split(",")
+    absent = [f for f in ("components", "description", "labels", "resolution")
+              if f not in sent]
+    suite.record(GK, "get-actually-requests-the-issue-fields",
+                 problem_if(absent, "not requested: %r" % absent),
+                 detail=["fields=%s" % ",".join(sent),
+                         "the constant is only half the fix -- the REQUEST has "
+                         "to carry it, or components renders as absent forever "
+                         "and the table is honest about the wrong thing"])
+
+    # -- the remaining subcommands, in outline ----------------------------
+    client, _t = client_with(mod, [response(mod, 200, {
+        "issues": [dict(GET_ISSUE)], "startAt": 0, "total": 1})],
+        deployment="Server")
+    args = parse_args(mod, connected(["search", "project = STR"]))
+    with captured() as (out_search, _err):
+        code = mod.cmd_search(args, client)
+    text = out_search.getvalue()
+    rows = table_rows(text)
+    problems = []
+    if code != 0:
+        problems.append("exit %r" % code)
+    if not has_heading(text, "## Search"):
+        problems.append("no `## Search` heading")
+    if fenced_block(text, "jql").strip() != "project = STR":
+        problems.append("the JQL is not in a fenced block: %r"
+                        % fenced_block(text, "jql"))
+    if not rows:
+        problems.append("no table at all")
+    else:
+        header = [c.strip() for c in rows[0].strip().strip("|").split("|")]
+        if header != ["Key", "Status", "Type", "Assignee", "Summary"]:
+            problems.append("header row: %r" % header)
+        if unescaped_pipes(rows[0]) != unescaped_pipes(rows[-1]):
+            problems.append("the piped summary changed the column count: %r"
+                            % rows[-1])
+    suite.record(GK, "search-renders-the-five-column-table", problems,
+                 detail=text.splitlines())
+
+    available = [{"id": "31", "name": "Start Progress",
+                  "to": {"name": "In Progress"}}]
+    client, _t = client_with(mod, [response(mod, 200,
+                                            {"transitions": available})],
+                             deployment="Server")
+    args = parse_args(mod, connected(["transitions", "STR-7"]))
+    with captured() as (out_tr, _err):
+        code = mod.cmd_transitions(args, client)
+    text = out_tr.getvalue()
+    rows = table_rows(text)
+    problems = []
+    if code != 0:
+        problems.append("exit %r" % code)
+    if not has_heading(text, "## Transitions"):
+        problems.append("no `## Transitions` heading")
+    if not rows:
+        problems.append("no table at all")
+    elif [c.strip() for c in rows[0].strip().strip("|").split("|")] \
+            != ["Id", "Name", "To"]:
+        problems.append("header row: %r" % rows[0])
+    if "| 31 | Start Progress | In Progress |" not in text:
+        problems.append("the transition row is not rendered")
+    suite.record(GK, "transitions-renders-the-id-name-to-table", problems,
+                 detail=text.splitlines())
+
+    client, _t = client_with(mod, [response(mod, 200, {
+        "displayName": "A Person", "accountId": "5b10a2",
+        "emailAddress": EMAIL})], url=BASE_CLOUD, email=EMAIL,
+        deployment="Cloud")
+    args = parse_args(mod, connected(["whoami", "--email", EMAIL],
+                                     url=BASE_CLOUD))
+    with captured() as (out_who, _err):
+        code = mod.cmd_whoami(args, client)
+    text = out_who.getvalue()
+    problems = []
+    if code != 0:
+        problems.append("exit %r" % code)
+    if not has_heading(text, "## Jira connection"):
+        problems.append("no `## Jira connection` heading")
+    if "| Field | Value |" not in text:
+        problems.append("the connection facts are not a kv table")
+    if TOKEN in text:
+        problems.append("THE TOKEN VALUE WAS PRINTED")
+    if "value never printed" not in text:
+        problems.append("the token row lost its 'value never printed' wording")
+    suite.record(GK, "whoami-is-a-markdown-kv-table", problems,
+                 detail=text.splitlines()
+                 + ["the rendering changed; the rule that the token VALUE is "
+                    "never printed did not, so it is re-asserted through the "
+                    "new renderer rather than assumed to have survived"])
+
+    # -- the NEGATIVE CONTROL for this group ------------------------------
+
+    def naive_escaper(text):
+        """Collapses newlines and leaves the pipe alone -- the live defect.
+
+        It looks finished: every value is one line and every row is one row,
+        and the table renders correctly right up until a summary contains a `|`.
+        """
+        return " ".join(str(text).splitlines())
+
+    caught = check_escaper(naive_escaper)
+    suite.record(GK, "control-escaper-that-ignores-the-pipe-is-rejected",
+                 problem_if(not caught,
+                            "the oracle ACCEPTED an escaper that lets a "
+                            "separator pipe through, so it is not protecting "
+                            "the table"),
+                 detail=["mutant: newlines collapsed, `|` left alone",
+                         "rejected with: %s" % ("; ".join(caught) or "NOTHING")])
+
+    suite.record(GK, "control-real-escaper-passes-the-same-oracle",
+                 check_escaper(mod.md_escape),
+                 detail=["the MIRROR: without it, an oracle that rejected "
+                         "EVERYTHING would satisfy the row above and prove "
+                         "nothing"])
+
+    mod.reset_deployment_cache()
+
+
+# ---------------------------------------------------------------------------
 # I. hygiene
 # ---------------------------------------------------------------------------
 
@@ -1753,7 +2312,8 @@ def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
                     title="Jira CLI: auth, URL join, deployment probe, both "
-                          "paging models, config, write guards, error mapping",
+                          "paging models, config, write guards, error "
+                          "mapping, Markdown rendering",
                     opts=opts, mode="grouped")
 
     before = repo_tree()
@@ -1777,8 +2337,11 @@ def run(opts=None):
             group_g(suite, mod)
             group_h(suite, mod)
             group_j(suite, mod, workspace.path)
+            group_k(suite, mod)
         finally:
             mod.reset_deployment_cache()
+        # group_i LAST, always: it asserts the repo tree is exactly as this run
+        # found it, so every group that could write has to have finished.
         group_i(suite, before, pyc_before, workspace.path)
 
     suite.print_summary()
