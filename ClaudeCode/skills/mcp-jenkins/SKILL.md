@@ -143,7 +143,7 @@ Console output, pipeline overview, or one stage's log — three modes, three dif
 * `start_line` (aliases `start`, `startLine`, **`offset`**) — int, 0-based, default `0`.
 * `max_lines` (aliases `max`, `maxLines`) — int, default `1000`.
 
-`mode="full"` → the fenced console text plus the row line.
+`mode="full"` → the fenced console text plus the row line. The console body is read to at most **32 MiB** before line paging; past that a `body capped at ... bytes` line says so and `totalLines` counts only the part read. Narrow with `mode="pipeline"` or a stage log rather than raising anything.
 `mode="pipeline"` → the stage table (id, stage, status, duration) plus a `stage errors` block naming the failing stage — this is how you find WHICH stage broke before pulling any log.
 `mode="stage"` → that stage's log. Five strategies are tried in order (stage `wfapi/log`, child flow nodes, the descriptor's `_links.log.href`, flow-graph traversal, and finally slicing `consoleText` between stage markers), so it still returns something on older Pipeline plugin versions.
 
@@ -205,11 +205,13 @@ States: `started` (with `buildNumber` + `buildUrl`), `cancelled`, `pending` (wit
 * `job_path` — **required**.
 * `parameters` — as `start_build`.
 * `delay_sec` — as `start_build`.
-* `timeout_sec` — int, default `1800` (overall budget).
+* `timeout_sec` — int, default `1800` (overall budget), clamped to 1..3600.
 * `poll_interval_sec` (aliases `pollInterval`, `pollIntervalSec`) — int, default `5`, minimum 1.
 * `log_tail` (aliases `logTail`, `tail`) — int, default `0`. Include the last N console lines.
 
-The document ends with `**result**: <result> — phase <completed|timeout>`. Earlier phases report where they stopped (`start_build` / `queue`) and embed that step's own reply. **Tail-biased** — a truncated reply keeps the verdict and the end of the log.
+The document ends with `**result**: <result> — phase <completed|timeout|polling_failed>`. Earlier phases report where they stopped (`start_build` / `queue`) and embed that step's own reply. **Tail-biased** — a truncated reply keeps the verdict and the end of the log.
+
+`polling_failed` means the status poll failed **3 consecutive times** (a Jenkins restart, a 502 from the proxy, a 30x to SSO) and the wait was abandoned — the build was started and may still be running, so re-check it with `get_build_status`. The failing poll's own reply is embedded as evidence, and the log tail is skipped rather than adding a fourth failure. A single failed poll is tolerated: the counter resets on the next success.
 
 ### `inspect_build` (`inspect`, `summary`, `summarize_build`, `overview`)
 **RECIPE.** One call for the whole investigation: `get_job_info` + `get_build_status` + `get_build_log mode="pipeline"`, fetched in PARALLEL, then the test report and log tail as needed.
@@ -229,6 +231,8 @@ Sections: job → build → pipeline → test report → log tail → `**verdict
 * `return_type` (aliases `returnType`, `type`) — `text` (default) | `base64` for binaries.
 
 Returns contentType, contentLength, `encoding` for base64, and the content in a fence. Binaries are large: set `max_answer_chars` deliberately, and note that a base64 blob is ONE line, so it is the one payload where the cut cannot land on a line boundary.
+
+A response body is read to at most **32 MiB**; past that the read stops and a `truncatedBytes` field says so. That is an OOM guard, not a paging mechanism — nothing above it would have fitted in a reply anyway — but a `truncatedBytes` artifact is a PREFIX of the file, not the file.
 
 ## Function alias table
 

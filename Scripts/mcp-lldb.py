@@ -34,6 +34,7 @@ import fcntl
 import termios
 import logging
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Any
 
 
@@ -266,6 +267,26 @@ class LldbSession:
         self.slave_fd: Optional[int] = None
         self.target: Optional[str] = None
         self.ready = False
+        # ONE command channel, so ONE lock. execute_command() writes the command
+        # into the PTY master (line 315) and read_until_prompt() then drains the
+        # reply off that same fd (line 342) until it sees `(lldb) `. Two
+        # coroutines doing that at once do not produce two answers: they produce
+        # two writes lldb interleaves as it pleases, and then each os.read()
+        # keeps whichever bytes it won the race for and returns at whichever
+        # prompt it saw first — so both callers get a spliced reply and neither
+        # can tell. Requests are dispatched concurrently now (McpServer.run), so
+        # this is the state that has to be defended.
+        #
+        # Held for a whole HANDLER, not a whole command, because the composites
+        # are the sharp edge: frame_info does `frame select N` then `frame
+        # variable` (line 755+), set_breakpoint parses a breakpoint number out of
+        # one reply and modifies THAT number in the next (line 568+), and a
+        # foreign command landing between the two answers — plausibly, silently —
+        # about a different frame or a different breakpoint.
+        #
+        # Constructed only from handle_lldb_start (line 445), i.e. from inside the
+        # running loop, which is what 3.9's Lock still binds itself to.
+        self.lock = asyncio.Lock()
 
     async def start(self) -> str:
         """Start the LLDB process with a PTY."""
@@ -912,6 +933,40 @@ async def handle_lldb_help(mgr: SessionManager, args: dict) -> str:
         return f"Failed to get help: {e}"
 
 
+async def _run_locked(mgr: SessionManager, handler, args: dict) -> str:
+    """Await one handler, serialized against the session it names.
+
+    Requests are dispatched CONCURRENTLY now (McpServer.run), which is what keeps
+    ping / list_sessions / a second session answerable while a 60s `continue`
+    burns down. Concurrency is safe for everything in this module EXCEPT one
+    session's command channel, so that is the only thing serialized, and the lock
+    lives on the SESSION (LldbSession.lock) rather than on the server: commands
+    against session A still queue in order, while session B and every stateless
+    call proceed.
+
+    A handler with no `session_id` — lldb_start, lldb_list_sessions,
+    lldb_mcp_status — takes no lock. start's session is not in the registry yet
+    and gets a PTY of its own; the other two only read the registry, with no
+    `await` inside the read, so the event loop cannot preempt them mid-walk.
+    Locking those would be the very stall this fix exists to remove.
+
+    An unknown session_id also takes no lock and fails INSIDE the handler, where
+    mgr.get() already produces "No active LLDB session". Same for a session that
+    lldb_terminate cleaned up while this call waited on its lock: the wait ends,
+    the registry lookup fails, and the caller is told so — instead of a command
+    being written into a closed PTY fd whose number the OS has since handed out
+    to something else.
+    """
+    session_id = args.get("session_id")
+    # isinstance guard, not a truthiness check: the wire can carry an unhashable
+    # session_id (a list, a dict), and dict.get() raises TypeError on those.
+    session = mgr.sessions.get(session_id) if isinstance(session_id, str) else None
+    if session is None:
+        return await handler(mgr, args)
+    async with session.lock:
+        return await handler(mgr, args)
+
+
 async def handle_lldb_call(mgr: SessionManager, args: dict) -> str:
     """Dispatcher: call any LLDB tool by name. Used by the AI via the lldb-mcp skill."""
     function = args.get("function", "")
@@ -937,7 +992,7 @@ async def handle_lldb_call(mgr: SessionManager, args: dict) -> str:
     # The ceiling is imposed HERE, at the one point every function passes
     # through, so the per-function head/tail decision lives in one auditable
     # table instead of scattered across 29 return statements.
-    return _apply_cap(function, params, await handler(mgr, params))
+    return _apply_cap(function, params, await _run_locked(mgr, handler, params))
 
 
 # ============================================================
@@ -1174,12 +1229,21 @@ class McpServer:
             )
 
         try:
-            result = await handler(self.manager, args)
-            if name != "lldb_call":
-                # lldb_call has already capped its inner function's reply under
-                # THAT function's policy. Capping again here would append a
+            if name == "lldb_call":
+                # No lock here, and no cap here. The dispatcher touches no
+                # session of its own: it resolves the inner function and calls it
+                # through _run_locked, which takes that session's lock, and
+                # _apply_cap's under THAT function's policy. Taking the lock here
+                # too would be a nested acquire of a non-reentrant asyncio.Lock —
+                # an instant, permanent deadlock holding the session hostage —
+                # for any caller who puts session_id at the top level (where
+                # nothing reads it) as well as inside params, which is an easy
+                # mistake for a model to make. Capping here too would append a
                 # second closing line whenever the inner call raised the ceiling,
                 # and the convention allows exactly one.
+                result = await handler(self.manager, args)
+            else:
+                result = await _run_locked(self.manager, handler, args)
                 result = _apply_cap(name, args, result)
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
@@ -1190,9 +1254,36 @@ class McpServer:
         loop = asyncio.get_running_loop()
         log.debug("mcp-lldb server ready (stdio)")
 
+        # One task per request, and stdin read on an executor of its OWN. This
+        # loop used to await the handler on the same line of control it later
+        # awaited the readline, so while a handler ran the server did not read
+        # stdin at all: every other request sat unread in the pipe, timed out
+        # client-side (~60s) and was then answered against an id the client had
+        # already abandoned. From the caller's chair that is a dead server, and
+        # restarting it was the only lever they had.
+        #
+        # A debugger is the worst possible place for that. `run` / `continue` /
+        # `attach` are 60s calls here, read_until_prompt polls to the deadline,
+        # and a `continue` that hits no breakpoint burning the full 60s is NORMAL
+        # interaction, not an error path — while a debugger is exactly the tool a
+        # caller pings concurrently ("is it still alive? which sessions exist?").
+        #
+        # Handlers stay on the event loop: they are already coroutines and every
+        # wait inside them is already an await, so tasks give real concurrency
+        # with no thread pool to add. Only the ONE genuinely blocking call —
+        # sys.stdin.readline — needs a thread, and it gets a dedicated executor
+        # rather than the default one so that nothing else can ever be queued
+        # ahead of the read that keeps this server listening.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lldb-stdin")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    # ValueError: readline on an already-closed stdin.
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     log.debug("stdin EOF — shutting down")
                     break
@@ -1204,25 +1295,78 @@ class McpServer:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as e:
-                    log.debug(f"JSON parse error: {e}")
+                    # Answering is not optional: a bare `continue` here left the
+                    # caller's request id unanswered until it timed out.
+                    log.warning("Invalid JSON: %s", e)
+                    self._write(self._error(None, -32700, f"Parse error: {e}"))
+                    continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() and take the
+                    # process down with an AttributeError that escaped run() —
+                    # and an MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
                     continue
 
-                try:
-                    response = await self.handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    log.debug("→ RAW: %s", json.dumps(response))
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
 
         finally:
+            # Cancel BEFORE cleanup, in this order on purpose. A cancelled
+            # handler is suspended at an await (read_until_prompt's sleep, a
+            # wait_for), so cancellation is delivered there and it can never
+            # execute another os.read on a PTY fd cleanup_all is about to close.
+            # cleanup_all's own first await then gives every cancelled task the
+            # scheduling slot it needs to unwind and drop its session lock.
+            # `cancel()` schedules, it does not run callbacks, and there is no
+            # await in the loop body — so the done_callback cannot mutate
+            # `inflight` while it is being iterated.
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
             log.debug("Cleaning up all sessions")
             await self.manager.cleanup_all()
+
+    async def _serve(self, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await self.handle_message(msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            # Exception, NOT BaseException: a CancelledError from the shutdown
+            # path must propagate so the task actually ends cancelled.
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread — handlers are coroutines, not
+        pool jobs — so two replies cannot interleave inside one write and this
+        needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ RAW: %s", out)
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, this escaped run() and killed the process — taking every
+            # live debug session with it.
+            log.warning("stdout write failed: %s", exc)
 
 
 # ============================================================
@@ -1254,6 +1398,14 @@ def main() -> None:
         asyncio.run(server.run())
     except KeyboardInterrupt:
         log.debug("Server stopped")
+    # stdin is closed (or Ctrl-C arrived), so the client is gone and run()'s
+    # finally has already cleaned up every LLDB session. What is left is the
+    # stdin reader thread, which lives in the server's own executor rather than
+    # the loop's default one — so asyncio does not join it, but
+    # concurrent.futures registers an atexit hook that WOULD, and a thread parked
+    # in sys.stdin.readline never returns to be joined. Every reply is flushed as
+    # it is written and logging flushes per record, so there is nothing to drain.
+    os._exit(0)
 
 
 if __name__ == "__main__":

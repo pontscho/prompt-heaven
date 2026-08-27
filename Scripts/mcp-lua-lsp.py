@@ -15,6 +15,8 @@ Usage:
 """
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -23,6 +25,7 @@ import re
 import shutil
 import sys
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 
@@ -225,7 +228,18 @@ class LuaLsClient:
         self._next_id: int = 1
         self._pending: Dict[int, asyncio.Future] = {}
         self._diagnostics: Dict[str, List] = {}
-        self._diag_events: Dict[str, asyncio.Event] = {}
+        # Diagnostics are a LEVEL, not an edge. _diag_gen counts publishes per
+        # uri and is bumped in the same breath as _diagnostics[uri], so a caller
+        # can sample it, cause a didOpen, and then tell whether the answering
+        # publish has landed yet — rather than clearing an Event and waiting for
+        # a push that, for an already-open file, had already arrived and will
+        # never repeat (see get_diagnostics).
+        self._diag_gen: Dict[str, int] = {}
+        # One future PER WAITER, not one shared Event: two concurrent
+        # get_diagnostics calls on the same uri used to clear each other's Event
+        # and send one of them to its timeout. The reader wakes them all and
+        # drops the list.
+        self._diag_waiters: Dict[str, List[asyncio.Future]] = {}
         self._opened_files: set = set()
         self._reader_task: Optional[asyncio.Task] = None
         self._indexing_done: asyncio.Event = asyncio.Event()
@@ -430,9 +444,12 @@ class LuaLsClient:
                 uri = params.get("uri", "")
                 diags = params.get("diagnostics", [])
                 self._diagnostics[uri] = diags
-                ev = self._diag_events.get(uri)
-                if ev:
-                    ev.set()
+                # Bump the generation in the SAME breath as the payload, and
+                # wake every waiter rather than setting one shared Event.
+                self._diag_gen[uri] = self._diag_gen.get(uri, 0) + 1
+                for fut in self._diag_waiters.pop(uri, ()):
+                    if not fut.done():
+                        fut.set_result(None)
                 log.debug(f"Diagnostics for {uri}: {len(diags)} items")
 
             # luals requests configuration — respond with empty settings per item
@@ -471,20 +488,30 @@ class LuaLsClient:
     async def _notify(self, method: str, params: Any) -> None:
         await self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
-    async def open_document(self, path: str) -> None:
-        """Send textDocument/didOpen if not already open."""
+    async def open_document(self, path: str) -> bool:
+        """Send textDocument/didOpen if not already open.
+
+        Returns True only when a notification actually went out. That return is
+        the "is a publish owed?" signal get_diagnostics needs: a didOpen obliges
+        luals to publish, an already-open document obliges it to nothing. Every
+        other caller ignores it, as before.
+
+        The membership check and the add have no await between them (read_text
+        is synchronous), so two concurrent callers cannot both send a didOpen
+        for the same uri.
+        """
         abs_path = pathlib.Path(path)
         if not abs_path.is_absolute():
             abs_path = pathlib.Path(self.project_root) / abs_path
         abs_path = abs_path.resolve()
         uri = abs_path.as_uri()
         if uri in self._opened_files:
-            return
+            return False
         try:
             content = abs_path.read_text(encoding="utf-8")
         except Exception as e:
             log.debug(f"Cannot read {abs_path}: {e}")
-            return
+            return False
         self._opened_files.add(uri)
         await self._notify("textDocument/didOpen", {
             "textDocument": {
@@ -494,6 +521,7 @@ class LuaLsClient:
                 "text": content,
             }
         })
+        return True
 
     # ── LSP method wrappers ──────────────────────────────────
 
@@ -572,15 +600,76 @@ class LuaLsClient:
         return resp.get("result") or []
 
     async def get_diagnostics(self, path: str, timeout: float = 10.0) -> List[dict]:
-        """Open document, wait for publishDiagnostics push, return diagnostics."""
+        """Open the document, wait only for a publish that is actually OWED, and
+        return the diagnostics.
+
+        This used to clear a per-uri Event and then wait for the push that would
+        set it again. For an already-open file that push had ALREADY arrived —
+        _prime_index opens up to ten sources at startup, so the common case is a
+        document luals published for long ago — and open_document no-ops on an
+        already-open uri, so nothing would ever re-publish. The clear discarded
+        the only signal there was, and every such call burned its full timeout
+        before returning the correct cached answer anyway. Measured on this file:
+        10.003 s of pure stall on a call that had its answer in hand.
+
+        The signal is a LEVEL, so it is read as one. Two samples taken around
+        the didOpen answer two separate questions:
+
+        * is a publish owed?  -> open_document's return, which is True only when
+          a didOpen actually went out (that being the only notification this
+          client ever sends), OR the document being open with nothing ever
+          published for it. The second clause is not decoration: with per-request
+          concurrency, the FIRST of two same-uri calls sends the didOpen and the
+          second finds the document already open, so on `sent` alone it would
+          skip the wait and hand back an empty cache while the publish it is
+          entitled to was still in flight. Measured, before the clause was
+          added: waiter #1 correct in 201 ms, waiters #2 and #3 count=0 in 3 ms.
+          This is the role purity's per-document version counter plays; this file
+          has no didChange path to bump one, so the notification's own return
+          plus "nothing published yet" is the whole signal.
+        * has it landed yet?  -> _diag_gen, bumped by the reader task next to
+          the payload. Sampled BEFORE the didOpen, so a publish that races in
+          while we send is still seen as fresh rather than waited for twice.
+
+        Membership in _diagnostics, not truthiness: a clean file publishes an
+        empty list, and that empty list is an answer, not a missing one.
+
+        Freshness is not traded away relative to the old code: the old code
+        waited for a push that a no-op didOpen could not provoke either, so it
+        returned the same cached list — only 10 s later. What this file cannot do
+        at all, before or after, is notice an edit to a document it has already
+        opened (no didChange is ever sent); that is a separate defect and is not
+        touched here.
+        """
         uri = self._abs_uri(path)
-        ev = self._diag_events.setdefault(uri, asyncio.Event())
-        ev.clear()
-        await self.open_document(path)
-        try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            pass
+        gen_before = self._diag_gen.get(uri, 0)
+        sent = await self.open_document(path)
+        # Unreadable paths never enter _opened_files, so nothing is owed for
+        # them and they fall straight through to the (empty) cache rather than
+        # sitting out the timeout.
+        owed = sent or (uri in self._opened_files and uri not in self._diagnostics)
+
+        if owed and self._diag_gen.get(uri, 0) == gen_before:
+            # A publish is owed and has not arrived yet.
+            loop = asyncio.get_running_loop()
+            fut: asyncio.Future = loop.create_future()
+            self._diag_waiters.setdefault(uri, []).append(fut)
+            try:
+                # Passive wait: our didOpen is already sent and no exchange of
+                # ours is in flight, so the backend lock is dropped for its
+                # duration (see _backend_lock_released) and retaken before the
+                # cache read below. Held, it would make concurrent diagnostics
+                # calls wait one after another instead of together.
+                async with _backend_lock_released():
+                    await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                waiters = self._diag_waiters.get(uri)
+                if waiters is not None and fut in waiters:
+                    waiters.remove(fut)
+                    if not waiters:
+                        self._diag_waiters.pop(uri, None)
         return self._diagnostics.get(uri, [])
 
     def _abs_uri(self, path: str) -> str:
@@ -607,6 +696,137 @@ def _require_client() -> LuaLsClient:
     if _client is None or _client.process is None:
         raise RuntimeError("lua-language-server not initialized — call luals_init first")
     return _client
+
+
+# ============================================================
+# Backend serialization
+# ============================================================
+# run() gives every request its own task, so two handlers can now be in flight
+# at once. Everything mutable they touch lives on the ONE LuaLsClient above —
+# the id counter, the pending map, the opened-file set, the diagnostics cache —
+# and _request's `req_id = self._next_id; self._next_id += 1;
+# self._pending[req_id] = fut` is atomic ONLY because there is no await between
+# those lines on a single event-loop thread. That invariant is exactly why there
+# is no handler thread pool here (a worker pool would break it), and why the
+# remaining interleaving — two handlers taking turns at their await points, one
+# stealing the reply the other is waiting for or opening a document under it —
+# is closed with a lock instead.
+#
+# ONE backend, therefore ONE lock, not a registry: this server owns a single
+# lua-language-server and all 13 handlers go through it, so there is nothing to
+# key a per-backend map on and no lock-ordering cycle that could exist. The lock
+# is created lazily inside the running loop, never at import: on Python 3.9
+# (this file's floor) asyncio.Lock() still binds get_event_loop() at
+# construction time. The check-and-create in _hold_backend has no await between
+# the lookup and the store, so two concurrent first-callers cannot end up with
+# two different locks.
+_backend_lock: Optional["asyncio.Lock"] = None
+
+# Whether the CURRENT request owns that lock — a one-element set, or None when
+# no request session is installed. A ContextVar rather than a parameter: each
+# request is its own task and a task copies the context at creation, so
+# ownership is per-request state that needs no plumbing through thirteen handler
+# signatures.
+_BACKEND_SESSION: "contextvars.ContextVar[Optional[set]]" = contextvars.ContextVar(
+    "luals_backend_session", default=None
+)
+
+_BACKEND_KEY = "luals"
+
+
+@contextlib.asynccontextmanager
+async def _backend_session():
+    """Install a request-scoped ownership record for the backend lock.
+
+    The finally is what makes the lock safe: a handler that raised or was
+    cancelled cannot strand it and wedge the backend for the life of the
+    process.
+    """
+    session: set = set()
+    token = _BACKEND_SESSION.set(session)
+    try:
+        yield session
+    finally:
+        _release_backend(session)
+        _BACKEND_SESSION.reset(token)
+
+
+async def _hold_backend() -> None:
+    """Take the backend lock for the REST OF THIS REQUEST.
+
+    Idempotent: a request that already owns the lock returns at once, so a
+    handler may funnel through here more than once (and the composite handlers
+    call other handlers in-process) without self-deadlocking on a non-reentrant
+    asyncio.Lock.
+
+    Outside a request session there is no scope that could release the lock, so
+    this warns and proceeds unserialized — which is precisely the behaviour an
+    in-process caller had before, and there are none: every path into a handler
+    goes through handle_luals_call or _auto_init, and both install a session.
+    """
+    global _backend_lock
+    session = _BACKEND_SESSION.get()
+    if session is None:
+        log.warning("No request session installed; backend runs unserialized")
+        return
+    if _BACKEND_KEY in session:
+        return
+    lock = _backend_lock
+    if lock is None:
+        lock = asyncio.Lock()
+        _backend_lock = lock
+    await lock.acquire()
+    # No await between acquire() returning and this line, so a cancellation can
+    # never strand an acquired-but-unrecorded lock.
+    session.add(_BACKEND_KEY)
+
+
+def _release_backend(session: set) -> None:
+    """Release the backend lock if *session* holds it."""
+    if _BACKEND_KEY in session:
+        session.discard(_BACKEND_KEY)
+        if _backend_lock is not None and _backend_lock.locked():
+            _backend_lock.release()
+
+
+@contextlib.asynccontextmanager
+async def _backend_lock_released():
+    """Drop this request's backend lock across a PASSIVE wait, then retake it.
+
+    "Passive" means precisely this: no request/response exchange of ours is in
+    flight for the duration, we are parked on a push the BACKGROUND reader task
+    will deliver. Holding the lock across such a wait serializes waiting itself,
+    which would turn a batch of diagnostics calls from overlapping waits into
+    consecutive ones.
+
+    What is NOT protected across the gap: another request may take the backend,
+    open documents and issue its own exchanges. Callers must therefore have
+    finished all of their own protocol traffic BEFORE entering, and must treat
+    anything they re-read afterwards as possibly refreshed. The one caller
+    (get_diagnostics) satisfies this: its didOpen is already sent, and all it
+    does on the far side is read the _diagnostics cache the reader task fills.
+
+    Deadlock-free by construction: the reader task that fires the awaited future
+    never takes the backend lock, so the wakeup cannot depend on the lock just
+    dropped. Retaking goes through _hold_backend, so it may queue behind another
+    request but can never self-deadlock (that call is idempotent).
+
+    Cancellation-safe: the lock leaves the session on release and only rejoins
+    it on a successful retake, so a handler cancelled or raising inside the gap
+    leaves nothing for _release_backend to strand, and one cancelled while
+    retaking never holds what it did not record.
+    """
+    session = _BACKEND_SESSION.get()
+    held = bool(session) and _BACKEND_KEY in session
+    if held:
+        session.discard(_BACKEND_KEY)
+        if _backend_lock is not None and _backend_lock.locked():
+            _backend_lock.release()
+    try:
+        yield
+    finally:
+        if held:
+            await _hold_backend()
 
 
 # ============================================================
@@ -1473,7 +1693,11 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
 
     function = FUNCTION_ALIASES.get(function, function)
 
-    # If auto-init is in progress and the client isn't ready yet, wait for it
+    # If auto-init is in progress and the client isn't ready yet, wait for it.
+    # This stays BEFORE _hold_backend and must: _auto_init holds the backend
+    # lock for the whole cold start, so acquiring first and then waiting on the
+    # init task here would deadlock. Waiting first only ever queues behind a
+    # bounded hold (initialize 30 s + index barrier 60 s + priming ~2 s).
     if (function != "luals_init"
             and server and server._init_task and not server._init_task.done()
             and (_client is None or _client.process is None)):
@@ -1488,8 +1712,19 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
         return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
 
+    # This is the single funnel that knows a backend is about to be touched, so
+    # this is where the lock is taken — for the WHOLE handler, not per LSP
+    # exchange, because a handler's shared state spans its awaits (an id and its
+    # pending reply, a workspace/symbol result then used for a positional query
+    # against the same document). All 13 handlers here are backend handlers;
+    # everything answered above — the status query, the recursion guard, the
+    # unknown-function error — takes no lock and stays answerable while the
+    # backend is busy or cold-starting. luals_init is included on purpose: it is
+    # the one that mutates the global _client.
     try:
-        result = await handler(_resolve_aliases(params))
+        async with _backend_session():
+            await _hold_backend()
+            result = await handler(_resolve_aliases(params))
     except ValueError as e:
         return _serialize(function, {"error": str(e)})
     except RuntimeError as e:
@@ -1826,25 +2061,40 @@ class McpServer:
                 self._auto_init()
             )
 
-        await self._read_loop()
-
-    async def _auto_init(self) -> None:
-        result = await handle_init({
-            "project_root": self.auto_project_root,
-            "luals_path": self.auto_luals_path,
-            "config_path": self.auto_config_path,
-        })
-        if isinstance(result, dict) and "error" in result:
-            sys.stderr.write(f"mcp-lua-lsp auto-init FAILED: {result['error']}\n")
-            sys.stderr.flush()
-        else:
-            log.debug(f"Auto-init OK: {result}")
-
-    async def _read_loop(self) -> None:
-        loop = asyncio.get_running_loop()
+        # One task per request, and a reader executor of its OWN, on purpose.
+        # This loop used to await the handler on the same line of control it
+        # later awaited the readline, so for the whole duration of one call the
+        # server did not READ: every other request sat unread in the pipe, timed
+        # out client-side (~60 s) and was then answered against an id the client
+        # had already abandoned. From the caller's chair that is a dead server.
+        # And the blocking calls here are the ORDINARY ones, not the failure
+        # ones: the auto-init gate below gives a cold start 90 s, the index
+        # barrier alone is 60 s, and diagnostics defaults to 10 s. Measured on
+        # this file before the change: a `ping` sent 50 ms after one
+        # luals_document_outline came back 61,646 ms later.
+        #
+        # The executor must be dedicated: sys.stdin.readline used to run on the
+        # DEFAULT executor, which is where any handler that parks sync work
+        # would also land — a saturated pool would delay the reader and
+        # reintroduce exactly the deafness this fixes.
+        #
+        # No handler thread pool, deliberately: handle_message is already a
+        # coroutine, and LuaLsClient._request takes its id and registers its
+        # future with no await in between, which is safe only while all handlers
+        # share one event-loop thread. Worker threads would break that
+        # invariant; concurrent access to the backend is serialized with a lock
+        # instead (see _hold_backend).
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="luals-stdin")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    # A closed/detached stdin raises rather than returning "";
+                    # unguarded it escaped run() as a traceback.
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     log.debug("stdin EOF — shutting down")
                     break
@@ -1855,29 +2105,104 @@ class McpServer:
 
                 try:
                     msg = json.loads(line)
-                except json.JSONDecodeError as e:
-                    log.debug(f"JSON parse error: {e}")
+                except json.JSONDecodeError as exc:
+                    # Answering is not optional: the bare `continue` that used to
+                    # stand here left the caller's id unanswered until it timed
+                    # out, which is indistinguishable from a hung server.
+                    log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
+                    continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() in
+                    # handle_message and take the process down with an
+                    # AttributeError escaping run() — measured: the server
+                    # exited rc=1 and the next client write got EPIPE, and an
+                    # MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
                     continue
 
-                log.debug(f"← RAW: {line}")
-
-                try:
-                    response = await self.handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    log.debug("→ RAW: %s", json.dumps(response))
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
+                # Structure only, never the payload: params can carry file
+                # contents.
+                log.debug("← method=%s id=%s", msg.get("method"), msg.get("id"))
+                task = loop.create_task(self._serve(msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
 
         finally:
+            pending = list(inflight)
+            for task in pending:
+                task.cancel()
+            if pending:
+                # Let the cancellations land so every handler's finally runs
+                # before the backend goes away.
+                await asyncio.gather(*pending, return_exceptions=True)
+            reader.shutdown(wait=False)
             log.debug("Shutting down lua-language-server...")
             if _client is not None:
+                # Graceful, NOT os._exit(0): the lua-language-server child is
+                # ours, and only this path (LSP shutdown/exit, then terminate,
+                # then kill) plus asyncio.run()'s teardown of the subprocess
+                # transport is what reaps it. A hard exit here would orphan a
+                # wedged luals process on every disconnect.
                 await _client.stop()
+
+    async def _auto_init(self) -> None:
+        # Its own session, so the cold start holds the backend lock like any
+        # other backend-touching request: a luals_init arriving concurrently
+        # must not race this one on the global _client.
+        async with _backend_session():
+            await _hold_backend()
+            result = await handle_init({
+                "project_root": self.auto_project_root,
+                "luals_path": self.auto_luals_path,
+                "config_path": self.auto_config_path,
+            })
+        if isinstance(result, dict) and "error" in result:
+            sys.stderr.write(f"mcp-lua-lsp auto-init FAILED: {result['error']}\n")
+            sys.stderr.flush()
+        else:
+            log.debug(f"Auto-init OK: {result}")
+
+    async def _serve(self, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await self.handle_message(msg)
+        except Exception as exc:  # CancelledError is a BaseException, so it flies
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers may await, but _serve
+        resumes on the loop after them, so two replies cannot interleave on
+        stdout and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            # A non-serialisable payload used to kill the loop mid-write, i.e.
+            # after some bytes were already on the wire.
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ id=%s %s", response.get("id"),
+                  "error" if "error" in response else "ok")
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, a client that hung up mid-reply escaped run().
+            log.warning("stdout write failed: %s", exc)
 
 
 # ============================================================

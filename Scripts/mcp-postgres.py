@@ -55,6 +55,8 @@ import socket
 import ssl
 import struct
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
@@ -550,44 +552,145 @@ class PgConnection:
 # ---------------------------------------------------------------------------
 
 class ConnectionManager:
+    """Named connections, lazy connect, reconnect-once — plus the locking that
+    makes all three safe to touch from several handler threads at once.
+
+    Handlers now run concurrently (see McpServer.run), and a PostgreSQL
+    connection is the least concurrency-tolerant object in this fleet: it is a
+    strictly sequential message stream over ONE socket. Two threads writing
+    queries into it, or two reading replies out of it, interleave frames and
+    either hand one caller another caller's rows or desync the connection
+    permanently. The extended protocol is worse still — _send_parse/_send_bind
+    address the UNNAMED prepared statement and the UNNAMED portal, one slot per
+    connection, so a second Parse overwrites the first one's plan even if the
+    frames somehow stayed in order.
+
+    So there are two lock levels, and every path takes them in this order —
+    per-connection FIRST, registry SECOND — which is why none of them can
+    deadlock against another:
+
+      * ``_lock_for(name)`` — one lock per NAMED connection, held across a whole
+        request/response exchange: the query frames, every reply frame up to
+        ReadyForQuery, the Parse/Bind/Describe/Execute/Sync sequence as one
+        unit, and the lazy connect or reconnect that may precede it. Per NAME
+        and not global, so two different connections still proceed in parallel.
+      * ``_registry_lock`` — short-held only, guards the three dicts (configs,
+        connections, _locks). It is never held across a connect() or a close(),
+        both of which can block for the full socket timeout; that is exactly
+        what the per-connection lock is for.
+    """
+
     def __init__(self, default_config: dict):
         self.configs: Dict[str, dict] = {"default": default_config}
         self.connections: Dict[str, PgConnection] = {}
+        self._registry_lock = threading.Lock()
+        self._locks: Dict[str, threading.Lock] = {}
+
+    def _lock_for(self, name: str) -> threading.Lock:
+        """The exchange lock for one named connection, created on first use.
+
+        Created under the registry lock, because two first-use requests for the
+        same name would otherwise each mint their OWN lock and serialize against
+        nothing at all.
+        """
+        with self._registry_lock:
+            lock = self._locks.get(name)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[name] = lock
+            return lock
 
     def add_config(self, name: str, config: dict) -> None:
-        self.configs[name] = config
+        with self._registry_lock:
+            self.configs[name] = config
 
     def has(self, name: str) -> bool:
-        return name in self.configs
+        with self._registry_lock:
+            return name in self.configs
+
+    def default_config(self) -> dict:
+        """A copy of the default config — for the status line and connect()'s
+        fallbacks. A copy, so the caller cannot read it half-mutated."""
+        with self._registry_lock:
+            return dict(self.configs["default"])
+
+    def snapshot(self) -> List[tuple]:
+        """``(name, config, is_connected)`` per configured connection.
+
+        list_connections used to walk self.configs live; with a concurrent
+        connect() inserting into it that raises "dictionary changed size during
+        iteration". Copy under the lock instead.
+        """
+        with self._registry_lock:
+            out: List[tuple] = []
+            for cfg_name in sorted(self.configs.keys()):
+                conn = self.connections.get(cfg_name)
+                out.append((cfg_name, dict(self.configs[cfg_name]),
+                            conn is not None and conn.is_alive()))
+            return out
 
     def get(self, name: str = "default", force_reconnect: bool = False) -> PgConnection:
+        """The live connection for ``name``, dialing it if there is none.
+
+        THE CALLER MUST HOLD ``_lock_for(name)``. This is where the lazy connect
+        happens, and it is the classic double-open race: two concurrent
+        first-use requests both find no connection, both dial, both store — one
+        socket leaks un-terminated and the loser's PgConnection is driven by a
+        thread while the registry hands the winner to everyone else. Only a lock
+        held across get() AND the exchange closes that, and _registry_lock
+        cannot be it: it must not be held across a 15-second connect().
+        """
         name = name or "default"
-        if name not in self.configs:
-            known = ", ".join(sorted(self.configs.keys()))
-            raise ValueError(f"Unknown connection '{name}'. Known: {known}")
+        with self._registry_lock:
+            if name not in self.configs:
+                known = ", ".join(sorted(self.configs.keys()))
+                raise ValueError(f"Unknown connection '{name}'. Known: {known}")
+            config = dict(self.configs[name])
+            conn = self.connections.get(name)
+            stale = None
+            if conn is not None and (force_reconnect or not conn.is_alive()):
+                stale = self.connections.pop(name, None)
+                conn = None
+            if conn is not None:
+                return conn
 
-        conn = self.connections.get(name)
-        if conn is not None and (force_reconnect or not conn.is_alive()):
-            conn.close()
-            self.connections.pop(name, None)
-            conn = None
-        if conn is not None:
-            return conn
-
-        conn = PgConnection(**self.configs[name])
+        # Outside the registry lock on purpose: close() writes a Terminate frame
+        # and connect() can block for the whole socket timeout, and holding the
+        # registry lock across either would park every OTHER named connection
+        # behind this one. Safe because the caller holds _lock_for(name) — no
+        # other thread can be on this socket, and `stale` is already out of the
+        # registry, so nobody can pick it up either.
+        if stale is not None:
+            stale.close()
+        conn = PgConnection(**config)
         conn.connect()
-        self.connections[name] = conn
+        with self._registry_lock:
+            self.connections[name] = conn
         return conn
 
+    def open_connection(self, name: str) -> PgConnection:
+        """Force-open a named connection — the eager dial behind `connect`.
+
+        Exists so the handler does not have to know about the lock get() needs.
+        """
+        name = name or "default"
+        with self._lock_for(name):
+            return self.get(name, force_reconnect=True)
+
     def _run(self, name: str, fn: Callable[[PgConnection], Any]) -> Any:
-        conn = self.get(name)
-        try:
-            return fn(conn)
-        except (ConnectionError, OSError):
-            # Socket-level failure → reconnect once and retry. A server-side
-            # PgError (bad SQL etc.) is NOT caught here, so it surfaces cleanly.
-            conn = self.get(name, force_reconnect=True)
-            return fn(conn)
+        name = name or "default"
+        # One lock, one exchange: held across the connect, the send, every reply
+        # frame, and the reconnect-and-retry below. Split it anywhere and a
+        # second thread's frames land in the middle of this one's.
+        with self._lock_for(name):
+            conn = self.get(name)
+            try:
+                return fn(conn)
+            except (ConnectionError, OSError):
+                # Socket-level failure → reconnect once and retry. A server-side
+                # PgError (bad SQL etc.) is NOT caught here, so it surfaces cleanly.
+                conn = self.get(name, force_reconnect=True)
+                return fn(conn)
 
     def simple_query(self, name: str, sql: str) -> List[QueryResult]:
         return self._run(name, lambda c: c.simple_query(sql))
@@ -596,21 +699,45 @@ class ConnectionManager:
         return self._run(name, lambda c: c.extended_query(sql, params))
 
     def disconnect(self, name: str) -> bool:
-        conn = self.connections.pop(name, None)
-        if conn is not None:
-            conn.close()
-        # Keep the "default" config so it can be reopened lazily.
-        if name != "default":
-            self.configs.pop(name, None)
-        return conn is not None
+        # Exchange lock first, so a query in flight on this connection finishes
+        # before its socket is closed from under it; registry lock second, the
+        # same order _run uses, which is why the two cannot deadlock.
+        with self._lock_for(name):
+            with self._registry_lock:
+                conn = self.connections.pop(name, None)
+                # Keep the "default" config so it can be reopened lazily.
+                if name != "default":
+                    self.configs.pop(name, None)
+                # The _locks entry stays: dropping it would let a thread already
+                # waiting on this lock mint a fresh one and lose serialization.
+                # Bounded by the number of names ever used.
+            if conn is not None:
+                conn.close()
+            return conn is not None
 
     def close_all(self) -> None:
-        for conn in list(self.connections.values()):
+        # Shutdown path, run on the event-loop thread while handler threads may
+        # still be mid-exchange. Try-acquire with a tiny timeout rather than
+        # wait: a blocked handler holds its lock for up to the socket timeout
+        # (15s), the client is already gone, and os._exit closes the fds anyway —
+        # so skipping the polite Terminate beats holding the process open. What
+        # we must NOT do is write a Terminate frame into a socket another thread
+        # is still reading.
+        with self._registry_lock:
+            live = list(self.connections.items())
+        for name, conn in live:
+            lock = self._lock_for(name)
+            if not lock.acquire(timeout=0.05):
+                log.debug("close_all: '%s' is mid-exchange, leaving it to exit", name)
+                continue
             try:
                 conn.close()
             except Exception:
                 pass
-        self.connections.clear()
+            finally:
+                lock.release()
+        with self._registry_lock:
+            self.connections.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -1240,10 +1367,10 @@ def handle_call_procedure(params: dict, mgr: ConnectionManager) -> dict:
 
 def handle_list_connections(params: dict, mgr: ConnectionManager) -> dict:
     lines = ["Configured connections:"]
-    for cfg_name in sorted(mgr.configs.keys()):
-        cfg = mgr.configs[cfg_name]
-        conn = mgr.connections.get(cfg_name)
-        state = "connected" if (conn is not None and conn.is_alive()) else "idle"
+    # One locked snapshot, not a live walk of two dicts a concurrent
+    # connect/disconnect may be rewriting underneath us.
+    for cfg_name, cfg, connected in mgr.snapshot():
+        state = "connected" if connected else "idle"
         lines.append(
             f"  {cfg_name}: {cfg['user']}@{cfg['host']}:{cfg['port']}/{cfg['dbname']} "
             f"(sslmode={cfg.get('sslmode', 'prefer')}) [{state}]"
@@ -1255,7 +1382,7 @@ def handle_connect(params: dict, mgr: ConnectionManager) -> dict:
     name = params.get("name")
     if not name:
         raise ValueError("Missing required parameter: name")
-    default_cfg = mgr.configs["default"]
+    default_cfg = mgr.default_config()
 
     raw_host = params.get("host")
     if raw_host:
@@ -1293,7 +1420,7 @@ def handle_connect(params: dict, mgr: ConnectionManager) -> dict:
     }
     mgr.add_config(name, config)
     # Connect eagerly to validate credentials and report the live server version.
-    conn = mgr.get(name, force_reconnect=True)
+    conn = mgr.open_connection(name)
     server_version = conn.server_params.get("server_version", "?")
     return {"__raw_text__": (
         f"Connected '{name}' → {conn.target()}\n"
@@ -1305,7 +1432,7 @@ def handle_disconnect(params: dict, mgr: ConnectionManager) -> dict:
     name = params.get("name")
     if not name:
         raise ValueError("Missing required parameter: name")
-    if name not in mgr.configs:
+    if not mgr.has(name):
         raise ValueError(f"Unknown connection '{name}'")
     was_open = mgr.disconnect(name)
     suffix = " (config retained)" if name == "default" else ""
@@ -1400,7 +1527,7 @@ def handle_postgres_call(arguments: dict, mgr: ConnectionManager) -> dict:
         return {"error": str(exc)}
 
     if not function:
-        default_cfg = mgr.configs["default"]
+        default_cfg = mgr.default_config()
         func_list = "\n".join(f"  {name}" for name in sorted(HANDLER_DESCRIPTIONS.keys()))
         target = (f"{default_cfg['user']}@{default_cfg['host']}:{default_cfg['port']}"
                   f"/{default_cfg['dbname']} (sslmode={default_cfg.get('sslmode', 'prefer')})")
@@ -1494,6 +1621,16 @@ POSTGRES_CALL_TOOL = {
 }
 
 
+# How many requests may be in flight at once. The stdin reader owns a thread of
+# its own, OUTSIDE this pool, so saturating it delays queued CALLS and can never
+# stop the server from READING — which is the whole point of the split in run().
+# Requests on the SAME connection serialize on that connection's lock (see
+# ConnectionManager), so a fair share of these threads can be parked waiting for
+# one socket; 8 leaves room for a ping and for other named connections while a
+# long query holds one.
+MAX_INFLIGHT_REQUESTS = 8
+
+
 class McpServer:
     """Minimal MCP server over stdio (JSON-RPC 2.0, one JSON object per line)."""
 
@@ -1505,9 +1642,31 @@ class McpServer:
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         log.info("MCP server starting")
+        # TWO executors, and one task per request, on purpose. This loop used to
+        # call _handle_message inline on the same thread it awaited readline on,
+        # so ONE query froze the entire server for its duration — and the socket
+        # timeout (15s) is a per-recv budget, not a query budget, so a big result
+        # set keeps resetting it and can hold the loop far longer than that.
+        # Every other request then sat unread in the pipe, timed out client-side
+        # (~60s), and got answered against an id the client had already
+        # abandoned. From the caller's chair that is a dead server, restart-only.
+        #
+        # The reader gets a thread of its OWN: one shared pool would let
+        # saturated handlers starve the readline and reintroduce the same
+        # deafness. Concurrency is safe here only because of the per-connection
+        # locking in ConnectionManager — a PostgreSQL socket is a sequential
+        # message stream, and two handlers on one connection would corrupt it.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pg-stdin")
+        workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+                                     thread_name_prefix="pg-call")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     break
                 line = line.strip()
@@ -1517,26 +1676,67 @@ class McpServer:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    # Answering is not optional: a bare `continue` here left the
+                    # caller's request id unanswered until it timed out.
                     log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
+                    continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() and take the
+                    # process down with an AttributeError that escaped run() —
+                    # and an MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
                     continue
 
                 log.debug("← %s", json.dumps(msg)[:200])
-                try:
-                    response = self._handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    out = json.dumps(response)
-                    log.debug("→ %s", out[:200])
-                    sys.stdout.write(out + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(loop, workers, msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
         finally:
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
+            workers.shutdown(wait=False)
             log.info("MCP server shutting down")
             self.manager.close_all()
+
+    async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await loop.run_in_executor(workers, self._handle_message, msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers run in the worker pool,
+        but `_serve` resumes on the loop after its await, so concurrent replies
+        cannot interleave and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ %s", out[:200])
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, this escaped run() and killed the process.
+            log.warning("stdout write failed: %s", exc)
 
     def _handle_message(self, msg: dict) -> Optional[dict]:
         msg_id = msg.get("id")
@@ -1692,6 +1892,13 @@ def main() -> None:
     manager = ConnectionManager(default_config)
     server = McpServer(manager)
     asyncio.run(server.run())
+    # stdin is closed, so the client is gone. Handler threads live in the
+    # server's own executors rather than the loop's default one, so asyncio does
+    # not join them — but concurrent.futures registers an atexit hook that
+    # would, and one handler blocked in a socket recv would hold this process
+    # open for the rest of its 15-second timeout. Every reply is flushed as it is
+    # written and logging flushes per record, so there is nothing left to drain.
+    os._exit(0)
 
 
 if __name__ == "__main__":

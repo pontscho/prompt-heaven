@@ -54,6 +54,8 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("mcp-inspect")
@@ -175,6 +177,32 @@ def _fold_kv(text: str) -> List[str]:
         key, val = key.strip().strip('"').lower(), val.strip().rstrip(".")
         out.append(f"{key}: {val}" if key and val else ln.strip())
     return out
+
+
+# Ceiling on a CALLER-SUPPLIED `timeout`. The five functions that accept one
+# (processes / ports / connections / open_files / disk_usage) handed it straight
+# to `_run` with no upper bound, so `{"timeout": 86400}` bought a day-long `du`.
+# That is the same defect class as the read loop at the bottom of this file, one
+# layer down: it no longer DEAFENS the server -- the stdin reader owns a thread
+# outside the handler pool -- but MAX_INFLIGHT_REQUESTS of them and the pool is
+# gone, which the caller experiences as the same dead server. 120s is four times
+# the largest default here (`du`'s 30), so a genuinely slow tree can still be
+# waited out, while an unbounded park is no longer expressible.
+MAX_TIMEOUT_SEC = 120
+
+
+def _timeout_param(p: dict, default: int) -> int:
+    """The caller's `timeout`, clamped to [1, MAX_TIMEOUT_SEC].
+
+    The lower bound is not cosmetic: subprocess.run treats a zero or negative
+    timeout as ALREADY expired, so `{"timeout": -1}` turned every probe into an
+    instant rc=124 that reads exactly like the underlying tool being broken.
+    Absent `timeout` returns the caller's default un-clamped -- those are this
+    module's own literals, all well under the ceiling.
+    """
+    if "timeout" not in p:
+        return default
+    return max(1, min(MAX_TIMEOUT_SEC, _int_param(p["timeout"], "timeout")))
 
 
 def _run(cmd: List[str], timeout: int = 15,
@@ -303,7 +331,7 @@ def h_processes(p: dict) -> str:
     sort_given = bool((p.get("sort") or "").strip())
     sort = (p.get("sort") or "cpu").strip().lower()
     limit = _int_param(p.get("limit", 30), "limit") if "limit" in p else 30
-    timeout = _int_param(p.get("timeout", 15), "timeout") if "timeout" in p else 15
+    timeout = _timeout_param(p, 15)
 
     rc, out, err = _run(_ps_selector(), timeout)
     if rc not in (0,) and not out:
@@ -383,7 +411,7 @@ def h_ports(p: dict) -> str:
     proto = (p.get("proto") or "all").strip().lower()
     if proto not in ("tcp", "udp", "all"):
         raise ValueError("params.proto must be one of: tcp, udp, all.")
-    timeout = _int_param(p.get("timeout", 15), "timeout") if "timeout" in p else 15
+    timeout = _timeout_param(p, 15)
 
     if _have("lsof"):
         rc, out, err = _lsof_listen(proto, timeout)
@@ -408,7 +436,7 @@ def h_ports(p: dict) -> str:
 
 def h_connections(p: dict) -> str:
     state = (p.get("state") or "established").strip().lower()
-    timeout = _int_param(p.get("timeout", 15), "timeout") if "timeout" in p else 15
+    timeout = _timeout_param(p, 15)
     if _have("lsof"):
         if state == "established":
             rc, out, err = _run(["lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED"], timeout)
@@ -432,7 +460,7 @@ def h_connections(p: dict) -> str:
 def h_open_files(p: dict) -> str:
     if not _have("lsof"):
         raise ValueError("lsof not available on this host.")
-    timeout = _int_param(p.get("timeout", 20), "timeout") if "timeout" in p else 20
+    timeout = _timeout_param(p, 20)
     limit = _int_param(p.get("limit", 200), "limit") if "limit" in p else 200
     cmd = ["lsof", "-nP"]
     filtered = False
@@ -575,7 +603,7 @@ def h_disk_usage(p: dict) -> str:
         raise ValueError(f"path does not exist: {path}")
     depth = _int_param(p.get("depth", 1), "depth") if "depth" in p else 1
     top = _int_param(p.get("top", 20), "top") if "top" in p else 20
-    timeout = _int_param(p.get("timeout", 30), "timeout") if "timeout" in p else 30
+    timeout = _timeout_param(p, 30)
     depth_flag = ["-d", str(depth)] if IS_MAC else [f"--max-depth={depth}"]
     rc, out, err = _run(["du", "-k"] + depth_flag + [path], timeout)
     if rc not in (0,) and not out.strip():
@@ -1066,7 +1094,7 @@ def h_versions(p: dict) -> str:
 _HASH_ALGOS = ("sha256", "sha512", "sha384", "sha224", "sha1", "md5",
                "blake2b", "blake2s")
 _HASH_MAX_MB = 2048          # refuse bigger files unless max_mb is raised: the
-                             # server loop is single-threaded while hashing
+                             # digest holds one handler worker start to finish
 _HASH_CHUNK = 1024 * 1024
 
 
@@ -1184,8 +1212,8 @@ _VALIDATE_EXT = {
     ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
 }
 
-_VALIDATE_MAX_MB = 32        # parsers build a full in-memory tree; the server
-                             # loop is single-threaded while parsing
+_VALIDATE_MAX_MB = 32        # parsers build a full in-memory tree, and hold one
+                             # handler worker for as long as they are building it
 
 # (status, message, line, col)
 _VResult = Tuple[str, str, Optional[int], Optional[int]]
@@ -1226,12 +1254,31 @@ def _v_json(data: bytes, name: str) -> _VResult:
     return _v_ok("valid JSON")
 
 
+# The ONE piece of process-global state any handler in this module touches.
+# `warnings.catch_warnings` works by swapping `warnings.filters` and
+# `warnings.showwarning` out and restoring them on exit -- the stdlib documents
+# it as "modifying global state and therefore not thread-safe" -- so once
+# handlers run concurrently, two `python` validations at once would (a) record
+# file A's SyntaxWarning into file B's report, because whichever recorder is
+# installed catches it, and (b) on the losing unwind order leave the recorder and
+# the "always" filter installed for the rest of the process, since each thread
+# restores the snapshot IT saw. Python 3.14 can make the filters context-local,
+# but only in a free-threaded build or under -X context_aware_warnings (checked
+# on this host: warnings._use_context == 0), and this script's floor is 3.9 where
+# no such mode exists -- so the resource is guarded rather than assumed fixed.
+# The lock wraps ONLY the compile: a Python source parses in milliseconds, so
+# serialising this one validator is unmeasurable, and every other function --
+# including the other nine validators, which are all per-call objects -- still
+# runs fully concurrently.
+_V_PYTHON_LOCK = threading.Lock()
+
+
 def _v_python(data: bytes, name: str) -> _VResult:
     import warnings
 
     caught: List[Any] = []
     try:
-        with warnings.catch_warnings(record=True) as caught:
+        with _V_PYTHON_LOCK, warnings.catch_warnings(record=True) as caught:
             # SyntaxWarnings (invalid escape sequence, `assert (x, y)`, `is` with
             # a literal) are real defects that ast.parse never surfaces.
             warnings.simplefilter("always", SyntaxWarning)
@@ -1870,6 +1917,12 @@ INSPECT_CALL_TOOL = {
 }
 
 
+# How many tool calls may be in flight at once. The stdin reader owns a thread of
+# its own, OUTSIDE this pool, so saturating it delays queued CALLS and can never
+# stop the server from READING -- which is the whole point of the split in run().
+MAX_INFLIGHT_REQUESTS = 8
+
+
 class McpServer:
     def __init__(self, project_root: Optional[str]):
         self.project_root = os.path.realpath(project_root) if project_root else None
@@ -1877,35 +1930,122 @@ class McpServer:
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         log.info("MCP server starting (%s)", _SYS)
+        # TWO executors, and one task per request, on purpose. This loop used to
+        # call the handler INLINE on the event-loop thread, between the two
+        # awaits of the readline -- so for as long as a handler ran, the server
+        # did not read stdin. `du` is a 30s budget and `open_files` a 20s one;
+        # every request behind one of those sat unread in the pipe, timed out
+        # client-side at ~60s, and was then answered against an id the client had
+        # already abandoned. From the caller's chair that is a dead server with a
+        # restart as the only lever -- and because this server is pre-approved
+        # and called constantly, it is the one where that is felt most often.
+        #
+        # The reader gets a pool OF ITS OWN. One shared pool would let
+        # MAX_INFLIGHT_REQUESTS slow handlers occupy every worker and leave the
+        # readline with nowhere to run: the same deafness, reintroduced by the
+        # fix and much harder to see.
+        #
+        # Handlers are safe to run concurrently, and that was AUDITED rather than
+        # assumed. The module declares no `global` anywhere; it caches nothing --
+        # no memoised which()/versions table, no host or process snapshot; and
+        # _VERSION_TOOLS / _VALIDATE_EXT / _VALIDATORS / HANDLERS / ALIASES are
+        # built at import time and thereafter only read (`.get`, indexing,
+        # sorted). Every list and dict a handler appends to is created inside that
+        # handler, the probes are read-only with shell=False, and project_root is
+        # written once in __init__. The ONE exception the audit turned up is the
+        # process-global warnings filter that `_v_python` must swap to see
+        # SyntaxWarnings, and that is serialised at the source by _V_PYTHON_LOCK
+        # instead of costing everything else its concurrency.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inspect-stdin")
+        workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+                                     thread_name_prefix="inspect-call")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    # A closed or detached stdin raises here; unwrapped, it
+                    # propagated out of run() as a traceback instead of a
+                    # shutdown, and the `finally` never got to cancel anything.
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     break
                 line = line.strip()
                 if not line:
                     continue
+
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    # Answering is not optional: the bare `continue` that used to
+                    # be here left the caller's request id unanswered until it
+                    # timed out, for a line the server had already understood was
+                    # broken.
                     log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
                     continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() and take the
+                    # process down with an AttributeError escaping run() -- and an
+                    # MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
+                    continue
+
                 log.debug("← %s", json.dumps(msg)[:200])
-                try:
-                    response = self._handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    out = json.dumps(response)
-                    log.debug("→ %s", out[:200])
-                    sys.stdout.write(out + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(loop, workers, msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
         finally:
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
+            workers.shutdown(wait=False)
             log.info("MCP server shutting down")
+
+    async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await loop.run_in_executor(workers, self._handle_message, msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            # Exception, NOT BaseException: the `finally` in run() cancels every
+            # inflight task on shutdown, and a swallowed CancelledError would
+            # turn each of those into a bogus -32603 written to a stdout that is
+            # already gone.
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers run in the worker pool,
+        but `_serve` resumes on the loop after its await, so two replies cannot
+        interleave mid-line and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ %s", out[:200])
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, a client that hung up mid-reply killed the process with
+            # the write instead of letting the read loop notice the closed stdin.
+            log.warning("stdout write failed: %s", exc)
 
     def _handle_message(self, msg: dict) -> Optional[dict]:
         msg_id = msg.get("id")
@@ -1993,6 +2133,14 @@ def main() -> None:
 
     server = McpServer(args.project_root)
     asyncio.run(server.run())
+    # stdin is closed, so the client is gone. Handler threads live in the
+    # server's OWN executors rather than the loop's default one, so asyncio does
+    # not join them on the way out -- but concurrent.futures registers an atexit
+    # hook that would, and one handler mid-`du` would hold this process open for
+    # the rest of its 30s budget after the client had already left. Every reply
+    # is flushed as it is written and logging flushes per record, so there is
+    # nothing left to drain.
+    os._exit(0)
 
 
 if __name__ == "__main__":

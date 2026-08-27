@@ -33,6 +33,7 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 log = logging.getLogger("mcp-forge")
@@ -914,6 +915,15 @@ def run_command(command: str, cwd: str, env: Dict[str, str],
 	# stdin (an interactive prompt, a stray `cat`, a test runner in watch mode)
 	# eats protocol messages out from under the client and the session desyncs.
 	# It looks like a hang, not like a bug. Build commands never need stdin.
+	#
+	# start_new_session is os.setsid, done in C between fork and exec instead of
+	# as a preexec_fn. Identical result — the child leads its own process group,
+	# which is what the os.killpg escalation below needs — but preexec_fn runs
+	# PYTHON in the forked child, and this function is now called from several
+	# handler threads at once (see McpServer.run). A fork taken while another
+	# thread holds the allocator or import lock leaves that lock held forever in
+	# the child, so interpreting bytecode there can deadlock before exec, and a
+	# child deadlocked before exec burns the whole `timeout` budget.
 	proc = subprocess.Popen(
 		command,
 		shell=True,
@@ -922,7 +932,7 @@ def run_command(command: str, cwd: str, env: Dict[str, str],
 		stdin=subprocess.DEVNULL,
 		stdout=subprocess.PIPE,
 		stderr=stderr_target,
-		preexec_fn=os.setsid,
+		start_new_session=True,
 	)
 	try:
 		stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
@@ -1635,6 +1645,16 @@ FORGE_CALL_TOOL = {
 }
 
 
+# How many tool calls may be in flight at once. This is a QUEUEING cap, not a
+# safety one — what makes concurrency safe is the state audit written up in
+# run() — so a low number only buys fewer builds thrashing the same cores, and a
+# high number only costs that. What the number does NOT affect is whether the
+# server keeps reading: the stdin reader owns a thread OUTSIDE this pool, so
+# saturating it delays queued CALLS and can never make the server deaf. That
+# split is the entire point of the two executors below.
+MAX_INFLIGHT_REQUESTS = 8
+
+
 class McpServer:
 	"""Minimal MCP server over stdio (JSON-RPC 2.0, one JSON object per line)."""
 
@@ -1646,9 +1666,56 @@ class McpServer:
 		loop = asyncio.get_running_loop()
 		log.info("MCP server starting, project_root=%s, cfg=%s",
 		         self.project_root, self.cfg_path)
+		# TWO executors, and one task per request, on purpose. This loop used to
+		# call the handler INLINE on the very thread it awaited readline on, so a
+		# single command froze the whole server for its duration — and here that
+		# duration is `timeout`, which defaults to 600s PER COMMAND and then
+		# multiplies over a target's command list, a call's target list, and any
+		# auto_build prerequisites pulled in ahead of a test. A `forge_call test`
+		# on a real project is exactly that multi-minute call: the ORDINARY case,
+		# not the error path. Meanwhile every other request sat unread in the
+		# pipe, timed out client-side (~60s, an order of magnitude sooner), and
+		# was finally answered in a burst against ids the client had already
+		# abandoned. From the caller's chair that is a dead server, and a restart
+		# was the only lever they had.
+		#
+		# One shared pool would not do. If the reader borrowed a worker thread,
+		# MAX_INFLIGHT_REQUESTS concurrent builds would leave nothing to read
+		# with and the deafness would be back, just behind a higher threshold.
+		#
+		# Concurrent handlers are safe here — audited, not assumed:
+		#   * no `global` anywhere, and no cache or memo of any kind;
+		#   * every module-level name is either read-only (PARAM_ALIASES,
+		#     FILTER_ALIASES, DANGEROUS_PATTERNS, TOP_LEVEL_KEYS, TARGET_KINDS —
+		#     only ever read via `in`, `.get` and iteration; _resolve_aliases
+		#     copies into a fresh dict rather than editing the table) or a
+		#     compiled regex (_DANGEROUS_RE, INTERP_RE), which are re-entrant;
+		#   * project-forge.yaml is NOT parsed once and shared: handle_forge_call
+		#     re-reads and re-parses it per call and YAMLParser is instantiated
+		#     per parse, so each handler owns its own cfg dict and its own parser;
+		#   * this instance holds two strings, both written in __init__ before the
+		#     loop starts and never reassigned;
+		#   * run_command holds its Popen in a local — no shared handle — and the
+		#     working directory travels as a Popen argument, because nothing in
+		#     this file calls os.chdir. os.environ is only ever .copy()'d, never
+		#     written, so no handler can perturb another's environment either.
+		# Two concurrent calls aimed at the same build tree can of course still
+		# fight over that tree, but that is the caller's YAML and the caller's
+		# choice, not state this process shares behind their back.
+		reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="forge-stdin")
+		workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+		                             thread_name_prefix="forge-call")
+		inflight: set = set()
 		try:
 			while True:
-				line = await loop.run_in_executor(None, sys.stdin.readline)
+				try:
+					line = await loop.run_in_executor(reader, sys.stdin.readline)
+				except (OSError, ValueError) as exc:
+					# ValueError is what a stdin closed from under us raises.
+					# Unguarded, either one unwound straight out of run() and
+					# past main(), skipping the shutdown below.
+					log.warning("stdin read failed, shutting down: %s", exc)
+					break
 				if not line:
 					break
 				line = line.strip()
@@ -1657,24 +1724,77 @@ class McpServer:
 				try:
 					msg = json.loads(line)
 				except json.JSONDecodeError as exc:
+					# Answering is not optional: the bare `continue` that used to
+					# stand here left the caller's request id unanswered until it
+					# timed out, for a fault the caller could have seen at once.
 					log.warning("Invalid JSON: %s", exc)
+					self._write(self._error(None, -32700, f"Parse error: {exc}"))
+					continue
+				if not isinstance(msg, dict):
+					# `5` on a line is valid JSON. It used to reach msg.get() and
+					# take the process down with an AttributeError that escaped
+					# run() — and an MCP client does not respawn a dead stdio
+					# server, so one malformed line cost the whole session.
+					log.warning("Request was %s, not an object", type(msg).__name__)
+					self._write(self._error(
+						None, -32600,
+						"Invalid Request: expected a JSON object, got "
+						f"{type(msg).__name__}"))
 					continue
 				log.debug("<- %s", json.dumps(msg)[:200])
-				try:
-					response = self._handle_message(msg)
-				except Exception as exc:
-					log.exception("Unhandled exception while handling message")
-					response = self._error(
-						msg.get("id"), -32603,
-						f"Internal error: {type(exc).__name__}: {exc}"
-					)
-				if response is not None:
-					out = json.dumps(response)
-					log.debug("-> %s", out[:200])
-					sys.stdout.write(out + "\n")
-					sys.stdout.flush()
+				task = loop.create_task(self._serve(loop, workers, msg))
+				# Held so the loop keeps a strong reference — an unreferenced
+				# task can be garbage-collected mid-flight — and so shutdown has
+				# something to cancel.
+				inflight.add(task)
+				task.add_done_callback(inflight.discard)
 		finally:
+			for task in inflight:
+				task.cancel()
+			reader.shutdown(wait=False)
+			workers.shutdown(wait=False)
 			log.info("MCP server shutting down")
+
+	async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
+		"""One request, from dispatch to written reply. Runs as its own task."""
+		try:
+			response = await loop.run_in_executor(workers, self._handle_message, msg)
+		except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+			# Deliberately Exception, not BaseException: cancellation on shutdown
+			# must propagate rather than be reported back as an internal error.
+			log.exception("Unhandled exception while handling message")
+			response = self._error(
+				msg.get("id"), -32603,
+				f"Internal error: {type(exc).__name__}: {exc}"
+			)
+		if response is not None:
+			self._write(response)
+
+	def _write(self, response: dict) -> None:
+		"""Serialize and emit one JSON-RPC message.
+
+		Called only from the event-loop thread: handlers run in the worker pool,
+		but `_serve` resumes on the loop after its await, so two replies can
+		never interleave mid-line and this needs no lock.
+		"""
+		try:
+			out = json.dumps(response)
+		except (TypeError, ValueError) as exc:
+			# A reply that cannot be serialised is still a reply the caller is
+			# waiting for; sending -32603 beats leaving the id dangling.
+			log.exception("Response was not JSON-serialisable")
+			out = json.dumps(self._error(response.get("id"), -32603,
+			                             f"Response not serialisable: {exc}"))
+		log.debug("-> %s", out[:200])
+		try:
+			sys.stdout.write(out + "\n")
+			sys.stdout.flush()
+		except (BrokenPipeError, OSError) as exc:
+			# A client that hung up mid-reply must not kill the process: other
+			# handlers may still be mid-command, and unguarded this escaped
+			# run() as an exception rather than the clean shutdown that follows
+			# from the reader seeing EOF.
+			log.warning("stdout write failed: %s", exc)
 
 	def _handle_message(self, msg: dict) -> Optional[dict]:
 		msg_id = msg.get("id")
@@ -1771,6 +1891,15 @@ def main() -> None:
 
 	server = McpServer(args.project_root, args.config)
 	asyncio.run(server.run())
+	# stdin is closed, so the client is gone. Handler threads live in the
+	# server's own executors rather than the loop's default one, so asyncio does
+	# not join them on the way out of asyncio.run — but concurrent.futures
+	# registers an atexit hook that WOULD, and a handler sitting in
+	# proc.communicate() would hold this process open for the rest of its
+	# timeout, 600s by default, long after there is anyone left to answer. Every
+	# reply is flushed as it is written and logging flushes per record, so there
+	# is nothing buffered left to drain.
+	os._exit(0)
 
 
 if __name__ == "__main__":

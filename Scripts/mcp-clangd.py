@@ -15,6 +15,8 @@ Usage:
 """
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import os
 import pathlib
@@ -22,6 +24,7 @@ import re
 import sys
 import argparse
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 
@@ -253,8 +256,23 @@ class ClangdClient:
         self._next_id: int = 1
         self._pending: Dict[int, asyncio.Future] = {}
         self._diagnostics: Dict[str, List] = {}       # uri → list[diagnostic]
-        self._diag_events: Dict[str, asyncio.Event] = {}
+        # Diagnostics are a LEVEL, not an edge. _diag_gen counts publishes per
+        # uri and is bumped in the same breath as _diagnostics[uri], so a caller
+        # can sample it, cause a didOpen, and then tell whether the answering
+        # publish has landed yet — rather than clearing an Event and waiting for
+        # a push that, for an already-open file, had already arrived and will
+        # never repeat (see get_diagnostics).
+        self._diag_gen: Dict[str, int] = {}           # uri → publish count
+        # One future PER WAITER, not one shared Event: two concurrent
+        # get_diagnostics calls on the same uri would otherwise clear each
+        # other's Event and send one of them to its timeout. The reader wakes
+        # them all and drops the list.
+        self._diag_waiters: Dict[str, List[asyncio.Future]] = {}
         self._opened_files: set = set()
+        # uri → the LSP document version we have actually announced. Bumped by
+        # open_document only when it really sent a notification, which is what
+        # makes it a truthful answer to "is a publish owed?".
+        self._doc_versions: Dict[str, int] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._indexing_done: asyncio.Event = asyncio.Event()
         self._active_progress: set = set()   # tokens with begin but no end yet
@@ -392,6 +410,9 @@ class ClangdClient:
         self._pending.clear()
         self._opened_files.clear()
         self._diagnostics.clear()
+        self._diag_gen.clear()
+        self._diag_waiters.clear()
+        self._doc_versions.clear()
 
     async def _reader_loop(self) -> None:
         """Background task: read all LSP messages and route them."""
@@ -437,9 +458,12 @@ class ClangdClient:
                 uri = params.get("uri", "")
                 diags = params.get("diagnostics", [])
                 self._diagnostics[uri] = diags
-                ev = self._diag_events.get(uri)
-                if ev:
-                    ev.set()
+                # Bump the generation in the SAME breath as the payload, and
+                # wake every waiter rather than setting one shared Event.
+                self._diag_gen[uri] = self._diag_gen.get(uri, 0) + 1
+                for fut in self._diag_waiters.pop(uri, ()):
+                    if not fut.done():
+                        fut.set_result(None)
                 log.debug(f"Diagnostics for {uri}: {len(diags)} items")
 
             else:
@@ -483,11 +507,18 @@ class ClangdClient:
             log.debug(f"Cannot read {abs_path}: {e}")
             return
         self._opened_files.add(uri)
+        # Bumped BEFORE the notification goes out and only on the path that
+        # actually sends one, so a caller sampling it across this await learns
+        # exactly whether clangd now owes it a publish. The early return above
+        # leaves it untouched, which is the whole point: an already-open
+        # document is owed nothing.
+        version = self._doc_versions.get(uri, 0) + 1
+        self._doc_versions[uri] = version
         await self._notify("textDocument/didOpen", {
             "textDocument": {
                 "uri": uri,
                 "languageId": _detect_language(str(abs_path)),
-                "version": 1,
+                "version": version,
                 "text": content,
             }
         })
@@ -580,15 +611,67 @@ class ClangdClient:
         return resp.get("result") or []
 
     async def get_diagnostics(self, path: str, timeout: float = 10.0) -> List[dict]:
-        """Open document, wait for publishDiagnostics push, return diagnostics."""
+        """Open the document, wait only for a publish that is actually OWED,
+        and return the diagnostics.
+
+        This used to clear a per-uri Event and then wait for the push that would
+        set it again. For an already-open document that push had ALREADY
+        arrived — open_document no-ops on a uri in _opened_files, so nothing
+        would ever re-publish — and the clear discarded the only signal there
+        was. Every such call burned its full timeout and then returned the
+        correct cached answer anyway: measured here at 10.002 s for a second
+        diagnostics call on the same file, against 0.013 s for the first.
+
+        The signal is a LEVEL, so it is read as one. Two samples taken around
+        the open answer the two separate questions:
+
+        * is a publish owed?  → the document's own version counter. Only
+          open_document bumps it, and only when it actually sent a didOpen.
+          Already open means nothing was sent, so nothing is owed and the cache
+          is already the answer.
+        * has it landed yet?  → _diag_gen, bumped by the reader task next to the
+          payload. Sampled BEFORE the open, so a publish that races in while we
+          open is seen as fresh rather than waited for twice.
+
+        The generation counter alone is not enough for either question: sampled
+        on its own it can only say "no publish since I started", which is
+        equally true of a document that owes one and of a document that does
+        not — the first must be waited for, the second must not.
+
+        Freshness is not traded away relative to what this file could ever
+        offer. It has no mtime tracking and no didChange path at all, so an
+        edit to an already-open document was invisible here before this change
+        too (measured: the pre-fix code returned the same pre-edit cache, just
+        10 s later). What still works, and still waits properly, is the first
+        look at a document — including one edited on disk before it is opened.
+        """
         uri = self._abs_uri(path)
-        ev = self._diag_events.setdefault(uri, asyncio.Event())
-        ev.clear()
+        gen_before = self._diag_gen.get(uri, 0)
+        ver_before = self._doc_versions.get(uri, 0)
         await self.open_document(path)
-        try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            pass
+        ver_after = self._doc_versions.get(uri, 0)
+
+        if ver_after > ver_before and self._diag_gen.get(uri, 0) == gen_before:
+            # A notification went out and its publish has not arrived yet.
+            loop = asyncio.get_running_loop()
+            fut: asyncio.Future = loop.create_future()
+            self._diag_waiters.setdefault(uri, []).append(fut)
+            try:
+                # Passive wait: our didOpen is already sent and no exchange of
+                # ours is in flight, so the backend lock is dropped for its
+                # duration (see _backend_lock_released) and retaken before the
+                # cache read below. Held, it would make concurrent diagnostics
+                # calls wait one after another instead of together.
+                async with _backend_lock_released():
+                    await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                waiters = self._diag_waiters.get(uri)
+                if waiters is not None and fut in waiters:
+                    waiters.remove(fut)
+                    if not waiters:
+                        self._diag_waiters.pop(uri, None)
         return self._diagnostics.get(uri, [])
 
     def _abs_uri(self, path: str) -> str:
@@ -615,6 +698,128 @@ def _require_client() -> ClangdClient:
     if _client is None or _client.process is None:
         raise RuntimeError("clangd not initialized — call clangd_init first")
     return _client
+
+
+# ============================================================
+# Backend serialization
+# ============================================================
+
+# Every request that reaches clangd is serialized against every other one that
+# does. Now that each request runs as its own task, handlers interleave freely,
+# and the LSP session behind `_client` is a single conversation with ONE
+# ordering: _next_id/_pending, _opened_files, _doc_versions and the `_client`
+# reference itself are all read and written across awaits. Two requests racing
+# there does not fail loudly — it answers WRONG (a definition resolved against a
+# half-open document, or a second clangd spawned over the first), which is the
+# worst failure mode available in a tool whose entire value is being
+# compiler-accurate.
+#
+# One lock per backend TYPE, held for the whole request that touched it. This
+# server has exactly one backend type, so the dispatcher — which knows it
+# statically — is the single funnel; purity needs an _ensure_backend funnel for
+# the key only because it routes between clangd and luals, and a drifted copy of
+# that routing would lock the WRONG backend. Here there is nothing to derive and
+# nothing to drift. The pure paths (server status, unknown-function) take no
+# lock: they never touch the session.
+#
+# The lock is created lazily inside the running loop, never at import: on Python
+# 3.9 (this file's floor) asyncio.Lock() still binds get_event_loop() at
+# construction time. The check-and-create in _hold_backend has no await between
+# the lookup and the store, so concurrent first-callers cannot end up with two
+# different locks for one backend.
+BACKEND_TYPE = "clangd"
+
+_backend_locks: Dict[str, "asyncio.Lock"] = {}
+
+# The set of backend types whose lock the CURRENT request owns, or None when no
+# request session is installed. A ContextVar because each request is its own
+# task and a task copies the context at creation — per-request state that needs
+# no plumbing through every handler signature.
+_BACKEND_SESSION: "contextvars.ContextVar[Optional[set]]" = contextvars.ContextVar(
+    "clangd_backend_session", default=None
+)
+
+
+async def _hold_backend(backend_type: str = BACKEND_TYPE) -> None:
+    """Take *backend_type*'s lock for the REST OF THIS REQUEST.
+
+    Idempotent: a request that already owns the lock returns at once, so a
+    handler may funnel through more than once without self-deadlocking on a
+    non-reentrant asyncio.Lock.
+
+    Outside a request session there is no scope that could release the lock, so
+    this warns and proceeds unserialized rather than stranding it. The two
+    callers that matter — the dispatcher and the auto-init task — both install
+    one.
+    """
+    session = _BACKEND_SESSION.get()
+    if session is None:
+        log.warning("No request session installed; backend %r runs unserialized",
+                    backend_type)
+        return
+    if backend_type in session:
+        return
+    lock = _backend_locks.get(backend_type)
+    if lock is None:
+        lock = asyncio.Lock()
+        _backend_locks[backend_type] = lock
+    await lock.acquire()
+    # No await between acquire() returning and this line, so a cancellation can
+    # never strand an acquired-but-unrecorded lock.
+    session.add(backend_type)
+
+
+def _release_backends(session: set) -> None:
+    """Release every backend lock *session* acquired.
+
+    Called from the dispatcher's finally so a handler that raised or was
+    cancelled cannot strand a lock and wedge clangd for the life of the process.
+    """
+    while session:
+        backend_type = session.pop()
+        lock = _backend_locks.get(backend_type)
+        if lock is not None and lock.locked():
+            lock.release()
+
+
+@contextlib.asynccontextmanager
+async def _backend_lock_released():
+    """Drop this request's backend lock(s) across a PASSIVE wait, then retake.
+
+    "Passive" means precisely this: no request/response exchange of ours is in
+    flight for the duration, we are parked on a push the BACKGROUND reader task
+    will deliver. Holding the lock across such a wait serializes waiting itself,
+    which would turn a batch of diagnostics calls from overlapping waits into
+    consecutive ones.
+
+    What is NOT protected across the gap: another request may take the backend,
+    open documents and issue its own exchanges. Callers must therefore have
+    finished all of their own protocol traffic BEFORE entering, and must treat
+    anything they re-read afterwards as possibly refreshed. The one caller
+    (get_diagnostics) satisfies this: its didOpen is already sent, and all it
+    does on the far side is read the _diagnostics cache the reader task fills.
+
+    Deadlock-free by construction: the reader task that resolves the awaited
+    future never takes a backend lock, so the wakeup cannot depend on the lock
+    just dropped. Retaking goes through _hold_backend, so it may queue behind
+    another request but can never self-deadlock.
+
+    Cancellation-safe: the locks leave _BACKEND_SESSION on release and only
+    rejoin it on a successful retake, so a handler cancelled inside the gap
+    leaves nothing for the dispatcher's finally to strand.
+    """
+    session = _BACKEND_SESSION.get()
+    held = sorted(session) if session else []
+    for backend_type in held:
+        lock = _backend_locks.get(backend_type)
+        if lock is not None and lock.locked():
+            lock.release()
+        session.discard(backend_type)
+    try:
+        yield
+    finally:
+        for backend_type in held:
+            await _hold_backend(backend_type)
 
 
 # ============================================================
@@ -1595,7 +1800,27 @@ async def handle_clangd_call(args: dict, server: Optional["McpServer"] = None) -
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
         return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
 
-    result = await handler(params)
+    # Serialize this request against every other one that touches clangd, for
+    # its whole duration. Every function in ALL_HANDLERS reaches the backend —
+    # clangd_init included, which is what stops an explicit init arriving
+    # mid-cold-start from seeing `_client` set but `_client.process` still None,
+    # falling through handle_init's already-initialized guard, and spawning a
+    # SECOND clangd over the first.
+    #
+    # Taken AFTER the auto-init gate above, on purpose and load-bearingly: that
+    # gate waits on the auto-init task, which holds this same lock, so acquiring
+    # first would deadlock. With this ordering nothing that holds the lock ever
+    # waits on it, so no cycle can exist.
+    session: set = set()
+    session_token = _BACKEND_SESSION.set(session)
+    try:
+        await _hold_backend()
+        result = await handler(params)
+    finally:
+        # Released before the ContextVar reset, and in a finally so a handler
+        # that raised or was cancelled cannot strand the lock.
+        _release_backends(session)
+        _BACKEND_SESSION.reset(session_token)
     return _serialize(function, result)
 
 
@@ -1960,6 +2185,28 @@ class McpServer:
             f"Unknown tool: '{name}'. This server exposes 'clangd_call'. Invoke the clangd-mcp skill."
         )
 
+    async def _auto_init(self) -> Any:
+        """Cold-start clangd holding the backend lock.
+
+        The lock matters even though no request has been served yet: this task
+        assigns `_client` before its first await and only fills in
+        `_client.process` much later, so an explicit clangd_init arriving in
+        that window used to spawn a second clangd. Holding the lock makes such a
+        request queue and then take the already-initialized path instead.
+        """
+        session: set = set()
+        session_token = _BACKEND_SESSION.set(session)
+        try:
+            await _hold_backend()
+            return await handle_init({
+                "project_root": self.auto_project_root,
+                "clangd_path": self.auto_clangd_path,
+                "compile_commands_dir": self.auto_compile_commands_dir,
+            })
+        finally:
+            _release_backends(session)
+            _BACKEND_SESSION.reset(session_token)
+
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         log.debug("mcp-clangd server ready (stdio)")
@@ -1967,17 +2214,42 @@ class McpServer:
         # Auto-init: kick off in background so it doesn't block the MCP handshake
         if self.auto_project_root:
             log.debug(f"Auto-init: {self.auto_project_root}")
-            self._init_task = asyncio.create_task(
-                handle_init({
-                    "project_root": self.auto_project_root,
-                    "clangd_path": self.auto_clangd_path,
-                    "compile_commands_dir": self.auto_compile_commands_dir,
-                })
-            )
+            self._init_task = asyncio.create_task(self._auto_init())
 
+        # One task per request, and a reader executor of its OWN, on purpose.
+        # This loop used to await the handler on the same line of control it
+        # later awaited the readline, so for the whole duration of one call the
+        # server did not READ: every other request sat unread in the pipe, timed
+        # out client-side (~60s) and was then answered against an id the client
+        # had already abandoned. Measured here on the pre-fix loop: a pure
+        # status call — which needs no backend at all — sent 50 ms after an LSP
+        # call came back 60.09 s later, behind it. And the blocking waits here
+        # are the ORDINARY ones, not the failure ones: the auto-init gate is
+        # 90 s, the index barrier 60 s, the LSP initialize 30 s.
+        #
+        # The executor must be dedicated. sys.stdin.readline used to run on the
+        # DEFAULT executor, which anything else parking work there could
+        # saturate — that would delay the reader and reintroduce exactly the
+        # deafness this fixes.
+        #
+        # No handler thread pool, deliberately. The handlers are coroutines, and
+        # _request's `req_id = self._next_id; self._next_id += 1; ...;
+        # self._pending[req_id] = fut` has no await between the read and the
+        # store — safe on one event-loop thread and ONLY there. A worker pool
+        # would break precisely that invariant, handing two requests the same
+        # LSP id. Concurrency comes from tasks; safety comes from the per-backend
+        # lock every dispatched handler holds.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clangd-stdin")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    # A closed/detached stdin raises rather than returning "";
+                    # unguarded it escaped run() as a traceback.
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     log.debug("stdin EOF — shutting down")
                     break
@@ -1988,29 +2260,87 @@ class McpServer:
 
                 try:
                     msg = json.loads(line)
-                except json.JSONDecodeError as e:
-                    log.debug(f"JSON parse error: {e}")
+                except json.JSONDecodeError as exc:
+                    # Answering is not optional: the bare `continue` that used to
+                    # stand here left the caller's id unanswered until it timed
+                    # out, which is indistinguishable from a hung server.
+                    log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
+                    continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() in
+                    # handle_message and take the process down with an
+                    # AttributeError — which the except below then re-raised out
+                    # of run() by calling msg.get("id") on the same int. Measured
+                    # on the pre-fix loop: one `5` on a line, exit code 1, and an
+                    # MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
                     continue
 
                 log.debug(f"← RAW: {line}")
-
-                try:
-                    response = await self.handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    log.debug("→ RAW: %s", json.dumps(response))
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
 
         finally:
+            # Cancel and REAP before touching the client: a handler still in
+            # flight would otherwise race _client.stop() over the same LSP
+            # session, and asyncio.run() would report destroyed-pending tasks.
+            pending = [t for t in inflight if not t.done()]
+            if self._init_task is not None and not self._init_task.done():
+                pending.append(self._init_task)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            reader.shutdown(wait=False)
             log.debug("Shutting down clangd...")
+            # Graceful, never os._exit(). This finally is the ONLY thing that
+            # terminates the clangd child: os._exit would skip it and skip
+            # asyncio.run()'s transport teardown, orphaning a wedged clangd that
+            # nothing is left to reap.
             if _client is not None:
                 await _client.stop()
+
+    async def _serve(self, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await self.handle_message(msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers may hop to an executor,
+        but _serve resumes on the loop after its await, so two replies cannot
+        interleave on stdout and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            # A non-serialisable payload used to kill the loop mid-write, i.e.
+            # after some bytes were already on the wire.
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ RAW: %s", out)
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, a client that hung up mid-reply escaped run().
+            log.warning("stdout write failed: %s", exc)
 
 
 # ============================================================

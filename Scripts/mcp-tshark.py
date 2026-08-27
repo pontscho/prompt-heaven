@@ -32,7 +32,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -78,6 +80,24 @@ def _get_tshark() -> str:
 SESSIONS: Dict[str, dict] = {}
 CAPTURES_DIR = ".tshark-captures"
 
+# Requests are dispatched CONCURRENTLY (see McpServer.run), which makes SESSIONS
+# the one piece of shared mutable state in this module that can be corrupted:
+# two handlers writing the dict, or two stop_captures tearing down the same
+# capture. Every read and every write of it happens under this lock.
+#
+# The lock covers BOOKKEEPING ONLY — the id reservation, the field updates, the
+# snapshot list_sessions renders from, and the pop that ends a session. It is
+# never held across a tshark run: a capture lives for its whole `-a duration:`
+# and _packet_count alone may take 30s, so holding it there would just relocate
+# the freeze this file was fixed to remove.
+#
+# Ownership of a capture's CHILD PROCESS is transferred rather than shared:
+# whoever pops `session["process"]` under this lock is the only one allowed to
+# signal it. That is what stops two stop_captures — or a stop_capture racing
+# shutdown — from running the kill ladder against the same pid, and it is why
+# the key is absent until there is a child to kill.
+_SESSIONS_LOCK = threading.Lock()
+
 
 def _session_id() -> str:
     return f"{int(time.time())}-{os.urandom(4).hex()}"
@@ -111,13 +131,23 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
 
 
 def _cleanup_sessions() -> None:
-    """Kill all active capture processes."""
-    for sid, session in list(SESSIONS.items()):
-        proc = session.get("process")
+    """Kill all active capture processes.
+
+    Runs on the event-loop thread as the server shuts down, while handler
+    threads may still be mid-flight. The registry is emptied and every child
+    CLAIMED (popped) under the lock in one step, so an in-flight stop_capture
+    can no longer find a process to signal; the SIGTERM -> wait(5) -> SIGKILL
+    ladder then runs OUTSIDE the lock, because up to 10s per child is precisely
+    the kind of wait that must not sit inside one.
+    """
+    with _SESSIONS_LOCK:
+        claimed = [(sid, session.pop("process", None))
+                   for sid, session in SESSIONS.items()]
+        SESSIONS.clear()
+    for sid, proc in claimed:
         if proc:
             _kill_process_group(proc)
             log.info("Cleaned up session %s", sid)
-    SESSIONS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +390,32 @@ def handle_start_capture(params: dict, project_root: str) -> dict:
     max_packets    = int(params.get("max_packets", 100000))
     session_name   = params.get("session_name", "")
 
-    sid = _session_id()
-    pcap_path = os.path.join(_captures_path(project_root), f"{sid}.pcap")
+    captures_dir = _captures_path(project_root)
+
+    # The id is RESERVED before the spawn instead of registered after it. The
+    # pcap path is derived from the id, so two concurrent start_captures that
+    # picked the same id would hand tshark the same `-w` file AND the second
+    # SESSIONS write would drop the first entry — orphaning a live child nobody
+    # can stop any more. `int(time.time())` plus 4 random bytes only collides
+    # inside a single second, but the cost of that collision is a lost capture
+    # and the cost of ruling it out is one dict lookup.
+    with _SESSIONS_LOCK:
+        sid = _session_id()
+        while sid in SESSIONS:
+            sid = _session_id()
+        pcap_path = os.path.join(captures_dir, f"{sid}.pcap")
+        SESSIONS[sid] = {
+            "interface":      interface,
+            "capture_filter": capture_filter,
+            "timeout":        timeout_sec,
+            "max_packets":    max_packets,
+            "pcap_path":      pcap_path,
+            "session_name":   session_name,
+            "start_time":     time.time(),
+            # No "process" key yet: that key IS the kill claim (see
+            # _SESSIONS_LOCK), so it may not exist before there is a child.
+            "status":         "starting",
+        }
 
     args = [tshark, "-i", interface]
     if capture_filter:
@@ -388,19 +442,25 @@ def handle_start_capture(params: dict, project_root: str) -> dict:
             preexec_fn=os.setsid,
         )
     except OSError as exc:
+        with _SESSIONS_LOCK:
+            SESSIONS.pop(sid, None)   # nothing to stop — drop the reservation
         return {"error": f"Failed to start tshark: {exc}"}
 
-    SESSIONS[sid] = {
-        "process":        proc,
-        "interface":      interface,
-        "capture_filter": capture_filter,
-        "timeout":        timeout_sec,
-        "max_packets":    max_packets,
-        "pcap_path":      pcap_path,
-        "session_name":   session_name,
-        "start_time":     time.time(),
-        "status":         "running",
-    }
+    with _SESSIONS_LOCK:
+        session = SESSIONS.get(sid)
+        # The reservation can disappear from under us while we are spawning:
+        # shutdown empties the registry, and a stop_capture that guessed the id
+        # claims it. In both cases nobody else holds this child, so publishing it
+        # would resurrect a session already declared dead — kill it instead.
+        stolen = session is None or session.get("status") == "stopping"
+        if stolen:
+            SESSIONS.pop(sid, None)
+        else:
+            session["process"] = proc
+            session["status"] = "running"
+    if stolen:
+        _kill_process_group(proc)   # outside the lock: up to 10s of waiting
+        return {"error": f"Capture {sid} was stopped while it was still starting."}
 
     parts = [
         "## Capture Started",
@@ -437,24 +497,37 @@ def handle_stop_capture(params: dict, project_root: str) -> dict:
     if not sid:
         return {"error": "session_id is required"}
 
-    session = SESSIONS.get(sid)
-    if not session:
-        return {"error": f"Unknown session: {sid}. Use list_sessions to see active sessions."}
+    # ONE claim, taken under the lock: the caller that flips the status to
+    # "stopping" and pops the child owns this teardown from here on. A second
+    # concurrent stop_capture is turned away instead of SIGTERMing the same pid,
+    # re-running the 30s packet count, and racing this one's unlink() against its
+    # own getsize(). Everything below works off LOCALS — the long part (kill
+    # ladder, packet count) must not hold the lock, and the transient "stopping"
+    # status is what keeps a concurrent list_sessions coherent while it runs.
+    with _SESSIONS_LOCK:
+        session = SESSIONS.get(sid)
+        if not session:
+            return {"error": f"Unknown session: {sid}. Use list_sessions to see active sessions."}
+        if session.get("status") == "stopping":
+            return {"error": f"Session {sid} is already being stopped."}
+        stop_time = time.time()
+        session["status"] = "stopping"
+        session["stop_time"] = stop_time
+        proc = session.pop("process", None)
+        pcap_path = session.get("pcap_path", "")
+        start_time = session.get("start_time", stop_time)
 
-    proc = session.get("process")
     if proc:
         _kill_process_group(proc)
 
-    session["status"] = "stopped"
-    session["stop_time"] = time.time()
-    duration = session["stop_time"] - session.get("start_time", session["stop_time"])
+    duration = stop_time - start_time
 
-    pcap_path = session.get("pcap_path", "")
     if not os.path.isfile(pcap_path) or os.path.getsize(pcap_path) == 0:
         keep = _bool_param(params, "keep_file", True)
         if not keep and os.path.isfile(pcap_path):
             os.unlink(pcap_path)
-        SESSIONS.pop(sid, None)
+        with _SESSIONS_LOCK:
+            SESSIONS.pop(sid, None)
         return {
             "__raw_text__": (
                 f"## Capture Stopped\n"
@@ -486,7 +559,8 @@ def handle_stop_capture(params: dict, project_root: str) -> dict:
         parts.append(f"\nUse `analyze`, `statistics`, or `follow_stream` with "
                       f"`file: \"{rel_path}\"` to inspect the capture.")
 
-    SESSIONS.pop(sid, None)
+    with _SESSIONS_LOCK:
+        SESSIONS.pop(sid, None)
     return {"__raw_text__": "\n".join(parts)}
 
 
@@ -502,6 +576,19 @@ def _bool_param(params: dict, key: str, default: bool) -> bool:
 
 
 # ---- 3. analyze (+ _run_analyze helper) ----------------------------------
+
+# Upper bound on the caller-supplied `analyze` timeout. An unclamped timeout the
+# CALLER picks is the same defect class as the inline blocking read loop this
+# server used to have: it hands one request the right to occupy a worker for as
+# long as it likes. PARAM_ALIASES maps `duration` and `max_time` onto it, so
+# {"duration": 86400} — an entirely plausible thing to write when you are
+# thinking about a CAPTURE — used to buy a day-long subprocess wait. Concurrent
+# dispatch bounds the blast radius (the loop keeps reading), it does not remove
+# it: MAX_INFLIGHT_REQUESTS such calls and every worker is busy again, which
+# reads as a dead server for the second time. 600s is far past any local-file
+# dissection that was ever going to finish.
+MAX_ANALYZE_SEC = 600
+
 
 def _run_analyze(params: dict, project_root: str) -> str:
     """Core analysis — shared by stop_capture and analyze."""
@@ -523,7 +610,7 @@ def _run_analyze(params: dict, project_root: str) -> str:
     head_limit     = int(params.get("head_limit", 0))
     offset         = int(params.get("offset", 0))
     max_chars      = int(params.get("max_output_chars", 500000))
-    timeout_sec    = int(params.get("timeout", 120))
+    timeout_sec    = min(MAX_ANALYZE_SEC, max(1, int(params.get("timeout", 120))))
 
     if custom_fields:
         fields = [f.strip() for f in custom_fields.split(",") if f.strip()]
@@ -639,14 +726,23 @@ def handle_analyze(params: dict, project_root: str) -> dict:
 def handle_list_sessions(params: dict, project_root: str) -> dict:
     status_filter = params.get("status", "")
 
-    if not SESSIONS:
+    # A snapshot under the lock, rendered outside it: os.path.getsize is file I/O
+    # per row, and a concurrent start/stop must not queue behind this render.
+    # Each session is shallow-copied because the live dict keeps being mutated by
+    # its owning handler while we format — iterating SESSIONS directly would also
+    # raise "dictionary changed size during iteration" the moment one of them
+    # finished mid-loop.
+    with _SESSIONS_LOCK:
+        snapshot = [(sid, dict(session)) for sid, session in SESSIONS.items()]
+
+    if not snapshot:
         return {"__raw_text__": "## Capture Sessions\n\nNo active sessions."}
 
     now = time.time()
     headers = ["Session ID", "Name", "Interface", "Filter", "Status", "Duration", "PCAP Size"]
     rows: List[List[str]] = []
 
-    for sid, s in SESSIONS.items():
+    for sid, s in snapshot:
         status = s.get("status", "unknown")
         if status_filter and status != status_filter:
             continue
@@ -825,6 +921,17 @@ def handle_follow_stream(params: dict, project_root: str) -> dict:
 
 # ---- 8. config ------------------------------------------------------------
 
+# The saved-config store is a read-modify-write over one file, so concurrent
+# dispatch can destroy it outright: `open(..., "w")` TRUNCATES before json.dump
+# refills it, and a reader landing in that window parses invalid JSON, falls back
+# to `{}` (the except below), and the next save writes that empty dict back —
+# every other saved configuration gone, with a success reply. A separate lock
+# from _SESSIONS_LOCK because it guards a different object and only ever spans a
+# few KB of local file I/O; it is held across the whole read-modify-write, since
+# locking each half separately is what leaves the lost-update window open.
+_CONFIG_LOCK = threading.Lock()
+
+
 def handle_config(params: dict, project_root: str) -> dict:
     action = params.get("action", "")
     if not action:
@@ -832,56 +939,57 @@ def handle_config(params: dict, project_root: str) -> dict:
 
     config_path = os.path.join(_captures_path(project_root), "configs.json")
 
-    configs: Dict[str, dict] = {}
-    if os.path.isfile(config_path):
-        try:
-            with open(config_path, "r") as fh:
-                configs = json.load(fh)
-        except (json.JSONDecodeError, OSError):
-            configs = {}
+    with _CONFIG_LOCK:
+        configs: Dict[str, dict] = {}
+        if os.path.isfile(config_path):
+            try:
+                with open(config_path, "r") as fh:
+                    configs = json.load(fh)
+            except (json.JSONDecodeError, OSError):
+                configs = {}
 
-    if action == "list":
-        if not configs:
-            return {"__raw_text__": "## Saved Configurations\n\nNo saved configurations."}
-        headers = ["Name", "Keys"]
-        rows = [[n, ", ".join(sorted(c.keys()))] for n, c in sorted(configs.items())]
-        return {"__raw_text__": f"## Saved Configurations\n\n{_markdown_table(headers, rows)}"}
+        if action == "list":
+            if not configs:
+                return {"__raw_text__": "## Saved Configurations\n\nNo saved configurations."}
+            headers = ["Name", "Keys"]
+            rows = [[n, ", ".join(sorted(c.keys()))] for n, c in sorted(configs.items())]
+            return {"__raw_text__": f"## Saved Configurations\n\n{_markdown_table(headers, rows)}"}
 
-    name = params.get("session_name", "")
-    if not name:
-        return {"error": "name is required for save/load/delete"}
+        name = params.get("session_name", "")
+        if not name:
+            return {"error": "name is required for save/load/delete"}
 
-    if action == "save":
-        config_data = params.get("config")
-        if not config_data or not isinstance(config_data, dict):
-            return {"error": "config (dict) is required for save"}
-        configs[name] = config_data
-        with open(config_path, "w") as fh:
-            json.dump(configs, fh, indent=2)
-        return {
-            "__raw_text__": (
-                f"## Configuration Saved\n"
-                f"**Name:** `{name}`\n"
-                f"**Keys:** {', '.join(sorted(config_data.keys()))}"
-            )
-        }
+        if action == "save":
+            config_data = params.get("config")
+            if not config_data or not isinstance(config_data, dict):
+                return {"error": "config (dict) is required for save"}
+            configs[name] = config_data
+            with open(config_path, "w") as fh:
+                json.dump(configs, fh, indent=2)
+            return {
+                "__raw_text__": (
+                    f"## Configuration Saved\n"
+                    f"**Name:** `{name}`\n"
+                    f"**Keys:** {', '.join(sorted(config_data.keys()))}"
+                )
+            }
 
-    if action == "load":
-        if name not in configs:
-            return {"error": f"Configuration not found: {name}"}
-        cfg = configs[name]
-        lines = [f"## Configuration: {name}", ""]
-        for k, v in sorted(cfg.items()):
-            lines.append(f"- **{k}:** `{v}`")
-        return {"__raw_text__": "\n".join(lines)}
+        if action == "load":
+            if name not in configs:
+                return {"error": f"Configuration not found: {name}"}
+            cfg = configs[name]
+            lines = [f"## Configuration: {name}", ""]
+            for k, v in sorted(cfg.items()):
+                lines.append(f"- **{k}:** `{v}`")
+            return {"__raw_text__": "\n".join(lines)}
 
-    if action == "delete":
-        if name not in configs:
-            return {"error": f"Configuration not found: {name}"}
-        del configs[name]
-        with open(config_path, "w") as fh:
-            json.dump(configs, fh, indent=2)
-        return {"__raw_text__": f"## Configuration Deleted\n**Name:** `{name}`"}
+        if action == "delete":
+            if name not in configs:
+                return {"error": f"Configuration not found: {name}"}
+            del configs[name]
+            with open(config_path, "w") as fh:
+                json.dump(configs, fh, indent=2)
+            return {"__raw_text__": f"## Configuration Deleted\n**Name:** `{name}`"}
 
     return {"error": f"Unknown action: {action}. Valid: save, load, list, delete"}
 
@@ -1002,6 +1110,14 @@ TSHARK_CALL_TOOL = {
 # ---------------------------------------------------------------------------
 # McpServer
 # ---------------------------------------------------------------------------
+
+# How many tool calls may be in flight at once. The stdin reader owns a thread of
+# its own, OUTSIDE this pool, so saturating it delays queued CALLS and can never
+# stop the server from READING — which is the whole point of the split in run().
+# 8 also bounds how many tshark children this server can have dissecting at once.
+MAX_INFLIGHT_REQUESTS = 8
+
+
 class McpServer:
     """Minimal MCP server over stdio (JSON-RPC 2.0, one JSON object per line)."""
 
@@ -1011,36 +1127,120 @@ class McpServer:
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         log.info("MCP server starting, project_root=%s", self.project_root)
+        # TWO executors, and one task per request, on purpose. This loop used to
+        # call _handle_message INLINE on the very thread that awaits the
+        # readline, so a single blocking handler froze the whole event loop for
+        # its duration — and here that duration is BUDGETED: `analyze` defaults
+        # to 120s and statistics / follow_stream carry a hard 120s, so two
+        # minutes of deafness was the DESIGNED case, not the failure case. Every
+        # other request then sat unread in the pipe, timed out client-side at
+        # ~60s (twice as fast as the call it was waiting behind), and was finally
+        # answered against an id the client had already abandoned. From the
+        # caller's chair that is a dead server, and a restart was the only lever.
+        #
+        # The reader gets a pool to ITSELF because a single shared pool is the
+        # easy way to reintroduce the same deafness one layer down:
+        # MAX_INFLIGHT_REQUESTS busy handlers would leave `sys.stdin.readline`
+        # with no thread to run on, and the server stops reading again.
+        #
+        # Handlers are safe to run concurrently because the module's shared
+        # mutable state is guarded: SESSIONS by _SESSIONS_LOCK (bookkeeping only,
+        # never across a capture or a packet count) and the saved-config file by
+        # _CONFIG_LOCK. `_tshark_path` is an idempotent single-value cache — two
+        # threads racing it compute the same path — and project_root is written
+        # once in __init__ before this loop starts.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tshark-stdin")
+        workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+                                     thread_name_prefix="tshark-call")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    # A closed/detached stdin must end the loop through the
+                    # `finally` below, not unwind out of run() past the cleanup.
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     break
                 line = line.strip()
                 if not line:
                     continue
+
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    # Answering is not optional: the bare `continue` that used to
+                    # be here left the caller's request id unanswered until it
+                    # timed out — indistinguishable from a hung server.
                     log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
                     continue
+                if not isinstance(msg, dict):
+                    # `5` on a line is valid JSON. It used to reach msg.get() and
+                    # take the process down with an AttributeError that escaped
+                    # run() — and an MCP client does not respawn a dead stdio
+                    # server, so one stray line was a restart.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
+                    continue
+
                 log.debug("← %s", json.dumps(msg)[:200])
-                try:
-                    response = self._handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    out = json.dumps(response)
-                    log.debug("→ %s", out[:200])
-                    sys.stdout.write(out + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(loop, workers, msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
         finally:
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
+            workers.shutdown(wait=False)
+            # Last, and deliberately after the executors are released: this kills
+            # the capture children, and it claims each one under _SESSIONS_LOCK
+            # so a stop_capture still mid-flight cannot signal the same pid.
             _cleanup_sessions()
             log.info("MCP server shutting down")
+
+    async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await loop.run_in_executor(workers, self._handle_message, msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            # Catching Exception and not BaseException is load-bearing: the
+            # `finally` above cancels these tasks, and swallowing CancelledError
+            # would turn shutdown into a hang.
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers run in the worker pool,
+        but `_serve` resumes on the loop after its await, so concurrent replies
+        cannot interleave and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ %s", out[:200])
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, a client that closed the pipe mid-reply killed the
+            # process with the traceback escaping run().
+            log.warning("stdout write failed: %s", exc)
 
     def _handle_message(self, msg: dict) -> Optional[dict]:
         msg_id = msg.get("id")
@@ -1172,6 +1372,14 @@ def main() -> None:
 
     server = McpServer(args.project_root)
     asyncio.run(server.run())
+    # stdin is closed, so the client is gone. Handler threads live in the
+    # server's own executors rather than the loop's default one, so asyncio does
+    # not join them — but concurrent.futures registers an atexit hook that WOULD,
+    # and one handler mid-`analyze` would hold this process open for the rest of
+    # its 120s budget (up to MAX_ANALYZE_SEC if the caller asked for more). Every
+    # reply is flushed as it is written and logging flushes per record, so there
+    # is nothing left to drain; the captures were killed in run()'s finally.
+    os._exit(0)
 
 
 if __name__ == "__main__":

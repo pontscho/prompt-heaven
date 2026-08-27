@@ -335,11 +335,17 @@ def scan_source(source, path):
 
 
 def python_files(root):
-    """Every .py under `root`, repo-relative and sorted. Skips __pycache__."""
+    """Every .py under `root`, repo-relative and sorted. Skips __pycache__.
+
+    `.claude` is pruned for the same reason as `__pycache__`: it is scratch, not
+    source. A gated root of `Scripts` walks `Scripts/.claude/tmp/` too, so an
+    unrelated checkout dropped there was reported as a spawn site of OURS —
+    a scan-scope gap, not a finding.
+    """
     out = []
     for dirpath, dirs, files in os.walk(root):
         dirs[:] = sorted(d for d in dirs
-                         if d not in ("__pycache__", ".git"))
+                         if d not in ("__pycache__", ".git", ".claude"))
         for name in sorted(files):
             if name.endswith(".py"):
                 out.append(os.path.join(dirpath, name))

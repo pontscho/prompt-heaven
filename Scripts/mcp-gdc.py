@@ -26,6 +26,7 @@ import argparse
 import logging
 import urllib.request
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Any, Callable
 
 
@@ -1566,11 +1567,43 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
 # MCP Server — JSON-RPC 2.0 over stdio
 # ============================================================
 
+# The ceiling on a single call. It predates the concurrent dispatch below —
+# it was installed against an observed 15-minute silent hang — and it stays as
+# a backstop, not as the defence. What changed is its reach: the server is no
+# longer serial, so this now bounds ONE call instead of the whole server. Note
+# it is still longer than a typical ~60s client timeout, i.e. it never could
+# save the call it fires on; it only ever saved the process, which is exactly
+# why it was never enough on its own.
+HANDLER_CEILING_SECONDS = 90.0
+
+# Functions that touch no CDP session at all: an HTTP GET /json plus two
+# scalars off the manager. They answer while a page-driving call is in flight —
+# the read-only concurrency actually worth having. Everything else, including
+# the snapshot-looking list_console_messages / list_network_requests, goes
+# through _resolve_session, which may CONNECT (see GdcManager.get_session), so
+# it takes a lane.
+LOCK_FREE_FUNCTIONS = frozenset({"gdc_status", "list_pages"})
+
+# Functions that WRITE the manager's single selection slot. They take the
+# selected lane whatever target_id they name, so a select_page(X) followed by
+# an implicit navigate cannot reorder into a navigate of the previous tab.
+SELECTION_FUNCTIONS = frozenset({"select_page", "new_page", "close_page"})
+
+# The lane of "whichever tab is selected". The NUL prefix cannot collide with a
+# Chrome target id (upper-case hex).
+SELECTED_LANE = "\0selected"
+
+
 class McpServer:
     PROTOCOL_VERSION = "2024-11-05"
 
     def __init__(self, browser_url: str):
         self.manager = GdcManager(browser_url)
+        # Lane locks, created on first use (NOT here: this runs before
+        # asyncio.run in main, and a pre-loop asyncio.Lock binds to the wrong
+        # loop on 3.9) and dropped when a lane's last user leaves — see _serve.
+        self._lanes: Dict[str, asyncio.Lock] = {}
+        self._lane_users: Dict[str, int] = {}
 
     @staticmethod
     def _result(msg_id: Any, result: Any) -> dict:
@@ -1630,18 +1663,16 @@ class McpServer:
             )
 
         try:
-            # Global safety cap: no single handler may wedge the (serial) server.
-            # Even if some await slips past its own timeout, the tool call fails
-            # here and the run loop resumes reading stdin instead of going silent.
-            result = await asyncio.wait_for(handler(self.manager, args), timeout=90.0)
+            # The global cap that used to sit here moved to _call_with_ceiling,
+            # one level out, so it covers every method and not just this one.
+            # Catching it here was also actively misleading on Python 3.11+,
+            # where asyncio.TimeoutError IS the builtin TimeoutError: a CDP
+            # command hitting its own 30s budget (CdpSession.send raises
+            # TimeoutError) was reported as "the 90s global cap" — the wrong
+            # diagnosis, and 60s off. It now falls to the branch below and
+            # reports what actually timed out.
+            result = await handler(self.manager, args)
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
-        except asyncio.TimeoutError:
-            log.debug(f"Handler '{name}' exceeded the 90s global cap")
-            return self._tool_error(
-                msg_id,
-                f"Error in {name}: handler timed out (90s global cap). "
-                f"The server stayed responsive — retry the call.",
-            )
         except Exception as e:
             log.debug(f"Handler '{name}' error: {e}")
             return self._tool_error(msg_id, f"Error in {name}: {e}")
@@ -1649,10 +1680,33 @@ class McpServer:
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         log.debug("mcp-gdc server ready (stdio)")
-
+        # A reader thread of its OWN, and one task per request. This loop used
+        # to await the handler on the same line it later awaited the readline,
+        # so for the whole duration of one call the server did not read stdin at
+        # all: every other request sat unread in the pipe, timed out
+        # client-side (~60s) and was then answered against an id the client had
+        # already abandoned. From the caller's chair that is a dead server, and
+        # restarting it was the only lever they had. The ceiling below was
+        # installed against the same incident — a ceiling bounds an outage, it
+        # does not remove one.
+        #
+        # The executor holds exactly one thread and reads stdin ONLY. Handlers
+        # never enter it: they are coroutines on this loop, which is also what
+        # keeps CdpSession's id counter and pending map safe without a mutex —
+        # `self._msg_id += 1` and the `_pending[msg_id] = fut` that follows it
+        # have no await between them, so on a single-threaded loop no other
+        # handler can observe or reuse that id. Move handlers into a thread pool
+        # and that stops being true.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gdc-stdin")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    # ValueError: stdin was closed under us mid-read.
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     log.debug("stdin EOF — shutting down")
                     break
@@ -1664,25 +1718,206 @@ class McpServer:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as e:
+                    # Answering is not optional: the bare `continue` that used
+                    # to be here left the caller's id unanswered until it timed
+                    # out, which is indistinguishable from a wedged server.
                     log.debug(f"JSON parse error: {e}")
+                    self._write(self._error(None, -32700, f"Parse error: {e}"))
+                    continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() and take the
+                    # process down with an AttributeError escaping run() — and an
+                    # MCP client does not respawn a dead stdio server.
+                    log.debug("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
                     continue
 
-                try:
-                    response = await self.handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    log.debug("→ RAW: %s", json.dumps(response))
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
-
+                task = loop.create_task(self._serve(msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
         finally:
+            pending = list(inflight)
+            for task in pending:
+                task.cancel()
+            if pending:
+                # cancel() only SCHEDULES cancellation. Give the tasks one
+                # bounded chance to unwind before cleanup_all closes the
+                # sessions they are still holding.
+                await asyncio.wait(pending, timeout=2.0)
+            reader.shutdown(wait=False)
             log.debug("Cleaning up all sessions")
             await self.manager.cleanup_all()
+
+    # One task per request is what stops a blocking call from deafening the
+    # server; the lane lock below is what stops that same concurrency from
+    # letting a screenshot overtake the navigate it was meant to follow. The two
+    # halves are inseparable here — a screenshot of the wrong page is worse than
+    # a slow one.
+
+    def _lane_key(self, msg: dict) -> Optional[str]:
+        """The lane a request serializes on, or None to run unserialized.
+
+        Page-affecting handlers must not interleave. Each resolves its session
+        on its first line (_resolve_session) and then issues a SEQUENCE of CDP
+        commands against it: navigate clears session._load_event and then waits
+        on it, fill reads then writes, screenshot captures whatever is on screen
+        at that instant. Two of them on one tab do not merely race on the wire —
+        that part is safe, CDP demuxes by message id — they race on the PAGE,
+        and the loser gets another call's page back as its answer.
+
+        So the lane is the target, not the request:
+          * explicit target_id -> that target's lane. Separate tabs stay
+            concurrent, which is what _resolve_session's per-call target_id was
+            built for and the reason dispatching as tasks is worth anything.
+          * no target_id -> SELECTED_LANE, the lane of the manager's single
+            selection slot. A target_id naming the currently selected tab
+            normalizes to the SAME lane, so mixing both addressing styles on one
+            tab still serializes.
+          * SELECTION_FUNCTIONS -> SELECTED_LANE regardless of target_id, so the
+            slot cannot be rewritten under an implicit call that is in flight.
+          * LOCK_FREE_FUNCTIONS -> None.
+
+        The envelope has to be unwrapped here: tools/list advertises only
+        gdc_call, so in practice EVERY call arrives as gdc_call and the real
+        function name and target_id sit NESTED in its arguments. A lane keyed on
+        the outer name would put every call in the world into one lane and hand
+        back the serial server this fix exists to remove.
+        """
+        if msg.get("method") != "tools/call":
+            return None
+        params = msg.get("params")
+        if not isinstance(params, dict):
+            return None
+        args = params.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                return None  # malformed; _dispatch_tool rejects it without a session
+        if not isinstance(args, dict):
+            return None
+        name = params.get("name") or ""
+        if name == "gdc_call":
+            name = args.get("function") or args.get("f") or ""
+            args = args.get("params") or args.get("p") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+        # A non-string name is not just unroutable, it is unhashable if it came
+        # in as an object — and this runs before the try in _serve.
+        if not isinstance(name, str) or not name:
+            return None  # no function -> handle_gdc_call answers with status
+        if name in LOCK_FREE_FUNCTIONS:
+            return None
+        if name in SELECTION_FUNCTIONS:
+            return SELECTED_LANE
+        target_id = args.get("target_id")
+        if not isinstance(target_id, str) or not target_id:
+            return SELECTED_LANE
+        if target_id == self.manager.selected_id:
+            return SELECTED_LANE
+        return target_id
+
+    async def _serve(self, msg: dict) -> None:
+        """One request, from lane acquisition to written reply. Its own task."""
+        response: Optional[dict]
+        try:
+            key = self._lane_key(msg)
+            if key is None:
+                response = await self._call_with_ceiling(msg)
+            else:
+                # The setdefault and the refcount bump are SYNCHRONOUS on
+                # purpose. Tasks start in creation order (call_soon is FIFO) and
+                # run to their first await; when that first await is the acquire
+                # below, asyncio.Lock's FIFO waiter queue replays the lane in
+                # ARRIVAL order — which is the whole ordering guarantee. Put any
+                # await above this line and navigate/screenshot can reorder.
+                #
+                # The refcount is what allows pruning at all: a bare
+                # `if not lock.locked(): del` would drop a lock a just-woken
+                # waiter still owns (release() clears _locked before the waiter
+                # runs) and hand the next arrival a fresh, uncontended one.
+                lock = self._lanes.setdefault(key, asyncio.Lock())
+                self._lane_users[key] = self._lane_users.get(key, 0) + 1
+                try:
+                    async with lock:
+                        response = await self._call_with_ceiling(msg)
+                finally:
+                    remaining = self._lane_users.get(key, 1) - 1
+                    if remaining > 0:
+                        self._lane_users[key] = remaining
+                    else:
+                        self._lane_users.pop(key, None)
+                        self._lanes.pop(key, None)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    async def _call_with_ceiling(self, msg: dict) -> Optional[dict]:
+        """Run one message under HANDLER_CEILING_SECONDS.
+
+        Nothing a handler raises reaches this wait_for — _dispatch_tool already
+        turns handler exceptions into a tool error — so the only TimeoutError
+        caught here is the ceiling's own, and it cannot be confused with a CDP
+        command's 30s budget expiring.
+        """
+        try:
+            return await asyncio.wait_for(self.handle_message(msg),
+                                          timeout=HANDLER_CEILING_SECONDS)
+        except asyncio.TimeoutError:
+            msg_id = msg.get("id")
+            if msg_id is None:
+                return None
+            method = msg.get("method", "")
+            params = msg.get("params")
+            name = (params.get("name") or "") if isinstance(params, dict) else ""
+            if method == "tools/call":
+                log.debug("Handler '%s' exceeded the %ds global cap",
+                          name, HANDLER_CEILING_SECONDS)
+                return self._tool_error(
+                    msg_id,
+                    f"Error in {name}: handler timed out "
+                    f"({HANDLER_CEILING_SECONDS:.0f}s global cap). "
+                    f"The server stayed responsive — retry the call.",
+                )
+            log.debug("Method '%s' exceeded the %ds global cap",
+                      method, HANDLER_CEILING_SECONDS)
+            return self._error(
+                msg_id, -32603,
+                f"Handler timed out ({HANDLER_CEILING_SECONDS:.0f}s global cap): {method}")
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Event-loop-thread only: handlers are coroutines on this loop, so _serve
+        resumes here to write and this function has no await inside it. Two
+        replies therefore cannot interleave mid-line, and it needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ RAW: %s", out)
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, this escaped run() and killed the process.
+            log.warning("stdout write failed: %s", exc)
 
 
 # ============================================================

@@ -2,7 +2,11 @@
 __pycache__/
 *.pyc
 *.pyo
-.claude/tmp
+# Unanchored on purpose: a pattern containing a slash is matched from the repo
+# root only, so the anchored spelling left scratch trees like Scripts/.claude/tmp
+# neither ignored nor tracked — and tests/test_spawn_stdin.py, which walks all of
+# Scripts/**, then gated one as if it were our source.
+**/.claude/tmp
 
 # Tooling caches (mcp-webfetch, etc.)
 .cache/

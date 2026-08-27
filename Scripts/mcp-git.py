@@ -35,12 +35,15 @@ via `python3 mcp-git.py --list`).
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger("mcp-git")
@@ -417,6 +420,104 @@ def _quote_arg(a: str) -> str:
 # ---------------------------------------------------------------------------
 
 DEFAULT_MAX_CHARS = 100_000
+
+DEFAULT_TIMEOUT_SEC = 60
+
+# Upper bound on the caller-supplied `timeout`, in the spirit of mcp-jenkins'
+# MAX_RUN_AND_WAIT_SEC. An UNCLAMPED caller-supplied deadline is the same defect
+# class as the inline handler this loop used to have (see McpServer.run): both
+# let one request decide how long the server stays unavailable, and neither is
+# bounded by anything the SERVER controls. It merely used to be unreachable in
+# practice because a local git read finishes in milliseconds — "practically
+# fine" was a property of current usage, not of the code, and a model writing
+# {"timeout": 86400} bought a day-long worker slot (and, for a mutating stash, a
+# day-long hold on _MUTATING_GIT_LOCK below). 300s is far past any honest local
+# read on this whitelist: the slowest of them — `log -p` over a full history,
+# `grep` across a large tree, `count-objects -v` on a cold cache — are seconds,
+# not minutes.
+MAX_TIMEOUT_SEC = 300
+
+# One lock for every git invocation that MUTATES this working tree. The module
+# itself holds no state (see the audit note in McpServer.run), so handlers are
+# free to run concurrently — but the REPOSITORY is shared state that no amount
+# of stateless Python makes safe: two `git stash push` calls racing on one
+# worktree interleave their index writes, and the loser is a caller's
+# uncommitted work. So the mutating door is serialized while the read-only ones
+# stay concurrent, which is the entire point of the two-executor loop below.
+#
+# ONE lock for the process, not one per worktree. `cwd` can name a sub-repo (or,
+# without --strict, an absolute path in another repo entirely), so two stashes in
+# two unrelated repositories serialize against each other needlessly. That is the
+# conservative direction of wrong: the cost is one waiting stash, the alternative
+# is keying a lock table on a resolved worktree path — module-level mutable state,
+# in the server whose read loop was just fixed for not having any.
+#
+# Only `stash` can get through here: every other whitelisted subcommand is
+# read-only by construction (hash-object rejects -w, fetch demands --dry-run,
+# apply demands --check, config/branch/tag/remote reject their mutating flags).
+# The lock is held across subprocess.run, so MAX_TIMEOUT_SEC above is what keeps
+# it from being held forever.
+#
+# Residual, stated rather than hidden: a read-only git command may still take
+# .git/index.lock briefly to refresh the index, so it can collide with a
+# concurrent stash and git will print its own "Unable to create index.lock"
+# error. That is git's ordinary multi-client behaviour — the same thing a human
+# typing `git status` in a terminal during a stash gets — and it is a retryable
+# error message, not corruption. Two concurrent stashes are corruption, which is
+# why THAT is the pair this lock separates.
+_MUTATING_GIT_LOCK = threading.Lock()
+
+# The two stash subcommands that only READ. Everything else in validate_stash's
+# allowlist — including the empty positional list, which git reads as an
+# implicit `push` — mutates.
+_READ_ONLY_STASH = {"list", "show"}
+
+
+def _mutates_repo(function: str, args: List[str]) -> bool:
+    """True when this argv would change the worktree, the index or a ref.
+
+    The positional list is extracted exactly as validate_stash extracts it, so
+    the two cannot disagree about what a given argv means: a `--` or any flag is
+    skipped, so `stash push -- src/x.c` is seen as mutating (positional[0] is
+    the path, not "show") and `stash show -- src/x.c` is not.
+    """
+    if function != "stash":
+        return False
+    positional = [a for a in args if not a.startswith("-")]
+    return not positional or positional[0] not in _READ_ONLY_STASH
+
+
+def _run_timeout(params: dict) -> float:
+    """The clamped subprocess deadline for one git invocation.
+
+    Coercion, not just clamping, because the clamp needs a NUMBER to compare
+    and the wire hands over whatever the caller typed. Three shapes reach here
+    that `min()` cannot handle and that used to reach subprocess.run intact:
+      * a string: `subprocess.run(timeout="30")` is a TypeError inside
+        Popen.wait, surfacing as an opaque "Internal server error: TypeError"
+        instead of a git answer. float() repairs the NUMERIC ones — `"30"`
+        means 30 to every reader, and refusing it would be pedantry — while a
+        non-numeric string takes the fallback.
+      * NaN: json.loads accepts the bare token `NaN` by default, and every
+        comparison against NaN is False — so the deadline never expires and the
+        clamp this function exists for is silently skipped.
+      * 0 / negative (which is also what a `timeout: false` coerces to): a
+        deadline the command cannot possibly meet, so the call could only ever
+        answer "timed out".
+    The unusable ones fall back to the documented default rather than raising:
+    the caller asked a git question, and a bad deadline is not a reason to
+    refuse it.
+    """
+    try:
+        requested = float(params.get("timeout", DEFAULT_TIMEOUT_SEC))
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT_SEC
+    # `requested != requested` is the NaN test; it must come first, because NaN
+    # would also slip through the `<= 0` comparison below.
+    if requested != requested or requested <= 0:
+        return DEFAULT_TIMEOUT_SEC
+    return min(float(MAX_TIMEOUT_SEC), requested)
+
 
 # Keys in params that are handled specially (not forwarded as git CLI flags)
 _META_KEYS = {"args", "cwd", "timeout", "max_answer_chars"}
@@ -850,15 +951,22 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
         args = extended
 
     cmd = ["git", function] + args
+    # Handlers run concurrently (McpServer.run), so a mutating argv takes the
+    # repository lock for the duration of the spawn and a read-only one does not.
+    # nullcontext keeps the two paths one statement rather than an acquire /
+    # release pair straddling the except clauses below.
+    guard = (_MUTATING_GIT_LOCK if _mutates_repo(function, args)
+             else contextlib.nullcontext())
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,   # git must never consume the MCP stream
-            timeout=params.get("timeout", 60),
-        )
+        with guard:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,   # git must never consume the MCP stream
+                timeout=_run_timeout(params),
+            )
     except FileNotFoundError:
         return {"error": "git executable not found in PATH"}
     except subprocess.TimeoutExpired:
@@ -986,7 +1094,8 @@ GIT_CALL_TOOL = {
         "    - Do NOT pass `--no-verify`, `--no-gpg-sign`, or any hook bypass\n"
         "      unless the user explicitly requests it.\n\n"
         "Params: args (CLI args list), cwd (sub-repo, default project root), "
-        "max_answer_chars (default 100000), timeout (default 60s). Markdown output.\n\n"
+        "max_answer_chars (default 100000), timeout (default 60s, capped at 300s). "
+        "Markdown output.\n\n"
         "NAMED PARAMS (alternative to args). The SAME key set applies to EVERY\n"
         "function — there is no per-subcommand schema — so a key is simply\n"
         "meaningless where git takes no such argument (log with `remote` hands git\n"
@@ -1034,6 +1143,12 @@ GIT_CALL_TOOL = {
 }
 
 
+# How many tool calls may be in flight at once. The stdin reader owns a thread of
+# its own, outside this pool, so saturating it delays queued CALLS and can never
+# stop the server from READING — which is the entire point of the split in run().
+MAX_INFLIGHT_REQUESTS = 8
+
+
 class McpServer:
     def __init__(self, project_root: str, strict: bool = False):
         self.project_root = os.path.realpath(project_root)
@@ -1042,35 +1157,116 @@ class McpServer:
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         log.info("MCP server starting, project_root=%s", self.project_root)
+        # TWO executors, and one task per request, on purpose. This loop used to
+        # call the handler INLINE — `self._handle_message(msg)`, no await, no
+        # executor — on the very thread that next had to await sys.stdin.readline.
+        # A running git command therefore froze the whole server for its duration:
+        # every other request sat unread in the pipe, timed out client-side (~60s)
+        # and was then answered in a burst against ids the client had already
+        # abandoned. From the caller's chair that is a dead server, and a restart
+        # was the only lever. A local git read is milliseconds, so this was the
+        # mild end of the fleet — but `timeout` is caller-supplied (see
+        # MAX_TIMEOUT_SEC, which now bounds it), so the freeze had no ceiling
+        # the server controlled.
+        #
+        # ONE POOL WOULD NOT DO. If the readline shared the handler pool, eight
+        # slow calls would occupy every worker and the readline would sit in the
+        # pool's QUEUE — reintroducing exactly the deafness above, just with more
+        # steps. The reader's single dedicated thread is what makes reading
+        # unconditional.
+        #
+        # Concurrent handlers are safe here, and this was audited rather than
+        # assumed: the module declares no `global` and holds no mutable state —
+        # every collection at module level (SAFE_SUBCOMMANDS, FILTERED_SUBCOMMANDS,
+        # SUBCOMMAND_DESCRIPTIONS, the _*_KEYS sets, _SHELL_SAFE_CHARS,
+        # GIT_CALL_TOOL) is built once at import and only ever read; there is no
+        # cache, no memoised repo root (safe_path recomputes per call) and no
+        # resolved-repo handle; every list a handler appends to is a function
+        # local; and self.project_root / self.strict are written in __init__
+        # before this loop starts and never again. What IS shared is the
+        # repository on disk, which Python statelessness cannot protect — so the
+        # mutating stash argvs serialize on _MUTATING_GIT_LOCK at the spawn site
+        # while the read-only commands run concurrently.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="git-stdin")
+        workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+                                     thread_name_prefix="git-call")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     break
                 line = line.strip()
                 if not line:
                     continue
+
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    # Answering is not optional: a bare `continue` here left the
+                    # caller's request id unanswered until it timed out.
                     log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
                     continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() and take the
+                    # process down with an AttributeError that escaped run() —
+                    # and an MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
+                    continue
+
                 log.debug("← %s", json.dumps(msg)[:200])
-                try:
-                    response = self._handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    out = json.dumps(response)
-                    log.debug("→ %s", out[:200])
-                    sys.stdout.write(out + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(loop, workers, msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
         finally:
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
+            workers.shutdown(wait=False)
             log.info("MCP server shutting down")
+
+    async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await loop.run_in_executor(workers, self._handle_message, msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers run in the worker pool,
+        but `_serve` resumes on the loop after its await, so concurrent replies
+        cannot interleave and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ %s", out[:200])
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, this escaped run() and killed the process.
+            log.warning("stdout write failed: %s", exc)
 
     def _handle_message(self, msg: dict) -> Optional[dict]:
         msg_id = msg.get("id")
@@ -1174,6 +1370,13 @@ def main() -> None:
 
     server = McpServer(args.project_root, strict=args.strict)
     asyncio.run(server.run())
+    # stdin is closed, so the client is gone. Handler threads live in the
+    # server's own executors rather than the loop's default one, so asyncio does
+    # not join them — but concurrent.futures registers an atexit hook that
+    # would, and one handler mid-command would hold this process open for the
+    # rest of its (now clamped) timeout budget. Every reply is flushed as it is
+    # written and logging flushes per record, so there is nothing left to drain.
+    os._exit(0)
 
 
 if __name__ == "__main__":

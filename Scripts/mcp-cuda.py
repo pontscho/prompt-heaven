@@ -24,6 +24,8 @@ Usage:
 """
 
 import asyncio
+import contextlib
+import contextvars
 import glob as glob_mod
 import json
 import logging
@@ -34,6 +36,7 @@ import shutil
 import sys
 import argparse
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 
@@ -598,8 +601,21 @@ class ClangdClient:
         self._next_id: int = 1
         self._pending: Dict[int, asyncio.Future] = {}
         self._diagnostics: Dict[str, List] = {}
-        self._diag_events: Dict[str, asyncio.Event] = {}
+        # Diagnostics are a LEVEL, not an edge. _diag_gen counts publishes per
+        # uri and is bumped in the same breath as _diagnostics[uri], so a caller
+        # can tell "already arrived" from "still owed" instead of clearing an
+        # Event and then waiting forever for a push that already arrived and
+        # will never repeat (see get_diagnostics).
+        self._diag_gen: Dict[str, int] = {}           # uri -> publish count
+        # One future PER WAITER, not one shared Event: two concurrent
+        # diagnostics calls on the same uri must both be woken by one publish,
+        # and neither may clear a signal out from under the other.
+        self._diag_waiters: Dict[str, List[asyncio.Future]] = {}
         self._opened_files: set = set()
+        # uri -> count of notifications this client actually SENT for the doc.
+        # open_document bumps it only when it really emitted a didOpen, which is
+        # what makes it a truthful answer to "is a publish owed?".
+        self._doc_versions: Dict[str, int] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._indexing_done: asyncio.Event = asyncio.Event()
         self._active_progress: set = set()
@@ -729,7 +745,17 @@ class ClangdClient:
 
         self._pending.clear()
         self._opened_files.clear()
+        self._doc_versions.clear()
         self._diagnostics.clear()
+        self._diag_gen.clear()
+        # Waiters outlive the backend only as stranded futures; wake them so a
+        # request parked on a publish that will now never come is not left to
+        # burn its full timeout against a dead client.
+        for waiters in self._diag_waiters.values():
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(None)
+        self._diag_waiters.clear()
 
     async def _reader_loop(self) -> None:
         assert self.process and self.process.stdout
@@ -770,9 +796,12 @@ class ClangdClient:
                 uri = params.get("uri", "")
                 diags = params.get("diagnostics", [])
                 self._diagnostics[uri] = diags
-                ev = self._diag_events.get(uri)
-                if ev:
-                    ev.set()
+                # Bump the generation in the SAME breath as the payload, and
+                # wake every waiter rather than setting one shared Event.
+                self._diag_gen[uri] = self._diag_gen.get(uri, 0) + 1
+                for fut in self._diag_waiters.pop(uri, ()):
+                    if not fut.done():
+                        fut.set_result(None)
                 log.debug(f"Diagnostics for {uri}: {len(diags)} items")
 
             else:
@@ -815,6 +844,10 @@ class ClangdClient:
             log.debug(f"Cannot read {abs_path}: {e}")
             return
         self._opened_files.add(uri)
+        # Record the notification BEFORE awaiting it out: get_diagnostics reads
+        # this to decide whether a publish is owed, and a didOpen that is queued
+        # but not yet drained still owes one.
+        self._doc_versions[uri] = self._doc_versions.get(uri, 0) + 1
         await self._notify("textDocument/didOpen", {
             "textDocument": {
                 "uri": uri,
@@ -912,14 +945,60 @@ class ClangdClient:
         return resp.get("result") or []
 
     async def get_diagnostics(self, path: str, timeout: float = 10.0) -> List[dict]:
+        """Open the document, wait only for a publish that is actually OWED,
+        and return the diagnostics.
+
+        This used to clear a per-uri Event and then wait for the push that would
+        set it again. For an already-open file that push had ALREADY arrived —
+        _prime_index opens up to ten CUDA sources at startup, so the common case
+        is a document clangd published for long ago — and open_document returns
+        early for a uri in _opened_files, so nothing would ever re-publish. The
+        clear discarded the only signal there was: every such call burned its
+        full timeout and then returned the correct cached answer anyway.
+
+        The signal is a LEVEL, so it is read as one. Two samples taken around
+        the open answer the two separate questions:
+
+        * is a publish owed?  -> the document's own version counter. Only
+          open_document bumps it, and only when it actually sent a didOpen. An
+          already-open file means nothing was sent, so nothing is owed and the
+          cache is already the answer.
+        * has it landed yet?  -> _diag_gen, bumped by the reader task next to
+          the payload. Sampled BEFORE the open, so a publish that races in
+          while we open is still seen as fresh rather than waited for twice.
+
+        Freshness is not traded away relative to what this file could ever
+        deliver: a first open still sends a didOpen carrying the file's current
+        on-disk text, still bumps the version, and still makes this wait for the
+        publish that answers it.
+        """
         uri = self._abs_uri(path)
-        ev = self._diag_events.setdefault(uri, asyncio.Event())
-        ev.clear()
+        gen_before = self._diag_gen.get(uri, 0)
+        ver_before = self._doc_versions.get(uri, 0)
         await self.open_document(path)
-        try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            pass
+        ver_after = self._doc_versions.get(uri, 0)
+
+        if ver_after > ver_before and self._diag_gen.get(uri, 0) == gen_before:
+            # A notification went out and its publish has not arrived yet.
+            loop = asyncio.get_running_loop()
+            fut: asyncio.Future = loop.create_future()
+            self._diag_waiters.setdefault(uri, []).append(fut)
+            try:
+                # Passive wait: our didOpen is already sent and no exchange of
+                # ours is in flight, so the backend lock is dropped for its
+                # duration (see _backend_lock_released) and retaken before the
+                # cache read below. Held, it would make concurrent diagnostics
+                # calls wait one after another instead of together.
+                async with _backend_lock_released():
+                    await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                waiters = self._diag_waiters.get(uri)
+                if waiters is not None and fut in waiters:
+                    waiters.remove(fut)
+                    if not waiters:
+                        self._diag_waiters.pop(uri, None)
         return self._diagnostics.get(uri, [])
 
     def _abs_uri(self, path: str) -> str:
@@ -946,6 +1025,160 @@ def _require_client() -> ClangdClient:
     if _client is None or _client.process is None:
         raise RuntimeError("CUDA clangd not initialized — call cuda_init first")
     return _client
+
+
+# ============================================================
+# Backend serialization
+# ============================================================
+#
+# run() now dispatches every request as its own task, so two requests can be
+# inside the client at once. Nothing in ClangdClient tolerates that on its own:
+# _request reads and increments _next_id and then stores _pending[req_id], the
+# reader task routes a reply purely by that id, and _opened_files / _diagnostics
+# / _doc_versions are one flat cache per client. Interleaving two requests there
+# does not merely slow clangd down, it can hand a reply to the WRONG waiter —
+# and a clangd session corrupted that way answers wrong rather than failing
+# loudly, the worst failure mode available here.
+#
+# So: one lock per backend, held for the whole request that touched the backend.
+# This server has exactly ONE backend (the CUDA clangd behind _client), so the
+# registry has a single fixed key; it is written as a per-backend map anyway to
+# match mcp-purity, from which this design is ported, and so that a second
+# backend cannot be added without inheriting the discipline.
+#
+# The lock is acquired at the single funnel that knows the backend type:
+# handle_cuda_call, immediately before it invokes a handler. Every one of the
+# fourteen handlers touches this one backend — thirteen via _require_client, and
+# cuda_init by creating it — and the key is a constant, so unlike mcp-purity
+# (where the key is derived from the file type and a drifted copy of that
+# derivation would lock the WRONG backend) the dispatcher is the correct and
+# safest place for it. _require_client is sync and cannot await a lock, and
+# making it async would rewrite thirteen semantic handlers to no benefit.
+#
+# Pure non-LSP work takes no lock at all: the bare-status reply, the recursion
+# guard, the unknown-function reply, and the MCP-level initialize / ping /
+# tools/list are answered while a backend cold start holds the lock.
+#
+# Locks are created lazily inside the running loop, never at import: on Python
+# 3.9 (this file's floor) asyncio.Lock() still binds get_event_loop() at
+# construction time. The check-and-create in _hold_backend has no await between
+# the lookup and the store, so concurrent first-callers cannot end up with two
+# different locks for one backend.
+_backend_locks: Dict[str, "asyncio.Lock"] = {}
+
+# The one backend this server owns.
+CLANGD_BACKEND = "clangd"
+
+# The set of backend types whose lock the CURRENT request owns, or None when no
+# request session is installed. A ContextVar because each request is its own
+# task and tasks copy the context at creation, so this is per-request state that
+# needs no plumbing through every handler signature.
+_BACKEND_SESSION: "contextvars.ContextVar[Optional[set]]" = contextvars.ContextVar(
+    "cuda_backend_session", default=None
+)
+
+
+async def _hold_backend(backend_type: str = CLANGD_BACKEND) -> None:
+    """Take *backend_type*'s lock for the REST OF THIS REQUEST.
+
+    Idempotent: a request that already owns the lock returns at once, so a
+    caller may funnel through here more than once without self-deadlocking on a
+    non-reentrant asyncio.Lock.
+
+    Outside a request session there is no scope that could release the lock, so
+    this warns and proceeds unserialized — exactly the pre-concurrency behaviour
+    an in-process caller already had.
+    """
+    session = _BACKEND_SESSION.get()
+    if session is None:
+        log.warning("No request session installed; backend %r runs unserialized",
+                    backend_type)
+        return
+    if backend_type in session:
+        return
+    lock = _backend_locks.get(backend_type)
+    if lock is None:
+        lock = asyncio.Lock()
+        _backend_locks[backend_type] = lock
+    await lock.acquire()
+    # No await between acquire() returning and this line, so a cancellation can
+    # never strand an acquired-but-unrecorded lock.
+    session.add(backend_type)
+
+
+def _release_backends(session: set) -> None:
+    """Release every backend lock *session* acquired.
+
+    Called from the dispatcher's finally so a handler that raised or was
+    cancelled cannot strand a lock and wedge the backend for the life of the
+    process.
+    """
+    while session:
+        backend_type = session.pop()
+        lock = _backend_locks.get(backend_type)
+        if lock is not None and lock.locked():
+            lock.release()
+
+
+@contextlib.contextmanager
+def _backend_session():
+    """Install a fresh request session and release whatever it acquired.
+
+    Used by the dispatcher and by the auto-init task, which reaches handle_init
+    without passing through the dispatcher and would otherwise race a wire-borne
+    cuda_init into a second clangd process.
+    """
+    session: set = set()
+    token = _BACKEND_SESSION.set(session)
+    try:
+        yield session
+    finally:
+        # Release before the ContextVar reset: a stranded backend lock would
+        # wedge the backend for the life of the process, and this finally is the
+        # only scope that runs on the raise/cancel paths too.
+        _release_backends(session)
+        _BACKEND_SESSION.reset(token)
+
+
+@contextlib.asynccontextmanager
+async def _backend_lock_released():
+    """Drop this request's backend lock(s) across a PASSIVE wait, then retake.
+
+    "Passive" means precisely this: no request/response exchange of ours is in
+    flight for the duration, we are parked on a push the BACKGROUND reader task
+    will deliver. Holding the lock across such a wait serializes waiting itself,
+    turning a batch of diagnostics calls from overlapping waits into consecutive
+    ones.
+
+    What is NOT protected across the gap: another request may take the backend,
+    open documents and issue its own exchanges. Callers must therefore have
+    finished all of their own protocol traffic BEFORE entering, and must treat
+    anything they re-read afterwards as possibly refreshed. The one caller
+    (get_diagnostics) satisfies this: its didOpen is already sent, and all it
+    does on the far side is read the _diagnostics cache the reader task fills.
+
+    Deadlock-free by construction: the reader task that fires the awaited future
+    never takes a backend lock, so the wakeup cannot depend on the lock we just
+    dropped. Retaking goes through _hold_backend, so it may queue behind another
+    request but can never self-deadlock (that call is idempotent).
+
+    Cancellation-safe: the locks leave _BACKEND_SESSION on release and only
+    rejoin it on a successful retake, so a handler cancelled or raising inside
+    the gap leaves nothing for the dispatcher's finally to strand, and one
+    cancelled while retaking never holds what it did not record.
+    """
+    session = _BACKEND_SESSION.get()
+    held = sorted(session) if session else []
+    for backend_type in held:
+        lock = _backend_locks.get(backend_type)
+        if lock is not None and lock.locked():
+            lock.release()
+        session.discard(backend_type)
+    try:
+        yield
+    finally:
+        for backend_type in held:
+            await _hold_backend(backend_type)
 
 
 # ============================================================
@@ -1826,6 +2059,15 @@ async def handle_cuda_call(args: dict, server: Optional["McpServer"] = None) -> 
     if function == "cuda_call":
         return _serialize("", {"error": "Cannot dispatch cuda_call recursively"})
 
+    handler = ALL_HANDLERS.get(function)
+    if handler is None:
+        available = ", ".join(sorted(ALL_HANDLERS.keys()))
+        return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
+
+    # The auto-init gate runs BEFORE the backend lock is taken, and must: the
+    # init task holds that same lock for its whole cold start, so waiting for it
+    # while holding the lock would deadlock. Waiting first and locking second
+    # only ever queues.
     if (function != "cuda_init"
             and server and server._init_task and not server._init_task.done()
             and (_client is None or _client.process is None)):
@@ -1835,13 +2077,14 @@ async def handle_cuda_call(args: dict, server: Optional["McpServer"] = None) -> 
         except (asyncio.TimeoutError, Exception) as e:
             log.debug(f"Auto-init wait failed: {e}")
 
-    handler = ALL_HANDLERS.get(function)
-    if handler is None:
-        available = ", ".join(sorted(ALL_HANDLERS.keys()))
-        return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
-
-    result = await handler(params)
-    return _serialize(function, result)
+    # The funnel: every dispatched function touches the one backend, so the lock
+    # is taken here and held until the reply is shaped. Everything answered
+    # above this line — status, the recursion guard, an unknown function — takes
+    # no lock and stays answerable during a cold start.
+    with _backend_session():
+        await _hold_backend()
+        result = await handler(params)
+        return _serialize(function, result)
 
 
 # ============================================================
@@ -2209,25 +2452,65 @@ class McpServer:
             f"Unknown tool: '{name}'. This server exposes 'cuda_call'. Invoke the cuda-mcp skill."
         )
 
+    async def _auto_init(self) -> Any:
+        """Run the startup init inside a backend session.
+
+        The auto-init task reaches handle_init without passing through
+        handle_cuda_call's funnel, so it must take the lock itself. Without it a
+        cuda_init arriving on the wire during the cold start would sail past
+        handle_init's `_client.process is not None` guard — _client is assigned
+        before start() ever sets .process — and spawn a SECOND clangd, orphaning
+        the first and leaving _client pointing at whichever finished last.
+        """
+        with _backend_session():
+            await _hold_backend()
+            return await handle_init({
+                "project_root": self.auto_project_root,
+                "clangd_path": self.auto_clangd_path,
+                "compile_commands_dir": self.auto_compile_commands_dir,
+                "cuda_path": self.auto_cuda_path,
+                "cuda_arch": self.auto_cuda_arch,
+            })
+
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         log.debug("mcp-cuda server ready (stdio)")
 
         if self.auto_project_root:
             log.debug(f"Auto-init: {self.auto_project_root}")
-            self._init_task = asyncio.create_task(
-                handle_init({
-                    "project_root": self.auto_project_root,
-                    "clangd_path": self.auto_clangd_path,
-                    "compile_commands_dir": self.auto_compile_commands_dir,
-                    "cuda_path": self.auto_cuda_path,
-                    "cuda_arch": self.auto_cuda_arch,
-                })
-            )
+            self._init_task = asyncio.create_task(self._auto_init())
 
+        # One task per request, and a reader executor of its OWN, on purpose.
+        # This loop used to await the handler on the same line of control it
+        # later awaited the readline, so for the whole duration of one call the
+        # server did not READ: every other request sat unread in the pipe, timed
+        # out client-side (~60s) and was then answered against an id the client
+        # had already abandoned. From the caller's chair that is a dead server.
+        # And the blocking calls here are the ORDINARY ones, not the failure
+        # ones: the auto-init gate is 90s, the index barrier 60s, the clangd
+        # handshake 30s, and diagnostics wait 10s by default.
+        #
+        # The executor must be dedicated rather than the default one, which is
+        # shared with anything else that parks work there, so a saturated pool
+        # can never delay the reader and reintroduce the deafness this fixes.
+        #
+        # No handler thread pool: _request does `req_id = self._next_id;
+        # self._next_id += 1` and then stores _pending[req_id] with no await
+        # between them, which is atomic ONLY on a single event-loop thread. A
+        # worker pool would break exactly that invariant. Handlers are already
+        # coroutines, so each becomes a task on this one loop, and every request
+        # that reaches the backend is serialized by _hold_backend anyway.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cuda-stdin")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    # A closed/detached stdin raises rather than returning "";
+                    # unguarded it escaped run() as a traceback.
+                    log.debug(f"stdin read failed, shutting down: {exc}")
+                    break
                 if not line:
                     log.debug("stdin EOF — shutting down")
                     break
@@ -2239,28 +2522,79 @@ class McpServer:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as e:
+                    # Answering is not optional: the bare `continue` that used to
+                    # stand here left the caller's id unanswered until it timed
+                    # out, which is indistinguishable from a hung server.
                     log.debug(f"JSON parse error: {e}")
+                    self._write(self._error(None, -32700, f"Parse error: {e}"))
+                    continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() below and
+                    # take the process down with an AttributeError escaping
+                    # run() — and an MCP client does not respawn a dead stdio
+                    # server.
+                    log.debug(f"Request was {type(msg).__name__}, not an object")
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
                     continue
 
                 log.debug(f"← RAW: {line}")
 
-                try:
-                    response = await self.handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    log.debug("→ RAW: %s", json.dumps(response))
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
 
         finally:
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
             log.debug("Shutting down clangd (CUDA)...")
+            # Graceful, NOT os._exit: this is what terminates the clangd child
+            # (terminate, 3s grace, then kill) and lets asyncio.run() tear down
+            # its subprocess transport. Exiting hard here would orphan a wedged
+            # clangd — the process this server spawned outliving the server that
+            # spawned it. The in-flight tasks are cancelled first so none is
+            # still mid-_request against a pipe that is about to close.
             if _client is not None:
                 await _client.stop()
+
+    async def _serve(self, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await self.handle_message(msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers may await, but _serve
+        resumes on the loop after its await, so two replies cannot interleave on
+        stdout and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            # A non-serialisable payload used to kill the loop mid-write, i.e.
+            # after some bytes were already on the wire.
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ RAW: %s", out)
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, a client that hung up mid-reply escaped run().
+            log.debug(f"stdout write failed: {exc}")
 
 
 # ============================================================

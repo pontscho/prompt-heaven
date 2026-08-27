@@ -15,6 +15,7 @@ links:
   - 0001-purity-server-unification
   - 0004-never-pin-a-browser-impersonation-version
   - 0007-a-path-spelled-deny-protects-the-spelling
+  - 0008-a-serialized-read-loop-looks-like-a-dead-server
 ---
 
 # Scripts & MCP Servers
@@ -30,6 +31,22 @@ seen in `Scripts/mcp-purity.py`. All use asyncio + JSON-RPC 2.0 over stdio.
 The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 `purity_call` entry point is recorded in [[0001-purity-server-unification]].
 
+That shared read loop used to await the handler on the same line of control that
+later awaits `sys.stdin.readline`, so one slow call made the server deaf to every
+other request and read, from the caller's chair, as a connection that died and
+needed a restart. **Every live server now dispatches each request as its own task,
+with the stdin reader on an executor nothing else can take.** Do not copy the
+locking from one server into another: the transport is uniform but the
+concurrency decision is per-server, and four of them deliberately keep their
+handlers as coroutines on one event loop because their id-counter safety depends
+on it. The reasoning, the rejected alternatives, the per-server table and the six
+pre-existing bugs the conversion exposed are in
+[[0008-a-serialized-read-loop-looks-like-a-dead-server]].
+
+The three unregistered servers below were converted too, even though they never
+launch: they are the template others get copied from, which is how one broken read
+loop became thirteen in the first place.
+
 | Script | Server | Domain |
 |--------|--------|--------|
 | `Scripts/mcp-purity.py` | mcp-purity | File ops: list, search, read, write |
@@ -40,6 +57,10 @@ The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 | `Scripts/mcp-wiki.py` | mcp-wiki | Wiki freshness / reindex / search / page reads over `docs/` |
 | `Scripts/mcp-inspect.py` | mcp-inspect | Read-only host/process/network inspection, file digests, syntax validation |
 | `Scripts/mcp-webfetch.py` | mcp-webfetch | Browser-emulated URL fetching with HTML→Markdown extraction, disk cache |
+| `Scripts/mcp-jenkins.py` | mcp-jenkins | Jenkins CI: jobs, builds, console + stage logs, artifacts, queue, test reports |
+| `Scripts/mcp-postgres.py` | mcp-postgres | PostgreSQL over the native v3 wire protocol — stdlib only, no libpq |
+| `Scripts/mcp-gdc.py` | mcp-gdc | Chrome DevTools: navigation, DOM, network, screenshots, JS evaluation |
+| `Scripts/mcp-tshark.py` | mcp-tshark | Packet capture and PCAP analysis via tshark |
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
 which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`

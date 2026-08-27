@@ -79,6 +79,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -348,13 +349,15 @@ def _paginate_text(text: str, start_line: Optional[int], max_lines: Optional[int
 # ---------------------------------------------------------------------------
 
 class HttpResult:
-    __slots__ = ("status", "headers", "body", "raw")
+    __slots__ = ("status", "headers", "body", "raw", "truncated")
 
-    def __init__(self, status: int, headers: Dict[str, str], body: Any, raw: Optional[bytes] = None):
+    def __init__(self, status: int, headers: Dict[str, str], body: Any,
+                 raw: Optional[bytes] = None, truncated: bool = False):
         self.status = status
         self.headers = headers
         self.body = body
         self.raw = raw
+        self.truncated = truncated
 
 
 class _AuthPreservingRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -411,7 +414,18 @@ def _do_request(method: str,
         with opener.open(req, timeout=timeout or JenkinsConfig.timeout) as resp:
             return _read_response(resp, response_type)
     except urllib.error.HTTPError as exc:
-        return _read_response(exc, response_type)
+        # The 2xx path closes through `with`; this one has to close by hand.
+        # HTTPError keeps the live response in .fp and defines no __del__, and
+        # the exception -> traceback -> frame -> exception reference cycle means
+        # refcounting alone never reclaims it — only a cyclic GC sweep does. A
+        # poll loop hammering a 503 therefore holds one socket per attempt until
+        # a generational collection happens to run, and fd exhaustion is a
+        # restart-only failure.
+        try:
+            return _read_response(exc, response_type)
+        finally:
+            if exc.fp is not None:
+                exc.close()
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -421,26 +435,43 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None  # urllib then yields the original 30x response
 
 
+# A whole console log (or a base64 artifact) arrives as ONE read, and Jenkins
+# will happily serve a few hundred MB of it. Every reply is capped at
+# max_answer_chars anyway, so nothing above this ceiling was ever going to reach
+# the caller intact — but an unbounded read is an OOM, and an MCP client does not
+# respawn a stdio server that died, which makes it restart-only. Reading one byte
+# past the ceiling is how the truncation gets DETECTED rather than assumed.
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+
 def _read_response(resp, response_type: str) -> HttpResult:
     status = getattr(resp, "status", None) or resp.getcode()
-    raw = resp.read() if hasattr(resp, "read") else b""
+    raw = b""
+    truncated = False
+    if hasattr(resp, "read"):
+        raw = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raw = raw[:MAX_RESPONSE_BYTES]
+            truncated = True
+            log.warning("Response body exceeded %d bytes — read capped",
+                        MAX_RESPONSE_BYTES)
     headers = {k: v for k, v in (resp.headers.items() if resp.headers else [])}
 
     if response_type == "bytes":
-        return HttpResult(status, headers, None, raw)
+        return HttpResult(status, headers, None, raw, truncated)
 
     text = raw.decode("utf-8", errors="replace") if raw else ""
 
     if response_type == "text":
-        return HttpResult(status, headers, text, raw)
+        return HttpResult(status, headers, text, raw, truncated)
 
     # response_type == "json"
     if not text:
-        return HttpResult(status, headers, {}, raw)
+        return HttpResult(status, headers, {}, raw, truncated)
     try:
-        return HttpResult(status, headers, json.loads(text), raw)
+        return HttpResult(status, headers, json.loads(text), raw, truncated)
     except json.JSONDecodeError:
-        return HttpResult(status, headers, text, raw)
+        return HttpResult(status, headers, text, raw, truncated)
 
 
 def _get_crumb() -> Optional[Tuple[str, str]]:
@@ -1120,6 +1151,8 @@ def handle_get_build_log(params: dict) -> dict:
         "returnedLines": len(paged["text"].split("\n")),
         "log": paged["text"],
     }
+    if r.truncated:
+        out["bodyTruncatedBytes"] = MAX_RESPONSE_BYTES
     if start_line is not None:
         out["startLine"] = start_line
     if paged["hasMore"]:
@@ -1174,7 +1207,12 @@ def _render_build_log(p: dict, level: int = 2) -> str:
     shown = p.get("returnedLines") if log_text else 0
     total = p.get("totalLines") or 0
     body = _md_fence(log_text, "log") if log_text else "_(empty log)_"
-    return _md_join([_md_head(title, level), body,
+    # A cap that is not reported reads as "this is the whole log".
+    capped = ("_body capped at %s bytes before line paging: the log is longer than "
+              "this server reads in one piece, so totalLines counts only the part "
+              "read. Narrow it with mode='pipeline' or a stage log._"
+              % p["bodyTruncatedBytes"]) if p.get("bodyTruncatedBytes") else ""
+    return _md_join([_md_head(title, level), body, capped,
                      _rows_note(start, _int_param(shown, 0), _int_param(total, 0))])
 
 
@@ -1523,7 +1561,7 @@ def handle_download_artifact(params: dict) -> dict:
     if return_type == "base64":
         content_bytes = result.raw or b""
         content = base64.b64encode(content_bytes).decode("ascii")
-        return _ok({
+        out = {
             "jobPath": job_path,
             "buildNumber": build_number,
             "artifactPath": artifact_path,
@@ -1531,17 +1569,22 @@ def handle_download_artifact(params: dict) -> dict:
             "contentLength": len(content),
             "encoding": "base64",
             "content": content,
-        }, _render_artifact)
-
-    content = result.body if isinstance(result.body, str) else json.dumps(result.body, indent=2)
-    return _ok({
-        "jobPath": job_path,
-        "buildNumber": build_number,
-        "artifactPath": artifact_path,
-        "contentType": content_type or "text/plain",
-        "contentLength": len(content),
-        "content": content,
-    }, _render_artifact)
+        }
+    else:
+        content = result.body if isinstance(result.body, str) else json.dumps(result.body, indent=2)
+        out = {
+            "jobPath": job_path,
+            "buildNumber": build_number,
+            "artifactPath": artifact_path,
+            "contentType": content_type or "text/plain",
+            "contentLength": len(content),
+            "content": content,
+        }
+    # An artifact cut mid-file is NOT the artifact; say so rather than hand back
+    # a prefix that looks whole.
+    if result.truncated:
+        out["truncatedBytes"] = MAX_RESPONSE_BYTES
+    return _ok(out, _render_artifact)
 
 
 def _render_artifact(p: dict, level: int = 2) -> str:
@@ -1552,7 +1595,8 @@ def _render_artifact(p: dict, level: int = 2) -> str:
     return _md_join([
         _md_head("artifact %s #%s — %s" % (p.get("jobPath"), p.get("buildNumber"),
                                            p.get("artifactPath")), level),
-        "\n".join(_md_fields(p, ("contentType", "contentLength", "encoding"))),
+        "\n".join(_md_fields(p, ("contentType", "contentLength", "encoding",
+                                 "truncatedBytes"))),
         _md_fence(content) if content else "_(empty artifact)_",
     ])
 
@@ -1947,6 +1991,21 @@ def _render_section(payload: dict, render: Callable[..., str],
     return render(payload, level)
 
 
+# How many CONSECUTIVE failed status polls end the wait. handle_get_build_status
+# reports a non-200 as a success-shaped payload carrying an `error` key, so the
+# poll loop below cannot tell "still building" from "Jenkins is not answering"
+# without counting: 503 during a Jenkins restart, 502 from the proxy, or a 30x to
+# SSO used to keep the loop spinning to the full deadline. Three tolerates a blip
+# — two 5s sleeps at the default poll_interval, so ~10s of grace — and gives up
+# on an outage; a fourth failure tells the caller nothing the third did not.
+MAX_POLL_ERRORS = 3
+
+# Upper bound on timeout_sec, mirroring the clamp handle_get_queue_item already
+# applies. Unclamped, PARAM_ALIASES maps "timeout" onto this parameter, so a
+# model writing {"timeout": 7200} bought a two-hour wait.
+MAX_RUN_AND_WAIT_SEC = 3600
+
+
 def handle_run_and_wait(params: dict) -> dict:
     """Chained workflow: start_build -> wait queue -> poll status until !building."""
     missing = _require_config()
@@ -1958,7 +2017,8 @@ def handle_run_and_wait(params: dict) -> dict:
         raise ValueError("Missing required parameter: job_path")
     parameters = params.get("parameters") or {}
     delay_sec = params.get("delay_sec")
-    overall_timeout = int(params.get("timeout_sec", 1800))
+    overall_timeout = min(MAX_RUN_AND_WAIT_SEC,
+                          max(1, int(params.get("timeout_sec", 1800))))
     poll_interval = max(1, int(params.get("poll_interval_sec", 5)))
     log_tail = int(params.get("log_tail", 0))
 
@@ -2000,22 +2060,40 @@ def handle_run_and_wait(params: dict) -> dict:
     # --- step 3: poll build status until !building --------------------------
     status: dict = {}
     timed_out = False
+    poll_errors = 0
+    last_poll_error: dict = {}
     while True:
         status = _payload(handle_get_build_status({
             "job_path": job_path,
             "build_number": str(build_number),
         }))
-        if "error" not in status and not status.get("building"):
-            break
+        if "error" in status:
+            # An error payload is NOT "keep waiting". It used to be, purely
+            # because the exit test was `"error" not in status and not
+            # status.get("building")` — one failing poll made both halves
+            # unreachable, so a Jenkins that answered nothing but 503 was
+            # indistinguishable from a build that never finished, and the loop
+            # burned the whole deadline on it.
+            poll_errors += 1
+            last_poll_error = status
+            if poll_errors >= MAX_POLL_ERRORS:
+                break
+        else:
+            poll_errors = 0  # a blip that passed is not an outage
+            if not status.get("building"):
+                break
         if time.monotonic() >= deadline:
             timed_out = True
             break
         time.sleep(poll_interval)
+    poll_failed = poll_errors >= MAX_POLL_ERRORS
 
     # --- step 4: optional log tail ------------------------------------------
     tail_lines: Optional[List[str]] = None
     log_total = 0
-    if log_tail > 0:
+    # Skip the tail when the status endpoint just failed three times: the log
+    # endpoint sits behind the same Jenkins and would only add a fourth failure.
+    if log_tail > 0 and not poll_failed:
         full_log = _payload(handle_get_build_log({
             "job_path": job_path,
             "build_number": str(build_number),
@@ -2028,7 +2106,8 @@ def handle_run_and_wait(params: dict) -> dict:
             tail_lines = all_lines[-log_tail:]
 
     out = {
-        "phase": "timeout" if timed_out else "completed",
+        "phase": ("polling_failed" if poll_failed
+                  else "timeout" if timed_out else "completed"),
         "jobPath": job_path,
         "buildNumber": build_number,
         "buildUrl": build_url,
@@ -2043,7 +2122,13 @@ def handle_run_and_wait(params: dict) -> dict:
         out["logTail"] = "\n".join(tail_lines)
         out["logTailLines"] = len(tail_lines)
         out["logTotalLines"] = log_total
-    if timed_out:
+    if poll_failed:
+        out["pollError"] = last_poll_error
+        out["hint"] = (f"Gave up after {MAX_POLL_ERRORS} consecutive failed status polls — "
+                       "the build was started and may still be running. Jenkins was not "
+                       "answering; check it, then re-check with get_build_status on "
+                       f"build {build_number}.")
+    elif timed_out:
         out["hint"] = ("Overall timeout reached while build was still running. "
                        "Re-run with a larger timeout_sec, or use get_build_status / cancel_build manually.")
     # tail-biased: the recap is the LAST line of this document, so a reply that
@@ -2081,6 +2166,10 @@ def _render_run_and_wait(p: dict, level: int = 2) -> str:
         return _md_join(blocks)
 
     blocks.append("\n".join(_md_fields(p, ("buildUrl", "queueUrl", "elapsedSec"))))
+    if p.get("pollError"):
+        # Show the poll's own reply verbatim — "polling_failed" without the 503
+        # underneath it is a verdict with no evidence.
+        blocks.append(_render_section(p["pollError"], _render_build_status, level + 1))
     blocks.append(_md_log_tail(p, level + 1))
     if p.get("hint"):
         blocks.append("_hint: %s_" % p["hint"])
@@ -2394,7 +2483,16 @@ def handle_jenkins_call(arguments: dict) -> dict:
         return _finish(handler(params), params)
     except (ValueError, KeyError) as exc:
         return _finish(_err(str(exc)), params)
-    except urllib.error.URLError as exc:
+    except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
+        # A socket READ timeout raises TimeoutError, which is an OSError but not
+        # a URLError, so it used to miss this clause and land in the last-resort
+        # guard below — reporting the same failure as "TimeoutError: timed out"
+        # instead of "Network error", and dumping a traceback at ERROR for a
+        # routine timeout. With requests running concurrently that is one stack
+        # dump per in-flight call. (A CONNECT timeout does get wrapped in
+        # URLError, which is how one failure grew two spellings.) socket.timeout
+        # is listed because it only became an alias of TimeoutError in 3.10 and
+        # this script declares 3.9.
         return _finish(_err(f"Network error: {exc}"), params)
     except Exception as exc:  # noqa: BLE001 — last-resort guard
         log.exception("Handler %s raised", function)
@@ -2440,6 +2538,12 @@ JENKINS_CALL_TOOL = {
 # MCP server (stdio, JSON-RPC 2.0)
 # ---------------------------------------------------------------------------
 
+# How many tool calls may be in flight at once. The stdin reader owns a thread of
+# its own, outside this pool, so saturating it delays queued CALLS and can never
+# stop the server from READING — which is the entire point of the split below.
+MAX_INFLIGHT_REQUESTS = 8
+
+
 class McpServer:
     """Minimal MCP server over stdio. Mirrors mcp-purity's loop."""
 
@@ -2449,9 +2553,29 @@ class McpServer:
                  JenkinsConfig.endpoint,
                  "configured" if JenkinsConfig.is_ready() else "missing",
                  JenkinsConfig.project or "(none)")
+        # TWO executors, and one task per request, on purpose. This loop used to
+        # await the handler on the same line it later awaited the readline, so a
+        # single blocking call froze the whole server for its duration — and a
+        # run_and_wait on a 20-minute build is the ORDINARY case here, not the
+        # failure case. Every other request then sat unread in the pipe, timed
+        # out client-side (~60s, i.e. 20x sooner), and got answered in a burst
+        # against ids the client had already abandoned. From the caller's chair
+        # that is a dead server, and restarting it was the only lever they had.
+        # Handlers are safe to run concurrently: the module holds no mutable
+        # state (no cache, no crumb, no cookie jar, no global), JenkinsConfig is
+        # written once in main() before this loop starts, and _opener carries no
+        # per-request state.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jenkins-stdin")
+        workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+                                     thread_name_prefix="jenkins-call")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     break
                 line = line.strip()
@@ -2461,25 +2585,66 @@ class McpServer:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    # Answering is not optional: a bare `continue` here left the
+                    # caller's request id unanswered until it timed out.
                     log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
+                    continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() and take the
+                    # process down with an AttributeError that escaped run() —
+                    # and an MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
                     continue
 
                 log.debug("<- %s", json.dumps(msg)[:200])
-                try:
-                    response = await loop.run_in_executor(None, self._handle_message, msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    out = json.dumps(response)
-                    log.debug("-> %s", out[:200])
-                    sys.stdout.write(out + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(loop, workers, msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
         finally:
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
+            workers.shutdown(wait=False)
             log.info("MCP server shutting down")
+
+    async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await loop.run_in_executor(workers, self._handle_message, msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers run in the worker pool,
+        but `_serve` resumes on the loop after its await, so concurrent replies
+        cannot interleave and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("-> %s", out[:200])
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, this escaped run() and killed the process.
+            log.warning("stdout write failed: %s", exc)
 
     def _handle_message(self, msg: dict) -> Optional[dict]:
         msg_id = msg.get("id")
@@ -2677,6 +2842,13 @@ def main() -> None:
 
     server = McpServer()
     asyncio.run(server.run())
+    # stdin is closed, so the client is gone. Handler threads live in the
+    # server's own executors rather than the loop's default one, so asyncio does
+    # not join them — but concurrent.futures registers an atexit hook that
+    # would, and one handler mid-poll would hold this process open for the rest
+    # of its deadline. Every reply is flushed as it is written and logging
+    # flushes per record, so there is nothing left to drain.
+    os._exit(0)
 
 
 if __name__ == "__main__":

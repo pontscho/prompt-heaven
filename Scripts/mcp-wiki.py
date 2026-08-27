@@ -57,11 +57,30 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 log = logging.getLogger("mcp-wiki")
 
 DEFAULT_WIKI_ROOT = "docs"
+
+# Wall-clock ceiling on ONE git invocation. Every git call in this file is a
+# local read-only query — `rev-parse --show-toplevel` (16.41 ms measured),
+# `rev-parse --short HEAD` (19.04 ms) and `diff --name-only` (~47 ms, 98% of it
+# process startup) — so 30 s is ~600x the slowest of them and can only ever be
+# reached by a git that is not going to answer at all: a credential or editor
+# prompt that got a terminal from somewhere despite stdin=DEVNULL, an NFS or
+# FUSE-backed worktree that has stopped responding, or a stuck index.lock.
+# `subprocess.run` with no timeout waits FOREVER, and forever is not a duration a
+# server may spend inside a request. It matters even now that handlers run off
+# the event-loop thread (see McpServer.run): a parked git no longer deafens the
+# server, but it does hold one of MAX_INFLIGHT_REQUESTS workers for good, and 8
+# such calls retire the pool permanently. A timeout returns 124 — the shell
+# convention, also what mcp-inspect.py's runner returns — which every caller here
+# already treats as "git could not answer": `_changed_files` records _INVALID and
+# the page classifies as `unverified`, never as `current`. Degrading toward "not
+# checkable" is the correct direction for a documentation freshness gate.
+GIT_TIMEOUT_SEC = 30
 
 # Page-type ordering for INDEX / list rendering (mirrors reindex.py).
 TYPE_ORDER = ["overview", "subsystem", "component", "reference", "analysis",
@@ -250,10 +269,13 @@ def git(args: List[str], cwd: str) -> Tuple[int, str, str]:
             ["git"] + args, cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+            timeout=GIT_TIMEOUT_SEC,   # never wait forever; see the constant
         )
         return proc.returncode, proc.stdout, proc.stderr
     except FileNotFoundError:
         return 127, "", "git executable not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", "git %s timed out after %ds" % (args[0] if args else "", GIT_TIMEOUT_SEC)
 
 
 def repo_root(start: Optional[str] = None) -> str:
@@ -1927,6 +1949,12 @@ WIKI_CALL_TOOL = {
 }
 
 
+# How many tool calls may be in flight at once. The stdin reader owns a thread of
+# its own, outside this pool, so saturating it delays queued CALLS and can never
+# stop the server from READING — which is the entire point of the split in run().
+MAX_INFLIGHT_REQUESTS = 8
+
+
 class McpServer:
     def __init__(self, project_root: str, wiki_root: str = DEFAULT_WIKI_ROOT,
                  strict: bool = False):
@@ -1938,35 +1966,154 @@ class McpServer:
         loop = asyncio.get_running_loop()
         log.info("MCP server starting, project_root=%s wiki_root=%s",
                  self.project_root, self.wiki_root)
+        # TWO executors, and one task per request, on purpose. This loop used to
+        # call the handler INLINE — `self._handle_message(msg)`, no await, no
+        # executor — on the very thread that next had to await sys.stdin.readline.
+        # A running handler therefore froze the whole server for its duration:
+        # every other request sat unread in the pipe, timed out client-side (~60s)
+        # and was then answered against an id the client had already abandoned.
+        # From the caller's chair that is a dead server, and a restart was the only
+        # lever. Measured on this very server before the fix: a `freshness` over a
+        # 120-page tree took 2540 ms, and a `ping` sent 152 ms into it was answered
+        # at 2541 ms — one millisecond AFTER the slow reply, having waited out the
+        # whole call. Most calls here are milliseconds (the hot path deliberately
+        # avoids spawning git: 0.076 ms vs 19.04 ms, see `_head_sha_nospawn`), so
+        # this was the mild end of the fleet — but `freshness` and `reindex` walk
+        # the entire corpus and `freshness` spends one subprocess per distinct
+        # verified commit, so seconds are reachable by ordinary use, not only by
+        # failure.
+        #
+        # ONE POOL WOULD NOT DO. If the readline shared the handler pool, eight
+        # slow calls would occupy every worker and the readline would sit in the
+        # pool's QUEUE — reintroducing exactly the deafness above, just with more
+        # steps. The reader's single dedicated thread is what makes reading
+        # unconditional.
+        #
+        # CONCURRENT HANDLERS ARE SAFE HERE, and this was AUDITED rather than
+        # assumed — this server is a search engine with three memo caches, so
+        # "no state" would have been a lie. The module declares no `global`
+        # anywhere, and exactly four runtime mutation sites of module-level state
+        # exist; everything else at module level (TYPE_ORDER, FIELD_WEIGHTS,
+        # TYPE_SIGNAL_TOKENS, QUERY_STOPWORDS, SKIP_*, HANDLERS, the alias tables,
+        # WIKI_CALL_TOOL) is built once at import and only ever read. The four:
+        #
+        #   * `_CORPUS_CACHE` (the BM25F index) — already built-fresh-and-swapped,
+        #     which is precisely what makes it safe. `_build_corpus` returns brand
+        #     new lists/dicts and `_build_corpus_cached` rebinds ONE key; nothing
+        #     is ever mutated in place, and no reader writes back (`_fn_search` /
+        #     `_fn_source_to_pages` only read `pd[...]` and append to their own
+        #     local `results`). So a reader holding the previous corpus keeps a
+        #     complete, immutable, self-consistent snapshot while a concurrent
+        #     rebuild installs the next one. Two cold misses duplicate the
+        #     read+tokenize work and the later writer wins — wasted CPU, never a
+        #     mixed index, because a half-built corpus is never reachable through
+        #     the cache. Invalidation is by `_corpus_signature` (mtime+size), so
+        #     it cannot go stale behind a concurrent editor either.
+        #   * `_REPO_ROOT_CACHE` — check-then-set. Two concurrent misses spawn
+        #     `git rev-parse` twice and store the SAME value; a lost update costs
+        #     16 ms, never an answer.
+        #   * `_FRESH_CACHE` .clear() + .setdefault() in `_recall_diff_cache` —
+        #     the one worth the thought, because it clears. The key is
+        #     (repo, HEAD sha), i.e. it ENCODES everything the cached diffs depend
+        #     on, so a HEAD move produces a different key and a different inner
+        #     dict; a dict built for one HEAD can never be handed out for another.
+        #     A racing clear can orphan an inner dict another request still holds,
+        #     which merely loses the memo — that dict's entries stay correct for
+        #     the HEAD it was keyed on, and the request re-spawns the diffs it
+        #     needs. Values are pure functions of (repo, HEAD, commit), so a
+        #     double write stores identical bytes.
+        #
+        # The inner dicts are only get/setitem'd, never iterated while written, so
+        # the GIL makes each op atomic and no plain-dict resize can be observed
+        # half-done. `reindex` — the one WRITING function — writes docs/INDEX.md,
+        # which both `iter_pages` and `_corpus_signature` skip (SKIP_FILES), so it
+        # can neither invalidate the search cache nor be half-read by a concurrent
+        # search. That is why no lock appears below: no invariant here spans more
+        # than one atomic dict operation, and every cached value is a pure function
+        # of a key that already carries its own dependencies. A lock across
+        # `_build_corpus` would only serialize searches behind whole-corpus reads.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wiki-stdin")
+        workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+                                     thread_name_prefix="wiki-call")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     break
                 line = line.strip()
                 if not line:
                     continue
+
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError as exc:
+                    # Answering is not optional: a bare `continue` here left the
+                    # caller's request id unanswered until it timed out.
                     log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
                     continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() and take the
+                    # process down with an AttributeError that escaped run() —
+                    # measured before the fix: the very next write to the server's
+                    # stdin raised BrokenPipeError, because there was no server
+                    # left. An MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
+                    continue
+
                 log.debug("← %s", json.dumps(msg)[:200])
-                try:
-                    response = self._handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    out = json.dumps(response)
-                    log.debug("→ %s", out[:200])
-                    sys.stdout.write(out + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(loop, workers, msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
         finally:
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
+            workers.shutdown(wait=False)
             log.info("MCP server shutting down")
+
+    async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
+        try:
+            response = await loop.run_in_executor(workers, self._handle_message, msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: handlers run in the worker pool,
+        but `_serve` resumes on the loop after its await, so concurrent replies
+        cannot interleave and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ %s", out[:200])
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, this escaped run() and killed the process.
+            log.warning("stdout write failed: %s", exc)
 
     def _handle_message(self, msg: dict) -> Optional[dict]:
         msg_id = msg.get("id")
@@ -2062,6 +2209,13 @@ def main() -> None:
 
     server = McpServer(args.project_root, wiki_root=args.wiki_root, strict=args.strict)
     asyncio.run(server.run())
+    # stdin is closed, so the client is gone. Handler threads live in the server's
+    # own executors rather than the loop's default one, so asyncio does not join
+    # them — but concurrent.futures registers an atexit hook that WOULD, and one
+    # handler mid-`git diff` would hold this process open for the rest of its
+    # GIT_TIMEOUT_SEC. Every reply is flushed as it is written and logging flushes
+    # per record, so there is nothing left to drain.
+    os._exit(0)
 
 
 if __name__ == "__main__":

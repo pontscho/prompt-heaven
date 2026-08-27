@@ -33,6 +33,7 @@ import argparse
 import urllib.request
 import urllib.parse
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 
@@ -226,6 +227,27 @@ def _cap_text(text: str, max_chars: int) -> str:
 # HTTP helper
 # ============================================================
 
+# How many upstream requests may be in the air at once. The stdin reader owns a
+# thread OUTSIDE this pool (see McpServer.run), so saturating it delays queued
+# CALLS and can never stop the server from READING — that split is the whole
+# point.
+MAX_INFLIGHT_REQUESTS = 8
+
+# The executor the blocking urlopen runs on, owned by McpServer.run() instead of
+# left as asyncio's default, for two reasons. First, the default executor is also
+# where sys.stdin.readline used to be submitted, and one pool shared between the
+# reader and eight 30s HTTP calls lets saturated handlers starve the reader —
+# reintroducing exactly the deafness this rework removes. Second, asyncio.run()
+# JOINS the default executor on shutdown, so a single in-flight request would
+# hold the process open for the rest of its 30s timeout after stdin had closed
+# and the client was already gone.
+#
+# Assigned once, before the read loop starts, and only ever read afterwards — the
+# same write-then-read-only discipline API_KEY has, so no lock is needed. None
+# means "not under the server" (falls back to the default executor).
+_HTTP_EXECUTOR: Optional[ThreadPoolExecutor] = None
+
+
 def _api_get_sync(path: str, params: dict, api_key: Optional[str] = None) -> str:
     """Blocking GET request to the Context7 API (run via executor)."""
     query_string = urllib.parse.urlencode(params)
@@ -243,9 +265,10 @@ def _api_get_sync(path: str, params: dict, api_key: Optional[str] = None) -> str
 
 
 async def _api_get(path: str, params: dict, api_key: Optional[str] = None) -> str:
-    """Async wrapper around _api_get_sync."""
+    """Async wrapper around _api_get_sync, on the server's own HTTP executor."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _api_get_sync, path, params, api_key)
+    return await loop.run_in_executor(_HTTP_EXECUTOR, _api_get_sync, path,
+                                      params, api_key)
 
 
 # ============================================================
@@ -578,37 +601,135 @@ class McpServer:
             return self._tool_error(msg_id, f"Error in {name}: {e}")
 
     async def run(self) -> None:
+        global _HTTP_EXECUTOR
         loop = asyncio.get_running_loop()
         log.debug("mcp-context7 server ready (stdio)")
 
-        while True:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-            if not line:
-                log.debug("stdin EOF — shutting down")
-                break
+        # TWO executors, and one task per request, on purpose. This loop used to
+        # await the handler on the same line of control that later awaited the
+        # readline, so a single upstream call froze the whole server for its
+        # duration — and the blocking budget here is urlopen(timeout=30) against
+        # a REMOTE documentation service, i.e. half a client timeout of total
+        # deafness on the one component in this fleet most likely to hang. Every
+        # other request then sat unread in the pipe, timed out client-side
+        # (~60s), and was finally answered against an id the client had already
+        # abandoned. From the caller's chair that is a dead server, and restart
+        # was the only lever they had.
+        #
+        # The reader gets its OWN single thread rather than sharing the pool the
+        # HTTP calls use: a shared pool lets MAX_INFLIGHT_REQUESTS saturated
+        # 30s requests starve sys.stdin.readline of a worker, which is the same
+        # deafness wearing a different hat.
+        #
+        # Dispatching concurrently is safe because this module holds NO mutable
+        # state a handler can reach: no resolved-library-id cache, no response
+        # cache, no session or cookie jar, no rate-limit counter, and no `global`
+        # written after startup. API_KEY is assigned once in main() before this
+        # loop begins; CONTEXT7_API_BASE_URL, DEFAULT_MAX_ANSWER_CHARS,
+        # PAGE_LINE_RESERVE, RESULT_SEPARATOR, LISTED_TOOLS and ALL_HANDLERS are
+        # read-only after import; _FENCE_LINE_RE is a compiled pattern, and re
+        # objects are safe to match on from several threads. Every formatting
+        # helper builds its own local list. So there is nothing here to lock.
+        reader = ThreadPoolExecutor(max_workers=1,
+                                    thread_name_prefix="context7-stdin")
+        _HTTP_EXECUTOR = ThreadPoolExecutor(
+            max_workers=MAX_INFLIGHT_REQUESTS,
+            thread_name_prefix="context7-http")
+        inflight: set = set()
+        try:
+            while True:
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:
+                    # Breaks the loop cleanly instead of unwinding out of run()
+                    # past the finally-block's job — the executors would be left
+                    # up and the inflight tasks never cancelled.
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
+                if not line:
+                    log.debug("stdin EOF — shutting down")
+                    break
 
-            line = line.strip()
-            if not line:
-                continue
+                line = line.strip()
+                if not line:
+                    continue
 
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError as e:
-                log.debug(f"JSON parse error: {e}")
-                continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    # Answering is not optional: the bare `continue` that used to
+                    # stand here left the caller's request id unanswered until it
+                    # timed out, which reads as a hung server rather than as one
+                    # bad line.
+                    log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
+                    continue
+                if not isinstance(msg, dict):
+                    # `5` is valid JSON. It used to reach msg.get() and take the
+                    # process down with an AttributeError escaping run() — and an
+                    # MCP client does not respawn a dead stdio server.
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
+                    continue
 
-            try:
-                response = await self.handle_message(msg)
-            except Exception as exc:
-                log.exception("Unhandled exception while handling message")
-                response = self._error(
-                    msg.get("id"), -32603,
-                    f"Internal error: {type(exc).__name__}: {exc}",
-                )
-            if response is not None:
-                log.debug("→ RAW: %s", json.dumps(response))
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
+                log.debug("← %s", json.dumps(msg)[:200])
+                task = loop.create_task(self._serve(msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
+        finally:
+            # stdin is gone, so nobody is left to read these replies. Cancelling
+            # is what lets asyncio.run() return promptly instead of waiting on a
+            # handler that is 25s into a 30s socket read.
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
+            _HTTP_EXECUTOR.shutdown(wait=False)
+            log.debug("mcp-context7 server shutting down")
+
+    async def _serve(self, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task.
+
+        handle_message is already a coroutine and already pushes its only
+        blocking work (urlopen) onto _HTTP_EXECUTOR, so it is awaited directly:
+        a second, handler-level thread pool would add a hop and buy nothing.
+        """
+        try:
+            response = await self.handle_message(msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            # Exception, NOT BaseException: a CancelledError from the shutdown
+            # path above must propagate, not be answered as an internal error.
+            log.exception("Unhandled exception while handling message")
+            response = self._error(
+                msg.get("id"), -32603,
+                f"Internal error: {type(exc).__name__}: {exc}",
+            )
+        if response is not None:
+            self._write(response)
+
+    def _write(self, response: dict) -> None:
+        """Serialize and emit one JSON-RPC message.
+
+        Called only from the event-loop thread: the HTTP work happens in the
+        executor, but _serve resumes on the loop after its await, so two replies
+        can never interleave mid-line and this needs no lock.
+        """
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ RAW: %s", out[:200])
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # Unguarded, a client that closed the pipe first took this process
+            # down with an exception escaping run().
+            log.warning("stdout write failed: %s", exc)
 
 
 # ============================================================
@@ -645,6 +766,14 @@ def main() -> None:
         asyncio.run(server.run())
     except KeyboardInterrupt:
         log.debug("Server stopped")
+    # stdin is closed, so the client is gone. The HTTP threads live in the
+    # server's own executor rather than the loop's default one, so asyncio does
+    # not join them — but concurrent.futures registers an atexit hook that
+    # would, and one request mid-urlopen would hold this process open for the
+    # rest of its 30s timeout with nobody left to answer. Every reply is flushed
+    # as it is written and logging flushes per record, so there is nothing left
+    # to drain.
+    os._exit(0)
 
 
 if __name__ == "__main__":
