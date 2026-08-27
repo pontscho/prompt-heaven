@@ -7,8 +7,8 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 24bd1a5
-  date: 2026-08-11
+  commit: f1d117b
+  date: 2026-08-27
 links:
   - overview
   - requirements-yaml

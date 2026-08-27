@@ -1,7 +1,7 @@
 ---
 name: 0008-a-serialized-read-loop-looks-like-a-dead-server
 type: adr
-status: draft
+status: active
 title: A serialized read loop makes one slow call look like a dead server
 description: Decision to dispatch each MCP request as its own task with a reader thread nothing can take, and to stop treating an error payload as "keep waiting" — the two halves that turned one transient 503 into a restart-only outage — then to convert all ten live servers, with the concurrency decision audited per server rather than copied.
 sources:
@@ -17,6 +17,9 @@ sources:
   - Scripts/mcp-tshark.py
   - Scripts/mcp-wiki.py
   - ClaudeCode/skills/mcp-jenkins/SKILL.md
+verified:
+  commit: f1d117b
+  date: 2026-08-27
 links:
   - scripts
   - skills
@@ -25,9 +28,7 @@ links:
 
 # ADR 0008: A serialized read loop makes one slow call look like a dead server
 
-**Status:** accepted, awaiting promotion. The code exists only in an uncommitted
-working tree, so any `verified.commit` here would be a false claim; promote this
-page (`draft → active`, add `verified:`) when the change lands. Append-only — the
+**Status:** accepted (implemented, `f1d117b`). Append-only — the
 WHY is frozen here; the living WHAT/HOW is the read loop in each
 `Scripts/mcp-*.py` server, with `mcp-jenkins.py` as the reference implementation
 the other nine were written against.
