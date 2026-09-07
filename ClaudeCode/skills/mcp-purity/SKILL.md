@@ -60,11 +60,18 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 |-|-|-|-|-|
 |`relative_path`|string|no|"."|Directory to list|
 |`recursive`|bool|no|false|Scan subdirectories|
+|`filter`|string|no|""|fnmatch on the bare **name** — `*.py`, `p80-s1*`. Filters files only; directories always pass|
+|`grep`|string|no|""|Case-insensitive regex applied to the rendered rows (post-filter)|
+|`long`|bool|no|false|Prepend size + mtime to each row|
+|`show_hidden`|bool|no|false|Include dotfiles and dotdirs|
+|`head_limit`|int|no|0|Max rows; 0 = all|
+|`offset`|int|no|0|Skip the first N rows (paged by row, never mid-path)|
 |`skip_ignored_files`|bool|no|false|Skip gitignored files — except `.claude/tmp`, never skipped|
 |`max_answer_chars`|int|no|-1|Character limit|
 
 ```json
 {"f":"list_dir","p":{"relative_path":"src","recursive":true,"skip_ignored_files":true}}
+{"f":"list_dir","p":{"relative_path":".claude/tmp","filter":"p80-s1*"}}
 ```
 
 ### 4. `find_file` — Find files by wildcard pattern
@@ -177,7 +184,7 @@ canonical name is what error messages reference.
 | Alias | Canonical |
 |-|-|
 | `path`, `file_path`, `file`, `root` | `relative_path` |
-| `pattern` | `substring_pattern` |
+| `pattern` | `substring_pattern` *(except in `list_dir`, where it means the fnmatch name filter — see below)* |
 | `search`, `find`, `old_string`, `old` | `needle` |
 | `replacement`, `replace`, `replace_with`, `new_string`, `new` | `repl` |
 | `line_start`, `start` | `start_line` |
@@ -196,6 +203,8 @@ canonical name is what error messages reference.
 | `replace_lines`     | `new_content` | `content` |
 | `insert_at_line`    | `new_content` | `content` |
 | `search_for_pattern` | `query` | `substring_pattern` *(global table cannot carry it — `symbol` owns `query` as its own canonical param)* |
+| `list_dir`          | `long_format` | `long`   |
+| `list_dir`          | `pattern` | `filter` *(the global `substring_pattern` target is not a `list_dir` param at all, so the global row would only ever produce a rejection)* |
 
 ### Function-name aliases
 

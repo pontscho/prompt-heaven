@@ -19,7 +19,7 @@ run):
                                                       `.claude/tmp` exemption,
                                                       the inheritance rule that
                                                       keeps it narrow, and the
-                                                      search parameter contract
+                                                      parameter contract
                                                       (A-F)
   mcp_git_params     tests/test_mcp_git_params.py     mcp-git named params ->
                                                       git argv, fully offline
@@ -233,8 +233,8 @@ SUITES = [
      "purity_call semantic navigation: clangd + luals absorption", 152),
     ("purity_file_ops", run_purity_file_ops,
      "purity_call file handlers: the .claude/tmp ignore exemption, the "
-     "inheritance rule that keeps it narrow, and the search param contract",
-     37),
+     "inheritance rule that keeps it narrow, and the param contract",
+     39),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 258),
     ("name_existence", run_name_existence,

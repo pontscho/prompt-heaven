@@ -191,6 +191,13 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     },
     "list_dir": {
         "long_format": "long",
+        # The global row sends `pattern` to substring_pattern, which list_dir
+        # does not accept — so the one spelling a caller reaches for to say
+        # `ls *.py` could only ever come back as the accepted-name dump,
+        # `filter` included and unrecognised. Here `pattern` means the
+        # fnmatch name filter, which is also what `pattern` means in
+        # find_file: the two listing calls now answer to the same word.
+        "pattern": "filter",
     },
     # `query` cannot go in the global table: `symbol` takes `query` as its own
     # canonical param, so a global alias would rewrite it out from under it.

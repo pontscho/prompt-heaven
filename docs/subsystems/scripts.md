@@ -218,8 +218,14 @@ getting; rejecting the false one is the whole point, because silently ignoring i
 is how a pattern meant literally quietly becomes a regex. `query` is an alias for
 `substring_pattern` per-function only, never in the global table, because `symbol`
 owns `query` as its own canonical parameter
-`Scripts/mcp-purity.py:PARAM_ALIASES_BY_FUNC`. The contract is pinned by the
-`purity_file_ops` suite (31 cases, no external binary, ~2 s)
+`Scripts/mcp-purity.py:PARAM_ALIASES_BY_FUNC`. The same table carries the opposite
+case: `pattern` is global (`-> substring_pattern`), but `list_dir` has no such
+parameter, so there the global row could only ever answer a name filter with the
+accepted-name dump — the per-function row aims it at `filter` instead, the fnmatch
+name match that `pattern` already means in `find_file`. A global alias is only
+global when every handler can honour it; the two escapes are *owned elsewhere* and
+*does not exist here*. The contract is pinned by the
+`purity_file_ops` suite (39 cases, no external binary, ~3 s)
 `tests/test_purity_file_ops.py` and restated model-facing in
 `ClaudeCode/skills/mcp-purity/SKILL.md`.
 

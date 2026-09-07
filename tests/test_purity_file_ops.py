@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """purity_call's gitignore-aware file handlers: the exemption, its narrowness,
-and the search parameter contract.
+and the parameter contract.
 
 Two behaviours are pinned here, and they pull in OPPOSITE directions -- which is
 the whole reason this suite exists rather than a couple of ad-hoc checks:
@@ -50,8 +50,9 @@ Groups:
   A  the exemption: `.claude/tmp` is searched, `build/` still is not
   B  the exemption is NARROW -- the inheritance rule (the shipped defect)
   C  list_dir, both branches, with and without skip_ignored_files
-  D  the search parameter contract: aliases (function and param), the inverted
-     `no_ignore` spelling, tolerated no-ops, real rejections
+  D  the parameter contract: aliases (function and param, global and
+     per-function), the inverted `no_ignore` spelling, tolerated no-ops,
+     real rejections
   E  path-shaped .gitignore: what the basename matcher does and does not honour
   F  hygiene
 """
@@ -379,7 +380,7 @@ def group_c(suite, drv):
 
 
 # ---------------------------------------------------------------------------
-# Group D -- the search parameter contract
+# Group D -- the parameter contract
 # ---------------------------------------------------------------------------
 
 def group_d(suite, drv):
@@ -431,6 +432,28 @@ def group_d(suite, drv):
         must_not_say=["unknown params for 'symbol'"],
         detail=["an LSP-unavailable or empty answer is acceptable here;",
                 "only an Unknown-params rejection of `query` is not"])
+
+    # Same shape as the pair above, in the other direction: `pattern` is GLOBAL
+    # (-> substring_pattern), and list_dir does not accept that param at all, so
+    # the global row could only ever produce a rejection there.  The
+    # per-function row aims it at the fnmatch name filter instead.  A filter
+    # that were merely TOLERATED and dropped leaves the `.txt` negatives below
+    # red, so this cannot pass on acceptance alone.
+    record_polarity(
+        suite, "D", "pattern-aliases-filter-in-list_dir", drv, "list_dir",
+        {"pattern": "*.json", "relative_path": ".", "recursive": True,
+         "show_hidden": True},
+        must=[P_SETTINGS], must_not=[P_SCRATCH, P_KEEP, P_GEN, P_LEAK],
+        extract=listing_paths,
+        detail=["`pattern` -> filter (fnmatch on the bare name, files only)"])
+    # ... and the override must stay per-function: moving it into the global
+    # table instead is the tempting one-line fix, and it turns `pattern` into an
+    # unknown param for every search.
+    record_polarity(
+        suite, "D", "pattern-stays-global-for-search", drv, "search",
+        {"pattern": NEEDLE},
+        must=[P_SCRATCH, P_KEEP], must_not=[P_GEN],
+        detail=["`pattern` -> substring_pattern everywhere except list_dir"])
 
     # One case, both halves of the FUNCTION alias -- and it takes both to be a
     # real test.  Dispatch happens on the RAW name, so a reply at all proves the
@@ -597,7 +620,7 @@ def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
                     title="purity_call file handlers: gitignore exemption, "
-                          "its narrowness, and the search param contract",
+                          "its narrowness, and the param contract",
                     opts=opts, mode="stream", group_width=3, cid_width=36)
 
     before = repo_tree()
