@@ -207,6 +207,11 @@ FUNCTION_ALIASES = {
     "glob": "find_file",
     "grep": "search_for_pattern",
     "search": "search_for_pattern",
+    # Serena's spelling of the same call. Observed in the wild often enough to
+    # be a reflex rather than a typo, and the miss is expensive: the failure is
+    # a 70-name "Available:" dump, so the retry costs a round trip plus the
+    # whole registry in context.
+    "search_content": "search_for_pattern",
     "temp_dir": "create_temp_dir",
     "mktemp": "create_temp_dir",
 }
@@ -225,6 +230,33 @@ def _bool_param(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
+
+
+def _skip_ignored_param(params: dict, default: bool) -> bool:
+    """Resolve `skip_ignored_files`, tolerating ripgrep's inverted `--no-ignore`.
+
+    `no_ignore` cannot be a PARAM_ALIASES entry: that layer renames KEYS and
+    never touches values, so `no_ignore=true` would arrive as
+    `skip_ignored_files=true` — the exact OPPOSITE of what was asked, silently.
+    An inverted spelling needs code rather than a table row, and this is it.
+
+    Both spellings at once is a contradiction, not a redundancy: either answer
+    disobeys half the request, so it is rejected rather than settled by a
+    precedence rule the caller cannot see. `default` differs per handler
+    (list_dir lists everything by default, search skips by default), so it is
+    passed in rather than assumed.
+    """
+    if "no_ignore" not in params:
+        return _bool_param(params.get("skip_ignored_files", default), default)
+    skip = not _bool_param(params["no_ignore"], True)
+    explicit = params.get("skip_ignored_files")
+    if explicit is not None and _bool_param(explicit, default) != skip:
+        raise ValueError(
+            "Parameters 'skip_ignored_files' and 'no_ignore' contradict each other: "
+            "'no_ignore' is the ripgrep-style INVERSE of 'skip_ignored_files'. "
+            "Pass one, not both."
+        )
+    return skip
 
 
 def _int_param(value, default: int) -> int:
@@ -811,7 +843,7 @@ def _format_mtime(mtime: float) -> str:
 def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path", ".")
     recursive = _bool_param(params.get("recursive", False))
-    skip_ignored = _bool_param(params.get("skip_ignored_files", False))
+    skip_ignored = _skip_ignored_param(params, False)
     long_format = _bool_param(params.get("long", False))
     show_hidden = _bool_param(params.get("show_hidden", False)) or _bool_param(params.get("all", False)) or _bool_param(params.get("hidden", False))
     glob_pattern = params.get("glob", None) or params.get("paths_include_glob", None) or params.get("filter", None)
@@ -1302,7 +1334,7 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
         )
 
     max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
-    skip_ignored = _bool_param(params.get("skip_ignored_files", True))
+    skip_ignored = _skip_ignored_param(params, True)
     # Serena-compat: when true, restrict the scan to source-code files
     # (CODE_FILE_EXTENSIONS) and skip docs/data/config. Default false =
     # search everything, matching Serena's default.
@@ -5369,6 +5401,7 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "search_for_pattern": handle_search_for_pattern,
     "grep": handle_search_for_pattern,
     "search": handle_search_for_pattern,
+    "search_content": handle_search_for_pattern,  # Serena's spelling
     # --- semantic (LSP) functions: canonical names ---
     "find_definition": handle_find_definition,
     "find_type_definition": handle_find_type_definition,
@@ -5487,7 +5520,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "create_temp_dir": {"subpath", "unique", "max_answer_chars"},
     "restart_lsp": {"backend", "filetype", "reindex", "max_answer_chars"},
     "list_dir": {
-        "relative_path", "recursive", "skip_ignored_files",
+        "relative_path", "recursive", "skip_ignored_files", "no_ignore",
         "long", "show_hidden", "all", "hidden",
         "paths_include_glob", "filter", "grep", "grep_pattern",
         "head_limit", "offset", "max_answer_chars",
@@ -5518,6 +5551,9 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         # Tolerated ripgrep-style no-ops; the handler rejects them only when set
         # to false, which would be a request purity cannot honour.
         "regex", "line_numbers",
+        # ripgrep's `--no-ignore`, the INVERSE of skip_ignored_files. Flipped in
+        # _skip_ignored_param, not in the alias table — see the docstring there.
+        "no_ignore",
     },
     # --- semantic (LSP) functions: POST-alias canonical param names ---
     "find_definition": {

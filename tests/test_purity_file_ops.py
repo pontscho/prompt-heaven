@@ -50,7 +50,8 @@ Groups:
   A  the exemption: `.claude/tmp` is searched, `build/` still is not
   B  the exemption is NARROW -- the inheritance rule (the shipped defect)
   C  list_dir, both branches, with and without skip_ignored_files
-  D  the search parameter contract: aliases, tolerated no-ops, real rejections
+  D  the search parameter contract: aliases (function and param), the inverted
+     `no_ignore` spelling, tolerated no-ops, real rejections
   E  path-shaped .gitignore: what the basename matcher does and does not honour
   F  hygiene
 """
@@ -345,6 +346,18 @@ def group_c(suite, drv):
         extract=listing_paths,
         detail=["skip_ignored_files defaults to FALSE in list_dir",
                 "(search defaults it to TRUE -- they genuinely differ)"])
+    # Same flag, same handler, opposite default: `no_ignore=false` has to turn
+    # filtering ON here, where the row above proves it is OFF by default.  A
+    # `no_ignore` implemented by leaning on either handler's default -- rather
+    # than by inverting the value -- passes in group D and fails right here.
+    record_polarity(
+        suite, "C", "no_ignore-false-makes-list_dir-skip", drv, "list_dir",
+        dict(deep, no_ignore=False),
+        must=[P_SCRATCH, ".claude/tmp"],
+        must_not=[P_GEN, P_LEAK, P_SETTINGS, ".claude/other", "build"],
+        extract=listing_paths,
+        detail=["no_ignore=false == skip_ignored_files=true, so the ignored",
+                "sibling a BARE list_dir shows (row above) disappears"])
     record_polarity(
         suite, "C", "flat-gateway-dir-listing", drv, "list_dir",
         {"relative_path": ".claude", "recursive": False, "show_hidden": True,
@@ -418,6 +431,53 @@ def group_d(suite, drv):
         must_not_say=["unknown params for 'symbol'"],
         detail=["an LSP-unavailable or empty answer is acceptable here;",
                 "only an Unknown-params rejection of `query` is not"])
+
+    # One case, both halves of the FUNCTION alias -- and it takes both to be a
+    # real test.  Dispatch happens on the RAW name, so a reply at all proves the
+    # `HANDLERS["search_content"]` entry; but `query` is a PER-FUNCTION param
+    # alias resolved under the CANONICAL name, so with the
+    # `FUNCTION_ALIASES["search_content"]` row missing, `query` would never be
+    # recognised and this same call would come back as an unknown-param
+    # rejection.  Either half absent turns this row red.
+    record_polarity(
+        suite, "D", "search_content-dispatches", drv, "search_content",
+        {"query": NEEDLE, "path": P_SCRATCH},
+        must=[P_SCRATCH], must_not=[P_KEEP, P_GEN],
+        detail=["Serena's spelling reaches handle_search_for_pattern",
+                "HANDLERS row  -> dispatch on the RAW name",
+                "FUNCTION_ALIASES row -> `query`/`path` resolve under the",
+                "CANONICAL name, so its absence reads as unknown-param"])
+
+    # `no_ignore` is ripgrep's spelling and the INVERSE of skip_ignored_files,
+    # so it cannot be a PARAM_ALIASES row (that layer renames keys and never
+    # touches values).  Both directions are pinned: an inversion that is dropped
+    # and an inversion applied twice both leave one of these two rows red.
+    record_polarity(
+        suite, "D", "no_ignore-true-reaches-ignored", drv, "search",
+        {"substring_pattern": NEEDLE, "no_ignore": True},
+        must=list(ALL_FILES), must_not=[],
+        detail=["no_ignore=true == skip_ignored_files=false: `build/gen.txt`",
+                "is skipped by the default search and reachable here"])
+    record_polarity(
+        suite, "D", "no_ignore-false-skips-ignored", drv, "search",
+        {"substring_pattern": NEEDLE, "no_ignore": False},
+        must=[P_SCRATCH, P_KEEP], must_not=[P_GEN, P_LEAK, P_SETTINGS],
+        detail=["no_ignore=false == skip_ignored_files=true, which is also",
+                "search's default -- the sign of the flip is what is pinned"])
+    record_error(
+        suite, "D", "no_ignore-contradiction-rejected", drv, "search",
+        {"substring_pattern": NEEDLE, "skip_ignored_files": True,
+         "no_ignore": True},
+        must_say=["contradict"],
+        detail=["both spellings with opposite meanings: either answer",
+                "disobeys half the request, so neither is guessed"])
+    record_error(
+        suite, "D", "no_ignore-agreement-tolerated", drv, "search",
+        {"substring_pattern": NEEDLE, "skip_ignored_files": False,
+         "no_ignore": True},
+        want_error=False, must_not_say=["contradict"],
+        detail=["the two agree (both mean 'do not skip'), and rejecting a",
+                "request that IS satisfiable would be gratuitous"])
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +598,7 @@ def run(opts=None):
     suite = H.Suite(NAME,
                     title="purity_call file handlers: gitignore exemption, "
                           "its narrowness, and the search param contract",
-                    opts=opts, mode="stream", group_width=3, cid_width=34)
+                    opts=opts, mode="stream", group_width=3, cid_width=36)
 
     before = repo_tree()
     pyc_before = H.pycache_snapshot()
