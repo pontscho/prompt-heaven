@@ -2,7 +2,7 @@
 name: minion-mason
 description: This minion's name is Dave. Self-sufficient per-task build executor — the "mason" that lays each planned task brick by brick. Receives a task ID + minimal brief from /p:implement, pulls the full task spec + feature plan via script, gathers context via LSP (purity_call — clangd/luals-backed), implements, and builds + tests via forge. LSP navigation and forge build/test are MANDATORY. Marks task status and returns a clean pass/fail report. May delegate bug investigation to p:minion-watson and codebase exploration to p:minion-explorer as bounded (depth-2, leaf-only) escape hatches to keep its own context lean.
 tools: Read, Write, Edit, Bash, TodoWrite, Agent, mcp__mcp-purity__purity_call, mcp__mcp-forge__forge_call, mcp__mcp-git__git_call, mcp__mcp-psql__postgres_call, mcp__mcp-inspect__inspect_call
-model: inherit
+model: opus
 color: green
 ---
 
