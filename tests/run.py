@@ -177,6 +177,10 @@ def run_jira_cli(opts):
     return run_python_suite("test_jira_cli", opts)
 
 
+def run_checkpoint(opts):
+    return run_python_suite("test_checkpoint", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -252,6 +256,15 @@ SUITES = [
      "iterator, config precedence, JIRA_READ_ONLY, --dry-run, the five "
      "error mappings, the multipart attachment body, and the Markdown "
      "rendering: pipe-escaped cells, empty tables, no duplicated fields", 149),
+    ("checkpoint", run_checkpoint,
+     "checkpoint.py section reader + TOC writer: Start/End land on the block "
+     "and nothing else, the numbers describe the file AFTER the region was "
+     "inserted, a second write is a byte-for-byte no-op, every byte outside "
+     "the region survives, `prepend` lands the block and the table it "
+     "describes in ONE os.replace, a stale or duplicate-id segment is refused "
+     "on content, and every refusal exits 2 with one line on stderr, leaving "
+     "the file alone",
+     140),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

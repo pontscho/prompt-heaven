@@ -50,10 +50,13 @@ for a plain shell and for CI.
 
 ## Suites
 
-Eleven registry entries in `run.py`: ten in-process Python suites plus `smoke`,
-which runs as a subprocess and reports *servers* rather than cases. Per-suite
-coverage detail lives in each module's own docstring; the design rationale lives
-in `docs/subsystems/tests.md`.
+One registry entry per suite in `run.py`: the in-process Python suites listed
+below plus `smoke`, which runs as a subprocess and reports *servers* rather than
+cases. The table is the roster; `run.py` is the registry. (No suite count in
+this sentence on purpose — the one it used to carry was already two suites
+behind, which is the same failure mode the case-count note above describes.)
+Per-suite coverage detail lives in each module's own docstring; the design
+rationale lives in `docs/subsystems/tests.md`.
 
 | name | file | groups |
 |---|---|---|
@@ -67,6 +70,8 @@ in `docs/subsystems/tests.md`.
 | `spawn_stdin` | `test_spawn_stdin.py` | A–D |
 | `mcp_footprint` | `test_mcp_footprint.py` | A–H |
 | `wiki_recall` | `test_wiki_recall.py` | A–P |
+| `jira_cli` | `test_jira_cli.py` | A–K |
+| `checkpoint` | `test_checkpoint.py` | A–K |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
@@ -93,6 +98,8 @@ python3 tests/test_name_existence.py
 python3 tests/test_spawn_stdin.py
 python3 tests/test_mcp_footprint.py
 python3 tests/test_wiki_recall.py
+python3 tests/test_jira_cli.py
+python3 tests/test_checkpoint.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 
@@ -177,6 +184,10 @@ tests/
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
   test_mcp_footprint.py      groups A-H   (AST + one handshake per server)
   test_wiki_recall.py        groups A-P   (synthetic corpus, offline)
+  test_jira_cli.py           groups A-K   (transport injected, nothing dialled)
+  test_checkpoint.py         groups A-K   (drives a WRITER: every path is a
+                                           mkdtemp path, never either of the
+                                           script's own default targets)
   files/                     tf_-prefixed C and Lua fixtures for purity_lsp
   README.md
 ```

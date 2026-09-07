@@ -14,15 +14,17 @@ links:
   - agents
   - scripts
   - layer-contract
+  - 0009-the-first-reader-is-a-cold-model
 ---
 
 # Test Fleet
 
 `tests/` is a stdlib-only, zero-dependency functional test fleet: one entry point
-(`tests/run.py`), one shared plumbing module (`tests/_harness.py`), ten in-process
-suite modules plus a subprocess smoke check, and a committed C/Lua fixture tree
-under `tests/files`. Two organising ideas explain nearly every design choice in
-the tree, and both exist because the repo already paid for the alternative.
+(`tests/run.py`), one shared plumbing module (`tests/_harness.py`), the in-process
+suite modules its `SUITES` table registers plus a subprocess smoke check, and a
+committed C/Lua fixture tree under `tests/files`. Two organising ideas explain
+nearly every design choice in the tree, and both exist because the repo already
+paid for the alternative.
 
 ## Idea 1 — every typed number is machine-checked
 
@@ -121,10 +123,15 @@ N) ===` blocks.
 
 ## The roster
 
-Eleven registry entries in `tests/run.py` — ten in-process Python suites plus
-`smoke`, which runs `Scripts/_mcp_smoke_test.py` as a subprocess and reports
-*servers* rather than cases. Every suite has a matching `forge` target in
-`project-forge.yaml`, each requiring the `syntax` prerequisite.
+One registry entry per suite in `tests/run.py`: the in-process Python suites
+listed below plus `smoke`, which runs `Scripts/_mcp_smoke_test.py` as a
+subprocess and reports *servers* rather than cases. Every suite has a matching
+`forge` target in `project-forge.yaml`, each requiring the `syntax` prerequisite.
+
+There is no suite count in that sentence on purpose. The one it used to carry was
+two suites behind by the time anyone noticed — Idea 1's own failure mode, showing
+up in the page that argues for it. The table below is the roster, `tests/run.py`
+is the registry, and the run is the only thing that knows the totals.
 
 | Suite | What it verifies |
 |---|---|
@@ -138,6 +145,8 @@ Eleven registry entries in `tests/run.py` — ten in-process Python suites plus
 | `spawn_stdin` | every spawn site under `Scripts/` passes an explicit `stdin=` — AST-based, one case per site |
 | `mcp_footprint` | fleet token cost: description tax, result ceilings, boilerplate. A tape measure, not a gate |
 | `wiki_recall` | the wiki search relevance gate on a synthetic corpus — silence, calibration, type signal, aliases |
+| `jira_cli` | the Jira CLI fully offline with the transport injected: auth mode, context-path URL join, lazy deployment probe, both paging models behind one iterator, `JIRA_READ_ONLY`, `--dry-run`, the error mappings and the byte-pinned multipart body |
+| `checkpoint` | `checkpoint.py` as a **writer**: `Start`/`End` land on the block and nothing else, the numbers describe the file *after* the region was inserted, `prepend` lands the block and the table it describes in one `os.replace`, a stale or duplicate-id segment is refused on content, and every refusal exits 2 leaving the file alone — [[0009-the-first-reader-is-a-cold-model]] |
 | `smoke` | JSON-RPC plumbing invariants across every server file |
 
 There is **no auto-discovery**: adding a suite is three edits — the module, a

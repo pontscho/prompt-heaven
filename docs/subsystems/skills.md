@@ -13,6 +13,7 @@ links:
   - overview
   - agents
   - feature-implementation-plan
+  - 0009-the-first-reader-is-a-cold-model
 ---
 
 # Skills
@@ -53,6 +54,7 @@ description is what Claude matches against to auto-activate the skill.
 | `p:feature-plan` / `p:task-plan` / `p:implement` | Migrated `/p:` workflow chain: plan -> `requirements.yaml` -> execute |
 | `p:code-review` / `p:branch-review` | Multi-lens code review (finder/verifier minion fan-out) — see [[feature-implementation-plan]] |
 | `p:sandbox-run` | Sandboxed CLI runner: the bundled `sbx` helper contains a command under macOS Seatbelt / Linux bwrap — default-deny writes, no network, secret read+write denial, fail-closed on any other platform — paired with the grant-only `sbx-gate.py` PreToolUse(Bash) gate that auto-allows a clean, in-project, network-free invocation |
+| `p:checkpoint` | Session handoff into `.claude/tmp/checkpoint.md`: an append-only stack of session blocks under a frozen mission tail, written whole in English whatever language the conversation is in, with a script-generated line-range table of contents that makes one block readable by offset — [[0009-the-first-reader-is-a-cold-model]] |
 
 The MCP-routing skills (`p:mcp-*`) all forbid built-in tool fallback, mirroring
 the mandate documented in [[overview]].

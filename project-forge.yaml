@@ -130,6 +130,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
+  checkpoint:
+    description: "The checkpoint section reader and TOC writer. Writes only inside a mkdtemp sandbox -- never the live .claude/tmp/checkpoint.md, which is the script's own default target: line ranges, the two-render offset fix point, idempotence, byte preservation, and the refusals."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py checkpoint
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]
