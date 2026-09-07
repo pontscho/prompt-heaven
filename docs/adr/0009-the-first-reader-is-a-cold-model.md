@@ -1,13 +1,16 @@
 ---
 name: 0009-the-first-reader-is-a-cold-model
 type: adr
-status: draft
+status: active
 title: The checkpoint file's first reader is a cold model, not a human
 description: Decision to write the whole checkpoint file in English regardless of the conversation language, to persist a script-generated line-range table of contents inside it so one block can be read by offset, and then to give the file exactly one writer -- a prepend command that lands the block and the regenerated table in a single atomic replace.
 sources:
   - ClaudeCode/skills/checkpoint/SKILL.md
   - ClaudeCode/skills/checkpoint/scripts/checkpoint.py
   - tests/test_checkpoint.py
+verified:
+  commit: a98b3ea
+  date: 2026-09-07
 links:
   - skills
   - tests
@@ -15,20 +18,19 @@ links:
 
 # ADR 0009: The checkpoint file's first reader is a cold model
 
-**Status:** accepted and implemented; this page awaits promotion. All three
-sources are uncommitted — two modified in the working tree, `tests/test_checkpoint.py`
-not yet tracked at all — so any `verified.commit` here would be a false claim;
-promote the page (`draft → active`, add `verified:`) when the change lands.
-
-An ADR is append-only *after acceptance*, and in this wiki the acceptance event is
-that promotion. While the page is `draft` the decision is still taking shape, so
-the `prepend` command below — decided after this page was first written — was
-edited into it rather than split off into a second ADR. Splitting would have left a
-false claim standing here (that a skipped `toc --write` is held back by discipline)
-and scattered one decision across two pages; the code wins, so the page follows the
-code. The living WHAT/HOW is the skill contract
+**Status:** accepted (implemented, `a98b3ea`). Append-only from here — the WHY is
+frozen on this page; the living WHAT/HOW is the skill contract
 `ClaudeCode/skills/checkpoint/SKILL.md` and its helper script
 `ClaudeCode/skills/checkpoint/scripts/checkpoint.py`, catalogued in [[skills]].
+
+The freeze arrived with this promotion, and one detail of how the page got here is
+worth keeping. An ADR is append-only *after acceptance*, and in this wiki that
+event is the promotion — so while the page was still `draft`, the decision was
+still taking shape, and the `prepend` command below (decided after the page was
+first written) was edited into it rather than split off into a second ADR.
+Splitting would have left a false claim standing here — that a skipped `toc --write`
+is held back by discipline — and scattered one decision across two pages. The code
+wins, so the page followed the code while it could; now it stops.
 
 ## Context
 
