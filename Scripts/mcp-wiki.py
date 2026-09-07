@@ -1718,6 +1718,7 @@ FUNCTION_ALIASES = {
     "q": "search",
     "page": "get_page",
     "get": "get_page",
+    "read": "get_page",
     "sources": "source_to_pages",
     "src2pages": "source_to_pages",
     "index": "reindex",
@@ -1749,8 +1750,17 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     # result list for that to mean anything on. Without this entry the natural
     # spelling of a window height would arrive as `limit` and be rejected as an
     # unknown param -- loudly, but for a request that was never wrong.
-    "get_page": {"name": "slug", "heading": "section", "body": "include_body",
-                 "count": "lines", "start": "from"},
+    #
+    # `path` -> `slug` rejects nothing the handler would have refused anyway:
+    # _fn_get_page matches `relpath == slug` already, so a docs-relative path IS
+    # a valid value of `slug` and only its SPELLING was being turned away. Both
+    # ways in teach that spelling -- a search hit prints `subsystems/scripts.md`,
+    # and get_page's own header answers `- **path**: subsystems/scripts.md` -- so
+    # the caller reaches for the one word the accepted-name dump does not carry.
+    # It stays per-function because `path` is owned elsewhere: source_to_pages
+    # spells `source` that way, and no other handler takes a `slug` at all.
+    "get_page": {"name": "slug", "path": "slug", "heading": "section",
+                 "body": "include_body", "count": "lines", "start": "from"},
     "reindex": {"check_only": "check", "dry_run": "check"},
 }
 
@@ -1915,7 +1925,9 @@ WIKI_CALL_TOOL = {
         "                   what they cover and not merely that they do; params:\n"
         "                   source (req, a path or path:symbol)\n"
         "  get_page         read one page whole, a single section, or a window of\n"
-        "                   file lines; params: slug (req), section, from, lines\n"
+        "                   file lines; params: slug (req — either the bare page\n"
+        "                   name or the docs-relative path a search hit prints,\n"
+        "                   subsystems/scripts.md), section, from, lines\n"
         "                   (default 40), include_body (default true), depth\n"
         "                   (default 2). When the section does not match, or\n"
         "                   include_body is false, the answer carries the page's\n"

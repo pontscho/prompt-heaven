@@ -2,7 +2,7 @@
 """Mechanical suite for the `search` relevance gate, the `get_page` section
 index, the `source_to_pages` per-hit description, the MEASURED state in every
 recall reply's `[type/state]` label, the page TYPE as a ranking signal and the
-frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (112 cases, A-P).
+frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (114 cases, A-P).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/.  Nothing is written outside
@@ -4481,6 +4481,65 @@ def run(opts=None):
                                        "that to mean anything on -- without the "
                                        "override the natural word is rejected for a "
                                        "request that was never wrong")],
+                     text="")
+
+        def raw_page(fn, params):
+            """One answer by RAW dispatcher call.  `Driver.get_page` spells both
+            the function name and `slug` for you, and the next two cases are
+            about precisely the other spellings."""
+            res = sdrv.mod.handle_wiki_call({"function": fn, "params": params},
+                                            sdrv.root, WIKI_REL)
+            return (res.get("__raw_text__") or res.get("error") or "",
+                    "error" in res)
+
+        by_slug = raw_page("get_page", {"slug": TALL_SLUG})[0]
+        by_path, path_err = raw_page("get_page", {"path": TALL_FILE})
+        problems = []
+        if path_err:
+            problems.append("path did not reach slug: %s" % by_path[:200])
+        elif by_path != by_slug:
+            problems.append("path and slug render different answers, so the alias "
+                            "landed on a different match arm than the one it names")
+        if "path" in sdrv.mod.PARAM_ALIASES:
+            problems.append("path became a GLOBAL alias; every OTHER function would "
+                            "then reject a caller's path under the name slug, a word "
+                            "they never sent")
+        if sdrv.mod.PARAM_ALIASES_BY_FUNC["source_to_pages"].get("path") != "source":
+            problems.append("source_to_pages no longer owns path, so the reason this "
+                            "row has to be per-function is gone and the pin below it "
+                            "means nothing")
+        suite.record("N", "path-reaches-slug-because-the-handler-already-took-one",
+                     problems,
+                     detail=[_d("call", "get_page path=%r against slug=%r"
+                                % (TALL_FILE, TALL_SLUG)),
+                             _d("why", "_fn_get_page matches `relpath == slug`, so a "
+                                       "docs-relative path was ALWAYS a legal value "
+                                       "of slug -- only its key was turned away, and "
+                                       "both a search hit and get_page's own "
+                                       "`- **path**:` header hand the caller that "
+                                       "exact word"),
+                             _d("scope", "per-function, because path is owned "
+                                         "elsewhere: source_to_pages spells `source` "
+                                         "that way")],
+                     text="")
+
+        by_read, read_err = raw_page("read", {"path": TALL_FILE})
+        problems = []
+        if read_err:
+            problems.append("read did not reach get_page: %s" % by_read[:200])
+        elif by_read != by_slug:
+            problems.append("read and get_page render different answers")
+        if sdrv.mod.FUNCTION_ALIASES.get("read") != "get_page":
+            problems.append("read no longer names get_page")
+        suite.record("N", "read-carries-get_page-s-param-aliases-with-it", problems,
+                     detail=[_d("call", 'function="read", params={"path": %r} -- the '
+                                        "reported call, verbatim" % TALL_FILE),
+                             _d("why", "the two aliases compose ONLY because the "
+                                       "dispatcher canonicalizes the function first "
+                                       "and hands that name to _resolve_aliases; "
+                                       "resolved against the raw name, path would "
+                                       "miss get_page's row and be rejected on a "
+                                       "call whose every half was right")],
                      text="")
 
         rows, problems = [], []

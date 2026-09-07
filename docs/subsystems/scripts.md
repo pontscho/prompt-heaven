@@ -229,6 +229,32 @@ global when every handler can honour it; the two escapes are *owned elsewhere* a
 `tests/test_purity_file_ops.py` and restated model-facing in
 `ClaudeCode/skills/mcp-purity/SKILL.md`.
 
+**A name a tool prints in its answers is a name it has to accept in its asks.**
+mcp-wiki reached the same table from a third direction: `get_page` refused `path`
+as an unknown param while `_fn_get_page` already matched `relpath == slug`
+`Scripts/mcp-wiki.py:_fn_get_page`, so a docs-relative path was always a legal
+*value* of `slug` and only its key was being turned away — and both ways in taught
+that key, a `search` hit rendering `subsystems/scripts.md#mcp-servers` and the
+page's own frontmatter header rendering `- **path**: subsystems/scripts.md`
+`Scripts/mcp-wiki.py:_render_frontmatter`. A spelling the answers hand out is not
+a caller error, it is a reflex the server trained, which is why it is fixed with
+an alias rather than with a doc telling the caller to read more carefully — the
+skill had been describing `get_page` as "by slug/path" all along
+`ClaudeCode/skills/wiki/SKILL.md`. The row stays per-function for a reason the
+purity cases do not cover. `source_to_pages` does own `path` as its own spelling
+of `source`, but per-function aliases resolve first, so it was never at risk; what
+a global row would break is the *diagnostics*, telling a caller who typed `path`
+on a `search` call `Unknown params for 'search': slug` — a word they never sent.
+So the escape list gains a third entry beside *owned elsewhere* and *does not
+exist here*: **renames the caller's word in another handler's rejection**. The
+function-name half is the same shape one level up — the registry names the
+handler, the caller reaches for the verb — so `read` joins the `page` and `get`
+rows aimed at `get_page`. The two halves compose only because the dispatcher
+canonicalizes the function *before* it resolves per-function params
+`Scripts/mcp-wiki.py:handle_wiki_call`: resolved against the raw `read`, `path`
+would miss `get_page`'s row and be rejected on a call whose every half was right.
+Both are pinned by `wiki_recall` group N (114 cases) `tests/test_wiki_recall.py`.
+
 ## Task utilities
 
 Operate on the `requirements.yaml` workflow (see [[overview]]):
