@@ -1838,6 +1838,11 @@ class McpServer:
                 try:
                     args = json.loads(args)
                 except json.JSONDecodeError:
+                    # Rejected by handle_gdc_call -> _ensure_dict, NOT by
+                    # _dispatch_tool as above: that one re-parses only the OUTER
+                    # arguments and never looks inside them. The lane is
+                    # irrelevant either way, because both rejections land before
+                    # _resolve_session, so no page exists yet to race on.
                     args = {}
             if not isinstance(args, dict):
                 args = {}
