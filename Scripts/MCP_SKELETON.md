@@ -112,10 +112,13 @@ porting (`log.debug(f"← {x}")`).
 
 ## 3. RPC helpers — static, on `McpServer`
 
-Three static helpers. `_result` and `_error` are the raw JSON-RPC envelopes;
-`_tool_error` is the MCP `isError` tool-result envelope (present on servers whose
-tool can fail with a human-readable message — the A-family and any tooling server
-that wants it).
+`_result` and `_error` are the raw JSON-RPC envelopes. The third thing is the MCP
+`isError` tool-result envelope, and it is **not** optional: every server's tool can
+fail, so every server must be able to say that it did (§3a). `_tool_error` is one
+way to build it and eight servers define it; the other seven set `isError` inline
+at the wrap — `mcp-purity.py` reads `is_error = "error" in result` and hands it
+straight to `_result` — which satisfies the same contract with no helper at all.
+What is required is the FLAG, never a particular spelling of it.
 
 ```python
 class McpServer:
@@ -142,6 +145,79 @@ Notes:
 - Callers may still write `self._result(...)` / `self._error(...)` — Python resolves
   static methods through the instance fine. Only the **definitions** must be static.
 - The legacy A-family names `_ok` → `_result` and `_err` → `_error`.
+
+### 3a. The error-envelope contract
+
+**A handler failure must reach `isError`.** Not per-server taste. The defect is a
+reply the caller cannot distinguish from a success, and no amount of well-written
+failure text repairs it, because prose is not the channel the flag is.
+
+The predicate is tested at the wrap, on whatever the handler handed back, and
+there are two shapes of it. Eleven servers test a **top-level `error` key** on a
+structured result — `is_error = "error" in result` in `mcp-forge.py`,
+`mcp-git.py`, `mcp-inspect.py`, `mcp-postgres.py`, `mcp-purity.py`,
+`mcp-tshark.py`, `mcp-webfetch.py` and `mcp-wiki.py`, and the same test spelled
+`isinstance(result, dict) and "error" in result` in `mcp-context7.py` (12 failure
+sites), `mcp-gdc.py` (33) and `mcp-lldb.py` (60). Three test the **type of the
+text**, because their dispatcher has already flattened the dict and cannot be
+restructured: `isinstance(result, _ErrorText)` in `mcp-clangd.py`, `mcp-cuda.py`
+and `mcp-lua-lsp.py`. `mcp-jenkins.py` names the predicate, `_is_error(payload)`.
+That is fifteen servers and no fourth shape.
+
+**Raising and returning are two routes into the same predicate, not two
+mechanisms.** The wrap's own `except Exception` assigns `result = {"error": …}`,
+so a `raise` is simply another way to produce the dict the test then reads — which
+is why every one of the eleven does both, per site: `mcp-inspect.py` raises at 49
+sites and returns the dict at 4, `mcp-purity.py` 45 and 30, `mcp-tshark.py` 3 and
+30. Neither is the house style; what is not optional is that one of them happens.
+The illegal fourth is what this batch removed: returning a **pre-rendered failure
+string** the wrap cannot tell from a success.
+
+**The predicate reads the TOP level only.** `mcp-jenkins.py` is the worked example
+in both directions: a top-level `error` key is a failure, and a nested one — real
+data copied out of an upstream JSON, `wfapi` per-stage records, `_probe_connection`
+— is left alone. A recursive or wildcard search would have flagged data as
+failure, which is this defect wearing the opposite sign.
+
+**Where two behaviours describe one condition, they read one predicate.** Jenkins'
+bug was two: rendering keyed on the payload's `error` key while the flag keyed on
+a separate `__is_error__` sentinel that only `_err` set, so 25 handler sites
+returning `_ok({"error": …})` rendered AS errors and reported `isError: False` — a
+failure shipped as a success. The sentinel is gone and both now read `_is_error`.
+Converting those 25 sites instead would only have made the shape *currently*
+absent rather than impossible.
+
+**An action that did not happen is a failure; a question answered with "none" is a
+success.** This is what keeps the sign from inverting, and it is the half a fix of
+this kind is most likely to get wrong on the rebound. `lldb_list_sessions`
+answering "No active LLDB sessions.", `gdc_status` reporting Chrome unreachable,
+`context7` answering that no library matched — all successes. They were asked, and
+they answered.
+
+**`_ErrorText` is declared here, not generated.** It is a `str` subclass carrying
+the verdict a flattened reply would otherwise lose, applied inside `_serialize`
+while the value is still a dict and tested at the wrap; it exists as three
+byte-identical hand copies, 1146 bytes each. Its `free_names` is empty, so it
+*could* be a canonical block (§8) — and it stays a hand copy deliberately.
+`mcp-purity.py`'s dict-to-the-wrap shape is the convention; the trio flattens
+inside its dispatcher because `_serialize` is a closure every exit already ran, so
+the wrap only ever sees a `str`. Blessing a second mechanism as generated
+infrastructure — in three servers that are not registered and never launched —
+would buy drift protection *for* the divergence instead of removing it. Record a
+divergence as a divergence. `_tool_error` is the precedent for wrap code
+documented here rather than generated: it cannot be a block at all, because its
+`free_names` holds `McpServer`, a name the host defines.
+
+**The control, and what it does not reach.** `Scripts/_mcp_smoke_test.py` check 7
+(`error_envelope_checks`) drives every server over live JSON-RPC with
+`function="__no_such_function__"` and requires `isError is True` — read as the
+flag and never as the text, since several servers answer by listing their whole
+catalogue. Its negative half omits `function` entirely, which most servers answer
+with a status or catalogue reply BY DESIGN, and requires that reply stay
+unflagged; without that half, a server flagging everything would pass. Its limit:
+it lands on ONE failure site per server, so it proves the wrap and not the sites.
+Jenkins passes it without exercising any of the 25 sites the predicate fixed,
+because the unknown-function path was always an `_err`.
 
 ---
 
@@ -284,9 +360,13 @@ the convergence** (sub-shapes: `await _client.stop()` for clangd/cuda/lua-lsp;
 ```
 
 > **Behavioral note (intentional):** with this shape, any exception that reaches
-> the loop now produces a `-32603` reply on stdout. Tool handlers already return
-> their own `_tool_error`, so an exception bubbling this far is genuinely
-> unexpected — replying is correct, hanging is not.
+> the loop now produces a `-32603` reply on stdout. What reaches it is narrow by
+> construction, and for a reason worth stating precisely: the tool wrap's own
+> `except` converts a handler failure into a flagged tool reply (§3a), so an
+> exception bubbling past THAT is one the wrap itself could not shape — replying
+> is correct, hanging is not. This note used to say handlers "already return
+> their own `_tool_error`". Six servers never routed a handler failure through
+> the flag at all, which is the hole §3a closes and this sentence hid.
 
 ---
 
@@ -362,8 +442,10 @@ if not isinstance(arguments, dict):
 ```
 
 **Level 2 — `params`, in the param normalizer** (`_resolve_aliases` /
-`_ensure_dict`), raising a clean `ValueError` the dispatcher turns into an error
-result:
+`_ensure_dict`), raising a clean `ValueError` the wrap turns into a flagged error
+result. Raising is one of two routes into that flag, not a rule: a handler may
+equally RETURN `{"error": …}`, which the same wrap predicate reads (§3a). What is
+not optional is that one of the two happens:
 
 ```python
 if isinstance(params, str):
@@ -581,7 +663,8 @@ drift committed into a server turns the fleet red.
 
 - [ ] shebang + PEP-723 block (`dependencies = []` if stdlib-only; exact list otherwise)
 - [ ] `import logging`; module-level `log = logging.getLogger("SERVER_NAME")`; no `debug_log`, no `DEBUG`/`_log_file` globals
-- [ ] static `_result` / `_error` / `_tool_error` (legacy `_ok`/`_err` renamed)
+- [ ] static `_result` / `_error` (legacy `_ok`/`_err` renamed); a tool-level `isError` envelope built either by a static `_tool_error` or inline at the wrap
+- [ ] **a handler failure REACHES the flag** — raise, or return `{"error": ...}`, or mark the text with `_ErrorText`; never a pre-rendered failure string the wrap cannot tell from a success (§3a)
 - [ ] `initialize` → `{protocolVersion, serverInfo, capabilities}`, version `"1.0.0"`
 - [ ] `ping` → `_result(msg_id, {})`; notifications → `None`; unknown → `-32601`
 - [ ] run() loop wraps the handler in try/except and **writes** a `-32603` reply

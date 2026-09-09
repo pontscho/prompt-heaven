@@ -34,7 +34,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 
 # ============================================================
@@ -444,6 +444,19 @@ def _parse_error_response(status: int, body: str, api_key: Optional[str]) -> str
 # Tool Handlers
 # ============================================================
 
+# The handler return contract, and it is a contract because _dispatch_tool reads
+# the SHAPE: a plain `str` is a SUCCESS, and `{"error": <text>}` is a FAILURE
+# that the wrap turns into MCP's `isError: True`. That flag is the only channel
+# that tells a caller its call did not work; a failure returned as a bare string
+# lands in a success envelope, where finding out costs the caller a sentence of
+# English to parse and an agent retrying it gets no signal at all. The <text> is
+# handed to the caller verbatim, so it stays exactly what the string form said.
+#
+# The inverse is the same defect wearing the opposite sign, so a handler that
+# legitimately reports a STATE — no library matched the name, the docs are not
+# published yet, here is the server's status — keeps returning a string.
+# "Nothing found" is an answer, and flagging it as an error would be a lie.
+
 async def handle_context7_status(args: dict) -> str:
     has_key = API_KEY is not None
     auth_status = "authenticated (API key configured)" if has_key else "anonymous (no API key — rate limited)"
@@ -454,7 +467,7 @@ async def handle_context7_status(args: dict) -> str:
     )
 
 
-async def handle_context7_resolve_library_id(args: dict) -> str:
+async def handle_context7_resolve_library_id(args: dict) -> Union[str, dict]:
     # Capped everywhere a value from UPSTREAM can reach the reply: the record
     # list, but also the two error paths, since `message` and `error` are fields
     # context7.com fills in and neither has a documented length.
@@ -463,23 +476,27 @@ async def handle_context7_resolve_library_id(args: dict) -> str:
     library_name = args.get("library_name", "").strip()
 
     if not query:
-        return "Error: 'query' parameter is required."
+        return {"error": "Error: 'query' parameter is required."}
     if not library_name:
-        return "Error: 'library_name' parameter is required."
+        return {"error": "Error: 'library_name' parameter is required."}
 
     try:
         raw = await _api_get("/v2/libs/search", {"query": query, "libraryName": library_name}, API_KEY)
         data = json.loads(raw)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        return _cap_text(_parse_error_response(e.code, body, API_KEY), cap)
+        return {"error": _cap_text(_parse_error_response(e.code, body, API_KEY), cap)}
     except Exception as e:
-        return _cap_text(f"Error searching libraries: {e}", cap)
+        return {"error": _cap_text(f"Error searching libraries: {e}", cap)}
 
     results = data.get("results", [])
     if not results:
+        # The two halves of an empty result are NOT the same answer. An `error`
+        # field is upstream saying the search did not run, so it is flagged; no
+        # field at all is upstream saying it ran and matched nothing, which is a
+        # successful search with an empty result and stays unflagged.
         error = data.get("error")
-        return _cap_text(error, cap) if error \
+        return {"error": _cap_text(error, cap)} if error \
             else "No libraries found matching the provided name."
 
     header = "Available Libraries:\n\n"
@@ -488,7 +505,7 @@ async def handle_context7_resolve_library_id(args: dict) -> str:
     return _cap_text(header + body, cap)
 
 
-async def handle_context7_query_docs(args: dict) -> str:
+async def handle_context7_query_docs(args: dict) -> Union[str, dict]:
     # THE payload this ceiling exists for: /v2/context returns as much markdown as
     # context7.com decides to return, and nothing on this side bounds it. Cut
     # head-first (upstream ranks snippets by relevance to `query`) with NO resume
@@ -501,18 +518,23 @@ async def handle_context7_query_docs(args: dict) -> str:
     query = args.get("query", "").strip()
 
     if not library_id:
-        return "Error: 'library_id' parameter is required."
+        return {"error": "Error: 'library_id' parameter is required."}
     if not query:
-        return "Error: 'query' parameter is required."
+        return {"error": "Error: 'query' parameter is required."}
 
     try:
         text = await _api_get("/v2/context", {"query": query, "libraryId": library_id}, API_KEY)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        return _cap_text(_parse_error_response(e.code, body, API_KEY), cap)
+        return {"error": _cap_text(_parse_error_response(e.code, body, API_KEY), cap)}
     except Exception as e:
-        return _cap_text(f"Error fetching library context. Please try again later. {e}", cap)
+        return {"error": _cap_text(f"Error fetching library context. Please try again later. {e}", cap)}
 
+    # NOT flagged, and the call was decided rather than overlooked: upstream
+    # answered 200 with an empty body, which is also how a real library with no
+    # published documentation answers. Flagging it would report "this library
+    # has no docs yet" as a failed call, so the reply says what it knows and
+    # names the likelier cause instead.
     if not text or not text.strip():
         return (
             "Documentation not found or not finalized for this library. "
@@ -524,28 +546,35 @@ async def handle_context7_query_docs(args: dict) -> str:
     return _cap_text(text, cap)
 
 
-async def handle_context7_call(args: dict) -> str:
+async def handle_context7_call(args: dict) -> Union[str, dict]:
     """Dispatcher: call any Context7 tool by name."""
     function = args.get("function", "")
     raw_params = args.get("params") or {}
     try:
         params = _ensure_dict(raw_params)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return {"error": f"Error: {exc}"}
 
+    # No `function` is not a failure: this tool is documented as answering with
+    # server status when called bare, so this reply stays a plain string. It is
+    # the control that keeps the flag meaningful — a server that flagged every
+    # reply would satisfy every error test and tell a caller nothing.
     if not function:
         has_key = API_KEY is not None
         auth_status = "authenticated" if has_key else "anonymous (rate limited)"
         return f"Context7 MCP server is running. Auth: {auth_status}"
 
     if function == "context7_call":
-        return "Cannot dispatch context7_call recursively."
+        return {"error": "Cannot dispatch context7_call recursively."}
 
     handler = ALL_HANDLERS.get(function)
     if handler is None:
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
-        return f"Unknown function: '{function}'. Available: {available}"
+        return {"error": f"Unknown function: '{function}'. Available: {available}"}
 
+    # Passed through as returned, shape included: an inner handler's
+    # {"error": ...} has to stay a dict all the way to the wrap, or the flag is
+    # lost for every function reached through this dispatcher — i.e. all of them.
     return await handler(params)
 
 
@@ -664,6 +693,8 @@ class McpServer:
 
         try:
             result = await handler(args)
+            if isinstance(result, dict) and "error" in result:
+                return self._tool_error(msg_id, result["error"])
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
             log.debug(f"Handler '{name}' error: {e}")

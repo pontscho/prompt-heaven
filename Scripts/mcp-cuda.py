@@ -2060,18 +2060,50 @@ ALL_HANDLERS = {
 # MCP dispatcher
 # ============================================================
 
+class _ErrorText(str):
+    """Rendered reply text that reports a FAILURE, and still knows it.
+
+    MCP carries the failure verdict on the tool-result envelope (`isError`), and
+    only McpServer._dispatch_tool can build that envelope. But error-ness is
+    decided down HERE, where a handler's `{"error": ...}` is still a dict: every
+    exit from this dispatcher flattens it first — to `ERROR: ...` under
+    MARKDOWN_MODE, to JSON otherwise — so by the time the reply reaches the wrap
+    there is no dict left to test. Re-deriving the verdict up there would mean
+    pattern-matching our own output in two formats, one of which interpolates an
+    upstream string, and a caller who queried a symbol literally named `ERROR:`
+    would decide the verdict for us.
+
+    So the one bit rides along with the text instead. A `str` subclass IS the
+    same characters — `json.dumps` encodes it identically, and every consumer
+    that concatenates, slices or compares it sees no difference — which is why
+    adding the flag changes no reply text anywhere. MARKDOWN_MODE stays the only
+    thing that decides the rendering.
+    """
+    __slots__ = ()
+
+
 async def handle_cuda_call(args: dict, server: Optional["McpServer"] = None) -> str:
     function = args.get("function", "")
     raw_params = args.get("params") or {}
     try:
         params = _resolve_aliases(raw_params)
     except ValueError as exc:
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        # Deliberately NOT _serialize: this site has always answered in JSON
+        # even under --markdown, and marking a failure must not change a
+        # rendering. Only the flag is new here.
+        return _ErrorText(json.dumps({"error": str(exc)}, ensure_ascii=False))
 
     def _serialize(fn: str, data: Any) -> str:
-        if MARKDOWN_MODE:
-            return _result_to_markdown(fn, data)
-        return json.dumps(data, ensure_ascii=False)
+        text = (_result_to_markdown(fn, data) if MARKDOWN_MODE
+                else json.dumps(data, ensure_ascii=False))
+        # Read off `data` while it is still a dict — see _ErrorText. This is the
+        # single choke point for the dispatcher's own failures (the recursion
+        # guard, an unknown function) AND for every handler's, since a handler
+        # reports failure only as {"error": ...} and its result comes back
+        # through here.
+        if isinstance(data, dict) and "error" in data:
+            return _ErrorText(text)
+        return text
 
     if not function:
         if server and server._init_task and not server._init_task.done():
@@ -2477,6 +2509,8 @@ class McpServer:
                 )
             try:
                 result = await handle_cuda_call(tool_args, server=self)
+                if isinstance(result, _ErrorText):
+                    return self._tool_error(msg_id, result)
                 return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
             except Exception as e:
                 log.debug(f"cuda_call error: {e}")

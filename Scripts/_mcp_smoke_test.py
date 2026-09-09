@@ -14,6 +14,15 @@ that the convergence patch guarantees:
   * forced handler exc   -> error.code == -32603  AND a response actually arrives
                            (this is the FIX-1 regression gate: bare loops crash,
                             silent-swallow loops hang -- both fail this check)
+  * unknown FUNCTION     -> result.isError is TRUE
+                           (a caller asking the dispatcher for a name that does
+                            not exist has failed, and the MCP flag is the only
+                            channel that says so; see error_envelope_checks)
+  * omitted function     -> result.isError is FALSY
+                           (the discriminating control: several servers answer
+                            an empty function with a status/catalogue reply ON
+                            PURPOSE, which is a success -- without this half the
+                            gate would pass a server that flags everything)
 
 Usage:
   python3 _mcp_smoke_test.py                 # all servers
@@ -168,6 +177,111 @@ class Server:
 
 def check(name, cond, detail=""):
     return (name, bool(cond), detail)
+
+
+class _Absent:
+    """The isError key was missing entirely.
+
+    FALSY on purpose, and that is the whole point of the class: an MCP client
+    reads a missing isError as success, so for verdict arithmetic `absent` and
+    `False` must behave identically or the gate would measure a spelling rather
+    than the contract.  A plain string sentinel got this backwards -- a
+    non-empty string is truthy, which failed the negative control on every
+    server whose status reply simply never sets the flag.
+
+    It is still a DISTINCT value from False so the detail line can say which of
+    the two it saw: "decided this is not an error" and "never had an opinion"
+    are the same behaviour to a client and different defects to a fixer.
+    """
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "<absent>"
+
+
+ABSENT = _Absent()
+
+
+def _dispatch_call(srv, call_id, tool, arguments, timeout=READ_TIMEOUT):
+    """tools/call `tool` with raw `arguments`; return (is_error, text, resp).
+
+    `is_error` is the isError value AS SENT, with the falsy ABSENT sentinel
+    standing in for a missing key (see _Absent).
+
+    A missing/timed-out reply and a JSON-RPC-level error both come back as
+    is_error=None, which fails the positive case AND the negative one: neither
+    is a tool-result envelope, so neither can carry the flag.
+    """
+    srv.send({"jsonrpc": "2.0", "id": call_id, "method": "tools/call",
+              "params": {"name": tool, "arguments": arguments}})
+    resp = srv.read(timeout=timeout)
+    if not isinstance(resp, dict) or not isinstance(resp.get("result"), dict):
+        return None, "", resp
+    result = resp["result"]
+    content = result.get("content") or []
+    text = content[0].get("text", "") if content else ""
+    return result.get("isError", ABSENT), text, resp
+
+
+def error_envelope_checks(srv, cfg, checks):
+    """The tool-level error-envelope contract, per server, over live JSON-RPC.
+
+    Two halves, and both are load-bearing:
+
+      POSITIVE -- function="__no_such_function__".  A caller asking for a
+        function that does not exist has failed, so the reply MUST carry
+        isError: True.  Some servers answer by listing their whole function
+        catalogue; that is still an error answer, so the assertion reads the
+        FLAG and never the text (a length or substring heuristic here would
+        pin the prose of 15 different servers instead of the contract).
+
+      NEGATIVE -- function omitted entirely.  Most servers answer that with a
+        status or catalogue reply BY DESIGN (mcp-gdc.py's handle_gdc_call:
+        `if not function: return await handle_gdc_status(...)`), which is a
+        success and MUST NOT be flagged.  Without this half a server that
+        flagged every reply -- the same defect wearing the opposite sign --
+        would pass the gate.
+
+    Both probes need NO environment: no browser, no database, no debugger, no
+    network.  Every server answers an unknown function name from its own
+    handler table, and every `if not function` status handler reports what it
+    knows locally.  The one that reaches out at all, gdc_status, wraps its
+    Chrome fetch in a bounded urlopen(timeout=5) inside its own try/except and
+    returns a running-server string either way, so its VERDICT does not depend
+    on whether Chrome is up -- only its text does.
+
+    Severity: this compares runtime behaviour of a locally-started process with
+    no network dependency and no ordering dependency, so it cannot flap and is
+    a hard failure -- the same bar every other check in this harness is held
+    to.  No server measured here is an exception.
+
+    The `registered` flag is deliberately ignored, exactly as the rest of this
+    harness ignores it: mcp-clangd.py, mcp-cuda.py and mcp-lua-lsp.py are never
+    launched by Claude Code, so their footprint is zero -- but all three start
+    offline and answer both probes in milliseconds, so the gate DRIVES them
+    rather than trusting a static reading of their source.  A measurement is
+    strictly better evidence than a reading, and an unmeasured server must
+    never be silently scored as a pass.
+    """
+    tool = cfg["tool"]
+
+    # `is True`, not truthiness: MCP declares isError a boolean, and a server
+    # stuffing a truthy string in there is a defect the strict form catches.
+    is_error, _text, resp = _dispatch_call(srv, 6, tool,
+                                           {"function": "__no_such_function__",
+                                            "params": {}})
+    checks.append(check(
+        "unknown-function -> isError True",
+        is_error is True,
+        "isError=%r; envelope=%s" % (is_error, json.dumps(resp)[:220])))
+
+    is_error, _text, resp = _dispatch_call(srv, 7, tool, {"params": {}})
+    checks.append(check(
+        "omitted-function -> isError falsy (control)",
+        is_error is not None and not is_error,
+        "isError=%r; envelope=%s" % (is_error, json.dumps(resp)[:220])))
 
 
 def _purity_call(srv, call_id, function, params=None):
@@ -412,7 +526,11 @@ def run_server(cfg):
                                 exc.get("error", {}).get("code") == -32603,
                                 repr(exc.get("error", {}).get("code"))))
 
-        # 7. purity-only: semantic dispatch + alias-routing checks (Phase 0, D2)
+        # 7. tool-level error envelope: the isError flag on a FAILING call, and
+        #    the control proving a deliberate status reply is not flagged.
+        error_envelope_checks(srv, cfg, checks)
+
+        # 8. purity-only: semantic dispatch + alias-routing checks (Phase 0, D2)
         if cfg["tool"] == "purity_call":
             purity_semantic_checks(srv, checks)
 

@@ -35,7 +35,7 @@ import termios
 import logging
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 
 
 log = logging.getLogger("mcp-lldb")
@@ -490,12 +490,39 @@ class SessionManager:
 # Tool Handlers
 # ============================================================
 
+# What a handler answers with, and the ONE thing that distinguishes a failure.
+#
+# A plain `str` is a SUCCESS payload: the model-facing text, capped under
+# CAP_POLICY and returned as tool content. A `{"error": text}` dict is a
+# FAILURE, and the text inside it is the same text that used to be returned
+# bare — _dispatch_tool unwraps it through _tool_error, so the caller reads
+# what it always read with `isError: True` beside it. Without the dict there is
+# no signal at all: a returned string lands in a success envelope, so a
+# debugger refusing every command for want of a session looked to the caller
+# exactly like a debugger answering them.
+#
+# Two things this shape is deliberately NOT:
+#
+#   Not a normalised error object (no code, no category, no added prefix). The
+#   wording of these ~60 messages is what callers have been reading since this
+#   server shipped, and rewording them here would hide a behaviour change
+#   inside a flag change.
+#
+#   Not applied to a handler that REPORTS A STATE. "No active LLDB sessions."
+#   is the answer to the question lldb_list_sessions was asked; flagging it
+#   would be this same defect with the sign reversed. The line is action vs
+#   question: an action that did not happen is a failure, a question answered
+#   with "none" is a success. lldb_mcp_status and lldb_list_sessions keep a
+#   bare `-> str`, which is the annotation saying they cannot fail.
+ToolResult = Union[str, Dict[str, str]]
+
+
 async def handle_lldb_mcp_status(mgr: SessionManager, args: dict) -> str:
     count = len(mgr.sessions)
     return f"LLDB MCP server is running. Active sessions: {count}"
 
 
-async def handle_lldb_start(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_start(mgr: SessionManager, args: dict) -> ToolResult:
     lldb_path = args.get("lldb_path", "lldb")
     working_dir = args.get("working_dir")
 
@@ -515,13 +542,13 @@ async def handle_lldb_start(mgr: SessionManager, args: dict) -> str:
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
             if proc.returncode != 0:
-                return f"Failed to start LLDB: invalid path '{lldb_path}'. {stderr.decode().strip()}"
+                return {"error": f"Failed to start LLDB: invalid path '{lldb_path}'. {stderr.decode().strip()}"}
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return f"Failed to start LLDB: timeout verifying '{lldb_path}'"
+            return {"error": f"Failed to start LLDB: timeout verifying '{lldb_path}'"}
     except Exception as e:
-        return f"Failed to start LLDB: {e}"
+        return {"error": f"Failed to start LLDB: {e}"}
 
     session_id = str(uuid.uuid4())
     working_dir = working_dir or os.getcwd()
@@ -531,16 +558,16 @@ async def handle_lldb_start(mgr: SessionManager, args: dict) -> str:
         output = await asyncio.wait_for(session.start(), timeout=15.0)
     except asyncio.TimeoutError:
         await session.cleanup()
-        return "Failed to start LLDB: timeout during initialization"
+        return {"error": "Failed to start LLDB: timeout during initialization"}
     except Exception as e:
         await session.cleanup()
-        return f"Failed to start LLDB: {e}"
+        return {"error": f"Failed to start LLDB: {e}"}
 
     mgr.sessions[session_id] = session
     return f"LLDB session started. ID: {session_id}\n\nOutput:\n{output}"
 
 
-async def handle_lldb_load(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_load(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     program = args.get("program", "")
     arguments: List[str] = args.get("arguments", [])
@@ -562,12 +589,12 @@ async def handle_lldb_load(mgr: SessionManager, args: dict) -> str:
         return f"Program loaded: {program}\n\nOutput:\n{output}"
 
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to load program: {e}"
+        return {"error": f"Failed to load program: {e}"}
 
 
-async def handle_lldb_command(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_command(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     command = args.get("command", "")
 
@@ -576,12 +603,12 @@ async def handle_lldb_command(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command(command)
         return f"Command: {command}\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to execute command: {e}"
+        return {"error": f"Failed to execute command: {e}"}
 
 
-async def handle_lldb_terminate(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_terminate(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
 
     try:
@@ -590,9 +617,9 @@ async def handle_lldb_terminate(mgr: SessionManager, args: dict) -> str:
         mgr.sessions.pop(session_id, None)
         return f"LLDB session terminated: {session_id}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to terminate session: {e}"
+        return {"error": f"Failed to terminate session: {e}"}
 
 
 async def handle_lldb_list_sessions(mgr: SessionManager, args: dict) -> str:
@@ -605,7 +632,7 @@ async def handle_lldb_list_sessions(mgr: SessionManager, args: dict) -> str:
     return "\n".join(lines)
 
 
-async def handle_lldb_attach(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_attach(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     pid = args.get("pid")
 
@@ -615,12 +642,12 @@ async def handle_lldb_attach(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command(f"process attach -p {pid}", timeout=60.0)
         return f"Attached to PID {pid}\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to attach: {e}"
+        return {"error": f"Failed to attach: {e}"}
 
 
-async def handle_lldb_load_core(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_load_core(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     program = args.get("program", "")
     core_path = args.get("core_path", "")
@@ -633,12 +660,12 @@ async def handle_lldb_load_core(mgr: SessionManager, args: dict) -> str:
         bt_out = await session.execute_command("bt")
         return f"Core loaded: {core_path}\n\n{file_out}\n{core_out}\n\nBacktrace:\n{bt_out}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to load core: {e}"
+        return {"error": f"Failed to load core: {e}"}
 
 
-async def handle_lldb_set_breakpoint(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_set_breakpoint(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     location = args.get("location", "")
     condition = args.get("condition")
@@ -662,12 +689,12 @@ async def handle_lldb_set_breakpoint(mgr: SessionManager, args: dict) -> str:
         return f"{label}\n\nOutput:\n{output}"
 
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to set breakpoint: {e}"
+        return {"error": f"Failed to set breakpoint: {e}"}
 
 
-async def handle_lldb_continue(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_continue(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
 
     try:
@@ -675,12 +702,12 @@ async def handle_lldb_continue(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command("continue", timeout=60.0)
         return f"Continued execution\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to continue: {e}"
+        return {"error": f"Failed to continue: {e}"}
 
 
-async def handle_lldb_step(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_step(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     instructions = _bool_param(args.get("instructions"), default=False)
 
@@ -691,12 +718,12 @@ async def handle_lldb_step(mgr: SessionManager, args: dict) -> str:
         label = "instruction" if instructions else "line"
         return f"Stepped {label}\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to step: {e}"
+        return {"error": f"Failed to step: {e}"}
 
 
-async def handle_lldb_next(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_next(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     instructions = _bool_param(args.get("instructions"), default=False)
 
@@ -707,12 +734,12 @@ async def handle_lldb_next(mgr: SessionManager, args: dict) -> str:
         label = "instruction" if instructions else "function call"
         return f"Stepped over {label}\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to step over: {e}"
+        return {"error": f"Failed to step over: {e}"}
 
 
-async def handle_lldb_finish(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_finish(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
 
     try:
@@ -720,12 +747,12 @@ async def handle_lldb_finish(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command("finish")
         return f"Finished current function\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to finish: {e}"
+        return {"error": f"Failed to finish: {e}"}
 
 
-async def handle_lldb_backtrace(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_backtrace(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     full = _bool_param(args.get("full"), default=False)
     limit = args.get("limit")
@@ -741,12 +768,12 @@ async def handle_lldb_backtrace(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command(command)
         return f"Backtrace:\n\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to get backtrace: {e}"
+        return {"error": f"Failed to get backtrace: {e}"}
 
 
-async def handle_lldb_print(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_print(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     expression = args.get("expression", "")
 
@@ -755,12 +782,12 @@ async def handle_lldb_print(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command(f"p {expression}")
         return f"Print {expression}:\n\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to print: {e}"
+        return {"error": f"Failed to print: {e}"}
 
 
-async def handle_lldb_examine(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_examine(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     expression = args.get("expression", "")
     fmt = args.get("format", "x")
@@ -786,12 +813,12 @@ async def handle_lldb_examine(mgr: SessionManager, args: dict) -> str:
         )
         return f"Examine {expression} (format={fmt}, count={count}):\n\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to examine memory: {e}"
+        return {"error": f"Failed to examine memory: {e}"}
 
 
-async def handle_lldb_info_registers(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_info_registers(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     register = args.get("register")
 
@@ -803,12 +830,12 @@ async def handle_lldb_info_registers(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command(command)
         return f"Registers:\n\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to read registers: {e}"
+        return {"error": f"Failed to read registers: {e}"}
 
 
-async def handle_lldb_watchpoint(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_watchpoint(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     expression = args.get("expression", "")
     watch_type = args.get("watch_type", "write")
@@ -824,12 +851,12 @@ async def handle_lldb_watchpoint(mgr: SessionManager, args: dict) -> str:
         )
         return f"Watchpoint set on {expression} (type={watch_type})\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to set watchpoint: {e}"
+        return {"error": f"Failed to set watchpoint: {e}"}
 
 
-async def handle_lldb_frame_info(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_frame_info(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     frame_index = args.get("frame_index", 0)
 
@@ -844,12 +871,12 @@ async def handle_lldb_frame_info(mgr: SessionManager, args: dict) -> str:
             f"\n\nSource:\n{source_out}"
         )
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to get frame info: {e}"
+        return {"error": f"Failed to get frame info: {e}"}
 
 
-async def handle_lldb_run(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_run(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
 
     try:
@@ -857,12 +884,12 @@ async def handle_lldb_run(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command("run", timeout=60.0)
         return f"Running program\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to run: {e}"
+        return {"error": f"Failed to run: {e}"}
 
 
-async def handle_lldb_kill(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_kill(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
 
     try:
@@ -870,12 +897,12 @@ async def handle_lldb_kill(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command("process kill")
         return f"Killed process\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to kill process: {e}"
+        return {"error": f"Failed to kill process: {e}"}
 
 
-async def handle_lldb_thread_list(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_thread_list(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
 
     try:
@@ -883,12 +910,12 @@ async def handle_lldb_thread_list(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command("thread list")
         return f"Threads:\n\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to list threads: {e}"
+        return {"error": f"Failed to list threads: {e}"}
 
 
-async def handle_lldb_thread_select(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_thread_select(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     # Note: thread_index is 1-based LLDB thread index, not OS PID
     thread_index = args.get("thread_index")
@@ -899,12 +926,12 @@ async def handle_lldb_thread_select(mgr: SessionManager, args: dict) -> str:
         bt_out = await session.execute_command("bt")
         return f"Selected thread {thread_index}\n\nOutput:\n{out}\n\nBacktrace:\n{bt_out}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to select thread: {e}"
+        return {"error": f"Failed to select thread: {e}"}
 
 
-async def handle_lldb_breakpoint_list(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_breakpoint_list(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
 
     try:
@@ -912,12 +939,12 @@ async def handle_lldb_breakpoint_list(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command("breakpoint list")
         return f"Breakpoints:\n\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to list breakpoints: {e}"
+        return {"error": f"Failed to list breakpoints: {e}"}
 
 
-async def handle_lldb_breakpoint_delete(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_breakpoint_delete(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     breakpoint_id = args.get("breakpoint_id")
 
@@ -926,12 +953,12 @@ async def handle_lldb_breakpoint_delete(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command(f"breakpoint delete {breakpoint_id}")
         return f"Deleted breakpoint {breakpoint_id}\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to delete breakpoint: {e}"
+        return {"error": f"Failed to delete breakpoint: {e}"}
 
 
-async def handle_lldb_expression(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_expression(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     expression = args.get("expression", "")
 
@@ -940,12 +967,12 @@ async def handle_lldb_expression(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command(f"expression -- {expression}")
         return f"Expression: {expression}\n\nOutput:\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to evaluate expression: {e}"
+        return {"error": f"Failed to evaluate expression: {e}"}
 
 
-async def handle_lldb_process_info(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_process_info(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
 
     try:
@@ -954,12 +981,12 @@ async def handle_lldb_process_info(mgr: SessionManager, args: dict) -> str:
         info_out = await session.execute_command("process info")
         return f"Process status:\n\n{status_out}\n\nProcess info:\n{info_out}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to get process info: {e}"
+        return {"error": f"Failed to get process info: {e}"}
 
 
-async def handle_lldb_disassemble(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_disassemble(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     location = args.get("location")
     count = args.get("count", 10)
@@ -973,12 +1000,12 @@ async def handle_lldb_disassemble(mgr: SessionManager, args: dict) -> str:
         output = await session.execute_command(command)
         return f"Disassembly:\n\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to disassemble: {e}"
+        return {"error": f"Failed to disassemble: {e}"}
 
 
-async def handle_lldb_help(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_help(mgr: SessionManager, args: dict) -> ToolResult:
     session_id = args.get("session_id", "")
     command = args.get("command")
 
@@ -991,12 +1018,12 @@ async def handle_lldb_help(mgr: SessionManager, args: dict) -> str:
             output = await session.execute_command("help")
             return f"LLDB help:\n\n{output}"
     except ValueError as e:
-        return str(e)
+        return {"error": str(e)}
     except Exception as e:
-        return f"Failed to get help: {e}"
+        return {"error": f"Failed to get help: {e}"}
 
 
-async def _run_locked(mgr: SessionManager, handler, args: dict) -> str:
+async def _run_locked(mgr: SessionManager, handler, args: dict) -> ToolResult:
     """Await one handler, serialized against the session it names.
 
     Requests are dispatched CONCURRENTLY now (McpServer.run), which is what keeps
@@ -1030,14 +1057,14 @@ async def _run_locked(mgr: SessionManager, handler, args: dict) -> str:
         return await handler(mgr, args)
 
 
-async def handle_lldb_call(mgr: SessionManager, args: dict) -> str:
+async def handle_lldb_call(mgr: SessionManager, args: dict) -> ToolResult:
     """Dispatcher: call any LLDB tool by name. Used by the AI via the lldb-mcp skill."""
     function = args.get("function", "")
     raw_params = args.get("params") or {}
     try:
         params = _ensure_dict(raw_params)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return {"error": f"Error: {exc}"}
 
     if not function:
         count = len(mgr.sessions)
@@ -1045,12 +1072,12 @@ async def handle_lldb_call(mgr: SessionManager, args: dict) -> str:
 
     # Prevent recursive dispatch
     if function == "lldb_call":
-        return "Cannot dispatch lldb_call recursively"
+        return {"error": "Cannot dispatch lldb_call recursively"}
 
     handler = ALL_HANDLERS.get(function)
     if handler is None:
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
-        return f"Unknown function: '{function}'. Available: {available}"
+        return {"error": f"Unknown function: '{function}'. Available: {available}"}
 
     # The ceiling is imposed HERE, at the one point every function passes
     # through, so the per-function head/tail decision lives in one auditable
@@ -1209,17 +1236,31 @@ CAP_POLICY = {
 }
 
 
-def _apply_cap(function: str, args: dict, text: str) -> str:
+def _apply_cap(function: str, args: dict, result: ToolResult) -> ToolResult:
     """Impose the per-call ceiling on one function's reply.
 
     An unlisted function falls back to (head, not pageable): a handler added
     later is capped from its first call rather than silently unbounded.
+
+    A FAILURE (see ToolResult) passes through untouched, and this is the one
+    place that has to know it. The ceiling is a volume knob for model-facing
+    payload — a `bt full`, a disassembly, a register bank — while a failure is a
+    one-line verdict that leaves through `isError` rather than as content:
+    capping it could only ever truncate the reason, and paging it would append
+    an `offset=` hint to a reply there is nothing to resume.
+
+    The test is wider than _dispatch_tool's `"error" in result` on purpose,
+    because the question here is a different one — not "did this fail" but "is
+    this text". A dict of any shape is not text, and _cap_text would measure its
+    KEY COUNT against the ceiling and hand it back unchanged anyway.
     """
+    if isinstance(result, dict):
+        return result
     bias, pageable = CAP_POLICY.get(function, (BIAS_HEAD, False))
     cap = _max_answer_chars(args)
     if pageable:
-        text = _page_lines(text, _offset(args), cap)
-    return _cap_text(text, cap, bias)
+        result = _page_lines(result, _offset(args), cap)
+    return _cap_text(result, cap, bias)
 
 
 # ============================================================
@@ -1316,6 +1357,16 @@ class McpServer:
             else:
                 result = await _run_locked(self.manager, handler, args)
                 result = _apply_cap(name, args, result)
+            # The handler's verdict, turned into the MCP flag. A failing handler
+            # RETURNS (it does not raise), so before this existed its message
+            # went out through the success envelope below and the only channel
+            # that says "this failed" — isError — stayed unset on all 60 of this
+            # server's failure paths. The `except` clause below already flagged
+            # the raised route; this is the returned one, and it reuses the same
+            # _tool_error so no second envelope shape gets invented. The text is
+            # the handler's own, unchanged: the flag is the entire difference.
+            if isinstance(result, dict) and "error" in result:
+                return self._tool_error(msg_id, result["error"])
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
             log.debug(f"Handler '{name}' error: {e}")

@@ -530,6 +530,26 @@ async def _resolve_session(mgr: GdcManager, args: dict) -> CdpSession:
 # Tool Handlers
 # ============================================================
 
+# The handler return contract, in one place because it is easy to get wrong:
+#
+#   success -> a plain str, rendered as-is.
+#   failure -> {"error": "<the very same text you would have returned>"},
+#              which _dispatch_tool unwraps into _tool_error, i.e. the identical
+#              text plus isError: True.
+#
+# A failure returned as a bare string is not a smaller bug than a wrong message
+# — it is invisible. It reaches the caller inside a SUCCESS envelope, so
+# "Error: selector required" and "Clicked: #submit" arrive equally unflagged and
+# only prose separates them. Returning the dict costs six characters and is the
+# only thing that makes the failure machine-readable.
+#
+# The bar for "failure" is the postcondition, not the wording: did the call do
+# what it was asked? A handler REPORTING a state it was asked to report has
+# succeeded even when the state is empty or unhappy — "No cookies found.",
+# "No targets found.", and gdc_status's own "(unreachable: …)" branch are all
+# true answers to the question asked, and flagging them would be this same
+# defect with the sign flipped.
+
 # --- Meta ---
 
 async def handle_gdc_status(mgr: GdcManager, args: dict) -> str:
@@ -574,17 +594,17 @@ async def handle_list_pages(mgr: GdcManager, args: dict) -> str:
     return "\n".join(lines)
 
 
-async def handle_select_page(mgr: GdcManager, args: dict) -> str:
+async def handle_select_page(mgr: GdcManager, args: dict) -> Any:
     target_id = args.get("target_id", "")
     if not target_id:
-        return "Error: target_id required"
+        return {"error": "Error: target_id required"}
 
     await mgr.get_session(target_id)
     mgr.selected_id = target_id
     return f"Selected page: {target_id}"
 
 
-async def handle_new_page(mgr: GdcManager, args: dict) -> str:
+async def handle_new_page(mgr: GdcManager, args: dict) -> Any:
     url = args.get("url", "about:blank")
 
     # FIX-3: prefer CDP Target.createTarget (avoids HTTP query-string URL encoding issues)
@@ -609,13 +629,13 @@ async def handle_new_page(mgr: GdcManager, args: dict) -> str:
         mgr.selected_id = target_id
         return f"New page created: {target_id}\nURL: {url}"
     except Exception as e:
-        return f"Failed to create page: {e}"
+        return {"error": f"Failed to create page: {e}"}
 
 
-async def handle_close_page(mgr: GdcManager, args: dict) -> str:
+async def handle_close_page(mgr: GdcManager, args: dict) -> Any:
     target_id = args.get("target_id") or mgr.selected_id
     if not target_id:
-        return "Error: no target selected and no target_id provided"
+        return {"error": "Error: no target selected and no target_id provided"}
 
     session = mgr.sessions.pop(target_id, None)
     if session:
@@ -632,7 +652,7 @@ async def handle_close_page(mgr: GdcManager, args: dict) -> str:
         return f"Close request sent (page may still have closed): {e}"
 
 
-async def handle_navigate(mgr: GdcManager, args: dict) -> str:
+async def handle_navigate(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     url = args.get("url")
     action = args.get("action")
@@ -644,7 +664,7 @@ async def handle_navigate(mgr: GdcManager, args: dict) -> str:
         frame_id = result.get("frameId", "")
         error_text = result.get("errorText", "")
         if error_text:
-            return f"Navigation error: {error_text}"
+            return {"error": f"Navigation error: {error_text}"}
         # Wait for Page.loadEventFired — ensures DOM and JS are ready
         try:
             await asyncio.wait_for(session._load_event.wait(), timeout=30.0)
@@ -683,23 +703,23 @@ async def handle_navigate(mgr: GdcManager, args: dict) -> str:
             pass
         return "Navigated forward"
     else:
-        return "Error: provide 'url' or 'action' (back|forward|reload)"
+        return {"error": "Error: provide 'url' or 'action' (back|forward|reload)"}
 
 
-async def handle_wait_for(mgr: GdcManager, args: dict) -> str:
+async def handle_wait_for(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     text = args.get("text", "")
     timeout = float(args.get("timeout", 10.0))
 
     if not text:
-        return "Error: text required"
+        return {"error": "Error: text required"}
 
     loop = asyncio.get_running_loop()
     start = loop.time()
     while True:
         elapsed = loop.time() - start
         if elapsed > timeout:
-            return f"Timeout after {timeout:.1f}s: text not found: {text!r}"
+            return {"error": f"Timeout after {timeout:.1f}s: text not found: {text!r}"}
 
         try:
             # Short per-attempt timeout: execution context may be destroyed during navigation
@@ -720,11 +740,11 @@ async def handle_wait_for(mgr: GdcManager, args: dict) -> str:
 
 # --- Input ---
 
-async def handle_click(mgr: GdcManager, args: dict) -> str:
+async def handle_click(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
     if not selector:
-        return "Error: selector required"
+        return {"error": "Error: selector required"}
 
     expression = """
     (function(sel) {
@@ -759,23 +779,23 @@ async def handle_click_at(mgr: GdcManager, args: dict) -> str:
     return f"Clicked at ({x}, {y})"
 
 
-async def handle_type_text(mgr: GdcManager, args: dict) -> str:
+async def handle_type_text(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     text = args.get("text", "")
     if not text:
-        return "Error: text required"
+        return {"error": "Error: text required"}
 
     await session.send("Input.insertText", {"text": text})
     return f"Typed: {text!r}"
 
 
-async def handle_fill(mgr: GdcManager, args: dict) -> str:
+async def handle_fill(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
     value = args.get("value", "")
 
     if not selector:
-        return "Error: selector required"
+        return {"error": "Error: selector required"}
 
     expression = """
     (function(sel, val) {
@@ -796,11 +816,11 @@ async def handle_fill(mgr: GdcManager, args: dict) -> str:
     return str(result.get("result", {}).get("value", ""))
 
 
-async def handle_press_key(mgr: GdcManager, args: dict) -> str:
+async def handle_press_key(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     key = args.get("key", "")
     if not key:
-        return "Error: key required"
+        return {"error": "Error: key required"}
 
     for event_type in ["keyDown", "keyUp"]:
         await session.send("Input.dispatchKeyEvent", {
@@ -875,7 +895,7 @@ def _default_screenshot_dir() -> str:
         d = parent
 
 
-async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
+async def handle_take_screenshot(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     fmt = args.get("format", "png")
     quality = args.get("quality", 80)
@@ -890,7 +910,7 @@ async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
     result = await session.send("Page.captureScreenshot", params, timeout=30.0)
     data = result.get("data", "")
     if not data:
-        return "Screenshot failed: no data returned"
+        return {"error": "Screenshot failed: no data returned"}
 
     save_path = args.get("savePath") or args.get("save_path")
     raw_path = args.get("path")
@@ -914,11 +934,11 @@ async def handle_take_screenshot(mgr: GdcManager, args: dict) -> str:
     return f"Screenshot saved: {filename}"
 
 
-async def handle_evaluate(mgr: GdcManager, args: dict) -> str:
+async def handle_evaluate(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     expression = args.get("expression", "")
     if not expression:
-        return "Error: expression required"
+        return {"error": "Error: expression required"}
 
     # FIX-5: 10s timeout (30s caused hangs on context destruction)
     result = await session.send("Runtime.evaluate", {
@@ -967,13 +987,13 @@ async def handle_list_console_messages(mgr: GdcManager, args: dict) -> str:
     return "\n".join(lines)
 
 
-async def handle_take_snapshot(mgr: GdcManager, args: dict) -> str:
+async def handle_take_snapshot(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
 
     try:
         result = await session.send("Accessibility.getFullAXTree", {}, timeout=30.0)
     except Exception as e:
-        return f"Failed to get accessibility tree: {e}"
+        return {"error": f"Failed to get accessibility tree: {e}"}
 
     nodes = result.get("nodes", [])
     if not nodes:
@@ -1037,11 +1057,11 @@ async def handle_list_network_requests(mgr: GdcManager, args: dict) -> str:
     return "\n".join(lines)
 
 
-async def handle_get_network_request(mgr: GdcManager, args: dict) -> str:
+async def handle_get_network_request(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     request_id = args.get("request_id", "")
     if not request_id:
-        return "Error: request_id required"
+        return {"error": "Error: request_id required"}
 
     entries = [e for e in session.network_log if e.get("requestId") == request_id]
 
@@ -1069,7 +1089,7 @@ async def handle_get_network_request(mgr: GdcManager, args: dict) -> str:
 
 # --- Emulation ---
 
-async def handle_emulate(mgr: GdcManager, args: dict) -> str:
+async def handle_emulate(mgr: GdcManager, args: dict) -> Any:
     session = await _resolve_session(mgr, args)
     viewport = args.get("viewport")
     user_agent = args.get("user_agent")
@@ -1113,14 +1133,14 @@ async def handle_emulate(mgr: GdcManager, args: dict) -> str:
         results.append(f"Network: {network}")
 
     if not results:
-        return "Error: provide at least one of: viewport, user_agent, network"
+        return {"error": "Error: provide at least one of: viewport, user_agent, network"}
 
     return "Emulation applied:\n" + "\n".join(f"  {r}" for r in results)
 
 
 # --- Extensions ---
 
-async def handle_hover(mgr: GdcManager, args: dict) -> str:
+async def handle_hover(mgr: GdcManager, args: dict) -> Any:
     """EXT-1: Move mouse over element or coordinates."""
     session = await _resolve_session(mgr, args)
     selector = args.get("selector")
@@ -1142,10 +1162,10 @@ async def handle_hover(mgr: GdcManager, args: dict) -> str:
         })
         val = result.get("result", {}).get("value")
         if not val:
-            return f"Element not found: {selector}"
+            return {"error": f"Element not found: {selector}"}
         x, y = val["x"], val["y"]
     elif x is None or y is None:
-        return "Error: provide 'selector' or both 'x' and 'y'"
+        return {"error": "Error: provide 'selector' or both 'x' and 'y'"}
 
     await session.send("Input.dispatchMouseEvent", {
         "type": "mouseMoved",
@@ -1174,12 +1194,12 @@ async def handle_get_cookies(mgr: GdcManager, args: dict) -> str:
     return "\n".join(lines)
 
 
-async def handle_set_cookie(mgr: GdcManager, args: dict) -> str:
+async def handle_set_cookie(mgr: GdcManager, args: dict) -> Any:
     """EXT-2: Set a cookie."""
     session = await _resolve_session(mgr, args)
     name = args.get("name")
     if not name:
-        return "Error: name required"
+        return {"error": "Error: name required"}
     params: dict = {"name": name, "value": args.get("value", "")}
     for key in ("url", "domain", "path", "httpOnly", "secure", "expires"):
         if key in args:
@@ -1188,7 +1208,7 @@ async def handle_set_cookie(mgr: GdcManager, args: dict) -> str:
     return f"Cookie set: {name}"
 
 
-async def handle_wait_for_selector(mgr: GdcManager, args: dict) -> str:
+async def handle_wait_for_selector(mgr: GdcManager, args: dict) -> Any:
     """EXT-3: Poll until a CSS selector appears in the DOM."""
     session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
@@ -1196,7 +1216,7 @@ async def handle_wait_for_selector(mgr: GdcManager, args: dict) -> str:
     visible = _bool_param(args.get("visible"), default=False)
 
     if not selector:
-        return "Error: selector required"
+        return {"error": "Error: selector required"}
 
     sel_json = json.dumps(selector)
     if visible:
@@ -1214,7 +1234,7 @@ async def handle_wait_for_selector(mgr: GdcManager, args: dict) -> str:
     while True:
         elapsed = loop.time() - start
         if elapsed > timeout:
-            return f"Timeout after {timeout:.1f}s: selector not found: {selector!r}"
+            return {"error": f"Timeout after {timeout:.1f}s: selector not found: {selector!r}"}
         try:
             result = await asyncio.wait_for(
                 session.send("Runtime.evaluate", {
@@ -1230,7 +1250,7 @@ async def handle_wait_for_selector(mgr: GdcManager, args: dict) -> str:
         await asyncio.sleep(0.25)
 
 
-async def handle_get_html(mgr: GdcManager, args: dict) -> str:
+async def handle_get_html(mgr: GdcManager, args: dict) -> Any:
     """EXT-4: Get outerHTML of a selector or the full document."""
     session = await _resolve_session(mgr, args)
     selector = args.get("selector")
@@ -1253,13 +1273,14 @@ async def handle_get_html(mgr: GdcManager, args: dict) -> str:
     })
     val = result.get("result", {}).get("value")
     if val is None:
-        return f"Element not found: {selector}" if selector else "Error: could not get HTML"
+        return {"error": f"Element not found: {selector}" if selector
+                else "Error: could not get HTML"}
     if len(val) > _MAX_HTML:
         return val[:_MAX_HTML] + f"\n... (truncated, {len(val)} total chars)"
     return val
 
 
-async def handle_select_option(mgr: GdcManager, args: dict) -> str:
+async def handle_select_option(mgr: GdcManager, args: dict) -> Any:
     """EXT-5: Set a <select> dropdown value by value or label text."""
     session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
@@ -1267,9 +1288,9 @@ async def handle_select_option(mgr: GdcManager, args: dict) -> str:
     label = args.get("label")
 
     if not selector:
-        return "Error: selector required"
+        return {"error": "Error: selector required"}
     if value is None and label is None:
-        return "Error: provide 'value' or 'label'"
+        return {"error": "Error: provide 'value' or 'label'"}
 
     if label is not None:
         expression = """
@@ -1301,14 +1322,14 @@ async def handle_select_option(mgr: GdcManager, args: dict) -> str:
     return str(result.get("result", {}).get("value", ""))
 
 
-async def handle_inject_script(mgr: GdcManager, args: dict) -> str:
+async def handle_inject_script(mgr: GdcManager, args: dict) -> Any:
     """EXT-6: Inject persistent JS that runs on every new document."""
     session = await _resolve_session(mgr, args)
     expression = args.get("expression", "")
     world = args.get("world", "main")
 
     if not expression:
-        return "Error: expression required"
+        return {"error": "Error: expression required"}
 
     params: dict = {"source": expression}
     if world != "main":
@@ -1319,25 +1340,25 @@ async def handle_inject_script(mgr: GdcManager, args: dict) -> str:
     return f"Script injected: {identifier}"
 
 
-async def handle_remove_injected_script(mgr: GdcManager, args: dict) -> str:
+async def handle_remove_injected_script(mgr: GdcManager, args: dict) -> Any:
     """EXT-6: Remove a previously injected persistent script."""
     session = await _resolve_session(mgr, args)
     identifier = args.get("identifier", "")
 
     if not identifier:
-        return "Error: identifier required"
+        return {"error": "Error: identifier required"}
 
     await session.send("Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier})
     return f"Injected script removed: {identifier}"
 
 
-async def handle_clear_field(mgr: GdcManager, args: dict) -> str:
+async def handle_clear_field(mgr: GdcManager, args: dict) -> Any:
     """EXT-7: Clear an input field (works with React/Vue controlled inputs)."""
     session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
 
     if not selector:
-        return "Error: selector required"
+        return {"error": "Error: selector required"}
 
     # Focus and select all content
     focus_expr = """
@@ -1353,7 +1374,7 @@ async def handle_clear_field(mgr: GdcManager, args: dict) -> str:
     result = await session.send("Runtime.evaluate", {"expression": focus_expr, "returnByValue": True})
     val = result.get("result", {}).get("value", "")
     if str(val).startswith("Element not found"):
-        return str(val)
+        return {"error": str(val)}
 
     # Ctrl+A to select all, then Delete
     for event_type in ("keyDown", "keyUp"):
@@ -1394,13 +1415,13 @@ async def handle_clear_field(mgr: GdcManager, args: dict) -> str:
     return f"Cleared: {selector}"
 
 
-async def handle_find_element(mgr: GdcManager, args: dict) -> str:
+async def handle_find_element(mgr: GdcManager, args: dict) -> Any:
     """EXT-8: Get position, size, text and visibility of an element."""
     session = await _resolve_session(mgr, args)
     selector = args.get("selector", "")
 
     if not selector:
-        return "Error: selector required"
+        return {"error": "Error: selector required"}
 
     expression = """
     (function(sel) {
@@ -1427,7 +1448,7 @@ async def handle_find_element(mgr: GdcManager, args: dict) -> str:
     })
     val = result.get("result", {}).get("value")
     if val is None:
-        return f"Element not found: {selector}"
+        return {"error": f"Element not found: {selector}"}
 
     text = val.get("text", "")
     return (
@@ -1442,26 +1463,33 @@ async def handle_find_element(mgr: GdcManager, args: dict) -> str:
 
 # --- Dispatcher ---
 
-async def handle_gdc_call(mgr: GdcManager, args: dict) -> str:
+async def handle_gdc_call(mgr: GdcManager, args: dict) -> Any:
     """Dispatcher: call any GDC tool by name via the gdc-mcp skill."""
     function = args.get("function") or args.get("f") or ""
     raw_params = args.get("params") or args.get("p") or {}
     try:
         params = _ensure_dict(raw_params)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return {"error": f"Error: {exc}"}
 
+    # Answering a missing function name with the status report is deliberate,
+    # and it is a SUCCESS: nothing was asked for and refused. It returns a
+    # plain string precisely so it stays unflagged.
     if not function:
         return await handle_gdc_status(mgr, {})
 
     if function == "gdc_call":
-        return "Cannot dispatch gdc_call recursively"
+        return {"error": "Cannot dispatch gdc_call recursively"}
 
     handler = ALL_HANDLERS.get(function)
     if handler is None:
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
-        return f"Unknown function: '{function}'. Available: {available}"
+        return {"error": f"Unknown function: '{function}'. Available: {available}"}
 
+    # Returned as-is, failure shape included. tools/list advertises only
+    # gdc_call, so in practice EVERY call arrives here — if this pass-through
+    # unwrapped or stringified an inner {"error": ...}, the flag would survive
+    # on the direct-tool path and be lost on the only path anyone uses.
     return await handler(mgr, params)
 
 
@@ -1703,6 +1731,17 @@ class McpServer:
             # diagnosis, and 60s off. It now falls to the branch below and
             # reports what actually timed out.
             result = await handler(self.manager, args)
+            # A handler that FAILED says so by shape, not by prose. Every
+            # failure return in this file is `{"error": <text>}`; a plain
+            # string is a success. Before this branch existed the two were
+            # indistinguishable here — "Error: selector required" went out in a
+            # success envelope, so the caller had to parse English to learn the
+            # call had failed, and a model that did not parse it carried on as
+            # if the click had landed. The TEXT is unchanged by the unwrapping:
+            # it is handed to gdc's own _tool_error, so nothing but the isError
+            # flag differs from what this line used to emit.
+            if isinstance(result, dict) and "error" in result:
+                return self._tool_error(msg_id, result["error"])
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
             log.debug(f"Handler '{name}' error: {e}")

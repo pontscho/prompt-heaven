@@ -797,7 +797,7 @@ def analyse_caps(source, path, registered=True):
         # a notice a handler emits.  The length bound keeps long advertising
         # prose out (a tool description mentioning truncation); the whitespace
         # requirement keeps IDENTIFIERS out -- without it
-        # `Scripts/mcp-jenkins.py:1312`'s `casesTruncated`, a field name in
+        # `Scripts/mcp-jenkins.py:1908`'s `casesTruncated`, a field name in
         # Jenkins' own JSON, was counted as a truncation notice.
         if ("truncat" in text.lower() and len(text) <= 200
                 and any(ch.isspace() for ch in text)):
@@ -1566,7 +1566,7 @@ def group_boilerplate(suite, census_rows, feet_by_file):
                     "heuristics  : (1) the truncation-marker census in group C "
                     "keys on 'truncat' in a short literal CONTAINING "
                     "WHITESPACE -- the whitespace test is what stops "
-                    "identifiers like mcp-jenkins.py:1312's `casesTruncated`, "
+                    "identifiers like mcp-jenkins.py:1908's `casesTruncated`, "
                     "a field name in Jenkins' own JSON, from counting as a "
                     "notice; (2) both bounds above are cut-offs, not proofs"])
 

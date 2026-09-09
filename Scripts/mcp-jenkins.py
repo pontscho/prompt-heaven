@@ -757,20 +757,70 @@ def _cap_text(text: str, max_chars: int, bias: str = "head") -> str:
 
 def _ok(payload: dict, render: Optional[Callable[..., str]] = None,
         bias: str = "head") -> dict:
-    """A successful handler result. `render` may be omitted for payloads that
-    carry an `error` key — those are rendered by `_render_error` regardless."""
+    """A handler result WITH a view of its own.
+
+    Not "a success": which of the two constructors built a result says nothing
+    about whether it failed. That is read off the payload by `_is_error`, so a
+    payload carrying a top-level `error` key is a failure however it was built —
+    and `render` may then be omitted, because `_render` hands such a payload to
+    `_render_error` regardless.
+    """
     return {"__payload__": payload, "__render__": render, "__bias__": bias}
 
 
 def _err(message: str, **extra) -> dict:
+    """A failure with no view of its own — `error` first, `_render_error` after.
+
+    Carries no error sentinel: the `error` key it always sets IS the sentinel,
+    and one that `_is_error` reads on payloads this function never touched.
+    """
     payload = {"error": message}
     payload.update(extra)
-    return {"__payload__": payload, "__is_error__": True}
+    return {"__payload__": payload}
 
 
 def _payload(result: dict) -> dict:
     """The data a handler produced — for the caller that is another handler."""
     return result.get("__payload__") or {}
+
+
+def _is_error(payload: dict) -> bool:
+    """Whether a payload is a FAILURE: does it carry a top-level `error` key?
+
+    ONE fact, read in two places — the view (`_render`, which sends such a
+    payload to `_render_error`) and the protocol flag (`isError` in the
+    `tools/call` reply). It used to be two: rendering keyed on this key while
+    the flag keyed on a separate `__is_error__` sentinel that only `_err` set.
+    Twenty-five handler sites return `_ok({"error": ...})` — "Job not found",
+    "Build not found", "Artifact not found" — so every one of them rendered as
+    an error and reported `isError: False`, i.e. shipped a failure as a success.
+    Deriving both from this key is what makes that shape impossible; converting
+    those 25 sites to `_err` would only have made it *currently* absent.
+
+    TOP-LEVEL ONLY, deliberately. Two payloads carry a nested `error` that is
+    DATA, not a failure: a per-stage `error` copied out of Jenkins' `wfapi` JSON
+    (inside `stages`, in the pipeline overview) and `_probe_connection`'s
+    `{"reachable": False, "error": ...}` (under `connection` in the status
+    reply). Both are one level down, and neither answer is a failed call —
+    a recursive test would report them as such.
+
+    Two routine negatives DO now report `isError: True` when asked for
+    directly: "Not found" from `wfapi/describe` (which every freestyle build
+    hits) and "No test report" (any job without a junit publisher). That is
+    accepted, not overlooked: "not found because you asked wrong" and "not
+    found because there is nothing there" is not a distinction a caller can act
+    on differently, and encoding it per site is exactly the per-site subtlety
+    that drifted into this bug in the first place. Do not "fix" it back by
+    exempting individual messages here.
+
+    Recipes are unaffected, and that is also deliberate: `handle_run_and_wait`
+    and `handle_inspect_build` nest their sub-calls' payloads under keys
+    (`start`, `queue`, `job`, `build`, `pipeline`, `testReport`) via `_payload`
+    and re-wrap with `_ok`, so a composite answer with one missing section
+    still reports `isError: False`. A bundle is not a failed call because one
+    of its five sections came back empty.
+    """
+    return "error" in payload
 
 
 def _render(result: dict, level: int = 2) -> str:
@@ -781,7 +831,7 @@ def _render(result: dict, level: int = 2) -> str:
     of them instead of thirteen near-identical ones.
     """
     payload = _payload(result)
-    if "error" in payload:
+    if _is_error(payload):
         return _render_error(payload, level)
     render = result.get("__render__")
     if render is None:
@@ -2040,12 +2090,13 @@ def _render_section(payload: dict, render: Callable[..., str],
 
 
 # How many CONSECUTIVE failed status polls end the wait. handle_get_build_status
-# reports a non-200 as a success-shaped payload carrying an `error` key, so the
-# poll loop below cannot tell "still building" from "Jenkins is not answering"
-# without counting: 503 during a Jenkins restart, 502 from the proxy, or a 30x to
-# SSO used to keep the loop spinning to the full deadline. Three tolerates a blip
-# — two 5s sleeps at the default poll_interval, so ~10s of grace — and gives up
-# on an outage; a fourth failure tells the caller nothing the third did not.
+# reports a non-200 as a payload carrying an `error` key — data this loop reads,
+# not a raised failure — so the poll loop below cannot tell "still building" from
+# "Jenkins is not answering" without counting: 503 during a Jenkins restart, 502
+# from the proxy, or a 30x to SSO used to keep the loop spinning to the full
+# deadline. Three tolerates a blip — two 5s sleeps at the default
+# poll_interval, so ~10s of grace — and gives up on an outage; a fourth
+# failure tells the caller nothing the third did not.
 MAX_POLL_ERRORS = 3
 
 # Upper bound on timeout_sec, mirroring the clamp handle_get_queue_item already
@@ -2489,10 +2540,15 @@ def _finish(result: dict, params: dict) -> dict:
     handlers so that a recipe's embedded sections are capped as one document,
     not thirteen times over, and so that every function obeys the same ceiling
     without each one having to remember to.
+
+    The payload rides along with the rendered text, unwrapped by the same
+    `_payload` accessor a handler would use, so the transport layer can put the
+    `isError` flag through `_is_error` — the SAME predicate the view above just
+    used — instead of trusting a flag computed here.
     """
     text = _cap_text(_render(result), _max_answer_chars(params),
                      bias=result.get("__bias__") or "head")
-    return {"__raw_text__": text, "__is_error__": bool(result.get("__is_error__"))}
+    return {"__raw_text__": text, "__payload__": _payload(result)}
 
 
 def handle_jenkins_call(arguments: dict) -> dict:
@@ -2748,13 +2804,18 @@ class McpServer:
             result = handle_jenkins_call(arguments)
         except Exception as exc:
             log.exception("Unhandled exception in handle_jenkins_call")
-            result = {"__is_error__": True, "error": f"Internal server error: {type(exc).__name__}: {exc}"}
-        is_error = bool(result.get("__is_error__"))
-        text = result.get("__raw_text__") or result.get("error", "")
+            # `_err`, not a hand-rolled dict: the guard of last resort has to
+            # answer in the one shape `_is_error` reads, or the one failure
+            # nothing else caught is the one that reports success.
+            result = _err(f"Internal server error: {type(exc).__name__}: {exc}")
+        payload = _payload(result)
+        # Unrendered above (there is no dispatcher left to render it), so the
+        # message itself is the text.
+        text = result.get("__raw_text__") or payload.get("error", "")
 
         return self._result(msg_id, {
             "content": [{"type": "text", "text": text}],
-            "isError": is_error,
+            "isError": _is_error(payload),
         })
 
     # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
