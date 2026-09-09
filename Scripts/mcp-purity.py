@@ -565,6 +565,9 @@ def _cap_result(result: dict, params: dict) -> dict:
     return out
 
 
+# Shared with the rest of the fleet. Refresh: python3 Scripts/amalgamate.py
+# -- do not edit inside the region; the generator refuses a hand-edited body.
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window
 def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     """Return a repr'd slice of *text* centred on *pos*.
 
@@ -579,6 +582,7 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     lead = "..." if start > 0 else ""
     tail = "..." if end < len(text) else ""
     return f"{lead}{text[start:end]!r}{tail}"
+# END GENERATED: 4c5e7e3f59cb
 
 
 def _canonical_function(function: str) -> str:

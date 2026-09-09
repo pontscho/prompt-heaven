@@ -181,6 +181,10 @@ def run_checkpoint(opts):
     return run_python_suite("test_checkpoint", opts)
 
 
+def run_generated_region(opts):
+    return run_python_suite("test_generated_region", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -265,6 +269,8 @@ SUITES = [
      "on content, and every refusal exits 2 with one line on stderr, leaving "
      "the file alone",
      140),
+    ("generated_region", run_generated_region,
+     "generated regions match their canonical source", 29),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

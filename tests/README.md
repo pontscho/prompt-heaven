@@ -72,6 +72,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `wiki_recall` | `test_wiki_recall.py` | A–P |
 | `jira_cli` | `test_jira_cli.py` | A–K |
 | `checkpoint` | `test_checkpoint.py` | A–K |
+| `generated_region` | `test_generated_region.py` | A–D |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
@@ -100,6 +101,7 @@ python3 tests/test_mcp_footprint.py
 python3 tests/test_wiki_recall.py
 python3 tests/test_jira_cli.py
 python3 tests/test_checkpoint.py
+python3 tests/test_generated_region.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 
@@ -188,6 +190,9 @@ tests/
   test_checkpoint.py         groups A-K   (drives a WRITER: every path is a
                                            mkdtemp path, never either of the
                                            script's own default targets)
+  test_generated_region.py   groups A-D   (in-memory only, writes nothing --
+                                           re-renders every generated region
+                                           and demands byte identity)
   files/                     tf_-prefixed C and Lua fixtures for purity_lsp
   README.md
 ```
