@@ -14,8 +14,11 @@ need a `sys.path` entry the test harness's `spec_from_file_location` never adds,
 and would move the helpers out of the module attributes where
 `tests/test_mcp_footprint.py` reaches for them.
 
-The test fleet *does* import it, which is the point: a helper inlined into
-fifteen files is unit-tested once, here.
+The test fleet *does* import it -- `tests/test_generated_region.py` group E loads
+it as a module and exercises every block directly, which is the point: a helper
+inlined into fifteen files is unit-tested once, here. Group A separately proves
+the copies MATCH. The two claims are different, and a drift gate on its own
+would only ever prove that fifteen files agree on the same bug.
 
 **Block contract.** A block may reference only builtins, the stdlib names this
 module imports, and its own arguments -- never a name the host server defines.
@@ -23,8 +26,103 @@ module imports, and its own arguments -- never a name the host server defines.
 down: its two lines are identical in three servers, but its body reads a
 per-server `FUNCTION_ALIASES` table, so sharing it means sharing a promise about
 the host's globals. Until that promise has a form and a check, it stays out.
+
+Every block below was lifted VERBATIM from `Scripts/mcp-purity.py`, which is why
+each region's first generated diff is four added marker lines and zero changed
+body lines. Where purity's copy is the fleet's superset (`_rows_note`) that is
+noted on the block; where a server's variant is deliberately different it simply
+never asks for the block (`mcp-webfetch`'s allow-list `_bool_param`, `mcp-tshark`'s
+`(params, key, default)` signature, `mcp-inspect`'s raising `_int_param`).
 """
 
+import json
+
+
+# --- scalar coercion ----------------------------------------------------------
+
+def _bool_param(value, default=False):
+    """Coerce a possibly-stringy value to bool.
+
+    The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+    naive bool("false") would wrongly yield True.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
+    return bool(value)
+
+
+def _int_param(value, default: int) -> int:
+    """Coerce a wire value to int, falling back instead of raising."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# --- row accounting -----------------------------------------------------------
+
+def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
+    """Row accounting for a row-shaped payload; goes on its LAST line.
+
+    Display indices are 1-based inclusive, which makes the 1-based last row equal
+    to the 0-based ``offset`` of the next one — so the hint is literally the value
+    to pass back. ``offset=`` is only ever emitted by handlers that ACCEPT
+    ``offset`` (see HANDLER_ACCEPTED_PARAMS); a resume hint the handler would
+    reject is worse than no hint, so the block-shaped payloads get the character
+    cap and no hint at all.
+
+    ``exact=False`` is for the one payload whose total is a LOWER BOUND:
+    search_for_pattern stops scanning when the ceiling is reached, so the files
+    it never opened may hold more matches. It says so rather than presenting the
+    count it happens to have reached as the total.
+
+    The four canonical forms, shared verbatim with the psql/jenkins twins:
+        [3 rows]                                       whole set delivered
+        [showing rows 1-20 of 347; offset=20 for more]  rows remain
+        [showing rows 5-6 of 6; no rows left]           window ends at the end
+        [no rows at offset 99 of 6]                     offset past the end
+    The first form is not reached from purity's callers, ON PURPOSE and by two
+    separate routes: every payload that can carry this line already states its
+    count in the header above it, so _row_page returns an EMPTY note for a
+    complete set rather than spend a line restating the count, and the one caller
+    that builds the note itself (search_for_pattern) only does so when the scan
+    was curtailed or an offset was given. It cannot be reached with
+    ``exact=False`` either, since a curtailed scan always keeps at least one row
+    (see the budget guard in _row_page and the collection loop). The branch stays
+    because the WORDING is fleet-wide and must not drift if a caller ever does
+    need it.
+    """
+    last = start + shown
+    total_disp = (str(total) if exact
+                  else f"{total}+ (scan stopped at the ceiling; true total unknown)")
+    if shown <= 0:
+        # Spelled out rather than as a 1-based range, which would INVERT
+        # ("rows 100-99 of 10") when the caller offsets past the end.
+        return (f"[no rows at offset {start} of {total_disp}]" if start
+                else f"[{total} rows]")
+    if last < total or not exact:
+        return (f"[showing rows {start + 1}-{last} of {total_disp}; "
+                f"offset={last} for more]")
+    if start > 0:
+        return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
+    return f"[{total} row{'s' if total != 1 else ''}]"
+
+
+# --- LSP framing (Content-Length over stdio) ----------------------------------
+
+def encode_lsp_message(body: dict) -> bytes:
+    """Encode a dict as an LSP message with Content-Length framing."""
+    text = json.dumps(body)
+    encoded = text.encode("utf-8")
+    header = f"Content-Length: {len(encoded)}\r\n\r\n"
+    return header.encode("ascii") + encoded
+
+
+# --- JSON error reporting -----------------------------------------------------
 
 def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     """Return a repr'd slice of *text* centred on *pos*.

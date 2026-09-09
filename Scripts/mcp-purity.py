@@ -224,6 +224,8 @@ FUNCTION_ALIASES = {
 }
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _bool_param
 def _bool_param(value, default=False):
     """Coerce a possibly-stringy value to bool.
 
@@ -237,6 +239,7 @@ def _bool_param(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
+# END GENERATED: df133cd7c299
 
 
 def _skip_ignored_param(params: dict, default: bool) -> bool:
@@ -266,12 +269,15 @@ def _skip_ignored_param(params: dict, default: bool) -> bool:
     return skip
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _int_param
 def _int_param(value, default: int) -> int:
     """Coerce a wire value to int, falling back instead of raising."""
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+# END GENERATED: 6c59c479f140
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +307,8 @@ def _max_answer_chars(params: dict) -> int:
                       DEFAULT_MAX_ANSWER_CHARS)
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _rows_note
 def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
     """Row accounting for a row-shaped payload; goes on its LAST line.
 
@@ -346,6 +354,7 @@ def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
     if start > 0:
         return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
     return f"[{total} row{'s' if total != 1 else ''}]"
+# END GENERATED: b9b4f5461f92
 
 
 def _row_page(rows: List[str], offset: int = 0, head_limit: int = 0,
@@ -565,8 +574,7 @@ def _cap_result(result: dict, params: dict) -> dict:
     return out
 
 
-# Shared with the rest of the fleet. Refresh: python3 Scripts/amalgamate.py
-# -- do not edit inside the region; the generator refuses a hand-edited body.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_json.py :: _json_error_window
 def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     """Return a repr'd slice of *text* centred on *pos*.
@@ -1605,12 +1613,15 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
 
 # --- LSP framing (Content-Length over stdio) ------------------------------
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: encode_lsp_message
 def encode_lsp_message(body: dict) -> bytes:
     """Encode a dict as an LSP message with Content-Length framing."""
     text = json.dumps(body)
     encoded = text.encode("utf-8")
     header = f"Content-Length: {len(encoded)}\r\n\r\n"
     return header.encode("ascii") + encoded
+# END GENERATED: c99fbaf62f6b
 
 
 async def read_lsp_message(reader: "asyncio.StreamReader") -> Optional[dict]:

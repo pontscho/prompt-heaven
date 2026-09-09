@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generated-region drift gate -- groups A-D.
+"""Generated-region drift gate -- groups A-E.
 
 `Scripts/_mcp_json.py` is the canonical source for helpers the MCP servers
 share, and `Scripts/amalgamate.py` inlines its named blocks into each server
@@ -39,11 +39,17 @@ IN-MEMORY ONLY. No subprocess, no external binary, no network, and this suite
 writes NOTHING -- not into the repo, not into a sandbox. The generator exposes
 `audit_text` precisely so the control group needs no scratch directory.
 
+Group E is the other half, and it is not optional: a drift gate on its own would
+only ever prove that fifteen files agree on the same bug. E imports the canonical
+module and exercises each block's BEHAVIOUR, so a helper inlined fifteen times is
+unit-tested once -- here, and nowhere else in the fleet.
+
 Groups:
   A. GATE:    the live regions in Scripts/mcp-*.py match the canonical source
   B. CONTRACT: marker spelling, hash algorithm, path anchoring, render layout
   C. CONTROL: mutations are detected; quoted markers are not regions
   D. HYGIENE: no bytecode written, no source file touched
+  E. BLOCKS:  what each shared block actually does
 
 Usage:
   python3 tests/test_generated_region.py            # standalone
@@ -55,6 +61,7 @@ Exit code 0 iff every non-informational case passes.
 """
 
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -82,6 +89,7 @@ GA = "A. GATE: live regions match the canonical source"
 GB = "B. CONTRACT: marker spelling, hashing, anchoring, layout"
 GC = "C. CONTROL: mutations detected, quoted markers inert"
 GD = "D. HYGIENE: no bytecode, no source touched"
+GE = "E. BLOCKS: what each shared block actually does"
 
 # --- synthetic material for group C -------------------------------------------
 
@@ -120,27 +128,22 @@ def group_gate(suite, mod):
     blocks = mod.load_blocks(mod.CANONICAL)
     regions = mod.audit(Path(TARGET), blocks)
 
+    # The COUNT is not asserted: it grows every time a block is extracted, and a
+    # number typed here would fail on progress rather than on a regression.
     suite.record(GA, "region-present", problem_if(
-        len(regions) != 1,
-        "mcp-purity.py should carry exactly 1 region, found %d" % len(regions),
-    ), detail=["names: %s" % ", ".join(r.label for r in regions)])
+        not regions,
+        "mcp-purity.py carries no generated region at all",
+    ), detail=["%d region(s): %s"
+               % (len(regions), "; ".join(r.label for r in regions))])
 
-    if not regions:
-        # Without a region the remaining gate cases have no subject; record them
-        # as failures rather than skipping, so the count never moves.
-        for cid in ("body-identical", "sum-recorded"):
-            suite.record(GA, cid, ["no region to inspect"])
-    else:
-        region = regions[0]
-        suite.record(GA, "body-identical", problem_if(
-            region.body != region.wanted,
-            "region body differs from the canonical render",
-        ))
-        suite.record(GA, "sum-recorded", problem_if(
-            region.recorded != mod.body_hash(region.body),
-            "recorded hash %r != body hash %r"
-            % (region.recorded, mod.body_hash(region.body)),
-        ))
+    drifted = ["%s: body differs from the canonical render" % r.label
+               for r in regions if r.body != r.wanted]
+    suite.record(GA, "body-identical", drifted, detail=drifted)
+
+    unsummed = ["%s: recorded %r, body hashes to %r"
+                % (r.label, r.recorded, mod.body_hash(r.body))
+                for r in regions if r.recorded != mod.body_hash(r.body)]
+    suite.record(GA, "sum-recorded", unsummed, detail=unsummed)
 
     stale = []
     listed = set()
@@ -333,6 +336,112 @@ def group_control(suite, mod):
     ))
 
 
+def group_blocks(suite, blocks):
+    """Unit-test the canonical module itself -- imported, not read as text."""
+    falsy = ["", "false", "0", "no", "off", "none", "FALSE", "  Off  "]
+    wrong = [v for v in falsy if blocks._bool_param(v) is not False]
+    suite.record(GE, "bool-falsy-strings", problem_if(
+        wrong, "these should read False: %s" % wrong,
+    ))
+
+    # The blacklist semantics are deliberate and load-bearing: an unrecognised
+    # string reads True. mcp-webfetch's allow-list variant is the opposite, which
+    # is exactly why it never asks for this block.
+    truthy = ["1", "true", "yes", "on", "y", "enabled", "2", "anything"]
+    wrong = [v for v in truthy if blocks._bool_param(v) is not True]
+    suite.record(GE, "bool-unrecognised-is-true", problem_if(
+        wrong, "these should read True under blacklist semantics: %s" % wrong,
+    ))
+
+    problems = []
+    if blocks._bool_param(True) is not True or blocks._bool_param(False) is not False:
+        problems.append("a real bool must pass through unchanged")
+    if blocks._bool_param(None) is not False:
+        problems.append("None must fall back to the default (False)")
+    if blocks._bool_param(None, True) is not True:
+        problems.append("None must fall back to an explicit True default")
+    suite.record(GE, "bool-passthrough-and-default", problems)
+
+    problems = []
+    for value, want in (("42", 42), (7, 7), ("-3", -3), (3.9, 3)):
+        got = blocks._int_param(value, 99)
+        if got != want:
+            problems.append("_int_param(%r) gave %r, wanted %r" % (value, got, want))
+    suite.record(GE, "int-valid", problems)
+
+    problems = []
+    for value in ("abc", None, "", [], {}, "1.5"):
+        got = blocks._int_param(value, 99)
+        if got != 99:
+            problems.append("_int_param(%r) gave %r instead of the fallback" % (value, got))
+    suite.record(GE, "int-falls-back-never-raises", problems)
+
+    note = blocks._rows_note
+    suite.record(GE, "rows-complete-set", problem_if(
+        (note(0, 3, 3), note(0, 1, 1)) != ("[3 rows]", "[1 row]"),
+        "complete-set wording drifted: %r / %r" % (note(0, 3, 3), note(0, 1, 1)),
+    ))
+    suite.record(GE, "rows-more-remain", problem_if(
+        note(0, 20, 347) != "[showing rows 1-20 of 347; offset=20 for more]",
+        "resume-hint wording drifted: %r" % note(0, 20, 347),
+    ))
+    suite.record(GE, "rows-window-ends", problem_if(
+        note(4, 2, 6) != "[showing rows 5-6 of 6; no rows left]",
+        "end-of-window wording drifted: %r" % note(4, 2, 6),
+    ))
+    # Spelled out rather than a 1-based range, which would invert past the end.
+    suite.record(GE, "rows-past-end-never-inverts", problem_if(
+        note(99, 0, 6) != "[no rows at offset 99 of 6]",
+        "offset-past-end wording drifted: %r" % note(99, 0, 6),
+    ))
+    inexact = note(0, 20, 347, exact=False)
+    suite.record(GE, "rows-lower-bound", problem_if(
+        "347+ (scan stopped at the ceiling; true total unknown)" not in inexact
+        or "offset=20 for more" not in inexact,
+        "lower-bound wording drifted: %r" % inexact,
+    ))
+
+    framed = blocks.encode_lsp_message({"jsonrpc": "2.0", "id": 1})
+    header, _, body = framed.partition(b"\r\n\r\n")
+    problems = []
+    if not header.startswith(b"Content-Length: "):
+        problems.append("missing Content-Length header: %r" % header)
+    else:
+        declared = int(header.split(b": ", 1)[1])
+        if declared != len(body):
+            problems.append(
+                "Content-Length says %d, body is %d BYTES long" % (declared, len(body))
+            )
+    if json.loads(body.decode("utf-8")) != {"jsonrpc": "2.0", "id": 1}:
+        problems.append("body does not round-trip through json.loads")
+    suite.record(GE, "lsp-framing-counts-bytes", problems)
+
+    window = blocks._json_error_window
+    suite.record(GE, "window-short-no-ellipsis", problem_if(
+        window("abc", 1) != "'abc'",
+        "a text shorter than the radius should carry no ellipsis: %r"
+        % window("abc", 1),
+    ))
+    long_window = window("x" * 500, 250)
+    suite.record(GE, "window-long-both-ellipses", problem_if(
+        not (long_window.startswith("...") and long_window.endswith("...")),
+        "a mid-text window needs an ellipsis on both sides: %r" % long_window,
+    ))
+    # The whole reason repr() is in there: a correctly escaped quote must LOOK
+    # different from a bare one, which a raw slice renders identically.
+    both = window(r'said \"ok\" then rung "1 CB/token" here', 26)
+    suite.record(GE, "window-repr-discriminates", problem_if(
+        '\\\\"' not in both or '"1 CB/token"' not in both,
+        "repr must show the escaped quote as backslash-quote and the broken one "
+        "bare; got %r" % both,
+    ))
+    suite.record(GE, "window-pos-at-end", problem_if(
+        window("abcdef", 6) != "'abcdef'",
+        "a pos at end-of-text (truncated JSON) must degrade to a left window: %r"
+        % window("abcdef", 6),
+    ))
+
+
 def group_hygiene(suite, pyc_before, digests_before):
     pyc_after = H.pycache_snapshot()
     suite.record(GD, "pycache-zero", problem_if(
@@ -360,9 +469,11 @@ def run(opts=None):
     digests_before = {p: H.sha256_file(p) for p in (SOURCE, GENERATOR, TARGET)}
 
     mod = H.load_module_from_path("amalgamate_under_test", GENERATOR)
+    blocks = H.load_module_from_path("mcp_json_under_test", SOURCE)
     group_gate(suite, mod)
     group_contract(suite, mod)
     group_control(suite, mod)
+    group_blocks(suite, blocks)
     group_hygiene(suite, pyc_before, digests_before)
 
     suite.print_summary()
