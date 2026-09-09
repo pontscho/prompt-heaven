@@ -1008,6 +1008,7 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
 		except json.JSONDecodeError as exc:
 			raise ValueError(
 				f"'{name}' was a string but not valid JSON: {exc}. "
+				f"Near the failure: {_json_error_window(value, exc.pos)}. "
 				f"Pass '{name}' as an object, not a JSON-encoded string."
 			)
 	if not isinstance(value, dict):
@@ -1016,6 +1017,33 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
 			f"got {type(value).__name__}."
 		)
 	return value
+
+
+# EXCLUSIONS HERE ARE PER BLOCK, NOT PER SERVER. This file takes
+# `_json_error_window` because its copy of that helper would be identical; it
+# still takes NONE of the others, and that is not an oversight waiting to be
+# tidied. `_result` annotates `result: dict` where the canonical says
+# `result: Any`, and `_bool_param` is an ALLOW-list where the canonical is a
+# deny-list -- an unrecognised string reads False here and True there. Those are
+# body and behaviour differences. Do not read this region as licence to fold in
+# the rest.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
+	"""Return a repr'd slice of *text* centred on *pos*.
+
+	A JSONDecodeError reports a character offset ("char 1530"), which the
+	caller that produced the string cannot count to; the one broken escape is
+	only actionable if it is shown. ``repr`` is what makes it visible -- the
+	typical defect is a quote escaped one level too shallow, and a raw slice
+	renders that identically to a correct one.
+	"""
+	start = max(0, pos - radius)
+	end = min(len(text), pos + radius)
+	lead = "..." if start > 0 else ""
+	tail = "..." if end < len(text) else ""
+	return f"{lead}{text[start:end]!r}{tail}"
+# END GENERATED: a0daa4beeefc
 
 
 def handle_webfetch_call(arguments: dict, project_root: str) -> dict:
@@ -1260,7 +1288,10 @@ class McpServer:
 				arguments = json.loads(arguments)
 			except json.JSONDecodeError as exc:
 				return self._tool_error(
-					msg_id, f"'arguments' was a string but not valid JSON: {exc}")
+					msg_id,
+					f"'arguments' was a string but not valid JSON: {exc}. "
+					f"Near the failure: {_json_error_window(arguments, exc.pos)}. "
+					"Pass arguments as an object, not a JSON-encoded string.")
 		if tool_name != "webfetch_call":
 			return self._error(msg_id, -32602, f"Unknown tool: {tool_name}")
 		if not isinstance(arguments, dict):

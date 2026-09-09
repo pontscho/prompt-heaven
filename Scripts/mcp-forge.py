@@ -850,6 +850,8 @@ def filter_output(raw_lines: List[str], filter_cfg: Optional[dict]) -> Tuple[Lis
 	return lines, total
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _bool_param
 def _bool_param(value, default=False):
 	"""Coerce a possibly-stringy value to bool.
 
@@ -863,6 +865,7 @@ def _bool_param(value, default=False):
 	if isinstance(value, str):
 		return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
 	return bool(value)
+# END GENERATED: b8c1033d8d6e
 
 
 def _resolve_aliases(params: dict, aliases: dict) -> dict:
@@ -1412,8 +1415,15 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
 		try:
 			value = json.loads(value)
 		except json.JSONDecodeError as exc:
+			# `value` is still the STRING here, which is the non-obvious part and
+			# the reason the window can be taken at all: `value = json.loads(value)`
+			# above binds nothing when json.loads raises, so the name still holds
+			# the text the caller sent. Every server's `_ensure_dict` relies on it;
+			# it is written down once, here, because this file is the skeleton's
+			# sync canonical and is what the others get copied from.
 			raise ValueError(
 				f"'{name}' was a string but not valid JSON: {exc}. "
+				f"Near the failure: {_json_error_window(value, exc.pos)}. "
 				f"Pass '{name}' as an object, not a JSON-encoded string."
 			)
 	if not isinstance(value, dict):
@@ -1422,6 +1432,25 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
 			f"got {type(value).__name__}."
 		)
 	return value
+
+
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
+	"""Return a repr'd slice of *text* centred on *pos*.
+
+	A JSONDecodeError reports a character offset ("char 1530"), which the
+	caller that produced the string cannot count to; the one broken escape is
+	only actionable if it is shown. ``repr`` is what makes it visible -- the
+	typical defect is a quote escaped one level too shallow, and a raw slice
+	renders that identically to a correct one.
+	"""
+	start = max(0, pos - radius)
+	end = min(len(text), pos + radius)
+	lead = "..." if start > 0 else ""
+	tail = "..." if end < len(text) else ""
+	return f"{lead}{text[start:end]!r}{tail}"
+# END GENERATED: a0daa4beeefc
 
 
 def _ensure_filter(value: Any) -> Any:
@@ -1845,6 +1874,8 @@ class McpServer:
 			"isError": is_error,
 		})
 
+	# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+	# BEGIN GENERATED: _mcp_json.py :: _result, _error
 	@staticmethod
 	def _result(msg_id: Any, result: Any) -> dict:
 		return {"jsonrpc": "2.0", "id": msg_id, "result": result}
@@ -1852,6 +1883,7 @@ class McpServer:
 	@staticmethod
 	def _error(msg_id: Any, code: int, message: str) -> dict:
 		return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+	# END GENERATED: be0c80f0db9f
 
 
 # ===========================================================================

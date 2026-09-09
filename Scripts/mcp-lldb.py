@@ -56,6 +56,7 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"'{name}' was a string but not valid JSON: {exc}. "
+                f"Near the failure: {_json_error_window(value, exc.pos)}. "
                 f"Pass '{name}' as an object, not a JSON-encoded string."
             )
     if not isinstance(value, dict):
@@ -64,6 +65,25 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
             f"got {type(value).__name__}."
         )
     return value
+
+
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
+    """Return a repr'd slice of *text* centred on *pos*.
+
+    A JSONDecodeError reports a character offset ("char 1530"), which the
+    caller that produced the string cannot count to; the one broken escape is
+    only actionable if it is shown. ``repr`` is what makes it visible -- the
+    typical defect is a quote escaped one level too shallow, and a raw slice
+    renders that identically to a correct one.
+    """
+    start = max(0, pos - radius)
+    end = min(len(text), pos + radius)
+    lead = "..." if start > 0 else ""
+    tail = "..." if end < len(text) else ""
+    return f"{lead}{text[start:end]!r}{tail}"
+# END GENERATED: 4c5e7e3f59cb
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
@@ -118,26 +138,34 @@ def _max_answer_chars(args: dict) -> int:
         return DEFAULT_MAX_ANSWER_CHARS
 
 
+# What an item is here (a payload LINE, never an address), and which functions
+# read this at all, is on `_page_lines` below — the pager that decides both.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _offset
 def _offset(args: dict) -> int:
-    """First payload LINE to display, 0-based — the value the page line hands back.
+    """First item to display, 0-based -- the value the page line hands back.
 
-    Display-level paging over output this call already produced. It is NOT an
-    address offset and NOT an index inside an LLDB command: the command is
-    re-executed on every call, so a caller walking a long dump pays for the
-    command each time.
+    Display-level paging over what THIS call already produced, never an upstream
+    cursor: the work is redone on every call, so a caller walking a large result
+    pays for it each time. What the item IS depends on the payload -- a row, a
+    record, an output line -- and the calling pager is where that is written
+    down, along with which of `_rows_note`'s forms the handler can reach.
 
-    Read only for the functions CAP_POLICY marks pageable — the ones that can
-    really resume. The others never emit an ``offset=`` hint, because a resume
-    hint for a knob that does not exist lies to the caller.
+    The 0 floor is the reason this is not a bare ``int()``. A negative offset
+    would index a list from its END, so `offset=-5` would quietly return the
+    LAST five items to a caller who asked for a position before the first one --
+    a wrong answer that looks like a right one, where a floor gives the caller
+    the start of the payload they asked for.
     """
     try:
         return max(0, int(args.get("offset", 0)))
     except (TypeError, ValueError):
         return 0
+# END GENERATED: de151293c0bb
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: _rows_note
+# BEGIN GENERATED: _mcp_paging.py :: _rows_note
 def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
     """Row accounting for a row-shaped payload; goes on its LAST line.
 
@@ -197,6 +225,16 @@ def _page_lines(text: str, offset: int, max_chars: int) -> str:
     this server never streams and never has to guess a count — which is why it
     never passes ``exact=False``, the form reserved for a server that CANNOT know
     its total and must SAY so instead of inventing a number.
+
+    The ``offset`` handed in is the LINE index `_offset` read off the wire, and it
+    is display-level paging over output this call already produced. It is NOT an
+    address offset and NOT an index inside an LLDB command: the command is
+    re-executed on every call, so a caller walking a long dump pays for the
+    command each time.
+
+    Read only for the functions CAP_POLICY marks pageable — the ones that can
+    really resume. The others never emit an ``offset=`` hint, because a resume
+    hint for a knob that does not exist lies to the caller.
     """
     lines = text.split("\n")
     total = len(lines)
@@ -1245,7 +1283,12 @@ class McpServer:
             try:
                 args = json.loads(args)
             except json.JSONDecodeError as exc:
-                return self._tool_error(msg_id, f"'arguments' was a string but not valid JSON: {exc}")
+                return self._tool_error(
+                    msg_id,
+                    f"'arguments' was a string but not valid JSON: {exc}. "
+                    f"Near the failure: {_json_error_window(args, exc.pos)}. "
+                    "Pass arguments as an object, not a JSON-encoded string."
+                )
         if not isinstance(args, dict):
             return self._tool_error(msg_id, f"'arguments' must be an object; got {type(args).__name__}.")
 

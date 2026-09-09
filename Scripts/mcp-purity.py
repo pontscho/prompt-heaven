@@ -307,8 +307,38 @@ def _max_answer_chars(params: dict) -> int:
                       DEFAULT_MAX_ANSWER_CHARS)
 
 
+# What an "item" is in each of purity's four callers: `handle_list_dir` and
+# `handle_find_file` page ENTRIES, `handle_search_for_pattern` pages MATCHES,
+# and `_md_paged` pages the rows of an already-rendered Markdown payload.
+# `handle_read_file` deliberately does NOT use it — see the note at its own
+# `offset` read, which turns the value into a 1-based `start_line` and must not
+# floor it.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: _rows_note
+# BEGIN GENERATED: _mcp_paging.py :: _offset
+def _offset(args: dict) -> int:
+    """First item to display, 0-based -- the value the page line hands back.
+
+    Display-level paging over what THIS call already produced, never an upstream
+    cursor: the work is redone on every call, so a caller walking a large result
+    pays for it each time. What the item IS depends on the payload -- a row, a
+    record, an output line -- and the calling pager is where that is written
+    down, along with which of `_rows_note`'s forms the handler can reach.
+
+    The 0 floor is the reason this is not a bare ``int()``. A negative offset
+    would index a list from its END, so `offset=-5` would quietly return the
+    LAST five items to a caller who asked for a position before the first one --
+    a wrong answer that looks like a right one, where a floor gives the caller
+    the start of the payload they asked for.
+    """
+    try:
+        return max(0, int(args.get("offset", 0)))
+    except (TypeError, ValueError):
+        return 0
+# END GENERATED: de151293c0bb
+
+
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _rows_note
 def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
     """Row accounting for a row-shaped payload; goes on its LAST line.
 
@@ -757,6 +787,16 @@ def handle_read_file(params: dict, project_root: str, strict: bool = False) -> d
         # `offset` is the 0-based synonym of start_line, so the resume hint the
         # truncation note prints (`offset=<n>`) names a parameter this handler
         # really accepts. Without it the hint would be a lie.
+        #
+        # Read inline, NOT through the shared `_offset`, and the difference is
+        # deliberate: `_offset` floors at 0 and this handler must not. The value
+        # becomes a 1-based `start_line`, so `idx_start = start - 1` puts a
+        # negative offset into Python's from-the-end slicing — `offset=-20`
+        # returns the file's last 20 lines, which is a coherent answer to the
+        # question asked. Flooring would silently return the HEAD instead: a
+        # wrong answer shaped exactly like a right one. The other four `offset`
+        # reads in this server index a list forward, where a negative value has
+        # no such meaning, and they do go through the shared helper.
         start = _int_param(params.get("offset", 0), 0) + 1
     start = _int_param(start, 1)
     end = params.get("end_line")          # 1-based, inclusive
@@ -887,7 +927,7 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     glob_pattern = params.get("glob", None) or params.get("paths_include_glob", None) or params.get("filter", None)
     grep_pattern = params.get("grep", None) or params.get("grep_pattern", None)
     head_limit = _int_param(params.get("head_limit", 0), 0)
-    offset = max(0, _int_param(params.get("offset", 0), 0))
+    offset = _offset(params)
 
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
@@ -1036,7 +1076,7 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
         raise ValueError("Missing required parameter: file_mask")
     rel = params.get("relative_path", ".")
     head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
-    offset = max(0, _int_param(params.get("offset", 0), 0))
+    offset = _offset(params)
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
         return {"text": f"(directory does not exist: {rel})", "count": 0}
@@ -1330,7 +1370,7 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     search_rel = params.get("relative_path", "")
     max_chars = _max_answer_chars(params)
     head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
-    offset = max(0, _int_param(params.get("offset", 0), 0))
+    offset = _offset(params)
 
     search_root = safe_path(project_root, search_rel, strict) if search_rel else project_root
     search_single_file = os.path.isfile(search_root)
@@ -1616,7 +1656,7 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
 # --- LSP framing (Content-Length over stdio) ------------------------------
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: encode_lsp_message
+# BEGIN GENERATED: _mcp_lsp.py :: encode_lsp_message
 def encode_lsp_message(body: dict) -> bytes:
     """Encode a dict as an LSP message with Content-Length framing."""
     text = json.dumps(body)
@@ -4547,7 +4587,7 @@ def _md_paged(text: str, params: dict) -> dict:
     and is passed through untouched.
     """
     max_chars = _max_answer_chars(params)
-    offset = max(0, _int_param(params.get("offset", 0), 0))
+    offset = _offset(params)
     lines = text.split("\n")
     try:
         split = lines.index("")

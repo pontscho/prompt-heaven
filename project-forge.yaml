@@ -139,7 +139,7 @@ test:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
   generated_region:
-    description: "The generated-region drift gate: every # BEGIN GENERATED region in Scripts/mcp-*.py re-rendered from Scripts/_mcp_json.py in memory and demanded byte-identical, the marker format contract asserted against the generator, and a synthetic control group proving each mutation is detected while a quoted marker stays inert. In-memory only -- writes nothing."
+    description: "The generated-region drift gate: every # BEGIN GENERATED region in Scripts/mcp-*.py re-rendered in memory from the canonical source its own marker names (Scripts/_mcp_json.py, Scripts/_mcp_lsp.py or Scripts/_mcp_paging.py) and demanded byte-identical, the marker format contract and the source registry asserted against the generator, every canonical module imported and its blocks unit-tested, and a synthetic control group proving each mutation is detected, a cross-source name is refused, and a quoted marker stays inert. Plus the tab group: re-indentation is decided per BLOCK by tokenize rather than per file, an unsafe block is refused by name for a tab host, and a space host is served exactly what it was before. In-memory only -- writes nothing."
     requires: [syntax]
     commands:
       - python3 tests/run.py generated_region

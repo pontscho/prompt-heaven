@@ -72,7 +72,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `wiki_recall` | `test_wiki_recall.py` | A–P |
 | `jira_cli` | `test_jira_cli.py` | A–K |
 | `checkpoint` | `test_checkpoint.py` | A–K |
-| `generated_region` | `test_generated_region.py` | A–D |
+| `generated_region` | `test_generated_region.py` | A–F |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
@@ -190,9 +190,14 @@ tests/
   test_checkpoint.py         groups A-K   (drives a WRITER: every path is a
                                            mkdtemp path, never either of the
                                            script's own default targets)
-  test_generated_region.py   groups A-D   (in-memory only, writes nothing --
+  test_generated_region.py   groups A-F   (in-memory only, writes nothing --
                                            re-renders every generated region
-                                           and demands byte identity)
+                                           from the canonical source its own
+                                           marker names and demands byte
+                                           identity, imports every canonical
+                                           module and unit-tests its blocks,
+                                           and decides tab re-indentation per
+                                           BLOCK rather than per file)
   files/                     tf_-prefixed C and Lua fixtures for purity_lsp
   README.md
 ```

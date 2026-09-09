@@ -9,10 +9,11 @@
 > designed async variant for the LSP/subprocess ("A-family") servers.
 >
 > **Some of the plumbing below is no longer described here but *generated*.** The
-> named blocks in `Scripts/_mcp_json.py` are pasted into each server by
-> `Scripts/amalgamate.py`; for those, that file is the canonical source and this
-> one only explains the shape. §8 is the mechanism, and it is the first thing to
-> read before editing a server's helpers.
+> named blocks in the canonical sources — `Scripts/_mcp_json.py`,
+> `Scripts/_mcp_lsp.py` and `Scripts/_mcp_paging.py` — are pasted into each
+> server by `Scripts/amalgamate.py`; for those, the canonical file is the source
+> of truth and this one only explains the shape. §8 is the mechanism, and it is
+> the first thing to read before editing a server's helpers.
 >
 > **When you touch a server's plumbing, diff it against this file.** When this file
 > and the servers disagree, one of them is a bug — fix the bug, don't fork the style.
@@ -30,8 +31,12 @@ Throughout this document, substitute per server:
 | `DISPATCH(...)` | the server-specific tool handler call | `handle_forge_call(...)` |
 
 **Indentation is NOT unified.** Each file keeps its existing indentation —
-`mcp-forge.py` / `mcp-webfetch.py` / `mcp-tshark.py` use **TABS**;
-all others use **4 spaces**. Match the file you are editing. Examples below use 4 spaces.
+`mcp-forge.py` and `mcp-webfetch.py` use **TABS**; all others, `mcp-tshark.py`
+included, use **4 spaces**. Match the file you are editing. Examples below use 4
+spaces. (This line used to name tshark among the tab users; it does not use
+tabs, and the generator reads a host's style off its own `INDENT` tokens — 220
+space indents, no tabs — rather than off this table, which is why the error was
+harmless until §8 made indentation a mechanical input.)
 
 **Dispatch sync/async is NOT unified.** Servers that `await` a subprocess (the
 LSP/A-family) keep an `async def handle_message` + `await DISPATCH`. Pure-stdlib
@@ -427,10 +432,15 @@ differs.
 
 ---
 
-## 8. Generated regions — one source, fifteen copies, no import
+## 8. Generated regions — one source per domain, fifteen copies, no import
 
 Some of the code above no longer lives in this file's copy of each server. It
-lives once in `Scripts/_mcp_json.py` and is **pasted into** each server by
+lives once in a canonical source — `Scripts/_mcp_json.py` for the JSON-RPC
+envelopes, wire-value coercion and JSON error reporting; `Scripts/_mcp_lsp.py`
+for the LSP `Content-Length` framing the four language-server hosts share;
+`Scripts/_mcp_paging.py` for output capping and the two halves of the pager
+protocol, the `offset=<n> for more` line a payload ends with and the read that
+takes the number back — and is **pasted into** each server by
 `python3 Scripts/amalgamate.py`. In a server the result looks like this, and it
 is the whole of the mechanism:
 
@@ -445,6 +455,20 @@ The `BEGIN` line is a **request**: *put the top-level `_json_error_window` from
 `_mcp_json.py` here.* The hex on the `END` line is a fingerprint of whatever
 currently sits between the markers.
 
+**The source filename on that line is not decoration.** It selects the block map
+the region's names are resolved against, so a name defined in *another*
+canonical file does not resolve — asking `_mcp_json.py` for `encode_lsp_message`
+is refused by name, not quietly served from next door. That is what keeps each
+canonical file a **domain** rather than a shelf, and it is why the JSON source
+has been narrowed twice: framing left for `_mcp_lsp.py`, row accounting for
+`_mcp_paging.py`, each move a marker-line-only diff with the END hash unchanged.
+The domains are listed
+explicitly in the generator's `CANONICAL_SOURCES`; the registry is hand-written
+rather than globbed from `_mcp_*.py` so that a new helper file cannot become a
+generation source merely by existing. The `generated_region` suite proves both
+halves — a cross-source name is refused, and when two sources define the same
+name the marker decides which body is emitted.
+
 **Nothing is dynamic at run time.** The server is an ordinary self-contained
 file holding an ordinary function; Python never learns the generator exists,
 there is no import, no `sys.path` entry, and no build step — the pasted code is
@@ -457,7 +481,8 @@ every one of those properties and still leaves one place to edit.
 
 ### The two things you actually do
 
-**Change a shared helper** — edit `Scripts/_mcp_json.py`, then:
+**Change a shared helper** — edit its canonical source (`Scripts/_mcp_json.py`,
+`Scripts/_mcp_lsp.py` or `Scripts/_mcp_paging.py`), then:
 
 ```
 $ python3 Scripts/amalgamate.py
@@ -491,7 +516,7 @@ file's table of contents.
 
 ### The block contract
 
-A block may reference **only** builtins, the stdlib names `_mcp_json.py` itself
+A block may reference **only** builtins, the stdlib names its own canonical file
 imports, and its own arguments — never a name the host server defines. The near
 miss that made the rule necessary is `_canonical_function`: two lines, identical
 in three servers, but its body reads a per-server `FUNCTION_ALIASES` table, so
@@ -514,16 +539,36 @@ Three more properties worth knowing before you touch it:
   the block lands indented, which is what lets a region sit inside a class body —
   the route by which the `_result` / `_error` methods of §3 are shareable at all.
 
-### What the emitter will not do: tabs
+### Tabs: refused per BLOCK, not per file
 
-Shifting a block sideways is not the same as re-indenting it, and only the first
-is safe. A block indented with 4 spaces cannot be hosted by a **tab**-indented
-file, and the generator does not try: converting leading spaces to tabs would
-also convert **alignment** to tabs — `_rows_note`'s continuation line aligns its
-`else` under an open paren — putting the code in a column nobody chose, in a
-region no human is supposed to read closely. `mcp-forge.py` and `mcp-webfetch.py`
-(§0) therefore keep their own copies of anything shared, and that is a refusal
-with a reason, not a gap waiting to be filled.
+**This narrows an earlier decision.** The rule used to be that a tab-indented
+file could host no generated region at all, because converting leading spaces to
+tabs would also convert **alignment** to tabs — `_rows_note`'s continuation line
+aligns its `else` under an open paren — putting the code in a column nobody
+chose, in a region no human is supposed to read closely. That reasoning is
+correct, and it is a property of **that block**, not of tab indentation. Seven of
+the eight canonical blocks contain no bracket continuation at all, so every one
+of their indents is structural and a tab conversion is mechanical.
+
+The generator now decides it per block, and mechanically. `block_is_tab_safe`
+demands two things of a block: no implicit line join (`tokenize`, the same pass
+that finds the markers) and every leading run a whole 4-space level (arithmetic,
+which also covers indentation inside a string, where the tokenizer sees one atom
+and has nothing to say). Anything unprovable is unsafe. The host's own style
+comes from its `INDENT` tokens, not from the marker's column — a module-level
+marker sits at column 0 and carries no signal.
+
+A tab host asking for an unsafe block is **refused by name**; it is not quietly
+served spaces, because a file mixing both is worse than either. `_rows_note` is
+the only block that hits this today.
+
+`mcp-forge.py` came in under the narrowed rule and its diff was marker lines
+only — the emitted bodies were byte-for-byte what it already had. **`mcp-webfetch.py`
+stays out, and tabs are no longer the reason for it:** its `_result` annotates
+`result: dict` where the canonical says `result: Any`, and its `_bool_param` is
+an **allow**-list where the canonical is a deny-list, so an unrecognised string
+reads `False` there and `True` here. Those are body and behaviour differences,
+and they would survive any amount of re-indenting.
 
 `python3 Scripts/amalgamate.py --check` writes nothing and exits 1 if any region
 is stale; the `generated_region` suite does the same comparison in memory, so

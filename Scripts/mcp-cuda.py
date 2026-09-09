@@ -66,6 +66,25 @@ PARAM_ALIASES = {
 }
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
+    """Return a repr'd slice of *text* centred on *pos*.
+
+    A JSONDecodeError reports a character offset ("char 1530"), which the
+    caller that produced the string cannot count to; the one broken escape is
+    only actionable if it is shown. ``repr`` is what makes it visible -- the
+    typical defect is a quote escaped one level too shallow, and a raw slice
+    renders that identically to a correct one.
+    """
+    start = max(0, pos - radius)
+    end = min(len(text), pos + radius)
+    lead = "..." if start > 0 else ""
+    tail = "..." if end < len(text) else ""
+    return f"{lead}{text[start:end]!r}{tail}"
+# END GENERATED: 4c5e7e3f59cb
+
+
 def _resolve_aliases(params: Any) -> dict:
     if params is None:
         return {}
@@ -75,6 +94,7 @@ def _resolve_aliases(params: Any) -> dict:
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"'params' was a string but not valid JSON: {exc}. "
+                f"Near the failure: {_json_error_window(params, exc.pos)}. "
                 "Pass params as an object, not a JSON-encoded string."
             )
     if not isinstance(params, dict):
@@ -461,7 +481,7 @@ def _has_cuda_sources(project_root: str,
 # ============================================================
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: encode_lsp_message
+# BEGIN GENERATED: _mcp_lsp.py :: encode_lsp_message
 def encode_lsp_message(body: dict) -> bytes:
     """Encode a dict as an LSP message with Content-Length framing."""
     text = json.dumps(body)
@@ -2442,7 +2462,12 @@ class McpServer:
             try:
                 tool_args = json.loads(tool_args)
             except json.JSONDecodeError as exc:
-                return self._tool_error(msg_id, f"'arguments' was a string but not valid JSON: {exc}")
+                return self._tool_error(
+                    msg_id,
+                    f"'arguments' was a string but not valid JSON: {exc}. "
+                    f"Near the failure: {_json_error_window(tool_args, exc.pos)}. "
+                    "Pass arguments as an object, not a JSON-encoded string."
+                )
 
         if name == "cuda_call":
             if not isinstance(tool_args, dict):

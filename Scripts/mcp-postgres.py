@@ -799,6 +799,25 @@ def _canonical_function(function: str) -> str:
     return FUNCTION_ALIASES.get(function, function)
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
+    """Return a repr'd slice of *text* centred on *pos*.
+
+    A JSONDecodeError reports a character offset ("char 1530"), which the
+    caller that produced the string cannot count to; the one broken escape is
+    only actionable if it is shown. ``repr`` is what makes it visible -- the
+    typical defect is a quote escaped one level too shallow, and a raw slice
+    renders that identically to a correct one.
+    """
+    start = max(0, pos - radius)
+    end = min(len(text), pos + radius)
+    lead = "..." if start > 0 else ""
+    tail = "..." if end < len(text) else ""
+    return f"{lead}{text[start:end]!r}{tail}"
+# END GENERATED: 4c5e7e3f59cb
+
+
 def _resolve_aliases(params: Any, function: Optional[str] = None) -> dict:
     """Return a new dict with aliased parameter names resolved to canonical names."""
     if isinstance(params, str):
@@ -807,6 +826,7 @@ def _resolve_aliases(params: Any, function: Optional[str] = None) -> dict:
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"'params' was a string but not valid JSON: {exc}. "
+                f"Near the failure: {_json_error_window(params, exc.pos)}. "
                 "Pass params as an object, not a JSON-encoded string."
             )
     if not isinstance(params, dict):
@@ -906,7 +926,7 @@ def _cell(value: Optional[str]) -> str:
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: _rows_note
+# BEGIN GENERATED: _mcp_paging.py :: _rows_note
 def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
     """Row accounting for a row-shaped payload; goes on its LAST line.
 
@@ -956,6 +976,12 @@ def _render_result(res: QueryResult, max_rows: int = 0, offset: int = 0,
     is spent by dropping whole rows rather than by cutting characters: the last
     line kept is always a complete row, and the closing line says where to
     resume. ``char_budget`` of 0 means unlimited.
+
+    The ``offset`` handed in is the ROW index `_offset` read off the wire, and it
+    is display-level paging over the rows this call already fetched, NOT a SQL
+    OFFSET: the statement is re-executed on every call, so a caller paging a big
+    result set pays for the scan each time. It exists so the row-truncation line's
+    ``offset=<n> for more`` is an instruction that actually works.
 
     Which of _rows_note's four forms postgres reaches: all of them, and it is the
     one pager here that emits the note unconditionally. `[N rows]` for a whole set
@@ -1070,18 +1096,31 @@ def _max_rows(params: dict) -> int:
         return 0
 
 
-def _offset(params: dict) -> int:
-    """First row to display, 0-based — the value the page line hands back.
+# That this is a display offset over already-fetched rows and NOT a SQL OFFSET
+# is on `_render_result` above — the pager that spends it. Read it there before
+# assuming this server pushes the offset down into the statement.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _offset
+def _offset(args: dict) -> int:
+    """First item to display, 0-based -- the value the page line hands back.
 
-    Display-level paging over the rows this call already fetched, NOT a SQL
-    OFFSET: the statement is re-executed on every call, so a caller paging a big
-    result set pays for the scan each time. It exists so the row-truncation
-    line's ``offset=<n> for more`` is an instruction that actually works.
+    Display-level paging over what THIS call already produced, never an upstream
+    cursor: the work is redone on every call, so a caller walking a large result
+    pays for it each time. What the item IS depends on the payload -- a row, a
+    record, an output line -- and the calling pager is where that is written
+    down, along with which of `_rows_note`'s forms the handler can reach.
+
+    The 0 floor is the reason this is not a bare ``int()``. A negative offset
+    would index a list from its END, so `offset=-5` would quietly return the
+    LAST five items to a caller who asked for a position before the first one --
+    a wrong answer that looks like a right one, where a floor gives the caller
+    the start of the payload they asked for.
     """
     try:
-        return max(0, int(params.get("offset", 0)))
+        return max(0, int(args.get("offset", 0)))
     except (TypeError, ValueError):
         return 0
+# END GENERATED: de151293c0bb
 
 
 def _bool_param(value: Any, default: bool = False) -> bool:

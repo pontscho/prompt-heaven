@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Generated-region drift gate -- groups A-E.
 
-`Scripts/_mcp_json.py` is the canonical source for helpers the MCP servers
-share, and `Scripts/amalgamate.py` inlines its named blocks into each server
-between `# BEGIN GENERATED` / `# END GENERATED` markers. The servers stay
+`Scripts/_mcp_json.py`, `Scripts/_mcp_lsp.py` and `Scripts/_mcp_paging.py` are
+the canonical sources for the helpers the MCP servers share, and
+`Scripts/amalgamate.py` inlines their named blocks into each server between
+`# BEGIN GENERATED` / `# END GENERATED` markers. The servers stay
 single-file on purpose (an imported sibling would write `Scripts/__pycache__`
 into a tree four suites assert is empty, and would move the helpers out of the
 module attributes `test_mcp_footprint` reaches for), so the shared code is
@@ -12,6 +13,20 @@ duplicated on disk BY DESIGN -- and duplication on disk is exactly what rots.
 This suite is the thing that stops it rotting: it re-renders every live region
 from the canonical source in memory and demands byte identity. A region that
 drifted, or whose recorded hash no longer matches its body, fails here.
+
+MORE THAN ONE SOURCE, AND THE SOURCE IS LOAD-BEARING. The filename on a BEGIN
+line selects which block map the region's names are resolved against -- it is
+not a comment. Two rules follow, and both are asserted rather than assumed: an
+unknown source is refused by name, and a name defined in ANOTHER canonical file
+does not resolve. That second one is the dangerous direction: a block served
+out of the wrong domain compiles, runs, and looks correct in every server that
+carries it, so nothing downstream would ever report it.
+
+Each source is a DOMAIN, and the domains are narrowed as blocks earn their own
+home -- LSP framing and row accounting both started in the JSON source and both
+left it. Group E asserts the departures as well as the arrivals: a block that
+came back would otherwise be tested in its new home and still be sitting in its
+old one.
 
 WHY THE MARKERS ARE SPELLED OUT BELOW instead of imported from the generator:
 they are an ON-DISK FORMAT CONTRACT, not an implementation detail. A test that
@@ -40,16 +55,20 @@ writes NOTHING -- not into the repo, not into a sandbox. The generator exposes
 `audit_text` precisely so the control group needs no scratch directory.
 
 Group E is the other half, and it is not optional: a drift gate on its own would
-only ever prove that fifteen files agree on the same bug. E imports the canonical
-module and exercises each block's BEHAVIOUR, so a helper inlined fifteen times is
-unit-tested once -- here, and nowhere else in the fleet.
+only ever prove that fourteen files agree on the same bug. E imports every
+canonical module and exercises each block's BEHAVIOUR, so a helper inlined into
+fourteen servers is unit-tested once -- here, and nowhere else in the fleet.
 
 Groups:
-  A. GATE:    the live regions in Scripts/mcp-*.py match the canonical source
-  B. CONTRACT: marker spelling, hash algorithm, path anchoring, render layout
-  C. CONTROL: mutations are detected; quoted markers are not regions
+  A. GATE:    the live regions in Scripts/mcp-*.py match their canonical source
+  B. CONTRACT: marker spelling, hashing, anchoring, layout, source disjointness
+  C. CONTROL: mutations are detected; quoted markers are not regions; a name
+              does not resolve against a source that does not define it
   D. HYGIENE: no bytecode written, no source file touched
   E. BLOCKS:  what each shared block actually does
+  F. TABS:    which blocks may be re-indented for a tab-indented host, decided
+              per BLOCK and mechanically; one that may not is refused by name;
+              a space-indented host is served exactly what it was served before
 
 Usage:
   python3 tests/test_generated_region.py            # standalone
@@ -74,6 +93,8 @@ import _harness as H  # noqa: E402
 NAME = "generated_region"
 
 SOURCE = H.repo_path("Scripts", "_mcp_json.py")
+LSP_SOURCE = H.repo_path("Scripts", "_mcp_lsp.py")
+PAGING_SOURCE = H.repo_path("Scripts", "_mcp_paging.py")
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
 TARGET = H.repo_path("Scripts", "mcp-purity.py")
 SCRIPTS = H.repo_path("Scripts")
@@ -84,18 +105,37 @@ BEGIN_PREFIX = "# BEGIN GENERATED:"
 END_PREFIX = "# END GENERATED:"
 TARGET_GLOB = "mcp-*.py"
 CANONICAL_NAME = "_mcp_json.py"
+LSP_CANONICAL_NAME = "_mcp_lsp.py"
+PAGING_CANONICAL_NAME = "_mcp_paging.py"
+# The registry is part of the same contract: it is written out by hand in the
+# generator precisely so a new `_mcp_*.py` file cannot become a generation
+# source by existing, and a test that read it back off a glob would agree with
+# whatever the glob found.
+CANONICAL_NAMES = (CANONICAL_NAME, LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME)
 
-GA = "A. GATE: live regions match the canonical source"
-GB = "B. CONTRACT: marker spelling, hashing, anchoring, layout"
-GC = "C. CONTROL: mutations detected, quoted markers inert"
+GA = "A. GATE: live regions match their canonical source"
+GB = "B. CONTRACT: marker spelling, hashing, anchoring, layout, disjointness"
+GC = "C. CONTROL: mutations detected, quoted markers inert, sources not crossed"
 GD = "D. HYGIENE: no bytecode, no source touched"
 GE = "E. BLOCKS: what each shared block actually does"
+GF = "F. TABS: per-block safety, host detection, space hosts untouched"
 
 # --- synthetic material for group C -------------------------------------------
 
 SYNTH_BODY = 'def _helper():\n    return "ok"\n'
 SYNTH_BLOCKS = {"_helper": SYNTH_BODY}
+SYNTH_SOURCES = {CANONICAL_NAME: SYNTH_BLOCKS}
 RENDER_BLOCKS = {"a": "def a():\n    pass\n", "b": "def b():\n    pass\n"}
+
+# A second synthetic domain that defines the SAME name with a different body.
+# The collision is the point: it makes "which source did the marker say" an
+# observable question instead of a stylistic one.
+OTHER_BODY = 'def _helper():\n    return "OTHER"\n'
+OTHER_ONLY_BODY = 'def _elsewhere():\n    return 1\n'
+TWO_SOURCES = {
+    CANONICAL_NAME: SYNTH_BLOCKS,
+    LSP_CANONICAL_NAME: {"_helper": OTHER_BODY, "_elsewhere": OTHER_ONLY_BODY},
+}
 
 
 def synth_host(body, recorded=None, names="_helper", source=CANONICAL_NAME):
@@ -107,6 +147,70 @@ def synth_host(body, recorded=None, names="_helper", source=CANONICAL_NAME):
         + body
         + "%s%s\n" % (END_PREFIX, tail)
     )
+
+
+# The fleet-wide sentence `_json_error_window` was extracted to serve. Spelled
+# out here for the same reason the markers are: it is a CONTRACT across every
+# server now, and a test that derived it from one of them would only ever prove
+# they all agree -- including on a drift.
+#
+# The SENTENCE is one string; what varies is only the LOCAL NAME holding the
+# text that failed to parse, and the fleet spells that name five ways: `params`
+# in a param normalizer, `value` in the generic `_ensure_dict(value, name)`
+# helper, and `args` / `arguments` / `tool_args` in the three flavours of
+# tools/call handler. Every one is listed DELIBERATELY, and the list is meant to
+# be edited when a sixth appears. Do NOT relax this into a substring or an
+# identifier wildcard: the whole point is that "Near the error", a missing
+# period and a lost trailing space are each caught, and a wildcard would wave
+# all three through while still looking like a test.
+WINDOW_NAME = "_json_error_window"
+WINDOW_SENTENCE = 'f"Near the failure: {%s(%%s, exc.pos)}. "' % WINDOW_NAME
+WINDOW_FIELDS = ("params", "args", "arguments", "tool_args", "value")
+WINDOW_MIN_HOSTS = 8
+
+
+def outside_regions(mod, label, text, sources):
+    """*text* with every generated region's marker-to-marker span removed.
+
+    A call INSIDE a region is the block calling itself, not a caller; counting
+    it would make "this region has a user" true the moment the region exists.
+    """
+    lines = text.splitlines(keepends=True)
+    for region in sorted(mod.audit_text(label, text, sources),
+                         key=lambda r: r.begin, reverse=True):
+        del lines[region.begin:region.end + 1]
+    return "".join(lines)
+
+
+def tab_host(names, source=PAGING_CANONICAL_NAME):
+    """A synthetic TAB-indented target carrying exactly one region at column 0.
+
+    The imports are not decoration: the block contract check runs against the
+    host, and `_result`'s annotation needs `Any` while `encode_lsp_message`
+    needs `json`. A fixture without them would be refused for the wrong reason
+    and the tab cases would pass on an error that has nothing to do with tabs.
+    """
+    return (
+        '"""A tab-indented target."""\n'
+        "import json\n"
+        "from typing import Any\n"
+        "\n\n"
+        "def _existing():\n"
+        "\tif True:\n"
+        "\t\treturn json, Any\n"
+        "\n\n"
+        "%s %s :: %s\n" % (BEGIN_PREFIX, source, names)
+        + "%s\n" % END_PREFIX
+    )
+
+
+def untab(text, width=4):
+    """Reverse of the emitter's conversion: one leading tab back to 4 spaces."""
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.lstrip("\t")
+        out.append(" " * (width * (len(line) - len(body))) + body)
+    return "".join(out)
 
 
 def expect_exit(fn):
@@ -125,8 +229,24 @@ def problem_if(condition, message):
 # --- groups -------------------------------------------------------------------
 
 def group_gate(suite, mod):
-    blocks = mod.load_blocks(mod.CANONICAL)
-    regions = mod.audit(Path(TARGET), blocks)
+    sources = mod.load_all_blocks()
+    regions = mod.audit(Path(TARGET), sources)
+
+    # The registry itself, before anything is resolved against it: an explicit
+    # tuple of filenames, each one a real file. A source silently missing from
+    # the registry would not fail below -- every region naming it would be
+    # refused, which reads as a marker defect rather than a registry one.
+    registry = sorted(mod.CANONICAL_SOURCES)
+    problems = problem_if(
+        registry != sorted(CANONICAL_NAMES),
+        "generator registry is %s, the on-disk contract is %s"
+        % (registry, sorted(CANONICAL_NAMES)),
+    )
+    problems += ["%s: not a file at %s" % (name, path)
+                 for name, path in sorted(mod.CANONICAL_SOURCES.items())
+                 if not path.is_file()]
+    suite.record(GA, "sources-registered", problems,
+                 detail=["registered: %s" % ", ".join(registry)])
 
     # The COUNT is not asserted: it grows every time a block is extracted, and a
     # number typed here would fail on progress rather than on a regression.
@@ -148,17 +268,110 @@ def group_gate(suite, mod):
     stale = []
     listed = set()
     for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
-        for region in mod.audit(path, blocks):
-            listed.update(region.names)
+        for region in mod.audit(path, sources):
+            listed.update((region.source, name) for name in region.names)
             if region.state != "ok":
                 stale.append("%s [%s]: %s" % (path.name, region.label, region.state))
     suite.record(GA, "fleet-ok", stale, detail=stale)
 
-    missing = sorted(n for n in listed if n not in blocks)
+    # Resolved PER SOURCE, not against the union: a name that exists only in the
+    # other canonical file is exactly the defect this pair of loops must see.
+    missing = sorted("%s :: %s" % (source, name) for source, name in listed
+                     if name not in sources[source])
     suite.record(GA, "names-exist", problem_if(
         missing,
-        "regions list names absent from %s: %s" % (CANONICAL_NAME, missing),
-    ), detail=["names in use: %s" % ", ".join(sorted(listed))])
+        "regions list names their own source does not define: %s" % missing,
+    ), detail=["%s :: %s" % pair for pair in sorted(listed)])
+
+    # ONE WRITER, with the exceptions NAMED rather than hidden. A canonical block
+    # name defined at top level in a server but not inside a generated region is
+    # a hand copy -- either a server not yet converted, or a deliberate variant
+    # (mcp-webfetch's allow-list `_bool_param` and its tab-indented `_rows_note`,
+    # mcp-tshark's `(params, key, default)` signature, mcp-inspect's raising
+    # `_int_param`; the tab-indented pair cannot host a space-indented block at
+    # all). INFO, not FAIL: "this server keeps its own" is a legitimate answer,
+    # so this censuses rather than judges -- but a new hand copy cannot appear
+    # without landing on this line, and the census is what makes the next
+    # fan-out decision a reading rather than a survey.
+    known = {name for blocks in sources.values() for name in blocks}
+    hand = []
+    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
+        text = path.read_text(encoding="utf-8")
+        covered = set()
+        for region in mod.audit_text(path.name, text, sources):
+            covered.update(region.names)
+        defined = set(mod.load_blocks_text(path.name, text)) & known
+        hand += ["%s: %s" % (path.name, name)
+                 for name in sorted(defined - covered)]
+    suite.record(GA, "hand-copies-are-named", status=H.INFO,
+                 detail=hand or ["no server keeps a hand copy of a canonical "
+                                 "block name"])
+
+    # `_json_error_window` went fleet-wide, and that creates two invariants
+    # nothing measured before. FAIL rather than INFO for both: they compare text
+    # already in the repo, with no environment, no binary and no ordering, so
+    # neither can flap on ordinary work -- the fleet's bar for a gated FAIL.
+    hosts, callers, sentences = set(), set(), []
+    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
+        text = path.read_text(encoding="utf-8")
+        if any(WINDOW_NAME in r.names
+               for r in mod.audit_text(path.name, text, sources)):
+            hosts.add(path.name)
+        body = outside_regions(mod, path.name, text, sources)
+        if "%s(" % WINDOW_NAME in body:
+            callers.add(path.name)
+        sentences += [(path.name, line.strip()) for line in body.splitlines()
+                      if "Near the failure:" in line]
+
+    # A region with no caller is dead code -- and worse than ordinary dead code,
+    # because the drift gate would then faithfully prove that N files agree on
+    # carrying it. The reverse is a NameError the moment that path is taken.
+    problems = ["%s: hosts %s but never calls it" % (name, WINDOW_NAME)
+                for name in sorted(hosts - callers)]
+    problems += ["%s: calls %s without hosting the region -- NameError"
+                 % (name, WINDOW_NAME) for name in sorted(callers - hosts)]
+    problems += problem_if(
+        len(hosts) < WINDOW_MIN_HOSTS,
+        "only %d server(s) host %s; this case examined too few to mean "
+        "anything" % (len(hosts), WINDOW_NAME),
+    )
+    suite.record(GA, "window-region-has-a-caller", problems,
+                 detail=["%d host(s), all calling it: %s"
+                         % (len(hosts), ", ".join(sorted(hosts)))])
+
+    # One writer for the code was the easy half. The SENTENCE is the half that
+    # rots: it is hand-written at each call site, says the same thing in eleven
+    # files, and nothing but this case compares them.
+    allowed = {WINDOW_SENTENCE % field for field in WINDOW_FIELDS}
+    problems = ["%s: %s" % (name, line) for name, line in sentences
+                if line not in allowed]
+    carrying = {name for name, _line in sentences}
+    problems += problem_if(
+        carrying != hosts,
+        "the servers carrying the sentence and the servers hosting the block "
+        "differ: %s" % sorted(carrying ^ hosts),
+    )
+    problems += problem_if(
+        len(sentences) < WINDOW_MIN_HOSTS,
+        "only %d call site(s) found; the wording comparison is vacuous"
+        % len(sentences),
+    )
+    suite.record(GA, "window-sentence-identical", problems,
+                 detail=["%d call site(s), %d distinct wording(s)"
+                         % (len(sentences),
+                            len({line for _n, line in sentences}))])
+
+    # Every registered source must be ASKED FOR by a live region. A canonical
+    # file nobody names is not harmless: it is a shelf the drift gate cannot
+    # reach, so a block rotting in it reads green here forever.
+    used = {source for source, _name in listed}
+    suite.record(GA, "every-source-in-use", problem_if(
+        sorted(used) != sorted(CANONICAL_NAMES),
+        "registered but unrequested: %s"
+        % sorted(set(CANONICAL_NAMES) - used),
+    ), detail=["%s: %d name(s) requested"
+               % (source, len([1 for s, _n in listed if s == source]))
+               for source in sorted(CANONICAL_NAMES)])
 
 
 def group_contract(suite, mod):
@@ -187,14 +400,35 @@ def group_contract(suite, mod):
 
     # The generator resolves its paths from __file__, never from getcwd() --
     # that is what makes `python3 ../../Scripts/amalgamate.py` work.
+    anchored = [
+        "%s -> %s" % (name, path)
+        for name, path in sorted(mod.CANONICAL_SOURCES.items())
+        if os.path.realpath(str(path)) != os.path.realpath(
+            H.repo_path("Scripts", name))
+    ]
     suite.record(GB, "anchored-on-file", problem_if(
         os.path.realpath(str(mod.SCRIPTS_DIR)) != os.path.realpath(SCRIPTS)
-        or os.path.realpath(str(mod.CANONICAL)) != os.path.realpath(SOURCE),
-        "SCRIPTS_DIR=%s CANONICAL=%s do not resolve to the repo's Scripts/"
-        % (mod.SCRIPTS_DIR, mod.CANONICAL),
+        or anchored,
+        "SCRIPTS_DIR=%s / %s do not resolve to the repo's Scripts/"
+        % (mod.SCRIPTS_DIR, anchored),
     ))
 
-    rendered = mod.render(["a", "b"], RENDER_BLOCKS)
+    # No name may be defined by two canonical sources. A duplicate would make a
+    # marker's meaning depend on a field readers skim past, and copying a region
+    # from one server to another would then change what it emits.
+    seen = {}
+    collisions = []
+    for source in sorted(mod.CANONICAL_SOURCES):
+        for name in sorted(mod.load_blocks(mod.CANONICAL_SOURCES[source])):
+            if name in seen:
+                collisions.append("%r is defined by both %s and %s"
+                                  % (name, seen[name], source))
+            seen[name] = source
+    suite.record(GB, "sources-disjoint", collisions,
+                 detail=["%d block(s) across %d source(s)"
+                         % (len(seen), len(mod.CANONICAL_SOURCES))])
+
+    rendered = mod.render(CANONICAL_NAME, ["a", "b"], RENDER_BLOCKS)
     wanted = "def a():\n    pass\n\n\ndef b():\n    pass\n"
     suite.record(GB, "render-layout", problem_if(
         rendered != wanted,
@@ -210,7 +444,7 @@ def group_contract(suite, mod):
     # class body, against the two that `render-layout` above pins at column 0.
     # That is PEP 8's own split, and the indent is already the signal for which
     # side of it we are on -- a region hosted in a class needs no extra flag.
-    indented = mod.render(["a", "b"], RENDER_BLOCKS, "    ")
+    indented = mod.render(CANONICAL_NAME, ["a", "b"], RENDER_BLOCKS, "    ")
     suite.record(GB, "render-indented", problem_if(
         indented != "    def a():\n        pass\n\n    def b():\n        pass\n",
         "indented render gave %r" % indented,
@@ -218,8 +452,8 @@ def group_contract(suite, mod):
 
 
 def group_control(suite, mod):
-    def audit(text):
-        return mod.audit_text("synthetic.py", text, SYNTH_BLOCKS)
+    def audit(text, sources=SYNTH_SOURCES):
+        return mod.audit_text("synthetic.py", text, sources)
 
     good_sum = mod.body_hash(SYNTH_BODY)
     mutated = SYNTH_BODY.replace('"ok"', '"OK"')
@@ -286,15 +520,58 @@ def group_control(suite, mod):
             % (BEGIN_PREFIX, SYNTH_BODY, END_PREFIX))),
         "a BEGIN without the '::' separator was accepted",
     ))
+    unknown_source = expect_exit(lambda: audit(
+        synth_host(SYNTH_BODY, good_sum, source="somewhere-else.py")))
     suite.record(GC, "unknown-source", problem_if(
-        not expect_exit(lambda: audit(
-            synth_host(SYNTH_BODY, good_sum, source="somewhere-else.py"))),
+        not unknown_source,
         "a region naming an unknown source was accepted",
-    ))
+    ), detail=[str(unknown_source)])
+
+    # The refusal has to be actionable: whoever typed the wrong filename learns
+    # the right ones here, or goes reading the generator to find them.
+    listed_known = expect_exit(lambda: mod.audit_text(
+        "synthetic.py",
+        synth_host(SYNTH_BODY, good_sum, source="somewhere-else.py"),
+        TWO_SOURCES))
+    suite.record(GC, "unknown-source-lists-known", problem_if(
+        not listed_known or not all(n in listed_known for n in TWO_SOURCES),
+        "the refusal must name every source in play; got %r" % listed_known,
+    ), detail=[str(listed_known)])
+
     suite.record(GC, "unknown-name", problem_if(
         not expect_exit(lambda: audit(
             synth_host(SYNTH_BODY, good_sum, names="_not_in_source"))),
         "a region naming a symbol absent from the source was accepted",
+    ))
+
+    # A name defined ONLY in the other canonical file must not resolve, and the
+    # refusal must name the source that was actually asked -- not the file that
+    # happens to define the name, which is the reading that would send somebody
+    # to "fix" the wrong end.
+    crossed = expect_exit(lambda: mod.audit_text(
+        "synthetic.py",
+        synth_host(SYNTH_BODY, good_sum, names="_elsewhere"),
+        TWO_SOURCES))
+    suite.record(GC, "cross-source-name-refused", problem_if(
+        not crossed or CANONICAL_NAME not in str(crossed),
+        "a name defined only in %s resolved against %s, or the refusal named "
+        "the wrong file: %r" % (LSP_CANONICAL_NAME, CANONICAL_NAME, crossed),
+    ), detail=[str(crossed)])
+
+    # And the positive half: when BOTH sources define the name, the marker's
+    # source decides which body is emitted. Without this, "refused" above could
+    # be satisfied by a generator that simply merged the two namespaces and got
+    # lucky on the collision.
+    picked = mod.audit_text(
+        "synthetic.py",
+        synth_host(OTHER_BODY, mod.body_hash(OTHER_BODY),
+                   source=LSP_CANONICAL_NAME),
+        TWO_SOURCES)
+    suite.record(GC, "source-selects-the-body", problem_if(
+        len(picked) != 1 or picked[0].wanted != OTHER_BODY
+        or picked[0].source != LSP_CANONICAL_NAME,
+        "the marker's source did not choose the body: %s"
+        % [(r.source, r.wanted) for r in picked],
     ))
 
     # 10. An empty region is drift, not "nothing to do".
@@ -338,7 +615,7 @@ def group_control(suite, mod):
     with open(GENERATOR, encoding="utf-8") as handle:
         generator_source = handle.read()
     suite.record(GC, "bait-generator-itself", problem_if(
-        mod.audit_text("amalgamate.py", generator_source, SYNTH_BLOCKS),
+        mod.audit_text("amalgamate.py", generator_source, SYNTH_SOURCES),
         "the generator's own docstring markers were treated as regions",
     ), detail=["the live proof: amalgamate.py documents both markers"])
 
@@ -385,8 +662,8 @@ def group_control(suite, mod):
     ))
 
 
-def group_blocks(suite, blocks):
-    """Unit-test the canonical module itself -- imported, not read as text."""
+def group_blocks(suite, blocks, lsp, paging):
+    """Unit-test the canonical modules themselves -- imported, not read as text."""
     falsy = ["", "false", "0", "no", "off", "none", "FALSE", "  Off  "]
     wrong = [v for v in falsy if blocks._bool_param(v) is not False]
     suite.record(GE, "bool-falsy-strings", problem_if(
@@ -425,10 +702,28 @@ def group_blocks(suite, blocks):
             problems.append("_int_param(%r) gave %r instead of the fallback" % (value, got))
     suite.record(GE, "int-falls-back-never-raises", problems)
 
-    note = blocks._rows_note
+    # Row accounting moved OUT of the JSON source too: the line it renders is a
+    # sentence for a reader on the last line of a text payload, not a field in
+    # an envelope. Same shape of claim as the framing one below, and the same
+    # reason to state it where somebody would look for the function.
+    suite.record(GE, "json-source-drops-row-accounting", problem_if(
+        hasattr(blocks, "_rows_note"),
+        "%s still defines _rows_note; it belongs to %s"
+        % (CANONICAL_NAME, PAGING_CANONICAL_NAME),
+    ))
+
+    note = paging._rows_note
     suite.record(GE, "rows-complete-set", problem_if(
         (note(0, 3, 3), note(0, 1, 1)) != ("[3 rows]", "[1 row]"),
         "complete-set wording drifted: %r / %r" % (note(0, 3, 3), note(0, 1, 1)),
+    ))
+    # The empty set reaches a DIFFERENT branch from the two above -- `shown <= 0`
+    # with `start == 0` -- and that branch is hardcoded plural, which is correct
+    # for zero and is the one place the pluralisation is not computed. Nothing
+    # else in this group enters it.
+    suite.record(GE, "rows-empty-set", problem_if(
+        note(0, 0, 0) != "[0 rows]",
+        "empty-set wording drifted: %r" % note(0, 0, 0),
     ))
     suite.record(GE, "rows-more-remain", problem_if(
         note(0, 20, 347) != "[showing rows 1-20 of 347; offset=20 for more]",
@@ -450,7 +745,75 @@ def group_blocks(suite, blocks):
         "lower-bound wording drifted: %r" % inexact,
     ))
 
-    framed = blocks.encode_lsp_message({"jsonrpc": "2.0", "id": 1})
+    # `_offset` is the READ side of the line `_rows_note` prints, which is why
+    # the two share a source. Ordinary values first.
+    offset = paging._offset
+    problems = []
+    for args, want in (({}, 0), ({"offset": 7}, 7), ({"offset": "12"}, 12),
+                       ({"offset": 0}, 0), ({"offset": 3.9}, 3)):
+        got = offset(args)
+        if got != want:
+            problems.append("_offset(%r) gave %r, wanted %r" % (args, got, want))
+    suite.record(GE, "offset-default-and-valid", problems)
+
+    # The 0 floor is the entire reason this is not a bare int(): a negative
+    # offset indexes a list from its END, so an unfloored -5 answers "before the
+    # first item" with the LAST five -- a wrong answer shaped like a right one.
+    problems = []
+    for value in (-1, -5, "-5", -0.5, -99999):
+        got = offset({"offset": value})
+        if got != 0:
+            problems.append("_offset(offset=%r) gave %r, not the 0 floor"
+                            % (value, got))
+    suite.record(GE, "offset-floors-negative", problems)
+
+    # Junk falls back rather than raising: this value comes straight off the
+    # wire, and a handler that dies on a typo is worse than one that starts at
+    # the beginning.
+    problems = []
+    for value in ("abc", None, "", [], {}, "1.5", " ", True):
+        try:
+            got = offset({"offset": value})
+        except Exception as exc:                       # noqa: BLE001 -- the point
+            problems.append("_offset(offset=%r) RAISED %s: %s"
+                            % (value, type(exc).__name__, exc))
+            continue
+        # True is an int in Python and legitimately reads as 1; everything else
+        # here is junk and must read 0.
+        want = 1 if value is True else 0
+        if got != want:
+            problems.append("_offset(offset=%r) gave %r, wanted %r"
+                            % (value, got, want))
+    suite.record(GE, "offset-junk-never-raises", problems)
+
+    # The two halves closing the loop, on the actual printed text rather than on
+    # a number typed twice: take the hint `_rows_note` emits, parse it back out
+    # of the line, and feed it to `_offset`. A drift in either half fails here,
+    # and the guard below stops the case going quiet if the hint disappears.
+    line = note(0, 20, 347)
+    problems = []
+    if "offset=" not in line:
+        problems.append("the page line emits no offset= hint, so this case "
+                        "parsed nothing: %r" % line)
+    else:
+        hinted = line.split("offset=", 1)[1].split(" ", 1)[0]
+        back = offset({"offset": hinted})
+        if back != 20:
+            problems.append("the hint %r read back as %r, not 20" % (hinted, back))
+    suite.record(GE, "offset-round-trips-the-page-line", problems,
+                 detail=[line])
+
+    # LSP framing moved OUT of the JSON source: it is a different protocol, and
+    # the region markers in the four LSP servers now name `_mcp_lsp.py`. If it
+    # came back here the two sources would collide, group B would see it -- but
+    # this says so at the point a reader is looking for the function.
+    suite.record(GE, "json-source-drops-framing", problem_if(
+        hasattr(blocks, "encode_lsp_message"),
+        "%s still defines encode_lsp_message; it belongs to %s"
+        % (CANONICAL_NAME, LSP_CANONICAL_NAME),
+    ))
+
+    framed = lsp.encode_lsp_message({"jsonrpc": "2.0", "id": 1})
     header, _, body = framed.partition(b"\r\n\r\n")
     problems = []
     if not header.startswith(b"Content-Length: "):
@@ -464,6 +827,51 @@ def group_blocks(suite, blocks):
     if json.loads(body.decode("utf-8")) != {"jsonrpc": "2.0", "id": 1}:
         problems.append("body does not round-trip through json.loads")
     suite.record(GE, "lsp-framing-counts-bytes", problems)
+
+    # A non-ASCII payload, and the honest finding: this CANNOT discriminate a
+    # byte count from a character count, because `json.dumps` escapes to \\uXXXX
+    # by default, so the wire form is ASCII and the two numbers coincide. Saying
+    # that out loud is the case's job. The block's `len(encoded)` is already
+    # byte-based and only starts to MATTER the day somebody passes
+    # ensure_ascii=False -- at which point a character count would under-declare
+    # and the peer would read a short frame and desynchronise the stream rather
+    # than report anything. Pinning the escaping here is what stops that change
+    # landing quietly; relax this case only together with the length arithmetic.
+    payload = {"text": "hello — 日本語"}
+    framed = lsp.encode_lsp_message(payload)
+    header, _, body = framed.partition(b"\r\n\r\n")
+    declared = int(header.split(b": ", 1)[1])
+    as_text = body.decode("utf-8")
+    problems = []
+    if declared != len(body):
+        problems.append("Content-Length says %d, body is %d bytes"
+                        % (declared, len(body)))
+    try:
+        body.decode("ascii")
+    except UnicodeDecodeError:
+        problems.append(
+            "the wire form is no longer ASCII-escaped, so Content-Length now "
+            "has to count ENCODED BYTES -- re-read the block's arithmetic "
+            "before relaxing this case"
+        )
+    if json.loads(as_text) != payload:
+        problems.append("a non-ASCII payload does not round-trip")
+    suite.record(GE, "lsp-framing-non-ascii-payload", problems,
+                 detail=["%d bytes for %d characters on the wire"
+                         % (len(body), len(as_text))])
+
+    # One header field, CRLFCRLF-terminated, and BYTES out -- a str return would
+    # satisfy every assertion above and then fail at the first writer.write().
+    framed = lsp.encode_lsp_message({"id": 2})
+    problems = []
+    if not isinstance(framed, bytes):
+        problems.append("encode_lsp_message returned %s" % type(framed).__name__)
+    if framed.count(b"\r\n\r\n") != 1:
+        problems.append("expected exactly one header terminator: %r" % framed)
+    head = framed.split(b"\r\n\r\n", 1)[0]
+    if b"\r\n" in head:
+        problems.append("the header carries more than one field: %r" % head)
+    suite.record(GE, "lsp-framing-header-shape", problems)
 
     # _result/_error are staticmethod DESCRIPTORS here, not callables -- they are
     # methods only at their destination. Reaching through __func__ is the point,
@@ -509,6 +917,121 @@ def group_blocks(suite, blocks):
     ))
 
 
+def group_tabs(suite, mod):
+    """The tab refusal is PER BLOCK now, so both arms have to be live."""
+    sources = mod.load_all_blocks()
+    verdicts = {name: mod.block_is_tab_safe(body)
+                for blocks in sources.values() for name, body in blocks.items()}
+    unsafe = sorted(n for n, ok in verdicts.items() if not ok)
+    safe = sorted(n for n, ok in verdicts.items() if ok)
+
+    # Driven by the REAL canonical text, not a synthetic, so the case cannot
+    # drift away from the thing it protects. Both arms asserted: a detector that
+    # called everything safe would pass a "_rows_note is unsafe" check written
+    # the other way round, and one that called everything unsafe would pass a
+    # refusal check.
+    problems = problem_if(
+        unsafe != ["_rows_note"],
+        "expected exactly _rows_note to be tab-unsafe, got %s" % unsafe,
+    )
+    problems += problem_if(
+        len(safe) < 2,
+        "no tab-SAFE blocks left, so the accept arm proves nothing: %s" % safe,
+    )
+    suite.record(GF, "tab-safety-real-blocks", problems,
+                 detail=["unsafe: %s" % ", ".join(unsafe),
+                         "safe: %s" % ", ".join(safe)])
+
+    # The mechanism itself, on shapes the canonical set does not contain -- a
+    # backslash continuation and an off-level indent have no live example, and
+    # an unexercised branch of a safety check is where the next hole opens.
+    cases = [
+        ("plain nesting", "def f():\n    if x:\n        return 1\n", True),
+        ("bracket join", "def f():\n    return (1 if x\n            else 2)\n", False),
+        ("backslash join", "def f():\n    return 1 + \\\n        2\n", False),
+        ("off-level indent", "def f():\n      return 1\n", False),
+        ("already tabbed", "def f():\n\treturn 1\n", False),
+    ]
+    problems = ["%s: tab-safe read %r, wanted %r" % (what, mod.block_is_tab_safe(src), want)
+                for what, src, want in cases
+                if mod.block_is_tab_safe(src) is not want]
+    suite.record(GF, "tab-safety-mechanism", problems)
+
+    # The refusal, and the SAME fixture accepting a safe block one line later.
+    # Without the second half this case would pass on a generator that refused
+    # every block in a tab host, which is the old per-file rule.
+    refusal = expect_exit(lambda: mod.audit_text(
+        "tabby.py", tab_host("_rows_note"), sources))
+    problems = problem_if(not refusal, "a tab host was served _rows_note")
+    problems += problem_if(
+        refusal and "_rows_note" not in str(refusal),
+        "the refusal does not name the block: %r" % refusal,
+    )
+    accepted = mod.audit_text("tabby.py", tab_host("_offset"), sources)
+    problems += problem_if(
+        len(accepted) != 1,
+        "the same tab fixture refused a tab-SAFE block too, so the refusal "
+        "above is the old per-FILE rule, not a per-block one",
+    )
+    suite.record(GF, "tab-host-refuses-unsafe-by-name", problems,
+                 detail=[str(refusal)])
+
+    # Emission: tabs at every structural level, and NOT ONE leading space. A
+    # half-converted body would still import and run, and would be invisible in
+    # a diff viewer that renders both the same width.
+    problems = []
+    for name in safe:
+        source = next(s for s, blocks in sources.items() if name in blocks)
+        regions = mod.audit_text("tabby.py", tab_host(name, source), sources)
+        if len(regions) != 1:
+            problems.append("%s: expected one region, got %d" % (name, len(regions)))
+            continue
+        body = regions[0].wanted
+        if any(line.startswith(" ") for line in body.splitlines()):
+            problems.append("%s: a line still begins with a SPACE" % name)
+        if untab(body) != sources[source][name]:
+            problems.append("%s: de-tabbing does not round-trip to canonical" % name)
+    suite.record(GF, "tab-emission-is-all-tabs", problems,
+                 detail=["%d block(s) emitted into a tab host" % len(safe)])
+
+    # Host style comes from the host's own INDENT tokens. The marker's column
+    # cannot answer it -- every fixture above puts the marker at column 0, which
+    # is exactly the case that carries no signal.
+    styles = {}
+    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
+        styles[path.name] = mod.host_indent(path.read_text(encoding="utf-8"))
+    tabbed = sorted(n for n, s in styles.items() if s == "tab")
+    problems = problem_if(
+        tabbed != ["mcp-forge.py", "mcp-webfetch.py"],
+        "expected forge and webfetch to be the tab-indented servers, got %s" % tabbed,
+    )
+    problems += problem_if(
+        mod.host_indent(tab_host("_offset")) != "tab",
+        "a column-0 marker in a tab file was not detected as a tab host",
+    )
+    suite.record(GF, "host-indent-from-tokens", problems,
+                 detail=["tab: %s" % ", ".join(tabbed)])
+
+    # The invariant a careless indent refactor breaks first: a SPACE host must
+    # be untouched by any of the above. Not one leading tab may appear in what
+    # a space host is served, and what it is served must already be on disk.
+    problems = []
+    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
+        text = path.read_text(encoding="utf-8")
+        if mod.host_indent(text) != "space":
+            continue
+        for region in mod.audit_text(path.name, text, sources):
+            if any(line.startswith("\t") for line in region.wanted.splitlines()):
+                problems.append("%s [%s]: a TAB leaked into a space host"
+                                % (path.name, region.label))
+            if region.body != region.wanted:
+                problems.append("%s [%s]: no longer byte-identical on disk"
+                                % (path.name, region.label))
+    suite.record(GF, "space-hosts-take-no-tabs", problems,
+                 detail=["%d space-indented server(s) re-rendered"
+                         % sum(1 for s in styles.values() if s == "space")])
+
+
 def group_hygiene(suite, pyc_before, digests_before):
     pyc_after = H.pycache_snapshot()
     suite.record(GD, "pycache-zero", problem_if(
@@ -533,14 +1056,18 @@ def run(opts=None):
                     opts=opts, mode="grouped")
 
     pyc_before = H.pycache_snapshot()
-    digests_before = {p: H.sha256_file(p) for p in (SOURCE, GENERATOR, TARGET)}
+    digests_before = {p: H.sha256_file(p) for p in
+                      (SOURCE, LSP_SOURCE, PAGING_SOURCE, GENERATOR, TARGET)}
 
     mod = H.load_module_from_path("amalgamate_under_test", GENERATOR)
     blocks = H.load_module_from_path("mcp_json_under_test", SOURCE)
+    lsp = H.load_module_from_path("mcp_lsp_under_test", LSP_SOURCE)
+    paging = H.load_module_from_path("mcp_paging_under_test", PAGING_SOURCE)
     group_gate(suite, mod)
     group_contract(suite, mod)
     group_control(suite, mod)
-    group_blocks(suite, blocks)
+    group_blocks(suite, blocks, lsp, paging)
+    group_tabs(suite, mod)
     group_hygiene(suite, pyc_before, digests_before)
 
     suite.print_summary()

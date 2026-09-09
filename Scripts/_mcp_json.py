@@ -5,6 +5,18 @@
 # ///
 """Canonical source for the JSON/param helpers the MCP servers share.
 
+**This is one canonical source of several, not the shelf.** The generator's
+registry (`CANONICAL_SOURCES` in `Scripts/amalgamate.py`) lists them, and the
+source named on a region's BEGIN line is load-bearing: that region's names are
+resolved against THAT file's blocks and no other, so a name defined next door
+does not resolve here. Each file is therefore a domain and has to earn the
+label, and this one has been narrowed twice: LSP `Content-Length` framing was
+not a JSON helper and now lives in `_mcp_lsp.py`, and `_rows_note` renders a
+sentence for a human onto the last line of a text payload -- paging, not JSON --
+so it now lives in `_mcp_paging.py`. What belongs here is the JSON-RPC
+envelopes, wire-value coercion, and JSON error reporting: the blocks below, and
+nothing whose reason for existing is a different concern.
+
 **No server imports this module.** Its named blocks are inlined into each server
 between `# BEGIN GENERATED` / `# END GENERATED` markers by
 `Scripts/amalgamate.py`, so every server stays the self-contained single file
@@ -29,11 +41,9 @@ the host's globals. Until that promise has a form and a check, it stays out.
 
 Every block below was lifted VERBATIM from `Scripts/mcp-purity.py`, which is why
 each region's first generated diff is marker lines only, with zero changed body
-lines — the evidence that the lift was faithful. `_rows_note` is the one
-exception, and deliberately: purity's copy was the fleet's superset but its
-docstring named purity's own callers, which would have been misleading prose in
-the four other servers that share it. The caller-specific half now lives on
-purity's `_row_page`, where it describes the code that actually decides it.
+lines — the evidence that the lift was faithful. (The fleet's one deliberate
+exception to that rule was `_rows_note`, and the account of it travelled with
+the block to `_mcp_paging.py`, where the code it describes now lives.)
 
 Where a server's variant is deliberately different it simply never asks for the
 block: `mcp-webfetch`'s allow-list `_bool_param` (an unrecognised string reads
@@ -42,6 +52,16 @@ False there and True here, and its flags are `allow_private` and `overwrite`),
 `_int_param`, which takes a parameter NAME and raises where this one takes a
 default and falls back.
 
+`mcp-webfetch` is the only server hosting NO region, and INDENTATION IS NOT WHY
+-- the emitter re-indents for a tab host now, and `mcp-forge` proved it by
+adopting three copies with a marker-line-only diff. Webfetch is out on two body
+differences that would survive any amount of re-indenting: the `_bool_param`
+polarity above, and a `_result` that annotates `result: dict` where this one
+says `result: Any`. Its `_error` alone IS byte-identical modulo the indent
+character, so that one is a live candidate whenever somebody wants to split the
+pair; nobody has asked, and a region holding half of a pair that reads as a
+pair is a decision, not a cleanup.
+
 **Annotations are not free.** A block whose signature says `value: Any` needs
 `Any` in the HOST's namespace, evaluated at def time, so a server that does not
 import it dies at startup. That is a host dependency the contract above does not
@@ -49,7 +69,6 @@ yet cover and nothing yet checks, which is why the blocks here stay unannotated
 even though four servers annotate their copies.
 """
 
-import json
 from typing import Any
 
 
@@ -68,8 +87,11 @@ from typing import Any
 # silently becomes `_result(self=server, msg_id=..., result=...)` -- every reply
 # malformed, on every server, from the first call.
 #
-# Measured byte-identical across all 13 space-indented servers (one 123-byte
-# body). `mcp-forge` and `mcp-webfetch` indent with tabs and keep their own.
+# Measured byte-identical across 14 servers (one 123-byte body), `mcp-forge`
+# included: it indents with TABS, and the emitter now re-indents a block whose
+# indentation is purely structural, which this pair's is. `mcp-webfetch` is the
+# one holdout, and not over tabs -- see the exclusions paragraph in the module
+# docstring for the two real reasons.
 
 @staticmethod
 def _result(msg_id: Any, result: Any) -> dict:
@@ -104,58 +126,6 @@ def _int_param(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-# --- row accounting -----------------------------------------------------------
-
-def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
-    """Row accounting for a row-shaped payload; goes on its LAST line.
-
-    Display indices are 1-based inclusive, which makes the 1-based last row equal
-    to the 0-based ``offset`` of the next one — so the hint is literally the value
-    to pass back. ``offset=`` is therefore only ever emitted for a payload whose
-    handler ACCEPTS ``offset``: a resume hint the handler would reject is worse
-    than no hint at all, so block-shaped payloads get a character cap and no hint.
-
-    ``exact=False`` is for a total that is a LOWER BOUND — a scan curtailed at a
-    ceiling, where the files it never opened may hold more matches. It says so
-    rather than presenting the count it happens to have reached as the total.
-
-    The four canonical forms. This WORDING is fleet-wide, and keeping it from
-    drifting is the whole reason the function is shared rather than reimplemented
-    once per server:
-        [3 rows]                                        whole set delivered
-        [showing rows 1-20 of 347; offset=20 for more]  rows remain
-        [showing rows 5-6 of 6; no rows left]           window ends at the end
-        [no rows at offset 99 of 6]                     offset past the end
-    A branch no current caller can reach is not dead code here. It is the wording
-    the next caller must not invent differently, and each server reaches a
-    different subset — see the calling pager for which ones and why.
-    """
-    last = start + shown
-    total_disp = (str(total) if exact
-                  else f"{total}+ (scan stopped at the ceiling; true total unknown)")
-    if shown <= 0:
-        # Spelled out rather than as a 1-based range, which would INVERT
-        # ("rows 100-99 of 10") when the caller offsets past the end.
-        return (f"[no rows at offset {start} of {total_disp}]" if start
-                else f"[{total} rows]")
-    if last < total or not exact:
-        return (f"[showing rows {start + 1}-{last} of {total_disp}; "
-                f"offset={last} for more]")
-    if start > 0:
-        return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
-    return f"[{total} row{'s' if total != 1 else ''}]"
-
-
-# --- LSP framing (Content-Length over stdio) ----------------------------------
-
-def encode_lsp_message(body: dict) -> bytes:
-    """Encode a dict as an LSP message with Content-Length framing."""
-    text = json.dumps(body)
-    encoded = text.encode("utf-8")
-    header = f"Content-Length: {len(encoded)}\r\n\r\n"
-    return header.encode("ascii") + encoded
 
 
 # --- JSON error reporting -----------------------------------------------------

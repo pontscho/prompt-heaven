@@ -3,7 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""Inline the shared helper blocks from `_mcp_json.py` into the MCP servers.
+"""Inline the shared helper blocks from the canonical sources into the servers.
 
 The servers stay single-file (see `_mcp_json.py` for why an import was rejected),
 so the shared code is *generated into* each one instead. A region looks like:
@@ -14,7 +14,7 @@ so the shared code is *generated into* each one instead. A region looks like:
         ...
     # END GENERATED: 3f9a1c2b7d40
 
-Three rules earn their keep, and each one is a failure mode somebody has already
+Four rules earn their keep, and each one is a failure mode somebody has already
 shipped:
 
 * **The trailing hash is over the emitted body alone.** On the next run the body
@@ -27,6 +27,14 @@ shipped:
   quietly stops being maintained is the whole failure this mechanism exists to
   prevent.
 * **A file with no region at all is fine.** Servers are converted one at a time.
+* **The source named on the BEGIN line SELECTS the block map.** There is more
+  than one canonical file -- see `CANONICAL_SOURCES` -- and each one is a
+  domain, not a shelf: a name is resolved only against the source its own
+  region names, so a marker asking `_mcp_json.py` for an LSP block is refused
+  rather than quietly served out of the other file. The registry is written
+  down by hand instead of globbed from `_mcp_*.py`, because a glob would let an
+  unrelated file become a generation source by merely existing, and the marker
+  naming it would look exactly as legitimate as the ones that belong.
 
 Paths are resolved from `__file__`, so `python3 ../../Scripts/amalgamate.py`
 works from any working directory, and `resolve()` follows a symlink to the real
@@ -48,7 +56,7 @@ import sys
 import textwrap
 import tokenize
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Collection, Dict, List, NamedTuple, Optional, Set, Tuple
 
 BUILTIN_NAMES = frozenset(dir(builtins))
 
@@ -57,12 +65,19 @@ END_PREFIX = "# END GENERATED:"
 TARGET_GLOB = "mcp-*.py"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-CANONICAL = SCRIPTS_DIR / "_mcp_json.py"
+
+# The canonical sources, one per DOMAIN, named explicitly on purpose: a glob
+# over `_mcp_*.py` would silently promote the next helper file somebody drops
+# into Scripts/ to a generation source, and a region naming it would read as
+# legitimate as any other. Adding a source is a deliberate edit here.
+CANONICAL_NAMES = ("_mcp_json.py", "_mcp_lsp.py", "_mcp_paging.py")
+CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 
 
 class Region(NamedTuple):
     """One generated region located in a target file."""
 
+    source: str         # the canonical file its names are resolved against
     names: List[str]
     begin: int          # 0-based index of the BEGIN line
     end: int            # 0-based index of the END line
@@ -93,6 +108,18 @@ def load_blocks(path: Path) -> Dict[str, str]:
     if not path.is_file():
         raise SystemExit(f"{path}: not a file")
     return load_blocks_text(path.name, path.read_text(encoding="utf-8"))
+
+
+def load_all_blocks() -> Dict[str, Dict[str, str]]:
+    """Map every canonical FILENAME to its own block map.
+
+    The two levels are the whole of multi-source support: a region names a
+    source, and only that source's names are in scope for it. Flattening these
+    into one namespace would make a marker's source field decorative, and the
+    first collision between two domains would resolve to whichever file loaded
+    last -- a silent choice nobody wrote down.
+    """
+    return {name: load_blocks(path) for name, path in CANONICAL_SOURCES.items()}
 
 
 def load_blocks_text(label: str, text: str) -> Dict[str, str]:
@@ -168,7 +195,16 @@ def host_provides(text: str) -> Set[str]:
     return provided
 
 
-def parse_names(marker: str, label: str, lineno: int) -> List[str]:
+def parse_names(marker: str, label: str, lineno: int,
+                known: Collection[str]) -> Tuple[str, List[str]]:
+    """Split a BEGIN marker into (source filename, requested names).
+
+    *known* is the set of canonical filenames in play -- normally the keys of
+    `load_all_blocks()`. An unrecognised source is refused by NAME and the
+    refusal lists what is on offer: the reader of that message is somebody who
+    just mistyped a filename or invented one, and a bare "unknown source" would
+    send them to the generator's source to find out what the alternatives are.
+    """
     spec = marker[len(BEGIN_PREFIX):].strip()
     if "::" not in spec:
         raise SystemExit(
@@ -176,39 +212,153 @@ def parse_names(marker: str, label: str, lineno: int) -> List[str]:
             f"'{BEGIN_PREFIX} <source> :: <name>[, <name>...]', got {marker!r}"
         )
     source, listed = spec.split("::", 1)
-    if source.strip() != CANONICAL.name:
+    source = source.strip()
+    if source not in known:
         raise SystemExit(
-            f"{label}:{lineno}: unknown source {source.strip()!r}; "
-            f"only {CANONICAL.name} is generated"
+            f"{label}:{lineno}: unknown source {source!r}; "
+            f"the generated sources are {', '.join(sorted(known))}"
         )
     names = [n.strip() for n in listed.split(",") if n.strip()]
     if not names:
         raise SystemExit(f"{label}:{lineno}: the region lists no names")
-    return names
+    return source, names
 
 
-def render(names: List[str], blocks: Dict[str, str], indent: str = "") -> str:
+def block_is_tab_safe(block: str) -> bool:
+    """True when *block*'s indentation is purely STRUCTURAL, so tabs can carry it.
+
+    Re-indenting is only safe where every leading run of whitespace means "one
+    more nesting level". Where it means "line this token up under that one",
+    a tab puts the code in a column nobody chose -- and the reader of a
+    generated region is the least likely person to notice.
+
+    Two independent checks, and a block must pass both, because they fail on
+    different halves of the same hazard:
+
+    * **No implicit line join.** A physical newline while a bracket is open is
+      the shape that produces alignment in the first place. Decided with
+      `tokenize`, which is already how markers are found.
+    * **Every indent is a whole 4-space level.** A leading run that is not a
+      multiple of four is alignment by arithmetic, wherever it came from --
+      including inside a string, where the tokenizer sees one atom and has
+      nothing to say.
+
+    Anything unprovable is unsafe: a tokenizer failure, a stray tab, a
+    backslash continuation. Of the canonical blocks exactly one fails --
+    `_rows_note`, whose `else` aligns under an open paren three times.
+    """
+    lines = block.splitlines()
+    for line in lines:
+        if not line.strip():
+            continue
+        lead = line[:len(line) - len(line.lstrip())]
+        if "\t" in lead or len(lead) % 4:
+            return False
+        if line.rstrip().endswith("\\"):
+            return False
+    try:
+        depth = 0
+        for tok in tokenize.generate_tokens(io.StringIO(block).readline):
+            if tok.type == tokenize.OP:
+                if tok.string in "([{":
+                    depth += 1
+                elif tok.string in ")]}":
+                    depth -= 1
+            elif tok.type == tokenize.NL and depth > 0:
+                return False
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return False
+    return True
+
+
+def to_tabs(block: str) -> str:
+    """Rewrite each 4-space indent LEVEL as one tab. Leading whitespace only.
+
+    Only ever called on a block `block_is_tab_safe` has cleared, so the integer
+    division cannot silently drop a remainder: there is none.
+    """
+    out = []
+    for line in block.splitlines(keepends=True):
+        body = line.lstrip(" ")
+        out.append("\t" * ((len(line) - len(body)) // 4) + body)
+    return "".join(out)
+
+
+def host_indent(text: str) -> str:
+    """'tab' or 'space' -- the host's own convention, read off its INDENT tokens.
+
+    The marker's own column cannot answer this: a module-level region sits at
+    column 0 and carries no signal at all, and that is the majority of them.
+    A host that cannot be tokenized reads as 'space', which is the status quo
+    and therefore the change-nothing answer.
+    """
+    tabs = spaces = 0
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.INDENT:
+                if tok.string.startswith("\t"):
+                    tabs += 1
+                else:
+                    spaces += 1
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return "space"
+    return "tab" if tabs > spaces else "space"
+
+
+def render(source: str, names: List[str], blocks: Dict[str, str],
+           indent: str = "", tabs: bool = False, label: str = "") -> str:
     """Emit the named blocks, each line prefixed with *indent*.
+
+    *blocks* is the block map of *source* alone, and *source* is carried only
+    so the refusal can name the file that was actually asked. A name defined in
+    a DIFFERENT canonical file must not resolve here: crossing that line is how
+    a JSON helper would end up pasted in on the strength of a marker that says
+    LSP, and the region would look correct in every server that carries it.
 
     The prefix is taken from the BEGIN marker's own column, which is what lets a
     region sit inside a class body: `_result` and `_error` are byte-identical
-    methods in thirteen servers, and the marker's indentation is the only piece
+    methods in fourteen servers, and the marker's indentation is the only piece
     of information needed to place them.
 
-    This shifts a block sideways; it does NOT re-indent the block internally, so
-    a target that indents with TABS cannot host a space-indented block. That is a
-    refusal rather than a gap: converting leading spaces to tabs would also
-    convert ALIGNMENT to tabs -- `_rows_note`'s continuation line aligns its
-    `else` under an open paren -- and a tab there moves the code to a column
-    nobody chose. Two tab-indented servers therefore keep their own copies.
+    *tabs* re-indents the block for a TAB-indented host, one tab per 4-space
+    level, before the prefix is applied. **This refusal is PER BLOCK, and that
+    narrows an earlier decision that made it per FILE** (recorded as "tab
+    re-indentation refused"). The old reasoning was right about the block it
+    was drawn from and wrong to generalise: `_rows_note` aligns an `else` under
+    an open paren, so tabs would move it, but seven of the eight canonical
+    blocks contain no bracket continuation at all and their indentation is
+    purely structural. Refusing those cost `mcp-forge` three hand copies that
+    were byte-identical to the canonical text modulo the indent character.
+    `block_is_tab_safe` now decides it mechanically, per block, and a block it
+    cannot clear is refused BY NAME rather than quietly emitted with spaces --
+    a file mixing both is worse than either.
+
+    `mcp-webfetch` stays out, and NOT over indentation: its `_result` annotates
+    `result: dict` where the canonical says `result: Any`, and its `_bool_param`
+    is an ALLOW-list where this one is a deny-list, so an unrecognised string
+    reads False there and True here. Those are body and behaviour differences;
+    they would survive any amount of re-indenting.
     """
+    where = f"{label}: " if label else ""
     out = []
     for name in names:
         if name not in blocks:
             raise SystemExit(
-                f"{CANONICAL.name} defines no top-level {name!r}"
+                f"{where}{source} defines no top-level {name!r}"
             )
-        out.append(blocks[name].rstrip("\n"))
+        body = blocks[name]
+        if tabs:
+            if not block_is_tab_safe(body):
+                raise SystemExit(
+                    f"{where}{source} :: {name!r} cannot be generated into a "
+                    f"TAB-indented host: some of its indentation is ALIGNMENT, "
+                    f"not nesting -- an implicit line join, or a leading run "
+                    f"that is not a whole 4-space level -- and a tab there "
+                    f"moves the code to a column nobody chose. Keep this one "
+                    f"as a hand copy in this file and say why"
+                )
+            body = to_tabs(body)
+        out.append(body.rstrip("\n"))
     # Two blank lines between top-level definitions, one between members of a
     # class -- PEP 8's own split, and the indent already says which we are in.
     separator = "\n\n" if indent else "\n\n\n"
@@ -243,15 +393,20 @@ def marker_comments(label: str, text: str) -> List[Tuple[int, str]]:
     return found
 
 
-def audit(path: Path, blocks: Dict[str, str]) -> List[Region]:
+def audit(path: Path, sources: Dict[str, Dict[str, str]]) -> List[Region]:
     """Locate and classify every generated region in *path*."""
     if not path.is_file():
         raise SystemExit(f"{path}: not a file")
-    return audit_text(path.name, path.read_text(encoding="utf-8"), blocks)
+    return audit_text(path.name, path.read_text(encoding="utf-8"), sources)
 
 
-def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
+def audit_text(label: str, text: str,
+               sources: Dict[str, Dict[str, str]]) -> List[Region]:
     """Locate and classify every generated region in *text*.
+
+    *sources* maps a canonical FILENAME to that file's block map -- what
+    `load_all_blocks()` returns. Each region is resolved against the one entry
+    its own BEGIN marker names, never against the union.
 
     Split from `audit` so the region logic can be exercised on a synthetic
     source without writing a file: the fleet's negative-control rule wants a
@@ -263,9 +418,11 @@ def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
     """
     lines = text.splitlines(keepends=True)
     provided = host_provides(text)
+    tabs = host_indent(text) == "tab"
     regions: List[Region] = []
     open_at: Optional[int] = None
     open_names: List[str] = []
+    open_source = ""
 
     open_indent = ""
     for idx, comment in marker_comments(label, text):
@@ -276,13 +433,14 @@ def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
                     f"line {open_at + 1}"
                 )
             open_at = idx
-            open_names = parse_names(comment, label, idx + 1)
+            open_source, open_names = parse_names(comment, label, idx + 1, sources)
             raw = lines[idx]
             open_indent = raw[:len(raw) - len(raw.lstrip())]
         else:
             if open_at is None:
                 raise SystemExit(f"{label}:{idx + 1}: END without a BEGIN")
-            wanted = render(open_names, blocks, open_indent)
+            wanted = render(open_source, open_names, sources[open_source],
+                            open_indent, tabs=tabs, label=label)
             missing = sorted(free_names(wanted) - provided)
             if missing:
                 raise SystemExit(
@@ -292,6 +450,7 @@ def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
                     f"host if it is not"
                 )
             regions.append(Region(
+                source=open_source,
                 names=open_names,
                 begin=open_at,
                 end=idx,
@@ -323,7 +482,8 @@ def apply_regions(path: Path, regions: List[Region]) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Inline the shared _mcp_json.py blocks into the MCP servers."
+        description="Inline the shared blocks from the canonical sources "
+                    f"({', '.join(CANONICAL_NAMES)}) into the MCP servers."
     )
     ap.add_argument("targets", nargs="*", type=Path,
                     help=f"files to process (default: Scripts/{TARGET_GLOB})")
@@ -333,13 +493,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="overwrite a hand-edited region instead of refusing")
     args = ap.parse_args(argv)
 
-    blocks = load_blocks(CANONICAL)
+    sources = load_all_blocks()
     targets = args.targets or sorted(SCRIPTS_DIR.glob(TARGET_GLOB))
 
     stale = refused = 0
     for path in targets:
         pending = []
-        for region in audit(path, blocks):
+        for region in audit(path, sources):
             if region.state == "ok":
                 continue
             if region.state == "hand-edited" and not args.force:
