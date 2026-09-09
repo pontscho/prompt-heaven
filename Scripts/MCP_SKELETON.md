@@ -361,12 +361,34 @@ if isinstance(params, str):
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"'params' was a string but not valid JSON: {exc}. "
+            f"Near the failure: {_json_error_window(params, exc.pos)}. "
             "Pass params as an object, not a JSON-encoded string."
         )
 if not isinstance(params, dict):
     raise ValueError(f"'params' must be an object or JSON-encoded object string; "
                      f"got {type(params).__name__}.")
 ```
+
+The offset the exception carries (`char 1530`) is unusable on its own: the
+caller that hand-encoded the string cannot count to it, so its only recovery is
+to re-emit the whole payload and hope the second encode is luckier. Quoting the
+text around `exc.pos` names the one broken escape instead — and `repr` is the
+load-bearing part, because the usual defect is a quote escaped one level too
+shallow, which a raw slice prints identically to a correct one:
+
+```python
+def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
+    start = max(0, pos - radius)
+    end = min(len(text), pos + radius)
+    lead = "..." if start > 0 else ""
+    tail = "..." if end < len(text) else ""
+    return f"{lead}{text[start:end]!r}{tail}"
+```
+
+Do **not** go further and try to *repair* the broken JSON. The failure shape is
+ambiguous (a prematurely closed string is indistinguishable from a genuinely
+short value), and on a write path a wrong guess silently commits corrupted
+content to a file — strictly worse than the bounce.
 
 > The `force-error` smoke check still passes: it sends a non-dict at the JSON-RPC
 > `params` level (not `arguments`/inner-`params`), so `params.get(...)` in the

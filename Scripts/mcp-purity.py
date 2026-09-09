@@ -565,6 +565,22 @@ def _cap_result(result: dict, params: dict) -> dict:
     return out
 
 
+def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
+    """Return a repr'd slice of *text* centred on *pos*.
+
+    A JSONDecodeError reports a character offset ("char 1530"), which the
+    caller that produced the string cannot count to; the one broken escape is
+    only actionable if it is shown. ``repr`` is what makes it visible -- the
+    typical defect is a quote escaped one level too shallow, and a raw slice
+    renders that identically to a correct one.
+    """
+    start = max(0, pos - radius)
+    end = min(len(text), pos + radius)
+    lead = "..." if start > 0 else ""
+    tail = "..." if end < len(text) else ""
+    return f"{lead}{text[start:end]!r}{tail}"
+
+
 def _canonical_function(function: str) -> str:
     return FUNCTION_ALIASES.get(function, function)
 
@@ -587,6 +603,7 @@ def _resolve_aliases(params: Any, function: Optional[str] = None) -> dict:
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"'params' was a string but not valid JSON: {exc}. "
+                f"Near the failure: {_json_error_window(params, exc.pos)}. "
                 "Pass params as an object, not a JSON-encoded string."
             )
     if not isinstance(params, dict):
