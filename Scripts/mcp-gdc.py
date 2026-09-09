@@ -58,6 +58,8 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
     return value
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _bool_param
 def _bool_param(value, default=False):
     """Coerce a possibly-stringy value to bool.
 
@@ -71,6 +73,7 @@ def _bool_param(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
+# END GENERATED: df133cd7c299
 
 
 # ============================================================

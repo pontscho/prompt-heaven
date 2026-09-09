@@ -127,31 +127,47 @@ def _offset(args: dict) -> int:
         return 0
 
 
-def _rows_note(start: int, shown: int, total: int) -> str:
-    """Record accounting for a row-shaped payload; goes on its LAST line.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _rows_note
+def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
+    """Row accounting for a row-shaped payload; goes on its LAST line.
 
-    <total> is EXACT here: the search response is parsed into a complete list
-    before any of it is rendered, so this server never has to guess a count for
-    THIS payload. (It cannot know the size of a documentation answer in advance
-    either, but that payload is not row-shaped and never reaches this line.)
+    Display indices are 1-based inclusive, which makes the 1-based last row equal
+    to the 0-based ``offset`` of the next one — so the hint is literally the value
+    to pass back. ``offset=`` is therefore only ever emitted for a payload whose
+    handler ACCEPTS ``offset``: a resume hint the handler would reject is worse
+    than no hint at all, so block-shaped payloads get a character cap and no hint.
 
-    Display indices are 1-based inclusive, which makes the 1-based last record
-    equal to the 0-based ``offset`` of the next one — so the hint is literally the
-    value to pass back. ``offset=`` is emitted only when records really remain: a
-    resume hint that would return nothing is worse than no hint.
+    ``exact=False`` is for a total that is a LOWER BOUND — a scan curtailed at a
+    ceiling, where the files it never opened may hold more matches. It says so
+    rather than presenting the count it happens to have reached as the total.
+
+    The four canonical forms. This WORDING is fleet-wide, and keeping it from
+    drifting is the whole reason the function is shared rather than reimplemented
+    once per server:
+        [3 rows]                                        whole set delivered
+        [showing rows 1-20 of 347; offset=20 for more]  rows remain
+        [showing rows 5-6 of 6; no rows left]           window ends at the end
+        [no rows at offset 99 of 6]                     offset past the end
+    A branch no current caller can reach is not dead code here. It is the wording
+    the next caller must not invent differently, and each server reaches a
+    different subset — see the calling pager for which ones and why.
     """
     last = start + shown
-    if shown == 0:
-        # Spelled out rather than as a 1-based range, which would invert
-        # ("rows 100-99") when the caller offsets past the end.
-        return (f"[no rows at offset {start} of {total}]" if start
+    total_disp = (str(total) if exact
+                  else f"{total}+ (scan stopped at the ceiling; true total unknown)")
+    if shown <= 0:
+        # Spelled out rather than as a 1-based range, which would INVERT
+        # ("rows 100-99 of 10") when the caller offsets past the end.
+        return (f"[no rows at offset {start} of {total_disp}]" if start
                 else f"[{total} rows]")
-    if last < total:
-        return (f"[showing rows {start + 1}-{last} of {total}; "
+    if last < total or not exact:
+        return (f"[showing rows {start + 1}-{last} of {total_disp}; "
                 f"offset={last} for more]")
     if start > 0:
         return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
     return f"[{total} row{'s' if total != 1 else ''}]"
+# END GENERATED: ec97ab4325e5
 
 
 _FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
@@ -327,8 +343,15 @@ def _format_search_results(results: list, offset: int = 0,
     description, so a handful of verbose libraries can outgrow the ceiling on
     their own. ``char_budget`` of 0 means unlimited.
 
-    The note is emitted only when the view is actually partial; a full list needs
-    no accounting line, and one on every reply is pure per-call boilerplate.
+    Which of _rows_note's four forms context7 reaches, and why the first is not
+    one of them: the note is emitted only when the view is actually partial, so a
+    complete list returns above it — a full list needs no accounting line, and one
+    on every reply is pure per-call boilerplate. The three partial forms are all
+    live, and the <total> each of them prints is EXACT: the search response is
+    parsed into a complete list before any of it is rendered, so this server never
+    has to guess a count for THIS payload. (It cannot know the size of a
+    documentation answer in advance either, but that payload is not row-shaped and
+    never reaches this line.)
     """
     if not results:
         return "No documentation libraries found matching your query."

@@ -66,6 +66,8 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
     return value
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _bool_param
 def _bool_param(value, default=False):
     """Coerce a possibly-stringy value to bool.
 
@@ -79,6 +81,7 @@ def _bool_param(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
+# END GENERATED: df133cd7c299
 
 
 # ============================================================
@@ -133,31 +136,47 @@ def _offset(args: dict) -> int:
         return 0
 
 
-def _rows_note(start: int, shown: int, total: int) -> str:
-    """Line accounting for a line-shaped payload; goes on its LAST line.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _rows_note
+def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
+    """Row accounting for a row-shaped payload; goes on its LAST line.
 
-    <total> is EXACT and always known here: read_until_prompt() buffers the whole
-    PTY reply before any handler sees it, so this server never streams and never
-    has to guess a count. A server that CANNOT know its total must SAY so on this
-    line instead of inventing a number.
+    Display indices are 1-based inclusive, which makes the 1-based last row equal
+    to the 0-based ``offset`` of the next one — so the hint is literally the value
+    to pass back. ``offset=`` is therefore only ever emitted for a payload whose
+    handler ACCEPTS ``offset``: a resume hint the handler would reject is worse
+    than no hint at all, so block-shaped payloads get a character cap and no hint.
 
-    Display indices are 1-based inclusive, which makes the 1-based last line
-    equal to the 0-based ``offset`` of the next one — so the hint is literally the
-    value to pass back. ``offset=`` is emitted only when lines really remain: a
-    resume hint that would return nothing is worse than no hint.
+    ``exact=False`` is for a total that is a LOWER BOUND — a scan curtailed at a
+    ceiling, where the files it never opened may hold more matches. It says so
+    rather than presenting the count it happens to have reached as the total.
+
+    The four canonical forms. This WORDING is fleet-wide, and keeping it from
+    drifting is the whole reason the function is shared rather than reimplemented
+    once per server:
+        [3 rows]                                        whole set delivered
+        [showing rows 1-20 of 347; offset=20 for more]  rows remain
+        [showing rows 5-6 of 6; no rows left]           window ends at the end
+        [no rows at offset 99 of 6]                     offset past the end
+    A branch no current caller can reach is not dead code here. It is the wording
+    the next caller must not invent differently, and each server reaches a
+    different subset — see the calling pager for which ones and why.
     """
     last = start + shown
-    if shown == 0:
-        # Spelled out rather than as a 1-based range, which would invert
-        # ("rows 100-99") when the caller offsets past the end.
-        return (f"[no rows at offset {start} of {total}]" if start
+    total_disp = (str(total) if exact
+                  else f"{total}+ (scan stopped at the ceiling; true total unknown)")
+    if shown <= 0:
+        # Spelled out rather than as a 1-based range, which would INVERT
+        # ("rows 100-99 of 10") when the caller offsets past the end.
+        return (f"[no rows at offset {start} of {total_disp}]" if start
                 else f"[{total} rows]")
-    if last < total:
-        return (f"[showing rows {start + 1}-{last} of {total}; "
+    if last < total or not exact:
+        return (f"[showing rows {start + 1}-{last} of {total_disp}; "
                 f"offset={last} for more]")
     if start > 0:
         return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
     return f"[{total} row{'s' if total != 1 else ''}]"
+# END GENERATED: ec97ab4325e5
 
 
 def _page_lines(text: str, offset: int, max_chars: int) -> str:
@@ -168,10 +187,16 @@ def _page_lines(text: str, offset: int, max_chars: int) -> str:
     symbol name is worse than a missing line. So the ceiling is spent by dropping
     whole lines, and the closing line says where to resume.
 
-    The note is emitted ONLY when the view is actually partial. Unlike a SQL row
-    count, the line count of a debugger reply is not something the caller asked
+    Which of _rows_note's four forms lldb reaches, and why the first is not one of
+    them: the note is emitted ONLY when the view is actually partial. Unlike a SQL
+    row count, the line count of a debugger reply is not something the caller asked
     for, and a bare "[42 rows]" appended to every single answer is pure per-call
-    boilerplate — the exact cost this convention exists to cut.
+    boilerplate — the exact cost this convention exists to cut. The three partial
+    forms are all live, and the <total> each prints is EXACT and always known:
+    read_until_prompt() buffers the whole PTY reply before any handler sees it, so
+    this server never streams and never has to guess a count — which is why it
+    never passes ``exact=False``, the form reserved for a server that CANNOT know
+    its total and must SAY so instead of inventing a number.
     """
     lines = text.split("\n")
     total = len(lines)

@@ -56,6 +56,8 @@ PARAM_ALIASES = {
 }
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _bool_param
 def _bool_param(value, default=False):
     """Coerce a possibly-stringy value to bool.
 
@@ -69,6 +71,7 @@ def _bool_param(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
+# END GENERATED: df133cd7c299
 
 
 def _resolve_aliases(params: Any) -> dict:
@@ -109,12 +112,15 @@ log = logging.getLogger("mcp-lua-lsp")
 # LSP framing
 # ============================================================
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: encode_lsp_message
 def encode_lsp_message(body: dict) -> bytes:
     """Encode a dict as an LSP message with Content-Length framing."""
     text = json.dumps(body)
     encoded = text.encode("utf-8")
     header = f"Content-Length: {len(encoded)}\r\n\r\n"
     return header.encode("ascii") + encoded
+# END GENERATED: c99fbaf62f6b
 
 
 async def read_lsp_message(reader: asyncio.StreamReader) -> Optional[dict]:

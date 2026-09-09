@@ -28,11 +28,25 @@ per-server `FUNCTION_ALIASES` table, so sharing it means sharing a promise about
 the host's globals. Until that promise has a form and a check, it stays out.
 
 Every block below was lifted VERBATIM from `Scripts/mcp-purity.py`, which is why
-each region's first generated diff is four added marker lines and zero changed
-body lines. Where purity's copy is the fleet's superset (`_rows_note`) that is
-noted on the block; where a server's variant is deliberately different it simply
-never asks for the block (`mcp-webfetch`'s allow-list `_bool_param`, `mcp-tshark`'s
-`(params, key, default)` signature, `mcp-inspect`'s raising `_int_param`).
+each region's first generated diff is marker lines only, with zero changed body
+lines — the evidence that the lift was faithful. `_rows_note` is the one
+exception, and deliberately: purity's copy was the fleet's superset but its
+docstring named purity's own callers, which would have been misleading prose in
+the four other servers that share it. The caller-specific half now lives on
+purity's `_row_page`, where it describes the code that actually decides it.
+
+Where a server's variant is deliberately different it simply never asks for the
+block: `mcp-webfetch`'s allow-list `_bool_param` (an unrecognised string reads
+False there and True here, and its flags are `allow_private` and `overwrite`),
+`mcp-tshark`'s `(params, key, default)` signature, and `mcp-inspect`'s
+`_int_param`, which takes a parameter NAME and raises where this one takes a
+default and falls back.
+
+**Annotations are not free.** A block whose signature says `value: Any` needs
+`Any` in the HOST's namespace, evaluated at def time, so a server that does not
+import it dies at startup. That is a host dependency the contract above does not
+yet cover and nothing yet checks, which is why the blocks here stay unannotated
+even though four servers annotate their copies.
 """
 
 import json
@@ -70,31 +84,24 @@ def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
 
     Display indices are 1-based inclusive, which makes the 1-based last row equal
     to the 0-based ``offset`` of the next one — so the hint is literally the value
-    to pass back. ``offset=`` is only ever emitted by handlers that ACCEPT
-    ``offset`` (see HANDLER_ACCEPTED_PARAMS); a resume hint the handler would
-    reject is worse than no hint, so the block-shaped payloads get the character
-    cap and no hint at all.
+    to pass back. ``offset=`` is therefore only ever emitted for a payload whose
+    handler ACCEPTS ``offset``: a resume hint the handler would reject is worse
+    than no hint at all, so block-shaped payloads get a character cap and no hint.
 
-    ``exact=False`` is for the one payload whose total is a LOWER BOUND:
-    search_for_pattern stops scanning when the ceiling is reached, so the files
-    it never opened may hold more matches. It says so rather than presenting the
-    count it happens to have reached as the total.
+    ``exact=False`` is for a total that is a LOWER BOUND — a scan curtailed at a
+    ceiling, where the files it never opened may hold more matches. It says so
+    rather than presenting the count it happens to have reached as the total.
 
-    The four canonical forms, shared verbatim with the psql/jenkins twins:
-        [3 rows]                                       whole set delivered
+    The four canonical forms. This WORDING is fleet-wide, and keeping it from
+    drifting is the whole reason the function is shared rather than reimplemented
+    once per server:
+        [3 rows]                                        whole set delivered
         [showing rows 1-20 of 347; offset=20 for more]  rows remain
         [showing rows 5-6 of 6; no rows left]           window ends at the end
         [no rows at offset 99 of 6]                     offset past the end
-    The first form is not reached from purity's callers, ON PURPOSE and by two
-    separate routes: every payload that can carry this line already states its
-    count in the header above it, so _row_page returns an EMPTY note for a
-    complete set rather than spend a line restating the count, and the one caller
-    that builds the note itself (search_for_pattern) only does so when the scan
-    was curtailed or an offset was given. It cannot be reached with
-    ``exact=False`` either, since a curtailed scan always keeps at least one row
-    (see the budget guard in _row_page and the collection loop). The branch stays
-    because the WORDING is fleet-wide and must not drift if a caller ever does
-    need it.
+    A branch no current caller can reach is not dead code here. It is the wording
+    the next caller must not invent differently, and each server reaches a
+    different subset — see the calling pager for which ones and why.
     """
     last = start + shown
     total_disp = (str(total) if exact

@@ -591,28 +591,47 @@ def _int_param(value: Any, default: int) -> int:
         return default
 
 
-def _rows_note(start: int, shown: int, total: int) -> str:
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _rows_note
+def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
     """Row accounting for a row-shaped payload; goes on its LAST line.
 
-    Display indices are 1-based inclusive, which makes the 1-based last row
-    equal to the 0-based offset of the next one — so `offset=` is literally the
-    value to pass back. Only emitted with `offset=` when rows really remain: a
-    resume hint the handler would ignore is worse than no hint, and every
-    function that can emit this line accepts `offset` (get_build_log takes it as
-    a synonym of start_line, for exactly that reason).
+    Display indices are 1-based inclusive, which makes the 1-based last row equal
+    to the 0-based ``offset`` of the next one — so the hint is literally the value
+    to pass back. ``offset=`` is therefore only ever emitted for a payload whose
+    handler ACCEPTS ``offset``: a resume hint the handler would reject is worse
+    than no hint at all, so block-shaped payloads get a character cap and no hint.
+
+    ``exact=False`` is for a total that is a LOWER BOUND — a scan curtailed at a
+    ceiling, where the files it never opened may hold more matches. It says so
+    rather than presenting the count it happens to have reached as the total.
+
+    The four canonical forms. This WORDING is fleet-wide, and keeping it from
+    drifting is the whole reason the function is shared rather than reimplemented
+    once per server:
+        [3 rows]                                        whole set delivered
+        [showing rows 1-20 of 347; offset=20 for more]  rows remain
+        [showing rows 5-6 of 6; no rows left]           window ends at the end
+        [no rows at offset 99 of 6]                     offset past the end
+    A branch no current caller can reach is not dead code here. It is the wording
+    the next caller must not invent differently, and each server reaches a
+    different subset — see the calling pager for which ones and why.
     """
     last = start + shown
-    if shown <= 0 and start > 0:
-        # Offset past the end. `rows {start+1}-{last}` would print an INVERTED
-        # range here (`rows 100-99 of 10`), which reads as corruption; the plain
-        # statement is the only honest shape.
-        return f"[no rows at offset {start} of {total}]"
-    if last < total:
-        return (f"[showing rows {start + 1}-{last} of {total}; "
+    total_disp = (str(total) if exact
+                  else f"{total}+ (scan stopped at the ceiling; true total unknown)")
+    if shown <= 0:
+        # Spelled out rather than as a 1-based range, which would INVERT
+        # ("rows 100-99 of 10") when the caller offsets past the end.
+        return (f"[no rows at offset {start} of {total_disp}]" if start
+                else f"[{total} rows]")
+    if last < total or not exact:
+        return (f"[showing rows {start + 1}-{last} of {total_disp}; "
                 f"offset={last} for more]")
     if start > 0:
         return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
-    return f"[{total} rows]"
+    return f"[{total} row{'s' if total != 1 else ''}]"
+# END GENERATED: ec97ab4325e5
 
 
 def _row_window(rows: list, offset: int, limit: int) -> Tuple[list, str]:

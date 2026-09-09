@@ -314,31 +314,24 @@ def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
 
     Display indices are 1-based inclusive, which makes the 1-based last row equal
     to the 0-based ``offset`` of the next one — so the hint is literally the value
-    to pass back. ``offset=`` is only ever emitted by handlers that ACCEPT
-    ``offset`` (see HANDLER_ACCEPTED_PARAMS); a resume hint the handler would
-    reject is worse than no hint, so the block-shaped payloads get the character
-    cap and no hint at all.
+    to pass back. ``offset=`` is therefore only ever emitted for a payload whose
+    handler ACCEPTS ``offset``: a resume hint the handler would reject is worse
+    than no hint at all, so block-shaped payloads get a character cap and no hint.
 
-    ``exact=False`` is for the one payload whose total is a LOWER BOUND:
-    search_for_pattern stops scanning when the ceiling is reached, so the files
-    it never opened may hold more matches. It says so rather than presenting the
-    count it happens to have reached as the total.
+    ``exact=False`` is for a total that is a LOWER BOUND — a scan curtailed at a
+    ceiling, where the files it never opened may hold more matches. It says so
+    rather than presenting the count it happens to have reached as the total.
 
-    The four canonical forms, shared verbatim with the psql/jenkins twins:
-        [3 rows]                                       whole set delivered
+    The four canonical forms. This WORDING is fleet-wide, and keeping it from
+    drifting is the whole reason the function is shared rather than reimplemented
+    once per server:
+        [3 rows]                                        whole set delivered
         [showing rows 1-20 of 347; offset=20 for more]  rows remain
         [showing rows 5-6 of 6; no rows left]           window ends at the end
         [no rows at offset 99 of 6]                     offset past the end
-    The first form is not reached from purity's callers, ON PURPOSE and by two
-    separate routes: every payload that can carry this line already states its
-    count in the header above it, so _row_page returns an EMPTY note for a
-    complete set rather than spend a line restating the count, and the one caller
-    that builds the note itself (search_for_pattern) only does so when the scan
-    was curtailed or an offset was given. It cannot be reached with
-    ``exact=False`` either, since a curtailed scan always keeps at least one row
-    (see the budget guard in _row_page and the collection loop). The branch stays
-    because the WORDING is fleet-wide and must not drift if a caller ever does
-    need it.
+    A branch no current caller can reach is not dead code here. It is the wording
+    the next caller must not invent differently, and each server reaches a
+    different subset — see the calling pager for which ones and why.
     """
     last = start + shown
     total_disp = (str(total) if exact
@@ -354,7 +347,7 @@ def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
     if start > 0:
         return f"[showing rows {start + 1}-{last} of {total}; no rows left]"
     return f"[{total} row{'s' if total != 1 else ''}]"
-# END GENERATED: b9b4f5461f92
+# END GENERATED: ec97ab4325e5
 
 
 def _row_page(rows: List[str], offset: int = 0, head_limit: int = 0,
@@ -369,6 +362,15 @@ def _row_page(rows: List[str], offset: int = 0, head_limit: int = 0,
     when the whole set was delivered. ``exact=False`` marks a *rows* list that is
     itself only what a curtailed scan managed to collect, so the note reports the
     total as a lower bound instead of a fact.
+
+    Which of _rows_note's four forms purity reaches, and why the first is not one
+    of them: every payload that can carry the line already states its count in the
+    header above it, so a complete set returns an EMPTY note here rather than
+    spend a line restating it. `[N rows]` is unreachable with ``exact=False`` too,
+    since a curtailed scan always keeps at least one row — the guard below lets
+    the first row through unconditionally. The one caller that builds the note
+    itself, search_for_pattern, only does so when the scan was curtailed or an
+    offset was given.
     """
     total = len(rows)
     start = max(0, offset)
