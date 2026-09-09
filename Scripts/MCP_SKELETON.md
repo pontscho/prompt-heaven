@@ -8,6 +8,12 @@
 > Source of truth: distilled from `mcp-forge.py` (sync canonical) plus the
 > designed async variant for the LSP/subprocess ("A-family") servers.
 >
+> **Some of the plumbing below is no longer described here but *generated*.** The
+> named blocks in `Scripts/_mcp_json.py` are pasted into each server by
+> `Scripts/amalgamate.py`; for those, that file is the canonical source and this
+> one only explains the shape. §8 is the mechanism, and it is the first thing to
+> read before editing a server's helpers.
+>
 > **When you touch a server's plumbing, diff it against this file.** When this file
 > and the servers disagree, one of them is a bug — fix the bug, don't fork the style.
 
@@ -421,7 +427,97 @@ differs.
 
 ---
 
-## 8. Convergence checklist (per file)
+## 8. Generated regions — one source, fifteen copies, no import
+
+Some of the code above no longer lives in this file's copy of each server. It
+lives once in `Scripts/_mcp_json.py` and is **pasted into** each server by
+`python3 Scripts/amalgamate.py`. In a server the result looks like this, and it
+is the whole of the mechanism:
+
+```python
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
+    ...                                   # the function's text, pasted in
+# END GENERATED: 4c5e7e3f59cb
+```
+
+The `BEGIN` line is a **request**: *put the top-level `_json_error_window` from
+`_mcp_json.py` here.* The hex on the `END` line is a fingerprint of whatever
+currently sits between the markers.
+
+**Nothing is dynamic at run time.** The server is an ordinary self-contained
+file holding an ordinary function; Python never learns the generator exists,
+there is no import, no `sys.path` entry, and no build step — the pasted code is
+committed, so a fresh clone runs. This is why the trick exists at all: an
+imported sibling module would write `Scripts/__pycache__` into a tree four
+suites assert is empty, would need a `sys.path` entry the test harness's
+`spec_from_file_location` never adds, and would move the helpers out of the
+module attributes `tests/test_mcp_footprint.py` reaches for. Generating keeps
+every one of those properties and still leaves one place to edit.
+
+### The two things you actually do
+
+**Change a shared helper** — edit `Scripts/_mcp_json.py`, then:
+
+```
+$ python3 Scripts/amalgamate.py
+updated: mcp-purity.py [_json_error_window]
+```
+
+**Give a server a helper it does not have yet** — paste the two marker lines
+with an empty body, listing what you want, then run the generator; it fills the
+body in and writes the fingerprint:
+
+```python
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+# END GENERATED:
+```
+
+### If you edit inside a region
+
+You get refused, not overwritten:
+
+```
+$ python3 Scripts/amalgamate.py
+HAND-EDITED: mcp-purity.py [_json_error_window] -- recorded 4c5e7e3f59cb,
+found f36927863526; re-run with --force to discard the edit
+```
+
+Your edit stays on disk and the generator tells you where to go instead. That is
+the point of the fingerprint: neither party can silently eat the other's work.
+The file has exactly one writer — the same conclusion
+`docs/adr/0009-the-first-reader-is-a-cold-model.md` reached for the checkpoint
+file's table of contents.
+
+### The block contract
+
+A block may reference **only** builtins, the stdlib names `_mcp_json.py` itself
+imports, and its own arguments — never a name the host server defines. The near
+miss that made the rule necessary is `_canonical_function`: two lines, identical
+in three servers, but its body reads a per-server `FUNCTION_ALIASES` table, so
+sharing it would mean sharing a promise about the host's globals. It stays out
+until that promise has a form and a check.
+
+Three more properties worth knowing before you touch it:
+
+- **Markers are found with `tokenize`, `COMMENT` tokens only.** A marker quoted
+  inside a docstring is inert — necessarily, since `amalgamate.py`'s own
+  docstring carries a full `BEGIN`/`END` pair as its example, and a line scanner
+  would paste generated code into the middle of it.
+- **A `BEGIN` without an `END` is a hard error**, never a skip. A region that
+  quietly stops being maintained is the failure the whole mechanism prevents.
+- **A file with no region at all is fine.** Servers are converted one at a time,
+  and a server whose variant is deliberately different simply never asks for the
+  block — that is how `mcp-webfetch`'s inverted-polarity `_bool_param` (§7b) can
+  keep its own version while the others share one.
+
+`python3 Scripts/amalgamate.py --check` writes nothing and exits 1 if any region
+is stale; the `generated_region` suite does the same comparison in memory, so
+drift committed into a server turns the fleet red.
+
+---
+
+## 9. Convergence checklist (per file)
 
 - [ ] shebang + PEP-723 block (`dependencies = []` if stdlib-only; exact list otherwise)
 - [ ] `import logging`; module-level `log = logging.getLogger("SERVER_NAME")`; no `debug_log`, no `DEBUG`/`_log_file` globals
@@ -433,3 +529,4 @@ differs.
 - [ ] `_handle_tool_call` decodes a string `arguments` (JSON) before the dict guard (§7a)
 - [ ] param normalizer decodes a string `params` (JSON); every bool flag read via `_bool_param` (§7a/§7b)
 - [ ] `MARKDOWN_MODE` / subprocess `finally` cleanup left intact where present
+- [ ] every `# BEGIN GENERATED` region left to the generator, never hand-edited; `python3 Scripts/amalgamate.py --check` clean (§8)
