@@ -252,7 +252,9 @@ def _resolve_aliases(params: Any) -> dict:
     return resolved
 
 
-def _bool_param(value: Any, default: bool = False) -> bool:
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _bool_param
+def _bool_param(value, default=False):
     """Coerce a possibly-stringy value to bool.
 
     The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
@@ -265,6 +267,7 @@ def _bool_param(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
+# END GENERATED: df133cd7c299
 
 
 def _normalize_project(raw: Optional[str]) -> Optional[str]:
@@ -606,12 +609,15 @@ def _max_answer_chars(params: dict) -> int:
         return DEFAULT_MAX_ANSWER_CHARS
 
 
-def _int_param(value: Any, default: int) -> int:
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _int_param
+def _int_param(value, default: int) -> int:
     """Coerce a wire value to int, falling back instead of raising."""
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+# END GENERATED: 6c59c479f140
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).

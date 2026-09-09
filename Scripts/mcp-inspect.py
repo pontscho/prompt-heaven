@@ -117,7 +117,14 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
 # END GENERATED: 4c5e7e3f59cb
 
 
-def _bool_param(value: Any, default: bool = False) -> bool:
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _bool_param
+def _bool_param(value, default=False):
+    """Coerce a possibly-stringy value to bool.
+
+    The wire frequently carries booleans as strings ("false"/"0"/"no"), where a
+    naive bool("false") would wrongly yield True.
+    """
     if isinstance(value, bool):
         return value
     if value is None:
@@ -125,6 +132,7 @@ def _bool_param(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
+# END GENERATED: df133cd7c299
 
 
 def _int_param(value: Any, name: str) -> int:

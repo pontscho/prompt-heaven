@@ -40,10 +40,13 @@ per-server `FUNCTION_ALIASES` table, so sharing it means sharing a promise about
 the host's globals. Until that promise has a form and a check, it stays out.
 
 Every block below was lifted VERBATIM from `Scripts/mcp-purity.py`, which is why
-each region's first generated diff is marker lines only, with zero changed body
+a LIFT's first generated diff is marker lines only, with zero changed body
 lines — the evidence that the lift was faithful. (The fleet's one deliberate
 exception to that rule was `_rows_note`, and the account of it travelled with
-the block to `_mcp_paging.py`, where the code it describes now lives.)
+the block to `_mcp_paging.py`, where the code it describes now lives.) An
+ADOPTION claims nothing of the kind: a server whose copy DIFFERED shows every
+difference as a changed body line, which is precisely why it has to be declared
+instead of read as a lift.
 
 Where a server's variant is deliberately different it simply never asks for the
 block: `mcp-webfetch`'s allow-list `_bool_param` (an unrecognised string reads
@@ -52,21 +55,28 @@ False there and True here, and its flags are `allow_private` and `overwrite`),
 `_int_param`, which takes a parameter NAME and raises where this one takes a
 default and falls back.
 
-`mcp-webfetch` is the only server hosting NO region, and INDENTATION IS NOT WHY
--- the emitter re-indents for a tab host now, and `mcp-forge` proved it by
-adopting three copies with a marker-line-only diff. Webfetch is out on two body
-differences that would survive any amount of re-indenting: the `_bool_param`
-polarity above, and a `_result` that annotates `result: dict` where this one
-says `result: Any`. Its `_error` alone IS byte-identical modulo the indent
-character, so that one is a live candidate whenever somebody wants to split the
-pair; nobody has asked, and a region holding half of a pair that reads as a
-pair is a decision, not a cleanup.
+`mcp-webfetch` hosts two of these blocks in tabs, `_json_error_window` and
+`_int_param`, and INDENTATION IS NOT WHY it keeps the rest -- the emitter
+re-indents a block whose indentation is purely structural, and `mcp-forge`
+proved that by adopting three copies with a marker-line-only diff. What webfetch
+declines, it declines on body differences that survive any amount of
+re-indenting: the `_bool_param` polarity above, and a `_result` that annotates
+`result: dict` where this one says `result: Any`. Its `_error` alone IS
+byte-identical modulo the indent character, so that one is a live candidate
+whenever somebody wants to split the pair; nobody has asked, and a region
+holding half of a pair that reads as a pair is a decision, not a cleanup.
 
 **Annotations are not free.** A block whose signature says `value: Any` needs
 `Any` in the HOST's namespace, evaluated at def time, so a server that does not
-import it dies at startup. That is a host dependency the contract above does not
-yet cover and nothing yet checks, which is why the blocks here stay unannotated
-even though four servers annotate their copies.
+import it dies at startup. A builtin annotation has no such price -- `text: str`
+and `default: int` appear above -- and `Any` is what a wire value would want, so
+`value` stays bare in both coercions above. The generator now computes that
+dependency rather than trusting it, `free_names` against `host_provides`, so the
+envelope pair's `msg_id: Any` is refused BY NAME in a host that lacks the import
+instead of killing it. What the annotation still never buys is a check, because
+nothing reads `__annotations__`: it was therefore the whole of a cheap
+difference, and the four copies that used to illustrate the tension were adopted
+on that reading, dropping theirs.
 """
 
 from typing import Any

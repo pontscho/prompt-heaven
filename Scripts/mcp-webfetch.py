@@ -606,11 +606,15 @@ PARAM_ALIASES = {
 OUTPUT_MODES = ("markdown", "markdown_full", "text", "text_full", "html")
 
 
-def _int_param(value: Any, default: int) -> int:
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _int_param
+def _int_param(value, default: int) -> int:
+	"""Coerce a wire value to int, falling back instead of raising."""
 	try:
 		return int(value)
 	except (TypeError, ValueError):
 		return default
+# END GENERATED: 27db69253706
 
 
 def _bool_param(value: Any, default: bool = False) -> bool:

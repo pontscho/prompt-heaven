@@ -333,7 +333,8 @@ def render(source: str, names: List[str], blocks: Dict[str, str],
     cannot clear is refused BY NAME rather than quietly emitted with spaces --
     a file mixing both is worse than either.
 
-    `mcp-webfetch` stays out, and NOT over indentation: its `_result` annotates
+    `mcp-webfetch` hosts two tab-rendered regions of its own, so what keeps its
+    `_result` and `_bool_param` out is NOT indentation: its `_result` annotates
     `result: dict` where the canonical says `result: Any`, and its `_bool_param`
     is an ALLOW-list where this one is a deny-list, so an unrecognised string
     reads False there and True here. Those are body and behaviour differences;

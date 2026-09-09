@@ -564,7 +564,8 @@ the only block that hits this today.
 
 `mcp-forge.py` came in under the narrowed rule and its diff was marker lines
 only — the emitted bodies were byte-for-byte what it already had. **`mcp-webfetch.py`
-stays out, and tabs are no longer the reason for it:** its `_result` annotates
+hosts two regions in tabs (`_json_error_window`, `_int_param`), so tabs are not
+what keeps its `_result` and its `_bool_param` out:** its `_result` annotates
 `result: dict` where the canonical says `result: Any`, and its `_bool_param` is
 an **allow**-list where the canonical is a deny-list, so an unrecognised string
 reads `False` there and `True` here. Those are body and behaviour differences,

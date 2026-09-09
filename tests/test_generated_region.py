@@ -285,14 +285,19 @@ def group_gate(suite, mod):
 
     # ONE WRITER, with the exceptions NAMED rather than hidden. A canonical block
     # name defined at top level in a server but not inside a generated region is
-    # a hand copy -- either a server not yet converted, or a deliberate variant
-    # (mcp-webfetch's allow-list `_bool_param` and its tab-indented `_rows_note`,
-    # mcp-tshark's `(params, key, default)` signature, mcp-inspect's raising
-    # `_int_param`; the tab-indented pair cannot host a space-indented block at
-    # all). INFO, not FAIL: "this server keeps its own" is a legitimate answer,
-    # so this censuses rather than judges -- but a new hand copy cannot appear
-    # without landing on this line, and the census is what makes the next
-    # fan-out decision a reading rather than a survey.
+    # a hand copy, and every one left today is a DECLARED exclusion with a
+    # measured reason: mcp-inspect's `_int_param` takes a parameter NAME and
+    # RAISES where the canonical takes a default and falls back; mcp-tshark's
+    # `_bool_param` keeps the older `(params, key, default)` signature;
+    # mcp-webfetch's `_bool_param` is an ALLOW-list, so an unrecognised string
+    # reads False there and True canonically; and mcp-webfetch's `_rows_note`
+    # fails `block_is_tab_safe` -- its `else` aligns under an open paren, so a
+    # tab host is refused that one BY NAME. Exclusion is per BLOCK, not per
+    # server: both tab-indented servers host regions, webfetch two of them.
+    # INFO, not FAIL: "this server keeps its own" is a legitimate answer, so
+    # this censuses rather than judges -- but an UNDECLARED hand copy, or a new
+    # one, cannot appear without landing on this line, and the census is what
+    # makes the next fan-out decision a reading rather than a survey.
     known = {name for blocks in sources.values() for name in blocks}
     hand = []
     for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
