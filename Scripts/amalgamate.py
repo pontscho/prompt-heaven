@@ -65,6 +65,7 @@ class Region(NamedTuple):
     recorded: str       # hash written on the END line ("" when never written)
     body: str           # what is between the markers right now
     wanted: str         # what the canonical source says it should be
+    indent: str         # the BEGIN marker's own leading whitespace
 
     @property
     def state(self) -> str:
@@ -85,18 +86,34 @@ def body_hash(body: str) -> str:
 
 def load_blocks(path: Path) -> Dict[str, str]:
     """Map every top-level name in *path* to its verbatim source text."""
-    text = path.read_text(encoding="utf-8")
+    if not path.is_file():
+        raise SystemExit(f"{path}: not a file")
+    return load_blocks_text(path.name, path.read_text(encoding="utf-8"))
+
+
+def load_blocks_text(label: str, text: str) -> Dict[str, str]:
+    """Map every top-level name in *text* to its verbatim source text.
+
+    The slice starts at the first DECORATOR line when there is one, not at the
+    `def`: `ast` puts a decorated function's `lineno` on the `def`, so slicing
+    from there would drop `@staticmethod` and silently turn a method into an
+    instance method that takes the class's first argument as its own. That is
+    the difference between a shareable `_result` -- byte-identical in thirteen
+    servers -- and a server that raises on its first reply.
+    """
     lines = text.splitlines(keepends=True)
     blocks: Dict[str, str] = {}
-    for node in ast.parse(text, filename=str(path)).body:
+    try:
+        tree = ast.parse(text, filename=label)
+    except SyntaxError as exc:
+        raise SystemExit(f"{label}: cannot be parsed ({exc})")
+    for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
+        start = node.lineno
         if node.decorator_list:
-            raise SystemExit(
-                f"{path.name}: '{node.name}' carries a decorator, and the emitter "
-                f"slices from the `def` line -- it would be dropped silently."
-            )
-        blocks[node.name] = "".join(lines[node.lineno - 1:node.end_lineno])
+            start = min(start, min(d.lineno for d in node.decorator_list))
+        blocks[node.name] = "".join(lines[start - 1:node.end_lineno])
     return blocks
 
 
@@ -119,7 +136,21 @@ def parse_names(marker: str, label: str, lineno: int) -> List[str]:
     return names
 
 
-def render(names: List[str], blocks: Dict[str, str]) -> str:
+def render(names: List[str], blocks: Dict[str, str], indent: str = "") -> str:
+    """Emit the named blocks, each line prefixed with *indent*.
+
+    The prefix is taken from the BEGIN marker's own column, which is what lets a
+    region sit inside a class body: `_result` and `_error` are byte-identical
+    methods in thirteen servers, and the marker's indentation is the only piece
+    of information needed to place them.
+
+    This shifts a block sideways; it does NOT re-indent the block internally, so
+    a target that indents with TABS cannot host a space-indented block. That is a
+    refusal rather than a gap: converting leading spaces to tabs would also
+    convert ALIGNMENT to tabs -- `_rows_note`'s continuation line aligns its
+    `else` under an open paren -- and a tab there moves the code to a column
+    nobody chose. Two tab-indented servers therefore keep their own copies.
+    """
     out = []
     for name in names:
         if name not in blocks:
@@ -127,7 +158,13 @@ def render(names: List[str], blocks: Dict[str, str]) -> str:
                 f"{CANONICAL.name} defines no top-level {name!r}"
             )
         out.append(blocks[name].rstrip("\n"))
-    return "\n\n\n".join(out) + "\n"
+    text = "\n\n\n".join(out) + "\n"
+    if not indent:
+        return text
+    return "".join(
+        f"{indent}{line}" if line.strip() else line
+        for line in text.splitlines(keepends=True)
+    )
 
 
 def marker_comments(label: str, text: str) -> List[Tuple[int, str]]:
@@ -175,6 +212,7 @@ def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
     open_at: Optional[int] = None
     open_names: List[str] = []
 
+    open_indent = ""
     for idx, comment in marker_comments(label, text):
         if comment.startswith(BEGIN_PREFIX):
             if open_at is not None:
@@ -184,6 +222,8 @@ def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
                 )
             open_at = idx
             open_names = parse_names(comment, label, idx + 1)
+            raw = lines[idx]
+            open_indent = raw[:len(raw) - len(raw.lstrip())]
         else:
             if open_at is None:
                 raise SystemExit(f"{label}:{idx + 1}: END without a BEGIN")
@@ -193,7 +233,8 @@ def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
                 end=idx,
                 recorded=comment[len(END_PREFIX):].strip(),
                 body="".join(lines[open_at + 1:idx]),
-                wanted=render(open_names, blocks),
+                wanted=render(open_names, blocks, open_indent),
+                indent=open_indent,
             ))
             open_at = None
 
@@ -211,7 +252,7 @@ def apply_regions(path: Path, regions: List[Region]) -> None:
     for region in sorted(regions, key=lambda r: r.begin, reverse=True):
         lines[region.begin + 1:region.end + 1] = [
             region.wanted,
-            f"{END_PREFIX} {body_hash(region.wanted)}\n",
+            f"{region.indent}{END_PREFIX} {body_hash(region.wanted)}\n",
         ]
     path.write_text("".join(lines), encoding="utf-8")
 

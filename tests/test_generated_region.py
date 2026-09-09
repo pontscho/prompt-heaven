@@ -202,6 +202,15 @@ def group_contract(suite, mod):
         % rendered,
     ))
 
+    # An indent shifts every non-blank line and must NOT leave whitespace on a
+    # blank one -- trailing whitespace is drift the byte comparison would catch
+    # forever after.
+    indented = mod.render(["a", "b"], RENDER_BLOCKS, "    ")
+    suite.record(GB, "render-indented", problem_if(
+        indented != "    def a():\n        pass\n\n\n    def b():\n        pass\n",
+        "indented render gave %r" % indented,
+    ))
+
 
 def group_control(suite, mod):
     def audit(text):
@@ -327,6 +336,41 @@ def group_control(suite, mod):
         mod.audit_text("amalgamate.py", generator_source, SYNTH_BLOCKS),
         "the generator's own docstring markers were treated as regions",
     ), detail=["the live proof: amalgamate.py documents both markers"])
+
+    # 16. A decorator must travel WITH its function. ast puts a decorated
+    #     function's lineno on the `def`, so a naive slice would drop
+    #     @staticmethod and turn _result into an instance method that eats the
+    #     class as its first argument -- a server that raises on its first reply.
+    decorated = mod.load_blocks_text(
+        "synthetic_source.py",
+        "@staticmethod\ndef _result(msg_id, payload):\n    return payload\n",
+    )
+    suite.record(GC, "decorator-travels", problem_if(
+        decorated.get("_result", "").splitlines()[:1] != ["@staticmethod"],
+        "the decorator was dropped from the block: %r" % decorated.get("_result"),
+    ))
+
+    # 17. A region inside a class body. The BEGIN marker's own column is the
+    #     only thing that places it, and that is what makes the _result/_error
+    #     methods -- byte-identical in thirteen servers -- reachable at all.
+    nested_body = "".join(
+        "    %s" % line if line.strip() else line
+        for line in SYNTH_BODY.splitlines(keepends=True)
+    )
+    nested_host = (
+        "class Server:\n"
+        '    """doc"""\n'
+        "    %s %s :: _helper\n" % (BEGIN_PREFIX, CANONICAL_NAME)
+        + nested_body
+        + "    %s %s\n" % (END_PREFIX, mod.body_hash(nested_body))
+    )
+    regions = audit(nested_host)
+    suite.record(GC, "indented-region", problem_if(
+        len(regions) != 1 or regions[0].state != "ok"
+        or regions[0].indent != "    ",
+        "an indented region should read ok at a 4-space indent, got %s"
+        % [(r.state, r.indent) for r in regions],
+    ))
 
     # 15. A file with no region at all is legitimate -- servers convert one at
     #     a time, so this must be silence, not an error.

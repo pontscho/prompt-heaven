@@ -510,6 +510,20 @@ Three more properties worth knowing before you touch it:
   and a server whose variant is deliberately different simply never asks for the
   block — that is how `mcp-webfetch`'s inverted-polarity `_bool_param` (§7b) can
   keep its own version while the others share one.
+- **A region is emitted at its BEGIN marker's own column.** Indent the marker and
+  the block lands indented, which is what lets a region sit inside a class body —
+  the route by which the `_result` / `_error` methods of §3 are shareable at all.
+
+### What the emitter will not do: tabs
+
+Shifting a block sideways is not the same as re-indenting it, and only the first
+is safe. A block indented with 4 spaces cannot be hosted by a **tab**-indented
+file, and the generator does not try: converting leading spaces to tabs would
+also convert **alignment** to tabs — `_rows_note`'s continuation line aligns its
+`else` under an open paren — putting the code in a column nobody chose, in a
+region no human is supposed to read closely. `mcp-forge.py` and `mcp-webfetch.py`
+(§0) therefore keep their own copies of anything shared, and that is a refusal
+with a reason, not a gap waiting to be filled.
 
 `python3 Scripts/amalgamate.py --check` writes nothing and exits 1 if any region
 is stale; the `generated_region` suite does the same comparison in memory, so
