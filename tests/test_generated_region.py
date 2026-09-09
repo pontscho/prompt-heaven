@@ -205,9 +205,14 @@ def group_contract(suite, mod):
     # An indent shifts every non-blank line and must NOT leave whitespace on a
     # blank one -- trailing whitespace is drift the byte comparison would catch
     # forever after.
+    #
+    # The indent also chooses the separator: ONE blank line between members of a
+    # class body, against the two that `render-layout` above pins at column 0.
+    # That is PEP 8's own split, and the indent is already the signal for which
+    # side of it we are on -- a region hosted in a class needs no extra flag.
     indented = mod.render(["a", "b"], RENDER_BLOCKS, "    ")
     suite.record(GB, "render-indented", problem_if(
-        indented != "    def a():\n        pass\n\n\n    def b():\n        pass\n",
+        indented != "    def a():\n        pass\n\n    def b():\n        pass\n",
         "indented render gave %r" % indented,
     ))
 
@@ -459,6 +464,24 @@ def group_blocks(suite, blocks):
     if json.loads(body.decode("utf-8")) != {"jsonrpc": "2.0", "id": 1}:
         problems.append("body does not round-trip through json.loads")
     suite.record(GE, "lsp-framing-counts-bytes", problems)
+
+    # _result/_error are staticmethod DESCRIPTORS here, not callables -- they are
+    # methods only at their destination. Reaching through __func__ is the point,
+    # not a workaround: if the decorator were ever tidied away this would break,
+    # and so would every server's first reply.
+    result = getattr(blocks._result, "__func__", blocks._result)
+    error = getattr(blocks._error, "__func__", blocks._error)
+    suite.record(GE, "result-envelope", problem_if(
+        result(7, {"a": 2}) != {"jsonrpc": "2.0", "id": 7, "result": {"a": 2}},
+        "result envelope drifted: %r" % (result(7, {"a": 2}),),
+    ))
+    suite.record(GE, "error-envelope", problem_if(
+        error(7, -32601, "nope") != {
+            "jsonrpc": "2.0", "id": 7,
+            "error": {"code": -32601, "message": "nope"},
+        },
+        "error envelope drifted: %r" % (error(7, -32601, "nope"),),
+    ))
 
     window = blocks._json_error_window
     suite.record(GE, "window-short-no-ellipsis", problem_if(

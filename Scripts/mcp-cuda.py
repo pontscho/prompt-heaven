@@ -2393,6 +2393,8 @@ class McpServer:
         self.auto_cuda_arch = auto_cuda_arch
         self._init_task: Optional[asyncio.Task] = None
 
+    # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+    # BEGIN GENERATED: _mcp_json.py :: _result, _error
     @staticmethod
     def _result(msg_id: Any, result: Any) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
@@ -2400,6 +2402,7 @@ class McpServer:
     @staticmethod
     def _error(msg_id: Any, code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+    # END GENERATED: 0a5c31c9ccd8
 
     @staticmethod
     def _tool_error(msg_id: Any, text: str) -> dict:

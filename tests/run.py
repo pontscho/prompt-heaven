@@ -270,7 +270,7 @@ SUITES = [
      "the file alone",
      140),
     ("generated_region", run_generated_region,
-     "generated regions match their canonical source", 47),
+     "generated regions match their canonical source", 49),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

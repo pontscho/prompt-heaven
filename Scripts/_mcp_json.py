@@ -50,6 +50,35 @@ even though four servers annotate their copies.
 """
 
 import json
+from typing import Any
+
+
+# --- JSON-RPC envelopes -------------------------------------------------------
+#
+# These two are METHODS at their destination -- `@staticmethod` members of each
+# server's McpServer -- and the region that hosts them sits in a class body, which
+# is why the emitter places a block at its marker's own column. Here they are
+# top-level, so `load_blocks` can address them by name, and that makes this file a
+# text SOURCE for these two rather than a usable module: a module-level
+# `staticmethod` is a descriptor object, not a callable, so the suite reaches
+# through `__func__`.
+#
+# Do NOT "tidy" the decorator away. Without it the emitted member becomes an
+# instance method whose first parameter eats `self`, so `_result(msg_id, result)`
+# silently becomes `_result(self=server, msg_id=..., result=...)` -- every reply
+# malformed, on every server, from the first call.
+#
+# Measured byte-identical across all 13 space-indented servers (one 123-byte
+# body). `mcp-forge` and `mcp-webfetch` indent with tabs and keep their own.
+
+@staticmethod
+def _result(msg_id: Any, result: Any) -> dict:
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+
+@staticmethod
+def _error(msg_id: Any, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
 # --- scalar coercion ----------------------------------------------------------

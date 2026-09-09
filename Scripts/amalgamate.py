@@ -41,12 +41,16 @@ Usage:
 
 import argparse
 import ast
+import builtins
 import hashlib
 import io
 import sys
+import textwrap
 import tokenize
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+
+BUILTIN_NAMES = frozenset(dir(builtins))
 
 BEGIN_PREFIX = "# BEGIN GENERATED:"
 END_PREFIX = "# END GENERATED:"
@@ -117,6 +121,53 @@ def load_blocks_text(label: str, text: str) -> Dict[str, str]:
     return blocks
 
 
+def free_names(block: str) -> Set[str]:
+    """Names *block* READS but does not define -- what its host must provide.
+
+    This is the block contract turned into a computation instead of a promise.
+    Two failure modes it catches, both of which were live holes:
+
+    * A block that calls another canonical block. Emitting `_max_answer_chars`
+      without `_int_param` leaves a call to a name the host may not define.
+    * A block whose ANNOTATION needs an import. `msg_id: Any` is evaluated at
+      def time, so a host that does not import `Any` dies at startup -- and the
+      canonical file imports it, so the block looks fine where it is written.
+
+    Scope analysis is deliberately crude and errs toward reporting too much: a
+    false report is a loud refusal naming the symbol, which costs a line in the
+    region marker, while a miss is a dead server.
+    """
+    tree = ast.parse(textwrap.dedent(block))
+    bound: Set[str] = set()
+    used: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        if isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.alias):
+            bound.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, ast.Name):
+            (bound if isinstance(node.ctx, ast.Store) else used).add(node.id)
+    return {name for name in used - bound if name not in BUILTIN_NAMES}
+
+
+def host_provides(text: str) -> Set[str]:
+    """Module-level names *text* imports -- the host half of the contract."""
+    provided: Set[str] = set()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return provided
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                provided.add((alias.asname or alias.name).split(".")[0])
+    return provided
+
+
 def parse_names(marker: str, label: str, lineno: int) -> List[str]:
     spec = marker[len(BEGIN_PREFIX):].strip()
     if "::" not in spec:
@@ -158,7 +209,10 @@ def render(names: List[str], blocks: Dict[str, str], indent: str = "") -> str:
                 f"{CANONICAL.name} defines no top-level {name!r}"
             )
         out.append(blocks[name].rstrip("\n"))
-    text = "\n\n\n".join(out) + "\n"
+    # Two blank lines between top-level definitions, one between members of a
+    # class -- PEP 8's own split, and the indent already says which we are in.
+    separator = "\n\n" if indent else "\n\n\n"
+    text = separator.join(out) + "\n"
     if not indent:
         return text
     return "".join(
@@ -208,6 +262,7 @@ def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
     must be loud, because its silent form is a region nobody updates again.
     """
     lines = text.splitlines(keepends=True)
+    provided = host_provides(text)
     regions: List[Region] = []
     open_at: Optional[int] = None
     open_names: List[str] = []
@@ -227,13 +282,22 @@ def audit_text(label: str, text: str, blocks: Dict[str, str]) -> List[Region]:
         else:
             if open_at is None:
                 raise SystemExit(f"{label}:{idx + 1}: END without a BEGIN")
+            wanted = render(open_names, blocks, open_indent)
+            missing = sorted(free_names(wanted) - provided)
+            if missing:
+                raise SystemExit(
+                    f"{label}:{open_at + 1}: the region needs {missing}, which "
+                    f"{label} neither imports nor lists in the region -- add the "
+                    f"name to the marker if it is another block, import it in the "
+                    f"host if it is not"
+                )
             regions.append(Region(
                 names=open_names,
                 begin=open_at,
                 end=idx,
                 recorded=comment[len(END_PREFIX):].strip(),
                 body="".join(lines[open_at + 1:idx]),
-                wanted=render(open_names, blocks, open_indent),
+                wanted=wanted,
                 indent=open_indent,
             ))
             open_at = None
