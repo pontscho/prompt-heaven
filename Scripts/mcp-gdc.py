@@ -738,6 +738,61 @@ async def handle_wait_for(mgr: GdcManager, args: dict) -> Any:
         await asyncio.sleep(0.5)
 
 
+def _js_failure(result: dict) -> Optional[dict]:
+    """Recognise an injected-JS failure by SHAPE, never by prose.
+
+    Only for the four handlers whose snippets return a confirmation STRING on
+    success — click, fill, select_option, clear_field. The three that return
+    DATA on success (hover, get_html, find_element) use the `null` convention
+    instead and must NOT be routed through here: null is their natural empty
+    value and they test it directly.
+
+    Three faults are folded into one recognizer, because all three arrive on
+    the same reply and all three were swallowed at the call site before it:
+
+    1. `exceptionDetails` — a thrown JS exception. Chrome answers with NO
+       `value` key at all, so the old `.get("value", "")` turned a TypeError
+       into an empty string inside a SUCCESS envelope: no flag AND no text.
+       Reachable from a detached node, a cross-origin frame, or a page that
+       shadows document.querySelector. It gets its own wording and is never
+       reported as "element not found" — that would be a confident wrong
+       diagnosis of a different fault.
+    2. `{gdcError: <text>}` — the sentinel these four snippets return in place
+       of a bare failure string. A bare string cannot be told from success
+       without sniffing its prefix, and the prefix is FORGEABLE BY THE PAGE:
+       select_option's label branch answers 'Selected: ' + opt.value, and
+       opt.value is page-authored, so an <option value="Element not found: #x">
+       makes a SUCCESSFUL call read exactly like a failed one (measured
+       against live Chrome). A page cannot make opt.value a Python dict, so
+       the shape test cannot be forged. A bare `null` was rejected too: it
+       collapses select_option's two distinct reasons — no such element vs.
+       no such option — into a single indistinguishable answer.
+    3. A missing or null value where these snippets always return a string:
+       the evaluate produced nothing usable, which is a fault in its own right.
+
+    Returns the fleet's {"error": text} dict when the reply is a failure, else
+    None. `.get("value")` carries NO default on purpose — absence and "" are
+    different answers here, and conflating them is what hid fault 1.
+    """
+    exc = result.get("exceptionDetails")
+    if exc:
+        # "text" is always "Uncaught"; the useful message is in the exception
+        # description — the same unwrapping handle_evaluate does.
+        desc = exc.get("exception", {}).get("description", "")
+        text = exc.get("text", "")
+        return {"error": f"JS error: {desc or text or exc}"}
+
+    rv = result.get("result", {})
+    if "value" not in rv or rv["value"] is None:
+        return {"error": "Error: the injected script returned no value "
+                         f"(type={rv.get('type', 'unknown')})"}
+
+    val = rv["value"]
+    if isinstance(val, dict) and "gdcError" in val:
+        return {"error": str(val["gdcError"])}
+    return None
+
+
 # --- Input ---
 
 async def handle_click(mgr: GdcManager, args: dict) -> Any:
@@ -749,7 +804,7 @@ async def handle_click(mgr: GdcManager, args: dict) -> Any:
     expression = """
     (function(sel) {
         const el = document.querySelector(sel);
-        if (!el) return 'Element not found: ' + sel;
+        if (!el) return {gdcError: 'Element not found: ' + sel};
         el.scrollIntoView({block: 'center'});
         el.click();
         return 'Clicked: ' + sel;
@@ -760,6 +815,9 @@ async def handle_click(mgr: GdcManager, args: dict) -> Any:
         "expression": expression,
         "returnByValue": True,
     })
+    failure = _js_failure(result)
+    if failure:
+        return failure
     return str(result.get("result", {}).get("value", ""))
 
 
@@ -800,7 +858,7 @@ async def handle_fill(mgr: GdcManager, args: dict) -> Any:
     expression = """
     (function(sel, val) {
         const el = document.querySelector(sel);
-        if (!el) return 'Element not found: ' + sel;
+        if (!el) return {gdcError: 'Element not found: ' + sel};
         el.focus();
         el.value = val;
         el.dispatchEvent(new Event('input', {bubbles: true}));
@@ -813,6 +871,9 @@ async def handle_fill(mgr: GdcManager, args: dict) -> Any:
         "expression": expression,
         "returnByValue": True,
     })
+    failure = _js_failure(result)
+    if failure:
+        return failure
     return str(result.get("result", {}).get("value", ""))
 
 
@@ -1292,23 +1353,41 @@ async def handle_select_option(mgr: GdcManager, args: dict) -> Any:
     if value is None and label is None:
         return {"error": "Error: provide 'value' or 'label'"}
 
+    # Both branches guard `el.options` BEFORE reading it. Aiming this tool at a
+    # non-<select> is a real failure — handle_fill already sets a plain
+    # element's value, and letting select_option double as a worse fill is the
+    # muddy option — but the fault has to be NAMED. Without the guard the read
+    # is still refused, by Array.from() throwing "undefined is not iterable",
+    # which diagnoses the wrong thing just as surely as reporting a throw would
+    # be wrong if it were called "Element not found". A <select> with zero
+    # options carries an EMPTY HTMLOptionsCollection, which is an object and so
+    # truthy: that case passes the guard and falls through to the
+    # "Option ... not found" answer, which is the correct one for it.
     if label is not None:
         expression = """
         (function(sel, lbl) {
             const el = document.querySelector(sel);
-            if (!el) return 'Element not found: ' + sel;
+            if (!el) return {gdcError: 'Element not found: ' + sel};
+            if (!el.options) return {gdcError: 'Not a <select> element: ' + sel};
             const opt = Array.from(el.options).find(o => o.text === lbl);
-            if (!opt) return 'Option label not found: ' + lbl;
+            if (!opt) return {gdcError: 'Option label not found: ' + lbl};
             el.value = opt.value;
             el.dispatchEvent(new Event('change', {bubbles: true}));
             return 'Selected: ' + opt.value;
         })(%s, %s)
         """ % (json.dumps(selector), json.dumps(label))
     else:
+        # The `find` guard mirrors the label branch, and it is not cosmetic:
+        # assigning an unmatched value to a <select> silently leaves it at ""
+        # while this snippet still answered 'Selected: ' + val. That reply was
+        # a measured LIE, not merely an unflagged failure.
         expression = """
         (function(sel, val) {
             const el = document.querySelector(sel);
-            if (!el) return 'Element not found: ' + sel;
+            if (!el) return {gdcError: 'Element not found: ' + sel};
+            if (!el.options) return {gdcError: 'Not a <select> element: ' + sel};
+            const opt = Array.from(el.options).find(o => o.value === val);
+            if (!opt) return {gdcError: 'Option value not found: ' + val};
             el.value = val;
             el.dispatchEvent(new Event('change', {bubbles: true}));
             return 'Selected: ' + val;
@@ -1319,6 +1398,9 @@ async def handle_select_option(mgr: GdcManager, args: dict) -> Any:
         "expression": expression,
         "returnByValue": True,
     })
+    failure = _js_failure(result)
+    if failure:
+        return failure
     return str(result.get("result", {}).get("value", ""))
 
 
@@ -1364,7 +1446,7 @@ async def handle_clear_field(mgr: GdcManager, args: dict) -> Any:
     focus_expr = """
     (function(sel) {
         const el = document.querySelector(sel);
-        if (!el) return 'Element not found: ' + sel;
+        if (!el) return {gdcError: 'Element not found: ' + sel};
         el.focus();
         if (el.select) el.select();
         return 'focused';
@@ -1372,9 +1454,9 @@ async def handle_clear_field(mgr: GdcManager, args: dict) -> Any:
     """ % json.dumps(selector)
 
     result = await session.send("Runtime.evaluate", {"expression": focus_expr, "returnByValue": True})
-    val = result.get("result", {}).get("value", "")
-    if str(val).startswith("Element not found"):
-        return {"error": str(val)}
+    failure = _js_failure(result)
+    if failure:
+        return failure
 
     # Ctrl+A to select all, then Delete
     for event_type in ("keyDown", "keyUp"):
@@ -1395,7 +1477,7 @@ async def handle_clear_field(mgr: GdcManager, args: dict) -> Any:
     clear_expr = """
     (function(sel) {
         const el = document.querySelector(sel);
-        if (!el) return 'ok';
+        if (!el) return {gdcError: 'Element vanished between focus and clear: ' + sel};
         const proto = el.tagName === 'TEXTAREA'
             ? window.HTMLTextAreaElement.prototype
             : window.HTMLInputElement.prototype;
@@ -1411,7 +1493,12 @@ async def handle_clear_field(mgr: GdcManager, args: dict) -> Any:
     })(%s)
     """ % json.dumps(selector)
 
-    await session.send("Runtime.evaluate", {"expression": clear_expr, "returnByValue": True})
+    # This reply used to be discarded, so an element that vanished between the
+    # two evaluates still answered "Cleared: <sel>".
+    result = await session.send("Runtime.evaluate", {"expression": clear_expr, "returnByValue": True})
+    failure = _js_failure(result)
+    if failure:
+        return failure
     return f"Cleared: {selector}"
 
 
