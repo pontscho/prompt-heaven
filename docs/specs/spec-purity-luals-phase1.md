@@ -16,13 +16,15 @@ sources:
   - Scripts/mcp-purity.py:CLANGD_EXEC_DENYLIST_EXACT
   - Scripts/mcp-purity.py:HANDLERS
   - Scripts/_mcp_smoke_test.py:purity_semantic_checks
+  - Scripts/mcp-lua-lsp.py
 verified:
-  commit: 095db60
-  date: 2026-08-10
+  commit: 7459e17
+  date: 2026-09-10
 links:
   - spec-purity-unification
   - 0001-purity-server-unification
   - scripts
+  - 0008-a-serialized-read-loop-looks-like-a-dead-server
 ---
 
 # Phase 1: `luals` as the second LSP backend
@@ -115,11 +117,34 @@ second subprocess-spawning backend doubles the untrusted-input surface:
 
 Validation is over the wire rather than in-process: the smoke test asserts luals
 dispatch alongside the Phase 0 assertions
-`Scripts/_mcp_smoke_test.py:purity_semantic_checks`.
+`Scripts/_mcp_smoke_test.py:purity_semantic_checks`. A fleet-level gate has since
+joined it: check 7 drives all fifteen servers with an unknown function name and
+requires `isError: True`, read as the flag and never as the reply text, plus a
+control that omits `function` entirely to prove a deliberate status reply is not
+flagged `Scripts/_mcp_smoke_test.py:error_envelope_checks`.
 
 ## Still deferred
 
 Phase 2 — retiring the standalone `clangd_call` / `cuda_call` tools and migrating
 the `p:mcp-clangd` / `p:mcp-cuda` skills and minion tool-lists — remains
-unstarted. Both standalone servers (`Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`)
-and both skills are still in the tree.
+unstarted. All three standalone servers are still in the tree: this phase's own
+counterpart `Scripts/mcp-lua-lsp.py` beside `Scripts/mcp-clangd.py` and
+`Scripts/mcp-cuda.py`, with both skills.
+
+Unretired is not unmaintained, and the fleet has now paid that distinction twice.
+None of the three is registered, so Claude Code never launches them — but they
+are the template the whole fleet grew from, which is why the read-loop conversion
+covered them rather than skipping them
+[[0008-a-serialized-read-loop-looks-like-a-dead-server]], and why the
+error-envelope contract covers them too. Each carries an `_ErrorText` `str`
+subclass so a handler failure still reaches the caller's `isError` flag after the
+dispatcher has already flattened its reply to text
+`Scripts/mcp-lua-lsp.py:_ErrorText` — the three servers whose `_serialize` is a
+closure every exit has run, so the wrap only ever sees a `str`.
+
+That helper is three byte-identical hand copies, and it stays copies on purpose.
+It is *declared* as a divergence in `Scripts/MCP_SKELETON.md` rather than homed as
+a generated canonical block: generating it would bless a second error-reporting
+mechanism as infrastructure and buy drift protection **for** the divergence in
+three servers that never launch, instead of removing it. See [[scripts]] for the
+fleet-wide shape and the canonical-block machinery it declines to use.

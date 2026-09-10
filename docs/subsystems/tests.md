@@ -8,11 +8,12 @@ sources:
   - tests
   - project-forge.yaml
 verified:
-  commit: a98b3ea
-  date: 2026-09-07
+  commit: 7459e17
+  date: 2026-09-10
 links:
   - agents
   - scripts
+  - generated-regions
   - layer-contract
   - 0009-the-first-reader-is-a-cold-model
 ---
@@ -121,6 +122,29 @@ Rendering has two modes so neither ported driver lost its output shape: streamed
 one-line-per-case, or buffered and grouped into `=== group (pass N, fail N, info
 N) ===` blocks.
 
+The harness also owns the fleet's **repo-pollution detectors**, and they are a
+pair: `pycache_snapshot` for bytecode and `repo_tree` for path names
+`tests/_harness.py:repo_tree`. Four suites — `checkpoint`, `jira_cli`,
+`purity_file_ops` and `purity_lsp` — snapshot the tree at their start and again
+in their hygiene group, failing a `no-new-repo-paths` case on `after - before`.
+It lived as four hand copies until one of them independently grew the
+scratch-area exclusion and the other three never learned it; homing it beside
+its twin is what ended that. The `SUITES` table was not touched by that move
+`tests/run.py`, so Idea 1's own gate is what certifies the four suites kept
+their case counts.
+
+Two details of the homed version are recorded decisions rather than incidental.
+The scratch area is excluded **at any depth** `tests/_harness.py:SCRATCH_DIR`,
+mirroring `.gitignore`'s deliberately unanchored `**/.claude/tmp`, because a
+root-anchored skip would be *narrower than the concept it is named after* — and
+that mirroring is a **declared** divergence, not a silent hand-copy: the check
+is an `os.walk` over path names that deliberately never consults git, since a
+git dependency would change what it measures into "did some future `.gitignore`
+excuse this mess". And the match is on whole path components, never
+`str.startswith` `tests/_harness.py:_is_scratch_dir` — `".gitignore"` starts
+with `".git"`, and the prefix test this replaced silently ate that file out of
+the snapshot.
+
 ## The roster
 
 One registry entry per suite in `tests/run.py`: the in-process Python suites
@@ -147,7 +171,8 @@ is the registry, and the run is the only thing that knows the totals.
 | `wiki_recall` | the wiki search relevance gate on a synthetic corpus — silence, calibration, type signal, aliases |
 | `jira_cli` | the Jira CLI fully offline with the transport injected: auth mode, context-path URL join, lazy deployment probe, both paging models behind one iterator, `JIRA_READ_ONLY`, `--dry-run`, the error mappings and the byte-pinned multipart body |
 | `checkpoint` | `checkpoint.py` as a **writer**: `Start`/`End` land on the block and nothing else, the numbers describe the file *after* the region was inserted, `prepend` lands the block and the table it describes in one `os.replace`, a stale or duplicate-id segment is refused on content, and every refusal exits 2 leaving the file alone — [[0009-the-first-reader-is-a-cold-model]] |
-| `smoke` | JSON-RPC plumbing invariants across every server file |
+| `generated_region` | every live generated region still matches its canonical source, and the source named on a region's `BEGIN` line is the one its names resolve against — plus a behavioural group so a helper inlined into fourteen servers is unit-tested once — [[generated-regions]] |
+| `smoke` | JSON-RPC plumbing invariants across every server file, including the error-envelope contract ([[scripts]]) |
 
 There is **no auto-discovery**: adding a suite is three edits — the module, a
 wrapper function, and the `SUITES` row `tests/run.py`.

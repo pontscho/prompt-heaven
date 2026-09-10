@@ -7,21 +7,36 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: f1d117b
-  date: 2026-08-27
+  commit: 7459e17
+  date: 2026-09-10
 links:
   - overview
   - requirements-yaml
+  - tests
+  - generated-regions
   - 0001-purity-server-unification
   - 0004-never-pin-a-browser-impersonation-version
   - 0007-a-path-spelled-deny-protects-the-spelling
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
+  - 0010-a-handler-failure-must-reach-iserror
 ---
 
 # Scripts & MCP Servers
 
-`Scripts/` holds standalone Python 3.9+ scripts in three groups. They are
-deployed to `~/.claude/scripts/` or run directly.
+`Scripts/` holds standalone Python 3.9+ scripts: the MCP servers, the canonical
+sources their shared helpers are generated from `Scripts/amalgamate.py`, the
+`requirements.yaml` task utilities, and the search tools. The servers share that
+plumbing by generation rather than import; the three canonical sources, the
+rules deciding what may be a shared block, and the copies deliberately left in
+place are [[generated-regions]].
+
+**Nothing is deployed.** `~/.claude/scripts` is a *symlink* to this directory,
+so there is no copy step and no second tree to fall out of sync — an edit here
+is live in the next session with no install. Like the webfetch registration
+below, this is a host-level fact with no in-repo anchor, so it was measured
+rather than read: on the symlink itself, and on the live process list, where
+every registered server runs from its absolute path under this repo and none
+from `~/.claude/scripts/`.
 
 ## MCP servers
 
@@ -67,6 +82,102 @@ which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`
 (Lua, via the `luals_*` functions) and `mcp-cuda.py` (CUDA). The tools
 `clangd_call`, `luals_call` and `cuda_call` are not registered and cannot be
 called `Scripts/_mcp_smoke_test.py`; see [[0001-purity-server-unification]].
+
+### The error-envelope contract
+
+**A handler failure must reach the caller with `isError` set.** It is the one
+contract every server in the table above satisfies, and it is not per-server
+taste: the defect it forbids is a reply the caller cannot tell from a success,
+which no amount of well-written failure text repairs, because prose is not the
+channel the flag is. The contract is written up as section 3a of
+`Scripts/MCP_SKELETON.md`; the decision behind it — why the gate was written
+first and run red, the four alternatives rejected on the way, and the blind spot
+the gate keeps permanently — is frozen in
+[[0010-a-handler-failure-must-reach-iserror]].
+
+The predicate is tested at the **wrap**, on whatever the handler handed back,
+and across fifteen servers it has only two shapes. Eleven test a top-level
+`error` key on a structured result — `is_error = "error" in result` in
+`Scripts/mcp-purity.py`, spelled `isinstance(result, dict) and "error" in
+result` where a non-dict can arrive. Three test the **type of the text**,
+because their dispatcher has already flattened the dict and cannot be
+restructured: `isinstance(result, _ErrorText)` in `Scripts/mcp-clangd.py`,
+`Scripts/mcp-cuda.py` and `Scripts/mcp-lua-lsp.py`. `mcp-jenkins.py` is the
+same condition with a name on it `Scripts/mcp-jenkins.py:_is_error`. There is
+no fourth shape; the illegal one this contract removed was returning a
+pre-rendered failure **string** the wrap cannot distinguish from a success.
+
+Four things about the predicate are decisions, not details:
+
+- **Raising and returning are two routes into one predicate, not two
+  mechanisms.** The wrap's own `except Exception` assigns the same
+  `{"error": …}` dict a handler would have returned, which is why servers do
+  both per site rather than picking a house style. What is not optional is that
+  one of them happens.
+- **It reads the TOP level only.** A nested `error` is often real data copied
+  out of an upstream JSON — Jenkins' per-stage `wfapi` records are the worked
+  example — and a recursive search would flag data as failure, which is this
+  same defect wearing the opposite sign `Scripts/mcp-jenkins.py:_is_error`.
+- **Where two behaviours describe one condition, they read one predicate.**
+  Jenkins' bug was that rendering keyed on the payload's `error` key while the
+  flag keyed on a separate `__is_error__` sentinel only its `_err` helper set,
+  so 25 handler sites rendered *as* errors and reported `isError: False`. One
+  predicate read by both the renderer and the transport makes that shape
+  impossible; converting the 25 sites would only have made it *currently*
+  absent.
+- **An action that did not happen is a failure; a question answered with
+  "none" is a success.** This is what stops the sign inverting on the rebound.
+  `lldb_list_sessions` reporting no active sessions, `gdc_status` reporting
+  Chrome unreachable, context7 reporting that no library matched — all
+  successes. They were asked, and they answered.
+
+`_ErrorText` is a `str` subclass carrying the verdict a flattened reply would
+otherwise lose `Scripts/mcp-clangd.py:_ErrorText`. It exists as three
+byte-identical hand copies and is **declared** in `Scripts/MCP_SKELETON.md`
+rather than homed as a canonical block, even though it qualifies as one:
+blessing a second mechanism as generated infrastructure — in three servers that
+are never launched — would buy drift protection *for* the divergence instead of
+removing it. Record a divergence as a divergence.
+
+#### The gate, and the layer below it that the gate does not reach
+
+The contract is enforced by check 7 of the smoke harness,
+`Scripts/_mcp_smoke_test.py:error_envelope_checks`, which drives all fifteen
+servers over live JSON-RPC. It has two halves and both are load-bearing: a
+positive probe (`function="__no_such_function__"` must come back `isError:
+True`, asserted on the **flag** and never the text, since several servers answer
+by listing their whole catalogue) and a negative control (omitting `function`
+entirely, which most servers answer with a status reply by design, must stay
+unflagged — without it, a server that flagged *everything* would pass). It
+ignores the `registered` flag on purpose: the three unregistered servers start
+offline in milliseconds, so they are driven rather than excused.
+
+**Its limit is stated beside it, because an unstated scope is the same defect as
+the false invariant it replaced:** *"it lands on ONE failure site per server, so
+it proves the wrap and not the sites"* `Scripts/MCP_SKELETON.md`. Jenkins passes
+the gate without exercising any of the 25 sites its predicate fixed, because the
+unknown-function path was always an error.
+
+`mcp-gdc.py` is the first case of that gap being found real rather than
+hypothetical. Injected page JS reported "element not found" as a bare prose
+**string**, which four handlers passed straight back as a successful reply — a
+wrap-conformant server failing at the call sites below the wrap. Failure is now
+reported by **shape**: a `{gdcError: …}` object recognised by
+`Scripts/mcp-gdc.py:_js_failure`, which folds in two further faults that arrived
+on the same reply — a thrown JS exception (Chrome sends no `value` key at all,
+so a defaulted `.get("value", "")` turned it into an empty string inside a
+success envelope: no flag *and* no text) and an absent value where these
+snippets always return a string. The shape test is not stylistic: a prefix test
+on the string is **forgeable by the page**, because `select_option` answers
+`'Selected: ' + opt.value` and `opt.value` is page-authored, so an
+`<option value="Element not found: #x">` makes a successful call read exactly
+like a failed one. A page cannot make `opt.value` a Python dict.
+
+That second layer is **not** gateable by check 7 — both of its probes return
+before `_resolve_session` `Scripts/mcp-gdc.py:_resolve_session`, so neither ever
+reaches a page — and the evidence for it is a recorded live-Chrome probe rather
+than a suite case. Treat the gate as proof that each server's wrap is wired, and
+the call sites beneath it as unproven until measured.
 
 `mcp-webfetch.py` is registered at **user scope**, so it is live in every project
 rather than only this one. That registration is the one claim on this page with

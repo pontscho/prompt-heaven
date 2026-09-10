@@ -15,12 +15,13 @@ sources:
   - Scripts/mcp-clangd.py
   - Scripts/mcp-cuda.py
 verified:
-  commit: 095db60
-  date: 2026-08-10
+  commit: 7459e17
+  date: 2026-09-10
 links:
   - scripts
   - 0001-purity-server-unification
   - spec-purity-luals-phase1
+  - 0008-a-serialized-read-loop-looks-like-a-dead-server
 ---
 
 # Implementation Plan: Unify `mcp-clangd` + `mcp-cuda` into `mcp-purity` (Phase 0 — the skeleton)
@@ -423,6 +424,32 @@ None. Hard stdlib-only constraint; `# dependencies = []` stays accurate.
 - `Scripts/mcp-purity.py` — the unified target; gains the LSP core, CUDA config, backend map, semantic handlers, async dispatch, alias extensions, and the tool-description update.
 - `Scripts/mcp-clangd.py` — source of the common LSP core and the 3-tier fallback (reference, not modified in Phase 0).
 - `Scripts/mcp-cuda.py` — source of the CUDA language-config and the truncated-fallback bug reference (reference, not modified in Phase 0).
+
+### Where the two reference servers stand after Phase 0
+
+"Not modified in Phase 0" was true of Phase 0 and is no longer true of the tree.
+Phase 2 has not started — `Scripts/mcp-clangd.py` and `Scripts/mcp-cuda.py` are
+still present and still register `clangd_call` / `cuda_call` — but neither is a
+frozen copy of its pre-Phase-0 snapshot any more, so the archival line numbers
+above have drifted further still.
+
+Two fleet-wide contracts reached them after the fold, both on the argument that
+an unlaunched server is the template the next one is copied from rather than dead
+code. The concurrent read loop landed in both — one task per request, dispatched
+as a coroutine with no worker pool, over a reader thread nothing can take
+`Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`; the reasoning, including the
+decision to skip these two being made and then reversed, is
+[[0008-a-serialized-read-loop-looks-like-a-dead-server]]. And each now carries an
+`_ErrorText` `str` subclass so a handler failure survives the dispatcher's
+flattening and still sets the caller's `isError` flag
+`Scripts/mcp-cuda.py:_ErrorText`, kept as declared hand copies in
+`Scripts/MCP_SKELETON.md` instead of a generated canonical block — see [[scripts]]
+and the fuller account in [[spec-purity-luals-phase1]].
+
+Both are consequently exercised rather than assumed: the smoke test's check 7
+drives all fifteen servers over live JSON-RPC and deliberately ignores the
+`registered` flag, because a measurement beats a reading of the source
+`Scripts/_mcp_smoke_test.py:error_envelope_checks`.
 
 ## Post-Implementation Checklist
 - [ ] All outputs are in English
