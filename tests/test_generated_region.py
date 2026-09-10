@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Generated-region drift gate -- groups A-E.
+"""Generated-region drift gate -- groups A-F.
 
 `Scripts/_mcp_json.py`, `Scripts/_mcp_lsp.py` and `Scripts/_mcp_paging.py` are
 the canonical sources for the helpers the MCP servers share, and
 `Scripts/amalgamate.py` inlines their named blocks into each server between
 `# BEGIN GENERATED` / `# END GENERATED` markers. The servers stay
 single-file on purpose (an imported sibling would write `Scripts/__pycache__`
-into a tree four suites assert is empty, and would move the helpers out of the
-module attributes `test_mcp_footprint` reaches for), so the shared code is
-duplicated on disk BY DESIGN -- and duplication on disk is exactly what rots.
+into a tree every suite that snapshots bytecode asserts stays empty, and would
+move the helpers out of the module attributes `test_mcp_footprint` reaches
+for), so the shared code is duplicated on disk BY DESIGN -- and duplication on
+disk is exactly what rots.
 
 This suite is the thing that stops it rotting: it re-renders every live region
 from the canonical source in memory and demands byte identity. A region that
@@ -47,8 +48,11 @@ is the negative control -- synthetic sources, each mutation asserted DETECTED,
 plus bait that must stay silent, because a checker that silently matches nothing
 is indistinguishable from a clean tree. Group D is hygiene.
 
-Every case is a gated FAIL: comparing two in-memory strings cannot flap on
-ordinary work, so a failure here can only be a regression.
+Every case here is a gated FAIL but one: comparing two in-memory strings cannot
+flap on ordinary work, so a failure can only be a regression. The exception is
+group A's `hand-copies-are-named`, an INFO census -- the roster comment beside
+it gives the reason, that "this server keeps its own" is a legitimate answer
+and so not a thing to fail on.
 
 IN-MEMORY ONLY. No subprocess, no external binary, no network, and this suite
 writes NOTHING -- not into the repo, not into a sandbox. The generator exposes
@@ -291,9 +295,13 @@ def group_gate(suite, mod):
     # `_bool_param` keeps the older `(params, key, default)` signature;
     # mcp-webfetch's `_bool_param` is an ALLOW-list, so an unrecognised string
     # reads False there and True canonically; and mcp-webfetch's `_rows_note`
-    # fails `block_is_tab_safe` -- its `else` aligns under an open paren, so a
-    # tab host is refused that one BY NAME. Exclusion is per BLOCK, not per
-    # server: both tab-indented servers host regions, webfetch two of them.
+    # is excluded TWICE OVER -- it fails `block_is_tab_safe` (its `else` aligns
+    # under an open paren, so a tab host is refused that one BY NAME) AND its
+    # body has diverged: `(start, shown, total)` against the canonical
+    # `(start, shown, total, exact)`, with no lower-bound branch, so clearing
+    # the tab hazard alone would not make it adoptable. Exclusion is per BLOCK,
+    # not per server: both tab-indented servers host regions, webfetch two of
+    # them.
     # INFO, not FAIL: "this server keeps its own" is a legitimate answer, so
     # this censuses rather than judges -- but an UNDECLARED hand copy, or a new
     # one, cannot appear without landing on this line, and the census is what
@@ -639,7 +647,7 @@ def group_control(suite, mod):
 
     # 17. A region inside a class body. The BEGIN marker's own column is the
     #     only thing that places it, and that is what makes the _result/_error
-    #     methods -- byte-identical in thirteen servers -- reachable at all.
+    #     methods -- byte-identical in fourteen servers -- reachable at all.
     nested_body = "".join(
         "    %s" % line if line.strip() else line
         for line in SYNTH_BODY.splitlines(keepends=True)

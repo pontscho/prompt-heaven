@@ -129,7 +129,7 @@ def load_blocks_text(label: str, text: str) -> Dict[str, str]:
     `def`: `ast` puts a decorated function's `lineno` on the `def`, so slicing
     from there would drop `@staticmethod` and silently turn a method into an
     instance method that takes the class's first argument as its own. That is
-    the difference between a shareable `_result` -- byte-identical in thirteen
+    the difference between a shareable `_result` -- byte-identical in fourteen
     servers -- and a server that raises on its first reply.
     """
     lines = text.splitlines(keepends=True)

@@ -9,10 +9,10 @@
 between `# BEGIN GENERATED` / `# END GENERATED` markers by
 `Scripts/amalgamate.py`, so every server stays the self-contained single file
 `MCP_SKELETON.md` says it is. That is not stylistic: an imported sibling would
-write `Scripts/__pycache__/*.pyc` into a tree four suites assert is empty, would
-need a `sys.path` entry the test harness's `spec_from_file_location` never adds,
-and would move the helpers out of the module attributes where
-`tests/test_mcp_footprint.py` reaches for them.
+write `Scripts/__pycache__/*.pyc` into a tree every suite that snapshots
+bytecode asserts stays empty, would need a `sys.path` entry the test harness's
+`spec_from_file_location` never adds, and would move the helpers out of the
+module attributes where `tests/test_mcp_footprint.py` reaches for them.
 
 **Why this is a second file rather than more of `_mcp_json.py`.** The source
 named on a region's BEGIN line is not decoration -- the generator resolves that

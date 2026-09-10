@@ -24,10 +24,10 @@ of the other is the drift this arrangement makes visible.
 between `# BEGIN GENERATED` / `# END GENERATED` markers by
 `Scripts/amalgamate.py`, so every server stays the self-contained single file
 `MCP_SKELETON.md` says it is. That is not stylistic: an imported sibling would
-write `Scripts/__pycache__/*.pyc` into a tree four suites assert is empty, would
-need a `sys.path` entry the test harness's `spec_from_file_location` never adds,
-and would move the helpers out of the module attributes where
-`tests/test_mcp_footprint.py` reaches for them.
+write `Scripts/__pycache__/*.pyc` into a tree every suite that snapshots
+bytecode asserts stays empty, would need a `sys.path` entry the test harness's
+`spec_from_file_location` never adds, and would move the helpers out of the
+module attributes where `tests/test_mcp_footprint.py` reaches for them.
 
 The test fleet *does* import it -- `tests/test_generated_region.py` group E loads
 it as a module and exercises every block directly, which is the point: a helper
