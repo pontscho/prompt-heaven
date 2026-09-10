@@ -164,10 +164,6 @@ TRUSTED_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
 # ---------------------------------------------------------------------------
 LSP_CACHE_EXCEPTIONS = ()
 
-# Directories excluded from the repo tree snapshot: .git churns on its own and
-# .claude/tmp is the sanctioned scratch area.
-HYGIENE_SKIP_PREFIXES = (".git", os.path.join(".claude", "tmp"))
-
 
 # ---------------------------------------------------------------------------
 # The inventories the retired servers exposed, transcribed from their own
@@ -429,22 +425,6 @@ def have_binary(name):
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return shutil.which(name)
-
-
-def repo_tree(root=H.REPO_ROOT):
-    """Set of repo-relative paths (dirs end in '/'), minus the skip prefixes."""
-    out = set()
-    for dirpath, dirs, files in os.walk(root):
-        rel = os.path.relpath(dirpath, root)
-        rel = "" if rel == "." else rel
-        if rel.startswith(HYGIENE_SKIP_PREFIXES):
-            dirs[:] = []
-            continue
-        for name in dirs:
-            out.add(os.path.join(rel, name) + "/")
-        for name in files:
-            out.add(os.path.join(rel, name))
-    return {p for p in out if not p.startswith(HYGIENE_SKIP_PREFIXES)}
 
 
 # ---------------------------------------------------------------------------
@@ -1758,7 +1738,7 @@ def _pyc_problems(pyc_after, new_pyc, touched):
 
 
 def group_i(suite, before, digests_before, pyc_before, timings, stderr_bytes):
-    after = repo_tree()
+    after = H.repo_tree()
     new = sorted(p for p in after - before
                  if p not in LSP_CACHE_EXCEPTIONS
                  and not any(p.startswith(e) for e in LSP_CACHE_EXCEPTIONS))
@@ -1827,7 +1807,7 @@ def run(opts=None):
                "overlapping (see the module docstring; it was ~60s before the "
                "indexing wait was gated, ~3.7s before they were overlapped)")
 
-    before = repo_tree()
+    before = H.repo_tree()
     pyc_before = H.pycache_snapshot()
     digests_before = {"c": H.file_digests(FIXTURE_C),
                       "lua": H.file_digests(FIXTURE_LUA)}

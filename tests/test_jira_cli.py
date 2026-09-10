@@ -2251,21 +2251,8 @@ def group_k(suite, mod):
 # I. hygiene
 # ---------------------------------------------------------------------------
 
-def repo_tree():
-    out = set()
-    for dirpath, dirnames, filenames in os.walk(H.REPO_ROOT):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
-        rel = os.path.relpath(dirpath, H.REPO_ROOT)
-        prefix = "" if rel == "." else rel + "/"
-        for name in dirnames:
-            out.add(prefix + name + "/")
-        for name in filenames:
-            out.add(prefix + name)
-    return out
-
-
 def group_i(suite, before, pyc_before, workspace):
-    after = repo_tree()
+    after = H.repo_tree()
     new = sorted(after - before)
     gone = sorted(before - after)
     suite.record(GI, "no-new-repo-paths",
@@ -2316,7 +2303,7 @@ def run(opts=None):
                           "mapping, Markdown rendering",
                     opts=opts, mode="grouped")
 
-    before = repo_tree()
+    before = H.repo_tree()
     pyc_before = H.pycache_snapshot()
 
     if not os.path.isfile(TARGET):

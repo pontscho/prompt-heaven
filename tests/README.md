@@ -153,6 +153,21 @@ Hard rule, enforced rather than hoped for:
   every target, and the group fails if any recorded path escapes the sandbox.
   The per-run subdirectory exists because two concurrent instances at a fixed
   path had one instance's teardown deleting the other's fixtures mid-probe.
+* `_harness.repo_tree()` is the snapshot behind the `no-new-repo-paths` delta
+  check in `checkpoint`, `jira_cli`, `purity_file_ops` and `purity_lsp`, and it
+  **excludes `.claude/tmp` at any depth** as well as `.git`. Without that, the
+  per-run directories above are visible to a *different* suite's before/after
+  window: serially within one fleet run they are harmless, but two overlapping
+  fleet runs put one instance's transient sandbox inside the other's window and
+  fail a case no rule was broken to earn. It lived as four hand copies until one
+  of them independently grew the exclusion and the other three never learned it
+  — homing it beside its twin `pycache_snapshot` is what ended that. Two things
+  it records rather than repeats: the any-depth match mirrors `.gitignore:5-9`
+  (`**/.claude/tmp`, unanchored for a reason given there) as a **declared**
+  divergence — the check is an `os.walk` over names and deliberately never
+  consults git — and the match is per path component, never `str.startswith`,
+  because `".gitignore".startswith(".git")` is True and the prefix test this
+  replaced silently ate that file out of the snapshot.
 * `_harness` sets `sys.dont_write_bytecode = True` and exports
   `child_env()`, which puts `PYTHONDONTWRITEBYTECODE=1` into the environment
   of **every** child process, so neither the runner nor any server/hook it

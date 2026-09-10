@@ -1995,19 +1995,6 @@ def control_deleted_line(workspace):
 # K. hygiene -- runs LAST, after every group that writes
 # ---------------------------------------------------------------------------
 
-def repo_tree():
-    out = set()
-    for dirpath, dirnames, filenames in os.walk(H.REPO_ROOT):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
-        rel = os.path.relpath(dirpath, H.REPO_ROOT)
-        prefix = "" if rel == "." else rel + "/"
-        for name in dirnames:
-            out.add(prefix + name + "/")
-        for name in filenames:
-            out.add(prefix + name)
-    return out
-
-
 def group_k(suite, before, pyc_before, live_before, workspace):
     # The one that matters: the script's DEFAULT target is this file, and it
     # holds the user's session handoff.  Nothing in this suite may reach it.
@@ -2027,7 +2014,7 @@ def group_k(suite, before, pyc_before, live_before, workspace):
                      detail=["sha256 %s..." % live_before[:16],
                              "the default target of every command under test"])
 
-    after = repo_tree()
+    after = H.repo_tree()
     new = sorted(after - before)
     gone = sorted(before - after)
     suite.record(GK, "k-no-new-repo-paths",
@@ -2096,7 +2083,7 @@ def run(opts=None):
                           "refusal on one route",
                     opts=opts, mode="grouped")
 
-    before = repo_tree()
+    before = H.repo_tree()
     pyc_before = H.pycache_snapshot()
     live_before = (H.sha256_file(LIVE_CHECKPOINT)
                    if os.path.isfile(LIVE_CHECKPOINT) else None)

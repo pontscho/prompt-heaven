@@ -555,22 +555,8 @@ def group_e(suite, drv):
 # Group F -- hygiene
 # ---------------------------------------------------------------------------
 
-def repo_tree():
-    """Repo-relative paths (dirs end in '/'), excluding .git."""
-    out = set()
-    for dirpath, dirnames, filenames in os.walk(H.REPO_ROOT):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
-        rel = os.path.relpath(dirpath, H.REPO_ROOT)
-        prefix = "" if rel == "." else rel + "/"
-        for name in dirnames:
-            out.add(prefix + name + "/")
-        for name in filenames:
-            out.add(prefix + name)
-    return out
-
-
 def group_f(suite, before, pyc_before, workspaces, stderr_bytes):
-    after = repo_tree()
+    after = H.repo_tree()
     new = sorted(after - before)
     gone = sorted(before - after)
     suite.record("F", "no-new-repo-paths",
@@ -623,7 +609,7 @@ def run(opts=None):
                           "its narrowness, and the param contract",
                     opts=opts, mode="stream", group_width=3, cid_width=36)
 
-    before = repo_tree()
+    before = H.repo_tree()
     pyc_before = H.pycache_snapshot()
     stderr_bytes = 0
 

@@ -16,6 +16,8 @@ protocol and must not be forced through one abstraction:
     run_process               one-shot "run this argv with this stdin" helper
     load_module_from_path     import a loose .py WITHOUT writing __pycache__
     pycache_snapshot          repo-pollution detector
+    repo_tree                 its twin: the path-name snapshot behind the
+                              `no-new-repo-paths` delta check
     file_digests / sha256_file    fixture-tamper detector
 
   Layer 2 -- ONLY for suites that drive an MCP server
@@ -403,6 +405,55 @@ def load_module_from_path(name, path):
         return module
     finally:
         sys.dont_write_bytecode = previous
+
+
+# The sanctioned scratch area, excluded from `repo_tree` below.  Matched at ANY
+# DEPTH, mirroring `.gitignore:5-9`: that pattern is spelled `**/.claude/tmp`
+# and is deliberately unanchored, because the anchored spelling left trees like
+# `Scripts/.claude/tmp` neither ignored nor tracked -- and test_spawn_stdin.py
+# then gated one as if it were our source.  A root-anchored skip here would be
+# NARROWER than the concept it is named after, and two spellings of one
+# condition disagreeing is the drift this helper was homed to end.
+#
+# That mirroring is a DECLARED divergence, not a silent hand-copy: this check
+# deliberately does NOT consult git.  It is an `os.walk` over path NAMES,
+# ignore-status is irrelevant to what it measures (did this run leave anything
+# behind), and taking a git dependency would change what the check IS -- it
+# would begin excusing any mess a future `.gitignore` happened to cover.
+#
+# Matched on whole path COMPONENTS, never with `str.startswith`: `.gitignore`
+# starts with `.git`, and the prefix test this replaced silently ate that file
+# out of the snapshot.  Do not reintroduce it.
+SCRATCH_DIR = ".claude/tmp"
+
+
+def _is_scratch_dir(rel_dir):
+    """True when `rel_dir` IS the scratch area or a nested copy of it."""
+    return rel_dir == SCRATCH_DIR or rel_dir.endswith("/" + SCRATCH_DIR)
+
+
+def repo_tree():
+    """Repo-relative paths (dirs end in '/'), minus `.git` and every SCRATCH_DIR.
+
+    Taken at a suite's start and again in its hygiene group; the
+    `no-new-repo-paths` case fails on `after - before`.  `.git` churns on its
+    own.  The scratch area is excluded because `name_existence`, `spawn_stdin`
+    and `mcp_footprint` each create and remove a per-run directory under it:
+    serially within one fleet run that is invisible, but two overlapping fleet
+    runs put one instance's transient sandbox inside the other's window and
+    fail a case no rule was broken to earn.
+    """
+    out = set()
+    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+        rel = os.path.relpath(dirpath, REPO_ROOT)
+        prefix = "" if rel == "." else rel + "/"
+        dirnames[:] = [d for d in dirnames
+                       if d != ".git" and not _is_scratch_dir(prefix + d)]
+        for name in dirnames:
+            out.add(prefix + name + "/")
+        for name in filenames:
+            out.add(prefix + name)
+    return out
 
 
 def pycache_snapshot(root=REPO_ROOT):
