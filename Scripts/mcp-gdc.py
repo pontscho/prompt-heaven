@@ -2092,7 +2092,11 @@ class McpServer:
             log.exception("Response was not JSON-serialisable")
             out = json.dumps(self._error(response.get("id"), -32603,
                                          f"Response not serialisable: {exc}"))
-        log.debug("→ RAW: %s", out)
+        # F12/CWE-532: structure only (id + outcome), no body.
+        log.debug(
+            "→ id=%s %s", response.get("id"),
+            "error" if "error" in response else "ok",
+        )
         try:
             sys.stdout.write(out + "\n")
             sys.stdout.flush()

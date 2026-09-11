@@ -1303,7 +1303,19 @@ class McpServer:
 						"Invalid Request: expected a JSON object, got "
 						f"{type(msg).__name__}"))
 					continue
-				log.debug("← %s", json.dumps(msg)[:200])
+				# F12/CWE-532: log protocol structure only, never payload
+				# values (params.content / result text can carry file contents).
+				# Defensive: params/arguments may be a non-dict on a malformed
+				# message; this is a debug log and must never crash the loop.
+				_p = msg.get("params")
+				_p = _p if isinstance(_p, dict) else {}
+				_args = _p.get("arguments")
+				_args = _args if isinstance(_args, dict) else {}
+				log.debug(
+					"← method=%s id=%s fn=%s keys=%s",
+					msg.get("method"), msg.get("id"), _p.get("name"),
+					list(_args.keys()),
+				)
 				# The fetch is blocking and can occupy the full timeout.
 				# Handling it on the loop would stall ping and every other
 				# request for the duration, so it goes to the worker pool —
@@ -1367,7 +1379,11 @@ class McpServer:
 			log.exception("Response was not JSON-serialisable")
 			out = json.dumps(self._error(response.get("id"), -32603,
 			                             f"Response not serialisable: {exc}"))
-		log.debug("→ %s", out[:200])
+		# F12/CWE-532: structure only (id + outcome), no body.
+		log.debug(
+			"→ id=%s %s", response.get("id"),
+			"error" if "error" in response else "ok",
+		)
 		with self._write_lock:
 			try:
 				sys.stdout.write(out + "\n")
