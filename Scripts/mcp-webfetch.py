@@ -1269,7 +1269,14 @@ class McpServer:
 		                             thread_name_prefix="webfetch-call")
 		try:
 			while True:
-				line = await loop.run_in_executor(reader, sys.stdin.readline)
+				try:
+					line = await loop.run_in_executor(reader, sys.stdin.readline)
+				except (OSError, ValueError) as exc:
+					# A closed or detached stdin RAISES rather than returning "";
+					# unguarded it unwound out of run() past the finally below, so
+					# the drain never ran and both pools were left up.
+					log.warning("stdin read failed, shutting down: %s", exc)
+					break
 				if not line:
 					break
 				line = line.strip()
@@ -1278,7 +1285,23 @@ class McpServer:
 				try:
 					msg = json.loads(line)
 				except json.JSONDecodeError as exc:
+					# Answering is not optional: the bare `continue` that used to
+					# stand here left the caller's request id unanswered until it
+					# timed out, which reads as a hung server rather than as one
+					# bad line.
 					log.warning("Invalid JSON: %s", exc)
+					self._write(self._error(None, -32700, f"Parse error: {exc}"))
+					continue
+				if not isinstance(msg, dict):
+					# `5` is valid JSON. It used to reach msg.get() in
+					# _handle_message and take the process down with an
+					# AttributeError escaping run() — and an MCP client does not
+					# respawn a dead stdio server.
+					log.warning("Request was %s, not an object", type(msg).__name__)
+					self._write(self._error(
+						None, -32600,
+						"Invalid Request: expected a JSON object, got "
+						f"{type(msg).__name__}"))
 					continue
 				log.debug("← %s", json.dumps(msg)[:200])
 				# The fetch is blocking and can occupy the full timeout.
@@ -1317,11 +1340,31 @@ class McpServer:
 			)
 		if response is None:
 			return
+		self._write(response)
+
+	def _write(self, response: dict) -> None:
+		"""Serialize and emit one JSON-RPC message.
+
+		Every caller is on the event-loop thread — `_dispatch` resumes there
+		after its await, and the read loop's own error replies never leave it —
+		so the lock is redundant today. It is kept rather than removed: dropping
+		it is a separate decision from adding the guard below.
+		"""
 		out = json.dumps(response)
 		log.debug("→ %s", out[:200])
 		with self._write_lock:
-			sys.stdout.write(out + "\n")
-			sys.stdout.flush()
+			try:
+				sys.stdout.write(out + "\n")
+				sys.stdout.flush()
+			except (BrokenPipeError, OSError) as exc:
+				# Measured, because the two callers fail differently. From the
+				# READ LOOP (the -32700/-32600 replies above) an unguarded raise
+				# unwinds straight out of run(): the server stops reading, and
+				# every later request is unread rather than merely unanswered.
+				# From _dispatch it is swallowed as a never-retrieved task
+				# exception instead — one lost reply, silently, plus a traceback
+				# on stderr. Neither is acceptable; only the first was fatal.
+				log.warning("stdout write failed: %s", exc)
 
 	def _handle_message(self, msg: dict) -> Optional[dict]:
 		msg_id = msg.get("id")
