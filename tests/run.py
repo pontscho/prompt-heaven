@@ -80,6 +80,19 @@ run):
                                                       split DECLARED in a table
                                                       rather than inferred from
                                                       the fleet (AST-based, A-F)
+  wire_log           tests/test_wire_log.py           every Scripts/mcp-*.py
+                                                      logs protocol STRUCTURE
+                                                      at both wire sites and
+                                                      never a payload body or
+                                                      value -- F12/CWE-532, with
+                                                      truncation explicitly not
+                                                      accepted as a mitigation,
+                                                      the shape each site may
+                                                      log DECLARED per server,
+                                                      and MCP_SKELETON.md's own
+                                                      sample lifted by script
+                                                      and run through the same
+                                                      analyser (AST-based, A-F)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -200,6 +213,10 @@ def run_read_loop(opts):
     return run_python_suite("test_read_loop", opts)
 
 
+def run_wire_log(opts):
+    return run_python_suite("test_wire_log", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -295,6 +312,15 @@ SUITES = [
      "every MCP server's read loop carries ADR 0008's shape: a single-thread "
      "reader executor no handler can take, and one task per message -- with "
      "the pool/coroutine split declared per server rather than inferred", 47),
+    # TYPED for read_loop's reason above, not mcp_footprint's: a server that
+    # appears without a declared row is the defect, so a moved count is the
+    # alarm working.  The two per-server groups make it 2N + a fixed tail.
+    ("wire_log", run_wire_log,
+     "every MCP server's wire logging is structure only -- protocol metadata "
+     "and argument KEYS, never a payload body or value (F12/CWE-532), with "
+     "the shape each site may log declared per server rather than inferred, "
+     "and MCP_SKELETON.md's own sample lifted by script and gated the same way",
+     53),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

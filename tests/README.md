@@ -74,6 +74,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `checkpoint` | `test_checkpoint.py` | A–K |
 | `generated_region` | `test_generated_region.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
+| `wire_log` | `test_wire_log.py` | A–F |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
@@ -104,6 +105,7 @@ python3 tests/test_jira_cli.py
 python3 tests/test_checkpoint.py
 python3 tests/test_generated_region.py
 python3 tests/test_read_loop.py
+python3 tests/test_wire_log.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 
@@ -149,15 +151,15 @@ Hard rule, enforced rather than hoped for:
   `tempfile.mkdtemp()` directory (`_harness.TempWorkspace`) and removed
   afterwards. `--keep` retains the directory and prints its path.
 * Suites that need scratch *inside* the repo — `name_existence`,
-  `spawn_stdin`, `mcp_footprint`, `read_loop` — use a per-run
+  `spawn_stdin`, `mcp_footprint`, `read_loop`, `wire_log` — use a per-run
   `.claude/tmp/<suite>/run-<unique>/` directory instead, and that boundary is
   structurally gated: a single write path and a single child launcher record
   every target, and the group fails if any recorded path escapes the sandbox.
   The per-run subdirectory exists because two concurrent instances at a fixed
   path had one instance's teardown deleting the other's fixtures mid-probe.
 * `_harness.repo_tree()` is the snapshot behind the `no-new-repo-paths` delta
-  check in `checkpoint`, `jira_cli`, `purity_file_ops`, `purity_lsp` and
-  `read_loop`, and it
+  check in `checkpoint`, `jira_cli`, `purity_file_ops`, `purity_lsp`,
+  `read_loop` and `wire_log`, and it
   **excludes `.claude/tmp` at any depth** as well as `.git`. Without that, the
   per-run directories above are visible to a *different* suite's before/after
   window: serially within one fleet run they are harmless, but two overlapping
@@ -221,6 +223,15 @@ tests/
                                            Scripts/mcp-*.py, with the per-server
                                            pool/coroutine split declared in a
                                            table rather than inferred)
+  test_wire_log.py           groups A-F   (offline, AST only, nothing spawned --
+                                           F12/CWE-532: both wire sites of every
+                                           Scripts/mcp-*.py log protocol
+                                           structure and never a payload body or
+                                           value, truncation NOT accepted as a
+                                           mitigation, the shape each site may
+                                           log declared per server, and
+                                           MCP_SKELETON.md's own sample lifted
+                                           by script and gated the same way)
   files/                     tf_-prefixed C and Lua fixtures for purity_lsp
   README.md
 ```

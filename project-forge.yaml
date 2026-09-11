@@ -154,6 +154,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|READLINE|READER|DISPATCH|SHUTDOWN'
 
+  wire_log:
+    description: "The F12/CWE-532 wire-logging gate: every Scripts/mcp-*.py must log protocol STRUCTURE at both wire sites -- McpServer._write outbound and McpServer.run inbound -- and never a payload body or value. Truncation is not a mitigation: out[:200] is the FRONT of the frame, where the method, the tool name and the first arguments live, so any payload-derived expression is refused whether sliced, f-string-interpolated or wrapped in json.dumps. The shape each site may log is DECLARED per server in a table (twelve servers at the canonical method+id+fn+keys form, one at method+id, two that log nothing on the read loop at all) and measured against it, never inferred -- inferring it would pass, green, on today's thirteen broken servers. A synthetic control group plants each defect in turn: a bare out, a sliced out[:200], the bare response parameter, a non-structural key on it, an f-string over the raw line, json.dumps(msg)[:200], a value reached inside arguments, and the arguments container logged whole -- plus three correct forms it must stay silent on. Scripts/MCP_SKELETON.md is GATED rather than surveyed, its section 5 sample lifted out of the markdown by script and handed to the same analyser, because that template is the proven propagation vector for this defect. AST only -- starts nothing, writes only its sandbox."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py wire_log
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|PAYLOAD|SHAPE|WIRE|skeleton'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]
