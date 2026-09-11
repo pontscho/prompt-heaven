@@ -355,16 +355,30 @@ skill had been describing `get_page` as "by slug/path" all along
 purity cases do not cover. `source_to_pages` does own `path` as its own spelling
 of `source`, but per-function aliases resolve first, so it was never at risk; what
 a global row would break is the *diagnostics*, telling a caller who typed `path`
-on a `search` call `Unknown params for 'search': slug` — a word they never sent.
-So the escape list gains a third entry beside *owned elsewhere* and *does not
-exist here*: **renames the caller's word in another handler's rejection**. The
+on a `freshness` call `Unknown params for 'freshness': slug` — a word they never
+sent. So the escape list gains a third entry beside *owned elsewhere* and *does
+not exist here*: **renames the caller's word in another handler's rejection**. The
 function-name half is the same shape one level up — the registry names the
 handler, the caller reaches for the verb — so `read` joins the `page` and `get`
 rows aimed at `get_page`. The two halves compose only because the dispatcher
 canonicalizes the function *before* it resolves per-function params
 `Scripts/mcp-wiki.py:handle_wiki_call`: resolved against the raw `read`, `path`
 would miss `get_page`'s row and be rejected on a call whose every half was right.
-Both are pinned by `wiki_recall` group N (114 cases) `tests/test_wiki_recall.py`.
+
+The same word came back a second time from the *filter* side, and settled the
+scope question by construction instead of by argument. `search` and `list` were
+refusing `path` while filtering on `relpath.startswith(prefix)`
+`Scripts/mcp-wiki.py:_fn_search`, so a whole docs-relative path was a legal
+*value* of path_prefix there too — it selects the single page it names — and the
+trainer is the same one: a hit line prints a path, and no answer the server
+renders ever utters path_prefix. `path` therefore reaches **three** canonical
+names across four rows (`slug`, `source`, path_prefix), which is the global row's
+epitaph: one table cannot spell one word two ways, so the row that was declined
+on diagnostics grounds would by now be declined on arithmetic. The case pins each
+spelling against the UNFILTERED answer rather than only against path_prefix's —
+two spellings that agree prove the alias *resolved*, and only a narrower answer
+proves it reached the filter. All of it is pinned by `wiki_recall` group N
+(115 cases) `tests/test_wiki_recall.py`.
 
 ## Task utilities
 

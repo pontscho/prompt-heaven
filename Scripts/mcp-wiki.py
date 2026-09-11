@@ -1741,24 +1741,35 @@ PARAM_ALIASES = {
 }
 
 # Function-specific aliases — applied BEFORE the global PARAM_ALIASES.
+#
+# `path` occupies FOUR of the rows below and reaches THREE different canonical
+# names -- `slug`, `source`, path_prefix -- which is at once why each row is
+# right and why none of them may be global. Every one is the same trade: the
+# handler already took a docs-relative path as a VALUE and was turning away only
+# its KEY. _fn_get_page matches `relpath == slug`; _fn_search and _fn_list filter
+# on `relpath.startswith(prefix)`, where a WHOLE path selects the single page it
+# names. And the key the caller reaches for is the one the answers taught them --
+# a search hit prints `subsystems/scripts.md`, get_page's own header answers
+# `- **path**: subsystems/scripts.md`, and nothing the server renders ever says
+# path_prefix.
+#
+# What a GLOBAL row would cost is now visible rather than argued. A global
+# `path` -> `slug` would make search's row -- the SAME word, a different
+# canonical name -- unwritable; and it would answer the three handlers that take
+# no path under any name (freshness, reindex, stats) with `Unknown params for
+# 'freshness': slug`, renaming the caller's word inside another handler's
+# rejection.
 PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
-    "search": {"prefix": "path_prefix", "dir": "path_prefix", "pattern": "query"},
-    "list": {"prefix": "path_prefix", "dir": "path_prefix"},
+    "search": {"prefix": "path_prefix", "dir": "path_prefix",
+               "path": "path_prefix", "pattern": "query"},
+    "list": {"prefix": "path_prefix", "dir": "path_prefix",
+             "path": "path_prefix"},
     "source_to_pages": {"file": "source", "path": "source", "anchor": "source"},
     # `count` -> `lines` is NOT redundant with the global table, it OVERRIDES it:
     # globally `count` means `limit`, the search result count, and get_page has no
     # result list for that to mean anything on. Without this entry the natural
     # spelling of a window height would arrive as `limit` and be rejected as an
     # unknown param -- loudly, but for a request that was never wrong.
-    #
-    # `path` -> `slug` rejects nothing the handler would have refused anyway:
-    # _fn_get_page matches `relpath == slug` already, so a docs-relative path IS
-    # a valid value of `slug` and only its SPELLING was being turned away. Both
-    # ways in teach that spelling -- a search hit prints `subsystems/scripts.md`,
-    # and get_page's own header answers `- **path**: subsystems/scripts.md` -- so
-    # the caller reaches for the one word the accepted-name dump does not carry.
-    # It stays per-function because `path` is owned elsewhere: source_to_pages
-    # spells `source` that way, and no other handler takes a `slug` at all.
     "get_page": {"name": "slug", "path": "slug", "heading": "section",
                  "body": "include_body", "count": "lines", "start": "from"},
     "reindex": {"check_only": "check", "dry_run": "check"},

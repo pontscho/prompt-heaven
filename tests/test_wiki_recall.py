@@ -2,7 +2,7 @@
 """Mechanical suite for the `search` relevance gate, the `get_page` section
 index, the `source_to_pages` per-hit description, the MEASURED state in every
 recall reply's `[type/state]` label, the page TYPE as a ranking signal and the
-frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (114 cases, A-P).
+frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (115 cases, A-P).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/.  Nothing is written outside
@@ -4540,6 +4540,85 @@ def run(opts=None):
                                        "resolved against the raw name, path would "
                                        "miss get_page's row and be rejected on a "
                                        "call whose every half was right")],
+                     text="")
+
+        # `path` a SECOND time, and on a FILTER rather than on a lookup.  Both
+        # search and list take a path_prefix, and the filter they run is
+        # relpath.startswith(prefix) -- so a whole docs-relative path was always
+        # a legal value of it, selecting exactly the one page it spells.  Same
+        # reflex and the same cause as the case above: the answer hands the
+        # caller `tall-page.md` and never once says path_prefix, so the word
+        # they send back is the word they were shown.
+        #
+        # Measured against the UNFILTERED answer, not only against each other:
+        # two spellings that agree prove the alias RESOLVED, and only a narrower
+        # answer proves it reached the filter.  Without that second half the
+        # case would still pass with the prefix dropped on the floor.
+        filt_q = "page"
+        prem = sdrv.measure(filt_q)
+        gated_in = sorted(rel for rel, hs in prem["hits"].items()
+                          if hs and prem["cov"][rel] >= sdrv.mod.DEFAULT_MIN_COVERAGE)
+        wide = sdrv.search(filt_q, limit=len(prem["hits"]))
+        narrow = sdrv.search(filt_q, path_prefix=TALL_FILE)
+        aliased_f = sdrv.search(filt_q, path=TALL_FILE)
+        wide_l = raw_page("list", {})[0]
+        narrow_l = raw_page("list", {"path_prefix": TALL_FILE})[0]
+        aliased_l, aliased_l_err = raw_page("list", {"path": TALL_FILE})
+        problems = []
+        if TALL_FILE not in gated_in or len(gated_in) < 2:
+            problems.append("the fixture stopped carrying this case: %r reaches %d "
+                            "page(s) past the gate (%s), so no prefix here can be "
+                            "shown to NARROW anything"
+                            % (filt_q, len(gated_in), ", ".join(gated_in)))
+        if aliased_f["error"]:
+            problems.append("search: path did not reach path_prefix: %s"
+                            % aliased_f["text"][:200])
+        elif aliased_f["text"] != narrow["text"]:
+            problems.append("search: path and path_prefix render different answers, "
+                            "so the alias landed somewhere other than the filter it "
+                            "names")
+        if narrow["header_hits"] != 1:
+            problems.append("search: the whole path of ONE page returned %r hit(s) -- "
+                            "the value reached the handler but not its filter"
+                            % (narrow["header_hits"],))
+        if wide["header_hits"] != len(gated_in):
+            problems.append("search: the unfiltered answer reports %r hit(s) against "
+                            "%d page(s) past the gate, so the comparison the "
+                            "narrowing claim rests on is not measuring the corpus"
+                            % (wide["header_hits"], len(gated_in)))
+        if aliased_l_err:
+            problems.append("list: path did not reach path_prefix: %s"
+                            % aliased_l[:200])
+        elif aliased_l != narrow_l:
+            problems.append("list: path and path_prefix render different answers")
+        if narrow_l == wide_l:
+            problems.append("list: the filtered answer equals the unfiltered one, so "
+                            "path_prefix filters nothing and two spellings agreeing "
+                            "about it says nothing either")
+        for fn in ("search", "list"):
+            if sdrv.mod.PARAM_ALIASES_BY_FUNC[fn].get("path") != "path_prefix":
+                problems.append("%s no longer maps path, so the one word both its "
+                                "answers teach is rejected again" % fn)
+        if sdrv.mod.PARAM_ALIASES_BY_FUNC["get_page"].get("path") != "slug":
+            problems.append("get_page stopped spelling path as slug -- ONE word "
+                            "reaching three DIFFERENT canonical names is the whole "
+                            "reason these rows may not be global")
+        suite.record("N", "path-reaches-the-prefix-filter-because-a-whole-path-is-one",
+                     problems,
+                     detail=[_d("call", "search and list, path=%r against "
+                                        "path_prefix=%r" % (TALL_FILE, TALL_FILE)),
+                             _d("narrowing", "search %r hit(s) -> %r, list %d page "
+                                             "line(s) -> %d"
+                                % (wide["header_hits"], narrow["header_hits"],
+                                   wide_l.count("\n- "), narrow_l.count("\n- "))),
+                             _d("why", "the filter is relpath.startswith(prefix), so a "
+                                       "whole path names the page it selects and only "
+                                       "its KEY was turned away -- and that key's own "
+                                       "word is the one every hit line prints"),
+                             _d("scope", "per-function, because path reaches a "
+                                         "different canonical name in every row that "
+                                         "owns it: slug in get_page, source in "
+                                         "source_to_pages, path_prefix in these two")],
                      text="")
 
         rows, problems = [], []
