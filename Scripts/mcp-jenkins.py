@@ -598,7 +598,10 @@ def _md_join(blocks) -> str:
 # costs an extra round trip to read back the part the model actually wanted.
 # Capping here means the oversized half is never built, and the caller is told
 # in one line how to ask for the rest.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
 DEFAULT_MAX_ANSWER_CHARS = 24000
+# END GENERATED: 25da79526dcc
 
 
 def _max_answer_chars(params: dict) -> int:
@@ -676,7 +679,10 @@ def _row_window(rows: list, offset: int, limit: int) -> Tuple[list, str]:
     return window, _rows_note(start, len(window), total)
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _FENCE_LINE_RE
 _FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
+# END GENERATED: f6d18108dd1c
 
 
 def _balance_fences(body: str, keep_tail: bool) -> str:

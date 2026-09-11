@@ -271,7 +271,7 @@ SUITES = [
      140),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
-     "a region's BEGIN line is the one its names resolve against", 73),
+     "a region's BEGIN line is the one its names resolve against", 75),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

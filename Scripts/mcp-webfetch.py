@@ -420,10 +420,16 @@ def _to_text(html: str, extract: bool) -> str:
 
 # Fleet default (mcp-purity.py). An uncapped fetch of a long documentation page
 # spends more context on one call than the whole session's tool descriptions.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
 DEFAULT_MAX_ANSWER_CHARS = 24000
+# END GENERATED: 25da79526dcc
 
 # Room kept free for the accounting line while the pager fills its budget.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: PAGE_LINE_RESERVE
 PAGE_LINE_RESERVE = 80
+# END GENERATED: 097a654ecf92
 
 
 def _rows_note(start: int, shown: int, total: int) -> str:

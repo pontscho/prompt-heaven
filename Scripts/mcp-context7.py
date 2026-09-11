@@ -114,10 +114,16 @@ API_KEY: Optional[str] = None
 #
 # Per-call overridable via max_answer_chars, so a caller who genuinely wants the
 # whole document asks for it explicitly. <= 0 means unlimited.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
 DEFAULT_MAX_ANSWER_CHARS = 24000
+# END GENERATED: 25da79526dcc
 
 # Room kept free for the closing accounting line while filling a record budget.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: PAGE_LINE_RESERVE
 PAGE_LINE_RESERVE = 80
+# END GENERATED: 097a654ecf92
 
 # The separator between two search records. Named because the record pager has to
 # charge it against the budget; the rendering is unchanged.
@@ -201,7 +207,10 @@ def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
 # END GENERATED: ec97ab4325e5
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _FENCE_LINE_RE
 _FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
+# END GENERATED: f6d18108dd1c
 
 
 def _balance_fences(body: str) -> str:

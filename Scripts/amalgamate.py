@@ -122,15 +122,60 @@ def load_all_blocks() -> Dict[str, Dict[str, str]]:
     return {name: load_blocks(path) for name, path in CANONICAL_SOURCES.items()}
 
 
+def assign_name(node: ast.stmt) -> Optional[str]:
+    """The one name a module-level CONSTANT binds, or None if it is not one.
+
+    A constant is a block like any other -- `DEFAULT_MAX_ANSWER_CHARS` is a
+    number six servers agree on, and agreement on disk is what rots -- but only
+    ONE assignment shape can carry a block, and the rest are out for reasons
+    that differ:
+
+    * `A = B = 1` and `A, B = f()` bind SEVERAL names from ONE statement. The
+      slice is indivisible, so `blocks["A"]` would emit a statement that also
+      defines `B` in the host -- a name the marker never mentions, in a region
+      no human is supposed to read closely. A marker must be the complete
+      statement of what its region brings in.
+    * `x.attr = 1` and `x[0] = 1` bind no name at all; there is nothing to key
+      the map on, and the target is a name the HOST owns.
+    * `X += 1` is the dangerous one. Its target carries a `Store` context, so
+      `free_names` BINDS `X` and reports nothing -- yet the statement cannot
+      run unless the host already defines `X`. A block whose precondition is
+      structurally invisible to the contract check is exactly the failure
+      `free_names` exists to prevent, so the shape is refused rather than
+      checked by a check that cannot see it.
+    * `X: int = 1` is left out on demand, not on principle: no queued block is
+      one, and accepting the form would also accept `X: int`, which binds
+      nothing at run time -- a block that renders cleanly and NameErrors at the
+      host's first read.
+
+    Nothing is raised here. This maps what it can and leaves the rest alone,
+    because the map is also pointed at the SERVERS (the suite's hand-copy
+    census does exactly that) and ordinary module-level statements must not
+    turn a drift gate into a traceback about an unrelated line. The skip is not
+    silent where it matters: a name only enters the system by being written on
+    a marker, and `render` refuses an unknown one BY NAME.
+    """
+    if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        return None
+    target = node.targets[0]
+    return target.id if isinstance(target, ast.Name) else None
+
+
 def load_blocks_text(label: str, text: str) -> Dict[str, str]:
     """Map every top-level name in *text* to its verbatim source text.
+
+    Three definition shapes qualify -- a function, a class, and a single-target
+    constant (`assign_name` holds the argument for that last one and for every
+    assignment form it turns down).
 
     The slice starts at the first DECORATOR line when there is one, not at the
     `def`: `ast` puts a decorated function's `lineno` on the `def`, so slicing
     from there would drop `@staticmethod` and silently turn a method into an
     instance method that takes the class's first argument as its own. That is
     the difference between a shareable `_result` -- byte-identical in fourteen
-    servers -- and a server that raises on its first reply.
+    servers -- and a server that raises on its first reply. An assignment has
+    no `decorator_list` at all, so the hoist is reached only for the node types
+    that have one.
     """
     lines = text.splitlines(keepends=True)
     blocks: Dict[str, str] = {}
@@ -139,12 +184,16 @@ def load_blocks_text(label: str, text: str) -> Dict[str, str]:
     except SyntaxError as exc:
         raise SystemExit(f"{label}: cannot be parsed ({exc})")
     for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
         start = node.lineno
-        if node.decorator_list:
-            start = min(start, min(d.lineno for d in node.decorator_list))
-        blocks[node.name] = "".join(lines[start - 1:node.end_lineno])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name: Optional[str] = node.name
+            if node.decorator_list:
+                start = min(start, min(d.lineno for d in node.decorator_list))
+        else:
+            name = assign_name(node)
+            if name is None:
+                continue
+        blocks[name] = "".join(lines[start - 1:node.end_lineno])
     return blocks
 
 
@@ -159,6 +208,16 @@ def free_names(block: str) -> Set[str]:
     * A block whose ANNOTATION needs an import. `msg_id: Any` is evaluated at
       def time, so a host that does not import `Any` dies at startup -- and the
       canonical file imports it, so the block looks fine where it is written.
+
+    A CONSTANT block needs nothing added here, and that is a property of the
+    walk rather than luck: the target of `_FENCE_LINE_RE = re.compile(...)`
+    is an `ast.Name` in a `Store` context, so the generic arm below binds it,
+    while `re` is read and reported. Nothing in this function assumes a
+    function scope -- `ast.walk` descends the whole tree and every binder is
+    matched by node type, so a module-level statement is analysed on the same
+    terms as a `def` body. The consequence is the one that matters: the first
+    constant to reference a stdlib name carries that import requirement to
+    every host that asks for it, exactly as an annotation does.
 
     Scope analysis is deliberately crude and errs toward reporting too much: a
     false report is a loud refusal naming the symbol, which costs a line in the
@@ -325,9 +384,13 @@ def render(source: str, names: List[str], blocks: Dict[str, str],
     narrows an earlier decision that made it per FILE** (recorded as "tab
     re-indentation refused"). The old reasoning was right about the block it
     was drawn from and wrong to generalise: `_rows_note` aligns an `else` under
-    an open paren, so tabs would move it, but seven of the eight canonical
-    blocks contain no bracket continuation at all and their indentation is
-    purely structural. Refusing those cost `mcp-forge` three hand copies that
+    an open paren, so tabs would move it, but EVERY OTHER canonical block
+    contains no bracket continuation at all and its indentation is purely
+    structural. That is not a count typed here and checked by nobody -- the
+    suite's `tab-safety-real-blocks` asserts the unsafe set is exactly
+    `_rows_note`, over the real canonical text, and a constant added to a
+    source moves that set or fails there. Refusing those cost `mcp-forge`
+    three hand copies that
     were byte-identical to the canonical text modulo the indent character.
     `block_is_tab_safe` now decides it mechanically, per block, and a block it
     cannot clear is refused BY NAME rather than quietly emitted with spaces --
@@ -362,6 +425,13 @@ def render(source: str, names: List[str], blocks: Dict[str, str],
         out.append(body.rstrip("\n"))
     # Two blank lines between top-level definitions, one between members of a
     # class -- PEP 8's own split, and the indent already says which we are in.
+    #
+    # This is the one place that still assumes a block is a DEFINITION: PEP 8
+    # puts no blank line between two adjacent constants, and nothing here can
+    # say so. It costs nothing today because a constant is given a region of
+    # its OWN, which is the right shape for a second reason -- the sentence
+    # explaining what the number is for is host-specific prose, and a region
+    # per constant leaves it above the BEGIN marker where it was written.
     separator = "\n\n" if indent else "\n\n\n"
     text = separator.join(out) + "\n"
     if not indent:

@@ -74,7 +74,10 @@ SSL_REQUEST_CODE = 80877103           # magic for SSLRequest
 # in this fleet that can be arbitrarily large by accident (one missing WHERE).
 # Per-call overridable via the max_answer_chars parameter, so a caller who
 # genuinely wants the whole dump asks for it explicitly.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
 DEFAULT_MAX_ANSWER_CHARS = 24000
+# END GENERATED: 25da79526dcc
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +907,10 @@ NULL_TOKEN = "NULL"
 CELL_MAX_CHARS = 120
 
 # Room kept free for a page/closing line while filling a row budget.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: PAGE_LINE_RESERVE
 PAGE_LINE_RESERVE = 80
+# END GENERATED: 097a654ecf92
 
 
 def _escape_cell(text: str) -> str:

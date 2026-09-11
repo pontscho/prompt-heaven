@@ -190,18 +190,25 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
     """A synthetic TAB-indented target carrying exactly one region at column 0.
 
     The imports are not decoration: the block contract check runs against the
-    host, and `_result`'s annotation needs `Any` while `encode_lsp_message`
-    needs `json`. A fixture without them would be refused for the wrong reason
-    and the tab cases would pass on an error that has nothing to do with tabs.
+    host, and `_result`'s annotation needs `Any`, `encode_lsp_message` needs
+    `json`, and `_FENCE_LINE_RE` -- the first CONSTANT block -- needs `re`. A
+    fixture without them would be refused for the wrong reason and the tab
+    cases would pass on an error that has nothing to do with tabs.
+
+    `tab-emission-is-all-tabs` drives EVERY tab-safe block through this one
+    fixture, so the import list is not "what today's cases happen to need" but
+    the union of what every canonical block reads. A block added upstream with
+    a new free name lands here as a refusal naming that name.
     """
     return (
         '"""A tab-indented target."""\n'
         "import json\n"
+        "import re\n"
         "from typing import Any\n"
         "\n\n"
         "def _existing():\n"
         "\tif True:\n"
-        "\t\treturn json, Any\n"
+        "\t\treturn json, re, Any\n"
         "\n\n"
         "%s %s :: %s\n" % (BEGIN_PREFIX, source, names)
         + "%s\n" % END_PREFIX
@@ -666,6 +673,93 @@ def group_control(suite, mod):
         "an indented region should read ok at a 4-space indent, got %s"
         % [(r.state, r.indent) for r in regions],
     ))
+
+    # 18. THE tree.body FILTER, which decides what may be a block at all. It
+    #     used to admit definitions only; it now also admits a module-level
+    #     CONSTANT, and every other assignment shape is still turned down --
+    #     each for its own reason, spelled out on `assign_name`. Both arms are
+    #     here because neither proves anything alone: a loader that extracted
+    #     nothing would satisfy the refusals, and one that extracted every
+    #     statement would satisfy the acceptance.
+    #
+    #     `GOOD += 1` is placed AFTER `GOOD = 1` on purpose. If the augmented
+    #     form were ever admitted it would overwrite the good entry under the
+    #     same key, so the name list would still read right and only the BODY
+    #     check below would see it -- which is how this shape would slip in.
+    assign_source = (
+        "GOOD = 1\n"
+        "MULTI = ALSO = 2\n"
+        "TUPLE_A, TUPLE_B = 3, 4\n"
+        "[LIST_A, LIST_B] = 5, 6\n"
+        "ANNOTATED: int = 7\n"
+        "DECLARED: int\n"
+        "GOOD += 1\n"
+        "holder.attr = 8\n"
+        "holder[0] = 9\n"
+        "def _fn():\n"
+        "    pass\n"
+    )
+    extracted = mod.load_blocks_text("synthetic_source.py", assign_source)
+    problems = problem_if(
+        sorted(extracted) != ["GOOD", "_fn"],
+        "the loader extracted %s; exactly the single-Name constant and the "
+        "def may be blocks" % sorted(extracted),
+    )
+    problems += problem_if(
+        extracted.get("GOOD") != "GOOD = 1\n",
+        "a constant block must be its own statement and nothing else, got %r"
+        % extracted.get("GOOD"),
+    )
+    suite.record(GC, "single-name-assign-only", problems,
+                 detail=["extracted: %s" % ", ".join(sorted(extracted))])
+
+    # 19. THE FREE-NAME REFUSAL -- the check that makes a region refuse rather
+    #     than emit a server that dies at startup. On the live tree it fires
+    #     only incidentally, because every region in it passes, so a silent
+    #     failure here would leave the whole suite green. Exercised directly,
+    #     and on a CONSTANT: that is the block shape most likely to need a host
+    #     import, since a compiled pattern reads `re` where a def usually reads
+    #     nothing but its own arguments.
+    #
+    #     Both arms again, and the second is the load-bearing one: "refused"
+    #     alone is satisfied by a generator that refuses every region, which is
+    #     indistinguishable from a working check until somebody adds a block.
+    pattern_body = '_PATTERN = re.compile(r"^x")\n'
+    needs_re = {CANONICAL_NAME: {"_PATTERN": pattern_body}}
+
+    def pattern_host(imports):
+        return (
+            '"""A synthetic target."""\n' + imports
+            + "%s %s :: _PATTERN\n" % (BEGIN_PREFIX, CANONICAL_NAME)
+            + "%s\n" % END_PREFIX
+        )
+
+    refused = expect_exit(lambda: mod.audit_text(
+        "synthetic.py", pattern_host(""), needs_re))
+    problems = problem_if(
+        not refused,
+        "a host that never imports `re` was served a block that reads it -- "
+        "that server dies at its first import",
+    )
+    # The missing symbol is reported as a LIST, so the quotes are part of the
+    # match: a bare "re" would also be satisfied by the word "region".
+    problems += problem_if(
+        refused and "['re']" not in str(refused),
+        "the refusal must name the missing symbol; got %r" % refused,
+    )
+    accepted = mod.audit_text("synthetic.py", pattern_host("import re\n"),
+                              needs_re)
+    problems += problem_if(
+        len(accepted) != 1,
+        "the same region was refused to a host that DOES import `re`, so the "
+        "refusal above is not about the free name",
+    )
+    problems += problem_if(
+        accepted and accepted[0].wanted != pattern_body,
+        "the importing host was served %r"
+        % (accepted[0].wanted if accepted else None),
+    )
+    suite.record(GC, "free-name-refusal", problems, detail=[str(refused)])
 
     # 15. A file with no region at all is legitimate -- servers convert one at
     #     a time, so this must be silence, not an error.

@@ -605,8 +605,24 @@ in three servers, but its body reads a per-server `FUNCTION_ALIASES` table, so
 sharing it would mean sharing a promise about the host's globals. It stays out
 until that promise has a form and a check.
 
-Three more properties worth knowing before you touch it:
+Five more properties worth knowing before you touch it (the count was wrong at
+three when the list already had four; it is checked now):
 
+- **A block is a top-level function, a class, or a single-target CONSTANT.**
+  `load_blocks_text` walks the canonical file's `tree.body`, and the constant
+  arm is narrow on purpose: exactly `NAME = <value>`. `A = B = 1` and
+  `A, B = f()` bind several names from one indivisible slice, so the region
+  would define a name its marker never mentions; `x.attr = 1` binds no name to
+  key on; and `X += 1` is refused because its target reads as a *binding* to
+  `free_names`, which would hide the fact that the host must already define
+  `X`. `X: int = 1` is out on demand rather than principle. The argument for
+  each sits on `amalgamate.py:assign_name`, and `single-name-assign-only` in
+  the suite's control group pins every arm of it.
+  `DEFAULT_MAX_ANSWER_CHARS`, `PAGE_LINE_RESERVE` and `_FENCE_LINE_RE` are the
+  first constants to travel this way. Give each one a region of its **own**:
+  the sentence above a constant explaining what the number is for is
+  host-specific prose, and a region per constant leaves it outside the markers
+  where it was written.
 - **Markers are found with `tokenize`, `COMMENT` tokens only.** A marker quoted
   inside a docstring is inert — necessarily, since `amalgamate.py`'s own
   docstring carries a full `BEGIN`/`END` pair as its example, and a line scanner
@@ -628,9 +644,11 @@ file could host no generated region at all, because converting leading spaces to
 tabs would also convert **alignment** to tabs — `_rows_note`'s continuation line
 aligns its `else` under an open paren — putting the code in a column nobody
 chose, in a region no human is supposed to read closely. That reasoning is
-correct, and it is a property of **that block**, not of tab indentation. Seven of
-the eight canonical blocks contain no bracket continuation at all, so every one
-of their indents is structural and a tab conversion is mechanical.
+correct, and it is a property of **that block**, not of tab indentation. Every
+**other** canonical block contains no bracket continuation at all, so every one
+of their indents is structural and a tab conversion is mechanical. The
+`generated_region` suite asserts that the unsafe set is exactly `_rows_note`, so
+that claim is measured on every run rather than counted here by hand.
 
 The generator now decides it per block, and mechanically. `block_is_tab_safe`
 demands two things of a block: no implicit line join (`tokenize`, the same pass

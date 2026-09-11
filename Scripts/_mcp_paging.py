@@ -8,14 +8,30 @@
 `_rows_note` renders `[showing rows 1-20 of 347; offset=20 for more]` onto the
 LAST line of a text payload, and `_offset` reads back the number it printed.
 That is a sentence for a reader and its reply, not a field in an envelope, so
-neither belonged in a JSON source; what they share with the blocks queued to
-join them -- `_cap_text`, `_FENCE_LINE_RE`, `_balance_fences`,
-`DEFAULT_MAX_ANSWER_CHARS`, `PAGE_LINE_RESERVE` -- is the question of how much
-of a result a caller gets and how it is told where the rest is. This file is
-that domain's home, not a file invented for one function.
+neither belonged in a JSON source; what they share with the three CONSTANTS
+below -- and with `_cap_text` and `_balance_fences`, still queued -- is the
+question of how much of a result a caller gets and how it is told where the
+rest is. This file is that domain's home, not a file invented for one
+function.
 
-The two halves only stay honest TOGETHER, which is the reason they share a
-file: a handler that prints `offset=<n> for more` and does not read `offset`
+**The constants arrived late, and the delay was mechanical, not editorial.**
+`load_blocks_text` used to walk `tree.body` for `FunctionDef`,
+`AsyncFunctionDef` and `ClassDef` only, so a module-level assignment could not
+be a block however well it fitted the domain. It can now, for a single plain
+`Name` target and nothing else -- `Scripts/amalgamate.py:assign_name` carries
+the argument for that shape and against the four it turns down.
+
+What is still queued is queued for a DIFFERENT reason, and the two must not be
+confused: `_cap_text` and `_balance_fences` are extractable as written and
+their copies are not byte-identical -- three `_balance_fences` hash three ways,
+and every `_cap_text` differs (purity adds `repair_fences`, an anchor floor and
+an in-line degenerate cut; jenkins and lldb carry a `bias` axis purity lacks).
+Those are MERGES, where no existing copy is canonical. The constants were
+lifts.
+
+`_rows_note` and `_offset` only stay honest TOGETHER, which is the reason those
+two share a file: a handler that prints `offset=<n> for more` and does not read
+`offset`
 has told the caller a lie, and one that reads it without ever printing the hint
 has a knob nobody can discover. Changing the wording of one and not the reply
 of the other is the drift this arrangement makes visible.
@@ -30,17 +46,29 @@ bytecode asserts stays empty, would need a `sys.path` entry the test harness's
 module attributes where `tests/test_mcp_footprint.py` reaches for them.
 
 The test fleet *does* import it -- `tests/test_generated_region.py` group E loads
-it as a module and exercises every block directly, which is the point: a helper
-inlined into every server that asks for it is unit-tested once, here. Group A
-separately proves the copies MATCH. The two claims are different, and a drift
-gate on its own would only ever prove that every copy agrees on the same bug.
+it as a module and exercises every block that HAS behaviour, which is the point:
+a helper inlined into every server that asks for it is unit-tested once, here.
+Group A separately proves the copies MATCH. The two claims are different, and a
+drift gate on its own would only ever prove that every copy agrees on the same
+bug.
+
+Two of the three constants are outside that: `DEFAULT_MAX_ANSWER_CHARS` and
+`PAGE_LINE_RESERVE` have no behaviour to exercise, and a case asserting `== 24000`
+against a literal typed into the suite would be the same number written twice --
+the defect this repo has shipped six times. Group A already pins their text in
+every host, byte for byte, which is the whole of what there is to say about them.
+`_FENCE_LINE_RE` is NOT in that position and has no case yet: its `re.M` is real
+behaviour, and dropping the flag makes `findall` return at most one hit while the
+pattern still compiles and still reads right. A group E case belongs there.
 
 **Block contract.** A block may reference only builtins, the stdlib names this
 module imports, and its own arguments -- never a name the host server defines.
-Both blocks below need nothing but builtins, which is why there is no import
-here; a block added later that needs one must import it here too, or the
-generator's free-name check refuses the region in every host that does not
-already have it.
+The two FUNCTIONS need nothing but builtins. `_FENCE_LINE_RE` is the first
+block here to spend that budget: it reads `re`, so this file imports `re`, and
+every host that asks for it must import `re` too or `free_names` refuses the
+region by name at END-marker time rather than emitting a server that dies on
+its first import. All three hosts already did -- the requirement cost nothing
+to introduce and is checked on every run regardless.
 
 `_offset` keeps that property on purpose. Written as
 `max(0, _int_param(args.get("offset", 0), 0))` -- which is exactly how its one
@@ -61,13 +89,59 @@ code that actually decides it. That edit happened when the block was extracted;
 the move to this file changed nothing, and the unchanged END hash in all five
 hosts is the proof.
 
+The three constants are lifts on the same terms, and the matrix was measured
+before a marker was typed rather than after: `DEFAULT_MAX_ANSWER_CHARS` is one
+byte-identical line in six servers, `PAGE_LINE_RESERVE` in five (jenkins caps
+but does not page by row, so it never had one), `_FENCE_LINE_RE` in three. No
+host's body changed. What did NOT travel is the sentence above each one: every
+host justifies the same number in its own terms -- purity's reaches for a
+measured 511617-character call, jenkins names the console log, webfetch says
+"Fleet default (mcp-purity.py)" outright -- and that prose is host-specific, so
+each constant was given a region of its OWN and the explanation stayed above
+the BEGIN marker where it was written.
+
 **Annotations are not free.** A block whose signature says `value: Any` needs
 `Any` in the HOST's namespace, evaluated at def time, so a server that does not
-import it dies at startup. Both blocks annotate with `int`, `bool`, `str` and
-`dict` -- builtins, present everywhere -- so they are safe as written; a block
-wanting a `typing` name would be carrying that requirement to every host that
-asks for it.
+import it dies at startup. The two functions annotate with `int`, `bool`, `str`
+and `dict` -- builtins, present everywhere -- so they are safe as written; a
+block wanting a `typing` name would be carrying that requirement to every host
+that asks for it. The three constants carry no annotation at all, so the only
+requirement any of them places on a host is `_FENCE_LINE_RE`'s plain read of
+`re` -- which `free_names` sees on exactly the same terms, because it matches
+binders by node type rather than assuming a function scope.
 """
+
+import re
+
+
+# --- the output ceiling (how much of a result a caller gets) ------------------
+#
+# 24000 chars is ~6k tokens at the usual ~4 chars/token: a reply ONE call may
+# spend, not a reply that eats the session. The number is a FLEET convention,
+# not a per-server tuning knob that happened to converge -- six servers wrote
+# the same line, and one of them says so in its own comment. A server that
+# genuinely needs a different ceiling keeps its own copy and says why, which
+# the suite's hand-copy census then names rather than hides.
+DEFAULT_MAX_ANSWER_CHARS = 24000
+
+# Room kept free for the accounting line while a row pager fills its budget:
+# the pager stops taking rows while this many characters are still unspent, so
+# `_rows_note`'s sentence has somewhere to go. It is the companion of the print
+# side above, which is why it lives here and not with whatever calls it.
+PAGE_LINE_RESERVE = 80
+
+
+# --- fence accounting (a cut that lands INSIDE a fenced block) ----------------
+#
+# `re.M` is the whole of it: the pattern must match a fence at the start of any
+# LINE, not only at the start of the payload. Drop the flag and `findall`
+# quietly returns at most one hit, the fence count comes out even, and a reply
+# truncated mid-fence is handed to the reader with the block still open.
+#
+# The readers of this pattern -- each host's `_balance_fences` and `_cap_text`
+# -- are deliberately NOT blocks: their copies have diverged, so they are
+# merges rather than lifts. The constant went first because it had not.
+_FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
 
 
 # --- the resume offset (the read side of the page line) -----------------------
@@ -111,8 +185,10 @@ def _offset(args: dict) -> int:
 # This is the LAST survivor of a rule that used to be per FILE ("tab
 # re-indentation refused", which cost `mcp-forge` three hand copies). The old
 # reasoning was drawn from exactly this function and was right about it; it was
-# only wrong to generalise. The other seven canonical blocks contain no bracket
-# continuation at all, so nothing in them can move.
+# only wrong to generalise. EVERY OTHER canonical block -- the three constants
+# below included -- contains no bracket continuation at all, so nothing in them
+# can move. The suite asserts that set is exactly `_rows_note`, so this is a
+# measured claim rather than a number typed here and checked by nobody.
 
 def _rows_note(start: int, shown: int, total: int, exact: bool = True) -> str:
     """Row accounting for a row-shaped payload; goes on its LAST line.

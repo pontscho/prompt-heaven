@@ -295,10 +295,16 @@ def _int_param(value, default: int) -> int:
 # oversized half is never built, and the caller is told in one line how to ask
 # for the rest. Per-call overridable via max_answer_chars, so a caller who
 # genuinely wants the whole dump asks for it explicitly.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
 DEFAULT_MAX_ANSWER_CHARS = 24000
+# END GENERATED: 25da79526dcc
 
 # Room kept free for the accounting line while a row pager fills its budget.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: PAGE_LINE_RESERVE
 PAGE_LINE_RESERVE = 80
+# END GENERATED: 097a654ecf92
 
 
 def _max_answer_chars(params: dict) -> int:
@@ -423,7 +429,10 @@ def _row_page(rows: List[str], offset: int = 0, head_limit: int = 0,
     return kept, ("" if complete else _rows_note(start, len(kept), total, exact))
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _FENCE_LINE_RE
 _FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
+# END GENERATED: f6d18108dd1c
 
 # The resumable head of a purity row: `path:line:` or `path:line:col:`. The line
 # number must be digits, so a prose line that merely contains two colons
