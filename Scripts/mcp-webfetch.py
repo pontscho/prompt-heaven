@@ -57,6 +57,7 @@ import socket
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -1205,6 +1206,12 @@ WEBFETCH_CALL_TOOL = {
 # McpServer
 # ---------------------------------------------------------------------------
 
+# How many fetches may be in flight at once. The stdin reader owns a thread of
+# its own, OUTSIDE this pool, so saturating it delays queued CALLS and can never
+# stop the server from READING — which is the entire point of the split in run().
+MAX_INFLIGHT_REQUESTS = 8
+
+
 class McpServer:
 	"""Minimal MCP server over stdio (JSON-RPC 2.0, one JSON object per line)."""
 
@@ -1223,9 +1230,46 @@ class McpServer:
 	async def run(self) -> None:
 		loop = asyncio.get_running_loop()
 		log.info("MCP server starting, project_root=%s", self.project_root)
+		# TWO executors, and one task per request. The task half was already
+		# here; the executor half was not, and half of this shape is not a
+		# smaller version of it — it is a higher threshold for the same outage.
+		#
+		# `sys.stdin.readline` used to run on the DEFAULT executor, which is
+		# also where every fetch was parked. That pool holds
+		# min(32, cpu_count + 4) threads — 16 on a 12-core box — so 16 fetches
+		# sitting in a socket read left the readline with no worker to run on
+		# and the server stopped reading stdin entirely. Requests then sat
+		# unread in the pipe, timed out client-side (~60s), and were answered
+		# in a burst against ids the caller had already abandoned. From the
+		# caller's chair that is a dead server, and restarting it is the only
+		# lever they have. A shared pool merely buys a bigger number before
+		# that happens; the reader has to own a thread no handler can take.
+		#
+		# The budget being spent is caller-supplied and UNCLAMPED
+		# (`timeout`, default 30s, at handle_fetch), and one call walks the
+		# impersonation ladder up to three times, so a single fetch can hold
+		# its worker for 3x whatever the caller asked for. That is exactly why
+		# the reader may not share the pool with it.
+		#
+		# Handlers are safe to run concurrently: handle_fetch builds a fresh
+		# session per call (_create_session), the module holds no cookie jar,
+		# no connection pool and no `global` written after startup, and the
+		# disk cache is keyed per URL and landed with os.replace.
+		#
+		# Concurrency here is not NEW — dispatch was already one task per
+		# message — so this changes the ceiling, not the exposure. The one
+		# rough edge it inherits: _cache_store names its scratch file per
+		# PROCESS (`{path}.{pid}.tmp`), not per thread, so two threads
+		# refreshing the SAME url can garble one entry. The loader reads a
+		# decode error as a miss, so the cost is a wasted fetch, not bad data
+		# — and 8 workers can reach it in fewer ways than the default pool's
+		# 16 could.
+		reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="webfetch-stdin")
+		workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+		                             thread_name_prefix="webfetch-call")
 		try:
 			while True:
-				line = await loop.run_in_executor(None, sys.stdin.readline)
+				line = await loop.run_in_executor(reader, sys.stdin.readline)
 				if not line:
 					break
 				line = line.strip()
@@ -1237,22 +1281,34 @@ class McpServer:
 					log.warning("Invalid JSON: %s", exc)
 					continue
 				log.debug("← %s", json.dumps(msg)[:200])
-				# The fetch is blocking and can occupy the full 30s timeout.
+				# The fetch is blocking and can occupy the full timeout.
 				# Handling it on the loop would stall ping and every other
-				# request for the duration, so it goes to a thread — the same
-				# move mcp-jenkins and mcp-purity make for their sync backends.
-				task = asyncio.ensure_future(self._dispatch(loop, msg))
+				# request for the duration, so it goes to the worker pool —
+				# the same move mcp-jenkins and mcp-purity make for their sync
+				# backends.
+				task = asyncio.ensure_future(self._dispatch(loop, workers, msg))
 				self._inflight.add(task)
 				task.add_done_callback(self._inflight.discard)
 		finally:
+			# Drain BEFORE shutting the pools down, and drain rather than
+			# cancel: a fetch mid-flight may be part-way through writing
+			# save_to or a cache entry, and cancelling the task would not stop
+			# the thread doing it — it would only stop anyone waiting for it to
+			# finish. Once the gather returns, every worker is idle, so
+			# shutdown(wait=False) reclaims both pools without blocking. An
+			# executor nobody shuts down is a hang at exit, which is worse than
+			# the deafness this fixes.
 			if self._inflight:
 				log.debug("draining %d in-flight request(s)", len(self._inflight))
 				await asyncio.gather(*self._inflight, return_exceptions=True)
+			reader.shutdown(wait=False)
+			workers.shutdown(wait=False)
 			log.info("MCP server shutting down")
 
-	async def _dispatch(self, loop: asyncio.AbstractEventLoop, msg: dict) -> None:
+	async def _dispatch(self, loop: asyncio.AbstractEventLoop,
+	                    workers: ThreadPoolExecutor, msg: dict) -> None:
 		try:
-			response = await loop.run_in_executor(None, self._handle_message, msg)
+			response = await loop.run_in_executor(workers, self._handle_message, msg)
 		except Exception as exc:
 			log.exception("Unhandled exception while handling message")
 			response = self._error(
