@@ -269,22 +269,56 @@ reaches the message-level catch-all.
 
 ---
 
-## 5. run() loop — the message-level catch-all (FIX-1)
+## 5. run() loop — one task per message, and a reader thread nothing can take
 
-The read loop reads one JSON object per line. The **handler call is wrapped in
-try/except, and the `-32603` error response is ALWAYS written** when a handler
-raises unexpectedly. Silently swallowing the exception (logging without replying)
-leaves the client blocked forever — that is the bug this shape fixes.
+`tests/test_read_loop.py` gates four properties across all fifteen servers; the
+WHY is `docs/adr/0008-a-serialized-read-loop-looks-like-a-dead-server.md`.
 
-### 5a. Sync variant (pure-stdlib tooling servers)
+1. **`sys.stdin.readline` on a dedicated `max_workers=1` executor** — never
+   `None`, never a pool a handler can enter. Otherwise saturated handlers starve
+   the readline, the server stops reading stdin, and later requests time out
+   client-side against ids the caller has abandoned: a dead server, restart the
+   only lever.
+2. **One task per message** (`loop.create_task` / `asyncio.ensure_future` —
+   either), never awaited inline on the loop; keep a strong reference, since a
+   bare `ensure_future` can be garbage-collected mid-flight.
+3. **Malformed input is ANSWERED, never dropped** — `-32700` unparseable,
+   `-32600` valid JSON that is not an object. A bare `continue` leaves the id
+   unanswered until it times out (a hung server, not one bad line), and a bare
+   `5` reaching `msg.get()` used to kill the process. Plain wording, **not**
+   §7a's `Near the failure:` window: that quotes one hand-encoded field, this is
+   a whole raw line.
+4. **Both ends of the pipe guarded, every executor shut down** — a detached
+   stdin *raises* rather than returning `""`, a client hanging up mid-reply
+   raises `BrokenPipeError`, and an unshut executor hangs exit via
+   `concurrent.futures`' atexit join.
+
+**The transport is uniform; the dispatch decision is not.** Two groups, spelled
+as the gate's `FLEET` table spells them — **`pool`** (8: forge, git, inspect,
+jenkins, postgres, tshark, webfetch, wiki) and **`coroutine`** (7: clangd,
+context7, cuda, gdc, lldb, lua-lsp, purity). Audit this server's own state to
+pick; §5b is not a reduced §5a — for those seven a worker pool is a regression.
+
+### 5a. `pool` — blocking sync handlers in a worker `ThreadPoolExecutor`
+
+Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
 
 ```python
-    async def run(self):
+    async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        log.info("MCP server starting")
+        # Say HERE why concurrent dispatch is safe for THIS server: which mutable
+        # state a handler can reach, and which lock covers it. Never copy a verdict.
+        reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="SERVER-stdin")
+        workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
+                                     thread_name_prefix="SERVER-call")
+        inflight: set = set()
         try:
             while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
+                try:
+                    line = await loop.run_in_executor(reader, sys.stdin.readline)
+                except (OSError, ValueError) as exc:   # a detached stdin RAISES
+                    log.warning("stdin read failed, shutting down: %s", exc)
+                    break
                 if not line:
                     break
                 line = line.strip()
@@ -294,79 +328,73 @@ leaves the client blocked forever — that is the bug this shape fixes.
                     msg = json.loads(line)
                 except json.JSONDecodeError as exc:
                     log.warning("Invalid JSON: %s", exc)
+                    self._write(self._error(None, -32700, f"Parse error: {exc}"))
                     continue
-
+                if not isinstance(msg, dict):          # `5` is valid JSON
+                    log.warning("Request was %s, not an object", type(msg).__name__)
+                    self._write(self._error(
+                        None, -32600,
+                        "Invalid Request: expected a JSON object, got "
+                        f"{type(msg).__name__}"))
+                    continue
                 log.debug("← %s", json.dumps(msg)[:200])
-                try:
-                    response = self._handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    out = json.dumps(response)
-                    log.debug("→ %s", out[:200])
-                    sys.stdout.write(out + "\n")
-                    sys.stdout.flush()
+                task = loop.create_task(self._serve(loop, workers, msg))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
         finally:
+            for task in inflight:
+                task.cancel()
+            reader.shutdown(wait=False)
+            workers.shutdown(wait=False)
             log.info("MCP server shutting down")
-```
 
-### 5b. Async variant (LSP / subprocess — A-family)
-
-Identical except the handler is awaited, and the `finally` performs the server's
-subprocess cleanup. **The `finally` body is server-specific and is NOT changed by
-the convergence** (sub-shapes: `await _client.stop()` for clangd/cuda/lua-lsp;
-`await self.manager.cleanup_all()` for gdc/lldb; context7 has no `finally`).
-
-```python
-    async def run(self):
-        loop = asyncio.get_running_loop()
-        log.debug("SERVER_NAME server ready (stdio)")
-        # ... optional background auto-init task ...
+    async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
+        """One request, from dispatch to written reply. Runs as its own task."""
         try:
-            while True:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
-                if not line:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    log.debug("JSON parse error: %s", exc)
-                    continue
+            response = await loop.run_in_executor(workers, self._handle_message, msg)
+        except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
+            log.exception("Unhandled exception while handling message")
+            response = self._error(msg.get("id"), -32603,
+                                   f"Internal error: {type(exc).__name__}: {exc}")
+        if response is not None:
+            self._write(response)
 
-                log.debug("← RAW: %s", line)
-                try:
-                    response = await self.handle_message(msg)
-                except Exception as exc:
-                    log.exception("Unhandled exception while handling message")
-                    response = self._error(
-                        msg.get("id"), -32603,
-                        f"Internal error: {type(exc).__name__}: {exc}",
-                    )
-                if response is not None:
-                    log.debug("→ RAW: %s", json.dumps(response))
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
-        finally:
-            # server-specific cleanup — unchanged by convergence
-            if _client is not None:
-                await _client.stop()
+    def _write(self, response: dict) -> None:
+        """No lock needed: handlers run in the worker pool, but `_serve` resumes on
+        the event-loop thread after its await, so two replies cannot interleave."""
+        try:
+            out = json.dumps(response)
+        except (TypeError, ValueError) as exc:
+            log.exception("Response was not JSON-serialisable")
+            out = json.dumps(self._error(response.get("id"), -32603,
+                                         f"Response not serialisable: {exc}"))
+        log.debug("→ %s", out[:200])
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError) as exc:
+            log.warning("stdout write failed: %s", exc)
 ```
 
-> **Behavioral note (intentional):** with this shape, any exception that reaches
-> the loop now produces a `-32603` reply on stdout. What reaches it is narrow by
-> construction, and for a reason worth stating precisely: the tool wrap's own
-> `except` converts a handler failure into a flagged tool reply (§3a), so an
-> exception bubbling past THAT is one the wrap itself could not shape — replying
-> is correct, hanging is not. This note used to say handlers "already return
-> their own `_tool_error`". Six servers never routed a handler failure through
-> the flag at all, which is the hole §3a closes and this sentence hid.
+### 5b. `coroutine` — handlers awaited directly, no worker pool
+
+Three lines differ: `run()` builds only `reader`, dispatch is
+`loop.create_task(self._serve(msg))`, and `_serve` awaits `self._handle_message(msg)`
+directly. Read `mcp-purity.py:5944`. A worker pool there would be a **regression**:
+those handlers' per-client `_next_id += 1` and the `_pending[id] = fut` after it
+sit between the same two awaits, which is safe only on one thread.
+`mcp-context7.py:712` is the third arrangement — coroutine dispatch that still
+owns a pool, because its one blocking call parks itself on a module-level
+`_HTTP_EXECUTOR`. The `finally` body stays server-specific (`await _client.stop()`
+for the LSP hosts, `await self.manager.cleanup_all()` for gdc/lldb), and
+`mcp-webfetch.py:1315` **drains** instead of cancelling, because cancelling a task
+does not stop the thread part-way through writing the file a caller asked for.
+
+> **Behavioral note (intentional):** any exception reaching `_serve` produces a
+> `-32603` reply on stdout. What reaches it is narrow — the tool wrap's own
+> `except` already converts a handler failure into a flagged tool reply (§3a), so
+> one bubbling past THAT is a failure the wrap itself could not shape: replying
+> is correct, hanging is not.
 
 ---
 
@@ -685,7 +713,8 @@ drift committed into a server turns the fleet red.
 - [ ] **a handler failure REACHES the flag** — raise, or return `{"error": ...}`, or mark the text with `_ErrorText`; never a pre-rendered failure string the wrap cannot tell from a success (§3a)
 - [ ] `initialize` → `{protocolVersion, serverInfo, capabilities}`, version `"1.0.0"`
 - [ ] `ping` → `_result(msg_id, {})`; notifications → `None`; unknown → `-32601`
-- [ ] run() loop wraps the handler in try/except and **writes** a `-32603` reply
+- [ ] run() loop: readline on a dedicated `max_workers=1` executor, one task per message, `-32700`/`-32600` **answered**, readline and write guarded, every executor shut down (§5 — `tests/test_read_loop.py` gates this)
+- [ ] `_serve` wraps the handler in try/except and **writes** a `-32603` reply
 - [ ] `main()` canonical logging block; `--debug` + `--log-file` present
 - [ ] `_handle_tool_call` decodes a string `arguments` (JSON) before the dict guard (§7a)
 - [ ] param normalizer decodes a string `params` (JSON); every bool flag read via `_bool_param` (§7a/§7b)
