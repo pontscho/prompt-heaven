@@ -73,6 +73,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `jira_cli` | `test_jira_cli.py` | A–K |
 | `checkpoint` | `test_checkpoint.py` | A–K |
 | `generated_region` | `test_generated_region.py` | A–F |
+| `read_loop` | `test_read_loop.py` | A–F |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
@@ -102,6 +103,7 @@ python3 tests/test_wiki_recall.py
 python3 tests/test_jira_cli.py
 python3 tests/test_checkpoint.py
 python3 tests/test_generated_region.py
+python3 tests/test_read_loop.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 
@@ -147,14 +149,15 @@ Hard rule, enforced rather than hoped for:
   `tempfile.mkdtemp()` directory (`_harness.TempWorkspace`) and removed
   afterwards. `--keep` retains the directory and prints its path.
 * Suites that need scratch *inside* the repo — `name_existence`,
-  `spawn_stdin`, `mcp_footprint` — use a per-run
+  `spawn_stdin`, `mcp_footprint`, `read_loop` — use a per-run
   `.claude/tmp/<suite>/run-<unique>/` directory instead, and that boundary is
   structurally gated: a single write path and a single child launcher record
   every target, and the group fails if any recorded path escapes the sandbox.
   The per-run subdirectory exists because two concurrent instances at a fixed
   path had one instance's teardown deleting the other's fixtures mid-probe.
 * `_harness.repo_tree()` is the snapshot behind the `no-new-repo-paths` delta
-  check in `checkpoint`, `jira_cli`, `purity_file_ops` and `purity_lsp`, and it
+  check in `checkpoint`, `jira_cli`, `purity_file_ops`, `purity_lsp` and
+  `read_loop`, and it
   **excludes `.claude/tmp` at any depth** as well as `.git`. Without that, the
   per-run directories above are visible to a *different* suite's before/after
   window: serially within one fleet run they are harmless, but two overlapping
@@ -213,6 +216,11 @@ tests/
                                            module and unit-tests its blocks,
                                            and decides tab re-indentation per
                                            BLOCK rather than per file)
+  test_read_loop.py          groups A-F   (offline, AST only, nothing spawned --
+                                           ADR 0008's read-loop shape in every
+                                           Scripts/mcp-*.py, with the per-server
+                                           pool/coroutine split declared in a
+                                           table rather than inferred)
   files/                     tf_-prefixed C and Lua fixtures for purity_lsp
   README.md
 ```
@@ -244,6 +252,13 @@ change to the very thing it measures. What is typed gets checked; what is
 derived gets derived. For those suites the gate is the *invariant*, not the
 count: "new spawn site with no explicit stdin at `foo.py:120`" is a far better
 error message than "265 != 262".
+
+`read_loop` is the deliberate counter-example, and it is worth understanding
+before copying the rule mechanically: it also emits cases per server, yet its
+count is **typed**. The difference is what a moved count MEANS. A new spawn site
+is ordinary; a new MCP server that has not declared its concurrency decision is
+the exact defect that suite exists to catch, so there the drift line is a second
+alarm rather than noise.
 
 Once the three edits are in place, `run.py` handles the name, the subset
 selection, and the aggregation.

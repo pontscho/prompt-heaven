@@ -69,6 +69,17 @@ run):
                                                       MUST reach coverage), each
                                                       on its own separate
                                                       fixture (A-P)
+  read_loop          tests/test_read_loop.py          every Scripts/mcp-*.py
+                                                      read loop carries ADR
+                                                      0008's shape: a
+                                                      single-thread reader
+                                                      executor no handler can
+                                                      take, and one task per
+                                                      message -- with the
+                                                      per-server pool/coroutine
+                                                      split DECLARED in a table
+                                                      rather than inferred from
+                                                      the fleet (AST-based, A-F)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -185,6 +196,10 @@ def run_generated_region(opts):
     return run_python_suite("test_generated_region", opts)
 
 
+def run_read_loop(opts):
+    return run_python_suite("test_read_loop", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -272,6 +287,14 @@ SUITES = [
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against", 75),
+    # TYPED, not None, although it is one-plus-one cases per server: here a
+    # server appearing WITHOUT a declared row is the defect, so a count that
+    # moves when the roster moves is the alarm working rather than noise.  That
+    # is the opposite of mcp_footprint's reasoning above, and deliberately so.
+    ("read_loop", run_read_loop,
+     "every MCP server's read loop carries ADR 0008's shape: a single-thread "
+     "reader executor no handler can take, and one task per message -- with "
+     "the pool/coroutine split declared per server rather than inferred", 47),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

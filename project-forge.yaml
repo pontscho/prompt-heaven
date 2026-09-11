@@ -146,6 +146,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
+  read_loop:
+    description: "The ADR 0008 read-loop gate: every Scripts/mcp-*.py must run sys.stdin.readline on its OWN single-thread ThreadPoolExecutor that no handler can enter, and must hand each message to its own task rather than awaiting the handler on the read loop. The per-server concurrency split is DECLARED in a table (eight servers run handlers in a worker pool, seven keep them as coroutines because their id-counter safety depends on a single event-loop thread) and measured against it, never inferred from the fleet -- inferring it would only prove the fleet agrees with itself. A synthetic control group plants each defect in turn: the reader on the default pool, the reader on the handler pool, a two-thread reader, an inline handler await, a reader leaked into _serve, an executor nobody shuts down. AST only -- starts nothing, writes only its sandbox."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py read_loop
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|READLINE|READER|DISPATCH|SHUTDOWN'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]
