@@ -1348,9 +1348,25 @@ class McpServer:
 		Every caller is on the event-loop thread — `_dispatch` resumes there
 		after its await, and the read loop's own error replies never leave it —
 		so the lock is redundant today. It is kept rather than removed: dropping
-		it is a separate decision from adding the guard below.
+		it is a separate decision from adding the guards below.
 		"""
-		out = json.dumps(response)
+		try:
+			out = json.dumps(response)
+		except (TypeError, ValueError) as exc:
+			# Measured on both callers before this guard existed, and they fail
+			# as differently as they do for stdout below. From _dispatch (a
+			# handler-built reply) the raise became a never-retrieved task
+			# exception: that id got SILENCE, the loop read on, one reply lost
+			# to a stderr traceback. From the READ LOOP it unwound out of run()
+			# and the process exited 1 — every later request unread rather than
+			# merely unanswered. Only _dispatch can reach it today: the loop's
+			# own -32700/-32600 payloads carry str/None throughout. The fallback
+			# re-serialises response["id"] and could in principle raise for the
+			# same reason; it cannot here, because every id that reaches _write
+			# came out of json.loads and is JSON-native by construction.
+			log.exception("Response was not JSON-serialisable")
+			out = json.dumps(self._error(response.get("id"), -32603,
+			                             f"Response not serialisable: {exc}"))
 		log.debug("→ %s", out[:200])
 		with self._write_lock:
 			try:
