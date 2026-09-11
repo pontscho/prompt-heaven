@@ -619,11 +619,30 @@ async def handle_new_page(mgr: GdcManager, args: dict) -> Any:
         except Exception:
             pass  # fall through to HTTP fallback
 
-    # Fallback: HTTP /json/new with properly encoded URL
+    # Fallback: HTTP /json/new with properly encoded URL.
+    #
+    # This is not the unlikely branch it looks like — it is the ONLY branch a
+    # cold server can take. mgr.sessions holds page-level sessions exclusively
+    # (get_session reads webSocketDebuggerUrl off a /json target), so on a fresh
+    # server it is empty and the CDP path above is skipped on the FIRST call
+    # every time. The guard is not defensive: with zero pages open there is no
+    # target to attach to at all, and attaching to a bystander tab merely to
+    # mint a new one would enable Page/Runtime/Network/Console on it and start
+    # recording someone else's traffic (see CdpSession.connect).
+    #
+    # The verb is load-bearing and must be PUT: Chrome answers a GET here with
+    # 405 "Using unsafe HTTP verb GET to invoke /json/new. This action supports
+    # only PUT verb." — measured against Chrome 152. The check is opt-in per
+    # endpoint rather than global, which is why the siblings need no change and
+    # why PUT is the safe spelling rather than merely the current one: /json,
+    # /json/close and /json/activate carry no check and dispatch on path alone,
+    # accepting any verb, so a build old enough to predate this check answers a
+    # PUT here the same way it answered a GET.
     try:
         encoded_url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=")
         create_url = f"{mgr.browser_url}/json/new?{encoded_url}"
-        with urllib.request.urlopen(create_url, timeout=10) as resp:
+        req = urllib.request.Request(create_url, method="PUT")
+        with urllib.request.urlopen(req, timeout=10) as resp:
             target = json.loads(resp.read().decode())
         target_id = target.get("id")
         mgr.selected_id = target_id
