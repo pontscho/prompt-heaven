@@ -100,10 +100,12 @@ server that must stay silent.
 
 SURVEY (group E, INFO only) -- `Scripts/MCP_SKELETON.md`
 --------------------------------------------------------
-Reported, never failed.  The canonical reference's section 5 still shows the
-PRE-0008 loop.  Gating a Markdown page is a scope decision for a human; printing
-the measurement so the gap is visible rather than invisible is this suite's job,
-and follows `spawn_stdin`'s GATED-vs-SURVEYED precedent.
+Reported, never failed.  The canonical reference's section 5 taught the PRE-0008
+loop when this suite was written; `a7b165e` closed that gap and the survey now
+measures it as closed.  It stays because that page is what a new server is copied
+from, so it can regress silently.  Gating a Markdown page is a scope decision for
+a human; printing the measurement so the gap is visible rather than invisible is
+this suite's job, and follows `spawn_stdin`'s GATED-vs-SURVEYED precedent.
 
 SANDBOX DISCIPLINE -- all fixtures under
 `.claude/tmp/test_read_loop/run-<unique>/`, one subdirectory per run so a
