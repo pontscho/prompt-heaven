@@ -11,8 +11,8 @@ sources:
   - Scripts/_mcp_paging.py
   - tests/test_generated_region.py
 verified:
-  commit: 7459e17
-  date: 2026-09-10
+  commit: 1a10f28
+  date: 2026-09-11
 links:
   - scripts
   - tests
@@ -71,9 +71,12 @@ A `BEGIN` without an `END` is a hard error rather than a skip, because a region
 that quietly stops being maintained is the whole failure the mechanism exists to
 prevent `Scripts/amalgamate.py`.
 
-As of the verified commit: **56 live regions across the 15 servers, emitting 70
-block instances** — a single region may name several blocks. `_json_error_window`
-is in every server; the `_result` / `_error` pair is in fourteen of fifteen.
+As of the verified commit: **70 live regions across the 15 servers, emitting 84
+block instances from 11 canonical blocks** — a single region may name several
+blocks, and that is the whole of the gap between the two counts: the fourteen
+`_result, _error` regions name two blocks each, every other region names one.
+`_json_error_window` is in every server; the `_result` / `_error` pair is in
+fourteen of fifteen, `mcp-webfetch.py` the one holdout.
 
 ## Three canonical sources, and why three
 
@@ -91,7 +94,7 @@ with both departures asserted as departures in the suite.
 |---|---|---|
 | `Scripts/_mcp_json.py` | 5 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
 | `Scripts/_mcp_lsp.py` | 1 | LSP `Content-Length` framing over stdio |
-| `Scripts/_mcp_paging.py` | 2 | the two halves of the pager protocol |
+| `Scripts/_mcp_paging.py` | 5 | how much of a result a caller gets, and how it is told where the rest is |
 
 The source name on a marker **selects the block map**: a name is resolved against
 that source and no other, and an unknown source is refused by name with the known
@@ -99,14 +102,37 @@ ones listed `Scripts/amalgamate.py:audit_text`.
 
 ## What may be a block — four constraints
 
-**Only top-level functions and classes.** `load_blocks_text` walks a source's
-`tree.body` and maps `FunctionDef`, `AsyncFunctionDef` and `ClassDef` only
-`Scripts/amalgamate.py:load_blocks_text`. Two consequences: a module-level
-assignment cannot be a block — which is why the paging source's own list of
-queued additions contains three names that are not extractable as written — and a
-method inside a class cannot be one either, which is why `_result` and `_error`
-are defined at module top level in the JSON source despite being methods at their
-destination.
+**A function, a class, or a single-target constant.** `load_blocks_text` walks a
+source's `tree.body` and takes `FunctionDef`, `AsyncFunctionDef`, `ClassDef` —
+and, since the constants were lifted, an `ast.Assign` whose one target is a bare
+`ast.Name` `Scripts/amalgamate.py:load_blocks_text`. Every other assignment shape
+is turned down, each on its own grounds `Scripts/amalgamate.py:assign_name`:
+`A = B = 1` and `A, B = f()` bind several names from one indivisible slice, so
+the region would define a name its marker never mentions; `x.attr = 1` and
+`x[0] = 1` bind no name to key the map on. **`X += 1` is the load-bearing
+refusal**, and it is structural rather than stylistic — its target carries a
+`Store` context, so `free_names` *binds* `X` and reports no requirement at all,
+while the statement cannot run unless the host already defines `X`. A block whose
+precondition is invisible to the contract check is the exact failure that check
+exists to catch, so the shape is refused rather than handed to a check that
+cannot see it. `X: int = 1` is out on demand rather than on principle: no queued
+block is one, and admitting the form would also admit a bare `X: int`, which
+binds nothing at run time and fails at the host's first read. Both arms — what is
+taken and what is turned down — are pinned by `single-name-assign-only`
+`tests/test_generated_region.py:group_control`.
+
+An unextractable shape is **skipped, not raised on**, and that follows from the
+loader having two callers. It is not only the canonical-source reader: the
+hand-copy census points it at every server in the fleet
+`tests/test_generated_region.py:group_gate`, so raising would turn an ordinary
+module-level statement in any server into a traceback naming the wrong subject
+entirely. Nothing is lost to the skip, because a name only enters the system by
+being written on a marker, and an unknown one is already refused by name with the
+source it was asked for `Scripts/amalgamate.py:render`.
+
+A method inside a class still cannot be a block — the walk is over `tree.body`
+and nothing else — which is why `_result` and `_error` are defined at module top
+level in the JSON source despite being methods at their destination.
 
 **The host must already import every free name.** `free_names` over-reports
 deliberately, and it catches two holes that were once live: a block calling
@@ -117,15 +143,39 @@ while the block looks fine where it is written. The host half,
 assignments. A free name the host *defines* is therefore still a refusal, and the
 region is rejected by name at END-marker time `Scripts/amalgamate.py:host_provides`.
 
+Admitting constants needed nothing added here, and that is a property of the walk
+rather than luck: `ast.walk` descends the whole tree and every binder is matched
+by node type, so a module-level statement is analysed on the same terms as a
+`def` body `Scripts/amalgamate.py:free_names`. `_FENCE_LINE_RE` is the first
+*constant* to spend the budget — it reads `re`, and carries that import
+requirement to each of its three hosts. It is not the first block to carry one at
+all: `_result`'s `msg_id: Any` has demanded `typing.Any` of fourteen hosts since
+long before, which is the annotation hole named above. What is new is the route,
+not the requirement — a plain read in an executable statement rather than an
+annotation. The refusal used to fire only incidentally, because every live region
+passes it; `free-name-refusal` now drives it directly, on a constant, against one
+host that imports `re` and one that does not
+`tests/test_generated_region.py:group_control`.
+
 **Tab safety is decided per block, mechanically.** `block_is_tab_safe` requires
 both that no line join happens while a bracket is open and that every leading
 whitespace run is a whole multiple of four; anything unprovable is unsafe
 `Scripts/amalgamate.py:block_is_tab_safe`. The host's style is read from its own
 indent tokens, not from the marker's column. This **narrowed an earlier per-file
 rule** that refused tab hosts outright and cost one server three hand copies that
-were byte-identical modulo the indent character. Live scope today is a single
-(block, host) pair: both tab-indented servers host regions, and exactly one of
-the eight blocks is unsafe.
+were byte-identical modulo the indent character.
+
+Neither the unsafe set nor the tab hosts are tallied here, because the suite
+measures both on every run: `tab-safety-real-blocks` asserts the unsafe set is
+exactly `_rows_note` over the real canonical text, and `host-indent-from-tokens`
+that the tab-indented servers are exactly `mcp-forge.py` and `mcp-webfetch.py`
+`tests/test_generated_region.py:group_tabs`. A block added to a source moves that
+set or fails there. The refusal therefore bites in one place: `mcp-webfetch` is
+the only tab host that carries `_rows_note` at all, and it keeps its own —
+excluded twice over, tab-unsafe *and* body-diverged, so clearing the tab hazard
+alone would not make it adoptable. Lifting the constants did not widen that
+surface even though it grew the block count, because a constant has no leading
+whitespace on any line and the tab conversion is a no-op for it.
 
 **A name must resolve against the source that was named.** Cross-source
 resolution is refused, and the suite gates both halves — the refusal *and* a
@@ -156,14 +206,22 @@ as generated infrastructure would buy drift protection for a divergence; see
 
 ## The gate
 
-`tests/test_generated_region.py` declares 73 cases in six groups: A gates the
-live tree against the canonical sources, B the marker and hash contract, C the
+`tests/test_generated_region.py` gates the mechanism in six groups: A the live
+tree against the canonical sources, B the marker and hash contract, C the
 negative controls, D hygiene, E what each shared block actually *does*, and F tab
-safety. Seventy-two are gated failures; the hand-copy census is the one
-informational case.
+safety. Exactly one case is informational — the hand-copy census — and every
+other is a gated failure.
+
+The case count is deliberately **not** repeated here. It is declared once, in the
+suite table, and asserted on every run against what the suite actually recorded
+`tests/run.py:SUITES`; a count that lives in prose and is checked by nobody is
+precisely the defect that table exists to prevent.
 
 Group E is not optional — the suite argues that a drift gate on its own would
-only ever prove that fourteen files agree on the same bug.
+only ever prove that every copy agrees on the same bug `Scripts/_mcp_paging.py`.
+It loads each canonical source as a module and exercises every block that *has*
+behaviour, which is why the two value constants sit outside it by design, and
+`_FENCE_LINE_RE` outside it by omission — see Known gaps.
 
 The format contract is spelled out **independently** of the generator rather than
 imported from it: a test that imported the marker constants would sail through a
@@ -171,11 +229,21 @@ rename that orphaned every region already written into a server.
 
 ## Known gaps
 
-- **Two of the generator's rules have no test case.** Nothing asserts that a
-  module-level assignment is skipped by the block loader, and nothing exercises
-  the `free_names` refusal directly — it fires only incidentally, because every
-  live region passes it. If either check silently stopped working, the suite
-  would stay green.
+- **`_FENCE_LINE_RE` has no behavioural case.** Group E exercises every block
+  that *has* behaviour, and this one does: `re.M` is the whole of it. Drop the
+  flag and the pattern still compiles and still reads right, while `findall`
+  quietly returns at most one hit — the fence count comes out even and a reply
+  cut mid-fence reaches the reader with the block still open
+  `Scripts/_mcp_paging.py`. Group A pins the constant's *text* in all three
+  hosts; nothing yet pins what it does. The other two constants are deliberately
+  not in this position: `DEFAULT_MAX_ANSWER_CHARS` and `PAGE_LINE_RESERVE` have
+  no behaviour to exercise, and a case asserting `== 24000` against a literal
+  typed into the suite would be the same number written twice.
+- **A name that is present but unextractable is reported as absent.** The loader
+  skips a shape it cannot take, so a marker naming `X` where the source writes
+  `X += 1` is refused with "defines no top-level `X`"
+  `Scripts/amalgamate.py:render`. That is true of the block map and misleading
+  about the cause; the refusal cannot yet tell the two apart.
 - **The census cannot see a hand copy that lives inside a class**, because the
   block loader walks module top level only. At least one server's `_result` and
   `_error` are exactly that: genuine hand copies, declared in
