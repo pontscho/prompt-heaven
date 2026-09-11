@@ -18,8 +18,8 @@ sources:
   - Scripts/mcp-wiki.py
   - ClaudeCode/skills/mcp-jenkins/SKILL.md
 verified:
-  commit: f1d117b
-  date: 2026-08-27
+  commit: f80dc90
+  date: 2026-09-11
 links:
   - scripts
   - skills

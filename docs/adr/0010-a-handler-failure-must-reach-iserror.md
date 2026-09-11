@@ -8,8 +8,8 @@ sources:
   - Scripts/MCP_SKELETON.md
   - Scripts/_mcp_smoke_test.py:error_envelope_checks
 verified:
-  commit: 7459e17
-  date: 2026-09-10
+  commit: f80dc90
+  date: 2026-09-11
 links:
   - scripts
   - tests

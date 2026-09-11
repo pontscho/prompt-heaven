@@ -9,14 +9,16 @@ sources:
   - ClaudeCode/skills/wiki
   - ClaudeCode/agents/minion-librarian.md
 verified:
-  commit: 9eeb66c
-  date: 2026-08-10
+  commit: f80dc90
+  date: 2026-09-11
 links:
   - scripts
   - skills
   - agents
+  - generated-regions
   - 0002-index-claims-no-freshness
   - 0003-the-trigger-travels-with-the-tool
+  - 0008-a-serialized-read-loop-looks-like-a-dead-server
 ---
 
 # Documentation Wiki Engine
@@ -84,6 +86,19 @@ reindex never invalidates it spuriously. The memoization is keyed on the root an
 else: no HEAD, no TTL, no eviction, so a long-lived server holds one tokenized
 copy of every root it has ever searched.
 
+Nothing in that memo is mutated in place — `_build_corpus` returns fresh lists
+and `_build_corpus_cached` rebinds a single key — which is what lets the server
+run handlers concurrently with no lock over its index: a reader holding the
+previous corpus keeps a self-consistent snapshot while a rebuild installs the
+next one, and two cold misses cost duplicated work rather than a half-built
+index. Up to eight handlers run at once and further calls queue behind them
+`Scripts/mcp-wiki.py:MAX_INFLIGHT_REQUESTS` — never behind the reader, which
+owns a thread of its own — and `reindex` — the one writing
+function — writes only `INDEX.md`, which the signature walk skips, so it can
+neither invalidate this cache nor be half-read by a concurrent search. The
+per-server audit that had to establish all of this before the dispatch changed
+is [[0008-a-serialized-read-loop-looks-like-a-dead-server]].
+
 The query side is not cached at all. `df`/`idf` are recomputed over the whole
 corpus per call, and a term is matched by scanning every token of every field
 for a `startswith` prefix hit `Scripts/mcp-wiki.py:_prefix_count`. That linear
@@ -134,6 +149,18 @@ The stdlib scripts `ClaudeCode/skills/wiki/scripts/freshness.py` and
 logic — including the same forbidden-status lint
 `ClaudeCode/skills/wiki/scripts/reindex.py:collect` — and remain as a pre-PR CI
 gate (non-zero exit on stale pages, duplicate slugs, or malformed frontmatter);
-`wiki_call` is the interactive path. The duplication is hand-maintained: the
-server vendors the script logic instead of importing it, so a change to either
-copy must be mirrored in the other.
+`wiki_call` is the interactive path. That pair is hand-maintained: the server
+vendors the script logic instead of importing it, and the fleet's generator
+renders only into `Scripts/mcp-*.py` `Scripts/amalgamate.py:TARGET_GLOB`, so it
+never reaches the skill's copies — a change to either copy must still be
+mirrored in the other by hand.
+
+Hand-maintained is no longer the whole story for this file, though. Three spans
+of `Scripts/mcp-wiki.py` are now generated regions rendered from the canonical
+`Scripts/_mcp_json.py` — `_bool_param`, `_json_error_window`, and the
+`_result`/`_error` pair — each fenced by `BEGIN GENERATED` / `END GENERATED`
+markers that carry the canonical file, the block names, and a hash of the
+rendered text. Editing inside those markers is overwritten on the next generator
+run; the fix belongs in the canonical file. The four rules that decide what may
+travel that way, and the two registers of deliberate exclusion, are in
+[[generated-regions]].
