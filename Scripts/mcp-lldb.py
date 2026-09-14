@@ -122,9 +122,17 @@ def _bool_param(value, default=False):
 # Per-call overridable via max_answer_chars, so a caller who genuinely wants the
 # whole dump asks for it explicitly. <= 0 means unlimited.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars
 DEFAULT_MAX_ANSWER_CHARS = 24000
-# END GENERATED: 25da79526dcc
+
+
+def _max_answer_chars(args: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
+    try:
+        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MAX_ANSWER_CHARS
+# END GENERATED: 6c119e9d0245
 
 # Room kept free for the closing accounting line while filling a line budget.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
@@ -134,14 +142,6 @@ PAGE_LINE_RESERVE = 80
 
 BIAS_HEAD = "head"
 BIAS_TAIL = "tail"
-
-
-def _max_answer_chars(args: dict) -> int:
-    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
-    try:
-        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_ANSWER_CHARS
 
 
 # What an item is here (a payload LINE, never an address), and which functions

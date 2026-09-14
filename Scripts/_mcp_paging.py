@@ -100,10 +100,17 @@ measured 511617-character call, jenkins names the console log, webfetch says
 each constant was given a region of its OWN and the explanation stayed above
 the BEGIN marker where it was written.
 
+`_max_answer_chars` is the one exception to that last rule, and not by choice.
+It READS `DEFAULT_MAX_ANSWER_CHARS`, `host_provides` offers a region only the
+host's module-level imports, and a marker names exactly one source -- so it can
+neither stand in a region of its own nor delegate to `_mcp_json.py`'s
+`_int_param` the way mcp-purity's hand copy did. The two ship together in one
+marker, and that pair is the only multi-name region this file serves.
+
 **Annotations are not free.** A block whose signature says `value: Any` needs
 `Any` in the HOST's namespace, evaluated at def time, so a server that does not
-import it dies at startup. The two functions annotate with `int`, `bool`, `str`
-and `dict` -- builtins, present everywhere -- so they are safe as written; a
+import it dies at startup. The three functions annotate with `int`, `bool`,
+`str` and `dict` -- builtins, present everywhere -- so they are safe as written; a
 block wanting a `typing` name would be carrying that requirement to every host
 that asks for it. The three constants carry no annotation at all, so the only
 requirement any of them places on a host is `_FENCE_LINE_RE`'s plain read of
@@ -123,6 +130,29 @@ import re
 # genuinely needs a different ceiling keeps its own copy and says why, which
 # the suite's hand-copy census then names rather than hides.
 DEFAULT_MAX_ANSWER_CHARS = 24000
+
+
+# The reader of that constant, and the one block in this file that cannot have a
+# region of its own: it READS `DEFAULT_MAX_ANSWER_CHARS`, and `host_provides`
+# offers a region only the host's module-level IMPORTS, never the names other
+# regions define. So a host asking for this one asks for both in a single marker
+# -- `DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars` -- and the constant's own
+# host-specific justification stays above that marker exactly as before.
+#
+# It does NOT delegate to `_mcp_json.py`'s `_int_param`, which is the shape
+# mcp-purity had reached for on its own. That was measured and refused: the two
+# names live in different canonical sources, a marker names exactly one source,
+# and a cross-source free name is what `free_names` exists to catch. The
+# duplicated coercion here is the price of the lift, and it is one copy in a
+# canonical file rather than the five hand copies it replaces -- four of which
+# still carried the OverflowError escape after the block form had been fixed.
+def _max_answer_chars(args: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
+    try:
+        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MAX_ANSWER_CHARS
+
 
 # Room kept free for the accounting line while a row pager fills its budget:
 # the pager stops taking rows while this many characters are still unspent, so

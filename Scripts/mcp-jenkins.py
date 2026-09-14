@@ -599,17 +599,17 @@ def _md_join(blocks) -> str:
 # Capping here means the oversized half is never built, and the caller is told
 # in one line how to ask for the rest.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars
 DEFAULT_MAX_ANSWER_CHARS = 24000
-# END GENERATED: 25da79526dcc
 
 
-def _max_answer_chars(params: dict) -> int:
+def _max_answer_chars(args: dict) -> int:
     """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
     try:
-        return int(params.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
-    except (TypeError, ValueError):
+        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
+    except (TypeError, ValueError, OverflowError):
         return DEFAULT_MAX_ANSWER_CHARS
+# END GENERATED: 6c119e9d0245
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).

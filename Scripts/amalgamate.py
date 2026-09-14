@@ -428,10 +428,14 @@ def render(source: str, names: List[str], blocks: Dict[str, str],
     #
     # This is the one place that still assumes a block is a DEFINITION: PEP 8
     # puts no blank line between two adjacent constants, and nothing here can
-    # say so. It costs nothing today because a constant is given a region of
-    # its OWN, which is the right shape for a second reason -- the sentence
-    # explaining what the number is for is host-specific prose, and a region
-    # per constant leaves it above the BEGIN marker where it was written.
+    # say so. It still costs nothing, though the reason narrowed when
+    # `_max_answer_chars` was lifted: a constant is given a region of its OWN
+    # unless a block READS it, and the one pair that exists renders a constant
+    # followed by a def, which is exactly where PEP 8 wants two blank lines.
+    # Two adjacent CONSTANTS in one region is the shape that would be wrong,
+    # and nothing asks for it. A region per constant also keeps the sentence
+    # explaining what the number is for -- host-specific prose -- above the
+    # BEGIN marker where it was written.
     separator = "\n\n" if indent else "\n\n\n"
     text = separator.join(out) + "\n"
     if not indent:

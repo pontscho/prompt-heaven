@@ -1104,17 +1104,30 @@ def group_tabs(suite, mod):
     # Emission: tabs at every structural level, and NOT ONE leading space. A
     # half-converted body would still import and run, and would be invisible in
     # a diff viewer that renders both the same width.
+    # `_max_answer_chars` is driven through PAIRED with the constant it reads.
+    # That is not a fixture convenience: `host_provides` offers a region only
+    # the host's module-level IMPORTS, never the names another region defines,
+    # so `free_names` refuses this block in a region of its own and every real
+    # host spells it as a two-name marker. Rendering it alone here would assert
+    # a shape no server is allowed to use.
+    paired = {"_max_answer_chars": "DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars"}
     problems = []
     for name in safe:
         source = next(s for s, blocks in sources.items() if name in blocks)
-        regions = mod.audit_text("tabby.py", tab_host(name, source), sources)
+        regions = mod.audit_text(
+            "tabby.py", tab_host(paired.get(name, name), source), sources)
         if len(regions) != 1:
             problems.append("%s: expected one region, got %d" % (name, len(regions)))
             continue
         body = regions[0].wanted
         if any(line.startswith(" ") for line in body.splitlines()):
             problems.append("%s: a line still begins with a SPACE" % name)
-        if untab(body) != sources[source][name]:
+        # The join is DECLARED here rather than asked of the generator, which
+        # would only prove it agrees with itself: two blank lines between
+        # top-level definitions is what `render` owes an unindented region.
+        expected = "\n\n\n".join(sources[source][n].rstrip("\n")
+                                 for n in regions[0].names) + "\n"
+        if untab(body) != expected:
             problems.append("%s: de-tabbing does not round-trip to canonical" % name)
     suite.record(GF, "tab-emission-is-all-tabs", problems,
                  detail=["%d block(s) emitted into a tab host" % len(safe)])

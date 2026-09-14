@@ -115,9 +115,17 @@ API_KEY: Optional[str] = None
 # Per-call overridable via max_answer_chars, so a caller who genuinely wants the
 # whole document asks for it explicitly. <= 0 means unlimited.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars
 DEFAULT_MAX_ANSWER_CHARS = 24000
-# END GENERATED: 25da79526dcc
+
+
+def _max_answer_chars(args: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
+    try:
+        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MAX_ANSWER_CHARS
+# END GENERATED: 6c119e9d0245
 
 # Room kept free for the closing accounting line while filling a record budget.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
@@ -128,14 +136,6 @@ PAGE_LINE_RESERVE = 80
 # The separator between two search records. Named because the record pager has to
 # charge it against the budget; the rendering is unchanged.
 RESULT_SEPARATOR = "\n----------\n"
-
-
-def _max_answer_chars(args: dict) -> int:
-    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
-    try:
-        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_ANSWER_CHARS
 
 
 # Which record `_offset` names here, and which handler reads it at all, is on

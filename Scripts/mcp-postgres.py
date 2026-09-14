@@ -68,18 +68,6 @@ log = logging.getLogger("mcp-postgres")
 PROTOCOL_VERSION_3 = 196608           # 3.0
 SSL_REQUEST_CODE = 80877103           # magic for SSLRequest
 
-# Cap convention v1. 24000 chars is ~6k tokens at the usual ~4 chars/token — a
-# reply one call may spend, not a reply that eats the session. The previous
-# 50000 was ~12k tokens for a SINGLE call, and a result set is the one payload
-# in this fleet that can be arbitrarily large by accident (one missing WHERE).
-# Per-call overridable via the max_answer_chars parameter, so a caller who
-# genuinely wants the whole dump asks for it explicitly.
-# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
-DEFAULT_MAX_ANSWER_CHARS = 24000
-# END GENERATED: 25da79526dcc
-
-
 # ---------------------------------------------------------------------------
 # Host parsing — scheme prefix carries the SSL hint
 # ---------------------------------------------------------------------------
@@ -1087,18 +1075,34 @@ def _conn_name(params: dict) -> str:
     return params.get("connection") or "default"
 
 
-def _max_answer_chars(params: dict) -> int:
+# Cap convention v1. 24000 chars is ~6k tokens at the usual ~4 chars/token — a
+# reply one call may spend, not a reply that eats the session. The previous
+# 50000 was ~12k tokens for a SINGLE call, and a result set is the one payload
+# in this fleet that can be arbitrarily large by accident (one missing WHERE).
+# Per-call overridable via the max_answer_chars parameter, so a caller who
+# genuinely wants the whole dump asks for it explicitly. The constant sits here
+# rather than with the wire-protocol constants at the top because the function
+# below is its ONLY reader, and the two must share one marker anyway.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars
+DEFAULT_MAX_ANSWER_CHARS = 24000
+
+
+def _max_answer_chars(args: dict) -> int:
     """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
     try:
-        return int(params.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
-    except (TypeError, ValueError):
+        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
+    except (TypeError, ValueError, OverflowError):
         return DEFAULT_MAX_ANSWER_CHARS
+# END GENERATED: 6c119e9d0245
 
 
 def _max_rows(params: dict) -> int:
+    # OverflowError: `1e999` and the bare `Infinity` token arrive as a float
+    # infinity, which `int()` refuses with neither a TypeError nor a ValueError.
     try:
         return int(params.get("max_rows", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
