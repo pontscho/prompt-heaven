@@ -65,9 +65,22 @@ The inverse governs everything that fires on prose. Rule 3b in the same suite
 scans agent bodies for tool prescriptions, and prose editing is this repo's main
 activity, so a false FAIL there would fire constantly. INFO is likewise chosen
 where a finding is a measurement rather than a verdict (`mcp_footprint` is a
-measuring tape and never a gate), or a knowingly-open gap that has not been
+measuring tape almost everywhere), or a knowingly-open gap that has not been
 decided yet — turning those into gates *"would report a decision that has not
 been made yet as a regression"* (`tests/test_mcp_footprint.py`).
+
+**That last reason can expire, and watching one expire is the useful half.** The
+sentence names its own precondition — a decision — so a landed decision does not
+merely permit the promotion, it withdraws the argument for the INFO.
+[[0013-the-ceiling-is-a-payload-class]] ratified the fleet's three output
+ceilings as three payload classes, and exactly one server finding in
+`mcp_footprint` became a gated FAIL: `ceiling-deviation-says-why`, which asserts
+that a server carrying a non-default ceiling wrote its reason down. It clears the
+flap test for the ordinary reason — an int and a comment, both already in the
+repo, no environment, no binary, no clock — but the part worth copying is that
+the promotion was a **reading** of a condition the suite had itself recorded,
+not a fresh argument. Conformance as a whole stays INFO, because that ADR
+licenses a deviation on the default alone and leaves the other two criteria open.
 
 INFO rows are printed, not swallowed, and that is the point: a knowingly-open
 gap stays **visible**, so promoting a tree to gated later is a scope decision on
@@ -167,7 +180,7 @@ is the registry, and the run is the only thing that knows the totals.
 | `mcp_git_params` | named params → `git` argv, fully offline with `subprocess` stubbed |
 | `name_existence` | prompt corpus + server text ↔ live MCP inventory, plus agent grants vs their own prescriptions |
 | `spawn_stdin` | every spawn site under `Scripts/` passes an explicit `stdin=` — AST-based, one case per site |
-| `mcp_footprint` | fleet token cost: description tax, result ceilings, boilerplate. A tape measure, not a gate |
+| `mcp_footprint` | fleet token cost: description tax, result ceilings, boilerplate. A tape measure, not a gate — with one exception, the ceiling-deviation rule of [[0013-the-ceiling-is-a-payload-class]], plus its own negative control |
 | `wiki_recall` | the wiki search relevance gate on a synthetic corpus — silence, calibration, type signal, aliases |
 | `jira_cli` | the Jira CLI fully offline with the transport injected: auth mode, context-path URL join, lazy deployment probe, both paging models behind one iterator, `JIRA_READ_ONLY`, `--dry-run`, the error mappings and the byte-pinned multipart body |
 | `checkpoint` | `checkpoint.py` as a **writer**: `Start`/`End` land on the block and nothing else, the numbers describe the file *after* the region was inserted, `prepend` lands the block and the table it describes in one `os.replace`, a stale or duplicate-id segment is refused on content, and every refusal exits 2 leaving the file alone — [[0009-the-first-reader-is-a-cold-model]] |

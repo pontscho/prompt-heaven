@@ -129,6 +129,25 @@ import re
 # the same line, and one of them says so in its own comment. A server that
 # genuinely needs a different ceiling keeps its own copy and says why, which
 # the suite's hand-copy census then names rather than hides.
+#
+# WHAT "A DIFFERENT CEILING" MEANS, since four servers carry one and the answer
+# used to live nowhere: the number follows from what KIND of payload the handler
+# returns, and ADR 0013 ratifies three classes -- 24000 when the server COMPOSED
+# the reply (it chose the rows, rendered the table, summarised the upstream
+# answer, so narrowing the query is a cheap and lossless move the caller can
+# make); 100_000 when the payload is a VERBATIM artefact it did not compose (a
+# subprocess transcript, a machine snapshot, a document the caller named, where
+# re-asking is lossy, non-idempotent, or a wasted round trip); and 500_000 when
+# the payload is a SEQUENCE whose meaning is in the row COUNT. The argument for
+# each class, and which of the three is weakest, is in the ADR and deliberately
+# not restated here.
+#
+# The class bounds the DEFAULT and nothing else. The wire parameter and the
+# closing line have fleet spellings of their own, and no class licenses a
+# deviation on either; the one server that deviates on the parameter is a
+# recorded open thread, not a fourth class. `tests/test_mcp_footprint.py` gates
+# the "says why" clause above -- the one finding about a server that file fails
+# on -- after 2 of the 4 deviating servers were measured never satisfying it.
 DEFAULT_MAX_ANSWER_CHARS = 24000
 
 

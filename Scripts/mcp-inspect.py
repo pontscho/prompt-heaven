@@ -64,6 +64,17 @@ _SYS = platform.system()
 IS_MAC = _SYS == "Darwin"
 IS_LINUX = _SYS == "Linux"
 
+# The output ceiling. Deliberately NOT the fleet's 24000, and it does not take
+# that shared block -- the block renders the reader together with its own 24000,
+# so adopting it would adopt the value. What a handler returns here is a MACHINE
+# SNAPSHOT, and the recovery the 24000 class relies on is not available: a
+# process table, an lsof listing or an env dump cut at 24000 chars cannot be
+# RESUMED, it can only be retaken -- against a machine that has moved in the
+# meantime. The second `ps` is a different measurement, not the remainder of the
+# first one, so paying for the whole snapshot once is cheaper than paying twice
+# for two that do not agree. Same number and spelling as mcp-git and mcp-wiki,
+# which arrive here by their own routes; the three payload classes are ratified
+# in ADR 0013.
 DEFAULT_MAX_CHARS = 100_000
 
 # Keys matching this (on the NAME) get their env value redacted.

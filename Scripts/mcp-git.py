@@ -419,6 +419,18 @@ def _quote_arg(a: str) -> str:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+# The output ceiling. Deliberately NOT the fleet's 24000, and it does not take
+# that shared block -- the block pairs the reader with its own 24000, so adopting
+# it would adopt the value. What a handler returns here is a VERBATIM git
+# transcript, not a reply this server composed, so the move the 24000 class
+# assumes the caller can make -- ask again, narrower -- is not available from the
+# answer: a diff cut in half is not a smaller diff, it is a diff that lies about
+# the file, and nothing in the reply tells the caller which half arrived. Same
+# number and same spelling as mcp-inspect and mcp-wiki, which reach it by their
+# own routes. The three payload classes are ratified in ADR 0013.
+#
+# It bounds the WHOLE reply, not merely the captured stdout: see the budget at
+# the foot of handle_git_call, and _cut_head for why the cut lands where it does.
 DEFAULT_MAX_CHARS = 100_000
 
 DEFAULT_TIMEOUT_SEC = 60
@@ -517,6 +529,82 @@ def _run_timeout(params: dict) -> float:
     if requested != requested or requested <= 0:
         return DEFAULT_TIMEOUT_SEC
     return min(float(MAX_TIMEOUT_SEC), requested)
+
+
+def _max_answer_chars(params: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it".
+
+    Hand-written rather than the fleet's generated block, and for exactly one
+    reason: that block renders the reader together with its own
+    `DEFAULT_MAX_ANSWER_CHARS = 24000`, because `host_provides` gives a region
+    only the host's imports and a marker names one canonical source. Taking the
+    reader would mean taking the number, and this server deviates on the number
+    by decision (ADR 0013). The coercion below is therefore a duplicate on
+    purpose, and it catches what the canonical one catches — including
+    `OverflowError`, which is what `int(float("inf"))` raises.
+
+    camelCase is read HERE because the argv loop already normalises it: see
+    `_camel_to_snake` and `_META_KEYS`. That loop strips `maxAnswerChars` as
+    meta so it never becomes a bogus git flag, but the ceiling used to be read
+    straight off the raw dict — so the camelCase spelling was accepted, silently
+    discarded, and the caller got the default while believing otherwise. Reusing
+    the normaliser keeps ONE answer to "what counts as this key"; with both
+    spellings present, insertion order decides, which is as arbitrary as the
+    caller sending both.
+
+    THE CANONICAL SPELLING IS READ AS A PLAIN `.get` WITH ITS DEFAULT, and that
+    shape is load-bearing rather than stylistic. `tests/test_mcp_footprint.py`
+    finds a per-call ceiling by looking for `<obj>.get("<param>", <default>)`;
+    a bare `items()` scan is invisible to it, and the server is then reported
+    CONST-ONLY — "a caller cannot raise or lower this per call" — which would be
+    a false statement about this file in the fleet's own instrument. The loop
+    below is the FALLBACK only, so the common path keeps the fleet idiom it is
+    measured by.
+    """
+    value = params.get("max_answer_chars", DEFAULT_MAX_CHARS)
+    if "max_answer_chars" not in params:
+        for key, alternative in params.items():
+            if _camel_to_snake(key) == "max_answer_chars":
+                value = alternative
+                break
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MAX_CHARS
+
+
+# The fleet's closing line, spelled the fleet's way (`tests/test_mcp_footprint.py`
+# pins the three parts). The wording earns its keep here: "narrow the query" is
+# a real instruction for git — a tighter pathspec, a shorter range — and this
+# server's previous notice said only that stdout had been cut, which told the
+# caller nothing about what to do next.
+_TRUNCATED = ("_[truncated: kept %d of %d chars from the head; "
+              "raise max_answer_chars or narrow the query]_")
+
+
+def _cut_head(text: str, room: int) -> Tuple[str, str]:
+    """Head-cut `text` to `room` chars. Returns (text, notice), notice "" if it
+    fitted. `room` below zero means no ceiling.
+
+    THE CUT LANDS ON THE PRE-FENCE TEXT, and that is the whole design. This
+    server wraps output in a ``` fence (`_md_fence`), and it carries none of the
+    fleet's fence accounting — no `_FENCE_LINE_RE`, no `_balance_fences`. Cutting
+    the ASSEMBLED Markdown could therefore hand the reader a block left open,
+    while cutting before the fence is applied cannot, whatever the payload
+    contains. So the budget moved to cover the whole reply; the knife did not.
+
+    The notice is CHARGED against `room`, as it is everywhere else in the fleet:
+    it is part of the reply the ceiling bounds. Sizing it takes two format calls
+    and neither is waste — the first measures the notice against `room`, and
+    since the payload can only shrink from there, its digit count is already at
+    maximum, so the second can only be the same length or shorter. Conservative
+    by at most a character or two, never over.
+    """
+    if room < 0 or len(text) <= room:
+        return text, ""
+    total = len(text)
+    keep = max(0, room - len(_TRUNCATED % (room, total)))
+    return text[:keep], _TRUNCATED % (keep, total)
 
 
 # Keys in params that are handled specially (not forwarded as git CLI flags)
@@ -996,12 +1084,12 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
 
     stdout = result.stdout or ""
     stderr = result.stderr or ""
-
-    max_chars = params.get("max_answer_chars", DEFAULT_MAX_CHARS)
-    truncated_stdout = False
-    if max_chars > 0 and len(stdout) > max_chars:
-        stdout = stdout[:max_chars]
-        truncated_stdout = True
+    # Whether there WAS output, recorded before any cut. Two decisions below
+    # rest on it, and both would be wrong if they read the surviving text: the
+    # `exit 0` shorthand would claim a command printed nothing when in truth its
+    # output did not fit, and `is_error` would turn a truncated failure into an
+    # error envelope with the payload thrown away.
+    had_stdout = bool(stdout)
 
     cmd_str = "git " + function + ("" if not args else " " + " ".join(_quote_arg(a) for a in args))
 
@@ -1020,22 +1108,51 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     elif injected:
         parts.append("_+ " + " ".join(_quote_arg(a) for a in injected) + "_")
 
+    # THE BUDGET COVERS THE WHOLE REPLY. It used to cover the captured stdout
+    # alone, which is how a ceiling named after the answer came to bound only
+    # part of it: the envelope and the whole of stderr were appended AFTERWARDS,
+    # so a reply could exceed the number by any amount stderr cared to be.
+    #
+    # The envelope is measured and never cut. It is the one part the caller
+    # cannot reconstruct -- a non-default cwd, the flags this server added, the
+    # exit code -- and it is bounded by the argv the caller itself sent.
+    #
+    # stderr is charged BEFORE the payload, on purpose. It is normally a line or
+    # two, it carries the diagnosis, and a large payload that pushed the error
+    # message out of the reply would hide the reason the call failed behind the
+    # output of the call that failed.
+    #
+    # Not accounted for: the 7-8 characters a fence pair adds (`_needs_fence`).
+    # Stated rather than chased -- charging for scaffolding the renderer has not
+    # decided to add yet would mean deciding twice, and the error is one line's
+    # worth on a 100_000-char budget.
+    max_chars = _max_answer_chars(params)
+    room = -1
+    if max_chars > 0:
+        room = max_chars - sum(len(part) + 1 for part in parts)
+    stderr, err_notice = _cut_head(stderr, room)
+    if room >= 0:
+        room = max(0, room - len(stderr) - len(err_notice) - 1)
+    stdout, out_notice = _cut_head(stdout, room)
+
     if stdout:
         parts.append(_md_fence(stdout) if _needs_fence(stdout)
                      else stdout.strip("\n"))
-    elif not stderr and result.returncode == 0:
+    elif not had_stdout and not stderr and result.returncode == 0:
         # No stdout and success: the exit code IS the answer. This is the whole
         # point of `merge-base --is-ancestor`, `diff --quiet` and `apply
         # --check` — a placeholder saying "no output" throws that bit away and
         # charges 13 characters for it.
         parts.append("exit 0")
-    if truncated_stdout:
-        parts.append(f"_stdout truncated at {max_chars} chars_")
+    if out_notice:
+        parts.append(out_notice)
     if stderr.strip():
         parts.append(_md_fence(stderr.strip()))
+    if err_notice:
+        parts.append(err_notice)
 
     md = "\n".join(parts)
-    is_error = result.returncode != 0 and not stdout
+    is_error = result.returncode != 0 and not had_stdout
     if is_error:
         return {"error": md}
     return {"__raw_text__": md}

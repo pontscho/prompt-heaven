@@ -15,15 +15,27 @@ Three taxes, all paid out of the context window, all invisible until measured:
   3. BOILERPLATE -- what a handler emits regardless of content: headings,
      fences, command echoes, filter statistics, empty-result notes.
 
-EVERY FINDING ABOUT A SERVER IS `INFO` IN THIS ROUND -- ON PURPOSE
------------------------------------------------------------------
+EVERY FINDING ABOUT A SERVER IS `INFO` IN THIS ROUND -- BUT ONE
+---------------------------------------------------------------
 A missing cap, a non-conforming cap, a fat description: all INFO, never FAIL.
 Turning them into a gate is a LATER work item, and doing it now would paint
 `test all` red until seven separate server fixes land -- i.e. it would report a
 decision that has not been made yet as a regression.
 
-What IS gated here is the suite's own integrity, because a measuring tape that
-silently reads zero is worse than no tape at all:
+THE EXCEPTION, and it is the sentence above that licenses it: the precondition
+named there is a DECISION, and for one rule the decision has landed. ADR 0013
+ratified the fleet's three ceilings as three payload classes, so
+`Scripts/_mcp_paging.py`'s standing demand -- a server needing a different
+ceiling keeps its own copy AND SAYS WHY -- stopped being a pending question and
+became a rule with a measured 50% compliance rate. `ceiling-deviation-says-why`
+in group C gates that clause and NOTHING else: it cost two comments, not seven
+server fixes, and it judges whether a reason was written down, never whether
+the reason is a good one. Conformance itself -- param name, default, closing
+line, bundled into one verdict -- stays INFO, because ADR 0013 ratified a
+deviation on the default alone and left the other two criteria open.
+
+What is otherwise gated here is the suite's own integrity, because a measuring
+tape that silently reads zero is worse than no tape at all:
 
   * group D  -- the cap detector must discriminate.  Planted defects it MUST
                 flag and bait it must NOT, same contract as
@@ -35,6 +47,9 @@ silently reads zero is worse than no tape at all:
   * group H  -- purity's truncation behaviour at RUNTIME.  Not a conformance
                 verdict pending a decision: a regression guard on a defect that
                 shipped and has been fixed (a reply of one header and zero rows).
+  * group C  -- the deviation rule above, plus its own negative control.  Once
+                the two offenders are fixed the live tree has none, so the
+                control is the only thing between that gate and a silent pass.
 
 THE REGISTERED-vs-EXISTING DISTINCTION IS LOAD-BEARING
 ------------------------------------------------------
@@ -450,6 +465,75 @@ INFER_FLOOR = 1000
 CAP_PARAM = "PARAM"        # per-call overridable, with a default
 CAP_CONST = "CONST-ONLY"   # hardcoded; a caller cannot raise or lower it
 CAP_NONE = "NONE"          # no output ceiling of any kind
+
+# The REPLY-ceiling family: the constants that bound a whole tool answer, as
+# against one cell, one page, one captured subprocess, or one retained log ring.
+# Deliberately NARROWER than CAP_CONST_RX, which also matches `CELL_MAX_CHARS`,
+# `MAX_OUTPUT_BYTES` and `_MAX_LOG` -- demanding a justification comment on a
+# cell width would be a rule satisfied by boilerplate and nothing else.  Three
+# spellings are live: the fleet's own `DEFAULT_MAX_ANSWER_CHARS`, plus
+# `DEFAULT_MAX_CHARS` and `DEFAULT_MAX_OUTPUT_CHARS` in the servers that
+# deviate.  A fourth spelling arriving is caught by the rule, not by this list.
+REPLY_CAP_CONST_RX = re.compile(r"^DEFAULT_MAX_(ANSWER_|OUTPUT_)?CHARS$")
+
+
+def comment_block_above(source, lineno):
+    """The contiguous `#` block directly above `lineno`, joined, or "".
+
+    CONTIGUOUS means no blank line in between, and that is the whole of what
+    separates a justification from a section banner sitting nearby: before ADR
+    0013, `Scripts/mcp-git.py`'s `Dispatcher` banner was three lines above its
+    ceiling with a blank line between them, and is correctly read as unrelated.
+
+    TEXT, and it has to be -- a comment is not in the AST at all, so there is no
+    semantic way to ask this question.  The line NUMBER comes from the AST (see
+    `analyse_caps`), so only the lexical half is done by hand.  That is the same
+    split `tests/test_generated_region.py` draws when it reasons about text
+    outside a region.
+    """
+    lines = source.splitlines()
+    out = []
+    idx = lineno - 2                       # 1-based lineno -> the line above it
+    while idx >= 0 and lines[idx].strip().startswith("#"):
+        out.append(lines[idx].strip().lstrip("#").strip())
+        idx -= 1
+    return "\n".join(reversed(out))
+
+
+def ceiling_deviations(report, source):
+    """(lineno, name, value, justification) per reply ceiling off the default."""
+    out = []
+    for lineno, name, value in report.constants:
+        if not REPLY_CAP_CONST_RX.match(name):
+            continue
+        if value is None or value == V1_DEFAULT:
+            continue
+        out.append((lineno, name, value, comment_block_above(source, lineno)))
+    return out
+
+
+def unjustified_deviations(report, source):
+    """The rule of `Scripts/_mcp_paging.py`, applied: a server carrying its own
+    ceiling must SAY WHY, and the test for "why" is that the comment names the
+    fleet default it departs from.
+
+    Naming the default rather than meeting a length floor, because a length
+    floor is arbitrary and a justification that never mentions what it deviates
+    from is not a justification of the deviation.  Both servers that satisfied
+    the rule before it was gated pass this as already written.
+    """
+    problems = []
+    for lineno, name, value, why in ceiling_deviations(report, source):
+        if not why:
+            problems.append(
+                "%s:%d %s = %s carries NO justification comment"
+                % (report.file, lineno, name, value))
+        elif str(V1_DEFAULT) not in why:
+            problems.append(
+                "%s:%d %s = %s is justified by a comment that never names the "
+                "%d it deviates from" % (report.file, lineno, name, value,
+                                         V1_DEFAULT))
+    return problems
 
 
 def _render(node, limit=40):
@@ -1306,8 +1390,12 @@ def group_probe_floor(suite, answering, total):
                          "finding about a server. Findings are INFO"])
 
 
-def group_ceilings(suite, reports):
-    """C: one INFO case per server source, then the fleet table."""
+def group_ceilings(suite, reports, sources):
+    """C: one INFO case per server source, the fleet table, then the one gate.
+
+    `sources` is {filename: source text}, needed only by the deviation gate: a
+    comment is invisible to the AST the reports were built from.
+    """
     for report in reports:
         detail = ["server      : Scripts/%s" % report.file,
                   "scope       : %s" % ("registered" if report.registered
@@ -1387,6 +1475,11 @@ def group_ceilings(suite, reports):
                     "gated         : NO. This round MEASURES conformance. "
                     "Turning it into a gate is a separate work item and would "
                     "paint the whole run red until the server fixes land",
+                    "one exception : the DEVIATION rule is gated below, and "
+                    "only that one. Conformance bundles three criteria -- param "
+                    "name, default, closing line -- and ADR 0013 ratified a "
+                    "deviation on the DEFAULT alone. The other two are still "
+                    "measured here and gated nowhere",
                     "not claimed   : line-boundary truncation, in THIS group. "
                     "The v1 rule that a `file:line` anchor is never cut in half "
                     "is a RUNTIME property; no static reading of the source can "
@@ -1407,6 +1500,95 @@ def group_ceilings(suite, reports):
                          "not a skip -- shrugging at files it cannot read is "
                          "how a detector goes blind while staying green",
                          "gated       : YES -- suite integrity"])
+
+    # THE ONE GATED FINDING ABOUT A SERVER IN THIS FILE; the header names it as
+    # the exception and says why it stopped being a "later work item".
+    # `Scripts/_mcp_paging.py`'s convention comment always demanded that a server
+    # needing a different ceiling keeps its own copy AND SAYS WHY. The second
+    # clause was gated nowhere, and it showed: 2 of the 4 deviating servers never
+    # satisfied it, and one of those two had been sitting there since the server
+    # was written. A rule with a 50% compliance rate is not a rule.
+    #
+    # What this file's header gave as the reason NOT to gate was that gating
+    # "would report a decision that has not been made yet". ADR 0013 is that
+    # decision -- the three ceilings are ratified as three payload classes -- and
+    # satisfying this costs two comments, not the seven server fixes that
+    # blocked it before.
+    #
+    # It cannot flap: an int already in the repo against a comment already in the
+    # repo. No environment, no binary, no ordering, no clock.
+    problems, deviations = [], []
+    for report in reports:
+        source = sources.get(report.file, "")
+        if report.parse_error or not source:
+            continue
+        problems += unjustified_deviations(report, source)
+        deviations += ["%s:%d %s = %s -- %s"
+                       % (report.file, ln, name, value,
+                          "justified" if why and str(V1_DEFAULT) in why
+                          else "NOT justified")
+                       for ln, name, value, why in ceiling_deviations(report,
+                                                                      source)]
+    suite.record(GC, "ceiling-deviation-says-why", problems,
+                 detail=(deviations
+                         or ["no server carries a reply ceiling other than %d"
+                             % V1_DEFAULT])
+                 + ["",
+                    "rule        : Scripts/_mcp_paging.py -- a server that "
+                    "genuinely needs a different ceiling keeps its own copy "
+                    "AND says why",
+                    "test for why: the contiguous comment block directly above "
+                    "the constant names the %d it departs from" % V1_DEFAULT,
+                    "not tested  : whether the reason is a GOOD one. That is "
+                    "what ADR 0013 is for; this asserts only that a reason was "
+                    "written down where the next reader will find it",
+                    "gated       : YES -- the one finding about a server this "
+                    "file gates. See ADR 0013"])
+
+    # Group D's contract, applied to this gate. Once the two offenders carry
+    # their sentence the live tree has ZERO of them, and a checker that silently
+    # matches nothing is indistinguishable from a clean tree -- the same reason
+    # the cap detector has a negative control at all.
+    #
+    # In memory, no fixture directory: the check is a pure function of source
+    # text, so planting a defect costs a string.
+    bare = "DEFAULT_MAX_CHARS = 100_000\n"
+    must_flag = {
+        "no-comment-at-all": bare,
+        # The exact shape mcp-git carried: a section banner nearby, separated by
+        # a blank line. If contiguity were not required, this would read as
+        # justified by the word "Dispatcher".
+        "banner-across-a-blank-line": ("# ----\n# Dispatcher\n# ----\n\n"
+                                       + bare),
+        "comment-that-never-names-the-default":
+            "# A bigger ceiling, because this server needs one.\n" + bare,
+    }
+    must_stay_silent = {
+        "justified": ("# Deliberately not the fleet's %d: this payload is a\n"
+                      "# verbatim artefact the server did not compose.\n"
+                      % V1_DEFAULT) + bare,
+        "at-the-fleet-default": "DEFAULT_MAX_ANSWER_CHARS = %d\n" % V1_DEFAULT,
+        "not-a-reply-ceiling": "# nothing here\nCELL_MAX_CHARS = 120\n",
+        "bounds-bytes-not-the-reply": "# nothing\nMAX_OUTPUT_BYTES = 50000000\n",
+    }
+    problems = []
+    for label in sorted(must_flag):
+        text = must_flag[label]
+        if not unjustified_deviations(analyse_caps(text, label), text):
+            problems.append("planted %r was NOT flagged" % label)
+    for label in sorted(must_stay_silent):
+        text = must_stay_silent[label]
+        found = unjustified_deviations(analyse_caps(text, label), text)
+        if found:
+            problems.append("bait %r was flagged: %s" % (label, found))
+    suite.record(GC, "ceiling-deviation-detector-discriminates", problems,
+                 detail=["must flag   : %s" % ", ".join(sorted(must_flag)),
+                         "must ignore : %s" % ", ".join(sorted(must_stay_silent)),
+                         "why         : after the two fixes the live tree has "
+                         "no offender, so this is the only thing standing "
+                         "between the gate and a silent pass",
+                         "gated       : YES -- suite integrity, same contract "
+                         "as group D"])
 
 
 def group_control(suite, fixture_root):
@@ -2057,7 +2239,7 @@ def run(opts=None):
             reports.append(report)
             census_rows.append(census)
 
-        group_ceilings(suite, reports)
+        group_ceilings(suite, reports, sources)
         group_control(suite, fixture_root)
         group_boilerplate(suite, census_rows, feet_by_file)
         group_drift(suite, servers, table_flagged)
