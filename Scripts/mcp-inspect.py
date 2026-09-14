@@ -1866,9 +1866,11 @@ def handle_inspect_call(arguments: dict, project_root: Optional[str]) -> dict:
         return {"error": f"internal error in '{canonical}': {type(exc).__name__}: {exc}"}
 
     max_chars = params.get("max_answer_chars", DEFAULT_MAX_CHARS)
+    # OverflowError: `1e999` and the bare `Infinity` token arrive as a float
+    # infinity, which `int()` refuses with neither a TypeError nor a ValueError.
     try:
         max_chars = int(max_chars)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         max_chars = DEFAULT_MAX_CHARS
     md, truncated = _truncate(md, max_chars)
     if truncated:

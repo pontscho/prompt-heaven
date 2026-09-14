@@ -64,6 +64,13 @@ log = logging.getLogger("mcp-wiki")
 
 DEFAULT_WIKI_ROOT = "docs"
 
+# The output ceiling, named rather than inlined twice in `_finalize`. This is
+# NOT the fleet's 24000-char convention and does not take that block: a wiki
+# reply is a whole page the caller asked for by name, where a cut costs a second
+# call to a document the model was already reading. The same number and the same
+# spelling as mcp-git and mcp-inspect, which deviate for their own reasons.
+DEFAULT_MAX_CHARS = 100_000
+
 # Wall-clock ceiling on ONE git invocation. Every git call in this file is a
 # local read-only query — `rev-parse --show-toplevel` (16.41 ms measured),
 # `rev-parse --short HEAD` (19.04 ms) and `diff --name-only` (~47 ms, 98% of it
@@ -1051,10 +1058,12 @@ def render_reindex_report(entries, dups, orphans, malformed, wrote_path) -> str:
 def _finalize(md: str, params: dict) -> dict:
     """Wrap markdown for return, truncating at max_answer_chars (default 100k)."""
     raw = params.get("max_answer_chars")
+    # OverflowError: `1e999` and the bare `Infinity` token arrive as a float
+    # infinity, which `int()` refuses with neither a TypeError nor a ValueError.
     try:
-        limit = int(raw) if raw is not None else 100000
-    except (TypeError, ValueError):
-        limit = 100000
+        limit = int(raw) if raw is not None else DEFAULT_MAX_CHARS
+    except (TypeError, ValueError, OverflowError):
+        limit = DEFAULT_MAX_CHARS
     if limit and len(md) > limit:
         # Cut on a LINE boundary. Every line here is load-bearing structure — a
         # `path.md#heading-slug` anchor, a `- Context (L24, 595c)` section entry, a
@@ -1243,9 +1252,13 @@ def _fn_search(params, project_root, wiki_root, strict):
     f_type = params.get("type")
     f_status = params.get("status")
     prefix = params.get("path_prefix")
+    # OverflowError here and on `depth` below: `1e999` and the bare `Infinity`
+    # token arrive as a float infinity, which `int()` refuses with neither a
+    # TypeError nor a ValueError. The `float()` coercions that follow need no
+    # entry -- `float(inf)` does not raise, and the clamps absorb it.
     try:
         limit = max(1, int(params.get("limit") or 10))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         limit = 10
     try:
         k1 = float(params.get("k1")) if params.get("k1") is not None else 1.2
@@ -1556,7 +1569,7 @@ def _fn_get_page(params, project_root, wiki_root, strict):
     include_body = _bool_param(params.get("include_body", True), True)
     try:
         depth = max(2, int(params.get("depth") or 2))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         depth = 2
     start = _window_int(params, "from")
     count = _window_int(params, "lines")

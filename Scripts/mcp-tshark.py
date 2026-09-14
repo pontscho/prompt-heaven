@@ -288,6 +288,67 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
 # END GENERATED: 4c5e7e3f59cb
 
 
+# Until this landed, this server was the fleet's only one that REFUSED a bad
+# wire integer instead of falling back: every numeric parameter went through a
+# bare `int()`, so `head_limit: "10 "` or `timeout: 1e999` came back as an error
+# rather than as the answer with a default. Everywhere else in the fleet a typo
+# in a paging knob costs nothing, and a caller who mistypes a limit still gets
+# their packets.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: _int_param
+def _int_param(value, default: int) -> int:
+    """Coerce a wire value to int, falling back instead of raising.
+
+    `OverflowError` is in the list because the wire can carry a float infinity:
+    `json.loads` reads both `1e999` and the bare `Infinity` token as one, and
+    `int()` on an infinity raises an error that is neither a TypeError nor a
+    ValueError. Without it the one value a caller is most likely to send as
+    "no limit" was the only bad value that did not fall back -- it escaped the
+    handler as an opaque internal error. NaN needs no entry: `int(nan)` raises
+    ValueError, which this already catches.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+# END GENERATED: 9184041df86b
+
+
+# The resume offset, hand-rolled here until now. Its readers all sit behind an
+# `if offset > 0` guard, so the 0 floor this adds is a no-op on today's paths --
+# what the block actually buys is the same fallback as above and one fewer copy
+# of a function the rest of the fleet shares.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _offset
+def _offset(args: dict) -> int:
+    """First item to display, 0-based -- the value the page line hands back.
+
+    Display-level paging over what THIS call already produced, never an upstream
+    cursor: the work is redone on every call, so a caller walking a large result
+    pays for it each time. What the item IS depends on the payload -- a row, a
+    record, an output line -- and the calling pager is where that is written
+    down, along with which of `_rows_note`'s forms the handler can reach.
+
+    The 0 floor is the reason this is not a bare ``int()``. A negative offset
+    would index a list from its END, so `offset=-5` would quietly return the
+    LAST five items to a caller who asked for a position before the first one --
+    a wrong answer that looks like a right one, where a floor gives the caller
+    the start of the payload they asked for.
+
+    `OverflowError` is caught for the same reason the fallback exists at all.
+    `json.loads` reads both `1e999` and the bare `Infinity` token as a float
+    infinity, and `int()` on one raises an error that is neither a TypeError nor
+    a ValueError -- so the one junk value that does not look like a typo was
+    also the only one that escaped the handler instead of starting at the
+    beginning. NaN needs no entry: `int(nan)` raises ValueError.
+    """
+    try:
+        return max(0, int(args.get("offset", 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+# END GENERATED: f4f358497b9c
+
+
 def _resolve_aliases(params: Any) -> dict:
     if params is None:
         return {}
@@ -406,8 +467,8 @@ def handle_start_capture(params: dict, project_root: str) -> dict:
     default_iface = "lo0" if platform.system() == "Darwin" else "any"
     interface      = params.get("interface", default_iface)
     capture_filter = params.get("capture_filter", "")
-    timeout_sec    = int(params.get("timeout", 60))
-    max_packets    = int(params.get("max_packets", 100000))
+    timeout_sec    = _int_param(params.get("timeout"), 60)
+    max_packets    = _int_param(params.get("max_packets"), 100000)
     session_name   = params.get("session_name", "")
 
     captures_dir = _captures_path(project_root)
@@ -609,6 +670,14 @@ def _bool_param(params: dict, key: str, default: bool) -> bool:
 # dissection that was ever going to finish.
 MAX_ANALYZE_SEC = 600
 
+# The output ceiling, named rather than inlined at three call sites. Spelled
+# after this server's own wire parameter (`max_output_chars`, the fleet's one
+# divergent spelling) and deliberately far above the fleet's 24000: a packet
+# dissection is a wide fixed-width table whose value is in the ROWS, and a cut
+# that lands after twenty packets answers a different question than the one
+# asked. Why the fleet carries three different ceilings at all is undecided.
+DEFAULT_MAX_OUTPUT_CHARS = 500_000
+
 
 def _run_analyze(params: dict, project_root: str) -> str:
     """Core analysis — shared by stop_capture and analyze."""
@@ -627,10 +696,10 @@ def _run_analyze(params: dict, project_root: str) -> str:
     preset         = params.get("preset", "default")
     decode_as      = params.get("decode_as", "")
     keylog_file    = params.get("keylog_file", "")
-    head_limit     = int(params.get("head_limit", 0))
-    offset         = int(params.get("offset", 0))
-    max_chars      = int(params.get("max_output_chars", 500000))
-    timeout_sec    = min(MAX_ANALYZE_SEC, max(1, int(params.get("timeout", 120))))
+    head_limit     = _int_param(params.get("head_limit"), 0)
+    offset         = _offset(params)
+    max_chars      = _int_param(params.get("max_output_chars"), DEFAULT_MAX_OUTPUT_CHARS)
+    timeout_sec    = min(MAX_ANALYZE_SEC, max(1, _int_param(params.get("timeout"), 120)))
 
     if custom_fields:
         fields = [f.strip() for f in custom_fields.split(",") if f.strip()]
@@ -866,7 +935,7 @@ def handle_statistics(params: dict, project_root: str) -> dict:
     protocol       = params.get("protocol", "tcp")
     interval       = params.get("interval", "0")
     display_filter = params.get("display_filter", "")
-    max_chars      = int(params.get("max_output_chars", 500000))
+    max_chars      = _int_param(params.get("max_output_chars"), DEFAULT_MAX_OUTPUT_CHARS)
 
     stat_arg = template.format(interval=interval, protocol=protocol)
     args = [tshark, "-r", file_path, "-z", stat_arg, "-q"]
@@ -910,7 +979,7 @@ def handle_follow_stream(params: dict, project_root: str) -> dict:
 
     protocol    = params.get("protocol", "tcp")
     output_mode = params.get("output_mode", "ascii")
-    max_chars   = int(params.get("max_output_chars", 500000))
+    max_chars   = _int_param(params.get("max_output_chars"), DEFAULT_MAX_OUTPUT_CHARS)
 
     args = [
         tshark, "-r", file_path,
