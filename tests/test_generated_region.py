@@ -326,7 +326,16 @@ def group_gate(suite, mod):
     # name defined at top level in a server but not inside a generated region is
     # a hand copy, and every one left today is a DECLARED exclusion with a
     # measured reason: mcp-inspect's `_int_param` takes a parameter NAME and
-    # RAISES where the canonical takes a default and falls back; mcp-tshark's
+    # RAISES where the canonical takes a default and falls back; mcp-git's
+    # `_max_answer_chars` is excluded TWICE OVER, like webfetch's `_rows_note`
+    # below -- it defaults to its own `DEFAULT_MAX_CHARS` rather than to the
+    # 24000 the canonical block renders its reader WITH, so taking that marker
+    # would take the value, AND its body carries a camelCase fallback loop the
+    # canonical has no trace of, so settling the value question alone would not
+    # make it adoptable. The reason was written at the definition all along;
+    # what was missing until the constant beside it was lifted is this roster
+    # entry, which is the half a reader surveying the fleet actually reaches for.
+    # mcp-tshark's
     # `_bool_param` keeps the older `(params, key, default)` signature;
     # mcp-webfetch's `_bool_param` is an ALLOW-list, so an unrecognised string
     # reads False there and True canonically; and mcp-webfetch's `_rows_note`
