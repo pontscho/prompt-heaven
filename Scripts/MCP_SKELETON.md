@@ -593,7 +593,8 @@ envelopes, wire-value coercion and JSON error reporting; `Scripts/_mcp_logging.p
 for how a server CONFIGURES logging, which is not the same question as what it
 logs (the wire log is a security invariant governed by `tests/test_wire_log.py`
 and deliberately stays hand-written in each server); `Scripts/_mcp_lsp.py`
-for the LSP `Content-Length` framing the four language-server hosts share;
+for how the LSP wire is spoken by the four language-server hosts — the
+`Content-Length` framing of a message, and the `file://` DocumentUri of a path;
 `Scripts/_mcp_paging.py` for output capping and the two halves of the pager
 protocol, the `offset=<n> for more` line a payload ends with and the read that
 takes the number back; and `Scripts/_mcp_concurrency.py` for how many tool calls

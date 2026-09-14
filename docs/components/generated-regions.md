@@ -75,14 +75,15 @@ A `BEGIN` without an `END` is a hard error rather than a skip, because a region
 that quietly stops being maintained is the whole failure the mechanism exists to
 prevent `Scripts/amalgamate.py`.
 
-As of the verified commit: **99 live regions across the 15 servers, emitting 125
-block instances from 16 canonical blocks** — a single region may name several
-blocks, and that is the whole of the gap between the two counts. Twenty-six
-regions name two blocks each and every other names one: fourteen
-`_result, _error`, seven `_json_error_window, _ensure_dict`, and five
-`DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars`. `_json_error_window` and
-`_configure_logging` are in every server; the `_result` / `_error` pair is in
-fourteen of fifteen, `mcp-webfetch.py` the one holdout.
+As of the verified commit: **103 live regions across the 15 servers, emitting 133
+block instances from 18 canonical blocks** — a single region may name several
+blocks, and that is the whole of the gap between the two counts. Thirty regions
+name two blocks each and every other names one: fourteen `_result, _error`, seven
+`_json_error_window, _ensure_dict`, five
+`DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars`, and four
+`uri_to_path, path_to_uri`. `_json_error_window` and `_configure_logging` are in
+every server; the `_result` / `_error` pair is in fourteen of fifteen,
+`mcp-webfetch.py` the one holdout.
 
 Those three numbers are measured at each edit rather than incremented, and the
 reason is the state they were just found in: the first two had read `70` and `84`
@@ -127,15 +128,16 @@ decides when a sixth source is warranted are
 | `Scripts/_mcp_concurrency.py` | 1 | how many tool calls a server runs at once |
 | `Scripts/_mcp_json.py` | 6 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
 | `Scripts/_mcp_logging.py` | 1 | how a server CONFIGURES logging — level, sink, file mode |
-| `Scripts/_mcp_lsp.py` | 1 | LSP `Content-Length` framing over stdio |
+| `Scripts/_mcp_lsp.py` | 3 | how the LSP wire is spoken — `Content-Length` framing of a message, `file://` DocumentUri of a path |
 | `Scripts/_mcp_paging.py` | 7 | how much of a result a caller gets, and how it is told where the rest is |
 
-Sixteen blocks across five sources, which the suite asserts as a disjointness
+Eighteen blocks across five sources, which the suite asserts as a disjointness
 check rather than a count. The paging row read `5` until the edit that added the
 logging row: the number was left behind when `_max_answer_chars` was lifted, and
-a stale figure sitting beside a new row is worse than one sitting alone. Both
-moves since are genuine arrivals rather than corrections — `_ensure_dict` in the
-JSON row, `DEFAULT_MAX_CHARS` in the paging one.
+a stale figure sitting beside a new row is worse than one sitting alone. The
+three moves since are genuine arrivals rather than corrections — `_ensure_dict`
+in the JSON row, `DEFAULT_MAX_CHARS` in the paging one, the DocumentUri pair in
+the LSP one.
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its three hosts
 were found in. `mcp-git.py`, `mcp-inspect.py` and `mcp-wiki.py` each wrote

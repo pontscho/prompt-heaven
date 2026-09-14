@@ -303,7 +303,7 @@ SUITES = [
      140),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
-     "a region's BEGIN line is the one its names resolve against", 80),
+     "a region's BEGIN line is the one its names resolve against", 83),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That

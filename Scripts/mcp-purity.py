@@ -1760,6 +1760,8 @@ async def read_lsp_message(reader: "asyncio.StreamReader") -> Optional[dict]:
 
 # --- LSP utility helpers ---------------------------------------------------
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_lsp.py :: uri_to_path, path_to_uri
 def uri_to_path(uri: str) -> str:
     """Convert a file:// URI to an absolute filesystem path - the exact inverse
     of pathlib.Path.as_uri() / path_to_uri(). Percent-DECODES the path
@@ -1781,6 +1783,7 @@ def uri_to_path(uri: str) -> str:
 def path_to_uri(path: str) -> str:
     """Convert an absolute path to a file:// URI."""
     return pathlib.Path(path).absolute().as_uri()
+# END GENERATED: 717a01b3fbea
 
 
 SYMBOL_KIND_MAP = {

@@ -261,33 +261,44 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
 
     The imports are not decoration: the block contract check runs against the
     host, and `_result`'s annotation needs `Any`, `encode_lsp_message` needs
-    `json`, `_FENCE_LINE_RE` -- the first CONSTANT block -- needs `re`, and
-    `_configure_logging` needs `logging`, `os` and `sys`. A fixture without
-    them would be refused for the wrong reason and the tab cases would pass on
-    an error that has nothing to do with tabs.
+    `json`, `_FENCE_LINE_RE` -- the first CONSTANT block -- needs `re`,
+    `_configure_logging` needs `logging`, `os` and `sys`, and the LSP URI pair
+    needs `pathlib` (`path_to_uri`) plus `urlparse` and `url2pathname`
+    (`uri_to_path`). A fixture without them would be refused for the wrong
+    reason and the tab cases would pass on an error that has nothing to do with
+    tabs.
 
     `tab-emission-is-all-tabs` drives EVERY tab-safe block through this one
     fixture, so the import list is not "what today's cases happen to need" but
     the union of what every canonical block reads. A block added upstream with
     a new free name lands here as a refusal naming that name.
 
-    That last sentence has now been paid out rather than merely promised: the
-    logging source arrived with three free names this fixture did not import,
-    and the suite stopped with a refusal naming `logging`, `os` and `sys` --
-    before any tab case could pass on an unrelated error.
+    That last sentence has now been paid out TWICE rather than merely promised.
+    The logging source arrived with three free names this fixture did not
+    import, and the suite stopped with a refusal naming `logging`, `os` and
+    `sys`. The LSP URI pair then did the same for `pathlib`, `urlparse` and
+    `url2pathname` -- and that one is the more instructive of the two, because
+    the same refusal had already fired against three REAL hosts: `mcp-clangd`,
+    `mcp-cuda` and `mcp-lua-lsp` each had to be given the two `urllib` imports
+    by hand before their regions would render at all. The fixture is refused on
+    exactly the terms a server is.
     """
     return (
         '"""A tab-indented target."""\n'
         "import json\n"
         "import logging\n"
         "import os\n"
+        "import pathlib\n"
         "import re\n"
         "import sys\n"
         "from typing import Any\n"
+        "from urllib.parse import urlparse\n"
+        "from urllib.request import url2pathname\n"
         "\n\n"
         "def _existing():\n"
         "\tif True:\n"
-        "\t\treturn json, logging, os, re, sys, Any\n"
+        "\t\treturn json, logging, os, pathlib, re, sys, Any\n"
+        "\treturn urlparse, url2pathname\n"
         "\n\n"
         "%s %s :: %s\n" % (BEGIN_PREFIX, source, names)
         + "%s\n" % END_PREFIX
@@ -1177,6 +1188,70 @@ def group_blocks(suite, blocks, lsp, paging, logmod):
     if b"\r\n" in head:
         problems.append("the header carries more than one field: %r" % head)
     suite.record(GE, "lsp-framing-header-shape", problems)
+
+    # The URI pair is the wire's other half, and unlike the framing above it did
+    # not arrive as a straight lift. Measured across the four LSP hosts before
+    # it was shared: FOUR copies of `uri_to_path` with THREE distinct bodies,
+    # against four of `path_to_uri` with one real one. So the ENCODE side had
+    # agreed fleet-wide while the DECODE side had not, and the round trip is the
+    # case that would have caught it -- `as_uri()` percent-encodes in every copy
+    # there has ever been, and only a decoding `uri_to_path` is its inverse.
+    # Three of the four stripped the `file://` prefix and handed back a path
+    # still carrying `%20`.
+    #
+    # Every character below is one `as_uri()` escapes, and `#` is the
+    # load-bearing one: left raw it is a FRAGMENT delimiter, so `urlparse` would
+    # truncate the path there before any decoding ran. The ENCODE half is
+    # asserted too, because a pair that neither encodes nor decodes round-trips
+    # perfectly and is still wrong -- that is precisely the shape the three
+    # predecessors were in with each other.
+    hairy = "/tmp/a dir/weird #1 & 2/ünïcode.c"
+    encoded = lsp.path_to_uri(hairy)
+    back = lsp.uri_to_path(encoded)
+    problems = problem_if(
+        "%20" not in encoded or "%23" not in encoded,
+        "path_to_uri did not percent-encode, so the round trip below would "
+        "pass on a pair that does NEITHER: %r" % encoded,
+    )
+    problems += problem_if(
+        back != hairy,
+        "the pair is not an inverse: %r came back as %r" % (hairy, back),
+    )
+    suite.record(GE, "lsp-uri-round-trips-reserved-chars", problems,
+                 detail=[encoded])
+
+    # SECURITY, and the reason this pair was worth one writer rather than four.
+    # Decoding is what turns an LSP-returned `%2e%2e` back into a `..` the
+    # downstream realpath / `_path_within_root` containment checks can see and
+    # collapse; the prefix-strip left it encoded, where those same checks read
+    # it as an ordinary directory name and let it through. Both halves are
+    # asserted -- what must come back AND what must not survive -- because "not
+    # the escaped form" alone is satisfied by any mangling at all.
+    decoded = lsp.uri_to_path("file:///root/%2e%2e/escape")
+    problems = problem_if(
+        decoded != "/root/../escape",
+        "encoded traversal did not decode: %r" % decoded,
+    )
+    problems += problem_if(
+        "%2e" in decoded.lower(),
+        "a percent escape survived into the path handed to realpath: %r"
+        % decoded,
+    )
+    suite.record(GE, "lsp-uri-decodes-encoded-traversal", problems,
+                 detail=[decoded])
+
+    # A scheme that is not `file` comes back UNCHANGED rather than decoded: a
+    # language server answers with `untitled:` for an unsaved buffer and with
+    # its own scheme for a synthesised source, and none of those is a path. The
+    # prefix-strip already had this behaviour, and the hardening had to keep it
+    # -- reaching `url2pathname` unconditionally would hand back a path-shaped
+    # string for a thing that is not a file, which is worse than not answering.
+    problems = []
+    for uri in ("untitled:Untitled-1", "git:/x/y.c?ref=HEAD", "jdt://contents"):
+        got = lsp.uri_to_path(uri)
+        if got != uri:
+            problems.append("%r came back as %r" % (uri, got))
+    suite.record(GE, "lsp-uri-passes-a-foreign-scheme-through", problems)
 
     # _result/_error are staticmethod DESCRIPTORS here, not callables -- they are
     # methods only at their destination. Reaching through __func__ is the point,

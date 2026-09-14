@@ -38,6 +38,8 @@ import argparse
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 
 # ============================================================
@@ -551,14 +553,30 @@ async def read_lsp_message(reader: asyncio.StreamReader) -> Optional[dict]:
 # Utility helpers
 # ============================================================
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_lsp.py :: uri_to_path, path_to_uri
 def uri_to_path(uri: str) -> str:
-    if uri.startswith("file://"):
-        return uri[len("file://"):]
-    return uri
+    """Convert a file:// URI to an absolute filesystem path - the exact inverse
+    of pathlib.Path.as_uri() / path_to_uri(). Percent-DECODES the path
+    (url2pathname is platform-aware: drive letters on Windows, plain unquote on
+    POSIX), so a path containing spaces or other reserved chars round-trips
+    losslessly instead of carrying literal %20 back into open_document/realpath.
+
+    SECURITY: decoding also normalises encoded traversal - an LSP-returned
+    file:///root/%2e%2e/escape decodes to /root/../escape, which the downstream
+    realpath / _path_within_root containment checks then collapse and reject.
+    The old prefix-strip left %2e%2e literal, slipping past those checks.
+    """
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return uri
+    return url2pathname(parsed.path)
 
 
 def path_to_uri(path: str) -> str:
+    """Convert an absolute path to a file:// URI."""
     return pathlib.Path(path).absolute().as_uri()
+# END GENERATED: 717a01b3fbea
 
 
 SYMBOL_KIND_MAP = {
