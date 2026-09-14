@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Generated-region drift gate -- groups A-F.
 
-`Scripts/_mcp_json.py`, `Scripts/_mcp_lsp.py` and `Scripts/_mcp_paging.py` are
-the canonical sources for the helpers the MCP servers share, and
+`Scripts/_mcp_json.py`, `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` and
+`Scripts/_mcp_paging.py` are the canonical sources for the helpers the MCP
+servers share, and
 `Scripts/amalgamate.py` inlines their named blocks into each server between
 `# BEGIN GENERATED` / `# END GENERATED` markers. The servers stay
 single-file on purpose (an imported sibling would write `Scripts/__pycache__`
@@ -85,7 +86,9 @@ Exit code 0 iff every non-informational case passes.
 
 import hashlib
 import json
+import logging
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -97,6 +100,7 @@ import _harness as H  # noqa: E402
 NAME = "generated_region"
 
 SOURCE = H.repo_path("Scripts", "_mcp_json.py")
+LOGGING_SOURCE = H.repo_path("Scripts", "_mcp_logging.py")
 LSP_SOURCE = H.repo_path("Scripts", "_mcp_lsp.py")
 PAGING_SOURCE = H.repo_path("Scripts", "_mcp_paging.py")
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
@@ -109,13 +113,15 @@ BEGIN_PREFIX = "# BEGIN GENERATED:"
 END_PREFIX = "# END GENERATED:"
 TARGET_GLOB = "mcp-*.py"
 CANONICAL_NAME = "_mcp_json.py"
+LOGGING_CANONICAL_NAME = "_mcp_logging.py"
 LSP_CANONICAL_NAME = "_mcp_lsp.py"
 PAGING_CANONICAL_NAME = "_mcp_paging.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
 # whatever the glob found.
-CANONICAL_NAMES = (CANONICAL_NAME, LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME)
+CANONICAL_NAMES = (CANONICAL_NAME, LOGGING_CANONICAL_NAME,
+                   LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME)
 
 GA = "A. GATE: live regions match their canonical source"
 GB = "B. CONTRACT: marker spelling, hashing, anchoring, layout, disjointness"
@@ -191,24 +197,33 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
 
     The imports are not decoration: the block contract check runs against the
     host, and `_result`'s annotation needs `Any`, `encode_lsp_message` needs
-    `json`, and `_FENCE_LINE_RE` -- the first CONSTANT block -- needs `re`. A
-    fixture without them would be refused for the wrong reason and the tab
-    cases would pass on an error that has nothing to do with tabs.
+    `json`, `_FENCE_LINE_RE` -- the first CONSTANT block -- needs `re`, and
+    `_configure_logging` needs `logging`, `os` and `sys`. A fixture without
+    them would be refused for the wrong reason and the tab cases would pass on
+    an error that has nothing to do with tabs.
 
     `tab-emission-is-all-tabs` drives EVERY tab-safe block through this one
     fixture, so the import list is not "what today's cases happen to need" but
     the union of what every canonical block reads. A block added upstream with
     a new free name lands here as a refusal naming that name.
+
+    That last sentence has now been paid out rather than merely promised: the
+    logging source arrived with three free names this fixture did not import,
+    and the suite stopped with a refusal naming `logging`, `os` and `sys` --
+    before any tab case could pass on an unrelated error.
     """
     return (
         '"""A tab-indented target."""\n'
         "import json\n"
+        "import logging\n"
+        "import os\n"
         "import re\n"
+        "import sys\n"
         "from typing import Any\n"
         "\n\n"
         "def _existing():\n"
         "\tif True:\n"
-        "\t\treturn json, re, Any\n"
+        "\t\treturn json, logging, os, re, sys, Any\n"
         "\n\n"
         "%s %s :: %s\n" % (BEGIN_PREFIX, source, names)
         + "%s\n" % END_PREFIX
@@ -769,7 +784,7 @@ def group_control(suite, mod):
     ))
 
 
-def group_blocks(suite, blocks, lsp, paging):
+def group_blocks(suite, blocks, lsp, paging, logmod):
     """Unit-test the canonical modules themselves -- imported, not read as text."""
     falsy = ["", "false", "0", "no", "off", "none", "FALSE", "  Off  "]
     wrong = [v for v in falsy if blocks._bool_param(v) is not False]
@@ -1041,6 +1056,39 @@ def group_blocks(suite, blocks, lsp, paging):
         % window("abcdef", 6),
     ))
 
+    # `_configure_logging` is measured on the one property that has already cost
+    # a fleet-wide commit: `c8b74d0`, "every log file was created world-readable
+    # in a world-writable directory", had to touch every server because the mode
+    # was written down fifteen times. It is written down once now, so it is
+    # pinned once -- and pinned against a real file rather than against a reading
+    # of the source, because the mode that matters is the one on disk.
+    #
+    # What this does NOT assert is deliberate. `logging.basicConfig` is a no-op
+    # when the root logger already carries a handler, so a case asserting on the
+    # level or the handler would pass or fail on the order the fleet runner
+    # happens to use. The `os.open` runs first and unconditionally, which is why
+    # the descriptor's mode is the honest thing to measure here.
+    log_dir = H.repo_path(".claude", "tmp", "test_generated_region")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "mode.log")
+    if os.path.exists(log_path):
+        os.unlink(log_path)
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    try:
+        logmod._configure_logging(False, log_path)
+        mode = stat.S_IMODE(os.stat(log_path).st_mode)
+    finally:
+        for handler in root.handlers:
+            if handler not in saved_handlers:
+                handler.close()
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+    suite.record(GE, "log-file-created-0600", problem_if(
+        mode != 0o600,
+        "the log file was created %04o, not 0600" % mode,
+    ), detail=["path: %s" % log_path, "mode: %04o" % mode])
+
 
 def group_tabs(suite, mod):
     """The tab refusal is PER BLOCK now, so both arms have to be live."""
@@ -1195,16 +1243,18 @@ def run(opts=None):
 
     pyc_before = H.pycache_snapshot()
     digests_before = {p: H.sha256_file(p) for p in
-                      (SOURCE, LSP_SOURCE, PAGING_SOURCE, GENERATOR, TARGET)}
+                      (SOURCE, LOGGING_SOURCE, LSP_SOURCE, PAGING_SOURCE,
+                       GENERATOR, TARGET)}
 
     mod = H.load_module_from_path("amalgamate_under_test", GENERATOR)
     blocks = H.load_module_from_path("mcp_json_under_test", SOURCE)
     lsp = H.load_module_from_path("mcp_lsp_under_test", LSP_SOURCE)
     paging = H.load_module_from_path("mcp_paging_under_test", PAGING_SOURCE)
+    logmod = H.load_module_from_path("mcp_logging_under_test", LOGGING_SOURCE)
     group_gate(suite, mod)
     group_contract(suite, mod)
     group_control(suite, mod)
-    group_blocks(suite, blocks, lsp, paging)
+    group_blocks(suite, blocks, lsp, paging, logmod)
     group_tabs(suite, mod)
     group_hygiene(suite, pyc_before, digests_before)
 

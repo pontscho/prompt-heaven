@@ -10,7 +10,8 @@
 >
 > **Some of the plumbing below is no longer described here but *generated*.** The
 > named blocks in the canonical sources — `Scripts/_mcp_json.py`,
-> `Scripts/_mcp_lsp.py` and `Scripts/_mcp_paging.py` — are pasted into each
+> `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` and `Scripts/_mcp_paging.py`
+> — are pasted into each
 > server by `Scripts/amalgamate.py`; for those, the canonical file is the source
 > of truth and this one only explains the shape. §8 is the mechanism, and it is
 > the first thing to read before editing a server's helpers.
@@ -91,7 +92,11 @@ Pick `requires-python` to match the oldest syntax the file actually relies on
 ## 2. Logging — stdlib `logging`, module-level logger
 
 No custom `debug_log()`. No `DEBUG` / `_log_file` globals. A single module-level
-logger; level and handlers are configured once in `main()`.
+logger; level and handlers are configured once in `main()`, by the generated
+`_configure_logging` block rather than by anything written here (§6, §8). The
+logger itself stays hand-written: its NAME is the one thing that differs between
+the fifteen copies, so a shared block would make every line in the fleet claim to
+come from one server.
 
 ```python
 import logging
@@ -417,8 +422,15 @@ does not stop the thread part-way through writing the file a caller asked for.
 ## 6. main() — argparse + canonical logging setup
 
 `--debug` and `--log-file` are universal. `--log-file` implies debug level. Default
-level is `WARNING`. `logging.basicConfig(...)` runs **before** `asyncio.run(...)`
+level is `WARNING`. Logging is configured **before** `asyncio.run(...)`
 so any background auto-init task logs through the same configuration.
+
+**The configuration is a generated region; the flags are not.** `_configure_logging`
+lives once in `Scripts/_mcp_logging.py` and is pasted in at module level by
+`Scripts/amalgamate.py` (§8) — do not hand-write it here. The `add_argument` calls
+stay per server on purpose: three servers word the `--log-file` help differently
+and `mcp-webfetch` declares `-v` / `--verbose` aliases, and those are declarations,
+not logic. Sharing them would mean deleting a feature to please a generator.
 
 ```python
 def main():
@@ -429,24 +441,7 @@ def main():
     # LSP trio also: parser.add_argument("--markdown", action="store_true", ...)
     args = parser.parse_args()
 
-    level = logging.DEBUG if (args.debug or args.log_file) else logging.WARNING
-    log_handlers = []
-    if args.log_file:
-        # 0600.  Both calls are needed: the mode argument to os.open applies
-        # only when the file is CREATED, and os.fchmod is what tightens a log
-        # file that already existed 0644.  fchmod takes the descriptor just
-        # opened, not the path, so nothing can swap the path underneath it.
-        _log_fd = os.open(args.log_file,
-                          os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        os.fchmod(_log_fd, 0o600)
-        log_handlers.append(logging.StreamHandler(os.fdopen(_log_fd, "a")))
-    else:
-        log_handlers.append(logging.StreamHandler(sys.stderr))
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=log_handlers,
-    )
+    _configure_logging(args.debug, args.log_file)
 
     # LSP trio: global MARKDOWN_MODE; if args.markdown: MARKDOWN_MODE = True
 
@@ -460,6 +455,16 @@ if __name__ == "__main__":
 
 Every server (including the former "lite trio" lldb/gdc/context7) exposes BOTH
 `--debug` and `--log-file` for full CLI parity.
+
+Two properties of that block are worth knowing before you reach for the flag.
+**`--log-file` does not redirect the log, it ENABLES it** — either flag raises the
+level to DEBUG, and with neither the server sits at WARNING on stderr, never
+stdout, which carries the frames. And the file is opened `0600` *and* `fchmod`ed
+to `0600`, because the mode argument to `os.open` applies only on creation while
+`fchmod` tightens a file an earlier run left `0644` under a laxer umask.
+`tests/test_generated_region.py` pins that mode against a real file rather than
+against a reading of the source: the fleet has already had to fix it in fifteen
+places at once, in `c8b74d0`, which is the whole argument for the region.
 
 ---
 
@@ -569,7 +574,10 @@ differs.
 
 Some of the code above no longer lives in this file's copy of each server. It
 lives once in a canonical source — `Scripts/_mcp_json.py` for the JSON-RPC
-envelopes, wire-value coercion and JSON error reporting; `Scripts/_mcp_lsp.py`
+envelopes, wire-value coercion and JSON error reporting; `Scripts/_mcp_logging.py`
+for how a server CONFIGURES logging, which is not the same question as what it
+logs (the wire log is a security invariant governed by `tests/test_wire_log.py`
+and deliberately stays hand-written in each server); `Scripts/_mcp_lsp.py`
 for the LSP `Content-Length` framing the four language-server hosts share;
 `Scripts/_mcp_paging.py` for output capping and the two halves of the pager
 protocol, the `offset=<n> for more` line a payload ends with and the read that
@@ -615,7 +623,8 @@ every one of those properties and still leaves one place to edit.
 ### The two things you actually do
 
 **Change a shared helper** — edit its canonical source (`Scripts/_mcp_json.py`,
-`Scripts/_mcp_lsp.py` or `Scripts/_mcp_paging.py`), then:
+`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` or `Scripts/_mcp_paging.py`),
+then:
 
 ```
 $ python3 Scripts/amalgamate.py
@@ -738,7 +747,7 @@ drift committed into a server turns the fleet red.
 - [ ] `ping` → `_result(msg_id, {})`; notifications → `None`; unknown → `-32601`
 - [ ] run() loop: readline on a dedicated `max_workers=1` executor, one task per message, `-32700`/`-32600` **answered**, readline and write guarded, every executor shut down (§5 — `tests/test_read_loop.py` gates this)
 - [ ] `_serve` wraps the handler in try/except and **writes** a `-32603` reply
-- [ ] `main()` canonical logging block; `--debug` + `--log-file` present
+- [ ] `_configure_logging` present as a GENERATED region (`_mcp_logging.py`), called once from `main()`; `--debug` + `--log-file` present and hand-written (§6)
 - [ ] `_handle_tool_call` decodes a string `arguments` (JSON) before the dict guard (§7a)
 - [ ] param normalizer decodes a string `params` (JSON); every bool flag read via `_bool_param` (§7a/§7b)
 - [ ] `MARKDOWN_MODE` / subprocess `finally` cleanup left intact where present

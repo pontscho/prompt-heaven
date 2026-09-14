@@ -210,3 +210,20 @@ which this gate does not read and does not need to.
   structure only, but the file is still created world-readable by
   `FileHandler`'s default mode, in a world-writable directory. Nobody has decided
   whether that matters, and this page does not decide it either.
+- **That thread is CLOSED, by `c8b74d0`** — "every log file was created
+  world-readable in a world-writable directory". Appended rather than edited into
+  the paragraph above, because the WHY is frozen and a reader needs to see what
+  was believed as well as what replaced it. Two of the claims above did not
+  survive the fix. The fleet installs no `logging.FileHandler` at all any more;
+  and `FileHandler` never had a "default mode" to blame — it passes no mode, so
+  the file lands at `0o666 & ~umask`, which is why the same code measured 0644
+  then and 0600 now. Every server now opens the descriptor itself with
+  `os.open(..., 0o600)` followed by `os.fchmod(fd, 0o600)`, the second call being
+  the one that tightens a file an earlier run left 0644. That pair is no longer
+  written down fifteen times: it lives once in `Scripts/_mcp_logging.py` and is
+  generated into each server, and `tests/test_generated_region.py` now pins the
+  resulting mode against a real file — the first case anywhere in the fleet to
+  assert anything about a server's log DESTINATION rather than its contents.
+  What this page decided, the structure-only rule for the two wire sites, is
+  untouched by that: destination and contents were always separate questions, and
+  this ADR only ever answered the second.

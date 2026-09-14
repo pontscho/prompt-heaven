@@ -3,10 +3,11 @@ name: generated-regions
 type: component
 status: active
 title: Generated regions — how the MCP fleet shares plumbing without importing it
-description: The amalgamate generator, its three canonical sources, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
+description: The amalgamate generator, its four canonical sources, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
 sources:
   - Scripts/amalgamate.py
   - Scripts/_mcp_json.py
+  - Scripts/_mcp_logging.py
   - Scripts/_mcp_lsp.py
   - Scripts/_mcp_paging.py
   - tests/test_generated_region.py
@@ -37,8 +38,9 @@ else.
 ## Why generation rather than an import
 
 Every server is a self-contained single file, and the rejection of a shared
-import is argued identically in all three canonical sources and in the suite
-`Scripts/_mcp_json.py`, `Scripts/_mcp_lsp.py`, `Scripts/_mcp_paging.py`,
+import is argued identically in all four canonical sources and in the suite
+`Scripts/_mcp_json.py`, `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`,
+`Scripts/_mcp_paging.py`,
 `tests/test_generated_region.py`. Three reasons: an import would write bytecode
 into a tree the fleet asserts is empty; it would need a `sys.path` entry the test
 harness's loader never adds; and it would move the helpers out of the module
@@ -78,7 +80,7 @@ blocks, and that is the whole of the gap between the two counts: the fourteen
 `_json_error_window` is in every server; the `_result` / `_error` pair is in
 fourteen of fifteen, `mcp-webfetch.py` the one holdout.
 
-## Three canonical sources, and why three
+## Four canonical sources, and why four
 
 The registry is a hand-written tuple, not a glob `Scripts/amalgamate.py:CANONICAL_NAMES`,
 because a glob would let an unrelated file become a generation source by merely
@@ -93,8 +95,28 @@ with both departures asserted as departures in the suite.
 | Source | Blocks | Domain |
 |---|---|---|
 | `Scripts/_mcp_json.py` | 5 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
+| `Scripts/_mcp_logging.py` | 1 | how a server CONFIGURES logging — level, sink, file mode |
 | `Scripts/_mcp_lsp.py` | 1 | LSP `Content-Length` framing over stdio |
-| `Scripts/_mcp_paging.py` | 5 | how much of a result a caller gets, and how it is told where the rest is |
+| `Scripts/_mcp_paging.py` | 6 | how much of a result a caller gets, and how it is told where the rest is |
+
+Thirteen blocks across four sources, which the suite asserts as a disjointness
+check rather than a count. The paging row read `5` until this edit: the number
+was left behind when `_max_answer_chars` was lifted, and a stale figure sitting
+beside a new row is worse than one sitting alone.
+
+The logging source is the newest and the only one whose domain is defined by
+what it EXCLUDES. Configuring logging is not the same question as what gets
+logged: the wire log is a security invariant decided in
+[[0011-a-truncated-payload-carries-the-first-cookie]] and gated by
+`tests/test_wire_log.py`, and that ADR already rejected lifting `_write` into a
+region on a ground that still holds — `host_provides` offers only the host's
+module-level imports, `log` is a module-level *assignment*, so any block reading
+it is refused by name. `_configure_logging` clears that bar by never reading
+`log`: it is a module-level `def` whose free names are `logging`, `os` and `sys`.
+The logger object itself stays hand-written because its NAME is the one thing
+that differs across the fifteen copies, and the `--debug` / `--log-file`
+declarations stay hand-written because `mcp-webfetch`'s `-v` / `--verbose`
+aliases are a feature, not drift.
 
 The source name on a marker **selects the block map**: a name is resolved against
 that source and no other, and an unknown source is refused by name with the known

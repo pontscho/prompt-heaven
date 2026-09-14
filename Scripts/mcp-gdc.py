@@ -33,6 +33,28 @@ from typing import Dict, List, Optional, Any, Callable
 log = logging.getLogger("mcp-gdc")
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_logging.py :: _configure_logging
+def _configure_logging(debug, log_file):
+    """DEBUG to *log_file* (mode 0600) or to stderr, else WARNING. Never stdout.
+
+    Either flag enables DEBUG: `--log-file` does not redirect the log, it turns
+    it on. `Scripts/_mcp_logging.py` carries the rest -- why the 0600 pair needs
+    both calls, and what deliberately stays out of this block.
+    """
+    level = logging.DEBUG if (debug or log_file) else logging.WARNING
+    handlers = []
+    if log_file:
+        fd = os.open(log_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        os.fchmod(fd, 0o600)
+        handlers.append(logging.StreamHandler(os.fdopen(fd, "a")))
+    else:
+        handlers.append(logging.StreamHandler(sys.stderr))
+    fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
+    logging.basicConfig(level=level, format=fmt, handlers=handlers)
+# END GENERATED: f77d402d6254
+
+
 def _ensure_dict(value: Any, name: str = "params") -> dict:
     """Coerce *value* to a dict.
 
@@ -2132,24 +2154,7 @@ def main() -> None:
             print(f"  {name:<{width}}  {desc}" if desc else f"  {name}")
         return
 
-    level = logging.DEBUG if (parsed.debug or parsed.log_file) else logging.WARNING
-    log_handlers = []
-    if parsed.log_file:
-        # 0600.  Both calls are needed: the mode argument to os.open applies
-        # only when the file is CREATED, and os.fchmod is what tightens a log
-        # file that already existed 0644.  fchmod takes the descriptor just
-        # opened, not the path, so nothing can swap the path underneath it.
-        _log_fd = os.open(parsed.log_file,
-                          os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        os.fchmod(_log_fd, 0o600)
-        log_handlers.append(logging.StreamHandler(os.fdopen(_log_fd, "a")))
-    else:
-        log_handlers.append(logging.StreamHandler(sys.stderr))
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=log_handlers,
-    )
+    _configure_logging(parsed.debug, parsed.log_file)
 
     server = McpServer(parsed.browser_url)
     try:
