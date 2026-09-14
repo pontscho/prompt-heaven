@@ -85,6 +85,7 @@ The case count lives in the SUITES table in tests/run.py, never here.
 Exit code 0 iff every non-informational case passes.
 """
 
+import ast
 import hashlib
 import json
 import logging
@@ -210,6 +211,49 @@ def outside_regions(mod, label, text, sources):
                          key=lambda r: r.begin, reverse=True):
         del lines[region.begin:region.end + 1]
     return "".join(lines)
+
+
+def bound_names(mod, label, text):
+    """Every name *text* binds at module top level OR as a direct class member.
+
+    The generator's own `load_blocks_text` walks `tree.body` and nothing else,
+    and that is RIGHT for a canonical SOURCE: a block is a thing a marker can
+    name and paste at the marker's column, and a method buried in a class is
+    not one. The hand-copy census points the same map at a SERVER, where the
+    question is a different one -- "does this file bind a canonical name
+    anywhere the generator is not writing it" -- and the answer has to include
+    the class body, because that is where the shared shape actually lives.
+    `_result` and `_error` are METHODS in all fifteen servers; a census that
+    saw only module level would report no hand copy of either, in any server,
+    ever -- green by construction rather than by measurement.
+
+    So the walk lives HERE and not in the generator. Widening
+    `load_blocks_text` to reach into classes would widen what may become a
+    BLOCK, which is the one thing that must not happen. Two questions, two
+    walks, and only the census's one is allowed to be this broad.
+
+    `mod.assign_name` is reused rather than reimplemented for either scope:
+    which assignment shapes bind exactly one nameable thing is the generator's
+    rule, spelled out at length on that function, and a second copy of it here
+    would be a second thing to keep in step with it.
+    """
+    try:
+        tree = ast.parse(text, filename=label)
+    except SyntaxError as exc:
+        raise SystemExit("%s: cannot be parsed (%s)" % (label, exc))
+    scopes = [tree.body] + [node.body for node in tree.body
+                            if isinstance(node, ast.ClassDef)]
+    names = set()
+    for body in scopes:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                names.add(node.name)
+            else:
+                bound = mod.assign_name(node)
+                if bound is not None:
+                    names.add(bound)
+    return names
 
 
 def tab_host(names, source=PAGING_CANONICAL_NAME):
@@ -353,6 +397,27 @@ def group_gate(suite, mod):
     # the tab hazard alone would not make it adoptable. Exclusion is per BLOCK,
     # not per server: both tab-indented servers host regions, webfetch two of
     # them.
+    #
+    # THE LAST TWO ENTRIES ARRIVED WHEN THIS CENSUS LEARNED TO LOOK INSIDE A
+    # CLASS, and they are the reason it had to. mcp-webfetch keeps `_result` and
+    # `_error` as methods of its own `McpServer`, where a walk of `tree.body`
+    # sees neither -- and since every copy of that pair in the fleet is a
+    # METHOD, the old walk could never have reported one. `bound_names` above is
+    # what closed it. Of the two, `_result` is an exclusion of the same kind as
+    # the ones already listed: it annotates `result: dict` where the canonical
+    # says `result: Any`, a body difference `render`'s own docstring records.
+    # `_error` is NOT, and that is why it is worth a line of its own -- it is
+    # byte-identical to the canonical block once re-indented for a tab host, it
+    # clears `block_is_tab_safe`, and its single free name (`Any`) is imported
+    # in that file, so NOTHING MEASURABLE keeps it out. It stays by hand only
+    # because the other fourteen servers take `_result` and `_error` co-listed
+    # on ONE marker and webfetch cannot take its neighbour. That is COLLATERAL
+    # from where the region's boundary was drawn, not a decision anybody
+    # recorded, and the two sitting side by side here is what makes the
+    # difference legible: split that marker and one of them stops being an
+    # exclusion, while the other stays one for a reason no granularity can
+    # touch.
+    #
     # INFO, not FAIL: "this server keeps its own" is a legitimate answer, so
     # this censuses rather than judges -- but an UNDECLARED hand copy, or a new
     # one, cannot appear without landing on this line, and the census is what
@@ -364,7 +429,7 @@ def group_gate(suite, mod):
         covered = set()
         for region in mod.audit_text(path.name, text, sources):
             covered.update(region.names)
-        defined = set(mod.load_blocks_text(path.name, text)) & known
+        defined = bound_names(mod, path.name, text) & known
         hand += ["%s: %s" % (path.name, name)
                  for name in sorted(defined - covered)]
     suite.record(GA, "hand-copies-are-named", status=H.INFO,
@@ -753,6 +818,41 @@ def group_control(suite, mod):
         "an indented region should read ok at a 4-space indent, got %s"
         % [(r.state, r.indent) for r in regions],
     ))
+
+    # THE CLASS-MEMBER WALK the hand-copy census runs on, both directions. The
+    # generator's `load_blocks_text` visits `tree.body` only, so a census built
+    # on it is blind in exactly the place the fleet's shared METHODS live: it
+    # would report no hand copy of `_result` or `_error` in any server, ever,
+    # and read green while saying so.
+    #
+    # Case 17's fixture is reused deliberately, because the two texts differ by
+    # two lines and nothing else. `nested_host` is the name held INSIDE an
+    # indented region -- what a server that took the marker looks like; strip
+    # the markers and the identical class body is a HAND COPY. The census must
+    # answer differently on each, or it is reporting "there is a class here"
+    # rather than "this name is held by hand".
+    def census(text):
+        covered = set()
+        for region in audit(text):
+            covered.update(region.names)
+        return (bound_names(mod, "synthetic.py", text)
+                & set(SYNTH_BLOCKS)) - covered
+
+    hand_held = 'class Server:\n    """doc"""\n%s' % nested_body
+    seen, silent = census(hand_held), census(nested_host)
+    problems = problem_if(
+        seen != set(SYNTH_BLOCKS),
+        "a canonical name held as a CLASS MEMBER outside every region was not "
+        "reported: %s" % sorted(seen),
+    )
+    problems += problem_if(
+        silent,
+        "the same name inside an INDENTED generated region was reported as a "
+        "hand copy: %s" % sorted(silent),
+    )
+    suite.record(GC, "class-member-hand-copy-is-seen", problems,
+                 detail=["held by hand: %s; generated: %s"
+                         % (sorted(seen), sorted(silent))])
 
     # 18. THE tree.body FILTER, which decides what may be a block at all. It
     #     used to admit definitions only; it now also admits a module-level
