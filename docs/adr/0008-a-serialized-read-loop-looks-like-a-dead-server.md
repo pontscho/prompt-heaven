@@ -5,17 +5,12 @@ status: active
 title: A serialized read loop makes one slow call look like a dead server
 description: Decision to dispatch each MCP request as its own task with a reader thread nothing can take, and to stop treating an error payload as "keep waiting" — the two halves that turned one transient 503 into a restart-only outage — then to convert all ten live servers, with the concurrency decision audited per server rather than copied.
 sources:
-  - Scripts/mcp-jenkins.py
-  - Scripts/mcp-forge.py
-  - Scripts/mcp-git.py
-  - Scripts/mcp-inspect.py
-  - Scripts/mcp-context7.py
-  - Scripts/mcp-purity.py
-  - Scripts/mcp-lldb.py
-  - Scripts/mcp-gdc.py
-  - Scripts/mcp-postgres.py
-  - Scripts/mcp-tshark.py
-  - Scripts/mcp-wiki.py
+  # The eleven servers this used to list made the page stale on every unrelated
+  # edit to any of them, which is noise rather than a freshness signal. The
+  # decision's real dependency is the GATE that holds it fleet-wide: the shape
+  # is declared and measured in tests/test_read_loop.py, so a server drifting
+  # away from this ADR fails there rather than silently ageing this page.
+  - tests/test_read_loop.py
   - ClaudeCode/skills/mcp-jenkins/SKILL.md
 verified:
   commit: f80dc90
