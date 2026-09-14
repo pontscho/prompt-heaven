@@ -2691,6 +2691,8 @@ MAX_INFLIGHT_REQUESTS = 8
 class McpServer:
     """Minimal MCP server over stdio. Mirrors mcp-purity's loop."""
 
+    PROTOCOL_VERSION = "2024-11-05"
+
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         log.info("MCP server starting, endpoint=%s, auth=%s, project=%s",
@@ -2817,7 +2819,7 @@ class McpServer:
 
         if method == "initialize":
             return self._result(msg_id, {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": self.PROTOCOL_VERSION,
                 "serverInfo": {"name": "mcp-jenkins", "version": "1.0.0"},
                 "capabilities": {"tools": {}},
             })

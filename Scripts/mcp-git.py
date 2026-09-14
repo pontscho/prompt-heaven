@@ -1312,6 +1312,8 @@ MAX_INFLIGHT_REQUESTS = 8
 
 
 class McpServer:
+    PROTOCOL_VERSION = "2024-11-05"
+
     def __init__(self, project_root: str, strict: bool = False):
         self.project_root = os.path.realpath(project_root)
         self.strict = strict
@@ -1457,7 +1459,7 @@ class McpServer:
 
         if method == "initialize":
             return self._result(msg_id, {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": self.PROTOCOL_VERSION,
                 "serverInfo": {"name": "mcp-git", "version": "1.0.0"},
                 "capabilities": {"tools": {}},
             })

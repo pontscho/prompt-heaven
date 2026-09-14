@@ -2084,6 +2084,8 @@ MAX_INFLIGHT_REQUESTS = 8
 
 
 class McpServer:
+    PROTOCOL_VERSION = "2024-11-05"
+
     def __init__(self, project_root: str, wiki_root: str = DEFAULT_WIKI_ROOT,
                  strict: bool = False):
         self.project_root = os.path.realpath(project_root)
@@ -2270,7 +2272,7 @@ class McpServer:
 
         if method == "initialize":
             return self._result(msg_id, {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": self.PROTOCOL_VERSION,
                 "serverInfo": {"name": "mcp-wiki", "version": "1.0.0"},
                 "capabilities": {"tools": {}},
             })

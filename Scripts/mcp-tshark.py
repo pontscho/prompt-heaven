@@ -1236,6 +1236,8 @@ MAX_INFLIGHT_REQUESTS = 8
 class McpServer:
     """Minimal MCP server over stdio (JSON-RPC 2.0, one JSON object per line)."""
 
+    PROTOCOL_VERSION = "2024-11-05"
+
     def __init__(self, project_root: str):
         self.project_root = os.path.realpath(project_root)
 
@@ -1384,7 +1386,7 @@ class McpServer:
 
         if method == "initialize":
             return self._result(msg_id, {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": self.PROTOCOL_VERSION,
                 "serverInfo": {"name": "mcp-tshark", "version": "1.0.0"},
                 "capabilities": {"tools": {}},
             })
