@@ -272,12 +272,21 @@ def _skip_ignored_param(params: dict, default: bool) -> bool:
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_json.py :: _int_param
 def _int_param(value, default: int) -> int:
-    """Coerce a wire value to int, falling back instead of raising."""
+    """Coerce a wire value to int, falling back instead of raising.
+
+    `OverflowError` is in the list because the wire can carry a float infinity:
+    `json.loads` reads both `1e999` and the bare `Infinity` token as one, and
+    `int()` on an infinity raises an error that is neither a TypeError nor a
+    ValueError. Without it the one value a caller is most likely to send as
+    "no limit" was the only bad value that did not fall back -- it escaped the
+    handler as an opaque internal error. NaN needs no entry: `int(nan)` raises
+    ValueError, which this already catches.
+    """
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
-# END GENERATED: 6c59c479f140
+# END GENERATED: 9184041df86b
 
 
 # ---------------------------------------------------------------------------
@@ -335,12 +344,19 @@ def _offset(args: dict) -> int:
     LAST five items to a caller who asked for a position before the first one --
     a wrong answer that looks like a right one, where a floor gives the caller
     the start of the payload they asked for.
+
+    `OverflowError` is caught for the same reason the fallback exists at all.
+    `json.loads` reads both `1e999` and the bare `Infinity` token as a float
+    infinity, and `int()` on one raises an error that is neither a TypeError nor
+    a ValueError -- so the one junk value that does not look like a typo was
+    also the only one that escaped the handler instead of starting at the
+    beginning. NaN needs no entry: `int(nan)` raises ValueError.
     """
     try:
         return max(0, int(args.get("offset", 0)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
-# END GENERATED: de151293c0bb
+# END GENERATED: f4f358497b9c
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).

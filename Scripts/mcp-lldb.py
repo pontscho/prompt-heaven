@@ -162,12 +162,19 @@ def _offset(args: dict) -> int:
     LAST five items to a caller who asked for a position before the first one --
     a wrong answer that looks like a right one, where a floor gives the caller
     the start of the payload they asked for.
+
+    `OverflowError` is caught for the same reason the fallback exists at all.
+    `json.loads` reads both `1e999` and the bare `Infinity` token as a float
+    infinity, and `int()` on one raises an error that is neither a TypeError nor
+    a ValueError -- so the one junk value that does not look like a typo was
+    also the only one that escaped the handler instead of starting at the
+    beginning. NaN needs no entry: `int(nan)` raises ValueError.
     """
     try:
         return max(0, int(args.get("offset", 0)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
-# END GENERATED: de151293c0bb
+# END GENERATED: f4f358497b9c
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).

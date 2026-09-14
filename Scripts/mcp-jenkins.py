@@ -615,12 +615,21 @@ def _max_answer_chars(params: dict) -> int:
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_json.py :: _int_param
 def _int_param(value, default: int) -> int:
-    """Coerce a wire value to int, falling back instead of raising."""
+    """Coerce a wire value to int, falling back instead of raising.
+
+    `OverflowError` is in the list because the wire can carry a float infinity:
+    `json.loads` reads both `1e999` and the bare `Infinity` token as one, and
+    `int()` on an infinity raises an error that is neither a TypeError nor a
+    ValueError. Without it the one value a caller is most likely to send as
+    "no limit" was the only bad value that did not fall back -- it escaped the
+    handler as an opaque internal error. NaN needs no entry: `int(nan)` raises
+    ValueError, which this already catches.
+    """
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
-# END GENERATED: 6c59c479f140
+# END GENERATED: 9184041df86b
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).

@@ -802,9 +802,22 @@ def group_blocks(suite, blocks, lsp, paging):
             problems.append("_int_param(%r) gave %r, wanted %r" % (value, got, want))
     suite.record(GE, "int-valid", problems)
 
+    # The infinities are the reason this case is guarded rather than a bare call.
+    # `json.loads` turns both `1e999` and the bare `Infinity` token into a float
+    # infinity, and `int()` on one raises OverflowError -- neither a TypeError
+    # nor a ValueError, so it escaped the fallback and surfaced as an opaque
+    # internal error. The case name promises "never raises"; an escape has to be
+    # a recorded failure naming the exception, not a traceback that takes the
+    # whole suite down before the remaining values are tried.
     problems = []
-    for value in ("abc", None, "", [], {}, "1.5"):
-        got = blocks._int_param(value, 99)
+    for value in ("abc", None, "", [], {}, "1.5",
+                  float("inf"), float("-inf"), float("nan")):
+        try:
+            got = blocks._int_param(value, 99)
+        except Exception as exc:                       # noqa: BLE001 -- the point
+            problems.append("_int_param(%r) RAISED %s: %s"
+                            % (value, type(exc).__name__, exc))
+            continue
         if got != 99:
             problems.append("_int_param(%r) gave %r instead of the fallback" % (value, got))
     suite.record(GE, "int-falls-back-never-raises", problems)
@@ -876,9 +889,14 @@ def group_blocks(suite, blocks, lsp, paging):
 
     # Junk falls back rather than raising: this value comes straight off the
     # wire, and a handler that dies on a typo is worse than one that starts at
-    # the beginning.
+    # the beginning. The infinities are junk of the one kind that does not look
+    # like a typo -- `1e999` and the bare `Infinity` token both reach this as a
+    # float, and `int()` on one raises OverflowError, which is neither of the two
+    # this used to catch. It is the same escape `_int_param` carried, in the
+    # sibling block, and both are read straight off the wire.
     problems = []
-    for value in ("abc", None, "", [], {}, "1.5", " ", True):
+    for value in ("abc", None, "", [], {}, "1.5", " ", True,
+                  float("inf"), float("-inf"), float("nan")):
         try:
             got = offset({"offset": value})
         except Exception as exc:                       # noqa: BLE001 -- the point
