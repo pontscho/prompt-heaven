@@ -70,8 +70,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 # over `_mcp_*.py` would silently promote the next helper file somebody drops
 # into Scripts/ to a generation source, and a region naming it would read as
 # legitimate as any other. Adding a source is a deliberate edit here.
-CANONICAL_NAMES = ("_mcp_json.py", "_mcp_logging.py", "_mcp_lsp.py",
-                   "_mcp_paging.py")
+CANONICAL_NAMES = ("_mcp_concurrency.py", "_mcp_json.py", "_mcp_logging.py",
+                   "_mcp_lsp.py", "_mcp_paging.py")
 CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 
 

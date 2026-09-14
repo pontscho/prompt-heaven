@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generated-region drift gate -- groups A-F.
 
-`Scripts/_mcp_json.py`, `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` and
+`Scripts/_mcp_concurrency.py`, `Scripts/_mcp_json.py`,
+`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` and
 `Scripts/_mcp_paging.py` are the canonical sources for the helpers the MCP
 servers share, and
 `Scripts/amalgamate.py` inlines their named blocks into each server between
@@ -100,6 +101,7 @@ import _harness as H  # noqa: E402
 NAME = "generated_region"
 
 SOURCE = H.repo_path("Scripts", "_mcp_json.py")
+CONCURRENCY_SOURCE = H.repo_path("Scripts", "_mcp_concurrency.py")
 LOGGING_SOURCE = H.repo_path("Scripts", "_mcp_logging.py")
 LSP_SOURCE = H.repo_path("Scripts", "_mcp_lsp.py")
 PAGING_SOURCE = H.repo_path("Scripts", "_mcp_paging.py")
@@ -113,14 +115,19 @@ BEGIN_PREFIX = "# BEGIN GENERATED:"
 END_PREFIX = "# END GENERATED:"
 TARGET_GLOB = "mcp-*.py"
 CANONICAL_NAME = "_mcp_json.py"
+CONCURRENCY_CANONICAL_NAME = "_mcp_concurrency.py"
 LOGGING_CANONICAL_NAME = "_mcp_logging.py"
 LSP_CANONICAL_NAME = "_mcp_lsp.py"
 PAGING_CANONICAL_NAME = "_mcp_paging.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
-# whatever the glob found.
-CANONICAL_NAMES = (CANONICAL_NAME, LOGGING_CANONICAL_NAME,
+# whatever the glob found. Mirrored here rather than imported for the same
+# reason the markers are, and the mirror earns its keep on exactly this kind of
+# edit: a fifth source added to the generator and not to this tuple fails
+# `sources-registered` by name instead of being adopted silently.
+CANONICAL_NAMES = (CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
+                   LOGGING_CANONICAL_NAME,
                    LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME)
 
 GA = "A. GATE: live regions match their canonical source"
@@ -1363,8 +1370,8 @@ def run(opts=None):
 
     pyc_before = H.pycache_snapshot()
     digests_before = {p: H.sha256_file(p) for p in
-                      (SOURCE, LOGGING_SOURCE, LSP_SOURCE, PAGING_SOURCE,
-                       GENERATOR, TARGET)}
+                      (SOURCE, CONCURRENCY_SOURCE, LOGGING_SOURCE, LSP_SOURCE,
+                       PAGING_SOURCE, GENERATOR, TARGET)}
 
     mod = H.load_module_from_path("amalgamate_under_test", GENERATOR)
     blocks = H.load_module_from_path("mcp_json_under_test", SOURCE)

@@ -1227,7 +1227,10 @@ TSHARK_CALL_TOOL = {
 # its own, OUTSIDE this pool, so saturating it delays queued CALLS and can never
 # stop the server from READING — which is the whole point of the split in run().
 # 8 also bounds how many tshark children this server can have dissecting at once.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_concurrency.py :: MAX_INFLIGHT_REQUESTS
 MAX_INFLIGHT_REQUESTS = 8
+# END GENERATED: 0ffae9f02744
 
 
 class McpServer:

@@ -26,7 +26,7 @@ links:
 `Scripts/` holds standalone Python 3.9+ scripts: the MCP servers, the canonical
 sources their shared helpers are generated from `Scripts/amalgamate.py`, the
 `requirements.yaml` task utilities, and the search tools. The servers share that
-plumbing by generation rather than import; the four canonical sources, the
+plumbing by generation rather than import; the five canonical sources, the
 rules deciding what may be a shared block, and the copies deliberately left in
 place are [[generated-regions]].
 

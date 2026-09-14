@@ -1695,7 +1695,10 @@ FORGE_CALL_TOOL = {
 # server keeps reading: the stdin reader owns a thread OUTSIDE this pool, so
 # saturating it delays queued CALLS and can never make the server deaf. That
 # split is the entire point of the two executors below.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_concurrency.py :: MAX_INFLIGHT_REQUESTS
 MAX_INFLIGHT_REQUESTS = 8
+# END GENERATED: 0ffae9f02744
 
 
 class McpServer:

@@ -1731,7 +1731,10 @@ POSTGRES_CALL_TOOL = {
 # ConnectionManager), so a fair share of these threads can be parked waiting for
 # one socket; 8 leaves room for a ping and for other named connections while a
 # long query holds one.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_concurrency.py :: MAX_INFLIGHT_REQUESTS
 MAX_INFLIGHT_REQUESTS = 8
+# END GENERATED: 0ffae9f02744
 
 
 class McpServer:

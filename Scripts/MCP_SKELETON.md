@@ -9,7 +9,8 @@
 > designed async variant for the LSP/subprocess ("A-family") servers.
 >
 > **Some of the plumbing below is no longer described here but *generated*.** The
-> named blocks in the canonical sources — `Scripts/_mcp_json.py`,
+> named blocks in the canonical sources — `Scripts/_mcp_concurrency.py`,
+> `Scripts/_mcp_json.py`,
 > `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` and `Scripts/_mcp_paging.py`
 > — are pasted into each
 > server by `Scripts/amalgamate.py`; for those, the canonical file is the source
@@ -595,7 +596,9 @@ and deliberately stays hand-written in each server); `Scripts/_mcp_lsp.py`
 for the LSP `Content-Length` framing the four language-server hosts share;
 `Scripts/_mcp_paging.py` for output capping and the two halves of the pager
 protocol, the `offset=<n> for more` line a payload ends with and the read that
-takes the number back — and is **pasted into** each server by
+takes the number back; and `Scripts/_mcp_concurrency.py` for how many tool calls
+run at once, which is one constant and deliberately not the executors around it
+— and is **pasted into** each server by
 `python3 Scripts/amalgamate.py`. In a server the result looks like this, and it
 is the whole of the mechanism:
 
@@ -636,7 +639,8 @@ every one of those properties and still leaves one place to edit.
 
 ### The two things you actually do
 
-**Change a shared helper** — edit its canonical source (`Scripts/_mcp_json.py`,
+**Change a shared helper** — edit its canonical source
+(`Scripts/_mcp_concurrency.py`, `Scripts/_mcp_json.py`,
 `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` or `Scripts/_mcp_paging.py`),
 then:
 

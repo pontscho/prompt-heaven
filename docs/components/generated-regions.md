@@ -3,9 +3,10 @@ name: generated-regions
 type: component
 status: active
 title: Generated regions — how the MCP fleet shares plumbing without importing it
-description: The amalgamate generator, its four canonical sources, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
+description: The amalgamate generator, its five canonical sources, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
 sources:
   - Scripts/amalgamate.py
+  - Scripts/_mcp_concurrency.py
   - Scripts/_mcp_json.py
   - Scripts/_mcp_logging.py
   - Scripts/_mcp_lsp.py
@@ -73,8 +74,8 @@ A `BEGIN` without an `END` is a hard error rather than a skip, because a region
 that quietly stops being maintained is the whole failure the mechanism exists to
 prevent `Scripts/amalgamate.py`.
 
-As of the verified commit: **90 live regions across the 15 servers, emitting 116
-block instances from 15 canonical blocks** — a single region may name several
+As of the verified commit: **99 live regions across the 15 servers, emitting 125
+block instances from 16 canonical blocks** — a single region may name several
 blocks, and that is the whole of the gap between the two counts. Twenty-six
 regions name two blocks each and every other names one: fourteen
 `_result, _error`, seven `_json_error_window, _ensure_dict`, and five
@@ -87,7 +88,7 @@ reason is the state they were just found in: the first two had read `70` and `84
 since before the logging source existed, and the third read `11` against a table
 that summed to thirteen further down this same page.
 
-## Four canonical sources, and why four
+## Five canonical sources, and why five
 
 The registry is a hand-written tuple, not a glob `Scripts/amalgamate.py:CANONICAL_NAMES`,
 because a glob would let an unrelated file become a generation source by merely
@@ -95,18 +96,37 @@ existing — and the marker naming it would look exactly as legitimate as the on
 that belong. `Scripts/_mcp_smoke_test.py` is the standing example: an `_mcp_*.py`
 file that is deliberately not a source.
 
+`Scripts/_mcp_concurrency.py` is the other side of that coin — the case where the
+deliberate edit was actually made, and the only source so far added for a constant
+rather than for code. It holds one line, `MAX_INFLIGHT_REQUESTS = 8`, which nine
+live servers had each written out: the fleet's widest-shared constant. It got a
+domain of its own because none of the four existing ones could hold it without
+becoming the shelf each of them is written not to be — JSON-RPC envelopes,
+logging configuration, LSP framing and output paging are four questions, and "how
+many handlers run at once" is a fifth. Filing it under the nearest of them would
+have made the marker's source field decorative for every block in that file,
+which is the one property the multi-source design exists to protect.
+
+What that source deliberately does **not** take is the concurrency *decision*.
+[[0008-a-serialized-read-loop-looks-like-a-dead-server]] records that the decision
+was audited per server rather than copied, and the shared block is the number
+those audits agreed on, not the agreeing. A server needing a different one keeps
+its own copy and says why, exactly as the output ceiling works — at which point
+the hand-copy census names it rather than hiding it.
+
 Each source is **a domain, not a shelf**, and the JSON source has been narrowed
 twice — framing left for the LSP source, row accounting for the paging source —
 with both departures asserted as departures in the suite.
 
 | Source | Blocks | Domain |
 |---|---|---|
+| `Scripts/_mcp_concurrency.py` | 1 | how many tool calls a server runs at once |
 | `Scripts/_mcp_json.py` | 6 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
 | `Scripts/_mcp_logging.py` | 1 | how a server CONFIGURES logging — level, sink, file mode |
 | `Scripts/_mcp_lsp.py` | 1 | LSP `Content-Length` framing over stdio |
 | `Scripts/_mcp_paging.py` | 7 | how much of a result a caller gets, and how it is told where the rest is |
 
-Fifteen blocks across four sources, which the suite asserts as a disjointness
+Sixteen blocks across five sources, which the suite asserts as a disjointness
 check rather than a count. The paging row read `5` until the edit that added the
 logging row: the number was left behind when `_max_answer_chars` was lifted, and
 a stale figure sitting beside a new row is worse than one sitting alone. Both

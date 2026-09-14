@@ -314,7 +314,10 @@ def _cap_text(text: str, max_chars: int) -> str:
 # thread OUTSIDE this pool (see McpServer.run), so saturating it delays queued
 # CALLS and can never stop the server from READING — that split is the whole
 # point.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_concurrency.py :: MAX_INFLIGHT_REQUESTS
 MAX_INFLIGHT_REQUESTS = 8
+# END GENERATED: 0ffae9f02744
 
 # The executor the blocking urlopen runs on, owned by McpServer.run() instead of
 # left as asyncio's default, for two reasons. First, the default executor is also

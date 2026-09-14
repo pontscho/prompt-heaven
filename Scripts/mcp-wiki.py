@@ -2040,7 +2040,10 @@ WIKI_CALL_TOOL = {
 # How many tool calls may be in flight at once. The stdin reader owns a thread of
 # its own, outside this pool, so saturating it delays queued CALLS and can never
 # stop the server from READING — which is the entire point of the split in run().
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_concurrency.py :: MAX_INFLIGHT_REQUESTS
 MAX_INFLIGHT_REQUESTS = 8
+# END GENERATED: 0ffae9f02744
 
 
 class McpServer:
