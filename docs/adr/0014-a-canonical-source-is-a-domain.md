@@ -175,3 +175,25 @@ block instances across the 15 servers.
   five sources hold a single block today. The rule above says domain rather than
   count, so none of the three is wrong — but nothing has revisited them, and
   nothing schedules a revisit.
+
+## Update — `11a3542`: the LSP source took the DocumentUri pair
+
+`uri_to_path` and `path_to_uri` were lifted into `Scripts/_mcp_lsp.py` from four
+hand copies, three of which could not decode what the fourth encoded. That
+widened the source's domain from the `Content-Length` framing of a message to how
+the LSP wire is spoken — framing **and** the `file://` DocumentUri of a path
+`Scripts/_mcp_lsp.py`. The rule above decided that placement rather than being
+bent by it: a separate source for the pair would have been two canonical files
+with a byte-identical consumer set naming the same protocol, which splits a
+domain instead of separating two.
+
+Two counts above are superseded, and neither of them is an argument.
+`_mcp_lsp.py` holds three blocks rather than one ("The rule for a sixth source"),
+and **two** of the five sources hold a single block rather than three ("What this
+page does not settle") — so the open question there now has two members. Block
+count is still not the test; the source took the pair because the pair is the
+same domain.
+
+The figure stamped at `8d56b6d` stands for the commit it names. Re-measured at
+`11a3542`: five sources, 18 blocks, 103 live regions emitting 133 block instances
+across the 15 servers.
