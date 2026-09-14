@@ -13,13 +13,14 @@ sources:
   - Scripts/_mcp_paging.py
   - tests/test_generated_region.py
 verified:
-  commit: 1a10f28
-  date: 2026-09-11
+  commit: 8d56b6d
+  date: 2026-09-14
 links:
   - scripts
   - tests
   - 0009-the-first-reader-is-a-cold-model
   - 0010-a-handler-failure-must-reach-iserror
+  - 0014-a-canonical-source-is-a-domain
 ---
 
 # Generated regions
@@ -116,7 +117,10 @@ the hand-copy census names it rather than hiding it.
 
 Each source is **a domain, not a shelf**, and the JSON source has been narrowed
 twice — framing left for the LSP source, row accounting for the paging source —
-with both departures asserted as departures in the suite.
+with both departures asserted as departures in the suite. The rule itself, the
+naming complaint that measurement redirected at the container, and the test that
+decides when a sixth source is warranted are
+[[0014-a-canonical-source-is-a-domain]].
 
 | Source | Blocks | Domain |
 |---|---|---|
