@@ -55,34 +55,8 @@ def _configure_logging(debug, log_file):
 # END GENERATED: f77d402d6254
 
 
-def _ensure_dict(value: Any, name: str = "params") -> dict:
-    """Coerce *value* to a dict.
-
-    Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
-    Raises ValueError on a non-JSON string, JSON that is not an object,
-    or any other type.
-    """
-    if value is None:
-        return {}
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"'{name}' was a string but not valid JSON: {exc}. "
-                f"Near the failure: {_json_error_window(value, exc.pos)}. "
-                f"Pass '{name}' as an object, not a JSON-encoded string."
-            )
-    if not isinstance(value, dict):
-        raise ValueError(
-            f"'{name}' must be an object (dict) or a JSON-encoded object string; "
-            f"got {type(value).__name__}."
-        )
-    return value
-
-
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window, _ensure_dict
 def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     """Return a repr'd slice of *text* centred on *pos*.
 
@@ -97,7 +71,31 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     lead = "..." if start > 0 else ""
     tail = "..." if end < len(text) else ""
     return f"{lead}{text[start:end]!r}{tail}"
-# END GENERATED: 4c5e7e3f59cb
+
+
+def _ensure_dict(value: Any, name: str = "params") -> dict:
+    """Coerce *value* to a dict.
+
+    Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
+    Raises ValueError on a non-JSON string, JSON that is not an object,
+    or any other type.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            msg = f"'{name}' was a string but not valid JSON: {exc}. "
+            msg += f"Near the failure: {_json_error_window(value, exc.pos)}. "
+            msg += f"Pass '{name}' as an object, not a JSON-encoded string."
+            raise ValueError(msg)
+    if not isinstance(value, dict):
+        msg = f"'{name}' must be an object (dict) or a JSON-encoded object string; "
+        msg += f"got {type(value).__name__}."
+        raise ValueError(msg)
+    return value
+# END GENERATED: e5ba86fb2715
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).

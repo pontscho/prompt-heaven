@@ -1048,42 +1048,18 @@ HANDLERS: Dict[str, Callable[[dict, str], dict]] = {
 _PRIMARY_FUNCTIONS = {"fetch"}
 
 
-def _ensure_dict(value: Any, name: str = "params") -> dict:
-	"""Coerce *value* to a dict.
-
-	Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
-	Raises ValueError on a non-JSON string, JSON that is not an object,
-	or any other type.
-	"""
-	if value is None:
-		return {}
-	if isinstance(value, str):
-		try:
-			value = json.loads(value)
-		except json.JSONDecodeError as exc:
-			raise ValueError(
-				f"'{name}' was a string but not valid JSON: {exc}. "
-				f"Near the failure: {_json_error_window(value, exc.pos)}. "
-				f"Pass '{name}' as an object, not a JSON-encoded string."
-			)
-	if not isinstance(value, dict):
-		raise ValueError(
-			f"'{name}' must be an object (dict) or a JSON-encoded object string; "
-			f"got {type(value).__name__}."
-		)
-	return value
-
-
 # EXCLUSIONS HERE ARE PER BLOCK, NOT PER SERVER. This file takes
-# `_json_error_window` because its copy of that helper would be identical; it
-# still takes NONE of the others, and that is not an oversight waiting to be
-# tidied. `_result` annotates `result: dict` where the canonical says
-# `result: Any`, and `_bool_param` is an ALLOW-list where the canonical is a
-# deny-list -- an unrecognised string reads False here and True there. Those are
-# body and behaviour differences. Do not read this region as licence to fold in
-# the rest.
+# `_json_error_window` and `_ensure_dict` -- on ONE marker, because the second
+# reads the first and a region may not reach a name its host does not import --
+# since both of its copies were identical to the canonical text modulo the
+# indent character. It still takes NONE of the others, and that is not an
+# oversight waiting to be tidied. `_result` annotates `result: dict` where the
+# canonical says `result: Any`, and `_bool_param` is an ALLOW-list where the
+# canonical is a deny-list -- an unrecognised string reads False here and True
+# there. Those are body and behaviour differences. Do not read this region as
+# licence to fold in the rest.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window, _ensure_dict
 def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
 	"""Return a repr'd slice of *text* centred on *pos*.
 
@@ -1098,7 +1074,31 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
 	lead = "..." if start > 0 else ""
 	tail = "..." if end < len(text) else ""
 	return f"{lead}{text[start:end]!r}{tail}"
-# END GENERATED: a0daa4beeefc
+
+
+def _ensure_dict(value: Any, name: str = "params") -> dict:
+	"""Coerce *value* to a dict.
+
+	Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
+	Raises ValueError on a non-JSON string, JSON that is not an object,
+	or any other type.
+	"""
+	if value is None:
+		return {}
+	if isinstance(value, str):
+		try:
+			value = json.loads(value)
+		except json.JSONDecodeError as exc:
+			msg = f"'{name}' was a string but not valid JSON: {exc}. "
+			msg += f"Near the failure: {_json_error_window(value, exc.pos)}. "
+			msg += f"Pass '{name}' as an object, not a JSON-encoded string."
+			raise ValueError(msg)
+	if not isinstance(value, dict):
+		msg = f"'{name}' must be an object (dict) or a JSON-encoded object string; "
+		msg += f"got {type(value).__name__}."
+		raise ValueError(msg)
+	return value
+# END GENERATED: 4a413a7afbd1
 
 
 def handle_webfetch_call(arguments: dict, project_root: str) -> dict:

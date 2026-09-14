@@ -534,6 +534,20 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     return f"{lead}{text[start:end]!r}{tail}"
 ```
 
+Both functions above are **generated, not hand-written**, in every server that
+factors this out into an `_ensure_dict`. Do not copy them in: paste the marker
+pair and let §8 fill the body. They travel on ONE marker, dependency first —
+
+```python
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window, _ensure_dict
+```
+
+— because `_ensure_dict` reads `_json_error_window`, and a region may only reach
+names its host *imports*. Asking for `_ensure_dict` alone is refused by name. A
+server that keeps the logic inline against a local `params`, as the sample above
+shows, requests `_json_error_window` on its own instead; both shapes are live in
+the fleet and neither is the deprecated one.
+
 Do **not** go further and try to *repair* the broken JSON. The failure shape is
 ambiguous (a prematurely closed string is indistinguishable from a genuinely
 short value), and on a write path a wrong guess silently commits corrupted

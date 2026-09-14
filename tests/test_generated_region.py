@@ -165,18 +165,31 @@ def synth_host(body, recorded=None, names="_helper", source=CANONICAL_NAME):
 # they all agree -- including on a drift.
 #
 # The SENTENCE is one string; what varies is only the LOCAL NAME holding the
-# text that failed to parse, and the fleet spells that name five ways: `params`
-# in a param normalizer, `value` in the generic `_ensure_dict(value, name)`
-# helper, and `args` / `arguments` / `tool_args` in the three flavours of
-# tools/call handler. Every one is listed DELIBERATELY, and the list is meant to
-# be edited when a sixth appears. Do NOT relax this into a substring or an
-# identifier wildcard: the whole point is that "Near the error", a missing
+# text that failed to parse, and the fleet spells that name four ways: `params`
+# in a param normalizer, and `args` / `arguments` / `tool_args` in the three
+# flavours of tools/call handler. Every one is listed DELIBERATELY, and the list
+# is meant to be edited when a fifth appears. Do NOT relax this into a substring
+# or an identifier wildcard: the whole point is that "Near the error", a missing
 # period and a lost trailing space are each caught, and a wildcard would wave
 # all three through while still looking like a test.
+#
+# `value` was the fifth spelling and has LEFT the list -- which is how a name
+# should leave it. It was the local inside `_ensure_dict`, and that function is
+# now a generated block co-listed with the window, so its call site is single-
+# sourced and compared byte for byte by group A instead of by this census. A
+# hand copy coming back would surface in `hand-copies-are-named` first, and a
+# drift inside the block cannot reach here at all.
 WINDOW_NAME = "_json_error_window"
 WINDOW_SENTENCE = 'f"Near the failure: {%s(%%s, exc.pos)}. "' % WINDOW_NAME
-WINDOW_FIELDS = ("params", "args", "arguments", "tool_args", "value")
+WINDOW_FIELDS = ("params", "args", "arguments", "tool_args")
 WINDOW_MIN_HOSTS = 8
+
+# The one block that calls the window from INSIDE a region. `host_provides`
+# offers a region only the host's module-level IMPORTS, never a name another
+# region defines, so `_ensure_dict` in a region of its own is refused in every
+# host -- it travels co-listed with the window on one marker. That co-listing is
+# why the liveness case below asks about the PAIR rather than about one name.
+WINDOW_RELAY = "_ensure_dict"
 
 
 def outside_regions(mod, label, text, sources):
@@ -347,44 +360,80 @@ def group_gate(suite, mod):
     # already in the repo, with no environment, no binary and no ordering, so
     # neither can flap on ordinary work -- the fleet's bar for a gated FAIL.
     hosts, callers, sentences = set(), set(), []
+    relay_hosts, relay_callers = set(), set()
     for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
         text = path.read_text(encoding="utf-8")
-        if any(WINDOW_NAME in r.names
-               for r in mod.audit_text(path.name, text, sources)):
+        regioned = set()
+        for region in mod.audit_text(path.name, text, sources):
+            regioned.update(region.names)
+        if WINDOW_NAME in regioned:
             hosts.add(path.name)
+        if WINDOW_RELAY in regioned:
+            relay_hosts.add(path.name)
         body = outside_regions(mod, path.name, text, sources)
         if "%s(" % WINDOW_NAME in body:
             callers.add(path.name)
+        if "%s(" % WINDOW_RELAY in body:
+            relay_callers.add(path.name)
         sentences += [(path.name, line.strip()) for line in body.splitlines()
                       if "Near the failure:" in line]
 
     # A region with no caller is dead code -- and worse than ordinary dead code,
     # because the drift gate would then faithfully prove that N files agree on
     # carrying it. The reverse is a NameError the moment that path is taken.
-    problems = ["%s: hosts %s but never calls it" % (name, WINDOW_NAME)
-                for name in sorted(hosts - callers)]
+    #
+    # Reached THROUGH THE RELAY, which is not the same as waived for it. Once
+    # `_ensure_dict` joined the window on one marker, the three servers whose
+    # only window call site was the one inside that function -- mcp-forge,
+    # mcp-git and mcp-inspect -- call the window from INSIDE the region, where
+    # `outside_regions` deliberately cannot see it. What keeps their region
+    # alive is a call to `_ensure_dict`, and it is required rather than assumed:
+    # a server that stopped calling BOTH still lands on this line.
+    reached = callers | (relay_hosts & relay_callers)
+    problems = ["%s: hosts %s, and neither it nor %s is called from outside a "
+                "region" % (name, WINDOW_NAME, WINDOW_RELAY)
+                for name in sorted(hosts - reached)]
     problems += ["%s: calls %s without hosting the region -- NameError"
                  % (name, WINDOW_NAME) for name in sorted(callers - hosts)]
+    problems += ["%s: calls %s without hosting it -- NameError"
+                 % (name, WINDOW_RELAY)
+                 for name in sorted(relay_callers - relay_hosts)]
     problems += problem_if(
         len(hosts) < WINDOW_MIN_HOSTS,
         "only %d server(s) host %s; this case examined too few to mean "
         "anything" % (len(hosts), WINDOW_NAME),
     )
+    # Without this the relay arm is vacuous: if nothing hosted `_ensure_dict`
+    # the union above would collapse back to `callers` and read green forever.
+    problems += problem_if(
+        not relay_hosts,
+        "no server hosts %s, so the relay arm of this case proves nothing"
+        % WINDOW_RELAY,
+    )
     suite.record(GA, "window-region-has-a-caller", problems,
-                 detail=["%d host(s), all calling it: %s"
-                         % (len(hosts), ", ".join(sorted(hosts)))])
+                 detail=["%d host(s): %d call %s directly, %d reach it only "
+                         "through %s"
+                         % (len(hosts), len(callers), WINDOW_NAME,
+                            len((relay_hosts & relay_callers) - callers),
+                            WINDOW_RELAY)])
 
     # One writer for the code was the easy half. The SENTENCE is the half that
-    # rots: it is hand-written at each call site, says the same thing in eleven
+    # rots: it is hand-written at each call site, says the same thing in a dozen
     # files, and nothing but this case compares them.
+    #
+    # Paired against the servers that call the window BY HAND, not against the
+    # servers that HOST it. Those two sets used to coincide and stopped the day
+    # `_ensure_dict` became a block: the sentence inside it is generated now,
+    # and group A compares it byte for byte. What is left under this case is
+    # exactly the hand-written population it was written for.
     allowed = {WINDOW_SENTENCE % field for field in WINDOW_FIELDS}
     problems = ["%s: %s" % (name, line) for name, line in sentences
                 if line not in allowed]
     carrying = {name for name, _line in sentences}
     problems += problem_if(
-        carrying != hosts,
-        "the servers carrying the sentence and the servers hosting the block "
-        "differ: %s" % sorted(carrying ^ hosts),
+        carrying != callers,
+        "the servers carrying the sentence and the servers calling %s by hand "
+        "differ: %s" % (WINDOW_NAME, sorted(carrying ^ callers)),
     )
     problems += problem_if(
         len(sentences) < WINDOW_MIN_HOSTS,
@@ -1056,6 +1105,64 @@ def group_blocks(suite, blocks, lsp, paging, logmod):
         % window("abcdef", 6),
     ))
 
+    # `_ensure_dict` is the window's one in-region caller, and these three cases
+    # are where the co-listing stops being a claim about the generator and turns
+    # into a claim about behaviour: the third message below can only be built if
+    # the block really does reach `_json_error_window` at run time.
+    ensure = blocks._ensure_dict
+    problems = []
+    for value, want in ((None, {}), ({"a": 1}, {"a": 1}), ({}, {}),
+                        ('{"a": 1}', {"a": 1}), ("{}", {})):
+        try:
+            got = ensure(value)
+        except Exception as exc:                       # noqa: BLE001 -- the point
+            problems.append("_ensure_dict(%r) RAISED %s: %s"
+                            % (value, type(exc).__name__, exc))
+            continue
+        if got != want:
+            problems.append("_ensure_dict(%r) gave %r, wanted %r"
+                            % (value, got, want))
+    suite.record(GE, "ensure-dict-accepts-none-dict-and-json", problems)
+
+    # Everything that is not an OBJECT must raise, and raise a ValueError that a
+    # handler can turn into a reply. The JSON array and the bare JSON scalar are
+    # the two that a plain `json.loads` would wave through, which is the whole
+    # reason the isinstance check sits after the decode rather than instead of it.
+    problems = []
+    for value in ("[1, 2]", "5", '"text"', "null", 5, [], ("a",), object()):
+        try:
+            got = ensure(value)
+        except ValueError:
+            continue
+        except Exception as exc:                       # noqa: BLE001 -- the point
+            problems.append("_ensure_dict(%r) raised %s, not ValueError"
+                            % (value, type(exc).__name__))
+            continue
+        problems.append("_ensure_dict(%r) returned %r instead of raising"
+                        % (value, got))
+    suite.record(GE, "ensure-dict-rejects-non-objects", problems)
+
+    # The message carries the two things a caller cannot reconstruct: WHICH
+    # parameter was wrong -- hosts pass their own field name, the default is
+    # "params" -- and WHERE the JSON broke. The window is reachable at all only
+    # because `value` still holds the caller's string in the except branch:
+    # `value = json.loads(value)` binds nothing when it raises.
+    problems = []
+    try:
+        ensure("{broken", "filter")
+    except ValueError as exc:
+        message = str(exc)
+        if "'filter'" not in message:
+            problems.append("the message does not name the parameter: %r" % message)
+        if "Near the failure:" not in message:
+            problems.append("the message carries no window: %r" % message)
+        if repr("{broken") not in message:
+            problems.append("the window did not repr the caller's own text, so "
+                            "`value` was rebound before it was read: %r" % message)
+    else:
+        problems.append("a non-JSON string did not raise")
+    suite.record(GE, "ensure-dict-message-names-field-and-window", problems)
+
     # `_configure_logging` is measured on the one property that has already cost
     # a fleet-wide commit: `c8b74d0`, "every log file was created world-readable
     # in a world-writable directory", had to touch every server because the mode
@@ -1152,13 +1259,17 @@ def group_tabs(suite, mod):
     # Emission: tabs at every structural level, and NOT ONE leading space. A
     # half-converted body would still import and run, and would be invisible in
     # a diff viewer that renders both the same width.
-    # `_max_answer_chars` is driven through PAIRED with the constant it reads.
-    # That is not a fixture convenience: `host_provides` offers a region only
-    # the host's module-level IMPORTS, never the names another region defines,
-    # so `free_names` refuses this block in a region of its own and every real
-    # host spells it as a two-name marker. Rendering it alone here would assert
-    # a shape no server is allowed to use.
-    paired = {"_max_answer_chars": "DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars"}
+    # Two blocks are driven through PAIRED with the name they read. That is not
+    # a fixture convenience: `host_provides` offers a region only the host's
+    # module-level IMPORTS, never the names another region defines, so
+    # `free_names` refuses either of these in a region of its own and every real
+    # host spells them as a two-name marker. Rendering one alone here would
+    # assert a shape no server is allowed to use. Dependency first in both, so
+    # the fixture emits what a server emits.
+    paired = {
+        "_max_answer_chars": "DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars",
+        WINDOW_RELAY: "%s, %s" % (WINDOW_NAME, WINDOW_RELAY),
+    }
     problems = []
     for name in safe:
         source = next(s for s, blocks in sources.items() if name in blocks)

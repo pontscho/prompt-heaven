@@ -73,12 +73,19 @@ A `BEGIN` without an `END` is a hard error rather than a skip, because a region
 that quietly stops being maintained is the whole failure the mechanism exists to
 prevent `Scripts/amalgamate.py`.
 
-As of the verified commit: **70 live regions across the 15 servers, emitting 84
-block instances from 11 canonical blocks** — a single region may name several
-blocks, and that is the whole of the gap between the two counts: the fourteen
-`_result, _error` regions name two blocks each, every other region names one.
-`_json_error_window` is in every server; the `_result` / `_error` pair is in
+As of the verified commit: **87 live regions across the 15 servers, emitting 113
+block instances from 14 canonical blocks** — a single region may name several
+blocks, and that is the whole of the gap between the two counts. Twenty-six
+regions name two blocks each and every other names one: fourteen
+`_result, _error`, seven `_json_error_window, _ensure_dict`, and five
+`DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars`. `_json_error_window` and
+`_configure_logging` are in every server; the `_result` / `_error` pair is in
 fourteen of fifteen, `mcp-webfetch.py` the one holdout.
+
+Those three numbers are measured at each edit rather than incremented, and the
+reason is the state they were just found in: the first two had read `70` and `84`
+since before the logging source existed, and the third read `11` against a table
+that summed to thirteen further down this same page.
 
 ## Four canonical sources, and why four
 
@@ -94,15 +101,17 @@ with both departures asserted as departures in the suite.
 
 | Source | Blocks | Domain |
 |---|---|---|
-| `Scripts/_mcp_json.py` | 5 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
+| `Scripts/_mcp_json.py` | 6 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
 | `Scripts/_mcp_logging.py` | 1 | how a server CONFIGURES logging — level, sink, file mode |
 | `Scripts/_mcp_lsp.py` | 1 | LSP `Content-Length` framing over stdio |
 | `Scripts/_mcp_paging.py` | 6 | how much of a result a caller gets, and how it is told where the rest is |
 
-Thirteen blocks across four sources, which the suite asserts as a disjointness
-check rather than a count. The paging row read `5` until this edit: the number
-was left behind when `_max_answer_chars` was lifted, and a stale figure sitting
-beside a new row is worse than one sitting alone.
+Fourteen blocks across four sources, which the suite asserts as a disjointness
+check rather than a count. The paging row read `5` until the edit that added the
+logging row: the number was left behind when `_max_answer_chars` was lifted, and
+a stale figure sitting beside a new row is worse than one sitting alone. The JSON
+row moved for the opposite reason — `_ensure_dict` is a genuine arrival, not a
+correction.
 
 The logging source is the newest and the only one whose domain is defined by
 what it EXCLUDES. Configuring logging is not the same question as what gets
@@ -165,6 +174,20 @@ while the block looks fine where it is written. The host half,
 assignments. A free name the host *defines* is therefore still a refusal, and the
 region is rejected by name at END-marker time `Scripts/amalgamate.py:host_provides`.
 
+The remedy is not to import the name but to **co-list it on the same marker**:
+`free_names` runs over the whole rendered region, so a block defined beside its
+caller is *bound* rather than free `Scripts/amalgamate.py:audit_text`. That is
+why `_max_answer_chars` travels with its constant and `_ensure_dict` travels with
+`_json_error_window`, dependency first in both. The second pairing is the
+instructive one, because it moved a cost into the test suite rather than the
+generator: in `mcp-forge.py`, `mcp-git.py` and `mcp-inspect.py`, `_ensure_dict`
+was the *only* caller of the window, so the moment it went inside the region
+those three had no window call site outside one — and the liveness census, which
+deliberately ignores calls inside a region, had to start asking whether the
+**pair** is reached instead of whether one name is
+`tests/test_generated_region.py:group_gate`. Co-listing is cheap at the marker
+and is not free further out.
+
 Admitting constants needed nothing added here, and that is a property of the walk
 rather than luck: `ast.walk` descends the whole tree and every binder is matched
 by node type, so a module-level statement is analysed on the same terms as a
@@ -198,6 +221,18 @@ excluded twice over, tab-unsafe *and* body-diverged, so clearing the tab hazard
 alone would not make it adoptable. Lifting the constants did not widen that
 surface even though it grew the block count, because a constant has no leading
 whitespace on any line and the tab conversion is a no-op for it.
+
+The rule's larger effect is not the refusals it issues but the **code it shapes
+before one is ever issued**. Both blocks extracted most recently had to be
+rewritten on the way in: `_configure_logging` and `_ensure_dict` each built a
+call across several physical lines in every hand copy, which is an implicit line
+join, and each has a tab-indented host — so the verbatim text would have been
+refused by name for `mcp-forge.py` and `mcp-webfetch.py` and quietly accepted
+everywhere else. Both now fit one call per physical line, and both say so in
+their canonical source, because a **reshape** and a **lift** make different
+promises: a lift's first generated diff is marker lines only, and reading a
+reshape as a botched lift is the misreading the declaration exists to prevent
+`Scripts/_mcp_json.py`.
 
 **A name must resolve against the source that was named.** Cross-source
 resolution is refused, and the suite gates both halves — the refusal *and* a

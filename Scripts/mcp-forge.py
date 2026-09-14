@@ -1424,40 +1424,8 @@ def handle_clean(cfg: Dict[str, Any], params: dict, project_root: str) -> dict:
 # Dispatcher
 # ===========================================================================
 
-def _ensure_dict(value: Any, name: str = "params") -> dict:
-	"""Coerce *value* to a dict.
-
-	Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
-	Raises ValueError on a non-JSON string, JSON that is not an object,
-	or any other type.
-	"""
-	if value is None:
-		return {}
-	if isinstance(value, str):
-		try:
-			value = json.loads(value)
-		except json.JSONDecodeError as exc:
-			# `value` is still the STRING here, which is the non-obvious part and
-			# the reason the window can be taken at all: `value = json.loads(value)`
-			# above binds nothing when json.loads raises, so the name still holds
-			# the text the caller sent. Every server's `_ensure_dict` relies on it;
-			# it is written down once, here, because this file is the skeleton's
-			# sync canonical and is what the others get copied from.
-			raise ValueError(
-				f"'{name}' was a string but not valid JSON: {exc}. "
-				f"Near the failure: {_json_error_window(value, exc.pos)}. "
-				f"Pass '{name}' as an object, not a JSON-encoded string."
-			)
-	if not isinstance(value, dict):
-		raise ValueError(
-			f"'{name}' must be an object (dict) or a JSON-encoded object string; "
-			f"got {type(value).__name__}."
-		)
-	return value
-
-
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+# BEGIN GENERATED: _mcp_json.py :: _json_error_window, _ensure_dict
 def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
 	"""Return a repr'd slice of *text* centred on *pos*.
 
@@ -1472,7 +1440,31 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
 	lead = "..." if start > 0 else ""
 	tail = "..." if end < len(text) else ""
 	return f"{lead}{text[start:end]!r}{tail}"
-# END GENERATED: a0daa4beeefc
+
+
+def _ensure_dict(value: Any, name: str = "params") -> dict:
+	"""Coerce *value* to a dict.
+
+	Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
+	Raises ValueError on a non-JSON string, JSON that is not an object,
+	or any other type.
+	"""
+	if value is None:
+		return {}
+	if isinstance(value, str):
+		try:
+			value = json.loads(value)
+		except json.JSONDecodeError as exc:
+			msg = f"'{name}' was a string but not valid JSON: {exc}. "
+			msg += f"Near the failure: {_json_error_window(value, exc.pos)}. "
+			msg += f"Pass '{name}' as an object, not a JSON-encoded string."
+			raise ValueError(msg)
+	if not isinstance(value, dict):
+		msg = f"'{name}' must be an object (dict) or a JSON-encoded object string; "
+		msg += f"got {type(value).__name__}."
+		raise ValueError(msg)
+	return value
+# END GENERATED: 4a413a7afbd1
 
 
 def _ensure_filter(value: Any) -> Any:

@@ -39,14 +39,49 @@ down: its two lines are identical in three servers, but its body reads a
 per-server `FUNCTION_ALIASES` table, so sharing it means sharing a promise about
 the host's globals. Until that promise has a form and a check, it stays out.
 
-Every block below was lifted VERBATIM from `Scripts/mcp-purity.py`, which is why
-a LIFT's first generated diff is marker lines only, with zero changed body
+Every block below except `_ensure_dict` was lifted VERBATIM from
+`Scripts/mcp-purity.py`, which is why a LIFT's first generated diff is marker
+lines only, with zero changed body
 lines — the evidence that the lift was faithful. (The fleet's one deliberate
 exception to that rule was `_rows_note`, and the account of it travelled with
 the block to `_mcp_paging.py`, where the code it describes now lives.) An
 ADOPTION claims nothing of the kind: a server whose copy DIFFERED shows every
 difference as a changed body line, which is precisely why it has to be declared
 instead of read as a lift.
+
+**`_ensure_dict` is the declared exception, and it is a RESHAPE: its first
+generated diff shows changed body lines in all seven hosts.** `mcp-purity` never
+had the function at all, so there was no copy to lift from. What forced the
+reshape is `block_is_tab_safe`: every hand copy builds its message inside a
+`raise ValueError(` that wraps across physical lines, which is an implicit line
+join, and `mcp-forge` and `mcp-webfetch` are TAB-indented hosts, so the verbatim
+text would have been refused BY NAME for exactly those two and quietly accepted
+by the other five. Each message below is therefore assembled one physical line
+at a time. The WORDING is untouched down to the trailing spaces, which is what
+lets the suite's sentence census go on comparing it. Five of the seven copies
+were already identical modulo the indent character; `mcp-inspect` had dropped
+the docstring and gets it back, and `mcp-forge` carried a six-line comment that
+is the next paragraph.
+
+**`value` is still the STRING in the `except` branch, and the window depends on
+that.** `value = json.loads(value)` binds nothing when `json.loads` raises, so
+the name still holds the text the caller sent and `_json_error_window` can be
+handed it. `mcp-forge` alone wrote this down, on the stated reasoning that it
+was the file the others were copied from. That reasoning now points here, so the
+argument moves here -- into a docstring copied into nothing, rather than into a
+block copied into seven servers.
+
+**It must be CO-LISTED with `_json_error_window` on one marker, and that is
+mechanics rather than tidiness.** `host_provides` offers a region only the
+host's module-level IMPORTS, never the names another region defines, so a region
+holding `_ensure_dict` alone is refused BY NAME in all seven hosts. The pair is
+spelled `_mcp_json.py :: _json_error_window, _ensure_dict`, dependency first,
+after `DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars`. The consequence lands in
+the SUITE rather than here: `mcp-forge`, `mcp-git` and `mcp-inspect` had
+`_ensure_dict` as their ONLY caller of the window, so the moment it moved inside
+the region those three had no window call site visible from outside one, and the
+liveness census had to start asking whether the PAIR is reached instead of
+whether one name is.
 
 Where a server's variant is deliberately different it simply never asks for the
 block: `mcp-webfetch`'s allow-list `_bool_param` (an unrecognised string reads
@@ -55,8 +90,8 @@ False there and True here, and its flags are `allow_private` and `overwrite`),
 `_int_param`, which takes a parameter NAME and raises where this one takes a
 default and falls back.
 
-`mcp-webfetch` hosts two of these blocks in tabs, `_json_error_window` and
-`_int_param`, and INDENTATION IS NOT WHY it keeps the rest -- the emitter
+`mcp-webfetch` hosts three of these blocks in tabs -- `_json_error_window`,
+`_ensure_dict` and `_int_param` -- and INDENTATION IS NOT WHY it keeps the rest -- the emitter
 re-indents a block whose indentation is purely structural, and `mcp-forge`
 proved that by adopting three copies with a marker-line-only diff. What webfetch
 declines, it declines on body differences that survive any amount of
@@ -79,6 +114,7 @@ difference, and the four copies that used to illustrate the tension were adopted
 on that reading, dropping theirs.
 """
 
+import json
 from typing import Any
 
 
@@ -163,3 +199,32 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     lead = "..." if start > 0 else ""
     tail = "..." if end < len(text) else ""
     return f"{lead}{text[start:end]!r}{tail}"
+
+
+# The window's only in-file caller, and the reason the two travel as a pair: a
+# marker naming `_ensure_dict` on its own is refused in every host, because the
+# name it reads is not an import anywhere. See the module docstring for the
+# reshape, and for why `value` still holds the caller's string below.
+
+def _ensure_dict(value: Any, name: str = "params") -> dict:
+    """Coerce *value* to a dict.
+
+    Accepts None (→ {}), dict (passthrough), or JSON-encoded object string.
+    Raises ValueError on a non-JSON string, JSON that is not an object,
+    or any other type.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            msg = f"'{name}' was a string but not valid JSON: {exc}. "
+            msg += f"Near the failure: {_json_error_window(value, exc.pos)}. "
+            msg += f"Pass '{name}' as an object, not a JSON-encoded string."
+            raise ValueError(msg)
+    if not isinstance(value, dict):
+        msg = f"'{name}' must be an object (dict) or a JSON-encoded object string; "
+        msg += f"got {type(value).__name__}."
+        raise ValueError(msg)
+    return value
