@@ -2,17 +2,21 @@
 """Mechanical suite for the `search` relevance gate, the `get_page` section
 index, the `source_to_pages` per-hit description, the MEASURED state in every
 recall reply's `[type/state]` label, the page TYPE as a ranking signal and the
-frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (115 cases, A-P).
+frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (116 cases, A-P).
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
-a temp workspace -- never the repo's real docs/.  Nothing is written outside
-mkdtemp.
+a temp workspace -- never the repo's real docs/, with ONE declared exception
+named below.  Nothing is written outside mkdtemp.
 
-Two spawns exist, both in group L and both deliberate.  (1) `git show
+Three spawn sites exist, all in group L and all deliberate.  (1) `git show
 HEAD:Scripts/mcp-wiki.py`, which is the only way to compare the worktree's
 `freshness` output against the code that shipped.  (2) The unpatched-driver
 case, which MEASURES what the recall path costs in a directory git does not
-track -- production spawns there, so a stub would hide the finding.  Every
+track -- production spawns there, so a stub would hide the finding.  (3) The
+unresolvable-`head` case, which drives the REAL repository -- and reads, never
+writes, the real docs/ -- because its premise is a contradiction only a real
+repository can hold: git must ANSWER for `HEAD` and REFUSE the caller's ref
+within one call, where the stubbed boundary answers nothing at all.  Every
 other group-L driver has the git boundary replaced by a lookup table, so
 `stale` and `orphaned-source` are reachable offline and deterministically.
 
@@ -138,10 +142,15 @@ Coverage by group:
      callers (`search` and `source_to_pages` render one classifier's answer,
      which is also, dict for dict, what `freshness` publishes), the two
      invariants of the cross-call diff memo (it spans calls, it dies with HEAD,
-     and two repos never share one changed-file set), and the two claims the
-     refactor itself makes: `freshness` is byte-identical to the committed
+     and two repos never share one changed-file set), the two claims the
+     refactor itself makes (`freshness` is byte-identical to the committed
      server, and moving the `status` filter to AFTER the scoring loop moved no
-     score, no coverage and no `best coverage N%`
+     score, no coverage and no `best coverage N%`), and WHOSE fault an
+     unresolvable `freshness` head is: a ref the repo cannot resolve is refused
+     by NAME before the corpus is walked, because reporting it page by page
+     accuses every commit in the wiki of a defect the parameter had -- while a
+     checkout git cannot read AT ALL is not a bad parameter and keeps the
+     literal fallback it has always had
 
   M  the truncation ceiling cuts on a LINE boundary and the marker states the
      REAL length instead of the parameter -- half an anchor still reads as an
@@ -6001,6 +6010,143 @@ def run(opts=None):
                                             "cost a subprocess, never a wrong "
                                             "label")],
                      text="")
+
+        # ---- a ref the repo cannot resolve: refused by name, nobody blamed ---
+        # `freshness`'s `head` is the git REF to compare the wiki against
+        # (default `HEAD`), so a caller who reads it as a display limit sends a
+        # number.  What came back named the wrong culprit: `freshness_analyze`
+        # falls back to the literal string when `rev-parse` fails,
+        # `_changed_files` returns None on ANY non-zero git exit, and
+        # `_classify_page` renders that one None as `verified.commit not in
+        # history` -- so ONE bad parameter accused every page of the real wiki,
+        # including pages whose `verified.commit` IS the current HEAD, of
+        # pointing at a commit that no longer exists.  The STATUS was right
+        # (nothing is checkable against a ref that does not resolve); only the
+        # ATTRIBUTION was invented, and it accused the one half of the
+        # comparison that was innocent.
+        #
+        # The ONLY case in this suite that points a server at the repo's real
+        # docs/, and the reason is the unpatched driver's: the premise IS a real
+        # repository.  git has to ANSWER for `HEAD` and REFUSE the caller's ref
+        # inside one call -- a contradiction the stubbed boundary above cannot
+        # hold, because there git answers nothing at all.  Read-only, and every
+        # assertion is about the refusal rather than about whatever the real
+        # wiki happens to contain today.
+        BAD_HEAD = "12"        # the reported value: `head` read as a page limit
+        real = H.load_module_from_path("mcp_wiki_state_realgit", SERVER)
+        real_rel = real.DEFAULT_WIKI_ROOT      # 'docs', read off the module
+        real_abs = os.path.join(H.REPO_ROOT, real_rel)
+
+        def real_freshness(head):
+            res = real.handle_wiki_call(
+                {"function": "freshness", "params": {"head": head}},
+                H.REPO_ROOT, real_rel)
+            return ("error" in res,
+                    res.get("__raw_text__") or res.get("error") or "")
+
+        rc_head, head_sha, _e = H.run_process(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=H.REPO_ROOT)
+        rc_bad, _o, _e = H.run_process(
+            ["git", "rev-parse", "--short", BAD_HEAD], cwd=H.REPO_ROOT)
+        head_sha = head_sha.strip()
+        # The pages that CAN be falsely accused -- read off the real frontmatter,
+        # no git: a page without a `verified.commit` never reaches the sentence.
+        verified = [rel for rel, fm, _b in real.iter_pages(real_abs)
+                    if isinstance(fm.get("verified"), dict)
+                    and fm["verified"].get("commit")]
+        # The accusation itself, taken from the server's OWN classifier on the
+        # fixture page verified against a ghost commit -- never typed here, so a
+        # reworded reason cannot leave this case passing against a phrase the
+        # server stopped printing.
+        blame = ldrv.classify(L_BY_SLUG["st-lostcommit"][L_FILE]).get("reason", "")
+        bad_is_err, bad_text = real_freshness(BAD_HEAD)
+        good_is_err, good_text = real_freshness("HEAD")
+        # The other half of the rule, on the driver where git answers NOTHING: the
+        # same unresolvable ref must still be served today's report, literal
+        # `head` and all.  A refusal keyed on "rev-parse failed" ALONE would take
+        # this branch too and turn every checkout git cannot read into an error.
+        stub_res = ldrv.mod.handle_wiki_call(
+            {"function": "freshness", "params": {"head": BAD_HEAD}},
+            ldrv.root, WIKI_REL)
+        stub_text = stub_res.get("__raw_text__") or stub_res.get("error") or ""
+        accused = [p for p in verified if p in bad_text]
+        problems = []
+        if rc_head != 0 or not head_sha:
+            problems.append("git cannot resolve HEAD in the repository itself "
+                            "(rc=%d) -- without that half there is no "
+                            "contradiction here and the case proves nothing"
+                            % rc_head)
+        if rc_bad == 0:
+            problems.append("premise broken: %r resolves as a ref in this repo, "
+                            "so it is not the unresolvable one" % BAD_HEAD)
+        if len(verified) < 2:
+            problems.append("premise broken: %d page(s) under %s/ carry a "
+                            "`verified.commit`, so 'every page was accused' has "
+                            "nothing left to accuse" % (len(verified), real_rel))
+        if not blame:
+            problems.append("premise broken: the classifier gives no `reason` for "
+                            "a commit git cannot resolve, so the false accusation "
+                            "has no wording this case can look for")
+        if not bad_is_err:
+            problems.append("head=%r was ANSWERED rather than refused -- git "
+                            "resolves HEAD here and not that ref, so the broken "
+                            "half is provably the caller's parameter" % BAD_HEAD)
+        if BAD_HEAD not in bad_text:
+            problems.append("the reply never names the ref the caller passed "
+                            "(%r), so it cannot be acted on: %r"
+                            % (BAD_HEAD, bad_text[:160]))
+        if blame and blame in bad_text:
+            problems.append("the reply still says %r -- every `git diff` in the "
+                            "walk failed on the ref the CALLER passed, so that "
+                            "sentence charges the commits with a defect the "
+                            "parameter had" % blame)
+        if accused:
+            problems.append("the reply names %d page(s) of the real wiki (%r ...) "
+                            "-- a ref nothing can be compared against must be "
+                            "refused BEFORE the corpus is walked, never reported "
+                            "as a corpus-wide fault"
+                            % (len(accused), accused[:3]))
+        if good_is_err:
+            problems.append("a head this repo DOES resolve was refused as well: "
+                            "%r" % good_text[:160])
+        elif head_sha and not good_text.startswith("# freshness @ %s" % head_sha):
+            problems.append("the resolvable run does not report %r as its head: "
+                            "%r -- the refusal must not cost the working case its "
+                            "answer" % (head_sha, good_text.split("\n")[0]))
+        if "error" in stub_res:
+            problems.append("the driver where git answers NOTHING refused %r too "
+                            "(%r): with no `rev-parse HEAD` to compare against, "
+                            "the supplied ref is not provably the broken half, and "
+                            "refusing here turns every checkout git cannot read "
+                            "into an error" % (BAD_HEAD, stub_text[:160]))
+        elif not stub_text.startswith("# freshness @ %s" % BAD_HEAD):
+            problems.append("the git-less driver rendered %r, want the literal "
+                            "`head` fallback -- deterministic output where nothing "
+                            "can be resolved is what that fallback is for"
+                            % stub_text.split("\n")[0])
+        suite.record("L", "unresolvable-head-is-refused-not-blamed-on-the-corpus",
+                     problems,
+                     detail=[_d("ref", "head=%r, a caller reading `head` as a "
+                                       "display limit" % BAD_HEAD),
+                             _d("premise", "`rev-parse --short HEAD` rc=%d -> %r, "
+                                           "`rev-parse --short %s` rc=%d"
+                                % (rc_head, head_sha, BAD_HEAD, rc_bad)),
+                             _d("corpus", "%d page(s) under %s/ carry a "
+                                          "verified.commit"
+                                % (len(verified), real_rel)),
+                             _d("refused", "%r" % bad_text.split("\n")[0][:100]),
+                             _d("accused", "%d page(s) named, %r said %d time(s)"
+                                % (len(accused), blame,
+                                   bad_text.count(blame) if blame else 0)),
+                             _d("resolvable", "%r"
+                                % good_text.split("\n")[0][:100]),
+                             _d("git-less", "%r" % stub_text.split("\n")[0][:100]),
+                             _d("why", "the status `unverified` was CORRECT and "
+                                       "only the reason was false, which is the "
+                                       "hard shape: the report read as a wiki-wide "
+                                       "defect for as long as the parameter stayed "
+                                       "wrong, and named no parameter at all")],
+                     text=bad_text)
     finally:
         st_work.cleanup()
         ag_work.cleanup()

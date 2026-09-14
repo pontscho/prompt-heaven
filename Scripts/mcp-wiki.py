@@ -935,6 +935,20 @@ def _classify_page(relpath: str, fm: dict, repo: str, changed_for) -> dict:
     return dict(base, status="current", verified_at=commit)
 
 
+def _head_resolves(head: str, repo: str) -> bool:
+    """Does git answer for this ref — asked with the argv `freshness` will use?
+
+    The SAME `rev-parse --short` invocation `freshness_analyze` resolves the head
+    sha with, deliberately: a probe that answered where the real call fails would
+    hand the corpus walk the very ref it was asked to vet, and the walk has no way
+    left to report that. `--short` also keeps the two costs identical (19.04 ms
+    measured), so this adds one rev-parse to an audit that already pays ~240 ms in
+    diffs and nothing at all to the recall path, which never calls it.
+    """
+    code, _out, _err = git(["rev-parse", "--short", head], cwd=repo)
+    return code == 0
+
+
 def freshness_analyze(root: str, head: str) -> dict:
     repo = repo_root(root)
     code, head_sha, _ = git(["rev-parse", "--short", head], cwd=repo)
@@ -1679,8 +1693,29 @@ def _fn_list(params, project_root, wiki_root, strict):
 
 def _fn_freshness(params, project_root, wiki_root, strict):
     abs_root, _rel_root = _resolve_root(params, project_root, wiki_root, strict)
-    head = params.get("head") or "HEAD"
-    report = freshness_analyze(abs_root, str(head))
+    head = str(params.get("head") or "HEAD")
+    # `head` is a git REF, and an unresolvable one used to be reported as a fault
+    # of the CORPUS. `freshness_analyze` falls back to the literal string when
+    # rev-parse fails, `_changed_files` returns None on ANY non-zero git exit, and
+    # `_classify_page` renders that one None as `verified.commit not in history` —
+    # so `head: 12`, from a caller reading the param as a display limit, accused
+    # every page of the wiki, pages verified against HEAD itself included, of
+    # pointing at a commit that is gone. The STATUS was right (nothing is
+    # checkable against a ref that does not resolve); only the attribution was
+    # invented, and it named the one half of the comparison that was innocent.
+    #
+    # Refused here, before the corpus walk, and ONLY when the caller's ref is
+    # provably the broken half: git answers for HEAD and not for what was passed.
+    # When rev-parse fails for BOTH, git cannot answer at all — a directory it
+    # does not track, no git on PATH — which is a different report rather than a
+    # bad parameter, so the literal fallback below stands and every page
+    # classifies as not-checkable exactly as it did before.
+    if not _head_resolves(head, abs_root) and _head_resolves("HEAD", abs_root):
+        raise ValueError(
+            "freshness 'head' is the git ref to compare the wiki against "
+            "(default 'HEAD'), not a count or a limit; this repo cannot resolve "
+            "%r" % head)
+    report = freshness_analyze(abs_root, head)
     return _finalize(freshness_render(report), params)
 
 
@@ -2018,7 +2053,9 @@ WIKI_CALL_TOOL = {
         "                   section and over include_body, and says so.\n"
         "  list             list pages grouped by type; params: type, status,\n"
         "                   path_prefix\n"
-        "  freshness        git-only staleness report; params: head (default HEAD)\n"
+        "  freshness        git-only staleness report; params: head — the git REF\n"
+        "                   to compare the wiki against (default HEAD), never a\n"
+        "                   count or a limit. This report is not paged.\n"
         "  reindex          regenerate INDEX.md + audit; params: check (true =\n"
         "                   audit only, write nothing). WRITES docs/INDEX.md by default.\n"
         "  stats            page counts by type/status + dup/orphan/malformed audit\n\n"

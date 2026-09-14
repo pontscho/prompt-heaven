@@ -285,7 +285,7 @@ SUITES = [
      "floored percentages, query-side stopwords, get_page section index, "
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
-     "the frontmatter aliases synonym field", 115),
+     "the frontmatter aliases synonym field", 116),
     ("jira_cli", run_jira_cli,
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "
