@@ -73,8 +73,8 @@ A `BEGIN` without an `END` is a hard error rather than a skip, because a region
 that quietly stops being maintained is the whole failure the mechanism exists to
 prevent `Scripts/amalgamate.py`.
 
-As of the verified commit: **87 live regions across the 15 servers, emitting 113
-block instances from 14 canonical blocks** — a single region may name several
+As of the verified commit: **90 live regions across the 15 servers, emitting 116
+block instances from 15 canonical blocks** — a single region may name several
 blocks, and that is the whole of the gap between the two counts. Twenty-six
 regions name two blocks each and every other names one: fourteen
 `_result, _error`, seven `_json_error_window, _ensure_dict`, and five
@@ -104,14 +104,26 @@ with both departures asserted as departures in the suite.
 | `Scripts/_mcp_json.py` | 6 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
 | `Scripts/_mcp_logging.py` | 1 | how a server CONFIGURES logging — level, sink, file mode |
 | `Scripts/_mcp_lsp.py` | 1 | LSP `Content-Length` framing over stdio |
-| `Scripts/_mcp_paging.py` | 6 | how much of a result a caller gets, and how it is told where the rest is |
+| `Scripts/_mcp_paging.py` | 7 | how much of a result a caller gets, and how it is told where the rest is |
 
-Fourteen blocks across four sources, which the suite asserts as a disjointness
+Fifteen blocks across four sources, which the suite asserts as a disjointness
 check rather than a count. The paging row read `5` until the edit that added the
 logging row: the number was left behind when `_max_answer_chars` was lifted, and
-a stale figure sitting beside a new row is worse than one sitting alone. The JSON
-row moved for the opposite reason — `_ensure_dict` is a genuine arrival, not a
-correction.
+a stale figure sitting beside a new row is worse than one sitting alone. Both
+moves since are genuine arrivals rather than corrections — `_ensure_dict` in the
+JSON row, `DEFAULT_MAX_CHARS` in the paging one.
+
+`DEFAULT_MAX_CHARS` is worth naming here because of the state its three hosts
+were found in. `mcp-git.py`, `mcp-inspect.py` and `mcp-wiki.py` each wrote
+`100_000` — ADR 0013's verbatim-artefact class — and each additionally asserted
+*in prose* that its number and spelling matched the other two. That is agreement
+claimed on disk in triplicate, and it is the costly form: correcting one of the
+three leaves two comments lying about it. The constant is generated now and the
+cross-references are gone; what stayed above each marker is the only
+host-specific half, why that server is in the class at all. None of the three
+takes the `DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars` pair, and that is not an
+oversight — the pair renders the reader together with its own `24000`, so taking
+the marker would take the value.
 
 The logging source is the newest and the only one whose domain is defined by
 what it EXCLUDES. Configuring logging is not the same question as what gets

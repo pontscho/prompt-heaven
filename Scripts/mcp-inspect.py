@@ -95,10 +95,11 @@ IS_LINUX = _SYS == "Linux"
 # RESUMED, it can only be retaken -- against a machine that has moved in the
 # meantime. The second `ps` is a different measurement, not the remainder of the
 # first one, so paying for the whole snapshot once is cheaper than paying twice
-# for two that do not agree. Same number and spelling as mcp-git and mcp-wiki,
-# which arrive here by their own routes; the three payload classes are ratified
-# in ADR 0013.
+# for two that do not agree. The three payload classes are ratified in ADR 0013.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_CHARS
 DEFAULT_MAX_CHARS = 100_000
+# END GENERATED: 4a4d02ccb7a4
 
 # Keys matching this (on the NAME) get their env value redacted.
 _SECRET_KEY_RE = re.compile(

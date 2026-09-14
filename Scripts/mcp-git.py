@@ -447,13 +447,15 @@ def _quote_arg(a: str) -> str:
 # transcript, not a reply this server composed, so the move the 24000 class
 # assumes the caller can make -- ask again, narrower -- is not available from the
 # answer: a diff cut in half is not a smaller diff, it is a diff that lies about
-# the file, and nothing in the reply tells the caller which half arrived. Same
-# number and same spelling as mcp-inspect and mcp-wiki, which reach it by their
-# own routes. The three payload classes are ratified in ADR 0013.
+# the file, and nothing in the reply tells the caller which half arrived. The
+# three payload classes are ratified in ADR 0013.
 #
 # It bounds the WHOLE reply, not merely the captured stdout: see the budget at
 # the foot of handle_git_call, and _cut_head for why the cut lands where it does.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_CHARS
 DEFAULT_MAX_CHARS = 100_000
+# END GENERATED: 4a4d02ccb7a4
 
 DEFAULT_TIMEOUT_SEC = 60
 

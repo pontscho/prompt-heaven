@@ -89,16 +89,25 @@ code that actually decides it. That edit happened when the block was extracted;
 the move to this file changed nothing, and the unchanged END hash in all five
 hosts is the proof.
 
-The three constants are lifts on the same terms, and the matrix was measured
+The four constants are lifts on the same terms, and the matrix was measured
 before a marker was typed rather than after: `DEFAULT_MAX_ANSWER_CHARS` is one
 byte-identical line in six servers, `PAGE_LINE_RESERVE` in five (jenkins caps
-but does not page by row, so it never had one), `_FENCE_LINE_RE` in three. No
+but does not page by row, so it never had one), `DEFAULT_MAX_CHARS` in three,
+`_FENCE_LINE_RE` in three. No
 host's body changed. What did NOT travel is the sentence above each one: every
 host justifies the same number in its own terms -- purity's reaches for a
 measured 511617-character call, jenkins names the console log, webfetch says
 "Fleet default (mcp-purity.py)" outright -- and that prose is host-specific, so
 each constant was given a region of its OWN and the explanation stayed above
 the BEGIN marker where it was written.
+
+`DEFAULT_MAX_CHARS` arrived last and is the one whose hosts had gone furthest:
+each of the three not only wrote the number but asserted IN PROSE that it
+matched the other two. That is agreement claimed on disk rather than enforced,
+in triplicate, and it is the most expensive form of the thing this file removes
+-- a reader who corrected one of the three would leave two comments lying about
+it. The cross-references came out with the lift; the reason each server is in
+ADR 0013's verbatim class stayed.
 
 `_max_answer_chars` is the one exception to that last rule, and not by choice.
 It READS `DEFAULT_MAX_ANSWER_CHARS`, `host_provides` offers a region only the
@@ -171,6 +180,30 @@ def _max_answer_chars(args: dict) -> int:
         return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
     except (TypeError, ValueError, OverflowError):
         return DEFAULT_MAX_ANSWER_CHARS
+
+
+# The SECOND of ADR 0013's three classes, and the one three servers had each
+# written out for themselves: the payload is a VERBATIM artefact the handler did
+# not compose -- a git transcript, a machine snapshot, a page the caller named --
+# so the recovery the 24000 class leans on is not available here. Asking again,
+# narrower, does not return the missing half: a diff cut in two is not a smaller
+# diff but one that lies about the file, a second `ps` is a fresh measurement
+# rather than the remainder of the first, and a document the model was already
+# reading costs a whole second call. The argument for the class is in the ADR and
+# the comment above; what belongs here is only the number.
+#
+# It is a block of its OWN rather than a second name on the pair above, and the
+# three hosts each say why in their own words: `_max_answer_chars` renders
+# together with `DEFAULT_MAX_ANSWER_CHARS`, so a server taking that marker would
+# take the 24000 along with the reader. These three want the number and no
+# reader, which is exactly what a constant block is for.
+#
+# All three wrote the line identically AND each said in prose that it matched the
+# other two -- agreement asserted on disk, in triplicate, which is the shape this
+# file exists to delete. Those cross-references are gone from all three hosts now
+# that the generator is what guarantees it. What stayed above each marker is the
+# half that was ever host-specific: why THAT server is in this class.
+DEFAULT_MAX_CHARS = 100_000
 
 
 # Room kept free for the accounting line while a row pager fills its budget:

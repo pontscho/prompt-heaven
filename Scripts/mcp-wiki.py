@@ -90,9 +90,11 @@ DEFAULT_WIKI_ROOT = "docs"
 # The output ceiling, named rather than inlined twice in `_finalize`. This is
 # NOT the fleet's 24000-char convention and does not take that block: a wiki
 # reply is a whole page the caller asked for by name, where a cut costs a second
-# call to a document the model was already reading. The same number and the same
-# spelling as mcp-git and mcp-inspect, which deviate for their own reasons.
+# call to a document the model was already reading. ADR 0013 ratifies the class.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_CHARS
 DEFAULT_MAX_CHARS = 100_000
+# END GENERATED: 4a4d02ccb7a4
 
 # Wall-clock ceiling on ONE git invocation. Every git call in this file is a
 # local read-only query — `rev-parse --show-toplevel` (16.41 ms measured),
