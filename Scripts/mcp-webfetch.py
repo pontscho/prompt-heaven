@@ -137,6 +137,19 @@ IMPERSONATE_LADDER = (("chrome", "edge", "firefox") if platform.system() == "Lin
 # server's real answer and retrying it with another fingerprint is superstition.
 RETRY_STATUSES = frozenset({403, 429, 503})
 
+# Ceiling and floor on the caller-supplied fetch timeout. An unclamped timeout the
+# CALLER picks is the defect class ADR 0008 closed in mcp-git (300s), mcp-inspect
+# (120s) and mcp-tshark (600s): one request decides how long a worker is occupied.
+# Concurrent dispatch bounds the blast radius, it does not remove it —
+# MAX_INFLIGHT_REQUESTS of them and every worker is busy, and this server has no
+# control-method fast path, so ping and tools/list queue behind them too.
+# The FLOOR is not symmetry. libcurl reads CURLOPT_TIMEOUT=0 as "never time out",
+# so {"timeout": 0} bought an unbounded fetch on the curl_cffi branch, and a
+# negative value reached the library just as untouched; max(1, ...) closes both.
+# 300 matches mcp-git. The impersonate ladder can spend it three times over on a
+# slow 403/429/503, so the real worst case for one call is about fifteen minutes.
+MAX_FETCH_TIMEOUT_SEC = 300
+
 
 def _create_session(profile: Optional[str] = None, timeout: int = 30) -> Tuple[Any, str]:
 	"""Create a fresh browser-emulated HTTP client. Returns (client, profile_name).
@@ -848,7 +861,7 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 	if output not in OUTPUT_MODES:
 		return {"error": f"output must be one of {', '.join(OUTPUT_MODES)} (got {output!r})"}
 
-	timeout = _int_param(params.get("timeout"), 30)
+	timeout = min(MAX_FETCH_TIMEOUT_SEC, max(1, _int_param(params.get("timeout"), 30)))
 	max_answer_chars = _int_param(params.get("max_answer_chars"), DEFAULT_MAX_ANSWER_CHARS)
 	offset = max(0, _int_param(params.get("offset"), 0))
 	ttl = _int_param(params.get("cache_ttl"), 900)
@@ -1174,7 +1187,8 @@ WEBFETCH_CALL_TOOL = {
 		"On 403/429/503 the fetch is retried with a different browser ENGINE "
 		"(chrome → safari → firefox); the report lists what was tried.\n\n"
 		"fetch parameters: url (required), method (GET/HEAD, default GET), output "
-		"(default markdown), timeout (s, default 30), max_answer_chars (default 24000; "
+		"(default markdown), timeout (s, default 30, clamped to 1-300), "
+		"max_answer_chars (default 24000; "
 		"alias max_chars), offset (line offset for paging), cache_ttl (s, default 900), "
 		"profile (impersonate alias — chrome/safari/firefox/edge; default rotates the "
 		"ladder), headers (dict of extra request headers), max_bytes (ceiling on the "
