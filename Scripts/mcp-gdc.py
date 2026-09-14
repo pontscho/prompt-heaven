@@ -2135,7 +2135,14 @@ def main() -> None:
     level = logging.DEBUG if (parsed.debug or parsed.log_file) else logging.WARNING
     log_handlers = []
     if parsed.log_file:
-        log_handlers.append(logging.FileHandler(parsed.log_file))
+        # 0600.  Both calls are needed: the mode argument to os.open applies
+        # only when the file is CREATED, and os.fchmod is what tightens a log
+        # file that already existed 0644.  fchmod takes the descriptor just
+        # opened, not the path, so nothing can swap the path underneath it.
+        _log_fd = os.open(parsed.log_file,
+                          os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        os.fchmod(_log_fd, 0o600)
+        log_handlers.append(logging.StreamHandler(os.fdopen(_log_fd, "a")))
     else:
         log_handlers.append(logging.StreamHandler(sys.stderr))
     logging.basicConfig(

@@ -57,7 +57,13 @@ def log(msg: str, *, debug: bool, log_path: str | None) -> None:
 	line = f"{ts} [attention-reminder] {msg}\n"
 	if log_path:
 		try:
-			with open(log_path, "a") as f:
+			# 0600.  Both calls are needed: the mode argument to os.open
+			# applies only when the file is CREATED, and os.fchmod is what
+			# tightens a log that already existed 0644.  fchmod takes the
+			# descriptor just opened, not the path.
+			fd = os.open(log_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+			os.fchmod(fd, 0o600)
+			with os.fdopen(fd, "a") as f:
 				f.write(line)
 			return
 		except OSError:
@@ -421,7 +427,10 @@ if __name__ == "__main__":
 			env_log = os.environ.get("ATTENTION_REMINDER_LOG")
 			if env_log:
 				try:
-					with open(env_log, "a") as f:
+					# 0600, for the reason spelled out in log() above.
+					fd = os.open(env_log, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+					os.fchmod(fd, 0o600)
+					with os.fdopen(fd, "a") as f:
 						f.write(msg)
 				except OSError:
 					sys.stderr.write(msg)
