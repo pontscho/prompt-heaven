@@ -64,13 +64,14 @@ rationale lives in `docs/subsystems/tests.md`.
 | `mcp_first_guard` | `test_mcp_first_guard.py` | A–N |
 | `sbx_gate` | `test_sbx_gate.py` | A–Q |
 | `purity_lsp` | `test_purity_lsp.py` | A–J |
-| `purity_file_ops` | `test_purity_file_ops.py` | A–F |
+| `purity_file_ops` | `test_purity_file_ops.py` | A–G |
 | `mcp_git_params` | `test_mcp_git_params.py` | A–M |
 | `name_existence` | `test_name_existence.py` | A–I |
 | `spawn_stdin` | `test_spawn_stdin.py` | A–D |
 | `mcp_footprint` | `test_mcp_footprint.py` | A–H |
 | `wiki_recall` | `test_wiki_recall.py` | A–P |
-| `jira_cli` | `test_jira_cli.py` | A–K |
+| `jira_cli` | `test_jira_cli.py` | A–M |
+| `bitbucket_cli` | `test_bitbucket_cli.py` | A–K |
 | `checkpoint` | `test_checkpoint.py` | A–K |
 | `generated_region` | `test_generated_region.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
@@ -105,10 +106,14 @@ python3 tests/test_spawn_stdin.py
 python3 tests/test_mcp_footprint.py
 python3 tests/test_wiki_recall.py
 python3 tests/test_jira_cli.py
+python3 tests/test_bitbucket_cli.py
 python3 tests/test_checkpoint.py
 python3 tests/test_generated_region.py
 python3 tests/test_read_loop.py
 python3 tests/test_wire_log.py
+python3 tests/test_handler_crash.py
+python3 tests/test_table_cells.py
+python3 tests/test_protocol_version.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 
@@ -209,13 +214,25 @@ tests/
   test_mcp_first_guard.py    groups A-N
   test_sbx_gate.py           groups A-Q   (grant-only gate; the guard's mirror)
   test_purity_lsp.py         groups A-J   (live clangd + lua-language-server)
-  test_purity_file_ops.py    groups A-F   (stdlib file handlers, no binary, ~2s)
+  test_purity_file_ops.py    groups A-G   (stdlib file handlers, no binary, ~2s)
   test_mcp_git_params.py     groups A-M   (offline, subprocess stubbed)
   test_name_existence.py     groups A-I
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
   test_mcp_footprint.py      groups A-H   (AST + one handshake per server)
   test_wiki_recall.py        groups A-P   (synthetic corpus, offline)
-  test_jira_cli.py           groups A-K   (transport injected, nothing dialled)
+  test_jira_cli.py           groups A-M   (transport injected, nothing dialled)
+  test_bitbucket_cli.py      groups A-K   (transport injected, nothing dialled
+                                           -- the one case that needs the REAL
+                                           opener gets it without a socket, by
+                                           calling urllib_fetch with a host-less
+                                           URL urllib rejects before connecting;
+                                           the write set is DERIVED by driving
+                                           every handler through a
+                                           verb-recording transport rather than
+                                           typed a second time, and the merge
+                                           gates are measured as zero requests
+                                           rather than asserted as statement
+                                           order)
   test_checkpoint.py         groups A-K   (drives a WRITER: every path is a
                                            mkdtemp path, never either of the
                                            script's own default targets)
@@ -241,6 +258,23 @@ tests/
                                            log declared per server, and
                                            MCP_SKELETON.md's own sample lifted
                                            by script and gated the same way)
+  test_handler_crash.py      groups A-E   (offline, AST only, nothing spawned --
+                                           every tool-handler catch-all leaves a
+                                           traceback at a level the default
+                                           WARNING configuration emits, at BOTH
+                                           site layers, each declared per server
+                                           rather than inferred)
+  test_table_cells.py        groups A-G   (in-memory only, writes nothing --
+                                           imports the real escapers and calls
+                                           them, with reversibility a SEPARATE
+                                           clause from the column count)
+  test_protocol_version.py   groups A-E   (offline, AST only, imports no server
+                                           -- the handshake version declared
+                                           once as McpServer's first member and
+                                           READ by the initialize reply, with
+                                           the fleet's agreement asserted
+                                           BETWEEN the files so the suite never
+                                           holds a copy of the number)
   files/                     tf_-prefixed C and Lua fixtures for purity_lsp
   README.md
 ```
