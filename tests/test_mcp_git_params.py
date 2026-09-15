@@ -45,6 +45,36 @@ Coverage by group:
      much each oracle is actually worth by running both round trips against the
      PRE-FIX rendering: an oracle that cannot tell the old bug from the fix
      protects nothing, and that limit belongs in the suite rather than in prose.
+  J  a bare `status` gets `--porcelain=v1 -b`, because the reply is read-only
+     and the advice git prints is unreachable through it.  A caller-chosen
+     format is left byte for byte alone across eight spellings, the scan is
+     letter-aware so `-uall` is not a choice, and the `--` is appended AFTER
+     the injection so both flag scans still see the caller's real argv.  The
+     default does not leak into `log`, `diff` or `show`.
+  K  the success reply carries no heading, no command echo and no `(exit 0)`:
+     the caller already knows what it sent.  The carve-out is a success with
+     no stdout at all, which DOES state the exit code and emits no placeholder
+     -- for `--is-ancestor` the code is the answer.  A failure keeps the full
+     echo, because an exit code is only diagnosable beside the argv that made
+     it.  Fencing is conditional on Markdown being able to damage the payload,
+     with three rows that must stay UNFENCED as the control.
+  L  no fenced reply carries a blank line against either delimiter -- measured
+     on 32 live calls, 24 carried one and shortlog carried two.  Asserted as a
+     format PROPERTY of the rendered reply rather than as an expected string,
+     so a future call site that fences a raw payload is covered too.  The
+     stripping is EDGES ONLY: an interior blank line is content, and for
+     diff/blame/grep a line's trailing whitespace IS the payload.  The sweep is
+     DERIVED from the server's own allowlist, so every name is exercised or
+     refused with a reason, and a hand-built offender proves the gate can fail.
+  M  normalization runs at the TOP of the conversion loop, before the meta
+     check and before any membership test, so no set has to carry two
+     spellings.  `maxCount` becomes `--max-count=3`, `noMerges` becomes a bare
+     flag, a camelCase key normalizing into a revision key lands as a
+     POSITIONAL -- pinned against both spellings -- and a meta key is stripped
+     rather than handed to git.  The untouched half is gated too: on an
+     already-snake key normalization is an IDENTITY, so the group C traps do
+     not shift.  Those three rows PASS rather than repeating C's INFO, because
+     "unchanged" is an invariant where C's "deliberately bogus" is a record.
 
 Three layers, deliberately, because each sees something the others cannot:
   exact rendering (F)  pins the policy; catches every class
