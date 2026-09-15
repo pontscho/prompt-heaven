@@ -227,3 +227,36 @@ which this gate does not read and does not need to.
   What this page decided, the structure-only rule for the two wire sites, is
   untouched by that: destination and contents were always separate questions, and
   this ADR only ever answered the second.
+
+- **The second blind spot was entered deliberately, by `3949317`, and it does not
+  reopen this decision.** The handler catch-all — named above as out of scope
+  because only `run` and `_write` are read — was silent in six of the fifteen
+  servers: `log.debug` with the traceback discarded, under a default level of
+  WARNING, so a crashed handler was recorded nowhere. Raising that to
+  `log.exception` means a traceback is now written by default, and a traceback's
+  last line carries the exception's own text, which is the question this page
+  would seem to govern. It does not, and the evidence is that it never did: the
+  other **nine** servers were already emitting full tracebacks at ERROR from this
+  exact site when this ADR swept the fleet at `ae31685^`, and the sweep did not
+  flag one of them. The rule decided here is about **what a wire log may contain**,
+  and a handler's own last-resort guard is neither of the two wire sites nor a
+  rendering of a wire frame.
+
+- **One clause did travel, and it is the only one that could.** The new gate
+  `tests/test_handler_crash.py` requires the catch-all's format string to be an
+  `ast.Constant`, which is this page's rule reduced to the single form an
+  argument-classifying analyser can still enforce at a site it does not otherwise
+  read. It stops the accident — an f-string interpolating `params` into the one
+  log guaranteed to be written — and it deliberately does not analyse the
+  remaining arguments, because doing so would rebuild this page's payload-root
+  machinery at a second site and turn one crisp invariant into the survey
+  `tests/test_wire_log.py` refuses to become. All nine correct servers already
+  satisfied the clause, so it cost nothing to require.
+
+- **What no gate anywhere can bound is the traceback's CONTENT**, and the reason
+  is structural rather than a judgement like the `exc.doc` one above:
+  `log.exception` pulls `exc_info` from `sys.exc_info()` inside the standard
+  library, so it is never an argument node in any AST. Only the LEVEL and the
+  DESTINATION bound it — the level gated by the new suite, the destination by the
+  0600 pair recorded in the paragraph above. Stated here so the next reader does
+  not mistake the analyser's silence for a clean measurement.

@@ -15,7 +15,10 @@ links:
   - scripts
   - generated-regions
   - layer-contract
+  - 0008-a-serialized-read-loop-looks-like-a-dead-server
   - 0009-the-first-reader-is-a-cold-model
+  - 0011-a-truncated-payload-carries-the-first-cookie
+  - 0013-the-ceiling-is-a-payload-class
 ---
 
 # Test Fleet
@@ -45,6 +48,17 @@ what is derived gets derived."* `tests/README.md` The same instinct removes the
 fleet size from human hands — `tests/run.py` computes it from
 `Scripts/_mcp_smoke_test.py`'s own table, because a hand-maintained copy was
 wrong within a day of being written.
+
+`None` is **not** the default for a per-server suite, though, and three rows say
+so where somebody would go looking: `read_loop`, `wire_log` and `handler_crash`
+each emit a fixed multiple of the fleet size and each **types** its count anyway
+`tests/run.py`. The reason is written beside every one of them, and it is the
+exact inverse of `mcp_footprint`'s: there a moved count would fire on a
+legitimately added server, so pinning it would buy a false failure; here *a
+server appearing without a declared row is the defect*, so a count that moves
+when the roster moves is the alarm working rather than noise. Same arithmetic,
+opposite verdict — which is why the choice is argued per suite instead of read
+off the shape.
 
 Note what this gate does **not** cover: it compares the `SUITES` table against
 the run, and nothing else. A case count repeated in a module docstring is
@@ -184,7 +198,10 @@ is the registry, and the run is the only thing that knows the totals.
 | `wiki_recall` | the wiki search relevance gate on a synthetic corpus — silence, calibration, type signal, aliases |
 | `jira_cli` | the Jira CLI fully offline with the transport injected: auth mode, context-path URL join, lazy deployment probe, both paging models behind one iterator, `JIRA_READ_ONLY`, `--dry-run`, the error mappings and the byte-pinned multipart body |
 | `checkpoint` | `checkpoint.py` as a **writer**: `Start`/`End` land on the block and nothing else, the numbers describe the file *after* the region was inserted, `prepend` lands the block and the table it describes in one `os.replace`, a stale or duplicate-id segment is refused on content, and every refusal exits 2 leaving the file alone — [[0009-the-first-reader-is-a-cold-model]] |
-| `generated_region` | every live generated region still matches its canonical source, and the source named on a region's `BEGIN` line is the one its names resolve against — plus a behavioural group so a helper inlined into fourteen servers is unit-tested once — [[generated-regions]] |
+| `generated_region` | every live generated region still matches its canonical source, and the source named on a region's `BEGIN` line is the one its names resolve against — plus a behavioural group so a shared helper is unit-tested once rather than only drift-checked — [[generated-regions]] |
+| `read_loop` | every server's read loop carries the shape [[0008-a-serialized-read-loop-looks-like-a-dead-server]] decided: a single-thread reader executor no handler can take, and one task per message — with the pool/coroutine split declared per server rather than inferred |
+| `wire_log` | wire logging is structure only at both sites — protocol metadata and argument *keys*, never a payload body or value (F12/CWE-532) — with the shape each site may log declared per server, and `Scripts/MCP_SKELETON.md`'s own sample lifted by script and run through the same analyser — [[0011-a-truncated-payload-carries-the-first-cookie]] |
+| `handler_crash` | every tool-handler catch-all leaves a traceback at a level the default WARNING configuration emits, at **both** site layers — the `McpServer` wrap, which all fifteen have, and the module-level dispatcher, which nine do — each declared per server, plus one security clause: the format string must be a literal, so a payload cannot be interpolated into the one log that IS written |
 | `smoke` | JSON-RPC plumbing invariants across every server file, including the error-envelope contract ([[scripts]]) |
 
 There is **no auto-discovery**: adding a suite is three edits — the module, a

@@ -109,11 +109,18 @@ pre-rendered failure **string** the wrap cannot distinguish from a success.
 
 Four things about the predicate are decisions, not details:
 
-- **Raising and returning are two routes into one predicate, not two
-  mechanisms.** The wrap's own `except Exception` assigns the same
-  `{"error": …}` dict a handler would have returned, which is why servers do
-  both per site rather than picking a house style. What is not optional is that
-  one of them happens.
+- **Raising and returning are two routes to one flag — but only nine servers
+  route them through the predicate.** In the nine that carry `_handle_tool_call`
+  the wrap's own `except Exception` assigns the same `{"error": …}` dict a
+  handler would have returned `Scripts/mcp-webfetch.py:McpServer`, so both routes
+  meet at the predicate above. The six `_dispatch_tool` servers return
+  `self._tool_error(...)` straight out of the except block
+  `Scripts/mcp-clangd.py:McpServer` — **skipping** the predicate rather than
+  failing it. Section 3a of `Scripts/MCP_SKELETON.md` asserted the first shape of
+  all fifteen until `3949317` corrected it, and the sentence survived being false
+  for six servers only because both routes land on the same `isError` envelope
+  anyway. That is the part that is not optional: not which route, but that one of
+  them happens.
 - **It reads the TOP level only.** A nested `error` is often real data copied
   out of an upstream JSON — Jenkins' per-stage `wfapi` records are the worked
   example — and a recursive search would flag data as failure, which is this
@@ -138,6 +145,24 @@ rather than homed as a canonical block, even though it qualifies as one:
 blessing a second mechanism as generated infrastructure — in three servers that
 are never launched — would buy drift protection *for* the divergence instead of
 removing it. Record a divergence as a divergence.
+Everything above is about what the wrap **reports**. What it **records** is a
+second invariant with its own gate, and the two are not the same channel: the
+reply carries the exception's type and text to the caller, so the one artefact
+that exists nowhere else is the traceback. Six of the fifteen logged that
+catch-all at `log.debug` with the traceback discarded, under a default level of
+`WARNING` `Scripts/_mcp_logging.py:_configure_logging`, so a crashed handler was
+recorded nowhere at all — the same six `_dispatch_tool` servers that skip the
+predicate above, which is a coincidence of shape rather than a common cause.
+`3949317` converged them on `log.exception` and
+`tests/test_handler_crash.py` now gates both site layers per server. Raising the
+level means a traceback is written by default, which looks like it should
+collide with ADR 0011's structure-only rule and does not: that rule binds the two
+wire sites and names handler logging as a declared blind spot, and the nine
+correct servers were already emitting tracebacks at ERROR from this exact site
+when that page swept the fleet. One clause travelled anyway — the format string
+must be a literal, because the one log guaranteed to be written is the worst
+place to interpolate a payload [[0011-a-truncated-payload-carries-the-first-cookie]].
+
 
 #### The gate, and the layer below it that the gate does not reach
 
