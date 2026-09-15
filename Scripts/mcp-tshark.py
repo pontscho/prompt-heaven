@@ -428,11 +428,45 @@ def _truncate(text: str, max_chars: int) -> str:
     )
 
 
+def _md_cell(value: str) -> str:
+    r"""Escape one value so it cannot open a column. Reversible: \\ \| \n \r \t.
+
+    A pipe inside a cell does not corrupt the cell, it creates a COLUMN: the row
+    stops matching its header, every later value shifts one place left, and the
+    output is still valid markdown -- which is why nothing notices. A newline is
+    worse, ending the row outright.
+
+    The pipe is reachable here from three independent directions, so this is not
+    a defensive flourish. Packet fields arrive from `-T fields ... -E quote=n`,
+    which is raw unquoted bytes off a capture that is untrusted by
+    construction: `_ws.col.Info` carries the verbatim HTTP request line, and
+    `dns.qry.name` and the TLS SNI carry whatever the sender put there. The
+    session table echoes back the caller's own BPF filter, where
+    `tcp[tcpflags] & (tcp-syn|tcp-ack) != 0` is textbook pcap-filter(7) syntax.
+    And the config table joins caller-named keys.
+
+    The vocabulary is `Scripts/mcp-postgres.py:_escape_cell`'s rather than a
+    second one, so the fleet spells this one way across two table formats. The
+    ORDER is load-bearing: the escape character is escaped FIRST, because doing
+    the delimiter first would let the backslash pass re-escape what it just
+    wrote, turning a literal pipe into a backslash followed by a real separator.
+    """
+    text = str(value).replace("\\", "\\\\").replace("|", "\\|")
+    return text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
 def _markdown_table(headers: List[str], rows: List[List[str]]) -> str:
-    """Build a markdown table from headers and rows."""
+    """Build a markdown table from headers and rows.
+
+    Cells are escaped BEFORE the widths are measured. Measuring the raw value
+    would mis-pad every row that gained an escape, and the widths exist for no
+    other purpose than to line the table up.
+    """
     if not headers:
         return ""
     ncols = len(headers)
+    headers = [_md_cell(h) for h in headers]
+    rows = [[_md_cell(c) for c in row] for row in rows]
     col_w = [len(h) for h in headers]
     for row in rows:
         for i in range(min(len(row), ncols)):
@@ -1197,6 +1231,12 @@ TSHARK_CALL_TOOL = {
         "Field presets: default, tcp, http, dns, tls.\n"
         "Output modes: table, text, verbose (-V protocol tree), "
         "json (-T json structured), hex (-x hex+ASCII dump).\n\n"
+        "Table cells are escaped so a value can never open a column: "
+        "`\\\\`=backslash, `\\|`=literal `|`, plus `\\n`/`\\r`/`\\t` for the "
+        "characters that would end the row. An UNESCAPED `|` is a column "
+        "separator. Packet fields arrive raw and unquoted, so a pipe in a URI, "
+        "in the Info column or in your own BPF filter is ordinary rather than "
+        "exotic.\n\n"
         "Parameter aliases: path/pcap→file, filter→display_filter, "
         "bpf→capture_filter, iface→interface, limit/max_rows→head_limit, "
         "skip→offset, proto→protocol, stream→stream_id, stat→stat_type, "

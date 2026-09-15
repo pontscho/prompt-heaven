@@ -170,6 +170,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|CATCH-ALL|TRACEBACK|LOGGED|LITERAL|control'
 
+  table_cells:
+    description: "The forged-column gate: a rendered table cell must not be able to invent a column boundary. Every renderer the fleet owns satisfies this by exactly ONE of two declared routes -- it ESCAPES its own delimiter and documents the scheme in its tools/list description, or it is whitespace-delimited inside a fence and has no delimiter to escape, which is a real answer and not an excuse. Five renderers exist and the table declares each with a prose reason: mcp-postgres escapes reversibly and says so on the wire, the jira CLI escapes the pipe with a DECLARED deviation (a newline collapses to a space, the backslash is not escaped) that the suite asserts is exactly what the row claims rather than tolerating, mcp-tshark is declared ESCAPED as a REQUIREMENT because its cells carry packet bytes off an untrusted capture, and mcp-jenkins plus mcp-inspect are STRUCTURE rows whose reason is MEASURED by rendering a pipe-bearing cell rather than accepted. Reversibility is a SEPARATE clause from the column count, and jira is the worked example of the gap: an encoder that escapes the pipe but not its own escape character passes count(|)-count(\\|) while a decoder correctly reads the survivor as a column boundary. The escaper oracle and the unescaped-pipe counter are both lifted from the jira suite, which is where this fleet first wrote the problem down. A control group plants an escaper that ignores the pipe, one that skips the backslash, one that is lossy, and one that rewrites a clean value -- plus two correct forms it must stay silent on. Imports the real functions and calls them: starts no server, writes nothing at all."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py table_cells
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|SEPARATOR|REVERSIB|COLUMN|SCHEME|DEVIATION|control'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]

@@ -138,6 +138,10 @@ def run_handler_crash(opts):
     return run_python_suite("test_handler_crash", opts)
 
 
+def run_table_cells(opts):
+    return run_python_suite("test_table_cells", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -252,6 +256,15 @@ SUITES = [
      "McpServer wrap and the module-level dispatcher, each declared per server "
      "rather than inferred, with the format string required to be a literal so "
      "a payload cannot be interpolated into a log that IS written", 58),
+    # TYPED for the same reason again.  The count is 3 escapers + 3 rendered
+    # rows + 2 documented + 2 structure + 4 roster + 7 control + 4 hygiene: a
+    # renderer that arrives or changes class moves it, which is the alarm.
+    ("table_cells", run_table_cells,
+     "a rendered table cell cannot forge a column boundary: every renderer "
+     "either escapes its own delimiter and documents the scheme where the "
+     "model reads it, or is whitespace-delimited and has none to escape -- "
+     "with reversibility a SEPARATE clause, because an encoder that does not "
+     "escape its own escape character passes a column count", 25),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]
