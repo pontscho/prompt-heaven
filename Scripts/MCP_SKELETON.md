@@ -146,6 +146,14 @@ class McpServer:
 ```
 
 Notes:
+- `PROTOCOL_VERSION` is the class's **first member** and the **only** place the
+  version literal appears in a server: the `initialize` reply reads
+  `self.PROTOCOL_VERSION` (§4), never a restated string. Not for fewer edits — a
+  server with no constant and one inline has one edit site too — but because a
+  named class member can be carried by a generated region and a literal buried in
+  a dict cannot. `tests/test_protocol_version.py` gates the shape;
+  `_mcp_smoke_test.py` gates the value over the wire and structurally cannot see
+  the shape.
 - `_tool_error` calls `McpServer._result(...)` (not `self._result`) so it works as a
   pure static.
 - Callers may still write `self._result(...)` / `self._error(...)` — Python resolves
@@ -880,6 +888,7 @@ drift committed into a server turns the fleet red.
 - [ ] **a handler failure REACHES the flag** — raise, or return `{"error": ...}`, or mark the text with `_ErrorText`; never a pre-rendered failure string the wrap cannot tell from a success (§3a)
 - [ ] **a handler CRASH reaches the operator** — every broad `except Exception` in the tool-call wrap and in the module-level dispatcher logs `log.exception("literal", ...)`, or `exc_info=True` at `warning` or above; never `log.debug`, which the default level drops (§3a — `tests/test_handler_crash.py` gates this per site)
 - [ ] `initialize` → `{protocolVersion, serverInfo, capabilities}`, version `"1.0.0"`
+- [ ] **the protocol version is READ, never restated** — `PROTOCOL_VERSION` is the first member of `McpServer`, the reply reads `self.PROTOCOL_VERSION`, and the literal appears nowhere else in the file (§3 — `tests/test_protocol_version.py` gates the shape, the smoke test gates the value)
 - [ ] `ping` → `_result(msg_id, {})`; notifications → `None`; unknown → `-32601`
 - [ ] run() loop: readline on a dedicated `max_workers=1` executor, one task per message, `-32700`/`-32600` **answered**, readline and write guarded, every executor shut down (§5 — `tests/test_read_loop.py` gates this)
 - [ ] `_serve` wraps the handler in try/except and **writes** a `-32603` reply

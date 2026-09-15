@@ -142,6 +142,10 @@ def run_table_cells(opts):
     return run_python_suite("test_table_cells", opts)
 
 
+def run_protocol_version(opts):
+    return run_python_suite("test_protocol_version", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -268,6 +272,21 @@ SUITES = [
      "model reads it, or is whitespace-delimited and has none to escape -- "
      "with reversibility a SEPARATE clause, because an encoder that does not "
      "escape its own escape character passes a column count", 33),
+    # TYPED for the same reason again.  The count is 3 clauses x 15 servers +
+    # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
+    # being analysed IS the defect here, so a count that moves when the fleet
+    # moves is the alarm working.  The control group is the large one on
+    # purpose -- this gate can never be observed red against the live tree,
+    # because the fleet converged before it was written, so the planted
+    # defects are the only evidence that it detects anything at all.
+    ("protocol_version", run_protocol_version,
+     "every MCP server declares the handshake protocol version once, as the "
+     "first member of class McpServer, and the initialize reply READS that "
+     "member instead of restating the literal -- the shape the live smoke "
+     "handshake structurally cannot see, since a server inlining the RIGHT "
+     "string is indistinguishable on the wire from one reading the constant, "
+     "with the fleet's agreement asserted BETWEEN the files so the suite "
+     "never holds a copy of the number it polices", 71),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

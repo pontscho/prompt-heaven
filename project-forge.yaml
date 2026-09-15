@@ -178,6 +178,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|SEPARATOR|REVERSIB|COLUMN|SCHEME|DEVIATION|control'
 
+  protocol_version:
+    description: "The second-home gate: every Scripts/mcp-*.py server must declare the MCP handshake protocol version ONCE, as the first non-docstring member of class McpServer, and the initialize reply must READ that member rather than restate the literal. Seven of fifteen servers had inlined it before the convergence commit and nothing failed, because the live smoke handshake asserts the VALUE and a server inlining the RIGHT string is indistinguishable on the wire from one reading the constant -- the live gate answers 'does the fleet agree on a version', this one answers 'is there one place to change it'. Three clauses per server, one case each so a failure names which broke: decl, use, literal. The suite NEVER contains the version: group B asserts the fifteen declared values agree WITH EACH OTHER, which is strictly stronger than a typed copy because it cannot go stale -- a correct version bump leaves this suite green and reports the new value in an INFO row, where a typed string would fail fifteen cases. Name matching is exact AST identity, because mcp-postgres declares an unrelated PROTOCOL_VERSION_3 for the PostgreSQL wire protocol and a regex matcher would flag it until a maintainer learned to ignore the suite. The enclosing method is never matched: this fleet spells it three ways and MCP_SKELETON.md declares that drift intentional, so the anchors are the class name and the protocolVersion dict key. An annotated declaration passes on purpose -- the rule is the property, not the spelling. A synthetic control group plants each defect in turn: the literal re-inlined, the constant moved to module level, removed, demoted below __init__, read unqualified, bound to a non-string, annotated with no value, the class renamed away, the initialize branch deleted, the file made unparseable, and the value restated in a second dict -- plus six correct forms it must stay silent on, including the tab-indented host, the docstring-first host, the async-dispatcher host, the annotated declaration and the PROTOCOL_VERSION_3 collision. That group is load-bearing rather than ceremonial: the fleet converged before the gate existed, so it can never be observed red against a real file. AST only -- starts nothing, imports no server, writes nothing at all."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py protocol_version
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|CONSTANT|VERSION|INITIALIZE|MCPSERVER|control'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]

@@ -75,6 +75,9 @@ rationale lives in `docs/subsystems/tests.md`.
 | `generated_region` | `test_generated_region.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
 | `wire_log` | `test_wire_log.py` | A–F |
+| `handler_crash` | `test_handler_crash.py` | A–E |
+| `table_cells` | `test_table_cells.py` | A–G |
+| `protocol_version` | `test_protocol_version.py` | A–E |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
