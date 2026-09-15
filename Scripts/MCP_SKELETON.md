@@ -655,18 +655,23 @@ first-wins.
 **This function is a HAND COPY in all ten hosts and cannot become a §8 block.**
 Its free names are each host's own alias tables — `PARAM_ALIASES`, plus
 `PARAM_ALIASES_BY_FUNC` in three — and `mcp-forge.py` takes the table as an
-argument instead, so the bodies are not copies that drifted but ten shapes that
-never agreed: nine distinct bodies over ten files, only `mcp-clangd.py` and
-`mcp-cuda.py` byte-identical. Two use tabs. When you change the rule, you change
-it nine times, and the gate below is what proves you did.
+argument instead. **That** is the disqualifier, and it does not depend on how
+alike the bodies happen to look: eight distinct bodies over ten files, with
+`mcp-clangd.py`, `mcp-cuda.py` and `mcp-tshark.py` byte-identical and two of the
+ten tab-indented. When you change the rule, you change it eight times, and the
+gate below is what proves you did.
+
+> The commit that introduced this section is what made that count eight rather
+> than nine: `mcp-tshark.py` held the fleet's last first-wins resolver, so
+> replacing it converged that body onto the clangd/cuda one. A supporting figure
+> can be invalidated by the change it was written to describe, which is why the
+> disqualifier above is the free names and not the number.
 
 Gated by `alias_collision_checks` in `Scripts/_mcp_smoke_test.py`, which drives
 all ten over live JSON-RPC in three halves — the refusal, a one-spelling control
 that catches a resolver flagging everything, and a coverage half running on all
 fifteen servers that fails if a file defines `_resolve_aliases` without a probe
 row. The WHY is frozen in `docs/adr/0015-ambiguity-is-the-defect.md`.
-
----
 
 ---
 

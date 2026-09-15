@@ -317,6 +317,34 @@ that is exactly what refuses it, since the name it needs is a module-level `def`
 in every host rather than an import, and the co-listing remedy above cannot reach
 an indented region `Scripts/MCP_SKELETON.md`.
 
+`_resolve_aliases` is the fourth entry and the widest of them: a hand copy in all
+ten hosts that define it, which makes it the fleet's widest hand-copied
+non-generated function. It fails on the same rule `_tool_error` does — its free
+names are each host's own alias tables, `PARAM_ALIASES` plus
+`PARAM_ALIASES_BY_FUNC` in three of them, and those are module-level
+*assignments*, while `host_provides` offers only the host's module-level imports
+`Scripts/amalgamate.py:host_provides`. `Scripts/mcp-forge.py` sidesteps the
+tables entirely by taking one as an argument
+`Scripts/mcp-forge.py:_resolve_aliases`, and that is the tell: these are not
+copies that drifted from one original but **ten shapes that never agreed**.
+Measured at the last edit to this page: **eight distinct bodies over the ten
+files**, only `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py` and
+`Scripts/mcp-tshark.py` byte-identical, and two of the ten tab-indented — the
+same `mcp-forge.py` / `mcp-webfetch.py` pair `host-indent-from-tokens` pins
+above. The rule all ten now implement — a collision is an error, not a
+precedence question — is frozen in [[0015-ambiguity-is-the-defect]], and it is
+gated behaviourally rather than structurally, by
+`Scripts/_mcp_smoke_test.py:alias_collision_checks` driving all ten over live
+JSON-RPC.
+
+That count is why the entry earns its space. ADR 0015 and section 7c of
+`Scripts/MCP_SKELETON.md` both record **nine** bodies with only clangd and cuda
+identical, and both were right when they were written: `Scripts/mcp-tshark.py`
+held the fleet's last first-wins resolver, and the very commit that made
+collisions an error is what converged it onto the clangd/cuda body. The ADR is
+frozen at its decision and keeps its number; this page re-measures, on the same
+grounds as the region counts above.
+
 ## The gate
 
 `tests/test_generated_region.py` gates the mechanism in six groups: A the live

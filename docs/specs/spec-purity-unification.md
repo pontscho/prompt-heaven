@@ -22,6 +22,7 @@ links:
   - 0001-purity-server-unification
   - spec-purity-luals-phase1
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
+  - 0015-ambiguity-is-the-defect
 ---
 
 # Implementation Plan: Unify `mcp-clangd` + `mcp-cuda` into `mcp-purity` (Phase 0 — the skeleton)
@@ -78,6 +79,7 @@ This is **Phase 0** — the *skeleton*. It establishes the abstract backend inte
 - `symbol_change_impact` has a "mixed" fallback: the references part is grep-degradable (A-class), the call-hierarchy part is not (B-class) — it returns a partial-but-honest result if the LSP yields no call hierarchy.
 - The backend map is effectively single-entry (`clangd`) in Phase 0, but the data structure is already a map (luals-ready).
 - `_resolve_aliases` is unified onto the clangd-style "last-wins" semantics (`mcp-clangd.py:74`); the purity "first-wins" (`mcp-purity.py:175`) is the one that changes. Rationale: last-wins is the simpler mental model (a later explicit key overrides an earlier alias) and matches the larger of the two codebases being folded in.
+  > **SUPERSEDED — see [[0015-ambiguity-is-the-defect]].** Neither rule survived: both read the wire order, so a collision is an error in all ten hosts rather than a precedence question.
 - The unified server stays a **single file** (`mcp-purity.py`, ~3000 lines), matching the project's existing one-file-per-server convention and the single-script MCP registration.
 
 **Constraints:**
@@ -226,6 +228,19 @@ for req_id, fut in list(self._pending.items()):
 ### Bug fix #3 — `_resolve_aliases` precedence + param-alias merge
 Unify onto **last-wins** (clangd `mcp-clangd.py:74`: `resolved[canonical] = value`). The purity resolver (`mcp-purity.py:145-177`) currently guards with `if canonical not in resolved` (first-wins, line 175) — change it to overwrite. Add a unit test pinning the chosen semantics.
 
+> **SUPERSEDED — do not act on the rule above.** The paragraph is left exactly as
+> written, because it is the record of what was decided at the time. What it
+> decided no longer holds: an alias-key collision is now an **error** in all ten
+> `_resolve_aliases` hosts — neither last-wins nor first-wins. The decision above
+> was taken while looking at three servers and never asked the other seven, and
+> both rules turn out to read the wire order, so neither was order-independent.
+> The WHY is frozen in [[0015-ambiguity-is-the-defect]]; the living rule is
+> section 7c of `Scripts/MCP_SKELETON.md`, gated by
+> `Scripts/_mcp_smoke_test.py:alias_collision_checks`. Every other mention of
+> last-wins on this page — in the design-decision list, the two source surveys,
+> the implementation order, the test plan and the success checklist — is
+> superseded on the same grounds.
+
 **[inspector M1] — more than precedence diverges:** purity's resolver signature is `(params, function)` with a two-tier `PARAM_ALIASES_BY_FUNC` + `PARAM_ALIASES` (`mcp-purity.py:145-177`); clangd's is `(params)` with a single flat `PARAM_ALIASES` (`mcp-clangd.py:56-76`). The semantic handlers depend on clangd's param aliases — `symbol→symbol_name`, `col/column/char→character`, `max→max_results`, `depth→call_hierarchy_depth` (`mcp-clangd.py:32-53`). These MUST be merged into purity's `PARAM_ALIASES` (or a semantic `PARAM_ALIASES_BY_FUNC` block). Keep purity's `(params, function)` signature. Without this merge the semantic handlers' param contract breaks. (CUDA-only init param aliases `arch`/`gpu_arch`/`cuda_sdk`/`sdk_path` at `mcp-cuda.py:44-63` are intentionally DROPPED — lazy init removes the init params; [inspector L-new-1].)
 
 ### Dispatcher pattern (extend the dict table)
@@ -321,6 +336,7 @@ None. Hard stdlib-only constraint; `# dependencies = []` stays accurate.
 6. **Backend map + lazy init**: replace the `_client` singleton with `_backends: Dict[str, ClangdClient]`, add `_require_backend(filetype)` + `_route_filetype`, and author the NEW lazy-init trigger (once-only guard, concurrent-first-call coalescing, init-failure caching — [inspector H2]) reusing ONLY the shielded 90s WAIT gate. Site the project-root mismatch warning (`mcp-clangd.py:921-935`) here, since there is no `handle_init` anymore ([inspector M3]).
 7. **Wire semantic handlers** into `HANDLERS` with canonical names; implement `symbol`/`at` parameter routing on POST-alias keys ([inspector M2]) in `find_definition`/`find_references`; merge `hover`+`deduced_type_at` into `type_at`. Create the canonical `handle_find_implementations` (wrap/rename `handle_find_implementations_at` — no name-based variant exists in source, [inspector L2]), and the canonical `outline`/`symbol` handlers (← source `handle_document_outline`/`handle_workspace_symbols`, [inspector L3]).
 8. **Extend the alias layer**: add all legacy `clangd_*` / `cuda_*` names as DIRECT `HANDLERS` keys (NOT only `FUNCTION_ALIASES` — that dict does not route, [inspector C1]); make `glob` canonical with `find_file` as alias. Enumerate the exact legacy→canonical map (incl. `*_at`, `workspace_symbols`→`symbol`, `document_outline`→`outline`, `hover`/`deduced_type_at`→`type_at`) and decide the fate of `clangd_init`/`cuda_init` (no canonical equivalent under lazy init → make them no-op/deprecation-notice handlers, not errors). Also extend `HANDLER_ACCEPTED_PARAMS` (`mcp-purity.py:797-833`) and `HANDLER_DESCRIPTIONS`/`--list` (`:1089-1099`) for the 10 functions. **Fix bug #3 + merge clangd `PARAM_ALIASES`**: unify `_resolve_aliases` onto last-wins and fold in clangd's param aliases.
+   > **SUPERSEDED in part — see [[0015-ambiguity-is-the-defect]].** Only the "unify onto last-wins" half; the `PARAM_ALIASES` merge stands. A collision is an error in all ten hosts.
 9. **Fix bug #2 (crash future leak)**: drain `_pending` with `set_exception` on `_reader_loop` EOF.
 10. **Flip dispatch to async**: make `_handle_tool_call` / `tools/call` async; `await` semantic handlers; executor-wrap sync file handlers. **Rewrite the `purity_call` tool description** ([inspector H1 — this is a REVERSAL, not a one-line addition]): the live description (`mcp-purity.py:885-956`) currently declares "purity is NOT for symbol navigation," "purity is the WRONG tool," marks symbol use a "VIOLATION," and routes C/C++/CUDA/Lua to `clangd_call`/`cuda_call`/`luals_call` as "MANDATORY." That ~40-line block must be rewritten so it advertises the new semantic functions WITHOUT self-contradiction — while NOT yet declaring `clangd_call`/`cuda_call` retired (they run in parallel in Phase 0). Thread the needle: "purity_call now ALSO does symbol navigation via `find_definition`/`find_references`/`type_at`; `search_for_pattern` remains free-text search over any filetype; `clangd_call`/`cuda_call` still exist (parallel, Phase 0)."
 
@@ -358,6 +374,7 @@ None. Hard stdlib-only constraint; `# dependencies = []` stays accurate.
 ### Unit Tests
 - `_route_filetype` / `_detect_language`: extension → backend / languageId mapping (`.c`, `.cpp`, `.cu`, `.cuh`, `.h`).
 - `_resolve_aliases`: last-wins precedence (pins bug #3).
+  > **SUPERSEDED — see [[0015-ambiguity-is-the-defect]].** What shipped pins the *refusal*, not a precedence: `Scripts/_mcp_smoke_test.py:alias_collision_checks` drives all ten hosts over live JSON-RPC.
 - Function-alias resolution: every legacy `clangd_*` / `cuda_*` name and `glob`/`find_file` reach the right handler.
 - `_translate_compile_commands`: nvcc JSON → clang JSON (flag stripping, `-x cuda` injection) — pure function, table-driven.
 - `symbol`/`at` parameter routing selects the correct internal path.
@@ -460,6 +477,7 @@ drives all fifteen servers over live JSON-RPC and deliberately ignores the
 - [ ] CUDA `static`/`__device__` symbol lookup succeeds via fallback (bug #1)
 - [ ] clangd-crash yields prompt error, not timeout (bug #2)
 - [ ] `_resolve_aliases` last-wins, unit-tested (bug #3)
+  > **SUPERSEDED — see [[0015-ambiguity-is-the-defect]].** A collision is an error in all ten hosts; neither last-wins nor first-wins. Gated by `Scripts/_mcp_smoke_test.py:alias_collision_checks`.
 - [ ] File layer answers with no LSP init; LSP lazily spins up
 - [ ] `tools/list` advertises exactly `purity_call`; description documents semantic functions + steering sentence
 - [ ] Unit + integration tests passing
