@@ -250,8 +250,17 @@ SUITES = [
      "SSO-proxy guard a response with NO Content-Type used to walk straight "
      "past into json.loads, a literal user name refused before Cloud can "
      "answer it with a 400 that names the field and not the reason, and one "
-     "timestamp format written down once in the copy a caller can read",
-     227),
+     "timestamp format written down once in the copy a caller can read -- "
+     "plus the $HOME boundary on that walk, which the docstring, the help "
+     "text and SKILL.md all claimed and the code held on neither side: one "
+     "`==` between a cwd os.getcwd() had resolved and a $HOME nothing had, "
+     "so it never bound from outside $HOME (where the walk climbed to `/` "
+     "and read /tmp/.claude/jira.json) and never bound through a symlinked "
+     "$HOME either, which is the macOS default -- both halves now gated, the "
+     "symlinked one against a real symlink, each with a control beside it, "
+     "and the case-folding residue realpath cannot close MEASURED rather "
+     "than claimed",
+     232),
     # TYPED, and the count is a fixed case table plus ONE derived row: group C
     # sweeps every entry in the CLI's HANDLERS dict, but it records three cases
     # regardless of how many subcommands it finds, so adding a subcommand moves
@@ -272,7 +281,16 @@ SUITES = [
      "in Markdown AND --json in one case, the per-subcommand request contract "
      "including pr-approve's three requests and paging that follows "
      "nextPageStart, reviewer flattening in both the documented and the "
-     "OBSERVED shape, and byte parity with jira.py's _profile_path", 128),
+     "OBSERVED shape, and byte parity with jira.py's _profile_path -- a "
+     "deliberate copy, gated on identity so the eventual unification stays "
+     "mechanical, and that is what it bought: the copy was taken carrying a "
+     "$HOME boundary that bound on neither side, and these rows are what "
+     "forced the repair through BOTH files in one change, the digest "
+     "re-measured only once the two slices matched again and the helper the "
+     "boundary test calls located and compared on its own because it sits "
+     "outside the slice -- then the boundary DRIVEN through a real symlinked "
+     "$HOME, because identical text in a file is not the same claim as "
+     "identical behaviour in the loaded module", 132),
     ("checkpoint", run_checkpoint,
      "checkpoint.py section reader + TOC writer: Start/End land on the block "
      "and nothing else, the numbers describe the file AFTER the region was "

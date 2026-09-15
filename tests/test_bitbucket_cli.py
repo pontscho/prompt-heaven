@@ -64,7 +64,11 @@ the one call it makes that no later call can undo is behind four of them:
      against a real instance -- a silent zero indistinguishable from a
      repository with none configured -- so the flat shape has its own named row.
   H  cross-file parity on `_profile_path`, which is a verbatim copy of jira.py's
-     and carries a known open defect.  See that group's docstring.
+     -- the identity is what forced a boundary repair through BOTH files in one
+     change instead of one, and the group also DRIVES that boundary through a
+     real symlinked $HOME, because identical text in a file is not the same
+     claim as identical behaviour in the loaded module.  See that group's
+     docstring.
   J  INFO rows: what is NOT proven.
 
 NEGATIVE CONTROL (group I) -- mandatory, explicit, named
@@ -89,7 +93,7 @@ Groups:
   E  pr-builds: the verdict, the blank state, and the exit code
   F  the per-subcommand request contract
   G  _flatten_reviewers, both shapes
-  H  cross-file parity on _profile_path
+  H  cross-file parity on _profile_path, and the $HOME boundary it now holds
   I  negative control
   J  INFO -- what is NOT proven
   K  hygiene
@@ -128,7 +132,7 @@ GD = "D. the merge gate"
 GE = "E. pr-builds"
 GF = "F. request contract"
 GG = "G. reviewer flattening"
-GH = "H. _profile_path parity"
+GH = "H. _profile_path parity + boundary"
 GI = "I. negative control"
 GJ = "J. not proven"
 GK = "K. hygiene"
@@ -333,6 +337,30 @@ class EnvSandbox:
             else:
                 os.environ[key] = value
         return False
+
+
+@contextlib.contextmanager
+def walking_from(cwd, home):
+    """Run the body with the working directory and $HOME both redirected.
+
+    `_profile_path` is the only thing in this CLI that reads either, and group
+    H is the only group that lets it walk at all -- every other case pins
+    `--profile` at a file this suite wrote.  Both are restored on the way out,
+    including the case where $HOME was not set, because group K asserts this
+    run left the environment as it found it.
+    """
+    saved_cwd = os.getcwd()
+    saved_home = os.environ.get("HOME")
+    os.chdir(cwd)
+    os.environ["HOME"] = home
+    try:
+        yield
+    finally:
+        os.chdir(saved_cwd)
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
 
 
 @contextlib.contextmanager
@@ -2277,12 +2305,28 @@ def group_g(suite, mod):
 # sha256 over the ten sliced lines joined with "\n" AND a trailing newline.
 # The convention matters: without the trailing newline the digest differs, and
 # a reader re-measuring this by hand would get a number that looks like drift.
-PARITY_SHA = "d02b53c00f3975c57875bf930365dae3b7a7ecaa09fba0497ee567732bde46a4"
+PARITY_SHA = "9ca53163f48a861b9eae85dde712f2a0d16f9b2b6250816bae96ca834ea233bd"
 PARITY_LINES = 10
 
 DEF_LINE = "def _profile_path("
-ANCHOR = "here = os.path.abspath(os.getcwd())"
-HOME_LINE = "if here == home or parent == here:"
+# BOTH of these moved when the $HOME boundary was repaired, and they are the
+# two strings that make this gate LOCATE rather than pin -- so changing them is
+# not a tidy-up, it is re-aiming the instrument.  Worth saying out loud: while
+# ANCHOR named the old spelling and only one file had moved, the locate row
+# below failed with "no `def _profile_path(` carrying ..." and RETURNED, which
+# means a one-sided edit TO THE ANCHOR LINE ITSELF is caught by that row and
+# never reaches the byte-identity row underneath it.  Both behaviours are the
+# gate working; they are just different rows, and a reader chasing a red here
+# should start at the top of the group rather than at the digest.
+ANCHOR = "here = os.path.realpath(os.getcwd())"
+HOME_LINE = "if parent == here or not _within(parent, home):"
+
+# The helper the walk's boundary test CALLS.  It is copied verbatim for the
+# same reason the walk is, and it is located separately because it lives above
+# `def _profile_path(` and therefore outside the slice: byte-identity of the
+# walk alone would let the two files answer the same question differently
+# while every row below stayed green.
+WITHIN_DEF = "def _within("
 
 
 def source_lines(path):
@@ -2324,25 +2368,85 @@ def locate_profile_path(lines):
     return lines[start:anchor], lines[anchor:end + 1], anchor + 1
 
 
-def group_h(suite, mod):
-    """Byte-identity between two deliberate copies of one function.
+def locate_whole_def(lines, header):
+    """Every line of the first `def` starting with `header`, or None.
+
+    Same end rule as the slice above -- the first following line that is
+    non-empty and starts at column 0 -- and located for the same reason: a
+    line number written down here is a line number that drifts.
+    """
+    start = next((i for i, line in enumerate(lines)
+                  if line.startswith(header)), None)
+    if start is None:
+        return None
+    end = start
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip() and not lines[i][0].isspace():
+            break
+        end = i
+    while end > start and not lines[end].strip():
+        end -= 1
+    return lines[start:end + 1]
+
+
+def symlinked_home(workspace, name):
+    """(base, real_home, linked_home, cwd) for a $HOME reachable by two names.
+
+    A REAL directory plus a symlink pointing at it -- the shape macOS ships
+    (`/Users/x` is also `/System/Volumes/Data/Users/x`) and the shape any
+    home-on-another-volume setup produces.  `cwd` is created under the REAL
+    spelling because that is what `os.getcwd()` hands back whichever name was
+    used to get there, and telling those two spellings apart is the entire
+    point of the fixture.
+    """
+    base = os.path.realpath(os.path.join(workspace.path, "walk", name))
+    real = os.path.join(base, "real-home")
+    linked = os.path.join(base, "linked-home")
+    cwd = os.path.join(real, "work", "repo")
+    os.makedirs(cwd, exist_ok=True)
+    if not os.path.islink(linked):
+        os.symlink(real, linked)
+    return base, real, linked, cwd
+
+
+def put_profile(directory, body):
+    """Write `.claude/bitbucket.json` under `directory`; return its path."""
+    path = os.path.join(directory, ".claude", "bitbucket.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(body))
+    return path
+
+
+def group_h(suite, mod, workspace):
+    """Byte-identity between two deliberate copies of one function, and the
+    boundary they now hold.
 
     WHY THIS GATE EXISTS.  `_profile_path` in bitbucket.py is a verbatim copy of
     jira.py's from the anchor line onwards -- the only difference above it is
     the environment variable this script names -- and the copy was made ON
-    PURPOSE, defect included.  `here == home` compares two paths produced by
-    normalisations of different strength (os.getcwd() is the resolved physical
-    path on POSIX, os.path.expanduser("~") is whatever $HOME literally says), so
-    the walk climbs past $HOME whenever $HOME is a symlinked spelling.  That is
-    a known OPEN defect, recorded in both files and carried in both.
+    PURPOSE rather than by accident.
 
     The byte-identity is the property that keeps the eventual unification
     MECHANICAL.  A generated region requires a byte-identical body; two
     identical copies fold into one canonical source with no behaviour change to
     argue about, while a copy corrected on one side only turns that fold into a
     change to jira.py's behaviour smuggled inside a refactor.  So the gate is
-    not "this code is right" -- it is "these two are still the same code", which
-    is the precondition for fixing it once instead of twice.
+    not "this code is right" -- it is "these two are still the same code".
+
+    That is exactly what it bought.  The copy was made while the walk carried a
+    $HOME boundary that did not bind, and when the repair landed these rows are
+    what forced it through BOTH files in one change: the digest moved, and it
+    could only be recorded again once the two slices matched each other.  The
+    helper the boundary test calls is located and compared on its own, because
+    it lives above the slice and identity of the walk alone would not cover it.
+
+    The last rows are BEHAVIOURAL, and they are here rather than left to the
+    jira suite for one reason identity cannot cover: identical text in a file
+    is not the same claim as identical behaviour in the loaded module.  A
+    second definition further down, or a shadowed helper, would satisfy every
+    row above it.  So the boundary is also driven, through a real symlink,
+    against this script's own function.
     """
     bb_lines = source_lines(TARGET)
     jira_lines = source_lines(JIRA_TARGET)
@@ -2427,7 +2531,102 @@ def group_h(suite, mod):
                          "PROFILE_FILENAME is what lets the SLICE be identical "
                          "while the files read different files: it is a module "
                          "constant, so the differing value never appears in "
-                         "the shared body"])
+                         "the shared body",
+                         "the header is also where the env-name ASYMMETRY "
+                         "lives, and normalising it away is how this row gates "
+                         "it: bitbucket.py must read BITBUCKET_PROFILE and "
+                         "bitbucket_profile, jira.py JIRA_PROFILE and "
+                         "jira_profile, and the case-distinct member of each "
+                         "pair is load-bearing -- environment names are "
+                         "case-sensitive, so a change covering only the "
+                         "uppercase spelling closes half a door"])
+
+    bb_within = locate_whole_def(bb_lines, WITHIN_DEF)
+    jira_within = locate_whole_def(jira_lines, WITHIN_DEF)
+    problems = []
+    if bb_within is None:
+        problems.append("bitbucket.py: no `%s`" % WITHIN_DEF)
+    if jira_within is None:
+        problems.append("jira.py: no `%s`" % WITHIN_DEF)
+    if bb_within is not None and jira_within is not None \
+            and bb_within != jira_within:
+        offenders = [i for i in range(max(len(bb_within), len(jira_within)))
+                     if bb_within[i:i + 1] != jira_within[i:i + 1]]
+        problems.append("line(s) %r of the helper differ" % offenders)
+    suite.record(GH, "the-helper-beside-the-walk-is-identical-too", problems,
+                 detail=(bb_within or ["<not found>"])
+                 + ["it carries NO environment name, so unlike the header it "
+                    "has to match with no normalisation at all",
+                    "it is compared separately because it sits ABOVE `%s` and "
+                    "therefore outside the slice: the boundary test is a CALL "
+                    "into it, so two identical walks reading two different "
+                    "helpers would pass every row above and answer the same "
+                    "question differently" % DEF_LINE])
+
+    # -- the boundary, driven rather than read -----------------------------
+    base, real_home, linked_home, cwd = symlinked_home(workspace, "symlinked")
+    bait = put_profile(base, {"project": "ABOVE-A-SYMLINKED-HOME"})
+    with walking_from(cwd, linked_home):
+        with EnvSandbox():
+            found = mod._profile_path(None)
+    problems = []
+    if found is not None:
+        problems.append("$HOME spelled through a symlink did not stop the "
+                        "walk; it climbed past and found %r" % found)
+    suite.record(GH, "the-boundary-binds-in-this-script-too", problems,
+                 detail=["$HOME as SET     : %s" % linked_home,
+                         "$HOME as RESOLVED: %s"
+                         % os.path.realpath(linked_home),
+                         "cwd              : %s" % cwd,
+                         "bait             : %s" % bait,
+                         "found            : %s" % found,
+                         "those two spellings ARE the defect this copy was "
+                         "made carrying: os.getcwd() hands back the second, "
+                         "os.path.expanduser(\"~\") hands back the first, and "
+                         "one `==` between them decided whether the walk "
+                         "stopped. On a shared machine the next thing it "
+                         "reached was /tmp/.claude/bitbucket.json, and a "
+                         "world-writable file there selects the repository "
+                         "every scoped subcommand acts in."])
+
+    base, real_home, linked_home, cwd = symlinked_home(workspace,
+                                                       "symlinked-at-home")
+    want = put_profile(real_home, {"project": "AT-A-SYMLINKED-HOME"})
+    with walking_from(cwd, linked_home):
+        with EnvSandbox():
+            found = mod._profile_path(None)
+    suite.record(GH, "a-profile-at-a-symlinked-HOME-is-still-found",
+                 problem_if(found != want,
+                            "found %r, want %r" % (found, want)),
+                 detail=["$HOME as SET: %s" % linked_home,
+                         "found       : %s" % found,
+                         "CONTROL: it passes before the boundary is repaired "
+                         "and after -- ANTI-VACUITY, because a `_profile_path` "
+                         "that returned None for everything would satisfy the "
+                         "row above and quietly take the walk out of this "
+                         "script altogether"])
+
+    base, real_home, linked_home, cwd = symlinked_home(workspace, "lower-env")
+    put_profile(cwd, {"project": "WALK"})
+    lower = os.path.join(base, "from-lowercase-env.json")
+    with open(lower, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"project": "LOWER"}))
+    with walking_from(cwd, linked_home):
+        with EnvSandbox(bitbucket_profile=lower):
+            found = mod._profile_path(None)
+    suite.record(GH, "the-lowercase-bitbucket_profile-spelling-still-wins",
+                 problem_if(found != lower,
+                            "`bitbucket_profile` lost to the walk: %r"
+                            % (found,)),
+                 detail=["found: %s" % found,
+                         "CONTROL: it cannot be observed red against the "
+                         "unrepaired file -- `_env_first(\"BITBUCKET_PROFILE\""
+                         ", \"bitbucket_profile\")` already read it.  It is "
+                         "here because the env pair sits directly above the "
+                         "anchor, so every change to the walk edits the lines "
+                         "around it, and the row above gates the SPELLING "
+                         "while this one gates that it still reaches the "
+                         "loader and still beats the walk"])
 
 
 # ---------------------------------------------------------------------------
@@ -2579,26 +2778,31 @@ def group_j(suite, mod):
     jira_lines = source_lines(JIRA_TARGET)
     bb_home = line_numbers(lines, HOME_LINE)
     jira_home = line_numbers(jira_lines, HOME_LINE)
-    suite.record(GJ, "the-HOME-walk-defect-is-carried-in-BOTH-files", [],
+    suite.record(GJ, "what-the-repaired-HOME-boundary-still-cannot-see", [],
                  status=H.INFO,
                  detail=["bitbucket.py:%s" % (bb_home[0] if bb_home else "?"),
                          "jira.py:%s" % (jira_home[0] if jira_home else "?"),
                          "both spell `%s`" % HOME_LINE,
-                         "MEASURED, not gated. `here == home` is raw string "
-                         "equality between paths produced by normalisations of "
-                         "DIFFERENT STRENGTH: os.getcwd() returns the resolved "
-                         "physical path on POSIX, os.path.expanduser(\"~\") "
-                         "returns whatever $HOME literally says. Whenever "
-                         "$HOME is a symlinked spelling (/Users/x versus "
-                         "/System/Volumes/Data/Users/x on macOS) the boundary "
-                         "never matches and the walk falls through to the "
-                         "filesystem-root check, reading e.g. "
-                         "/tmp/.claude/bitbucket.json on a shared machine.",
-                         "It is carried DELIBERATELY and identically in both "
-                         "files so group H's byte-identity holds and the fix "
-                         "can land in one canonical source. Recorded as INFO "
-                         "because fixing it is a change to two CLIs, not to "
-                         "their tests."])
+                         "The boundary itself is GATED, in group H here and in "
+                         "the jira suite's group L, through a real symlinked "
+                         "$HOME. What is recorded here is the one residue "
+                         "those gates do not close: os.path.realpath resolves "
+                         "SYMLINKS and does not canonicalise CASE, and "
+                         "os.path.normcase is a no-op on POSIX, so a $HOME "
+                         "spelled in a different case on a case-insensitive "
+                         "volume still fails to match its own directory.",
+                         "The residue runs in the CONSERVATIVE direction, "
+                         "which is why it is a residue and not the defect "
+                         "again: a parent the boundary cannot recognise is "
+                         "REFUSED, so the walk stops at the working directory "
+                         "instead of climbing past $HOME to /tmp. Fewer files "
+                         "trusted, an ancestor profile inside your own home "
+                         "missed, and the way out is the one --profile and "
+                         "BITBUCKET_PROFILE were always for.",
+                         "Closing it means st_dev/st_ino per directory -- a "
+                         "stat() per level, a different failure mode on every "
+                         "network filesystem, and a boundary nobody can read "
+                         "off the source. Refused, and written down here."])
 
 
 # ---------------------------------------------------------------------------
@@ -2659,7 +2863,9 @@ def run(opts=None):
                           "verdict and its exit code in both formats, the "
                           "per-subcommand request contract, reviewer "
                           "flattening in both shapes, and byte parity with "
-                          "jira.py's _profile_path",
+                          "jira.py's _profile_path -- plus the $HOME boundary "
+                          "that parity forced through both files at once, "
+                          "driven here through a real symlinked $HOME",
                     opts=opts, mode="grouped")
 
     before = H.repo_tree()
@@ -2686,7 +2892,7 @@ def run(opts=None):
         group_e(suite, mod, profile)
         group_f(suite, mod, profile)
         group_g(suite, mod)
-        group_h(suite, mod)
+        group_h(suite, mod, workspace)
         group_i(suite, mod, measured)
         group_j(suite, mod)
         # group_k LAST, always: it asserts the repo tree is exactly as this run

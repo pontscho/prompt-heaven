@@ -100,9 +100,17 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      profile NAMED and missing is an error (naming a path is a claim that it
      exists), malformed JSON is an error that has to name the file, and the
      walk stops at $HOME rather than climbing into whatever a shared parent
-     directory happens to hold.  The one-level `fields` / `aliases` merge is
-     here too: a deep merge would reach inside a Jira field payload that was
-     written to be sent whole.
+     directory happens to hold.  That last one is the group's sharpest pair,
+     because for a long time it was only a claim: the boundary was one `==`
+     between two paths normalised with DIFFERENT strength, so it bound neither
+     from outside $HOME (where `here` never became `home` and the walk climbed
+     to `/`) nor from inside it (where a symlinked $HOME -- the macOS default
+     -- never matched the physical path os.getcwd() returns).  Both halves are
+     gated now, the symlinked one against a real symlink, each with a control
+     beside it, and the one residue realpath cannot close is MEASURED rather
+     than claimed.  The one-level `fields` / `aliases` merge is here too: a
+     deep merge would reach inside a Jira field payload that was written to be
+     sent whole.
   M  the `create` payload.  Every row here is a thing that files a ticket
      WRONG rather than not at all: profile defaults that cannot be overridden
      from the command line, an alias that resolves on one side only, a
@@ -151,7 +159,8 @@ Groups:
   I  hygiene
   J  attachment upload: the one non-JSON request body
   K  Markdown rendering: cell escaping, empty tables, and no duplicated fields
-  L  profile discovery: the walk, its $HOME boundary, the one-level merge
+  L  profile discovery: the walk, its $HOME boundary through a real symlink,
+     the one-level merge
   M  create payload: shaping, aliases, sentinels, and the sprint refusals
 
 Usage:
@@ -3467,6 +3476,29 @@ def walk_tree(workspace, name):
     return root, home, cwd
 
 
+def symlinked_home(workspace, name):
+    """(base, real_home, linked_home, cwd) for a $HOME reachable by two names.
+
+    A REAL directory plus a symlink pointing at it.  This is not an exotic
+    shape: it is what macOS ships -- `/Users/x` is also `/System/Volumes/Data/
+    Users/x` -- and what every "home lives on another volume" setup produces.
+
+    `cwd` is created under the REAL spelling, because that is what
+    `os.getcwd()` hands back no matter which name the caller used to get
+    there.  The whole defect these rows gate is that the two sides of the
+    boundary used to be normalised with different strength, and the fixture
+    has to be able to TELL those two spellings apart to show it.
+    """
+    base = os.path.realpath(os.path.join(workspace, "walk", name))
+    real = os.path.join(base, "real-home")
+    linked = os.path.join(base, "linked-home")
+    cwd = os.path.join(real, "work", "repo")
+    os.makedirs(cwd, exist_ok=True)
+    if not os.path.islink(linked):
+        os.symlink(real, linked)
+    return base, real, linked, cwd
+
+
 def put_profile(directory, body):
     """Write `.claude/jira.json` under `directory`; return its path.
 
@@ -3582,6 +3614,34 @@ def group_l(suite, mod, workspace):
                          "same claim, made in the environment instead of on "
                          "the command line"])
 
+    root, home, cwd = walk_tree(workspace, "lowercase-env")
+    put_profile(cwd, {"project": "WALK"})
+    lower = os.path.join(root, "from-lowercase-env.json")
+    with open(lower, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"project": "LOWER"}))
+    with walking_from(cwd, home):
+        with EnvSandbox(jira_profile=lower):
+            data, path = mod.load_profile(None)
+    problems = []
+    if path != lower:
+        problems.append("`jira_profile` lost to the walk: found %r" % path)
+    if data.get("project") != "LOWER":
+        problems.append("loaded %r" % data)
+    suite.record(GL, "the-lowercase-jira_profile-spelling-reaches-the-loader",
+                 problems,
+                 detail=["found: %s" % path,
+                         "CONTROL: it cannot be observed red against the "
+                         "unfixed file, because the loader already read this "
+                         "spelling -- `_env_first(\"JIRA_PROFILE\", "
+                         "\"jira_profile\")`.  What was wrong was the module "
+                         "docstring, which listed the accepted lowercase "
+                         "fallbacks and left this one out.",
+                         "environment names are case-sensitive, so the pair is "
+                         "load-bearing rather than a nicety: this is a second, "
+                         "real way to point the profile loader at an arbitrary "
+                         "path, and a reader who only knew the uppercase "
+                         "spelling would have closed half a door"])
+
     # -- the $HOME boundary ------------------------------------------------
     root, home, cwd = walk_tree(workspace, "above-home")
     bait = put_profile(root, {"project": "ABOVE-HOME"})
@@ -3648,28 +3708,147 @@ def group_l(suite, mod, workspace):
                             "profile"),
                  detail=[text or "<no error>"])
 
-    # -- the measured divergence, recorded rather than gated ---------------
+    # -- the two halves of one boundary that did not bind -------------------
+    # The stop condition used to be `here == home or parent == here`, and it
+    # bound in NEITHER of the two situations a stop condition exists for.
+    #
+    # From outside $HOME, `here` never became `home` at all, so the walk fell
+    # through to the filesystem-root check and climbed to `/`.  On a shared
+    # machine that reads /tmp/.claude/jira.json, and a world-writable file
+    # then supplies `fields`, `aliases`, `require` and `board` to a live
+    # `create`.  It is not a credential leak and the chosen path IS printed --
+    # which is the only reason this was a defect rather than an incident.
+    #
+    # From INSIDE $HOME it failed just as systematically, because the two
+    # sides were produced by normalisations of DIFFERENT STRENGTH: os.getcwd()
+    # is guaranteed on POSIX to return the resolved, symlink-free physical
+    # path, while os.path.expanduser("~") returns whatever $HOME literally
+    # says.  Wherever $HOME is a symlinked spelling -- /Users/x versus
+    # /System/Volumes/Data/Users/x on macOS -- the equality never matched.
+    #
+    # Both sides are realpath()ed now, and the test moved to the PARENT: the
+    # walk climbs only while the next directory up is still inside $HOME.
+    # Testing `here` instead would let the final step land one directory ABOVE
+    # $HOME and read /Users/.claude/jira.json.
     root, home, cwd = walk_tree(workspace, "outside-home")
     outside = os.path.join(root, "outside", "repo")
     os.makedirs(outside, exist_ok=True)
-    planted = put_profile(os.path.dirname(outside), {"project": "OUTSIDE"})
+    bait = put_profile(os.path.dirname(outside), {"project": "OUTSIDE"})
     data, path = walked(mod, outside, home)
-    suite.record(GL, "walk-from-a-cwd-outside-HOME", [], status=H.INFO,
-                 detail=["cwd   : %s" % outside,
-                         "$HOME : %s" % home,
-                         "found : %s" % path,
-                         "planted: %s" % planted,
-                         "MEASURED, not gated.  `_profile_path` in jira.py -- "
-                         "NAMED, never pinned by line number, because the one "
-                         "this row used to cite had already drifted twice "
-                         "before anyone read it back -- stops the walk on "
-                         "`here == home` OR at the filesystem root, so the "
-                         "$HOME boundary only binds when the cwd is under "
-                         "$HOME; from anywhere else the walk climbs to `/`.  "
-                         "The docstring there and SKILL.md both say the walk "
-                         "stops at $HOME without that qualifier.  Recorded as "
-                         "INFO because deciding which of the two is wrong is a "
-                         "change to the CLI, not to its tests."])
+    problems = []
+    if path is not None:
+        problems.append("the walk climbed out of a cwd that is not under "
+                        "$HOME and found %r" % path)
+    if data:
+        problems.append("it loaded %r" % data)
+    suite.record(GL, "a-walk-from-outside-HOME-does-not-climb", problems,
+                 detail=["cwd  : %s" % outside,
+                         "$HOME: %s" % home,
+                         "bait : %s" % bait,
+                         "found: %s" % path,
+                         "the BEHAVIOUR CHANGE, and it is the intended "
+                         "direction: a checkout outside $HOME -- /opt/work/"
+                         "repo/subdir, a CI workspace, /tmp -- loses the "
+                         "upward walk entirely and sees only its own "
+                         "directory's profile.  Fewer files trusted, and it "
+                         "is what the code already promised in prose: a "
+                         "profile above it belongs to no project at all."])
+
+    root, home, cwd = walk_tree(workspace, "outside-home-own")
+    outside = os.path.join(root, "outside", "repo")
+    os.makedirs(outside, exist_ok=True)
+    want = put_profile(outside, {"project": "OWN"})
+    data, path = walked(mod, outside, home)
+    problems = []
+    if path != want:
+        problems.append("found %r, want %r" % (path, want))
+    if data.get("project") != "OWN":
+        problems.append("loaded %r" % data)
+    suite.record(GL, "a-walk-from-outside-HOME-still-reads-its-own-directory",
+                 problems,
+                 detail=["cwd  : %s" % outside, "found: %s" % path,
+                         "CONTROL: it passes before the boundary above is "
+                         "fixed and after -- ANTI-VACUITY, because a "
+                         "`return None` for every cwd outside $HOME would "
+                         "satisfy the row above and silently stop honouring "
+                         "the profile a CI checkout committed next to its own "
+                         "code",
+                         "the first directory is checked BEFORE any boundary "
+                         "test runs, which is what makes that possible"])
+
+    base, real_home, linked_home, cwd = symlinked_home(workspace, "symlinked")
+    bait = put_profile(base, {"project": "ABOVE-A-SYMLINKED-HOME"})
+    data, path = walked(mod, cwd, linked_home)
+    problems = []
+    if path is not None:
+        problems.append("$HOME spelled through a symlink did not stop the "
+                        "walk; it climbed past and found %r" % path)
+    if data:
+        problems.append("it loaded %r" % data)
+    suite.record(GL, "the-HOME-boundary-binds-through-a-symlinked-HOME",
+                 problems,
+                 detail=["$HOME as SET     : %s" % linked_home,
+                         "$HOME as RESOLVED: %s"
+                         % os.path.realpath(linked_home),
+                         "cwd              : %s" % cwd,
+                         "bait             : %s" % bait,
+                         "found            : %s" % path,
+                         "the two spellings above are the whole defect: "
+                         "os.getcwd() hands back the second, os.path."
+                         "expanduser(\"~\") hands back the first, and one "
+                         "`==` between them decided whether the walk stopped. "
+                         "It did not fail by accident -- it failed on every "
+                         "machine whose $HOME is a symlinked spelling, which "
+                         "on macOS is the default one."])
+
+    base, real_home, linked_home, cwd = symlinked_home(workspace,
+                                                       "symlinked-at-home")
+    want = put_profile(real_home, {"project": "AT-A-SYMLINKED-HOME"})
+    data, path = walked(mod, cwd, linked_home)
+    problems = []
+    if path != want:
+        problems.append("found %r, want %r" % (path, want))
+    if data.get("project") != "AT-A-SYMLINKED-HOME":
+        problems.append("loaded %r" % data)
+    suite.record(GL, "a-profile-at-a-symlinked-HOME-is-still-found", problems,
+                 detail=["$HOME as SET: %s" % linked_home,
+                         "found       : %s" % path,
+                         "CONTROL: it passes before the fix and after -- "
+                         "ANTI-VACUITY, because realpath()ing only the $HOME "
+                         "side and then keeping `here == home` would satisfy "
+                         "the row above while severing the walk two "
+                         "directories lower, and nothing else here would "
+                         "notice"])
+
+    root, home, cwd = walk_tree(workspace, "case-folded-home")
+    folded = os.path.join(root, "HOME")
+    insensitive = os.path.isdir(folded)
+    ancestor = put_profile(os.path.dirname(cwd), {"project": "INSIDE"})
+    data, path = walked(mod, cwd, folded)
+    suite.record(GL, "a-HOME-spelled-in-a-different-case", [], status=H.INFO,
+                 detail=["$HOME as SET  : %s" % folded,
+                         "on disk       : %s" % home,
+                         "volume is case-insensitive: %s" % insensitive,
+                         "planted inside: %s" % ancestor,
+                         "found         : %s" % path,
+                         "MEASURED, not gated, and DECLARED rather than "
+                         "chased.  os.path.realpath resolves symlinks and "
+                         "does not canonicalise CASE, and os.path.normcase is "
+                         "a no-op on POSIX, so a $HOME spelled in a different "
+                         "case on a case-insensitive volume still fails to "
+                         "match its own directory.",
+                         "the residue is in the CONSERVATIVE direction, which "
+                         "is why it is a residue and not the defect again: "
+                         "the boundary now refuses a parent it cannot "
+                         "recognise, so the walk stops at the working "
+                         "directory instead of climbing past $HOME.  Fewer "
+                         "files trusted, an ancestor profile inside your own "
+                         "home missed.",
+                         "closing it means comparing st_dev/st_ino per "
+                         "directory -- a stat() per level, a different failure "
+                         "mode on every network filesystem, and a boundary "
+                         "nobody can read off the source.  Refused, and "
+                         "written down here instead."])
 
     # -- the merge ---------------------------------------------------------
     profile = {"defaults": dict(MERGE_DEFAULTS),

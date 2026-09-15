@@ -9,9 +9,11 @@ WHY `create` KNOWS NO PROJECT.  Which fields a project demands, and what it
 wants in them, is a property of that project: the custom field ids are
 per-instance, the conventions are per-team, and both drift.  So none of it is
 in this file.  `create` reads a PROFILE -- `.claude/jira.json`, looked up by
-walking from the working directory towards $HOME -- which makes the defaults
-depend on which repository you are standing in, and keeps one shared CLI from
-carrying one project's habits into another's.  `createmeta` and `sprints` are
+walking from the working directory up through the ancestors that are still
+inside $HOME -- which makes the defaults depend on which repository you are
+standing in, and keeps one shared CLI from carrying one project's habits into
+another's.  From a checkout OUTSIDE $HOME there is no walk: only that
+directory's own profile is read.  `createmeta` and `sprints` are
 the two read commands that make such a profile writable in the first place.
 
 WHY v2 ON BOTH.  v2 exists on Cloud with the identical operation set, and
@@ -78,11 +80,19 @@ Environment variables
                     write subcommand refuse with exit 2 before anything is sent.
     JIRA_PROFILE    optional.  Path to the project profile used by create,
                     createmeta and sprints.  Absent, `.claude/jira.json` is
-                    looked for in the working directory and its ancestors, and
-                    the walk stops at $HOME.  Flag: --profile
+                    looked for in the working directory and in every ancestor
+                    up to and INCLUDING $HOME -- the walk climbs only while the
+                    next directory up is still inside $HOME, so it never reads
+                    a profile above it.  Run from OUTSIDE $HOME (a CI
+                    workspace, /opt, /tmp) there is no walk at all: only the
+                    working directory's own profile is read, and this variable
+                    is how you name one anywhere else.  Flag: --profile
 
-    Lowercase spellings (jira_url, jira_token, jira_email, jira_read_only) are
-    accepted as a fallback.
+    Lowercase spellings (jira_url, jira_token, jira_email, jira_read_only,
+    jira_profile) are accepted as a fallback.  Environment names are
+    case-sensitive, so each of those is a second, real way to set the thing it
+    names -- jira_profile especially, since it points the profile loader at an
+    arbitrary path.
 
 Output
     Markdown on stdout -- headings, fenced blocks and GitHub-flavoured tables,
@@ -209,8 +219,12 @@ RX_NUMERIC_ID = re.compile(r"^[0-9]+$")
 # tracks -- not in a CLI that several unrelated repositories share.  So the
 # shape is read from a profile discovered by walking UP from the working
 # directory, which makes the answer depend on which repository you are
-# standing in.  The walk stops at $HOME: a profile above it belongs to no
-# project at all.
+# standing in.  $HOME is the ceiling and it is INCLUSIVE -- the walk climbs
+# only while the next directory up is still inside it -- because a profile
+# above $HOME belongs to no project at all, and on a shared machine to no one
+# in particular.  The same rule read from the other end: started outside
+# $HOME, the walk cannot climb at all and only the working directory's own
+# profile is read.  See _profile_path().
 PROFILE_FILENAME = os.path.join(".claude", "jira.json")
 
 # Resolved against the SERVER at send time, never frozen into the profile.
@@ -1780,21 +1794,51 @@ def cmd_attach(args: argparse.Namespace, client: Jira) -> int:
 # profiles: everything project-specific, and none of it in this file
 # ---------------------------------------------------------------------------
 
+def _within(path: str, root: str) -> bool:
+	"""Is `path` `root` itself, or something underneath it?
+
+	Prefix containment on two paths the CALLER has already realpath()ed --
+	that is what makes a text comparison mean anything here.  os.path.commonpath
+	is deliberately not used: it RAISES on a mix of absolute and relative paths
+	and on an empty sequence, which is a traceback where this needs an answer,
+	and it buys nothing a prefix test does not already give.
+	"""
+	return path == root or path.startswith(root + os.sep)
+
+
 def _profile_path(explicit: Optional[str]) -> Optional[str]:
-	"""--profile, then JIRA_PROFILE, then the walk up from the cwd."""
+	"""--profile, then JIRA_PROFILE, then the walk up from the cwd.
+
+	The walk climbs only while the NEXT directory up is still inside $HOME,
+	and BOTH sides are realpath()ed before anything is compared.  They used to
+	be produced by normalisations of different strength -- os.getcwd() is
+	guaranteed on POSIX to return the resolved, symlink-free physical path,
+	while os.path.expanduser("~") returns whatever $HOME literally says -- so
+	one `==` between them bound on neither side: never from outside $HOME,
+	where it could not match at all and the walk climbed to `/`, and not from
+	inside it either on any machine whose $HOME is a symlinked spelling.
+
+	The PARENT is what is tested, never `here`.  Testing `here` would let the
+	final step land one directory ABOVE $HOME and read a profile belonging to
+	nobody in particular.
+
+	The consequence for a checkout OUTSIDE $HOME is intended: there is no walk
+	at all, only that directory's own profile, because a profile above it
+	belongs to no project.  Name one with --profile or JIRA_PROFILE.
+	"""
 	if explicit:
 		return explicit
 	from_env, _ = _env_first("JIRA_PROFILE", "jira_profile")
 	if from_env:
 		return from_env
-	here = os.path.abspath(os.getcwd())
-	home = os.path.abspath(os.path.expanduser("~"))
+	here = os.path.realpath(os.getcwd())
+	home = os.path.realpath(os.path.expanduser("~"))
 	while True:
 		candidate = os.path.join(here, PROFILE_FILENAME)
 		if os.path.isfile(candidate):
 			return candidate
 		parent = os.path.dirname(here)
-		if here == home or parent == here:
+		if parent == here or not _within(parent, home):
 			return None
 		here = parent
 
@@ -2238,7 +2282,10 @@ def build_parser() -> argparse.ArgumentParser:
 	profiled = argparse.ArgumentParser(add_help=False)
 	profiled.add_argument("--profile", help="path to the project profile "
 		"(overrides JIRA_PROFILE); by default %s is looked for in the working "
-		"directory and its ancestors up to $HOME" % PROFILE_FILENAME)
+		"directory and in every ancestor up to and including $HOME, never "
+		"above it — and from outside $HOME only the working directory itself "
+		"is looked at, so name one here when you are not in a project tree"
+		% PROFILE_FILENAME)
 	profiled.add_argument("--project", help="project key, e.g. PROJ "
 		"(default: the profile's \"project\")")
 

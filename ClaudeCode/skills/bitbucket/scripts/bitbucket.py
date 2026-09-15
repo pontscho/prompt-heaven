@@ -47,8 +47,10 @@ Every sweep here reads `nextPageStart` off the response and stops on `isLastPage
 
 WHY NOTHING PROJECT-SPECIFIC IS IN THIS FILE.  `pr-create` reads its defaults -- the
 project key, the repository slug, the target branch, the reviewers -- from a
-`.claude/bitbucket.json` profile found by walking up from the working directory.  A
-project's conventions belong to the project, not to a shared script.
+`.claude/bitbucket.json` profile found by walking up from the working directory through
+the ancestors that are still inside $HOME, never above it -- and from a checkout OUTSIDE
+$HOME there is no walk at all, only that directory's own profile.  A project's
+conventions belong to the project, not to a shared script.
 
 LIVE VERIFICATION STATUS, 2026-09-15 against Bitbucket 9.4.23.  Every read plus
 `pr-create` has now been exercised with a real token: version, whoami, repo, pr-list,
@@ -96,7 +98,12 @@ Environment variables:
 	BITBUCKET_TOKEN      personal HTTP access token, sent as a bearer token
 	BITBUCKET_PROJECT    default project key, overridden by --project
 	BITBUCKET_REPO       default repository slug, overridden by --repo
-	BITBUCKET_PROFILE    explicit path to a profile, overriding the walk up
+	BITBUCKET_PROFILE    explicit path to a profile, overriding the walk up.
+	                     The walk it overrides climbs from the working directory
+	                     only while the next directory up is still inside $HOME,
+	                     so it never reads a profile above $HOME -- and started
+	                     OUTSIDE $HOME it cannot climb at all, which is when
+	                     this variable stops being optional
 	bitbucket_profile    the SAME input spelled in lowercase, and read second.
 	                     Environment names are case-sensitive, so this is not a
 	                     nicety -- it is a second, real way to point the profile
@@ -199,6 +206,11 @@ RX_REPO_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # that nothing structural (a `/`, a `.`, a `%`) can be inside it.
 RX_COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
+# Discovered by walking UP from the working directory, which is what makes the
+# answer depend on which repository you are standing in.  $HOME is the ceiling
+# and it is INCLUSIVE -- the walk climbs only while the next directory up is
+# still inside it -- because a profile above $HOME belongs to no project at
+# all, and on a shared machine to no one in particular.  See _profile_path().
 PROFILE_FILENAME = os.path.join(".claude", "bitbucket.json")
 
 # Resolved against the default-reviewers endpoint for the branch pair actually
@@ -1645,48 +1657,81 @@ def cmd_pr_merge(args: argparse.Namespace, client: Bitbucket) -> int:
 # profiles: everything project-specific, and none of it in this file
 # ---------------------------------------------------------------------------
 
-# WHY THIS FUNCTION IS A VERBATIM COPY, DEFECT INCLUDED.
+# WHY THIS FUNCTION IS A VERBATIM COPY.
 #
-# The body below, from `here = os.path.abspath(os.getcwd())` onwards, is
-# byte-for-byte jira.py's `_profile_path`.  Only the four lines above it differ,
-# and only because they name this script's own environment variable.  It
-# carries a KNOWN OPEN DEFECT, recorded but not yet fixed there:
+# `_within` and the body below, from `here = os.path.realpath(os.getcwd())`
+# onwards, are byte-for-byte jira.py's.  Only the lines above the walk differ,
+# and only because they name this script's own environment variable.
 #
-#   `here == home` is raw string equality between two paths produced by
-#   normalisations of DIFFERENT STRENGTH.  os.getcwd() is guaranteed on POSIX to
-#   return the resolved, symlink-free physical path, while
-#   os.path.expanduser("~") returns whatever $HOME literally says.  So the
-#   comparison does not fail by accident -- it fails systematically whenever
-#   $HOME is a symlinked spelling (/Users/x versus /System/Volumes/Data/Users/x
-#   on macOS is the textbook case) or differs in case on a case-insensitive
-#   volume.  The walk then falls through to the `parent == here` filesystem-root
-#   check and climbs past $HOME, reading, for instance,
-#   /tmp/.claude/bitbucket.json on a shared machine.
+# It is copied AS IS on purpose rather than adapted.  A generated region
+# requires a byte-identical body, so two identical copies stay mechanically
+# foldable into one canonical source later, while a privately edited copy would
+# diverge and make that unification a commit that silently changes the other
+# tool's behaviour inside what reads as a refactor.  Anything this walk needs
+# to do differently belongs in both sites at once, or in the shared source that
+# replaces them.
 #
-# It was copied AS IS on purpose rather than corrected here.  A generated region
-# requires a byte-identical body, so two identical copies stay foldable into one
-# canonical source later, while a corrected copy would diverge and make that
-# unification a change to jira.py's behaviour smuggled inside a refactor.  The
-# fix belongs in both sites at once, or in the shared source that replaces them.
+# That is not a hypothetical, and the ledger is worth keeping.  The copy was
+# taken while the walk carried a $HOME boundary that did not bind -- `here ==
+# home` compared two paths produced by normalisations of different strength,
+# and matched on neither side of the boundary it was there to hold -- and it
+# was copied with the defect rather than quietly corrected here, so that the
+# two sites stayed identical and the repair could land in one change across
+# both.  That is exactly how it landed.  `tests/test_bitbucket_cli.py` group H
+# is what forced it: it compares these lines against jira.py's byte for byte,
+# so a repair on one side alone cannot go green.
 #
-# Do not read the presence of a second consumer as evidence that the behaviour
-# is settled.  It is not.
+# What the boundary still cannot see is recorded in that suite's group J, and
+# it is a residue rather than an open defect: realpath resolves symlinks and
+# does not canonicalise case, so a case-distinct $HOME on a case-insensitive
+# volume stops the walk EARLY -- fewer files trusted, which is the safe
+# direction, and --profile is the way past it.
+
+def _within(path: str, root: str) -> bool:
+	"""Is `path` `root` itself, or something underneath it?
+
+	Prefix containment on two paths the CALLER has already realpath()ed --
+	that is what makes a text comparison mean anything here.  os.path.commonpath
+	is deliberately not used: it RAISES on a mix of absolute and relative paths
+	and on an empty sequence, which is a traceback where this needs an answer,
+	and it buys nothing a prefix test does not already give.
+	"""
+	return path == root or path.startswith(root + os.sep)
+
 
 def _profile_path(explicit: Optional[str]) -> Optional[str]:
-	"""--profile, then BITBUCKET_PROFILE, then the walk up from the cwd."""
+	"""--profile, then BITBUCKET_PROFILE, then the walk up from the cwd.
+
+	The walk climbs only while the NEXT directory up is still inside $HOME,
+	and BOTH sides are realpath()ed before anything is compared.  They used to
+	be produced by normalisations of different strength -- os.getcwd() is
+	guaranteed on POSIX to return the resolved, symlink-free physical path,
+	while os.path.expanduser("~") returns whatever $HOME literally says -- so
+	one `==` between them bound on neither side: never from outside $HOME,
+	where it could not match at all and the walk climbed to `/`, and not from
+	inside it either on any machine whose $HOME is a symlinked spelling.
+
+	The PARENT is what is tested, never `here`.  Testing `here` would let the
+	final step land one directory ABOVE $HOME and read a profile belonging to
+	nobody in particular.
+
+	The consequence for a checkout OUTSIDE $HOME is intended: there is no walk
+	at all, only that directory's own profile, because a profile above it
+	belongs to no project.  Name one with --profile or BITBUCKET_PROFILE.
+	"""
 	if explicit:
 		return explicit
 	from_env, _ = _env_first("BITBUCKET_PROFILE", "bitbucket_profile")
 	if from_env:
 		return from_env
-	here = os.path.abspath(os.getcwd())
-	home = os.path.abspath(os.path.expanduser("~"))
+	here = os.path.realpath(os.getcwd())
+	home = os.path.realpath(os.path.expanduser("~"))
 	while True:
 		candidate = os.path.join(here, PROFILE_FILENAME)
 		if os.path.isfile(candidate):
 			return candidate
 		parent = os.path.dirname(here)
-		if here == home or parent == here:
+		if parent == here or not _within(parent, home):
 			return None
 		here = parent
 
@@ -1841,7 +1886,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 	scoped = argparse.ArgumentParser(add_help=False)
 	scoped.add_argument("--profile",
-		help="path to a profile, overriding the walk up from the cwd")
+		help="path to a profile, overriding the walk up from the cwd — that "
+			"walk stops at $HOME and never climbs above it, and from outside "
+			"$HOME it does not climb at all, so name one here when you are "
+			"not in a project tree")
 	scoped.add_argument("--project",
 		help="project key (overrides BITBUCKET_PROJECT and the profile)")
 	scoped.add_argument("--repo",

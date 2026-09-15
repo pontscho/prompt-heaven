@@ -173,14 +173,23 @@ same command means different things in different repositories, deliberately.
   names is unset. It is not the server's validation; it exists so a project can insist
   on something the server is happy to omit.
 
-Known limitation, stated because it is real and open rather than hypothetical: the
-walk-up that finds the profile stops at `$HOME` only when the two paths compare equal
-as strings. `os.getcwd()` returns a resolved physical path while `$HOME` is whatever
-the variable literally says, so on a symlinked or case-insensitive home the boundary
-does not fire and the walk climbs to the filesystem root. Pass `--profile` or set
-`BITBUCKET_PROFILE` when running from outside a project tree, especially on a shared
-machine. The same code and the same defect are in the jira skill's script; the fix
-belongs in both at once.
+Where the walk stops, stated precisely because the boundary is what bounds the blast
+radius below. Both sides are resolved with `realpath` and the walk climbs only while the
+**next directory up is still inside `$HOME`** — so `$HOME` itself is checked and nothing
+above it ever is. Read from the other end: **from a checkout outside `$HOME`** — a CI
+workspace, `/opt/work/repo`, `/tmp` — **there is no walk at all**, and only the working
+directory's own profile is read. Pass `--profile` or set `BITBUCKET_PROFILE` there.
+
+This used to be a single `==` between two paths normalised with different strength
+(`os.getcwd()` returns the resolved physical path, `$HOME` is whatever the variable
+literally says), which bound on neither side — not from outside `$HOME`, where it could
+never match, and not from inside it on any machine whose `$HOME` is a symlinked spelling,
+which on macOS is the default one. It was repaired in this script and in the jira skill's
+in one change, because the two copies are byte-identical on purpose and a test gates that.
+One residue is left and declared: `realpath` resolves symlinks but does not canonicalise
+**case**, so a case-distinct `$HOME` on a case-insensitive volume stops the walk at the
+working directory — fewer files trusted, which is the safe direction, and `--profile` is
+the way past it.
 
 The blast radius is wider than `pr-create`. The profile supplies the project and the
 repository for **every scoped subcommand**, so a planted profile selects the

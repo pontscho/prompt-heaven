@@ -130,8 +130,13 @@ IDs are per-instance, the conventions are per-team, and both drift. So the shape
 profile next to the code it tracks, and one shared CLI never carries one project's habits
 into another's.
 
-The profile is found by walking up from the working directory looking for `.claude/jira.json`,
-stopping at `$HOME`; `--profile PATH` or `JIRA_PROFILE` override the search. **No profile
+The profile is found by walking up from the working directory looking for `.claude/jira.json`.
+The walk climbs only while the next directory up is still inside `$HOME`, so `$HOME` itself is
+checked and nothing above it ever is — a profile up there belongs to no project, and on a shared
+machine to no one in particular. Read from the other end, the same rule says: **from a checkout
+outside `$HOME`** — a CI workspace, `/opt/work/repo`, `/tmp` — **there is no walk at all**, and
+only the working directory's own profile is read. That is deliberate and it is the conservative
+direction; `--profile PATH`, `JIRA_PROFILE` or `jira_profile` name one anywhere. **No profile
 anywhere is fine** — a named one that is missing is an error, because naming a path is a
 claim that it exists.
 
