@@ -95,9 +95,17 @@ def _resolve_aliases(params: Any) -> dict:
             f"got {type(params).__name__}."
         )
     resolved = {}
+    claimed = {}
     for key, value in params.items():
         canonical = PARAM_ALIASES.get(key, key)
+        if canonical in resolved:
+            first, second = sorted((claimed[canonical], key))
+            raise ValueError(
+                f"Ambiguous parameters: '{first}' and '{second}' both set "
+                f"'{canonical}'. Pass exactly one."
+            )
         resolved[canonical] = value
+        claimed[canonical] = key
     return resolved
 
 

@@ -267,10 +267,17 @@ def _resolve_aliases(params: Any) -> dict:
     if not isinstance(params, dict):
         raise ValueError("'params' must be an object or JSON-encoded object string.")
     resolved: dict = {}
+    claimed: dict = {}
     for key, value in params.items():
         canonical = PARAM_ALIASES.get(key, key)
-        if canonical not in resolved:
-            resolved[canonical] = value
+        if canonical in resolved:
+            first, second = sorted((claimed[canonical], key))
+            raise ValueError(
+                f"Ambiguous parameters: '{first}' and '{second}' both set "
+                f"'{canonical}'. Pass exactly one."
+            )
+        resolved[canonical] = value
+        claimed[canonical] = key
     return resolved
 
 

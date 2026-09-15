@@ -115,9 +115,17 @@ def _resolve_aliases(params: Any) -> dict:
             f"got {type(params).__name__}."
         )
     resolved = {}
+    claimed = {}
     for key, value in params.items():
         canonical = PARAM_ALIASES.get(key, key)
+        if canonical in resolved:
+            first, second = sorted((claimed[canonical], key))
+            raise ValueError(
+                f"Ambiguous parameters: '{first}' and '{second}' both set "
+                f"'{canonical}'. Pass exactly one."
+            )
         resolved[canonical] = value
+        claimed[canonical] = key
     return resolved
 
 
@@ -1792,6 +1800,20 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
 
     function = FUNCTION_ALIASES.get(function, function)
 
+    # Parameter normalization is a pure function of `params` and this module's
+    # own alias table, so it belongs up here with the other answers that take no
+    # lock -- not below _hold_backend, where it used to sit. Measured cost of the
+    # old placement: a caller who misspelled a parameter needed a WORKING
+    # lua-language-server before anyone would say so, because the backend was
+    # acquired first and a cold or absent one answered "not initialized" while
+    # the real complaint was never reached. It also waited out the 90 s auto-init
+    # below to hear it. This placement is what the other nine resolver hosts do:
+    # normalize before the handler lookup, every one of them.
+    try:
+        params = _resolve_aliases(params)
+    except ValueError as e:
+        return _serialize(function, {"error": str(e)})
+
     # If auto-init is in progress and the client isn't ready yet, wait for it.
     # This stays BEFORE _hold_backend and must: _auto_init holds the backend
     # lock for the whole cold start, so acquiring first and then waiting on the
@@ -1823,7 +1845,7 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
     try:
         async with _backend_session():
             await _hold_backend()
-            result = await handler(_resolve_aliases(params))
+            result = await handler(params)
     except ValueError as e:
         return _serialize(function, {"error": str(e)})
     except RuntimeError as e:

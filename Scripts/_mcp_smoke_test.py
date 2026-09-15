@@ -23,6 +23,9 @@ that the convergence patch guarantees:
                             an empty function with a status/catalogue reply ON
                             PURPOSE, which is a success -- without this half the
                             gate would pass a server that flags everything)
+  * aliased params       -> a canonical parameter name and one of its own
+                           aliases in the SAME call is refused, never silently
+                           decided by wire position (see alias_collision_checks)
 
 Usage:
   python3 _mcp_smoke_test.py                 # all servers
@@ -284,6 +287,115 @@ def error_envelope_checks(srv, cfg, checks):
         "isError=%r; envelope=%s" % (is_error, json.dumps(resp)[:220])))
 
 
+# The one token every host's collision error carries.  Asserting a shared
+# substring is the opposite of the prose-pinning error_envelope_checks warns
+# against: that gate reads only the FLAG because fifteen servers word their
+# failures differently and always did.  Here the wording is the contract being
+# established -- without a discriminator the positive probe would pass on any
+# error at all, including the "unknown function" one it is meant to look past.
+COLLISION_TOKEN = "Ambiguous parameters"
+
+# Per host: a function name, then TWO parameter spellings that canonicalize to
+# the same name on that server.
+#
+# Probe DATA, hand-written like "__no_such_function__" above, NOT a derived
+# copy of anything.  Deriving the pair would mean re-implementing three
+# different alias-table shapes -- flat, per-function-over-global, and forge's
+# injected table -- inside a harness whose subject is live JSON-RPC, and the
+# per-function tables do not merely extend the global one: mcp-postgres.py
+# INVERTS it for call_function (globally parameters->params, per-function
+# parameters->args), so a reverse map built from either table alone would be
+# wrong.  A row that stops colliding fails LOUDLY -- the positive half simply
+# gets no collision error -- rather than silently testing nothing.
+#
+# Every one of these reaches its server's resolver with NO environment: no
+# database, no browser, no language server, no network.  That is a property of
+# the resolver's POSITION, and it now holds on all ten: parameter normalization
+# happens before the handler lookup on every host.
+ALIAS_COLLISION = {
+    "mcp-clangd.py":   ("clangd_find_definition", "file",     "path"),
+    "mcp-cuda.py":     ("cuda_find_definition",  "file",      "path"),
+    "mcp-lua-lsp.py":  ("luals_find_definition", "file",      "path"),
+    "mcp-tshark.py":   ("analyze",               "pcap",      "file"),
+    "mcp-jenkins.py":  ("get_build_log",         "job",       "job_path"),
+    "mcp-postgres.py": ("query",                 "statement", "sql"),
+    "mcp-wiki.py":     ("search",                "q",         "query"),
+    "mcp-purity.py":   ("read_file",             "path",      "relative_path"),
+    "mcp-webfetch.py": ("fetch",                 "max_chars", "max_answer_chars"),
+    "mcp-forge.py":    ("build",                 "t",         "targets"),
+}
+
+
+def alias_collision_checks(srv, cfg, checks):
+    """Two spellings of one parameter must be an ERROR, per server, over live
+    JSON-RPC.
+
+    A caller that sends both a canonical name and one of its aliases has said
+    the same thing twice and meant two different things.  Every host used to
+    answer that by silently keeping one of the values, decided by WIRE POSITION
+    -- six kept the last, four kept the first, and neither rule is
+    order-independent or prefers the canonical spelling.  Picking one of the two
+    would have picked a coin; the ambiguity is the defect, so the resolver
+    reports it.
+
+    Three halves, and each catches a different failure:
+
+      POSITIVE -- both spellings.  The reply MUST carry isError: True AND name
+        the ambiguity.  The flag alone is not enough here, unlike in
+        error_envelope_checks: nearly any malformed call to these servers is
+        already flagged, so a probe reading only the flag would pass a server
+        that never learned the rule.
+
+      CONTROL -- one spelling.  MUST NOT carry the collision token.  This is the
+        opposite-sign defect: a resolver that flagged every call would satisfy
+        the positive half.  It deliberately does NOT assert isError is falsy --
+        a single bogus value is often a legitimate failure ('no such file'), and
+        asserting on that would pin fifteen servers' validation prose.
+
+      COVERAGE -- runs on ALL fifteen, including the five with no resolver at
+        all.  It asserts the probe table has a row for exactly those files whose
+        source defines `_resolve_aliases`, so an eleventh host cannot join the
+        fleet and quietly skip the gate.  The set is DERIVED from the source,
+        never typed: a hand-maintained copy of a fleet count was wrong within a
+        day of being written in this repo once already.
+
+    Scope, stated because an unstated one is the same defect as a false
+    invariant: this gate proves the resolver REFUSES, never that the ten alias
+    TABLES are free of collisions a caller could not have caused, and never the
+    envelope-level `function`/`f` and `params`/`p` or-chains, which are a
+    different mechanism at a different layer and remain first-wins.
+    """
+    row = ALIAS_COLLISION.get(cfg["file"])
+
+    with open(os.path.join(SCRIPT_DIR, cfg["file"]), encoding="utf-8") as fh:
+        has_resolver = "def _resolve_aliases(" in fh.read()
+    checks.append(check(
+        "alias probe row iff _resolve_aliases exists",
+        has_resolver == (row is not None),
+        "resolver=%r row=%r" % (has_resolver, row is not None)))
+    if row is None or not has_resolver:
+        return
+
+    function, spelling_a, spelling_b = row
+    tool = cfg["tool"]
+
+    is_error, text, resp = _dispatch_call(srv, 8, tool, {
+        "function": function,
+        "params": {spelling_a: "A", spelling_b: "B"}})
+    checks.append(check(
+        "alias collision -> isError True + named",
+        is_error is True and COLLISION_TOKEN in text,
+        "isError=%r; text=%r" % (is_error, text[:180])))
+
+    is_error, text, _resp = _dispatch_call(srv, 9, tool, {
+        "function": function,
+        "params": {spelling_a: "A"}})
+    checks.append(check(
+        "one spelling -> no collision error (control)",
+        COLLISION_TOKEN not in text,
+        "isError=%r; text=%r" % (is_error, text[:180])))
+
+
 def _purity_call(srv, call_id, function, params=None):
     """Send a purity_call tools/call and return (text, raw_response)."""
     srv.send({"jsonrpc": "2.0", "id": call_id, "method": "tools/call",
@@ -348,15 +460,31 @@ def purity_semantic_checks(srv, checks):
                         ("requires either" in text) and ("Unknown function" not in text),
                         text[:100]))
 
-    # (e) _resolve_aliases last-wins (bug #3) observable: 'path' and
-    #     'relative_path' both canonicalize to relative_path; the LAST key wins,
-    #     so the not-found error must name the canonical (last) value.
-    text, _ = _purity_call(srv, cid, "read_file",
-                           {"path": "alias_first.txt", "relative_path": "canonical_last.txt"})
-    cid += 1
-    checks.append(check("purity: _resolve_aliases last-wins",
-                        ("canonical_last.txt" in text) and ("alias_first.txt" not in text),
-                        text[:120]))
+    # (e) the alias-collision refusal is ORDER-INDEPENDENT, and that is the
+    #     whole reason it replaced last-wins here rather than first-wins: both
+    #     of those read the WIRE ORDER, so the very same two keys sent the other
+    #     way round quietly made a different call. This check used to pin the
+    #     last-wins OUTCOME -- it asserted that 'relative_path' beat 'path'
+    #     because it came second. Same pair now, sent both ways, and the two
+    #     replies must be the SAME message.
+    #
+    #     It is purity-specific on purpose even though alias_collision_checks
+    #     already drives all ten: that gate proves the refusal HAPPENS, this one
+    #     proves the reply is ACTIONABLE -- it names both spellings the caller
+    #     wrote and the canonical name they collide on, which is the difference
+    #     between an error a model can fix and one it can only retry.
+    ordered = []
+    for pair in ({"path": "A.txt", "relative_path": "B.txt"},
+                 {"relative_path": "B.txt", "path": "A.txt"}):
+        text, resp = _purity_call(srv, cid, "read_file", pair)
+        cid += 1
+        ordered.append((text, resp.get("result", {}).get("isError")))
+    (text_a, err_a), (text_b, err_b) = ordered
+    checks.append(check(
+        "purity: alias collision refused, order-independent, flagged",
+        (err_a is True and err_b is True and text_a == text_b
+         and "'path'" in text_a and "'relative_path'" in text_a),
+        "a=%r b=%r isError=(%r, %r)" % (text_a[:110], text_b[:110], err_a, err_b)))
 
     # (f) legacy luals_* names dispatch (direct HANDLERS keys [C1, Phase 1])
     luals = ["luals_find_definition", "luals_find_references",
@@ -530,7 +658,12 @@ def run_server(cfg):
         #    the control proving a deliberate status reply is not flagged.
         error_envelope_checks(srv, cfg, checks)
 
-        # 8. purity-only: semantic dispatch + alias-routing checks (Phase 0, D2)
+        # 8. two spellings of one parameter must be refused, not silently
+        #    decided by wire position -- plus the coverage half, which runs on
+        #    every server including the five with no resolver.
+        alias_collision_checks(srv, cfg, checks)
+
+        # 9. purity-only: semantic dispatch + alias-routing checks (Phase 0, D2)
         if cfg["tool"] == "purity_call":
             purity_semantic_checks(srv, checks)
 

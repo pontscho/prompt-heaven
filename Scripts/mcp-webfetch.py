@@ -679,7 +679,19 @@ def _bool_param(value: Any, default: bool = False) -> bool:
 
 
 def _resolve_aliases(params: dict) -> dict:
-	return {PARAM_ALIASES.get(k, k): v for k, v in params.items()}
+	resolved = {}
+	claimed = {}
+	for key, value in params.items():
+		canonical = PARAM_ALIASES.get(key, key)
+		if canonical in resolved:
+			first, second = sorted((claimed[canonical], key))
+			raise ValueError(
+				f"Ambiguous parameters: '{first}' and '{second}' both set "
+				f"'{canonical}'. Pass exactly one."
+			)
+		resolved[canonical] = value
+		claimed[canonical] = key
+	return resolved
 
 
 def _clean_headers(raw: Any) -> Dict[str, str]:

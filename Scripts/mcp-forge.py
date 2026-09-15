@@ -892,10 +892,17 @@ def _bool_param(value, default=False):
 
 def _resolve_aliases(params: dict, aliases: dict) -> dict:
 	resolved: Dict[str, Any] = {}
+	claimed: Dict[str, str] = {}
 	for key, value in params.items():
 		canonical = aliases.get(key, key)
-		if canonical not in resolved:
-			resolved[canonical] = value
+		if canonical in resolved:
+			first, second = sorted((claimed[canonical], key))
+			raise ValueError(
+				f"Ambiguous parameters: '{first}' and '{second}' both set "
+				f"'{canonical}'. Pass exactly one."
+			)
+		resolved[canonical] = value
+		claimed[canonical] = key
 	return resolved
 
 

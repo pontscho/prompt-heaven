@@ -595,6 +595,79 @@ omit the helper (no dead code). One server (`mcp-tshark`) keeps an older
 `(params, key, default)` signature; behavior is identical, only the call shape
 differs.
 
+### 7c. Two spellings of one parameter — refuse, never choose
+
+Every server accepts parameter aliases: `file`, `file_path` and `path` all mean
+the same thing. Nothing stopped a caller from sending **two** of them at once,
+and each resolver quietly kept one value and dropped the other.
+
+**Which one it kept was decided by the order the keys arrived on the wire.** Six
+servers kept the last, four kept the first, and neither rule is
+order-independent, neither prefers the canonical spelling, and no server looked
+at the raw key set before resolving — so `{"path": A, "relative_path": B}` and
+`{"relative_path": B, "path": A}` were two different calls on all ten. Unifying
+on one of the two rules would have picked a coin, not a fix: the ambiguity IS
+the defect.
+
+So the resolver **refuses**:
+
+```python
+    resolved = {}
+    claimed = {}
+    for key, value in params.items():
+        canonical = PARAM_ALIASES.get(key, key)
+        if canonical in resolved:
+            first, second = sorted((claimed[canonical], key))
+            raise ValueError(
+                f"Ambiguous parameters: '{first}' and '{second}' both set "
+                f"'{canonical}'. Pass exactly one."
+            )
+        resolved[canonical] = value
+        claimed[canonical] = key
+    return resolved
+```
+
+Four properties of that shape are load-bearing:
+
+- **It detects in the loop, on `canonical` — never against a reverse map built
+  from `PARAM_ALIASES`.** Three hosts overlay a per-function table on the global
+  one, and `mcp-postgres.py` *inverts* it: globally `parameters` → `params`,
+  but for `call_function` `parameters` → `args` **and** `params` → `args`. A
+  reverse map from either table alone is wrong there. The loop already computes
+  the effective mapping; the check reads what it computed.
+- **`claimed` exists so the message can name what the caller actually wrote.**
+  `resolved` only remembers canonical names, and telling someone that
+  `relative_path` collided with `relative_path` is not an error anyone can act
+  on.
+- **`sorted()` makes the message order-independent too**, not just the verdict.
+  The same mistake gets the same sentence whichever way round it was sent, which
+  is the property the whole decision is about.
+- **It is presence-based, not value-based.** `{"path": A, "relative_path": A}` is
+  refused as well, even though nothing is lost. Exempting equal values would
+  mean the same call shape errors or passes depending on the data — exactly the
+  per-site subtlety that drifts back (ADR 0010 names this pattern).
+
+The envelope-level `function`/`f` and `params`/`p` or-chains in each dispatcher
+are a **different mechanism at a different layer** and are deliberately NOT
+covered: they are `a or b` expressions, not table lookups, and they stay
+first-wins.
+
+**This function is a HAND COPY in all ten hosts and cannot become a §8 block.**
+Its free names are each host's own alias tables — `PARAM_ALIASES`, plus
+`PARAM_ALIASES_BY_FUNC` in three — and `mcp-forge.py` takes the table as an
+argument instead, so the bodies are not copies that drifted but ten shapes that
+never agreed: nine distinct bodies over ten files, only `mcp-clangd.py` and
+`mcp-cuda.py` byte-identical. Two use tabs. When you change the rule, you change
+it nine times, and the gate below is what proves you did.
+
+Gated by `alias_collision_checks` in `Scripts/_mcp_smoke_test.py`, which drives
+all ten over live JSON-RPC in three halves — the refusal, a one-spelling control
+that catches a resolver flagging everything, and a coverage half running on all
+fifteen servers that fails if a file defines `_resolve_aliases` without a probe
+row. The WHY is frozen in `docs/adr/0015-ambiguity-is-the-defect.md`.
+
+---
+
 ---
 
 ## 8. Generated regions — one source per domain, fifteen copies, no import

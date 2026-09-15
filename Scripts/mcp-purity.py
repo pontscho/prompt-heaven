@@ -707,12 +707,22 @@ def _resolve_aliases(params: Any, function: Optional[str] = None) -> dict:
 
     func_aliases = PARAM_ALIASES_BY_FUNC.get(function or "", {})
     resolved: dict = {}
+    claimed: dict = {}
     for key, value in params.items():
         canonical = func_aliases.get(key) or PARAM_ALIASES.get(key, key)
-        # Bug #3: last-wins precedence (unified with the clangd/cuda resolvers).
-        # A later explicit key overrides an earlier alias that targets the same
-        # canonical name.
+        # Two spellings of one parameter is a caller error, not a precedence
+        # question. This used to be last-wins, "unified with the clangd/cuda
+        # resolvers" -- but that rule reads the WIRE ORDER, so the same two keys
+        # sent the other way round silently made a different call. Section 7c of
+        # Scripts/MCP_SKELETON.md carries the argument for all ten hosts.
+        if canonical in resolved:
+            first, second = sorted((claimed[canonical], key))
+            raise ValueError(
+                f"Ambiguous parameters: '{first}' and '{second}' both set "
+                f"'{canonical}'. Pass exactly one."
+            )
         resolved[canonical] = value
+        claimed[canonical] = key
 
     # `paths`/`path` are occasionally sent as a list (grep-style multi-root).
     # purity searches a single root, so normalize: a 1-element list collapses to
