@@ -24,12 +24,18 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      and falls back to a hostname heuristic when serverInfo cannot answer.  Both
      directions are pinned: the probe overriding the heuristic AND the heuristic
      catching an unreachable probe.
-  C  the two paging models behind ONE iterator.  Cloud pages by an opaque
+  C  THREE pagers, two of them behind ONE iterator.  Cloud pages by an opaque
      `nextPageToken` and has no total; DC pages by `startAt`/`total` and
      documents that a page may legitimately come back EMPTY and that `total` may
      move between pages.  Both stop conditions are gated for DC, both for Cloud,
      and `--limit` is checked to cap ACROSS pages (a limit honoured per page is
-     the classic version of this bug).
+     the classic version of this bug).  The third is the agile
+     `isLast`/`startAt` envelope behind `_paged_values`, which serves boards,
+     sprints and create metadata: it is gated for walking past page one, for
+     re-sending the caller's own query on every page, for stopping on an empty
+     page when the envelope carries neither flag -- and for REFUSING, rather
+     than growing without limit, against a server that ignores `startAt`
+     altogether.
   D  config resolution: flag > env > unset, the source string each value
      carries, and the fail-fast that must name both the variable and its flag.
   E  the two write guards: JIRA_READ_ONLY refusing every write subcommand, and
@@ -98,7 +104,7 @@ asserts the repo tree is untouched and that ZERO bytecode was written.
 Groups:
   A  auth header + URL joining
   B  deployment detection: probe, cache, heuristic fallback
-  C  search paging: Cloud token model, DC offset model, --limit
+  C  paging: Cloud token model, DC offset model, --limit, agile envelope
   D  configuration resolution and the fail-fast
   E  JIRA_READ_ONLY and --dry-run
   F  error mapping
@@ -345,6 +351,23 @@ def keys_of(rows):
     return [row.get("key") for row in rows]
 
 
+def agile_values(kind, start, count):
+    """`count` agile entries -- one page of boards, or one page of sprints."""
+    return [{"id": start + i, "name": "%s %d" % (kind, start + i)}
+            for i in range(count)]
+
+
+def query_of(call):
+    """The recorded URL's query string, flattened to first values.
+
+    A GET carries its parameters in the URL and not in `call.body`, so a paging
+    case against a GET endpoint has to read them back off the wire the way the
+    server would.
+    """
+    parsed = urllib.parse.parse_qs(urllib.parse.urlsplit(call.url).query)
+    return {key: values[0] for key, values in parsed.items()}
+
+
 def parse_args(mod, argv):
     return mod.build_parser().parse_args(argv)
 
@@ -558,12 +581,16 @@ def sprint_resolver(mod):
     Each scenario gets its own client, because the scripted transport is the
     second half of the assertion: a scenario that scripts one response and a
     resolver that makes two requests fails here rather than quietly reading a
-    board list it had no business asking for.
+    board list it had no business asking for.  Both pages carry `isLast`
+    because the real endpoints do, and the envelope flag is what tells a pager
+    the walk is over -- a fixture that omits it is not a faithful stand-in for
+    the server, it is a server that never says when it has finished.
     """
     def resolve(boards, sprints):
-        script = [response(mod, 200, {"values": boards})]
+        script = [response(mod, 200, {"values": boards, "isLast": True})]
         if sprints is not None:
-            script.append(response(mod, 200, {"values": sprints}))
+            script.append(response(mod, 200, {"values": sprints,
+                                              "isLast": True}))
         client, _t = client_with(mod, script, deployment=mod.SERVER)
         return client.active_sprint_id("PROJ")
     return resolve
@@ -991,6 +1018,141 @@ def group_c(suite, mod):
     suite.record(GC, "search-returns-an-iterator-and-no-total", problems,
                  detail=["Cloud has no total and DC calls it optional, so the "
                          "public return type deliberately cannot carry one"])
+
+    # -- boards and sprints page too --------------------------------------
+    #
+    # A third pager, behind the agile `values`/`isLast` envelope rather than
+    # either search model.  It fails differently and worse: a board or a sprint
+    # on page two comes back as an ABSENCE rather than as an error, so the
+    # caller cannot tell a short list from a complete one and `@active` either
+    # refuses on an ordinary project or resolves against the wrong board.
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": agile_values("board", 1, 50),
+                            "isLast": False}),
+        response(mod, 200, {"values": agile_values("board", 51, 10),
+                            "isLast": True}),
+    ], deployment="Server")
+    got = client.boards("PROJ")
+    queries = [query_of(call) for call in transport.calls]
+    starts = [q.get("startAt") for q in queries]
+    projects = [q.get("projectKeyOrId") for q in queries]
+    problems = []
+    if len(got) != 60:
+        problems.append("returned %d board(s), want 60" % len(got))
+    if len(transport.calls) != 2:
+        problems.append("made %d request(s), want 2" % len(transport.calls))
+    if starts != ["0", "50"]:
+        problems.append("startAt went %r, want ['0', '50']" % (starts,))
+    if projects != ["PROJ"] * len(queries):
+        problems.append("projectKeyOrId was not carried on every page: %r"
+                        % (projects,))
+    suite.record(GC, "boards-walks-past-one-page", problems,
+                 detail=["queries: %r" % (queries,),
+                         "50 boards on one project is not exotic -- every "
+                         "team that ever made a personal board is on that list"])
+
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": agile_values("sprint", 1, 50),
+                            "isLast": False}),
+        response(mod, 200, {"values": agile_values("sprint", 51, 10),
+                            "isLast": True}),
+    ], deployment="Server")
+    got = client.sprints(1698, "active")
+    queries = [query_of(call) for call in transport.calls]
+    starts = [q.get("startAt") for q in queries]
+    states = [q.get("state") for q in queries]
+    problems = []
+    if len(got) != 60:
+        problems.append("returned %d sprint(s), want 60" % len(got))
+    if len(transport.calls) != 2:
+        problems.append("made %d request(s), want 2" % len(transport.calls))
+    if starts != ["0", "50"]:
+        problems.append("startAt went %r, want ['0', '50']" % (starts,))
+    if states != ["active"] * len(queries):
+        problems.append("state was not carried on every page: %r" % (states,))
+    suite.record(GC, "sprints-walks-past-one-page", problems,
+                 detail=["queries: %r" % (queries,),
+                         "the caller's query has to be re-sent on every page: "
+                         "a pager that copies it once drops `state` on page "
+                         "two and hands back every closed sprint on the board"])
+
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": agile_values("board", 1, 3),
+                            "isLast": True}),
+    ], deployment="Server")
+    got = client.boards("PROJ")
+    problems = []
+    if len(got) != 3:
+        problems.append("returned %d board(s), want 3" % len(got))
+    if len(transport.calls) != 1:
+        problems.append("made %d request(s), want 1" % len(transport.calls))
+    suite.record(GC, "boards-single-page-makes-one-request", problems,
+                 detail=["the control for the two rows above: paging must not "
+                         "be bought with a gratuitous extra round trip on the "
+                         "common case, which is a board list that fits"])
+
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": agile_values("board", 1, 50)}),
+        response(mod, 200, {"values": []}),
+    ], deployment="Server")
+    got = client.boards("PROJ")
+    problems = []
+    if len(got) != 50:
+        problems.append("returned %d board(s), want 50" % len(got))
+    if len(transport.calls) != 2:
+        problems.append("made %d request(s), want 2" % len(transport.calls))
+    suite.record(GC, "boards-without-islast-stop-on-an-empty-page", problems,
+                 detail=["neither isLast nor total came back, so the empty "
+                         "page is the only stop condition left -- and a walk "
+                         "that does not terminate here is invisible to the "
+                         "caller, who sees a command that never returns"])
+
+    # -- and the walk is BOUNDED, because one server shape defeats all three
+    # stop conditions at once: a full page every time, no isLast, no total,
+    # and `startAt` ignored.  `following` then advances on every iteration, so
+    # the `following <= start` guard never fires either, and the walk grows
+    # until the process is killed -- measured at 5.58 GB after 30 minutes.
+    #
+    # The ceiling below belongs to the TRANSPORT, not to the code under test:
+    # a case that can only fail by hanging the suite is not a gate, so the
+    # scripted queue runs out an order of magnitude above any legitimate bound
+    # and the exception it raises is reported as "did not stop".
+    ceiling = 500
+    endless = response(mod, 200, {"values": agile_values("board", 1, 50)})
+    client, transport = client_with(mod, [endless] * ceiling,
+                                    deployment="Server")
+    bound = getattr(mod, "MAX_PAGES", None)
+    problems = []
+    try:
+        got = client.boards("PROJ")
+    except Exception as exc:
+        if not isinstance(exc, mod.JiraError):
+            problems.append("raised %s after %d request(s) -- the walk has no "
+                            "bound of its own, it stopped only because the "
+                            "transport refused to answer again"
+                            % (type(exc).__name__, len(transport.calls)))
+        else:
+            if bound is None:
+                problems.append("refused, but MAX_PAGES is not declared beside "
+                                "PAGE_SIZE, so the bound is a magic number")
+            elif len(transport.calls) != bound:
+                problems.append("made %d request(s), want MAX_PAGES (%d)"
+                                % (len(transport.calls), bound))
+            missing = missing_tokens(str(exc), ["boards for PROJ", "startAt"])
+            if missing:
+                problems.append("the refusal does not name %s: %r"
+                                % (missing, str(exc)))
+    else:
+        problems.append("returned %d value(s) after %d request(s) instead of "
+                        "refusing" % (len(got), len(transport.calls)))
+    suite.record(GC, "paged-values-refuses-a-server-that-never-ends", problems,
+                 detail=["requests made: %d (transport ceiling %d)"
+                         % (len(transport.calls), ceiling),
+                         "JiraError and not SetupError: the server answered, "
+                         "and the answer is bad news -- exit 1, not exit 2",
+                         "the refusal names the SUBJECT rather than the path, "
+                         "because that is the string every caller already "
+                         "passes and the rest of this file's errors print"])
 
     mod.reset_deployment_cache()
 
@@ -3013,9 +3175,14 @@ def group_m(suite, mod, workspace):
                          "mid-run"])
 
     # -- @active, at depth, against a PINNED board ---------------------------
+    #
+    # `isLast` for the same reason sprint_resolver carries it: a RoutedTransport
+    # answers every request on a route with the SAME page, so a sprint envelope
+    # that never says the walk is over describes a server that pages forever.
     client, transport = routed_client(
         mod, [("/board/1698/sprint", response(mod, 200,
-                                              {"values": [SPRINT_ONE]})),
+                                              {"values": [SPRINT_ONE],
+                                               "isLast": True})),
               ("/myself", response(mod, 200, DC_ME))],
         deployment=mod.SERVER)
     nested = {"assignee": "@me",
@@ -3048,6 +3215,48 @@ def group_m(suite, mod, workspace):
                                               if scenario[3] is not None
                                               else "a refusal naming %s"
                                               % list(scenario[4]))])
+
+    # -- and a sprint id that cannot become an int refuses the same way -----
+    #
+    # These two rows are deliberately NOT entries in SPRINT_SCENARIOS: that
+    # oracle catches a bare `Exception` and asserts on message tokens, so it
+    # cannot express the property being measured here, which is the exception
+    # TYPE.  `main()` maps SetupError and JiraError onto exit codes and lets
+    # everything else out as a traceback, so an id that reaches int() unguarded
+    # is the difference between a named refusal on stderr and a stack trace.
+    # The oracle is also shared with the group H mutant, and editing it would
+    # change what that control proves.
+    for cid, sprint in (("with-no-id",
+                         {"name": "Sprint 12", "state": "active"}),
+                        ("with-a-non-numeric-id",
+                         {"id": "not-a-number", "name": "Sprint 12",
+                          "state": "active"})):
+        client, _t = client_with(mod, [
+            response(mod, 200, {"values": [SCRUM_ONE], "isLast": True}),
+            response(mod, 200, {"values": [sprint], "isLast": True}),
+        ], deployment=mod.SERVER)
+        problems = []
+        try:
+            got = client.active_sprint_id("PROJ")
+        except Exception as exc:
+            if not isinstance(exc, mod.SetupError):
+                problems.append("raised %s(%s); every exception that is not a "
+                                "SetupError escapes main() as a traceback"
+                                % (type(exc).__name__, exc))
+            else:
+                missing = missing_tokens(str(exc), ["1698", "@active"])
+                if missing:
+                    problems.append("the refusal does not name %s: %r"
+                                    % (missing, str(exc)))
+        else:
+            problems.append("resolved to %r where the sprint carries no usable "
+                            "id" % (got,))
+        suite.record(GM, "active-sprint-%s-is-a-setup-error" % cid, problems,
+                     detail=["sprint: %r" % (sprint,),
+                             "the two branches are different exceptions from "
+                             "int() -- absent is a TypeError, non-numeric a "
+                             "ValueError -- and both have to land on the one "
+                             "type main() knows how to report"])
 
     # -- --dry-run -----------------------------------------------------------
     plain = os.path.join(os.path.realpath(workspace), "plain-profile.json")
@@ -3100,7 +3309,8 @@ def group_m(suite, mod, workspace):
     def respond(method, url, _body, _headers):
         seen.append((method, url))
         if "/board/1698/sprint" in url:
-            return response(mod, 200, {"values": [SPRINT_ONE]})
+            return response(mod, 200, {"values": [SPRINT_ONE],
+                                       "isLast": True})
         if "/myself" in url:
             return response(mod, 200, DC_ME)
         raise AssertionError("unrouted request: %s %s" % (method, url))
@@ -3244,8 +3454,8 @@ def group_i(suite, before, pyc_before, workspace):
 def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
-                    title="Jira CLI: auth, URL join, deployment probe, both "
-                          "paging models, config, write guards, error "
+                    title="Jira CLI: auth, URL join, deployment probe, the "
+                          "three pagers, config, write guards, error "
                           "mapping, Markdown rendering, the profile walk and "
                           "the create payload",
                     opts=opts, mode="grouped")

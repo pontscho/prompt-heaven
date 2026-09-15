@@ -137,6 +137,7 @@ USAGE = 2
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_LIMIT = 50
 PAGE_SIZE = 50
+MAX_PAGES = 100	# 5000 values -- far past any board, sprint or create screen
 
 # Retry ONLY 429 and 5xx.  Any other 4xx is a statement about the request, and
 # repeating it merely repeats the mistake.
@@ -785,20 +786,29 @@ class Jira:
 			return {"accountId": str(me.get("accountId") or "")}
 		return {"name": str(me.get("name") or me.get("key") or "")}
 
-	# -- create metadata: split endpoints first, legacy expand as fallback --
+	# -- the paged envelope behind createmeta, boards and sprints --------
 
 	def _paged_values(self, path: str, subject: str,
 			query: Optional[Dict[str, str]] = None) -> List[dict]:
 		"""Every `values` entry behind an isLast/startAt envelope.
 
-		Paged rather than capped because this walks CREATE-SCREEN FIELDS, and
-		a required field sitting on page two would go missing from a profile
-		with nothing to show that it had -- the exact failure this command
-		exists to prevent.
+		Paged rather than capped because a value on page two comes back as an
+		ABSENCE rather than as an error: the caller cannot tell a short list
+		from a complete one, and writes a profile from what came back.  A
+		required create-screen field is the sharpest example -- missing from a
+		profile with nothing to show that it had -- but a board and a sprint
+		fail in exactly the same direction.
+
+		Bounded at MAX_PAGES because one server shape defeats all three stop
+		conditions below at once -- a full page every time, no isLast, no total
+		and `startAt` ignored -- and the walk was measured accumulating 5.58 GB
+		over thirty minutes before the process was killed.  So it refuses
+		rather than grows, and the next reader is asked not to delete the
+		bound as paranoia.
 		"""
 		out = []		# type: List[dict]
 		start = 0
-		while True:
+		for _ in range(MAX_PAGES):
 			page = dict(query or {})
 			page["startAt"] = str(start)
 			page["maxResults"] = str(PAGE_SIZE)
@@ -816,6 +826,10 @@ class Jira:
 			if following <= start:
 				return out
 			start = following
+		raise JiraError("%s did not end after %d pages of %d — the server is "
+			"ignoring startAt" % (subject, MAX_PAGES, PAGE_SIZE))
+
+	# -- create metadata: split endpoints first, legacy expand as fallback --
 
 	def createmeta(self, project: str,
 			issuetype: Optional[str] = None) -> List[dict]:
@@ -876,17 +890,14 @@ class Jira:
 	# -- boards and sprints: the two values a profile needs to name ------
 
 	def boards(self, project: str) -> List[dict]:
-		payload = self.request("GET", AGILE + "/board",
-			query={"projectKeyOrId": project,
-				"maxResults": str(PAGE_SIZE)},
-			subject="boards for %s" % project) or {}
-		return list(payload.get("values") or [])
+		return self._paged_values(AGILE + "/board",
+			"boards for %s" % project,
+			{"projectKeyOrId": project})
 
 	def sprints(self, board_id: Any, state: str = "active") -> List[dict]:
-		payload = self.request("GET", AGILE + "/board/%s/sprint" % board_id,
-			query={"state": state, "maxResults": str(PAGE_SIZE)},
-			subject="%s sprints on board %s" % (state, board_id)) or {}
-		return list(payload.get("values") or [])
+		return self._paged_values(AGILE + "/board/%s/sprint" % board_id,
+			"%s sprints on board %s" % (state, board_id),
+			{"state": state})
 
 	def active_sprint_id(self, project: str,
 			board_id: Optional[Any] = None) -> int:
@@ -925,7 +936,13 @@ class Jira:
 			raise SetupError("board %s has %d active sprints, so \"%s\" is "
 				"ambiguous — give the id instead: %s"
 				% (board_id, len(open_sprints), SENTINEL_ACTIVE_SPRINT, listed))
-		return int(open_sprints[0].get("id"))
+		raw = open_sprints[0].get("id")
+		try:
+			return int(raw)
+		except (TypeError, ValueError):
+			raise SetupError("board %s has an active sprint whose id %r is "
+				"not a number, so \"%s\" cannot resolve — give the id instead"
+				% (board_id, raw, SENTINEL_ACTIVE_SPRINT))
 
 	# -- attachments: the one write whose body is not JSON ----------------
 

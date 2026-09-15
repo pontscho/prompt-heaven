@@ -223,13 +223,18 @@ SUITES = [
     ("jira_cli", run_jira_cli,
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "
-     "iterator, config precedence, JIRA_READ_ONLY, --dry-run, the five "
+     "iterator, the agile envelope walked past page one on boards AND sprints "
+     "with the caller's query re-sent on every page and the walk BOUNDED "
+     "against a server that ignores startAt, config precedence, "
+     "JIRA_READ_ONLY, --dry-run, the five "
      "error mappings, the multipart attachment body, the Markdown "
      "rendering: pipe-escaped cells, empty tables, no duplicated fields, the "
      "`.claude/jira.json` walk and its $HOME boundary, and the create payload: "
      "the one-level merge, alias resolution, NAME=VALUE at the first `=`, the "
      "system-field shaping table, and `@active` refusing every ambiguous "
-     "board/sprint configuration instead of guessing", 192),
+     "board/sprint configuration instead of guessing -- including a sprint "
+     "whose id cannot become an int, which has to refuse as a SetupError "
+     "rather than escape main() as a traceback", 199),
     # TYPED, and the count is a fixed case table plus ONE derived row: group C
     # sweeps every entry in the CLI's HANDLERS dict, but it records three cases
     # regardless of how many subcommands it finds, so adding a subcommand moves
