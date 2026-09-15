@@ -19,6 +19,7 @@ links:
   - 0007-a-path-spelled-deny-protects-the-spelling
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
   - 0010-a-handler-failure-must-reach-iserror
+  - 0017-a-silent-zero-is-the-defect
 ---
 
 # Scripts & MCP Servers
