@@ -153,6 +153,17 @@ BACKOFF_SECONDS = 1.0
 # so the longest silence this file can produce stays one a caller recognises.
 MAX_RETRY_SLEEP = 30.0
 
+# The only statuses on which createmeta() may try the LEGACY endpoint after the
+# split ones failed, and the list is short because it guards a SECOND REQUEST.
+# Each entry is a server saying "there is no such route here" in the only
+# vocabulary it has: 404 from a Jira older than DC 8.4, which never had the
+# split endpoints; 405 and 501 from a gateway that knows the path and not the
+# method.  Everything else is an answer about THIS request -- 401, 403, 429, a
+# 5xx, an anonymous fallthrough, an SSO login page, and every refusal this file
+# makes on its own terms, which carry no status at all -- and retrying one of
+# those does not discover anything, it just reports it against the wrong URL.
+CREATEMETA_FALLBACK_STATUSES = (404, 405, 501)
+
 # DC's search defaults to *navigable and get-issue defaults to *all, so naming
 # the fields is the only behaviour that means the same thing on both.
 # `reporter` is here because `get` RENDERS it: a rendered row whose field was
@@ -218,10 +229,21 @@ SYSTEM_OBJECT_FIELDS = ("issuetype", "priority", "assignee", "reporter")
 SYSTEM_ARRAY_FIELDS = ("components", "fixVersions", "versions")
 SYSTEM_LIST_FIELDS = ("labels",)
 
-# Started timestamps are `%Y-%m-%dT%H:%M:%S.%f%z` -- milliseconds, and a
-# +0000-style offset with NO colon.  Documented rather than reformatted: a
-# silent rewrite of a caller's timestamp is worse than a server-side rejection.
-STARTED_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
+# The SUBSET of SYSTEM_OBJECT_FIELDS whose value names a PERSON.  Held apart
+# rather than special-cased inside the table above, because the table is a
+# statement about SHAPE and this is a statement about ADDRESSABILITY: Cloud hid
+# `name` at the GDPR deprecation and addresses a user by `accountId` alone, so
+# {"name": VALUE} -- the one shape a bare NAME=VALUE can produce -- is a
+# guaranteed 400 there.  _shape() cannot make that call; it is a pure function
+# of (field, value) with no client and therefore no deployment.
+SYSTEM_USER_FIELDS = ("assignee", "reporter")
+
+# A `--started` timestamp is passed through to the server exactly as typed --
+# a silent rewrite of a caller's timestamp is worse than a server-side
+# rejection -- so the format it has to be in is stated where the caller can
+# read it, in the `--started` help, and nowhere else.  A constant here said
+# the same thing a second time and a full-file search found exactly one
+# occurrence of it: its own definition.
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +251,26 @@ STARTED_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
 # ---------------------------------------------------------------------------
 
 class JiraError(Exception):
-	"""A finding -- the server answered, and the answer is bad news (exit 1)."""
+	"""A finding -- the server answered, and the answer is bad news (exit 1).
+
+	`status` is the HTTP status that CAUSED the error, and it is None whenever
+	nothing about a status did -- a refusal this file made on its own terms.
+	It exists for exactly one reader: createmeta(), which falls back from the
+	split endpoints to the legacy one and has no POSITIVE tell for "this route
+	is gone", so it discriminates on what must NEVER be retried instead.
+
+	The three raises in _decode() below deliberately leave it None even though
+	a status is in hand, and that is the whole point of the wording above.
+	Each of them is diagnosed from a HEADER or from a BODY and fires on ANY
+	status -- an anonymous fallthrough is usually a 200, and an SSO login page
+	can perfectly well arrive with the proxy's own 404 on it.  Stamping that
+	404 onto the error would let a login page be read as a missing endpoint
+	and retried, which is the hole `status` was added to close.
+	"""
+
+	def __init__(self, message: str, status: Optional[int] = None):
+		Exception.__init__(self, message)
+		self.status = status
 
 
 class SetupError(Exception):
@@ -608,14 +649,32 @@ class Jira:
 		# 2. Content-Type BEFORE json.loads. Behind an SSO proxy the body is a
 		#    login page, and json.loads would report a syntax error at
 		#    character 0 instead of the redirect that actually happened.
+		#
+		#    When the header is PRESENT it decides. When it is ABSENT the BODY
+		#    decides, and that half is the repair: the guard used to require a
+		#    Content-Type, so the response most likely to BE a login page --
+		#    the one a bare proxy stripped every header off -- was the one that
+		#    skipped the guard and fell into json.loads, producing the exact
+		#    message this block exists to replace. Dropping the header term
+		#    outright would be wrong in the other direction: a Data Center
+		#    behind a minimal proxy answers JSON with no Content-Type at all,
+		#    and that is a configuration rather than a hypothesis. So what is
+		#    refused untyped is a body that never opened like JSON.
 		ctype = response.content_type
-		if response.body.strip() and ctype and ctype != "application/json":
+		body = response.body.strip()
+		if ctype:
+			wrong_shape = ctype != "application/json"
+		else:
+			wrong_shape = not body.startswith(b"{") \
+				and not body.startswith(b"[")
+		if body and wrong_shape:
+			shown = ctype or "untyped (no Content-Type header)"
 			snippet = " ".join(response.text[:200].split())
 			raise JiraError("HTTP %d from %s %s, but the body is %s, not JSON\n"
 				"  body: %s\n"
 				"  hint: got %s — you may be behind an SSO proxy, or the "
 				"base URL's context path is wrong"
-				% (response.status, method, url, ctype, snippet, ctype))
+				% (response.status, method, url, shown, snippet, shown))
 
 		if response.status >= 400:
 			raise self._error(response, method, url, subject)
@@ -663,7 +722,11 @@ class Jira:
 		if response.status == 429:
 			lines.append("  rate limited after %d attempt(s); Retry-After: %s"
 				% (MAX_ATTEMPTS, response.header("retry-after") or "absent"))
-		return JiraError("\n".join(lines))
+		# The status travels WITH the error.  This is the one construction site
+		# where it caused the error rather than merely accompanying it, which
+		# is what lets createmeta() below tell "there is no such route here"
+		# apart from every other reason a request can fail.
+		return JiraError("\n".join(lines), response.status)
 
 	# -- deployment ------------------------------------------------------
 
@@ -937,10 +1000,24 @@ class Jira:
 		404 either -- `/issue/createmeta` falls through to `/issue/{key}` and
 		comes back "Issue Does Not Exist", which is why the fallback goes in
 		this direction and not the other.
+
+		That last sentence is also why the fallback is keyed the way it is.
+		There is no clean POSITIVE tell for "this endpoint is absent", so the
+		question asked here is the INVERSE one: which errors must never be
+		retried?  A bare `except JiraError` answered "none", and it caught
+		every diagnosis _decode and _error raise -- an anonymous credential
+		refusal, an SSO login page, a 401 CAPTCHA lockout, a 429 whose retry
+		DOUBLES the request count that produced the rate limit, and the page
+		bound above, whose own docstring says it refuses rather than grows and
+		which this caller quietly converted into a fallback.  None of those
+		reached a user; a second request to a different URL did, and the error
+		finally reported named that URL instead.
 		"""
 		try:
 			return self._createmeta_split(project, issuetype)
-		except JiraError:
+		except JiraError as exc:
+			if exc.status not in CREATEMETA_FALLBACK_STATUSES:
+				raise
 			return self._createmeta_legacy(project, issuetype)
 
 	def _createmeta_split(self, project: str,
@@ -1827,6 +1904,40 @@ def _shape(field: str, value: str) -> Any:
 	return value
 
 
+def _refuse_a_user_name_on_cloud(client: Jira, field: str, value: str) -> None:
+	"""Refuse a literal person for a user field on Cloud, before sending it.
+
+	_shape() maps `assignee` and `reporter` to {"name": VALUE} on every
+	deployment, and user_ref() exists precisely because Cloud hid `name` at
+	the GDPR deprecation and addresses a user by `accountId` alone.  Both are
+	right about their own half; they contradict each other on exactly one
+	input, a LITERAL name reaching Cloud through --field, and Cloud answers it
+	with a 400 that names the field and not the reason.
+
+	The check cannot live in _shape(): that is a pure function of (field,
+	value) with no client and therefore no deployment.  This is the first
+	frame up the chain that has one.
+
+	It REFUSES rather than resolving.  Turning a name into an accountId means
+	a user search -- another round trip, an ambiguity somebody has to break,
+	and a second way to file the work at the wrong person -- where
+	--field-json says the id out loud and @me says "me" without asking anyone.
+
+	A sentinel passes through untouched: it leaves the shaping table a bare
+	string on purpose, and resolve_sentinels() below swaps in user_ref(),
+	which is already per-deployment and already correct on both.
+	"""
+	if field not in SYSTEM_USER_FIELDS or value in SENTINELS:
+		return
+	if client._deployment() != CLOUD:
+		return
+	raise SetupError("--field %s=%s cannot be sent to Cloud: it addresses a "
+		"user by accountId and has hidden \"name\", which is the only "
+		"shape a bare NAME=VALUE can produce — pass --field-json "
+		"%s='{\"accountId\": \"...\"}', or \"%s\" for yourself"
+		% (field, value, field, SENTINEL_ME))
+
+
 def resolve_sentinels(client: Jira, project: str, block: Dict[str, Any],
 		value: Any) -> Any:
 	"""Replace @me / @active anywhere in the payload, at any depth.
@@ -1850,12 +1961,17 @@ def resolve_sentinels(client: Jira, project: str, block: Dict[str, Any],
 
 
 def _create_fields(args: argparse.Namespace, block: Dict[str, Any],
-		project: str) -> Dict[str, Any]:
+		project: str, client: Jira) -> Dict[str, Any]:
 	"""The `fields` object: profile first, command line laid over it.
 
 	The order IS the contract.  A profile states what a project always wants;
 	a flag states what this one issue wants instead.  A default that could not
 	be overridden would be a cage rather than a default.
+
+	`client` is here for one question the shaping table cannot answer on its
+	own -- see _refuse_a_user_name_on_cloud above -- and it is a required
+	parameter rather than an optional one because a deployment check that can
+	be omitted is a deployment check that will be.
 	"""
 	aliases = block.get("aliases") or {}
 	fields = {}		# type: Dict[str, Any]
@@ -1873,6 +1989,10 @@ def _create_fields(args: argparse.Namespace, block: Dict[str, Any],
 	for raw in args.field or []:
 		name, value = _split_assignment(raw)
 		field = _resolve_alias(name, aliases)
+		# Before the table, not after: what the table would produce here is
+		# the very thing Cloud rejects, so there is nothing to inspect
+		# afterwards that is not already the wrong payload.
+		_refuse_a_user_name_on_cloud(client, field, value)
 		fields[field] = _shape(field, value)
 	for raw in args.field_json or []:
 		name, value = _split_assignment(raw)
@@ -2043,7 +2163,7 @@ def cmd_create(args: argparse.Namespace, client: Jira) -> int:
 	project = _profile_project(profile, args.project)
 	block = project_profile(profile, project)
 
-	fields = _create_fields(args, block, project)
+	fields = _create_fields(args, block, project, client)
 	_check_required(fields, block)
 	# Sentinels resolve even under --dry-run, and that is the point: a dry run
 	# that echoed `@active` back would confirm the spelling and nothing else.

@@ -45,7 +45,11 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      carries, and the fail-fast that must name both the variable and its flag.
   E  the two write guards: JIRA_READ_ONLY refusing every write subcommand, and
      --dry-run printing what WOULD be sent while sending nothing.  Both are
-     asserted with a call counter, not by reading the code.
+     asserted with a call counter, not by reading the code.  --dry-run is also
+     the instrument for one row that is not a write guard at all: `--started`
+     reaching the wire exactly as typed, which is what makes the timestamp
+     format a thing stated ONCE, in the help a caller can read, rather than
+     twice with one copy unreachable.
   F  error mapping, which is the whole difference between usable and
      infuriating: an anonymous 200, a 404 that means two different things, an
      HTML login page where JSON was promised, a CAPTCHA lockout, and a retry
@@ -55,7 +59,17 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      sleep.  Three more failures live here because they all end the same way,
      as a traceback where a message was owed: an exception whose text is
      empty, an output pipe the reader closed, and an id the response did not
-     carry being sent as the literal string `None`.
+     carry being sent as the literal string `None`.  Two more are about a
+     diagnosis that was made correctly and then thrown away.  `createmeta`
+     caught every JiraError on its way to the legacy endpoint, so an auth
+     refusal, a CAPTCHA lockout, a rate limit and the page bound all became a
+     second request to a different URL and were finally reported against it;
+     the discrimination is now an ALLOWLIST of statuses that mean "no such
+     route here", and the rows assert it as zero requests to that endpoint
+     rather than as an exception type, because the old behaviour raised a
+     JiraError too.  And the SSO-proxy guard required a Content-Type to fire,
+     so the response most likely to be a login page -- the one a bare proxy
+     stripped the headers off -- was the only one that skipped it.
   G  issue-key AND board-id validation -- a local, unambiguous error instead of
      a round trip that comes back as an ambiguous 404.  A board id is the
      sharper half: it is concatenated into a REST path (api_url urlencodes the
@@ -98,7 +112,14 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      into the wrong sprint and reports success, so the four ambiguous board /
      sprint configurations are asserted on their REFUSAL TEXT rather than on
      an exception type, and the guessing implementation is carried as a mutant
-     in group H.
+     in group H.  One row here is the other kind: a payload Cloud will not
+     take at all.  The shaping table says `assignee` is {"name": VALUE} and
+     `user_ref` exists because Cloud hid `name`; both are right about their
+     own half and they meet on one input, a literal name through --field.  It
+     fails CLOSED, so what is gated is the refusal and the pointer to
+     --field-json, and the control beside it holds `@me` and Data Center
+     harmless -- a refusal keyed on the FIELD rather than on the VALUE would
+     take the sentinel down with it.
 
 NEGATIVE CONTROL (group H) -- mandatory, explicit, named
 --------------------------------------------------------
@@ -387,6 +408,23 @@ def query_of(call):
 
 def parse_args(mod, argv):
     return mod.build_parser().parse_args(argv)
+
+
+def subcommand_help(mod, name):
+    """`jira.py NAME --help` as a USER would read it, or "".
+
+    The subparser is LOCATED by walking the top-level actions for the one
+    carrying a `choices` mapping, rather than reached through argparse's
+    private `_subparsers` attribute, and the text comes from `format_help()`
+    rather than from `action.help`: the raw help string still carries the
+    `%%` argparse has not expanded yet, so a row asking what a user SEES
+    would be reading the wrong copy of it.
+    """
+    for action in mod.build_parser()._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict) and name in choices:
+            return choices[name].format_help()
+    return ""
 
 
 def connected(argv, url=BASE_DC, token=TOKEN):
@@ -1600,6 +1638,45 @@ def group_e(suite, mod):
                      detail=text.splitlines()
                      + ["requests made: %d" % guard.calls])
 
+    # -- one fact, written down once, in the copy a user can reach -----------
+    # `--started`'s format was stated TWICE: as a module constant that a
+    # full-file search finds exactly once (its own definition) and again, by
+    # hand, in the argparse help.  The dead copy is deleted and the reachable
+    # one kept.  The halves below that are NOT the gate are named as such,
+    # because the obvious wrong repair is to make the constant reachable by
+    # turning it into a validator -- and the constant's own comment argued
+    # against that in as many words: a silent rewrite of a caller's timestamp
+    # is worse than a server-side rejection.
+    problems = problem_if(hasattr(mod, "STARTED_FORMAT"),
+                          "STARTED_FORMAT is back: the format is written down "
+                          "twice again, and the second copy is unreachable")
+    help_text = subcommand_help(mod, "worklog")
+    problems += ["the --started help omits %r" % t for t in missing_tokens(
+        help_text, ["%Y-%m-%dT%H:%M:%S.%f%z",
+                    "2026-08-26T09:00:00.000+0000"])]
+
+    odd = "not-a-timestamp-at-all"
+    with EnvSandbox():
+        with NetworkGuard(mod) as guard:
+            with captured() as (out, err):
+                code = mod.main(connected(["worklog", "PROJ-1234", "3h",
+                                           "--dry-run", "--started", odd]))
+    printed = fenced_block(out.getvalue(), "json")
+    if code != 0:
+        problems.append("a --started this script does not parse became exit "
+                        "%r: the deletion turned into a validator" % (code,))
+    elif odd not in printed:
+        problems.append("the caller's own timestamp did not reach the body "
+                        "verbatim: %r" % printed)
+    suite.record(GE, "the-started-format-is-written-down-once-and-it-is-"
+                 "the-help", problems,
+                 detail=["body: %s" % " ".join(printed.split()),
+                         "GATE: the dead constant stays deleted",
+                         "ANTI-VACUITY, not a gate: the help text survives the "
+                         "deletion and `--started` still reaches the wire "
+                         "unparsed -- validating it is a behaviour change with "
+                         "a standing argument against it, not a tidy-up"])
+
 
 # ---------------------------------------------------------------------------
 # F. error mapping
@@ -2060,6 +2137,234 @@ def group_f(suite, mod, workspace):
                          "and after -- ANTI-VACUITY, because a refusal that "
                          "fired on every entry would satisfy that row and "
                          "break createmeta outright"])
+
+    # -- the fallback that swallowed every finding on its way past -----------
+    # `createmeta` tries the split endpoints and falls back to the legacy
+    # expand call, and the fallback used to be a bare `except JiraError`.  That
+    # catches everything `_decode` and `_error` raise, so a diagnosis meant for
+    # the caller became a SECOND request to a different URL and was finally
+    # reported against an endpoint that was never the problem.
+    #
+    # There is no POSITIVE tell to key on: a DC that dropped the legacy route
+    # answers "Issue Does Not Exist" rather than 404, which is the whole reason
+    # the fallback runs in this direction.  So the discrimination is INVERTED
+    # -- an allowlist of statuses that mean "not here", and a re-raise for
+    # everything else -- and the rows below assert the re-raise as ZERO
+    # requests to the legacy endpoint rather than as an exception type, because
+    # the bare `except` ended in a JiraError too.  It just ended in the wrong
+    # one, from the wrong URL, after a round trip nobody asked for.
+
+    def legacy_calls(transport):
+        """Recorded requests to the LEGACY createmeta endpoint.
+
+        Matched on a path ENDING at `/issue/createmeta`: the split endpoints
+        live one and two segments below that, so a prefix test would count the
+        very requests the fallback exists to replace.
+        """
+        return [c.path for c in transport.calls
+                if c.path.endswith("/issue/createmeta")]
+
+    def endless_pages(count):
+        """`count` identical FULL pages: no isLast, no total, startAt ignored.
+
+        The one server shape that defeats all three of _paged_values' stop
+        conditions at once, which is the shape MAX_PAGES was written for.
+        """
+        page = {"values": [{"name": "Bug", "id": "10004"}] * mod.PAGE_SIZE}
+        return [response(mod, 200, page)] * count
+
+    problems = []
+    client, _t = client_with(mod, [
+        response(mod, 404, {"errorMessages": ["gone"]}),
+    ], deployment="Server")
+    try:
+        client.request("GET", mod.API + "/issue/PROJ-1", subject="PROJ-1")
+    except mod.JiraError as exc:
+        got = getattr(exc, "status", "<no status attribute>")
+        if got != 404:
+            problems.append("a JiraError built from a 404 carries status %r"
+                            % (got,))
+    else:
+        problems.append("a 404 did not raise at all")
+
+    client, _t = client_with(mod, endless_pages(mod.MAX_PAGES),
+                             deployment="Server")
+    try:
+        client._paged_values(mod.API + "/issue/createmeta/PROJ/issuetypes",
+                             "issue types for PROJ")
+    except mod.JiraError as exc:
+        got = getattr(exc, "status", "<no status attribute>")
+        if got is not None:
+            problems.append("the page-bound refusal carries status %r, so "
+                            "`status is None` is NOT what keeps it out of the "
+                            "fallback" % (got,))
+    else:
+        problems.append("the page bound did not refuse")
+
+    for label, kwargs in (
+            ("an anonymous 200", {"payload": {"name": "x"},
+                                  "headers": {"X-AUSERNAME": "anonymous"}}),
+            ("an HTML body", {"body": HTML_BODY, "ctype": "text/html"})):
+        client, _t = client_with(mod, [response(mod, 200, **kwargs)],
+                                 deployment="Server")
+        try:
+            client.request("GET", mod.API + "/myself")
+        except mod.JiraError as exc:
+            got = getattr(exc, "status", "<no status attribute>")
+            if got is not None:
+                problems.append("%s carries status %r: a HEADER- or "
+                                "BODY-derived diagnosis fires on any status, "
+                                "including a proxy's own 404, and keying a "
+                                "retry on it re-opens the hole" % (label, got))
+        else:
+            problems.append("%s was not diagnosed" % label)
+    suite.record(GF, "a-JiraError-carries-the-status-that-caused-it", problems,
+                 detail=["`status` is the HTTP status that CAUSED the error, "
+                         "and None when nothing about a status did",
+                         "the _decode raises are DELIBERATELY None even though "
+                         "a status is in hand: each is diagnosed from a header "
+                         "or a body and fires on ANY status, so a login page "
+                         "served with a 404 would otherwise be read as `this "
+                         "route is gone` and retried",
+                         "MAX_PAGES refuses with no status at all, which is "
+                         "what the fallback below reads to leave it alone"])
+
+    problems = []
+    walked_paths = []
+    for status in (401, 403, 429):
+        client, transport = client_with(
+            mod, [response(mod, status, {"errorMessages": ["no"]})]
+            * (mod.MAX_ATTEMPTS * 2), deployment="Server")
+        try:
+            got = client.createmeta("PROJ", None)
+        except mod.JiraError as exc:
+            if str(status) not in str(exc):
+                problems.append("the %d escaped as %r" % (status, str(exc)))
+        except Exception as exc:
+            problems.append("%d raised %s: %s"
+                            % (status, type(exc).__name__, exc))
+        else:
+            problems.append("%d came back as %r instead of reaching the "
+                            "caller" % (status, got))
+        retried = legacy_calls(transport)
+        walked_paths.append("%d: %d request(s), legacy %r"
+                            % (status, len(transport.calls), retried))
+        if retried:
+            problems.append("the %d was retried against the legacy endpoint "
+                            "%r, so the error finally reported names THAT url"
+                            % (status, retried))
+    suite.record(GF, "createmeta-does-not-retry-a-401-403-or-429", problems,
+                 detail=walked_paths
+                 + ["a 401's CAPTCHA hint and a 429's Retry-After line are "
+                    "diagnoses for the caller, and a rate-limited run that "
+                    "falls back DOUBLES the request count that produced the "
+                    "rate limit"])
+
+    client, transport = client_with(mod, endless_pages(mod.MAX_PAGES + 2),
+                                    deployment="Server")
+    problems = []
+    try:
+        got = client.createmeta("PROJ", None)
+    except mod.JiraError as exc:
+        if "did not end after" not in str(exc):
+            problems.append("what escaped is not the page bound: %r"
+                            % str(exc))
+    except Exception as exc:
+        problems.append("raised %s: %s" % (type(exc).__name__, exc))
+    else:
+        problems.append("returned %r: the bound refused and the fallback "
+                        "converted the refusal into a second walk" % (got,))
+    retried = legacy_calls(transport)
+    if retried:
+        problems.append("the page bound was retried against the legacy "
+                        "endpoint %r" % retried)
+    if len(transport.calls) != mod.MAX_PAGES:
+        problems.append("made %d request(s), want exactly MAX_PAGES (%d)"
+                        % (len(transport.calls), mod.MAX_PAGES))
+    suite.record(GF, "createmeta-does-not-retry-the-page-bound-refusal",
+                 problems,
+                 detail=["requests: %d, legacy: %r"
+                         % (len(transport.calls), retried),
+                         "the bound's own docstring says it refuses RATHER "
+                         "THAN GROWS, and this caller was the one place that "
+                         "sentence was false -- the refusal never reached a "
+                         "user, it reached a second endpoint"])
+
+    client, transport = client_with(mod, [
+        response(mod, 404, {"errorMessages": ["null for uri: .../issuetypes"]}),
+        response(mod, 200, {"projects": [{"issuetypes": [
+            {"name": "Bug",
+             "fields": {"summary": {"name": "Summary", "required": True}}}]}]}),
+    ], deployment="Server")
+    problems = []
+    try:
+        got = client.createmeta("PROJ", None)
+    except Exception as exc:
+        got = None
+        problems.append("a 404 on the split endpoint no longer falls back: "
+                        "%s(%s)" % (type(exc).__name__, exc))
+    if got is not None:
+        if [entry.get("issuetype") for entry in got] != ["Bug"]:
+            problems.append("the legacy shape did not normalise: %r" % (got,))
+        if len(legacy_calls(transport)) != 1:
+            problems.append("the legacy endpoint was not reached: %r"
+                            % [c.path for c in transport.calls])
+    suite.record(GF, "createmeta-still-falls-back-when-the-route-is-a-404",
+                 problems,
+                 detail=["paths: %r" % [c.path for c in transport.calls],
+                         "CONTROL: it passes before the re-raise above exists "
+                         "and after -- ANTI-VACUITY, because deleting the "
+                         "fallback outright would satisfy all three rows above "
+                         "and break every Jira older than DC 8.4"])
+
+    # -- the guard a header-less response walked straight past ---------------
+    client, _t = client_with(mod, [
+        response(mod, 200, body=HTML_BODY, ctype=None),
+    ], deployment="Server")
+    problems = []
+    text = ""
+    try:
+        client.request("GET", mod.API + "/myself")
+    except mod.JiraError as exc:
+        text = str(exc)
+        problems += ["the diagnosis omits %r" % t for t in missing_tokens(
+            text, ["SSO proxy", "context path"])]
+    except Exception as exc:
+        problems.append("raised %s: %s" % (type(exc).__name__, exc))
+    else:
+        problems.append("an HTML login page with no Content-Type decoded "
+                        "cleanly")
+    suite.record(GF, "an-untyped-HTML-body-is-still-diagnosed", problems,
+                 detail=[text or "<no error>"]
+                 + ["the guard used to require a Content-Type (`and ctype`), "
+                    "so the response most likely to BE a login page -- the one "
+                    "a bare proxy stripped the headers off -- was the one that "
+                    "skipped it and reached json.loads, which is the \"syntax "
+                    "error at character 0\" the guard exists to replace"])
+
+    problems = []
+    for label, raw in (("an object", "{\"name\": \"jdoe\"}"),
+                       ("an array", "[{\"name\": \"jdoe\"}]"),
+                       ("leading whitespace", "\n  {\"name\": \"jdoe\"}")):
+        client, _t = client_with(mod, [response(mod, 200, body=raw,
+                                                ctype=None)],
+                                 deployment="Server")
+        try:
+            got = client.request("GET", mod.API + "/myself")
+        except Exception as exc:
+            problems.append("%s with no Content-Type was refused: %s(%s)"
+                            % (label, type(exc).__name__, exc))
+        else:
+            if not got:
+                problems.append("%s decoded to %r" % (label, got))
+    suite.record(GF, "an-untyped-JSON-body-is-still-decoded", problems,
+                 detail=["CONTROL: it passes before the guard above is "
+                         "widened and after -- ANTI-VACUITY, because simply "
+                         "dropping the `and ctype` term would satisfy that row "
+                         "while refusing a DC behind a minimal proxy, which is "
+                         "a configuration rather than a hypothetical",
+                         "so when the header is absent the BODY decides: what "
+                         "does not open with `{` or `[` was never JSON"])
 
     mod.reset_deployment_cache()
 
@@ -3354,7 +3659,10 @@ def group_l(suite, mod, workspace):
                          "$HOME : %s" % home,
                          "found : %s" % path,
                          "planted: %s" % planted,
-                         "MEASURED, not gated.  jira.py:1584 stops the walk on "
+                         "MEASURED, not gated.  `_profile_path` in jira.py -- "
+                         "NAMED, never pinned by line number, because the one "
+                         "this row used to cite had already drifted twice "
+                         "before anyone read it back -- stops the walk on "
                          "`here == home` OR at the filesystem root, so the "
                          "$HOME boundary only binds when the cwd is under "
                          "$HOME; from anywhere else the walk climbs to `/`.  "
@@ -3486,9 +3794,25 @@ def create_args(mod, *tail):
     return parse_args(mod, connected(["create"] + list(tail)))
 
 
-def created_fields(mod, block, *tail):
-    """The `fields` object `create` would send, for a given profile block."""
-    return mod._create_fields(create_args(mod, *tail), block, "PROJ")
+def created_fields(mod, block, *tail, **kwargs):
+    """The `fields` object `create` would send, for a given profile block.
+
+    A client is CONSTRUCTED rather than defaulted away.  `_create_fields` has
+    to ask the deployment before it can let a literal user name through the
+    shaping table, and a parameter that could be omitted would make that
+    question skippable -- which is the same silent bypass the Cloud row below
+    exists to gate.  `Server` is the default because it is the deployment
+    every other row in this group is measured against, and because it is the
+    one where the table's answer is right.
+
+    The transport is EMPTY: nothing here may reach it, and an unscripted
+    request raises rather than answering.
+    """
+    client, _transport = client_with(
+        mod, [], deployment=kwargs.pop("deployment", None) or mod.SERVER)
+    if kwargs:
+        raise TypeError("unexpected: %r" % sorted(kwargs))
+    return mod._create_fields(create_args(mod, *tail), block, "PROJ", client)
 
 
 # A create payload's shape is decided by the FIELD and not by the value, so the
@@ -3986,21 +4310,85 @@ def group_m(suite, mod, workspace):
                  + ["one is where a human goes to read the ticket, the other "
                     "is a JSON endpoint"])
 
-    # -- the measured divergence, recorded rather than gated -----------------
-    suite.record(GM, "assignee-shaping-is-name-only-on-both-deployments", [],
-                 status=H.INFO,
-                 detail=["_shape('assignee', 'jdoe') -> %r"
-                         % (mod._shape("assignee", "jdoe"),),
-                         "user_ref() on Cloud -> {'accountId': ...}",
-                         "MEASURED, not gated.  jira.py:1685 shapes assignee "
-                         "and reporter as {'name': VALUE} for BOTH "
-                         "deployments, while jira.py:775 exists precisely "
-                         "because Cloud wants accountId and has hidden `name` "
-                         "-- so a literal `--field assignee=someone` on Cloud "
-                         "is a guaranteed 400 that `@me` would not have hit.  "
-                         "It fails CLOSED (nothing is written) and it is one "
-                         "deployment and one input form, so this is recorded "
-                         "for the author rather than gated against them."])
+    # -- the shaping table against the deployment it cannot see --------------
+    # `_shape` maps assignee and reporter to {"name": VALUE} for every
+    # deployment, and `user_ref` exists precisely because Cloud hid `name` at
+    # the GDPR deprecation and addresses a user by accountId alone.  Both are
+    # right about their own half and they contradict each other on one input:
+    # a LITERAL name, on Cloud, through `--field`.  It fails closed -- a 400
+    # naming the field and not the reason, nothing written -- so what is gated
+    # is the round trip and the diagnosis, not a mis-filed ticket.
+    #
+    # `_shape` is a pure function of (field, value) and cannot make this call,
+    # so the refusal lives one level up, in `_create_fields`, which is the
+    # first frame that has a client.
+    problems = []
+    refusals = []
+    for field in ("assignee", "reporter"):
+        text = setup_error(mod, lambda f=field: created_fields(
+            mod, {}, "--summary", "s", "--field", "%s=jdoe" % f,
+            deployment=mod.CLOUD))
+        if text is None:
+            problems.append("`--field %s=jdoe` was shaped and sent on Cloud, "
+                            "where {'name': ...} cannot resolve" % field)
+            continue
+        refusals.append(text)
+        problems += ["the refusal does not name %r: %r" % (t, text)
+                     for t in missing_tokens(text, [field, "jdoe",
+                                                    "--field-json"])]
+    suite.record(GM, "a-literal-user-name-on-cloud-is-refused-not-sent",
+                 problems,
+                 detail=(refusals or ["<no refusal>"])
+                 + ["exit 2 before the round trip, with the way through named "
+                    "-- rather than a user SEARCH, which is another request, "
+                    "another ambiguity to break, and a second way to file the "
+                    "work at the wrong person"])
+
+    problems = []
+    for deployment in (mod.SERVER, mod.CLOUD):
+        fields = created_fields(mod, {}, "--summary", "s",
+                                "--field", "assignee=@me",
+                                "--field", "customfield_11300=@active",
+                                deployment=deployment)
+        if fields.get("assignee") != mod.SENTINEL_ME:
+            problems.append("%s: `@me` did not survive _create_fields: %r"
+                            % (deployment, fields.get("assignee")))
+        if fields.get("customfield_11300") != mod.SENTINEL_ACTIVE_SPRINT:
+            problems.append("%s: `@active` did not survive: %r"
+                            % (deployment, fields.get("customfield_11300")))
+    dc = created_fields(mod, {}, "--summary", "s", "--field", "assignee=jdoe",
+                        deployment=mod.SERVER)
+    if dc.get("assignee") != {"name": "jdoe"}:
+        problems.append("Data Center stopped shaping a literal name: %r"
+                        % dc.get("assignee"))
+    suite.record(GM, "the-sentinels-and-Data-Center-are-untouched-by-it",
+                 problems,
+                 detail=["CONTROL: it passes before the refusal above exists "
+                         "and after -- ANTI-VACUITY, because a refusal keyed "
+                         "on the FIELD rather than on the value would take "
+                         "`@me` down with it on the one deployment where `@me` "
+                         "is the only spelling that works",
+                         "a sentinel leaves the table a bare string on "
+                         "purpose: resolve_sentinels swaps in user_ref(), "
+                         "which is already per-deployment and right on both"])
+
+    problems = []
+    unknown = sorted(set(mod.SYSTEM_USER_FIELDS)
+                     - set(mod.SYSTEM_OBJECT_FIELDS))
+    if unknown:
+        problems.append("SYSTEM_USER_FIELDS names %r, which the shaping table "
+                        "does not shape as an object at all -- so the refusal "
+                        "guards an input _shape() never produced" % unknown)
+    suite.record(GM, "the-user-field-list-is-a-subset-of-the-object-list",
+                 problems,
+                 detail=["SYSTEM_USER_FIELDS  : %r" % (mod.SYSTEM_USER_FIELDS,),
+                         "SYSTEM_OBJECT_FIELDS: %r"
+                         % (mod.SYSTEM_OBJECT_FIELDS,),
+                         "CONTROL: a drift guard, not a gate -- it cannot be "
+                         "observed red against the unfixed file because the "
+                         "narrower list does not exist there.  It is here "
+                         "because two hand-written tables that have to agree "
+                         "are exactly the pair that stops agreeing"])
 
     mod.reset_deployment_cache()
 

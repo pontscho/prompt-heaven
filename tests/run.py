@@ -242,7 +242,16 @@ SUITES = [
      "board list, an identity that resolves to nothing being refused rather "
      "than sent, and the three ways main() owed a message and produced a "
      "traceback instead: an unclamped Retry-After, an exception with no text, "
-     "and a reader that closed the pipe", 218),
+     "and a reader that closed the pipe -- plus the createmeta fallback that "
+     "used to swallow every finding on its way past, now keyed on an "
+     "allowlist of statuses that mean `no such route here` and asserted as "
+     "ZERO requests to the legacy endpoint for a 401, a 403, a 429 and the "
+     "page bound whose own docstring says it refuses rather than grows, the "
+     "SSO-proxy guard a response with NO Content-Type used to walk straight "
+     "past into json.loads, a literal user name refused before Cloud can "
+     "answer it with a 400 that names the field and not the reason, and one "
+     "timestamp format written down once in the copy a caller can read",
+     227),
     # TYPED, and the count is a fixed case table plus ONE derived row: group C
     # sweeps every entry in the CLI's HANDLERS dict, but it records three cases
     # regardless of how many subcommands it finds, so adding a subcommand moves
