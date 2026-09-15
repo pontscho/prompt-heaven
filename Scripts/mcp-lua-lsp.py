@@ -1851,7 +1851,7 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
     except RuntimeError as e:
         result = {"error": str(e)}
     except Exception as e:
-        log.debug(f"Unhandled exception in handler '{function}': {e}")
+        log.exception("Unhandled exception in handler '%s'", function)
         result = {"error": f"Internal error in '{function}': {type(e).__name__}: {e}"}
     return _serialize(function, result)
 
@@ -2174,7 +2174,7 @@ class McpServer:
                     return self._tool_error(msg_id, result)
                 return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
             except Exception as e:
-                log.debug(f"luals_call error: {e}")
+                log.exception("Unhandled exception in handle_luals_call")
                 return self._tool_error(msg_id, f"Error: {e}")
 
         return self._tool_error(

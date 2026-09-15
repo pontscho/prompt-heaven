@@ -736,7 +736,7 @@ class McpServer:
                 return self._tool_error(msg_id, result["error"])
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
-            log.debug(f"Handler '{name}' error: {e}")
+            log.exception("Unhandled exception in handler '%s'", name)
             return self._tool_error(msg_id, f"Error in {name}: {e}")
 
     async def run(self) -> None:

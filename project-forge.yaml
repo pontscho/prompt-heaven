@@ -162,6 +162,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|PAYLOAD|SHAPE|WIRE|skeleton'
 
+  handler_crash:
+    description: "The silent-crash gate: every Scripts/mcp-*.py tool-handler catch-all must leave a traceback at a level the default configuration emits. _mcp_logging.py sets WARNING with no flags, so a catch-all reporting a crashed handler with log.debug reports it to nobody -- six of the fifteen did exactly that, and they are precisely the _dispatch_tool family. The rule is the PROPERTY, not the spelling: log.exception qualifies, so does error/critical/warning with exc_info=True, while debug and info never do and exc_info=False never does. BOTH site layers are gated and DECLARED per server in a table rather than inferred -- the McpServer wrap, which all fifteen have, and the module-level handle_x_call dispatcher, which nine do -- and the six absences are recorded with WHICH of the two reasons applies, since absent-because-the-family and absent-because-this-one-does-not are different facts. One security clause, deliberately only one: the format string must be a literal, which catches the f-string accident that would interpolate a caller payload into a log that IS written, without re-implementing the wire-log suite's payload machinery at a site ADR 0011 declared out of scope. A synthetic control group plants each defect in turn: log.debug, log.error with no exc_info, an explicit exc_info=False, an f-string format, a bare except pass, a catch-all that returns but logs nothing, and a log.exception in a neighbouring function so the scoping is proven rather than assumed -- plus three correct forms it must stay silent on. AST only -- starts nothing, writes only its sandbox."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py handler_crash
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|CATCH-ALL|TRACEBACK|LOGGED|LITERAL|control'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]

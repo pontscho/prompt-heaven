@@ -2567,7 +2567,7 @@ class McpServer:
                     return self._tool_error(msg_id, result)
                 return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
             except Exception as e:
-                log.debug(f"cuda_call error: {e}")
+                log.exception("Unhandled exception in handle_cuda_call")
                 return self._tool_error(msg_id, f"Error: {e}")
 
         return self._tool_error(

@@ -171,13 +171,32 @@ and `mcp-lua-lsp.py`. `mcp-jenkins.py` names the predicate, `_is_error(payload)`
 That is fifteen servers and no fourth shape.
 
 **Raising and returning are two routes into the same predicate, not two
-mechanisms.** The wrap's own `except Exception` assigns `result = {"error": …}`,
-so a `raise` is simply another way to produce the dict the test then reads — which
-is why every one of the eleven does both, per site: `mcp-inspect.py` raises at 49
-sites and returns the dict at 4, `mcp-purity.py` 45 and 30, `mcp-tshark.py` 3 and
-30. Neither is the house style; what is not optional is that one of them happens.
+mechanisms.** The wrap's own `except Exception` reaches the flag by one of two
+routes: nine servers assign `result = {"error": …}`, which the predicate above
+then reads, and the six `_dispatch_tool`-shaped ones return `self._tool_error(…)`
+directly, which sets the flag without consulting the predicate at all. (This
+paragraph used to describe only the first route, as though it were the fleet's;
+it was false for those six from the day they were written, and the *conclusion*
+survived only because both routes reach the same flag.) Either way a `raise` is
+simply another way to produce the failure the wrap reports — which is why every
+one of the eleven does both, per site: `mcp-inspect.py` raises at 49 sites and
+returns the dict at 4, `mcp-purity.py` 45 and 30, `mcp-tshark.py` 3 and 30.
+Neither is the house style; what is not optional is that one of them happens.
 The illegal fourth is what this batch removed: returning a **pre-rendered failure
 string** the wrap cannot tell from a success.
+
+**That same catch-all must also reach the OPERATOR, and that is a separate
+invariant with its own gate.** A handler that crashed produced no answer anybody
+planned, so the one artefact worth keeping is where it happened — and the reply
+already carries the exception's type and text to the caller, so the traceback is
+the part that exists nowhere else. `Scripts/_mcp_logging.py:102` sets the level
+to `WARNING` when no flag is passed, so a catch-all logging at `log.debug` writes
+to nobody; six of the fifteen did exactly that, discarding the traceback with it,
+for as long as they had existed. The shape is `log.exception("literal", …)`, or
+an explicit `exc_info=True` at `warning` or above. **The format string must be a
+literal**, because the one log guaranteed to be written is the worst place to
+interpolate a payload. Gated per site, at both layers, by
+`tests/test_handler_crash.py`.
 
 **The predicate reads the TOP level only.** `mcp-jenkins.py` is the worked example
 in both directions: a top-level `error` key is a failure, and a nested one — real
@@ -859,6 +878,7 @@ drift committed into a server turns the fleet red.
 - [ ] `import logging`; module-level `log = logging.getLogger("SERVER_NAME")`; no `debug_log`, no `DEBUG`/`_log_file` globals
 - [ ] static `_result` / `_error` (legacy `_ok`/`_err` renamed); a tool-level `isError` envelope built either by a static `_tool_error` or inline at the wrap
 - [ ] **a handler failure REACHES the flag** — raise, or return `{"error": ...}`, or mark the text with `_ErrorText`; never a pre-rendered failure string the wrap cannot tell from a success (§3a)
+- [ ] **a handler CRASH reaches the operator** — every broad `except Exception` in the tool-call wrap and in the module-level dispatcher logs `log.exception("literal", ...)`, or `exc_info=True` at `warning` or above; never `log.debug`, which the default level drops (§3a — `tests/test_handler_crash.py` gates this per site)
 - [ ] `initialize` → `{protocolVersion, serverInfo, capabilities}`, version `"1.0.0"`
 - [ ] `ping` → `_result(msg_id, {})`; notifications → `None`; unknown → `-32601`
 - [ ] run() loop: readline on a dedicated `max_workers=1` executor, one task per message, `-32700`/`-32600` **answered**, readline and write guarded, every executor shut down (§5 — `tests/test_read_loop.py` gates this)

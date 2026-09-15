@@ -93,6 +93,26 @@ run):
                                                       sample lifted by script
                                                       and run through the same
                                                       analyser (AST-based, A-F)
+  handler_crash      tests/test_handler_crash.py      every Scripts/mcp-*.py
+                                                      tool-handler catch-all
+                                                      leaves a traceback at a
+                                                      level the default WARNING
+                                                      configuration emits --
+                                                      log.debug reaches nobody,
+                                                      and six servers used it.
+                                                      BOTH site layers are
+                                                      gated, the McpServer wrap
+                                                      and the module-level
+                                                      dispatcher, each DECLARED
+                                                      per server in a table
+                                                      rather than inferred from
+                                                      the fleet, plus one
+                                                      security clause: the
+                                                      format string must be a
+                                                      literal, so a payload
+                                                      cannot be interpolated
+                                                      into a log that IS
+                                                      written (AST-based, A-E)
   smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
                                                       invariants across the
                                                       whole server fleet
@@ -217,6 +237,10 @@ def run_wire_log(opts):
     return run_python_suite("test_wire_log", opts)
 
 
+def run_handler_crash(opts):
+    return run_python_suite("test_handler_crash", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -321,6 +345,16 @@ SUITES = [
      "the shape each site may log declared per server rather than inferred, "
      "and MCP_SKELETON.md's own sample lifted by script and gated the same way",
      53),
+    # TYPED for the same reason as the two above.  The count is 24 declared
+    # sites + 15 servers + 4 roster + 11 control + 4 hygiene: the site total is
+    # 15 layer-W plus 9 layer-D, so a server that gains or loses a catch-all
+    # moves it, which is the alarm working.
+    ("handler_crash", run_handler_crash,
+     "every MCP server's tool-handler catch-all leaves a traceback at a level "
+     "the default WARNING configuration emits -- at BOTH site layers, the "
+     "McpServer wrap and the module-level dispatcher, each declared per server "
+     "rather than inferred, with the format string required to be a literal so "
+     "a payload cannot be interpolated into a log that IS written", 58),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]
