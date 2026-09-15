@@ -9,8 +9,8 @@ version: 1
 #
 # Every syntax check compiles IN MEMORY from bytes and runs under `python3 -B`.
 # Never reintroduce `py_compile`: it writes __pycache__/*.pyc into the tree as a
-# side effect, two suites now assert the tree is bytecode-free, and the Bash
-# guard denies it outright.
+# side effect, every suite that snapshots bytecode asserts the tree stays
+# empty, and the Bash guard denies it outright.
 
 configuration:
   settings:

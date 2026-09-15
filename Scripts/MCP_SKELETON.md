@@ -750,11 +750,12 @@ name the marker decides which body is emitted.
 file holding an ordinary function; Python never learns the generator exists,
 there is no import, no `sys.path` entry, and no build step — the pasted code is
 committed, so a fresh clone runs. This is why the trick exists at all: an
-imported sibling module would write `Scripts/__pycache__` into a tree four
-suites assert is empty, would need a `sys.path` entry the test harness's
-`spec_from_file_location` never adds, and would move the helpers out of the
-module attributes `tests/test_mcp_footprint.py` reaches for. Generating keeps
-every one of those properties and still leaves one place to edit.
+imported sibling module would write `Scripts/__pycache__` into a tree every
+suite that snapshots bytecode asserts stays empty, would need a `sys.path`
+entry the test harness's `spec_from_file_location` never adds, and would move
+the helpers out of the module attributes `tests/test_mcp_footprint.py` reaches
+for. Generating keeps every one of those properties and still leaves one place
+to edit.
 
 ### The two things you actually do
 

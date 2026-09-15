@@ -2166,9 +2166,10 @@ def group_hygiene(suite, fixture_root, pyc_before, sandbox):
                  else ["new=%r touched=%r" % (new, touched)],
                  detail=["pyc before=%d after=%d" % (len(pyc_before),
                                                      len(pyc_after)),
-                         "note        : ZERO, not 'unchanged' -- a "
-                         "pre-existing file reads as 1 before / 1 after and "
-                         "sails through a delta check"])
+                         "note        : a DELTA -- new or touched since this "
+                         "suite started.  A file already in the tree reads as "
+                         "1 before / 1 after and is invisible here; the "
+                         "absolute form lives in the suites asserting zero"])
 
     outside = inside(FIXTURE_BASE, H.repo_path("Scripts"))
     suite.record(GG, "fixture root is outside the scanned server tree",

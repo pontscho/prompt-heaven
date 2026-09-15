@@ -184,11 +184,15 @@ Hard rule, enforced rather than hoped for:
 * `--whitebox` needs to import the hook module; it goes through
   `_harness.load_module_from_path()`, which pins `dont_write_bytecode` for the
   duration of the import.
-* Group D of `inspect_validate` and group I of `purity_lsp` assert this at
-  runtime. Both assert **zero** `.pyc`, not "the count did not change": a file
-  that already existed when the run started reads as "1 before, 1 after" and
-  sails straight through a delta check, which is exactly how one hid under
-  `Scripts/__pycache__` until it was found by hand.
+* Two kinds of runtime assertion back this up, and they are **not**
+  interchangeable. Most suites check a *delta* — that the run wrote no new and
+  touched no existing `.pyc` — which stays silent on a file that was already
+  there. A smaller set asserts **zero** absolutely, because a pre-existing file
+  reads as "1 before, 1 after" and sails straight through a delta check, which
+  is exactly how one hid under `Scripts/__pycache__` until it was found by
+  hand. `purity_lsp` group I is the absolute form; `inspect_validate` group D
+  is the delta form, split into a `pycache-new` and a `pycache-touched` case.
+  No count is given here on purpose: both sets move whenever a suite is added.
 
 Nothing under `Scripts/`, `ClaudeCode/`, `tests/` or the repo root is created
 or modified by a test run.
