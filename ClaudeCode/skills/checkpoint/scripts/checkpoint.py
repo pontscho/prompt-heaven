@@ -168,14 +168,24 @@ def require_file(path):
 
 def toc_rows(blocks):
     """One row per SESSION / MISSION block: (label, when, branch, start, end).
-    The when/branch fields come from the pipe-separated header, so the contract
-    is exactly three fields -- a pipe inside a branch name breaks the header
-    itself, not this parser."""
+
+    The when/branch fields come from the pipe-separated header, and the split is
+    BOUNDED at two so the third field keeps whatever it contains. This used to
+    be an unbounded split, on the argument that a pipe inside a branch name
+    breaks the header rather than this parser. True, and it hid the real cost:
+    git permits `|` in a ref name, and an unbounded split does not fail on one,
+    it SILENTLY TRUNCATES -- a session on `feat|x` was recorded as `feat`, in
+    the one artefact whose whole job is telling a cold reader where it is.
+
+    Bounding the split is what makes a delimiter reachable in a rendered cell,
+    so it is why `render_toc` escapes. The two changes are one change: before,
+    the table was safe only because this parse was lossy.
+    """
     rows = []
     for block in blocks:
         number = session_num(block)
         if number is not None:
-            fields = [field.strip() for field in header_of(block).split("|")]
+            fields = [field.strip() for field in header_of(block).split("|", 2)]
             fields += [""] * (3 - len(fields))
             rows.append(("S%03d" % number, fields[1], fields[2], block.start, end_of(block)))
         elif is_mission(block):
@@ -193,14 +203,38 @@ def block_labels(lines):
     return [row[0] for row in toc_rows(parse_blocks(lines))]
 
 
+def _toc_cell(value):
+    r"""Escape one cell so a value cannot open a column. Reversible: \\ \| \n \r \t.
+
+    The delimiter of this table is the pipe, so a pipe inside a value does not
+    produce a broken cell -- it produces a COLUMN, and the row stops matching
+    its header while staying valid markdown. That matters more here than almost
+    anywhere: this table's first reader is a cold model locating a block by the
+    Start and End columns, so a shifted row sends it to the wrong lines.
+
+    Same vocabulary as `Scripts/mcp-postgres.py:_escape_cell` and
+    `Scripts/mcp-tshark.py:_md_cell` -- one spelling across the whole tree. The
+    escape character is escaped FIRST; doing the delimiter first would let the
+    backslash pass re-escape what it just wrote.
+    """
+    text = str(value).replace("\\", "\\\\").replace("|", "\\|")
+    return text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
 def render_toc(rows, offset=0):
     """The TOC region as lines, markers included, padded so it reads straight
     out of an editor. Its HEIGHT depends only on the number of rows, never on
     the offset -- that is what lets `toc --write` account for the shift the TOC
-    itself causes in a second render instead of iterating to a fixed point."""
+    itself causes in a second render instead of iterating to a fixed point.
+
+    Cells are escaped BEFORE the widths are measured, because a width taken
+    from the raw value mis-pads every row that gained an escape. Escaping does
+    not change the row COUNT, so the height contract above is untouched.
+    """
     table = [list(TOC_COLUMNS)]
     for label, when, branch, start, end in rows:
         table.append([label, when, branch, str(start + offset), str(end + offset)])
+    table = [[_toc_cell(cell) for cell in row] for row in table]
     widths = [max(len(row[i]) for row in table) for i in range(len(TOC_COLUMNS))]
 
     def row_line(row):

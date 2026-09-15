@@ -9,18 +9,28 @@ row silently grows a column: still valid output, still parses, just not the
 table that was meant.  The model then reads one field's value under another
 field's name and has no way to know.
 
-MEASURED at the commit this suite was written against, five renderers exist in
-the tree and they split two ways:
+MEASURED over `Scripts/` AND `ClaudeCode/skills/*/scripts/`, six renderers exist
+and they split two ways:
 
   * `Scripts/mcp-postgres.py`  escapes, reversibly, and SAYS SO on the wire.
   * `ClaudeCode/skills/jira/scripts/jira.py`  escapes the pipe, deliberately
     not reversibly, and says so to nobody.
-  * `Scripts/mcp-tshark.py`  does not escape at all -- and it is the one whose
+  * `Scripts/mcp-tshark.py`  did not escape at all -- and it is the one whose
     cells carry packet bytes, which are by definition untrusted input.
+  * `ClaudeCode/skills/checkpoint/scripts/checkpoint.py`  renders the TOC that
+    tells a COLD MODEL which line range to read, and was safe only because its
+    own parser ate the delimiter first.
   * `Scripts/mcp-jenkins.py` and `Scripts/mcp-inspect.py` do not escape either
     and do not need to: their delimiter is whitespace, not `|`.
 
 That last pair is why this suite has two halves rather than one rule.
+
+The first draft of this docstring said FIVE, and the sweep behind it read only
+`Scripts/`.  That was a `Scripts/`-scoped measurement stated as a tree-wide one,
+and it hid the sixth renderer -- in the file whose output a cold model parses by
+offset.  The roster already reached outside `Scripts/` by hand for the Jira CLI,
+so the sweep's narrower root was an inconsistency with the table it backstops,
+not a considered scope.  Both roots are swept now.
 
 THE INVARIANT, AS ONE SENTENCE
 ------------------------------
@@ -109,10 +119,12 @@ defect as a false invariant:
      which is correct in a `|`-delimited world and wrong the moment the
      delimiter is whitespace, where a literal pipe resting in a cell would read
      as a separator and fail a row for being exactly what it declares.
-  3. **Only the five renderers in the table are read.**  Group E's sweep is the
-     backstop: it re-runs the `.ljust(`/`.rjust(` census that found them and
-     fails if a sixth file appears, so a new renderer cannot arrive unnoticed.
-     A renderer that aligns by some other means would escape that sweep.
+  3. **Only the renderers in the table are read.**  Group E's sweep is the
+     backstop: it re-runs the `.ljust(`/`.rjust(` census that found them, across
+     BOTH roots the roster spans, and fails if an undeclared file appears -- so a
+     new renderer cannot arrive unnoticed.  A renderer that aligns by some other
+     means would still escape that sweep, which is how the sixth was missed:
+     nothing was wrong with the tokens, the ROOT was too narrow.
   4. **`_cell`'s NULL discipline is not judged here.**  `Scripts/mcp-postgres.py`
      spells the literal string "NULL" as `\\NULL`, which the decoder in this file
      deliberately reports as MALFORMED -- because this file decodes
@@ -140,7 +152,9 @@ Groups:
   E  ROSTER   -- the table covers the tree, totals hold, no row may declare
                  STRUCTURE for a pipe-delimited renderer
   F  control  -- escapers with one defect each that the oracle MUST reject, and
-                 correct ones it must not
+                 correct ones it must not; plus the PAIRING control, where a
+                 parser and a renderer are combined four ways and only one
+                 combination is safe
   G  hygiene  -- writes nothing, no bytecode, no new repo paths, and every
                  module came from the live tree
 """
@@ -175,7 +189,7 @@ STRUCTURE = "STRUCTURE"
 
 # Declared totals, so a silent re-classification of one renderer trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_ESCAPED = 3
+DECLARED_ESCAPED = 4
 DECLARED_STRUCTURE = 2
 
 
@@ -225,9 +239,7 @@ RENDERERS = {
             "untrusted capture, emitted under -E quote=n. It is declared "
             "REVERSIBLE where jira is not, on the data rather than on taste: a "
             "backslash before a pipe is a stretch in a ticket title and "
-            "routine in a packet. The escaper name matches postgres's because "
-            "converging on the fleet's existing name is the cheaper half of "
-            "the fix"),
+            "routine in a packet"),
 
     "jira-cli": Row(
         path="ClaudeCode/skills/jira/scripts/jira.py", cls=ESCAPED,
@@ -245,6 +257,25 @@ RENDERERS = {
             "no tools/list to carry the scheme -- which means its escaping is "
             "documented to nobody, mitigated only by `\\|` being the spelling "
             "a markdown-literate reader guesses"),
+
+    "checkpoint": Row(
+        path="ClaudeCode/skills/checkpoint/scripts/checkpoint.py", cls=ESCAPED,
+        renderer="render_toc", escaper="_toc_cell", delim="|",
+        reversible=True,
+        desc_const=None, desc_tokens=(),
+        why="Its delimiter IS the pipe: a padded GFM table, and the one whose "
+            "first reader is a COLD MODEL reading a session block by the line "
+            "range in its own Start/End columns. Until the commit that added "
+            "`_toc_cell` it escaped nothing -- and was nonetheless safe, "
+            "because `toc_rows` split the block header on `|` UNBOUNDED, so a "
+            "branch named `feat|x` reached the renderer already truncated to "
+            "`feat`. That is the invariant being retired: SAFE BECAUSE THE "
+            "PARSER IS LOSSY. Bounding the split so the branch survives is "
+            "exactly what CREATES the reachability, which is why the parse fix "
+            "and the escaper are one change and not two. Out of group C by "
+            "construction, like the Jira CLI: a skill script has no tools/list "
+            "to carry a scheme -- but unlike jira its reader is the model this "
+            "repo ships, so the scheme is documented in the skill body instead"),
 
     "mcp-jenkins": Row(
         path="Scripts/mcp-jenkins.py", cls=STRUCTURE,
@@ -279,6 +310,7 @@ NO_DESC = "TOOL-DESCRIPTION-NOT-FOUND"
 DELIM_IS_PIPE = "STRUCTURE-ROW-RENDERS-PIPE-SEPARATORS"
 NO_FENCE = "FENCE-HELPER-NOT-FOUND"
 NOT_DECLARED = "RENDERER-NOT-IN-TABLE"
+BRANCH_LOST = "BRANCH-DID-NOT-ROUND-TRIP"
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +342,35 @@ def added_pipes(text, supplied):
     misdeclared as STRUCTURE adds one per column boundary and is caught.
     """
     return text.count("|") - supplied
+
+
+def split_cells(line):
+    """Split a rendered `| a | b |` row on UNESCAPED delimiters.
+
+    This is the work a READER has to do, so the suite does it rather than
+    reaching for `str.split("|")` -- which is the very mistake the escaping
+    exists to prevent, and which would make an escaped cell look like two.
+    The leading and trailing empties a `| ... |` row produces are dropped.
+    """
+    cells = []
+    buf = []
+    index = 0
+    while index < len(line):
+        ch = line[index]
+        if ch == "\\" and index + 1 < len(line):
+            buf.append(ch)
+            buf.append(line[index + 1])
+            index += 2
+            continue
+        if ch == "|":
+            cells.append("".join(buf))
+            buf = []
+            index += 1
+            continue
+        buf.append(ch)
+        index += 1
+    cells.append("".join(buf))
+    return [cell.strip() for cell in cells[1:-1]]
 
 
 # The real shape of the defect, kept in the words tests/test_jira_cli.py:429
@@ -514,6 +575,18 @@ RND_BENIGN = [["plain", "harmless"]]
 RND_NASTY = [["plain", "pipe|here \\ back\nand a newline"]]
 
 
+def _render_checkpoint(module, headers, rows):
+    """`render_toc` takes 5-tuples and returns LINES, not one string.
+
+    The two probe columns map onto When and Branch, the only two fields that
+    carry free text -- the other three are generated (`S%03d` and two line
+    numbers) and can carry nothing a caller chose.
+    """
+    mapped = [("S%03d" % (index + 1), row[0], row[1], 1, 2)
+              for index, row in enumerate(rows)]
+    return "\n".join(module.render_toc(mapped))
+
+
 def group_rendered(suite, loaded):
     """B. a cell's CONTENT must not change the table's structure.
 
@@ -540,6 +613,8 @@ def group_rendered(suite, loaded):
                 try:
                     if key == "mcp-postgres":
                         text = _render_postgres(got.module, RND_HEADERS, data)
+                    elif key == "checkpoint":
+                        text = _render_checkpoint(got.module, RND_HEADERS, data)
                     else:
                         text = got.renderer(RND_HEADERS, data)
                 except Exception as exc:                      # pragma: no cover
@@ -563,6 +638,66 @@ def group_rendered(suite, loaded):
                      brief="%s | %s | %s"
                            % (H.FAIL if problems else H.PASS, key,
                               "forged" if problems else "structure held"))
+    case_checkpoint_coupling(suite, loaded)
+
+
+# Git permits `|` in a ref name -- check-ref-format forbids space, `~^:?*[\` and
+# the control characters, and not this one -- so `git checkout -b 'feat|x'` is
+# legal and this header is not a contrived input.
+CPT_BRANCH = "feat|with-pipe"
+CPT_BODY = [
+    "# Session Checkpoint",
+    "",
+    "## SESSION S001 | 2026-09-15 07:55 | " + CPT_BRANCH,
+    "",
+    "body",
+]
+
+
+def case_checkpoint_coupling(suite, loaded):
+    """B, continued: the TOC's PARSER and its RENDERER judged together.
+
+    The other group-B cases hand a renderer a cell directly.  This one feeds the
+    real `toc_rows` a real block header, because on this renderer the defect was
+    never in one function.  An unbounded split made an unescaped renderer look
+    safe -- the pipe never reached a cell, so the table was always well-formed
+    and always named the wrong branch.  Bounding the split is what CREATES the
+    reachability.  So the two assertions are made on one run: the table's
+    separator count is uniform, AND the Branch cell decodes back to the name the
+    header carried.  Either half alone can be satisfied by a defect.
+    """
+    got = loaded.get("checkpoint")
+    detail = ["branch      : %r" % CPT_BRANCH,
+              "header      : %r" % CPT_BODY[2]]
+    if got is None or got.module is None:
+        suite.record(GB, "checkpoint: the parse and the render, together",
+                     ["%s: checkpoint did not load" % NO_MODULE], detail=detail)
+        return
+    module = got.module
+    problems = []
+    rows = module.toc_rows(module.parse_blocks(list(CPT_BODY)))
+    region = [line for line in module.render_toc(rows) if line.startswith("|")]
+    counts = [unescaped_pipes(line) for line in region]
+    if len(set(counts)) != 1:
+        problems.append("%s: separators per table line are %r -- a cell opened "
+                        "a column" % (COLUMN_FORGED, counts))
+    branch_cells = [split_cells(line)[2] for line in region[2:]]
+    decoded = [decode_cell(cell)[0] for cell in branch_cells]
+    if decoded != [CPT_BRANCH]:
+        problems.append(
+            "%s: the Branch cell decodes to %r but the header carried %r, so "
+            "the TOC names a branch that does not exist"
+            % (BRANCH_LOST, decoded, [CPT_BRANCH]))
+    detail += ["parsed rows : %r" % (rows,),
+               "branch cell : %r" % branch_cells,
+               "decoded     : %r" % decoded,
+               "separators  : %r" % counts]
+    detail += ["  " + line for line in region]
+    suite.record(GB, "checkpoint: the parse and the render, together", problems,
+                 detail=detail,
+                 brief="%s | checkpoint-coupling | %s"
+                       % (H.FAIL if problems else H.PASS,
+                          "half-fixed" if problems else "both halves hold"))
 
 
 def group_documented(suite, loaded):
@@ -664,24 +799,45 @@ def group_structure(suite, loaded):
                               "misdeclared" if problems else "no pipe columns"))
 
 
-# The census that found these five: `.ljust(`/`.rjust(` across Scripts/, plus
-# postgres's unpadded DELIM.join.  Re-run every time, so a sixth renderer
-# cannot arrive unnoticed.
+# The census that found these six: `.ljust(`/`.rjust(` across BOTH roots the
+# roster spans, plus postgres's unpadded DELIM.join and jira's `---` GFM table,
+# neither of which pads.  Re-run every time, so a seventh cannot arrive unnoticed.
+#
+# The roots are two because the ROSTER is two.  It reached outside `Scripts/` by
+# hand for the Jira CLI while this sweep read `Scripts/` only, and that gap is
+# exactly what hid `checkpoint.py`: a padded pipe table using the very tokens
+# swept for, sitting in a directory not swept.  A backstop narrower than the
+# table it backs is not a backstop.
 ALIGN_TOKENS = (".ljust(", ".rjust(")
-SWEEP_ROOT = "Scripts"
-SWEEP_EXPECTED = {"mcp-inspect.py", "mcp-jenkins.py", "mcp-tshark.py"}
+SWEEP_ROOTS = ("Scripts", "ClaudeCode/skills")
+SWEEP_EXPECTED = {
+    "Scripts/mcp-inspect.py",
+    "Scripts/mcp-jenkins.py",
+    "Scripts/mcp-tshark.py",
+    "ClaudeCode/skills/checkpoint/scripts/checkpoint.py",
+}
 
 
 def _sweep():
-    root = H.repo_path(SWEEP_ROOT)
+    """Aligning .py files under the swept roots, as repo-relative paths.
+
+    Repo-relative rather than a bare filename: two roots can hold the same
+    basename, and a collision would let a declared renderer vouch for an
+    undeclared one.
+    """
+    repo = os.path.abspath(H.REPO_ROOT)
     hits = set()
-    for name in sorted(os.listdir(root)):
-        if not name.endswith(".py"):
-            continue
-        with open(os.path.join(root, name), encoding="utf-8") as fh:
-            source = fh.read()
-        if any(tok in source for tok in ALIGN_TOKENS):
-            hits.add(name)
+    for root in SWEEP_ROOTS:
+        base = H.repo_path(*root.split("/"))
+        for dirpath, _dirs, names in os.walk(base):
+            for name in sorted(names):
+                if not name.endswith(".py"):
+                    continue
+                full = os.path.join(dirpath, name)
+                with open(full, encoding="utf-8") as fh:
+                    source = fh.read()
+                if any(tok in source for tok in ALIGN_TOKENS):
+                    hits.add(os.path.relpath(full, repo).replace(os.sep, "/"))
     return hits
 
 
@@ -698,12 +854,14 @@ def group_roster(suite, loaded):
         if gone:
             problems.append("%s: declared but no longer aligning: %s"
                             % (NOT_DECLARED, ", ".join(gone)))
-    suite.record(GE, "the alignment sweep finds no sixth renderer", problems,
+    suite.record(GE, "the alignment sweep finds no undeclared renderer", problems,
                  detail=["tokens      : %s" % ", ".join(ALIGN_TOKENS),
+                         "roots       : %s" % ", ".join(SWEEP_ROOTS),
                          "found       : %s" % ", ".join(sorted(hits)),
-                         "note        : postgres aligns nothing -- it joins on "
-                         "DELIM unpadded, deliberately, so it is in the table "
-                         "by name rather than by this sweep"])
+                         "note        : postgres and jira align nothing -- one "
+                         "joins on DELIM unpadded and the other emits a `---` "
+                         "GFM rule, so both are in the table by name rather "
+                         "than by this sweep"])
 
     esc = sorted(k for k, r in RENDERERS.items() if r.cls == ESCAPED)
     stc = sorted(k for k, r in RENDERERS.items() if r.cls == STRUCTURE)
@@ -802,6 +960,119 @@ def ctl_good_verbose(text):
     return "".join(out)
 
 
+# ---------------------------------------------------------------------------
+# The PAIRING control, and it is the one that earns its place.
+#
+# The checkpoint TOC's defect lived in TWO functions and in neither of them
+# alone.  A lossy parse makes an unescaped renderer look safe; an escaping
+# renderer makes a lossy parse look harmless.  Both of those satisfy the
+# SEPARATOR assertion while failing the round trip, so a case checking only the
+# column count would have blessed either -- which is what happened for as long
+# as the file existed.
+#
+# The fourth combination is the one worth reading twice, and it was measured
+# rather than predicted: bounding the split WITHOUT adding the escaper fails
+# BOTH assertions.  The branch survives the parse and the raw render loses it
+# again, to a reader splitting on the unescaped pipe.  Fixing the parser alone
+# is not a partial fix; it is strictly worse than the state it replaces, and
+# that is the whole reason the parse fix and the escaper are one change.
+#
+# These are copies of the OLD behaviour rather than reads of the live file, on
+# purpose: they keep asserting the pairing after the live file is fixed, which a
+# case built from the live file cannot do.
+# ---------------------------------------------------------------------------
+
+def ctl_parse_unbounded(header):
+    """The OLD `toc_rows` split: `header.split("|")` with no maxsplit.
+
+    A branch named `feat|with-pipe` arrives as `feat`.  The renderer downstream
+    then has nothing to escape, which is exactly why the table looked correct.
+    """
+    fields = [f.strip() for f in header.split("|")]
+    fields += [""] * (3 - len(fields))
+    return fields[2]
+
+
+def ctl_parse_bounded(header):
+    """The fixed split: everything after the second `|` IS the branch."""
+    fields = [f.strip() for f in header.split("|", 2)]
+    fields += [""] * (3 - len(fields))
+    return fields[2]
+
+
+def ctl_render_raw(cells):
+    """The OLD `render_toc` row: join on `" | "`, escape nothing."""
+    return "| " + " | ".join(cells) + " |"
+
+
+def ctl_render_escaped(cells):
+    """The same row with the fleet's escaping applied to each cell first."""
+    return "| " + " | ".join(ctl_good(c) for c in cells) + " |"
+
+
+# (parse, render, name, must the branch round-trip?, must the row stay uniform?)
+PAIRS = [
+    (ctl_parse_unbounded, ctl_render_raw, "lossy-parse-and-raw-render",
+     False, True),
+    # MEASURED, not assumed, and it is the sharpest row here: bounding the split
+    # alone fails BOTH assertions.  The branch survives the parse and the raw
+    # render loses it again, because a reader splitting on unescaped pipes reads
+    # `feat` out of a forged column -- so fixing the parser on its own is not a
+    # partial fix, it is a worse state than the original.
+    (ctl_parse_bounded, ctl_render_raw, "fixed-parse-and-raw-render",
+     False, False),
+    (ctl_parse_unbounded, ctl_render_escaped, "lossy-parse-and-escaped-render",
+     False, True),
+    (ctl_parse_bounded, ctl_render_escaped, "fixed-parse-and-escaped-render",
+     True, True),
+]
+
+
+def case_pairing_control(suite):
+    """F, continued: three of four combinations are wrong, each in its own way."""
+    header = "SESSION S001 | 2026-09-15 07:55 | " + CPT_BRANCH
+    safe = 0
+    for parse, render, name, want_trip, want_uniform in PAIRS:
+        cells = ["S001", "2026-09-15 07:55", parse(header), "1", "2"]
+        line = render(cells)
+        want_separators = len(cells) + 1
+        uniform = unescaped_pipes(line) == want_separators
+        trip = decode_cell(split_cells(line)[2])[0] == CPT_BRANCH
+        problems = []
+        if trip != want_trip:
+            problems.append("%s: round-trip=%r, declared %r (cell %r)"
+                            % (BRANCH_LOST, trip, want_trip,
+                               split_cells(line)[2]))
+        if uniform != want_uniform:
+            problems.append("%s: %d separator(s), declared %s%d"
+                            % (COLUMN_FORGED, unescaped_pipes(line),
+                               "" if want_uniform else "NOT ", want_separators))
+        if trip and uniform:
+            safe += 1
+        suite.record(GF, "pair-" + name, problems,
+                     detail=["header      : %r" % header,
+                             "branch      : %r" % parse(header),
+                             "rendered    : %r" % line,
+                             "round-trip  : %r (declared %r)" % (trip, want_trip),
+                             "uniform     : %r (declared %r)"
+                             % (uniform, want_uniform)],
+                     brief="%s | pair-%s | %s"
+                           % (H.FAIL if problems else H.PASS, name,
+                              "as declared" if not problems else "drifted"))
+
+    suite.record(GF, "only the PAIR is safe",
+                 [] if safe == 1
+                 else ["%d of %d combinations satisfied BOTH assertions; "
+                       "exactly one may" % (safe, len(PAIRS))],
+                 detail=["combinations: %d" % len(PAIRS),
+                         "both-hold   : %d" % safe,
+                         "note        : this is the case the live suite cannot "
+                         "make. Once the file is fixed every live assertion "
+                         "passes, and nothing would then show that the two "
+                         "halves are load-bearing TOGETHER rather than "
+                         "separately"])
+
+
 CONTROLS = [
     # (fn, must the oracle complain?, must reversibility fail?)
     (ctl_ignores_pipe, True, True),
@@ -849,6 +1120,8 @@ def group_control(suite):
                          "silently accepted everything would be "
                          "indistinguishable from a fleet that already escapes"])
 
+    case_pairing_control(suite)
+
 
 def group_hygiene(suite, loaded, pyc_before, tree_before):
     """G. writes nothing, no bytecode, no new paths, live modules only."""
@@ -870,7 +1143,7 @@ def group_hygiene(suite, loaded, pyc_before, tree_before):
                  else ["new=%r touched=%r" % (new, touched)],
                  detail=["pyc before=%d after=%d"
                          % (len(pyc_before), len(pyc_after)),
-                         "note        : this suite IMPORTS five modules, so "
+                         "note        : this suite IMPORTS six modules, so "
                          "this case is load-bearing here rather than "
                          "ceremonial"])
 
