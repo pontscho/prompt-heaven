@@ -115,6 +115,15 @@ class Server:
 
     def start(self):
         path = os.path.join(SCRIPT_DIR, self.cfg["file"])
+        # No `env=` and no `-B` here, and that is not an oversight waiting to be
+        # patched.  A server runs as __main__, which CPython never caches, and
+        # the generated-region architecture means it imports no sibling from
+        # this repo -- so there is nothing here for CPython to write a .pyc for.
+        # MEASURED, not assumed: a standalone run of this file with
+        # PYTHONDONTWRITEBYTECODE unset starts all fifteen servers and leaves
+        # zero .pyc in the tree.  If a server ever grows a repo-local import,
+        # this stops being true and the five absolute-zero suites are what will
+        # say so.
         self.proc = subprocess.Popen(
             launch_prefix(self.cfg) + [path] + self.cfg["args"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
