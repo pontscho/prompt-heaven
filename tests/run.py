@@ -219,8 +219,12 @@ SUITES = [
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "
      "iterator, config precedence, JIRA_READ_ONLY, --dry-run, the five "
-     "error mappings, the multipart attachment body, and the Markdown "
-     "rendering: pipe-escaped cells, empty tables, no duplicated fields", 149),
+     "error mappings, the multipart attachment body, the Markdown "
+     "rendering: pipe-escaped cells, empty tables, no duplicated fields, the "
+     "`.claude/jira.json` walk and its $HOME boundary, and the create payload: "
+     "the one-level merge, alias resolution, NAME=VALUE at the first `=`, the "
+     "system-field shaping table, and `@active` refusing every ambiguous "
+     "board/sprint configuration instead of guessing", 192),
     ("checkpoint", run_checkpoint,
      "checkpoint.py section reader + TOC writer: Start/End land on the block "
      "and nothing else, the numbers describe the file AFTER the region was "

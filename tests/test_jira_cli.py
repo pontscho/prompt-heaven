@@ -59,14 +59,34 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      which is why `get` is asserted with a COUNT of the key and the summary
      rather than a presence check.  The group also pins the two field lists
      apart in the direction that put `components` back into a rendered issue.
+  L  profile discovery -- the walk that decides which project's defaults a
+     `create` inherits.  Its outcomes are asymmetric on purpose and each is
+     gated in the direction that can do damage: no profile anywhere is FINE, a
+     profile NAMED and missing is an error (naming a path is a claim that it
+     exists), malformed JSON is an error that has to name the file, and the
+     walk stops at $HOME rather than climbing into whatever a shared parent
+     directory happens to hold.  The one-level `fields` / `aliases` merge is
+     here too: a deep merge would reach inside a Jira field payload that was
+     written to be sent whole.
+  M  the `create` payload.  Every row here is a thing that files a ticket
+     WRONG rather than not at all: profile defaults that cannot be overridden
+     from the command line, an alias that resolves on one side only, a
+     `NAME=VALUE` split that truncates a value at its own `=`, a system field
+     sent in the wrong shape, and -- the expensive one -- `@active` guessing
+     when the answer is ambiguous.  A sprint picked by guess files the work
+     into the wrong sprint and reports success, so the four ambiguous board /
+     sprint configurations are asserted on their REFUSAL TEXT rather than on
+     an exception type, and the guessing implementation is carried as a mutant
+     in group H.
 
 NEGATIVE CONTROL (group H) -- mandatory, explicit, named
 --------------------------------------------------------
 An oracle that cannot fail proves nothing about the code it blesses.  Group H
-feeds the SAME oracle functions groups A/C/G use a set of deliberately BROKEN
+feeds the SAME oracle functions groups A/C/G/M use a set of deliberately BROKEN
 implementations and results -- an auth helper that ignores the email, a join
 built on urljoin, a pager that over-fetches, a pager that ignores an empty page,
-a key validator that accepts anything -- and FAILS if any of them is accepted.
+a key validator that accepts anything, a sprint resolver that takes the first
+candidate instead of refusing -- and FAILS if any of them is accepted.
 The mirror assertion (the real implementations pass those same oracles) is
 recorded alongside, so a control that silently stopped running is visible.
 Groups J and K carry their own controls for the same reason, against the two
@@ -87,6 +107,8 @@ Groups:
   I  hygiene
   J  attachment upload: the one non-JSON request body
   K  Markdown rendering: cell escaping, empty tables, and no duplicated fields
+  L  profile discovery: the walk, its $HOME boundary, the one-level merge
+  M  create payload: shaping, aliases, sentinels, and the sprint refusals
 
 Usage:
   python3 tests/test_jira_cli.py
@@ -122,12 +144,21 @@ GH = "H. negative control"
 GI = "I. hygiene"
 GJ = "J. attachment upload"
 GK = "K. markdown rendering"
+GL = "L. profile discovery"
+GM = "M. create payload"
 
 # Every environment variable the CLI reads, in both spellings.  Cleared before
 # each config case: a developer machine with a real JIRA_URL exported would
 # otherwise turn these into a different test.
+#
+# JIRA_PROFILE is on this list for a sharper version of the same reason: it does
+# not merely change what a case measures, it points `create` at a profile whose
+# CONTENTS this suite does not control, and every payload case would then be
+# asserting against somebody's real project defaults.
 ENV_KEYS = ("JIRA_URL", "JIRA_TOKEN", "JIRA_EMAIL", "JIRA_READ_ONLY",
-            "jira_url", "jira_token", "jira_email", "jira_read_only")
+            "JIRA_PROFILE",
+            "jira_url", "jira_token", "jira_email", "jira_read_only",
+            "jira_profile")
 
 BASE_DC = "https://jira.corp.local/jira"
 BASE_CLOUD = "https://acme.atlassian.net"
@@ -229,6 +260,35 @@ class EnvSandbox:
             else:
                 os.environ[key] = value
         return False
+
+
+@contextlib.contextmanager
+def walking_from(cwd, home):
+    """Run the body with the working directory and $HOME both redirected.
+
+    The profile walk is the only thing in this CLI that reads either, and it
+    compares them as STRINGS (`here == home`), so a caller must hand over two
+    paths that are already realpath()ed: on macOS a `mkdtemp()` path lives
+    under a symlinked `/var`, `os.getcwd()` hands back the resolved spelling,
+    and an unresolved $HOME would therefore never be recognised -- the walk
+    would sail straight past the boundary this group exists to pin.
+
+    Both are restored on the way out, including the case where $HOME was not
+    set at all, because group I asserts this run left the environment as it
+    found it.
+    """
+    saved_cwd = os.getcwd()
+    saved_home = os.environ.get("HOME")
+    os.chdir(cwd)
+    os.environ["HOME"] = home
+    try:
+        yield
+    finally:
+        os.chdir(saved_cwd)
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
 
 
 @contextlib.contextmanager
@@ -422,6 +482,91 @@ def check_pages(got, calls, want_keys, want_requests):
         problems.append("made %d request(s), want %d" % (len(calls),
                                                          want_requests))
     return problems
+
+
+# The board / sprint configurations `@active` has to survive.  Four of the six
+# are AMBIGUOUS and the only correct answer to each is a refusal: a sprint
+# chosen by guess files the work into the wrong sprint, reports success, and
+# leaves nothing behind that says which decision was taken.  So the expectation
+# is not "raises" -- an implementation that crashed on every input would satisfy
+# that -- it is the refusal NAMING the candidates it could not choose between,
+# which is the only form of the message a reader can act on.
+#
+#   (cid, boards, sprints, want_id, tokens the refusal must carry)
+#
+# `sprints=None` means the sprint endpoint must NOT be reached at all: with no
+# board or with several, the question is already unanswerable, and the scripted
+# transport turns a call made anyway into a failure rather than a silent extra
+# round trip.
+SCRUM_ONE = {"id": 1698, "name": "Platform board", "type": "scrum"}
+SPRINT_ONE = {"id": 442, "name": "Sprint 12", "state": "active"}
+
+SPRINT_SCENARIOS = [
+    ("one-board-one-sprint", [SCRUM_ONE], [SPRINT_ONE], 442, ()),
+    # A Kanban board on the same project has no sprints and answers the sprint
+    # endpoint with a 400, so leaving it in the candidate set would manufacture
+    # ambiguity where the project has exactly one board that can answer.
+    ("kanban-beside-a-scrum-board-is-not-ambiguous",
+     [{"id": 9, "name": "Support", "type": "kanban"}, SCRUM_ONE],
+     [SPRINT_ONE], 442, ()),
+    ("no-board-at-all", [], None, None, ["PROJ", "board"]),
+    ("several-boards",
+     [dict(SCRUM_ONE, id=10, name="Alpha"),
+      dict(SCRUM_ONE, id=11, name="Beta")],
+     None, None, ["10", "11", "Alpha", "Beta", "board", "@active"]),
+    ("no-active-sprint", [SCRUM_ONE], [], None, ["1698", "@active"]),
+    ("several-active-sprints", [SCRUM_ONE],
+     [SPRINT_ONE, dict(SPRINT_ONE, id=443, name="Sprint 12b")],
+     None, ["442", "443", "Sprint 12b", "@active"]),
+]
+
+
+def check_sprint_refusal(resolve, scenarios=SPRINT_SCENARIOS):
+    """Problems for a `resolve(boards, sprints) -> int` that must REFUSE.
+
+    Shared by the live rows in group M and by the mutant in group H, so the
+    rows that bless the real resolver are passing an oracle that has been shown
+    to reject one which guesses.  The unambiguous scenarios are part of the
+    same table deliberately: without them a resolver that refused EVERYTHING
+    would look perfect here, and `@active` would simply never work.
+    """
+    problems = []
+    for cid, boards, sprints, want_id, tokens in scenarios:
+        try:
+            got = resolve(boards, sprints)
+        except Exception as exc:
+            if want_id is not None:
+                problems.append("%s: refused (%s) where %r was unambiguous"
+                                % (cid, exc, want_id))
+                continue
+            missing = missing_tokens(str(exc), tokens)
+            if missing:
+                problems.append("%s: the refusal does not name %s: %r"
+                                % (cid, missing, str(exc)))
+            continue
+        if want_id is None:
+            problems.append("%s: GUESSED %r where the only correct answer was "
+                            "a refusal" % (cid, got))
+        elif got != want_id:
+            problems.append("%s: resolved %r, want %r" % (cid, got, want_id))
+    return problems
+
+
+def sprint_resolver(mod):
+    """The REAL `active_sprint_id`, adapted to the oracle's signature.
+
+    Each scenario gets its own client, because the scripted transport is the
+    second half of the assertion: a scenario that scripts one response and a
+    resolver that makes two requests fails here rather than quietly reading a
+    board list it had no business asking for.
+    """
+    def resolve(boards, sprints):
+        script = [response(mod, 200, {"values": boards})]
+        if sprints is not None:
+            script.append(response(mod, 200, {"values": sprints}))
+        client, _t = client_with(mod, script, deployment=mod.SERVER)
+        return client.active_sprint_id("PROJ")
+    return resolve
 
 
 # The real shape of the defect: a Jira summary is free text and pipes turn up
@@ -1003,6 +1148,12 @@ def group_d(suite, mod):
 
 WRITE_INVOCATIONS = {
     "comment": ["comment", "PROJ-1234", "a body"],
+    # `create` needs no profile fixture HERE, and that is itself the property
+    # being measured: the refusal fires in main() before the handler runs, so a
+    # guarded run never reaches the profile walk, never reads a file and never
+    # resolves a sentinel.  Its payload cases live in group M, where a pinned
+    # profile is in scope.
+    "create": ["create", "--project", "PROJ", "--summary", "a new issue"],
     "transition": ["transition", "PROJ-1234", "31"],
     "worklog": ["worklog", "PROJ-1234", "3h 20m"],
 }
@@ -1431,6 +1582,18 @@ def _mutant_key_validator(_key):
     return None
 
 
+def _mutant_active_sprint(boards, sprints):
+    """Takes the first candidate instead of refusing.
+
+    This is the defect in its natural form -- nobody writes "guess", they write
+    `[0]` -- and it is invisible from the outside: the create succeeds, the
+    ticket exists, and it is in the wrong sprint.
+    """
+    if not boards:
+        return 0
+    return int((sprints or [{"id": 0}])[0].get("id") or 0)
+
+
 MUTANTS = [
     ("mutant-auth-ignores-the-email", lambda: check_auth(_mutant_auth),
      "always Bearer, so a Cloud account silently authenticates as nobody"),
@@ -1445,6 +1608,10 @@ MUTANTS = [
     ("mutant-pager-ignores-an-empty-page",
      lambda: check_pages(["A-1"], [1, 2, 3, 4], ["A-1"], 2),
      "kept paging past the empty page; the issue list alone cannot see it"),
+    ("mutant-sprint-resolver-takes-the-first",
+     lambda: check_sprint_refusal(_mutant_active_sprint),
+     "picks candidate [0] rather than refusing, which files the work into the "
+     "wrong sprint and reports success"),
 ]
 
 
@@ -1479,10 +1646,13 @@ def group_h(suite, mod):
                  for p in check_key_validator(mod._validate_issue_key)]
     problems += ["pages: %s" % p
                  for p in check_pages(["A-1", "A-2"], [1, 2], ["A-1", "A-2"], 2)]
+    problems += ["sprint: %s" % p
+                 for p in check_sprint_refusal(sprint_resolver(mod))]
     suite.record(GH, "control-real-implementations-pass-the-same-oracles",
                  problems,
                  detail=["an oracle that rejects EVERYTHING would satisfy the "
                          "mutant rows above and prove nothing"])
+    mod.reset_deployment_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -2248,6 +2418,782 @@ def group_k(suite, mod):
 
 
 # ---------------------------------------------------------------------------
+# L. profile discovery: the walk, its $HOME boundary, and the one-level merge
+# ---------------------------------------------------------------------------
+
+def setup_error(mod, call):
+    """The SetupError text raised by `call`, or None if it did not raise.
+
+    Only SetupError is caught, deliberately.  "It raised something" is not the
+    assertion any of these rows want -- a TypeError from a typo in the fixture
+    would satisfy it -- and exit code 2 is reached from SetupError and from
+    nothing else.
+    """
+    try:
+        call()
+    except mod.SetupError as exc:
+        return str(exc)
+    return None
+
+
+def walk_tree(workspace, name):
+    """(root, home, cwd) for one profile-walk case, all three realpath()ed.
+
+    Every case gets its OWN tree.  They differ only in where a profile sits,
+    and one shared tree would leave each case depending on which of the others
+    had already run -- the walk reads the filesystem, so a leftover fixture two
+    directories up is indistinguishable from the thing under test.
+
+    `root` is the directory ABOVE the fake $HOME, which is where the rows that
+    pin the boundary put their bait.
+    """
+    root = os.path.realpath(os.path.join(workspace, "walk", name))
+    home = os.path.join(root, "home")
+    cwd = os.path.join(home, "work", "repo")
+    os.makedirs(cwd, exist_ok=True)
+    return root, home, cwd
+
+
+def put_profile(directory, body):
+    """Write `.claude/jira.json` under `directory`; return its path.
+
+    `body` is written verbatim when it is a string, so a row can plant a file
+    that is NOT valid JSON.
+    """
+    path = os.path.join(directory, ".claude", "jira.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body if isinstance(body, str) else json.dumps(body))
+    return path
+
+
+def walked(mod, cwd, home, explicit=None, env_profile=None):
+    """`load_profile` reached the way the CLI reaches it: cwd, $HOME and env.
+
+    JIRA_PROFILE is cleared by EnvSandbox unless a row sets it, which matters
+    more here than anywhere else in this suite: an exported one would point
+    every case at a real project's defaults and quietly pass.
+    """
+    with walking_from(cwd, home):
+        with EnvSandbox(JIRA_PROFILE=env_profile):
+            return mod.load_profile(explicit)
+
+
+MERGE_DEFAULTS = {
+    "issuetype": "Task",
+    "board": 1,
+    "aliases": {"epic": "customfield_11800"},
+    "fields": {"priority": {"name": "Moderate"},
+               "components": [{"name": "Shared"}]},
+}
+
+MERGE_PROJECT = {
+    "issuetype": "Bug",
+    "aliases": {"sprint": "customfield_11300"},
+    "fields": {"components": [{"name": "Parser"}], "assignee": "@me"},
+}
+
+
+def group_l(suite, mod, workspace):
+    # -- where the walk looks ---------------------------------------------
+    root, home, cwd = walk_tree(workspace, "cwd")
+    want = put_profile(cwd, {"project": "HERE"})
+    data, path = walked(mod, cwd, home)
+    problems = []
+    if path != want:
+        problems.append("found %r, want %r" % (path, want))
+    if data.get("project") != "HERE":
+        problems.append("loaded %r" % data)
+    suite.record(GL, "profile-found-in-the-working-directory", problems,
+                 detail=["found: %s" % path])
+
+    root, home, cwd = walk_tree(workspace, "ancestor")
+    want = put_profile(os.path.dirname(cwd), {"project": "ABOVE"})
+    data, path = walked(mod, cwd, home)
+    suite.record(GL, "profile-found-in-an-ancestor",
+                 problem_if(path != want, "found %r, want %r" % (path, want)),
+                 detail=["cwd  : %s" % cwd, "found: %s" % path,
+                         "the walk is what makes the defaults depend on which "
+                         "repository you are standing in"])
+
+    root, home, cwd = walk_tree(workspace, "nearest")
+    put_profile(home, {"project": "FAR"})
+    want = put_profile(cwd, {"project": "NEAR"})
+    data, path = walked(mod, cwd, home)
+    problems = []
+    if path != want:
+        problems.append("found %r, want the nearer %r" % (path, want))
+    if data.get("project") != "NEAR":
+        problems.append("loaded the farther profile: %r" % data)
+    suite.record(GL, "the-nearest-profile-wins", problems,
+                 detail=["a repository's own profile has to beat the one in "
+                         "the checkout above it, or a monorepo's outermost "
+                         "project would file everything"])
+
+    # -- absent is fine; NAMED and absent is not --------------------------
+    root, home, cwd = walk_tree(workspace, "absent")
+    problems = []
+    text = setup_error(mod, lambda: walked(mod, cwd, home))
+    if text is not None:
+        problems.append("no profile anywhere was treated as an error: %s"
+                        % text)
+    else:
+        data, path = walked(mod, cwd, home)
+        if (data, path) != ({}, None):
+            problems.append("returned %r / %r, want {} / None" % (data, path))
+    suite.record(GL, "no-profile-anywhere-is-not-an-error", problems,
+                 detail=["`create --project PROJ --summary ...` has to work in "
+                         "a checkout that never wrote a profile"])
+
+    missing = os.path.join(cwd, "nowhere", "jira.json")
+    text = setup_error(mod, lambda: walked(mod, cwd, home, explicit=missing))
+    problems = []
+    if text is None:
+        problems.append("a --profile that does not exist was accepted")
+    else:
+        problems += ["the error does not name %r" % t
+                     for t in missing_tokens(text, [missing])]
+    suite.record(GL, "a-named-profile-that-is-missing-is-an-error", problems,
+                 detail=[text or "<no error>",
+                         "naming a path is a claim that it exists; falling "
+                         "back to no defaults would file half a ticket and "
+                         "report success"])
+
+    text = setup_error(mod,
+                       lambda: walked(mod, cwd, home, env_profile=missing))
+    suite.record(GL, "a-JIRA_PROFILE-that-is-missing-is-an-error",
+                 problem_if(text is None,
+                            "an env-named profile that does not exist was "
+                            "accepted"),
+                 detail=[text or "<no error>",
+                         "same claim, made in the environment instead of on "
+                         "the command line"])
+
+    # -- the $HOME boundary ------------------------------------------------
+    root, home, cwd = walk_tree(workspace, "above-home")
+    bait = put_profile(root, {"project": "ABOVE-HOME"})
+    data, path = walked(mod, cwd, home)
+    problems = []
+    if path is not None:
+        problems.append("the walk climbed past $HOME and found %r" % path)
+    if data:
+        problems.append("it loaded %r" % data)
+    suite.record(GL, "the-walk-stops-at-HOME", problems,
+                 detail=["$HOME: %s" % home, "bait : %s" % bait,
+                         "a profile above $HOME belongs to no project, and on "
+                         "a shared machine it belongs to no one in particular"])
+
+    root, home, cwd = walk_tree(workspace, "at-home")
+    want = put_profile(home, {"project": "AT-HOME"})
+    data, path = walked(mod, cwd, home)
+    suite.record(GL, "the-HOME-boundary-is-inclusive",
+                 problem_if(path != want, "found %r, want %r" % (path, want)),
+                 detail=["$HOME itself is CHECKED and then the walk stops, so "
+                         "a personal default works and the directory above it "
+                         "does not"])
+
+    # -- precedence --------------------------------------------------------
+    root, home, cwd = walk_tree(workspace, "precedence")
+    put_profile(cwd, {"project": "WALK"})
+    env_path = os.path.join(root, "from-env.json")
+    flag_path = os.path.join(root, "from-flag.json")
+    for target, marker in ((env_path, "ENV"), (flag_path, "FLAG")):
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"project": marker}))
+    data, path = walked(mod, cwd, home, env_profile=env_path)
+    problems = problem_if(data.get("project") != "ENV",
+                          "JIRA_PROFILE lost to the walk: %r" % data)
+    data, path = walked(mod, cwd, home, explicit=flag_path,
+                        env_profile=env_path)
+    problems += problem_if(data.get("project") != "FLAG",
+                           "--profile lost to JIRA_PROFILE: %r" % data)
+    suite.record(GL, "flag-beats-env-beats-the-walk", problems,
+                 detail=["--profile > JIRA_PROFILE > .claude/jira.json"])
+
+    # -- a file that is there but is not a profile -------------------------
+    root, home, cwd = walk_tree(workspace, "malformed")
+    bad = put_profile(cwd, "{\"project\": \"PROJ\",}")
+    text = setup_error(mod, lambda: walked(mod, cwd, home))
+    problems = []
+    if text is None:
+        problems.append("malformed JSON was accepted")
+    else:
+        problems += ["the error does not name %r" % t
+                     for t in missing_tokens(text, [bad])]
+    suite.record(GL, "malformed-json-is-an-error-that-names-the-file",
+                 problems,
+                 detail=[text or "<no error>",
+                         "the file is named because a walk found it and the "
+                         "reader has no other way to know WHICH one it was"])
+
+    root, home, cwd = walk_tree(workspace, "not-an-object")
+    put_profile(cwd, "[1, 2, 3]")
+    text = setup_error(mod, lambda: walked(mod, cwd, home))
+    suite.record(GL, "a-json-array-is-not-a-profile",
+                 problem_if(text is None,
+                            "a top-level JSON array was accepted as a "
+                            "profile"),
+                 detail=[text or "<no error>"])
+
+    # -- the measured divergence, recorded rather than gated ---------------
+    root, home, cwd = walk_tree(workspace, "outside-home")
+    outside = os.path.join(root, "outside", "repo")
+    os.makedirs(outside, exist_ok=True)
+    planted = put_profile(os.path.dirname(outside), {"project": "OUTSIDE"})
+    data, path = walked(mod, outside, home)
+    suite.record(GL, "walk-from-a-cwd-outside-HOME", [], status=H.INFO,
+                 detail=["cwd   : %s" % outside,
+                         "$HOME : %s" % home,
+                         "found : %s" % path,
+                         "planted: %s" % planted,
+                         "MEASURED, not gated.  jira.py:1584 stops the walk on "
+                         "`here == home` OR at the filesystem root, so the "
+                         "$HOME boundary only binds when the cwd is under "
+                         "$HOME; from anywhere else the walk climbs to `/`.  "
+                         "The docstring there and SKILL.md both say the walk "
+                         "stops at $HOME without that qualifier.  Recorded as "
+                         "INFO because deciding which of the two is wrong is a "
+                         "change to the CLI, not to its tests."])
+
+    # -- the merge ---------------------------------------------------------
+    profile = {"defaults": dict(MERGE_DEFAULTS),
+               "projects": {"PROJ": dict(MERGE_PROJECT)}}
+    block = mod.project_profile(profile, "PROJ")
+    problems = []
+    if block.get("issuetype") != "Bug":
+        problems.append("the project block did not override issuetype: %r"
+                        % block.get("issuetype"))
+    if block.get("board") != 1:
+        problems.append("a defaults-only key was dropped: %r" % block)
+    if block.get("aliases") != {"epic": "customfield_11800",
+                                "sprint": "customfield_11300"}:
+        problems.append("aliases did not merge key by key: %r"
+                        % block.get("aliases"))
+    if block.get("fields") != {"priority": {"name": "Moderate"},
+                               "components": [{"name": "Parser"}],
+                               "assignee": "@me"}:
+        problems.append("fields did not merge key by key: %r"
+                        % block.get("fields"))
+    suite.record(GL, "defaults-merge-under-the-project-block", problems,
+                 detail=["a key the project block does not mention survives; "
+                         "one it does is replaced"])
+
+    problems = []
+    if block["fields"]["components"] != [{"name": "Parser"}]:
+        problems.append("a field VALUE was merged instead of replaced: %r"
+                        % block["fields"]["components"])
+    if MERGE_DEFAULTS["fields"]["components"] != [{"name": "Shared"}]:
+        problems.append("the merge mutated the profile it read: %r"
+                        % MERGE_DEFAULTS)
+    suite.record(GL, "the-merge-is-one-level-and-never-reaches-into-a-value",
+                 problems,
+                 detail=["`components` is a Jira field payload written to be "
+                         "sent WHOLE; a deep merge would union two arrays that "
+                         "each meant `these and only these`"])
+
+    block = mod.project_profile(profile, "OTHER")
+    problems = []
+    if block.get("issuetype") != "Task":
+        problems.append("an unnamed project did not fall back to defaults: %r"
+                        % block)
+    if block.get("fields", {}).get("components") != [{"name": "Shared"}]:
+        problems.append("it inherited the PROJ block: %r" % block)
+    suite.record(GL, "an-unnamed-project-gets-only-the-defaults", problems)
+
+    # -- which project ------------------------------------------------------
+    problems = []
+    if mod._profile_project({"project": "PROJ"}, None) != "PROJ":
+        problems.append("the profile's own project was ignored")
+    if mod._profile_project({"project": "PROJ"}, "OTHER") != "OTHER":
+        problems.append("--project lost to the profile")
+    text = setup_error(mod, lambda: mod._profile_project({}, None))
+    if text is None:
+        problems.append("a create with no project anywhere was accepted")
+    elif ".claude" not in text:
+        problems.append("the refusal does not say where a project is named: "
+                        "%r" % text)
+    suite.record(GL, "the-project-comes-from-the-flag-then-the-profile",
+                 problems, detail=[text or "<no error>"])
+
+    problems = []
+    for key in ("proj", "PROJ-1", "1PROJ", "", "P", "PR OJ", "PROJ/../OTHER"):
+        if setup_error(mod,
+                       lambda k=key: mod._profile_project({}, k)) is None:
+            problems.append("%r was accepted as a project key" % key)
+    for key in ("PROJ", "STR", "AB1", "X9Y"):
+        text = setup_error(mod, lambda k=key: mod._profile_project({}, k))
+        if text is not None:
+            problems.append("%r was rejected: %s" % (key, text))
+    suite.record(GL, "the-project-key-is-validated-locally", problems,
+                 detail=["the same reason as an issue key -- a project you may "
+                         "not create in answers 404 exactly like one that was "
+                         "never there -- and it is the only caller-supplied "
+                         "text that reaches a REST path unescaped"])
+
+
+# ---------------------------------------------------------------------------
+# M. the create payload: shaping, aliases, sentinels, and the sprint refusals
+# ---------------------------------------------------------------------------
+
+class RoutedTransport:
+    """Like FakeTransport, but answers by URL substring instead of position.
+
+    Sentinel resolution walks the payload in the order its keys happen to sit
+    in, so a positional queue would pin THAT order: reordering two fields in a
+    profile fixture would then fail a case about resolution depth.  Routing by
+    URL keeps each case measuring the thing it is named after.
+
+    Routes are tried in order, so the specific one goes first -- `/board` is a
+    prefix of `/board/1698/sprint`.
+    """
+
+    def __init__(self, routes):
+        self.routes = list(routes)
+        self.calls = []
+
+    def __call__(self, method, url, body, headers):
+        decoded = json.loads(body.decode("utf-8")) if body else None
+        self.calls.append(Call(method, url, decoded, dict(headers)))
+        for needle, item in self.routes:
+            if needle in url:
+                return item(method, url) if callable(item) else item
+        raise AssertionError("unrouted request: %s %s" % (method, url))
+
+    @property
+    def methods(self):
+        return [call.method for call in self.calls]
+
+
+def routed_client(mod, routes, url=BASE_DC, email=None, deployment=None):
+    mod.reset_deployment_cache()
+    if deployment is not None:
+        mod._DEPLOYMENT_CACHE = deployment
+    transport = RoutedTransport(routes)
+    return mod.Jira(make_cfg(mod, url=url, email=email), fetch=transport,
+                    sleep=lambda _seconds: None), transport
+
+
+def create_args(mod, *tail):
+    """Parsed `create` arguments, with the connection flags appended."""
+    return parse_args(mod, connected(["create"] + list(tail)))
+
+
+def created_fields(mod, block, *tail):
+    """The `fields` object `create` would send, for a given profile block."""
+    return mod._create_fields(create_args(mod, *tail), block, "PROJ")
+
+
+# A create payload's shape is decided by the FIELD and not by the value, so the
+# expectation is a table too.  Every row is a 400 waiting to happen if the
+# table and the server disagree -- and a 400 that blames the field rather than
+# the shaping.
+SHAPE_CASES = [
+    # system fields addressed by an object with a `name`
+    ("issuetype", "Bug", {"name": "Bug"}),
+    ("priority", "Moderate", {"name": "Moderate"}),
+    ("assignee", "jdoe", {"name": "jdoe"}),
+    ("reporter", "jdoe", {"name": "jdoe"}),
+    # system fields that are ARRAYS of those objects, comma-separated on the
+    # command line and trimmed, because `a, b` is what a human types
+    ("components", "Parser", [{"name": "Parser"}]),
+    ("components", "Parser, Render", [{"name": "Parser"}, {"name": "Render"}]),
+    ("fixVersions", "8.14.2", [{"name": "8.14.2"}]),
+    ("versions", "8.14.2,8.15.0", [{"name": "8.14.2"}, {"name": "8.15.0"}]),
+    # the one system field that is an array of BARE STRINGS
+    ("labels", "regression", ["regression"]),
+    ("labels", "regression, parser", ["regression", "parser"]),
+    # anything else falls through untouched: its shape is per-instance
+    ("customfield_11800", "PROJ-99", "PROJ-99"),
+    ("description", "free text", "free text"),
+    ("summary", "free text", "free text"),
+    # a sentinel is ALWAYS a bare string leaving the table, whatever field it
+    # names -- the shaping happens after it resolves, in the shape the
+    # deployment wants, or it would be wrapped twice
+    ("assignee", "@me", "@me"),
+    ("customfield_11300", "@active", "@active"),
+]
+
+CLOUD_ME = {"accountId": "5b10a2c8", "name": "hidden-on-cloud",
+            "displayName": "A Person"}
+DC_ME = {"name": "jdoe", "key": "jdoe", "displayName": "A Person"}
+
+
+def group_m(suite, mod, workspace):
+    # -- the payload: profile first, command line laid over it -------------
+    block = {"issuetype": "Bug",
+             "fields": {"priority": {"name": "Moderate"},
+                        "components": [{"name": "Parser"}]}}
+    fields = created_fields(mod, block, "--summary", "drops the Foo header",
+                            "--field", "priority=Critical")
+    want = {"components": [{"name": "Parser"}],
+            "priority": {"name": "Critical"},
+            "project": {"key": "PROJ"},
+            "issuetype": {"name": "Bug"},
+            "summary": "drops the Foo header"}
+    suite.record(GM, "profile-defaults-lie-under-the-command-line",
+                 problem_if(fields != want, "built %r, want %r"
+                            % (fields, want)),
+                 detail=["a default that could not be overridden would be a "
+                         "cage rather than a default, and `--field` is the "
+                         "only way to say `this one issue is different`"])
+
+    fields = created_fields(mod, block, "--summary", "s", "--type", "Task")
+    suite.record(GM, "the-type-flag-beats-the-profile-issuetype",
+                 problem_if(fields.get("issuetype") != {"name": "Task"},
+                            "issuetype is %r" % fields.get("issuetype")))
+
+    fields = created_fields(mod, block, "--summary", "s",
+                            "--description", "a body")
+    problems = problem_if(fields.get("description") != "a body",
+                          "description is %r" % fields.get("description"))
+    bare = created_fields(mod, block, "--summary", "s")
+    problems += problem_if("description" in bare,
+                           "an unset --description still sent a key: %r"
+                           % bare.get("description"))
+    suite.record(GM, "an-absent-description-is-not-sent-as-empty", problems,
+                 detail=["an empty string is a VALUE: it would clear whatever "
+                         "the project's create screen defaults the field to"])
+
+    # -- aliases ------------------------------------------------------------
+    aliased = {"aliases": {"epic": "customfield_11800",
+                           "sprint": "customfield_11300"},
+               "fields": {"epic": "PROJ-1"}}
+    fields = created_fields(mod, aliased, "--summary", "s")
+    problems = []
+    if fields.get("customfield_11800") != "PROJ-1":
+        problems.append("a profile key was not resolved: %r" % fields)
+    if "epic" in fields:
+        problems.append("the alias was sent as a field name: %r" % fields)
+    fields = created_fields(mod, aliased, "--summary", "s",
+                            "--field", "epic=PROJ-99")
+    if fields.get("customfield_11800") != "PROJ-99":
+        problems.append("--field did not resolve the alias: %r" % fields)
+    if "epic" in fields:
+        problems.append("--field sent the alias as a field name: %r" % fields)
+    suite.record(GM, "aliases-resolve-on-both-sides", problems,
+                 detail=["profile keys AND --field, or the same word would "
+                         "mean two things one line apart",
+                         "the per-instance ids then live in one block that a "
+                         "single `fields --grep` run can refresh"])
+
+    # -- NAME=VALUE ---------------------------------------------------------
+    fields = created_fields(mod, {}, "--summary", "s",
+                            "--field", "customfield_12000=a=b=c",
+                            "--field", "description=k=v&x=y",
+                            "--field", "customfield_12001=")
+    problems = []
+    if fields.get("customfield_12000") != "a=b=c":
+        problems.append("a value containing `=` was truncated: %r"
+                        % fields.get("customfield_12000"))
+    if fields.get("description") != "k=v&x=y":
+        problems.append("the description was truncated: %r"
+                        % fields.get("description"))
+    if fields.get("customfield_12001") != "":
+        problems.append("an empty value did not survive: %r"
+                        % fields.get("customfield_12001"))
+    suite.record(GM, "NAME=VALUE-splits-at-the-FIRST-equals", problems,
+                 detail=["a field name cannot contain `=` and a value very "
+                         "much can -- a URL, a query string, a base64 blob",
+                         "split() would have sent `a` where `a=b=c` was meant "
+                         "and the server would have accepted it"])
+
+    problems = []
+    for raw in ("epic", "=value", "  =value"):
+        text = setup_error(mod, lambda r=raw: created_fields(
+            mod, {}, "--summary", "s", "--field", r))
+        if text is None:
+            problems.append("%r was accepted as NAME=VALUE" % raw)
+    suite.record(GM, "a-field-without-a-name-is-refused", problems,
+                 detail=["exit 2 before anything is sent, not a 400 about a "
+                         "field called `epic` with no value"])
+
+    # -- the shaping table --------------------------------------------------
+    problems = []
+    for field, value, want_shape in SHAPE_CASES:
+        got = mod._shape(field, value)
+        if got != want_shape:
+            problems.append("%s=%s -> %r, want %r"
+                            % (field, value, got, want_shape))
+    suite.record(GM, "the-system-field-shaping-table", problems,
+                 detail=["%d row(s): object fields, array fields, the one list "
+                         "field, and the fall-through" % len(SHAPE_CASES)])
+
+    problems = []
+    for field in ("customfield_99999", "customfield_11800", "Epic Link"):
+        got = mod._shape(field, "{\"id\": \"7\"}")
+        if got != "{\"id\": \"7\"}":
+            problems.append("%s was rewritten to %r" % (field, got))
+    suite.record(GM, "an-unknown-custom-field-falls-through-untouched",
+                 problems,
+                 detail=["its shape is per-instance and there is nothing here "
+                         "that could know it; a guess comes back as a 400 "
+                         "blaming the FIELD rather than the guess",
+                         "--field-json and the profile are the two ways to say "
+                         "the shape out loud"])
+
+    fields = created_fields(mod, {}, "--summary", "s",
+                            "--field-json", "customfield_11300=[123]",
+                            "--field-json", "components=[{\"id\": \"7\"}]")
+    problems = []
+    if fields.get("customfield_11300") != [123]:
+        problems.append("--field-json was not parsed: %r"
+                        % fields.get("customfield_11300"))
+    if fields.get("components") != [{"id": "7"}]:
+        problems.append("--field-json went through the shaping table: %r"
+                        % fields.get("components"))
+    text = setup_error(mod, lambda: created_fields(
+        mod, {}, "--summary", "s", "--field-json", "components=[{id: 7}]"))
+    if text is None:
+        problems.append("invalid JSON was accepted")
+    elif "components" not in text:
+        problems.append("the error does not name the field: %r" % text)
+    suite.record(GM, "field-json-is-parsed-and-bypasses-the-table", problems,
+                 detail=[text or "<no error>",
+                         "the escape hatch for a field whose shape this script "
+                         "cannot know -- so the table must not second-guess it"])
+
+    # -- the profile's own required list ------------------------------------
+    required = dict(aliased, require=["epic"], fields={})
+    text = setup_error(mod, lambda: mod._check_required(
+        created_fields(mod, required, "--summary", "s"), required))
+    problems = []
+    if text is None:
+        problems.append("a missing required field was not refused")
+    else:
+        problems += ["the refusal does not name %r" % t
+                     for t in missing_tokens(text, ["customfield_11800",
+                                                    "--field epic"])]
+    supplied = created_fields(mod, required, "--summary", "s",
+                              "--field", "epic=PROJ-99")
+    if setup_error(mod, lambda: mod._check_required(supplied,
+                                                    required)) is not None:
+        problems.append("a field that WAS supplied was still reported missing")
+    suite.record(GM, "profile-require-is-checked-locally-and-names-the-alias",
+                 problems,
+                 detail=[text or "<no error>",
+                         "for the fields a project requires by CONVENTION; the "
+                         "schema-required ones are named by Jira's own 400, "
+                         "all at once"])
+
+    # -- @me, per deployment -------------------------------------------------
+    for label, deployment, me, want_ref in (
+            ("cloud", "Cloud", CLOUD_ME, {"accountId": "5b10a2c8"}),
+            ("dc", mod.SERVER, DC_ME, {"name": "jdoe"})):
+        client, transport = routed_client(
+            mod, [("/myself", response(mod, 200, me))],
+            url=BASE_CLOUD if label == "cloud" else BASE_DC,
+            email=EMAIL if label == "cloud" else None,
+            deployment=deployment)
+        got = mod.resolve_sentinels(client, "PROJ", {},
+                                    {"assignee": "@me"})
+        suite.record(GM, "me-resolves-to-the-%s-user-shape" % label,
+                     problem_if(got != {"assignee": want_ref},
+                                "resolved to %r, want %r"
+                                % (got, {"assignee": want_ref})),
+                     detail=["Cloud addresses a user by accountId and has "
+                             "hidden `name` since the GDPR deprecation; DC has "
+                             "no accountId at all",
+                             "sending one deployment the other's shape is a "
+                             "400 that names the field and not the reason"])
+
+    client, transport = routed_client(
+        mod, [("/myself", response(mod, 200, DC_ME))], deployment=mod.SERVER)
+    got = mod.resolve_sentinels(client, "PROJ", {},
+                                {"assignee": "@me", "reporter": "@me",
+                                 "customfield_1": ["@me"]})
+    problems = []
+    if len(transport.calls) != 1:
+        problems.append("%d request(s) for one identity" % len(transport.calls))
+    if got.get("customfield_1") != [{"name": "jdoe"}]:
+        problems.append("a sentinel inside a list was missed: %r" % got)
+    suite.record(GM, "the-identity-is-fetched-once-however-often-it-appears",
+                 problems,
+                 detail=["`@me` may appear in the profile AND on the command "
+                         "line in one invocation, and the answer cannot change "
+                         "mid-run"])
+
+    # -- @active, at depth, against a PINNED board ---------------------------
+    client, transport = routed_client(
+        mod, [("/board/1698/sprint", response(mod, 200,
+                                              {"values": [SPRINT_ONE]})),
+              ("/myself", response(mod, 200, DC_ME))],
+        deployment=mod.SERVER)
+    nested = {"assignee": "@me",
+              "customfield_11300": {"outer": ["@active", {"who": "@me"}]},
+              "labels": ["untouched", "@nothing"]}
+    got = mod.resolve_sentinels(client, "PROJ", {"board": 1698}, nested)
+    want = {"assignee": {"name": "jdoe"},
+            "customfield_11300": {"outer": [442, {"who": {"name": "jdoe"}}]},
+            "labels": ["untouched", "@nothing"]}
+    problems = problem_if(got != want, "resolved to %r, want %r" % (got, want))
+    problems += problem_if(
+        any("/board?" in c.url or c.url.endswith("/board")
+            for c in transport.calls),
+        "a pinned board was looked up anyway: %r" % transport.methods)
+    suite.record(GM, "sentinels-resolve-at-any-depth", problems,
+                 detail=["the Sprint field is a bare number on some instances "
+                         "and an array on others, so the sentinel legitimately "
+                         "sits one level down",
+                         "an unknown `@nothing` is left alone: only the two "
+                         "named sentinels mean anything"])
+
+    # -- @active refuses ambiguity ------------------------------------------
+    for scenario in SPRINT_SCENARIOS:
+        cid = scenario[0]
+        suite.record(GM, "active-sprint-%s" % cid,
+                     check_sprint_refusal(sprint_resolver(mod), [scenario]),
+                     detail=["boards : %r" % (scenario[1],),
+                             "sprints: %r" % (scenario[2],),
+                             "want   : %s" % ("id %s" % scenario[3]
+                                              if scenario[3] is not None
+                                              else "a refusal naming %s"
+                                              % list(scenario[4]))])
+
+    # -- --dry-run -----------------------------------------------------------
+    plain = os.path.join(os.path.realpath(workspace), "plain-profile.json")
+    with open(plain, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"project": "PROJ",
+                             "projects": {"PROJ": {"issuetype": "Bug"}}}))
+    with EnvSandbox():
+        with NetworkGuard(mod) as guard:
+            with captured() as (out, err):
+                code = mod.main(connected(
+                    ["create", "--profile", plain, "--summary", "shipped it",
+                     "--field", "labels=regression, parser", "--dry-run"]))
+    text = out.getvalue()
+    problems = []
+    if code != 0:
+        problems.append("exit %r, want 0" % code)
+    if guard.calls:
+        problems.append("--dry-run sent %d request(s)" % guard.calls)
+    if "POST" not in text or BASE_DC + "/rest/api/2/issue" not in text:
+        problems.append("the method and URL are not printed")
+    want_body = {"fields": {"project": {"key": "PROJ"},
+                            "issuetype": {"name": "Bug"},
+                            "summary": "shipped it",
+                            "labels": ["regression", "parser"]}}
+    try:
+        printed = json.loads(fenced_block(text, "json"))
+    except ValueError:
+        printed = None
+        problems.append("the body is not a fenced ```json block that parses")
+    if printed is not None and printed != want_body:
+        problems.append("body %r, want %r" % (printed, want_body))
+    suite.record(GM, "dry-run-create-prints-and-sends-nothing", problems,
+                 detail=text.splitlines()
+                 + ["requests made: %d" % guard.calls,
+                    "this row is here and not in group E's table because it "
+                    "is the one write whose body depends on a FILE, and the "
+                    "profile has to be pinned or the case would read whatever "
+                    "the machine running it happens to have"])
+
+    sentinel_profile = os.path.join(os.path.realpath(workspace),
+                                    "sentinel-profile.json")
+    with open(sentinel_profile, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"project": "PROJ", "projects": {"PROJ": {
+            "issuetype": "Bug", "board": 1698,
+            "aliases": {"sprint": "customfield_11300"},
+            "fields": {"assignee": "@me", "sprint": "@active"}}}}))
+
+    seen = []
+
+    def respond(method, url, _body, _headers):
+        seen.append((method, url))
+        if "/board/1698/sprint" in url:
+            return response(mod, 200, {"values": [SPRINT_ONE]})
+        if "/myself" in url:
+            return response(mod, 200, DC_ME)
+        raise AssertionError("unrouted request: %s %s" % (method, url))
+
+    mod.reset_deployment_cache()
+    mod._DEPLOYMENT_CACHE = mod.SERVER
+    with EnvSandbox():
+        with NetworkGuard(mod, responder=respond) as guard:
+            with captured() as (out, err):
+                code = mod.main(connected(
+                    ["create", "--profile", sentinel_profile,
+                     "--summary", "s", "--dry-run"]))
+    mod.reset_deployment_cache()
+    text = out.getvalue()
+    problems = []
+    if code != 0:
+        problems.append("exit %r, want 0" % code)
+    written = [pair for pair in seen if pair[0] != "GET"]
+    if written:
+        problems.append("--dry-run made a non-GET request: %r" % written)
+    try:
+        printed = json.loads(fenced_block(text, "json"))
+    except ValueError:
+        printed = None
+        problems.append("the printed body does not parse")
+    if printed is not None:
+        resolved = printed.get("fields", {})
+        if resolved.get("assignee") != {"name": "jdoe"}:
+            problems.append("`@me` was echoed back unresolved: %r"
+                            % resolved.get("assignee"))
+        if resolved.get("customfield_11300") != 442:
+            problems.append("`@active` was echoed back unresolved: %r"
+                            % resolved.get("customfield_11300"))
+    suite.record(GM, "dry-run-create-resolves-sentinels-with-reads-only",
+                 problems,
+                 detail=["requests: %r" % (seen,),
+                         "a dry run that echoed `@active` back would confirm "
+                         "the spelling and nothing else; resolving costs GETs "
+                         "and the run still writes nothing"])
+
+    # -- the real write ------------------------------------------------------
+    args = create_args(mod, "--profile", plain, "--summary", "shipped it")
+    client, transport = client_with(
+        mod, [response(mod, 201, {"key": "PROJ-77", "id": "10077",
+                                  "self": BASE_DC + "/rest/api/2/issue/10077"})],
+        deployment=mod.SERVER)
+    with EnvSandbox():
+        with captured() as (out, err):
+            code = mod.cmd_create(args, client)
+    text = out.getvalue()
+    problems = []
+    if code != 0:
+        problems.append("exit %r, want 0" % code)
+    if len(transport.calls) != 1:
+        problems.append("%d request(s) for one create" % len(transport.calls))
+    else:
+        call = transport.calls[0]
+        if (call.method, call.path) != ("POST", "/jira/rest/api/2/issue"):
+            problems.append("sent %s %s" % (call.method, call.path))
+        if call.body != {"fields": {"project": {"key": "PROJ"},
+                                    "issuetype": {"name": "Bug"},
+                                    "summary": "shipped it"}}:
+            problems.append("body %r" % call.body)
+    problems += ["the output omits %r" % t for t in missing_tokens(
+        text, ["PROJ-77", BASE_DC + "/browse/PROJ-77"])]
+    if "/rest/api/2/issue/10077" in text:
+        problems.append("the API `self` link was printed as the issue URL")
+    suite.record(GM, "create-prints-the-browse-url-not-the-self-link",
+                 problems,
+                 detail=text.splitlines()
+                 + ["one is where a human goes to read the ticket, the other "
+                    "is a JSON endpoint"])
+
+    # -- the measured divergence, recorded rather than gated -----------------
+    suite.record(GM, "assignee-shaping-is-name-only-on-both-deployments", [],
+                 status=H.INFO,
+                 detail=["_shape('assignee', 'jdoe') -> %r"
+                         % (mod._shape("assignee", "jdoe"),),
+                         "user_ref() on Cloud -> {'accountId': ...}",
+                         "MEASURED, not gated.  jira.py:1685 shapes assignee "
+                         "and reporter as {'name': VALUE} for BOTH "
+                         "deployments, while jira.py:775 exists precisely "
+                         "because Cloud wants accountId and has hidden `name` "
+                         "-- so a literal `--field assignee=someone` on Cloud "
+                         "is a guaranteed 400 that `@me` would not have hit.  "
+                         "It fails CLOSED (nothing is written) and it is one "
+                         "deployment and one input form, so this is recorded "
+                         "for the author rather than gated against them."])
+
+    mod.reset_deployment_cache()
+
+
+# ---------------------------------------------------------------------------
 # I. hygiene
 # ---------------------------------------------------------------------------
 
@@ -2300,7 +3246,8 @@ def run(opts=None):
     suite = H.Suite(NAME,
                     title="Jira CLI: auth, URL join, deployment probe, both "
                           "paging models, config, write guards, error "
-                          "mapping, Markdown rendering",
+                          "mapping, Markdown rendering, the profile walk and "
+                          "the create payload",
                     opts=opts, mode="grouped")
 
     before = H.repo_tree()
@@ -2325,6 +3272,8 @@ def run(opts=None):
             group_h(suite, mod)
             group_j(suite, mod, workspace.path)
             group_k(suite, mod)
+            group_l(suite, mod, workspace.path)
+            group_m(suite, mod, workspace.path)
         finally:
             mod.reset_deployment_cache()
         # group_i LAST, always: it asserts the repo tree is exactly as this run

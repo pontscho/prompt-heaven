@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """jira.py -- a read-mostly Jira CLI over REST API v2, stdlib only, no ADF.
 
-Six read subcommands and four write ones, aimed at the two deployments that
+Eight read subcommands and five write ones, aimed at the two deployments that
 actually exist in the wild -- Atlassian Cloud and Server/Data Center -- out of
 ONE code path.
+
+WHY `create` KNOWS NO PROJECT.  Which fields a project demands, and what it
+wants in them, is a property of that project: the custom field ids are
+per-instance, the conventions are per-team, and both drift.  So none of it is
+in this file.  `create` reads a PROFILE -- `.claude/jira.json`, looked up by
+walking from the working directory towards $HOME -- which makes the defaults
+depend on which repository you are standing in, and keeps one shared CLI from
+carrying one project's habits into another's.  `createmeta` and `sprints` are
+the two read commands that make such a profile writable in the first place.
 
 WHY v2 ON BOTH.  v2 exists on Cloud with the identical operation set, and
 staying off v3 keeps Atlassian Document Format entirely out of the picture: a
@@ -42,6 +51,10 @@ Usage:
     jira.py transitions PROJ-1234
     jira.py projects
     jira.py fields --grep 'story points'
+    jira.py createmeta --project PROJ --type Bug --required
+    jira.py sprints --project PROJ
+    jira.py create --summary 'parser drops the Foo header' --description -
+    jira.py create --summary '...' --field epic=PROJ-99 --field sprint=@active
     jira.py comment PROJ-1234 'deployed to staging'
     jira.py comment PROJ-1234 -            # body from stdin
     jira.py transition PROJ-1234 'In Progress' --comment 'picking this up'
@@ -63,6 +76,10 @@ Environment variables
                     Flag: --email
     JIRA_READ_ONLY  optional.  1 / true / yes (case-insensitive) makes every
                     write subcommand refuse with exit 2 before anything is sent.
+    JIRA_PROFILE    optional.  Path to the project profile used by create,
+                    createmeta and sprints.  Absent, `.claude/jira.json` is
+                    looked for in the working directory and its ancestors, and
+                    the walk stops at $HOME.  Flag: --profile
 
     Lowercase spellings (jira_url, jira_token, jira_email, jira_read_only) are
     accepted as a fallback.
@@ -104,6 +121,12 @@ PROG = "jira"
 USER_AGENT = "prompt-heaven-jira/1.0"
 API = "/rest/api/2"
 
+# Boards and sprints are not part of the core REST API -- they live on Jira
+# Software's own root, with the same shape on Cloud and on DC.  A Jira without
+# Jira Software installed answers 404 here and only here, which is why the
+# sprint lookup is reached only when something actually asks for a sprint.
+AGILE = "/rest/agile/1.0"
+
 CLOUD = "Cloud"
 SERVER = "Server"
 
@@ -140,13 +163,42 @@ ISSUE_FIELDS = SEARCH_FIELDS + ["description", "components", "labels",
 
 TRUTHY = ("1", "true", "yes")
 
-WRITE_COMMANDS = ("attach", "comment", "transition", "worklog")
+WRITE_COMMANDS = ("attach", "comment", "create", "transition", "worklog")
 
 # `PROJ-1234`: at least two leading uppercase alphanumerics (the project key),
 # a hyphen, then digits.  Checked locally because Jira answers a nonexistent
 # key and an unreadable one with the SAME 404, so a typo would come back as a
 # permissions question.
 RX_ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9]+-[0-9]+$")
+
+# The same key WITHOUT the issue number -- `STR`, not `STR-1234`.
+RX_PROJECT_KEY = re.compile(r"^[A-Z][A-Z0-9]+$")
+
+# NOTHING about any particular project is hard-coded in this file, and that is
+# the whole design of `create`: which fields a project demands, and what it
+# wants in them, is a property OF THAT PROJECT and belongs next to the code it
+# tracks -- not in a CLI that several unrelated repositories share.  So the
+# shape is read from a profile discovered by walking UP from the working
+# directory, which makes the answer depend on which repository you are
+# standing in.  The walk stops at $HOME: a profile above it belongs to no
+# project at all.
+PROFILE_FILENAME = os.path.join(".claude", "jira.json")
+
+# Resolved against the SERVER at send time, never frozen into the profile.
+# Both answers change without anyone editing anything -- a sprint closes, a
+# token is reissued to another account -- and a stale literal in a checked-in
+# file would keep working right up until it quietly filed into last month.
+SENTINEL_ME = "@me"
+SENTINEL_ACTIVE_SPRINT = "@active"
+SENTINELS = (SENTINEL_ME, SENTINEL_ACTIVE_SPRINT)
+
+# A create payload's shape is decided by the FIELD, not by the value, so this
+# is a table and not a heuristic.  It covers the system fields only: a custom
+# field's shape differs per instance, which is what the profile and
+# --field-json are for.
+SYSTEM_OBJECT_FIELDS = ("issuetype", "priority", "assignee", "reporter")
+SYSTEM_ARRAY_FIELDS = ("components", "fixVersions", "versions")
+SYSTEM_LIST_FIELDS = ("labels",)
 
 # Started timestamps are `%Y-%m-%dT%H:%M:%S.%f%z` -- milliseconds, and a
 # +0000-style offset with NO colon.  Documented rather than reformatted: a
@@ -273,6 +325,18 @@ def _validate_issue_key(key: str) -> None:
 	"""
 	if not RX_ISSUE_KEY.match(key or ""):
 		raise SetupError("invalid issue key: %s (expected e.g. PROJ-1234)"
+			% (key if key else "<empty>"))
+
+
+def _validate_project_key(key: str) -> None:
+	"""Reject a project key locally, for the same reason as an issue key.
+
+	`create` is the one command that names a project rather than an issue, and
+	a project you may not create in answers 404 exactly like one that was never
+	there.
+	"""
+	if not RX_PROJECT_KEY.match(key or ""):
+		raise SetupError("invalid project key: %s (expected e.g. PROJ)"
 			% (key if key else "<empty>"))
 
 
@@ -434,6 +498,10 @@ class Jira:
 		self.cfg = cfg
 		self._fetch = fetch or self._default_fetch
 		self._sleep = sleep or time.sleep
+		# Cached for the same reason as the deployment probe: `@me` may appear
+		# in the profile AND on the command line in one invocation, and the
+		# answer cannot change mid-run.
+		self._me = None		# type: Optional[dict]
 
 	def _default_fetch(self, method: str, url: str, body: Optional[bytes],
 			headers: Dict[str, str]) -> HttpResponse:
@@ -697,6 +765,168 @@ class Jira:
 			query={"expand": "transitions.fields"}, subject=key) or {}
 		return list(payload.get("transitions") or [])
 
+	# -- identity: who the token belongs to, in the right shape ----------
+
+	def myself(self) -> dict:
+		if self._me is None:
+			self._me = self.request("GET", API + "/myself") or {}
+		return self._me
+
+	def user_ref(self) -> Dict[str, str]:
+		"""The authenticated user as a FIELD VALUE, per deployment.
+
+		Cloud addresses a user by `accountId` and has hidden `name` since the
+		GDPR deprecation; DC has no accountId at all and wants `name`.  Sending
+		one deployment the other's shape yields a 400 that names the field and
+		not the reason, so the branch is here rather than in a caller.
+		"""
+		me = self.myself()
+		if self._deployment() == CLOUD:
+			return {"accountId": str(me.get("accountId") or "")}
+		return {"name": str(me.get("name") or me.get("key") or "")}
+
+	# -- create metadata: split endpoints first, legacy expand as fallback --
+
+	def _paged_values(self, path: str, subject: str,
+			query: Optional[Dict[str, str]] = None) -> List[dict]:
+		"""Every `values` entry behind an isLast/startAt envelope.
+
+		Paged rather than capped because this walks CREATE-SCREEN FIELDS, and
+		a required field sitting on page two would go missing from a profile
+		with nothing to show that it had -- the exact failure this command
+		exists to prevent.
+		"""
+		out = []		# type: List[dict]
+		start = 0
+		while True:
+			page = dict(query or {})
+			page["startAt"] = str(start)
+			page["maxResults"] = str(PAGE_SIZE)
+			payload = self.request("GET", path, query=page,
+				subject=subject) or {}
+			values = payload.get("values") or []
+			out.extend(values)
+			if payload.get("isLast") or not values:
+				return out
+			following = start + len(values)
+			total = payload.get("total")
+			if isinstance(total, int) and not isinstance(total, bool):
+				if following >= total:
+					return out
+			if following <= start:
+				return out
+			start = following
+
+	def createmeta(self, project: str,
+			issuetype: Optional[str] = None) -> List[dict]:
+		"""What this project's create screen demands, normalised to one shape.
+
+		The two-endpoint form is tried FIRST and the single expand call is the
+		fallback, which is a statement about VERSIONS rather than deployments:
+		the split endpoints are the modern form on both Cloud and Data Center
+		(DC 8.4 added them, DC 9.0 removed the old one; Cloud removed it in
+		2023), so branching on Cloud-vs-DC here would be branching on the
+		wrong axis.  A DC that has dropped the legacy route does not answer
+		404 either -- `/issue/createmeta` falls through to `/issue/{key}` and
+		comes back "Issue Does Not Exist", which is why the fallback goes in
+		this direction and not the other.
+		"""
+		try:
+			return self._createmeta_split(project, issuetype)
+		except JiraError:
+			return self._createmeta_legacy(project, issuetype)
+
+	def _createmeta_split(self, project: str,
+			issuetype: Optional[str]) -> List[dict]:
+		kinds = self._paged_values(
+			API + "/issue/createmeta/%s/issuetypes" % project,
+			"issue types for %s" % project)
+		out = []		# type: List[dict]
+		for kind in kinds:
+			name = _text(kind.get("name"))
+			if issuetype and name.lower() != issuetype.strip().lower():
+				continue
+			blobs = self._paged_values(
+				API + "/issue/createmeta/%s/issuetypes/%s"
+					% (project, kind.get("id")),
+				"create metadata for %s / %s" % (project, name))
+			# Here the id is INSIDE the entry, as `fieldId` -- the legacy shape
+			# below reverses that and keys the dict by it.
+			out.append({"issuetype": name,
+				"fields": [_meta_field(b.get("fieldId"), b) for b in blobs]})
+		return out
+
+	def _createmeta_legacy(self, project: str,
+			issuetype: Optional[str]) -> List[dict]:
+		query = {"projectKeys": project,
+			"expand": "projects.issuetypes.fields"}
+		if issuetype:
+			query["issuetypeNames"] = issuetype
+		payload = self.request("GET", API + "/issue/createmeta", query=query,
+			subject="create metadata for %s" % project) or {}
+		out = []		# type: List[dict]
+		for block in payload.get("projects") or []:
+			for kind in block.get("issuetypes") or []:
+				fields = [_meta_field(name, blob) for name, blob
+					in sorted((kind.get("fields") or {}).items())]
+				out.append({"issuetype": _text(kind.get("name")),
+					"fields": fields})
+		return out
+
+	# -- boards and sprints: the two values a profile needs to name ------
+
+	def boards(self, project: str) -> List[dict]:
+		payload = self.request("GET", AGILE + "/board",
+			query={"projectKeyOrId": project,
+				"maxResults": str(PAGE_SIZE)},
+			subject="boards for %s" % project) or {}
+		return list(payload.get("values") or [])
+
+	def sprints(self, board_id: Any, state: str = "active") -> List[dict]:
+		payload = self.request("GET", AGILE + "/board/%s/sprint" % board_id,
+			query={"state": state, "maxResults": str(PAGE_SIZE)},
+			subject="%s sprints on board %s" % (state, board_id)) or {}
+		return list(payload.get("values") or [])
+
+	def active_sprint_id(self, project: str,
+			board_id: Optional[Any] = None) -> int:
+		"""The one open sprint -- and ambiguity is REFUSED, not guessed at.
+
+		Two active sprints on one board is a legitimate configuration
+		(parallel sprints), and silently taking the first would file the work
+		into the wrong one with nothing to show for it afterwards.  So both
+		candidates are named and the profile is told to pin one.
+		"""
+		if board_id is None:
+			available = self.boards(project)
+			# A Kanban board has no sprints at all and answers the sprint
+			# endpoint with a 400, so leaving one in the candidate set would
+			# turn "which board" into ambiguity where there was none.
+			scrum = [b for b in available
+				if str(b.get("type") or "").lower() == "scrum"]
+			available = scrum or available
+			if not available:
+				raise SetupError("no board found for project %s — name one as "
+					"\"board\" in the profile" % project)
+			if len(available) > 1:
+				listed = ", ".join("%s (%s)" % (_text(b.get("id")),
+					_flat(b.get("name"))) for b in available)
+				raise SetupError("project %s has %d boards, so \"%s\" is "
+					"ambiguous — pin one as \"board\" in the profile: %s"
+					% (project, len(available), SENTINEL_ACTIVE_SPRINT, listed))
+			board_id = available[0].get("id")
+		open_sprints = self.sprints(board_id, "active")
+		if not open_sprints:
+			raise SetupError("board %s has no active sprint, so \"%s\" cannot "
+				"resolve" % (board_id, SENTINEL_ACTIVE_SPRINT))
+		if len(open_sprints) > 1:
+			listed = ", ".join("%s (%s)" % (_text(s.get("id")),
+				_flat(s.get("name"))) for s in open_sprints)
+			raise SetupError("board %s has %d active sprints, so \"%s\" is "
+				"ambiguous — give the id instead: %s"
+				% (board_id, len(open_sprints), SENTINEL_ACTIVE_SPRINT, listed))
+		return int(open_sprints[0].get("id"))
+
 	# -- attachments: the one write whose body is not JSON ----------------
 
 	def upload_attachment(self, key: str, filename: str, data: bytes) -> list:
@@ -731,6 +961,27 @@ def _retry_delay(response: HttpResponse, attempt: int) -> float:
 		except ValueError:
 			pass
 	return BACKOFF_SECONDS * (2 ** (attempt - 1))
+
+
+def _meta_field(field_id: Any, blob: Any) -> dict:
+	"""One create-screen field, from either deployment's shape into one.
+
+	`schema.type` is kept rather than flattened away because it is the answer
+	to the question every create payload turns on -- whether this field wants
+	a scalar, an `{"id": ...}`, or an array of them -- and `allowedValues` is
+	kept whole because a field that only accepts four strings is a field whose
+	profile entry can be written correctly the first time.
+	"""
+	blob = blob if isinstance(blob, dict) else {}
+	schema = blob.get("schema") if isinstance(blob.get("schema"), dict) else {}
+	return {
+		"id": _text(field_id, ""),
+		"name": _text(blob.get("name"), ""),
+		"required": bool(blob.get("required")),
+		"type": _text(schema.get("type"), ""),
+		"items": _text(schema.get("items"), ""),
+		"allowed": blob.get("allowedValues") or [],
+	}
 
 
 # ---------------------------------------------------------------------------
@@ -1312,6 +1563,361 @@ def cmd_attach(args: argparse.Namespace, client: Jira) -> int:
 	return OK
 
 
+# ---------------------------------------------------------------------------
+# profiles: everything project-specific, and none of it in this file
+# ---------------------------------------------------------------------------
+
+def _profile_path(explicit: Optional[str]) -> Optional[str]:
+	"""--profile, then JIRA_PROFILE, then the walk up from the cwd."""
+	if explicit:
+		return explicit
+	from_env, _ = _env_first("JIRA_PROFILE", "jira_profile")
+	if from_env:
+		return from_env
+	here = os.path.abspath(os.getcwd())
+	home = os.path.abspath(os.path.expanduser("~"))
+	while True:
+		candidate = os.path.join(here, PROFILE_FILENAME)
+		if os.path.isfile(candidate):
+			return candidate
+		parent = os.path.dirname(here)
+		if here == home or parent == here:
+			return None
+		here = parent
+
+
+def load_profile(explicit: Optional[str]) -> Tuple[Dict[str, Any],
+		Optional[str]]:
+	"""(profile, path).  No profile anywhere is FINE.
+
+	An explicitly named one that is missing is not: naming a path is a claim
+	that it exists, and silently falling back to "no defaults at all" would
+	file a ticket with half its fields empty and report success.
+	"""
+	path = _profile_path(explicit)
+	if not path:
+		return {}, None
+	if not os.path.isfile(path):
+		raise SetupError("profile not found: %s" % path)
+	try:
+		with open(path, "r", encoding="utf-8") as handle:
+			data = json.load(handle)
+	except OSError as exc:
+		raise SetupError("cannot read profile %s: %s" % (path, exc))
+	except ValueError as exc:
+		raise SetupError("profile %s is not valid JSON: %s" % (path, exc))
+	if not isinstance(data, dict):
+		raise SetupError("profile %s must be a JSON object" % path)
+	return data, path
+
+
+def project_profile(profile: Dict[str, Any], project: str) -> Dict[str, Any]:
+	"""`defaults` with `projects.<KEY>` laid over it, ONE level deep.
+
+	One level and not recursive: everything under `fields` is a Jira field
+	payload, and a deep merge would reach inside somebody else's schema to
+	combine two objects that were each written to be sent whole.
+	"""
+	merged = {}		# type: Dict[str, Any]
+	for source in (profile.get("defaults"),
+			(profile.get("projects") or {}).get(project)):
+		if not isinstance(source, dict):
+			continue
+		for name, value in source.items():
+			if name in ("fields", "aliases") and isinstance(value, dict):
+				combined = dict(merged.get(name) or {})
+				combined.update(value)
+				merged[name] = combined
+			else:
+				merged[name] = value
+	return merged
+
+
+def _profile_project(profile: Dict[str, Any],
+		explicit: Optional[str]) -> str:
+	"""--project, else the profile's own, else refuse."""
+	project = (explicit or str(profile.get("project") or "")).strip()
+	if not project:
+		raise SetupError("no project: pass --project, or name one as "
+			"\"project\" in a profile (%s)" % PROFILE_FILENAME)
+	_validate_project_key(project)
+	return project
+
+
+def _resolve_alias(name: str, aliases: Dict[str, Any]) -> str:
+	"""A profile alias (`epic`) to its per-instance id (`customfield_11800`).
+
+	Applied to the profile's OWN keys as well as to --field, so a profile can
+	be written in names a human recognises while the numeric ids stay in one
+	block that a single `fields --grep` run can refresh.
+	"""
+	return str(aliases.get(name) or name)
+
+
+def _csv(value: Any) -> List[str]:
+	"""`a,b` -> ["a", "b"]; a list that is already a list passes through."""
+	if isinstance(value, list):
+		return [str(item) for item in value]
+	return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def _split_assignment(raw: str) -> Tuple[str, str]:
+	"""`NAME=VALUE`, split at the FIRST `=`.
+
+	A value may contain an `=` -- a description, a URL, a base64 blob -- and a
+	field name may not, so partition() is correct where split() would truncate.
+	"""
+	name, sep, value = (raw or "").partition("=")
+	if not sep or not name.strip():
+		raise SetupError("expected NAME=VALUE, got: %s" % (raw or "<empty>"))
+	return name.strip(), value
+
+
+def _shape(field: str, value: str) -> Any:
+	"""A command-line scalar in the shape its SYSTEM field expects.
+
+	A custom field falls through untouched: its shape is per-instance, which
+	is what the profile and --field-json exist for, and a guess here would
+	come back as a 400 blaming the field rather than the guess.
+	"""
+	if value in SENTINELS:
+		return value
+	if field in SYSTEM_OBJECT_FIELDS:
+		return {"name": value}
+	if field in SYSTEM_ARRAY_FIELDS:
+		return [{"name": item} for item in _csv(value)]
+	if field in SYSTEM_LIST_FIELDS:
+		return _csv(value)
+	return value
+
+
+def resolve_sentinels(client: Jira, project: str, block: Dict[str, Any],
+		value: Any) -> Any:
+	"""Replace @me / @active anywhere in the payload, at any depth.
+
+	Recursive rather than top-level because the Sprint field is a bare number
+	on some instances and an array on others, so the sentinel legitimately
+	sits one level down -- and because the same sentinel has to mean the same
+	thing whether it arrived from the profile or from --field.
+	"""
+	if isinstance(value, dict):
+		return {name: resolve_sentinels(client, project, block, item)
+			for name, item in value.items()}
+	if isinstance(value, list):
+		return [resolve_sentinels(client, project, block, item)
+			for item in value]
+	if value == SENTINEL_ME:
+		return client.user_ref()
+	if value == SENTINEL_ACTIVE_SPRINT:
+		return client.active_sprint_id(project, block.get("board"))
+	return value
+
+
+def _create_fields(args: argparse.Namespace, block: Dict[str, Any],
+		project: str) -> Dict[str, Any]:
+	"""The `fields` object: profile first, command line laid over it.
+
+	The order IS the contract.  A profile states what a project always wants;
+	a flag states what this one issue wants instead.  A default that could not
+	be overridden would be a cage rather than a default.
+	"""
+	aliases = block.get("aliases") or {}
+	fields = {}		# type: Dict[str, Any]
+	for name, value in (block.get("fields") or {}).items():
+		fields[_resolve_alias(name, aliases)] = value
+
+	fields["project"] = {"key": project}
+	issuetype = args.type or block.get("issuetype")
+	if issuetype:
+		fields["issuetype"] = {"name": str(issuetype)}
+	fields["summary"] = args.summary
+	if args.description is not None:
+		fields["description"] = _body_text(args.description)
+
+	for raw in args.field or []:
+		name, value = _split_assignment(raw)
+		field = _resolve_alias(name, aliases)
+		fields[field] = _shape(field, value)
+	for raw in args.field_json or []:
+		name, value = _split_assignment(raw)
+		field = _resolve_alias(name, aliases)
+		try:
+			fields[field] = json.loads(value)
+		except ValueError as exc:
+			raise SetupError("--field-json %s: not valid JSON (%s)"
+				% (name, exc))
+	return fields
+
+
+def _check_required(fields: Dict[str, Any], block: Dict[str, Any]) -> None:
+	"""Refuse locally what the PROFILE says this project always needs.
+
+	The server's own required list is deliberately not fetched here: that is a
+	round trip for an answer `createmeta` prints on demand, and Jira's 400
+	names every missing schema-required field at once anyway.  This check is
+	for the other kind -- a field that is optional in the schema and mandatory
+	by team convention, an epic link being the standing example.
+	"""
+	aliases = block.get("aliases") or {}
+	backwards = {}		# type: Dict[str, str]
+	for alias, field in aliases.items():
+		backwards.setdefault(str(field), str(alias))
+	missing = []
+	for name in block.get("require") or []:
+		field = _resolve_alias(str(name), aliases)
+		value = fields.get(field)
+		if value is None or value == "" or value == [] or value == {}:
+			alias = backwards.get(field)
+			missing.append("%s%s" % (field,
+				" (--field %s=...)" % alias if alias else ""))
+	if missing:
+		raise SetupError("the profile requires these fields and they are "
+			"unset: %s" % ", ".join(missing))
+
+
+def _allowed_preview(values: Any, limit: int = 6) -> str:
+	"""The first few permitted values, then a count.
+
+	Truncated because a component list runs to hundreds on a shared project,
+	and the question this column answers is "does my value look like one of
+	these" rather than "what are all of them" -- --json carries the full set.
+	"""
+	if not isinstance(values, list) or not values:
+		return ""
+	names = [name for name in (_text(item, "") for item in values) if name]
+	if not names:
+		return ""
+	head = ", ".join(names[:limit])
+	if len(names) > limit:
+		head += ", ... (%d total)" % len(names)
+	return head
+
+
+def cmd_createmeta(args: argparse.Namespace, client: Jira) -> int:
+	"""What the project demands -- the command that makes a profile writable.
+
+	Run it BEFORE filling in a profile, not after: custom field ids are
+	per-instance, and a required field discovered by a failed create costs a
+	round trip through a 400 to learn what one GET says plainly.
+	"""
+	profile, _ = load_profile(args.profile)
+	project = _profile_project(profile, args.project)
+	meta = client.createmeta(project, args.type)
+	if args.json:
+		emit_json({"project": project, "issuetypes": meta})
+		summary("%d issue type(s) for %s" % (len(meta), project))
+		return OK
+	count = 0
+	for entry in meta:
+		fields = list(entry.get("fields") or [])
+		if args.required:
+			fields = [f for f in fields if f.get("required")]
+		count += len(fields)
+		print(md_heading(2, "%s / %s" % (project, entry.get("issuetype"))))
+		print("")
+		print(md_table(("Req", "Id", "Name", "Type", "Allowed"),
+			[["yes" if f["required"] else "", f["id"], f["name"],
+				"%s<%s>" % (f["type"], f["items"]) if f["items"] else f["type"],
+				_allowed_preview(f["allowed"])] for f in fields]))
+		print("")
+	summary("%d field(s) across %d issue type(s) in %s"
+		% (count, len(meta), project))
+	return OK
+
+
+def cmd_sprints(args: argparse.Namespace, client: Jira) -> int:
+	"""Boards and their sprints -- the other half of writing a profile.
+
+	`@active` needs a board to be unambiguous, and a board id appears nowhere
+	in the issue API, so it gets a command rather than a note telling somebody
+	to read it out of a browser URL.
+	"""
+	profile, _ = load_profile(args.profile)
+	project = ""
+	if args.board is None:
+		project = _profile_project(profile, args.project)
+		boards = client.boards(project)
+	else:
+		boards = [{"id": args.board, "name": ""}]
+	entries = []
+	for board in boards:
+		try:
+			found = client.sprints(board.get("id"), args.state)
+		except JiraError as exc:
+			# A Kanban board on the same project answers 400 "doesn't support
+			# sprints".  That is an answer about THAT board, not a failure of
+			# the question, and killing the sweep over it would hide every
+			# scrum board listed after it.
+			entries.append({
+				"board": board.get("id"),
+				"board_name": _flat(board.get("name"), ""),
+				"id": "",
+				"name": _flat(str(exc).splitlines()[-1]),
+				"state": "n/a",
+			})
+			continue
+		for sprint in found:
+			entries.append({
+				"board": board.get("id"),
+				"board_name": _flat(board.get("name"), ""),
+				"id": sprint.get("id"),
+				"name": _flat(sprint.get("name")),
+				"state": _text(sprint.get("state"), ""),
+			})
+	if args.json:
+		emit_json({"project": project or None, "state": args.state,
+			"sprints": entries})
+	else:
+		print(md_heading(2, "Sprints (%s)" % args.state))
+		print("")
+		print(md_table(("Board", "Board name", "Sprint", "Name", "State"),
+			[[e["board"], e["board_name"], e["id"], e["name"], e["state"]]
+				for e in entries]))
+	# The error rows are listed but not counted: they are boards that cannot
+	# answer, and counting them as sprints would overstate the result.
+	summary("%d %s sprint(s) across %d board(s)"
+		% (len([e for e in entries if e["id"] != ""]), args.state, len(boards)))
+	return OK
+
+
+def cmd_create(args: argparse.Namespace, client: Jira) -> int:
+	profile, profile_path = load_profile(args.profile)
+	project = _profile_project(profile, args.project)
+	block = project_profile(profile, project)
+
+	fields = _create_fields(args, block, project)
+	_check_required(fields, block)
+	# Sentinels resolve even under --dry-run, and that is the point: a dry run
+	# that echoed `@active` back would confirm the spelling and nothing else.
+	# It costs GETs only -- the run still writes nothing.
+	fields = resolve_sentinels(client, project, block, fields)
+
+	body = {"fields": fields}
+	path = API + "/issue"
+	if args.dry_run:
+		return _dry_run("POST", client.cfg.base_url, path, body)
+	created = client.request("POST", path, body=body,
+		subject="a new issue in %s" % project) or {}
+	key = _text(created.get("key"), "")
+	# The browse URL, not the `self` link the API returns: one is where a human
+	# goes to read the ticket, the other is a JSON endpoint.
+	url = api_url(client.cfg.base_url, "/browse/%s" % key) if key else ""
+	if args.json:
+		emit_json({"key": key, "id": created.get("id"), "url": url,
+			"project": project, "profile": profile_path})
+	else:
+		print(md_heading(2, "Issue created"))
+		print("")
+		print(md_kv([
+			("key", key),
+			("id", _text(created.get("id"), "")),
+			("url", url),
+			("profile", profile_path or ""),
+		]))
+	summary("%s created in %s" % (key or "<no key returned>", project))
+	return OK
+
+
 HANDLERS = {
 	"whoami": cmd_whoami,
 	"search": cmd_search,
@@ -1319,6 +1925,9 @@ HANDLERS = {
 	"transitions": cmd_transitions,
 	"projects": cmd_projects,
 	"fields": cmd_fields,
+	"createmeta": cmd_createmeta,
+	"sprints": cmd_sprints,
+	"create": cmd_create,
 	"comment": cmd_comment,
 	"transition": cmd_transition,
 	"worklog": cmd_worklog,
@@ -1347,6 +1956,13 @@ def build_parser() -> argparse.ArgumentParser:
 	dry = argparse.ArgumentParser(add_help=False)
 	dry.add_argument("--dry-run", action="store_true",
 		help="print the method, URL and body that WOULD be sent, then exit 0")
+
+	profiled = argparse.ArgumentParser(add_help=False)
+	profiled.add_argument("--profile", help="path to the project profile "
+		"(overrides JIRA_PROFILE); by default %s is looked for in the working "
+		"directory and its ancestors up to $HOME" % PROFILE_FILENAME)
+	profiled.add_argument("--project", help="project key, e.g. PROJ "
+		"(default: the profile's \"project\")")
 
 	parser = argparse.ArgumentParser(prog="jira.py",
 		description="Read-mostly Jira CLI over REST API v2 (Cloud and "
@@ -1386,6 +2002,36 @@ def build_parser() -> argparse.ArgumentParser:
 		help="list field ids, e.g. to map a name to customfield_NNNNN")
 	fields.add_argument("--grep", help="filter by name substring, "
 		"case-insensitive")
+
+	createmeta = sub.add_parser("createmeta", parents=[common, profiled],
+		help="what a project's create screen requires and permits")
+	createmeta.add_argument("--type", help="restrict to one issue type, "
+		"e.g. Bug")
+	createmeta.add_argument("--required", action="store_true",
+		help="show only the fields the server marks required")
+
+	sprints = sub.add_parser("sprints", parents=[common, profiled],
+		help="boards and their sprints, for pinning a profile's board id")
+	sprints.add_argument("--board", help="one board id, instead of every "
+		"board on the project")
+	sprints.add_argument("--state", default="active",
+		help="active, future or closed (default: %(default)s)")
+
+	create = sub.add_parser("create", parents=[common, profiled, dry],
+		help="create an issue; project-specific defaults come from the profile")
+	create.add_argument("--summary", required=True, help="the issue summary")
+	create.add_argument("--description", help="the description, or '-' to "
+		"read stdin")
+	create.add_argument("--type", help="issue type name, e.g. Bug "
+		"(default: the profile's \"issuetype\")")
+	create.add_argument("--field", action="append", metavar="NAME=VALUE",
+		help="set one field, repeatable. NAME may be a field id, a system "
+			"field name or a profile alias. VALUE '%s' becomes the "
+			"authenticated user and '%s' the board's open sprint"
+			% (SENTINEL_ME, SENTINEL_ACTIVE_SPRINT))
+	create.add_argument("--field-json", action="append", metavar="NAME=JSON",
+		help="same, with the value parsed as JSON — the escape hatch for a "
+			"custom field whose shape this script cannot know")
 
 	comment = sub.add_parser("comment", parents=[common, dry],
 		help="add a comment (v2: the body is a plain string)")

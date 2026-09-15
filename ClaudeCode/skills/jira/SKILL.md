@@ -3,22 +3,25 @@ name: jira
 description: >-
   Read from and write to Jira from the terminal via the bundled stdlib-only Python CLI at
   scripts/jira.py — search by JQL, read an issue with its comments and changelog, list a
-  project's fields, then add a comment, move an issue through a transition, log work, or
-  upload a file as an attachment.
+  project's fields, inspect what a project's create screen requires, then create an issue,
+  add a comment, move an issue through a transition, log work, or upload a file as an
+  attachment.
   Works against BOTH Jira Cloud and Jira Server/Data Center; the deployment is detected at
   runtime and the two search APIs are hidden behind one iterator. Auth is a Personal Access
   Token (Data Center) or an email plus API token (Cloud), always from the environment, never
   a flag value baked into a command. Use whenever a task mentions a Jira issue key such as
-  STR-1234, asks what a ticket says, needs a JQL query run, or needs a comment, status change,
-  worklog or attachment written back. Deliberately does NOT create, delete or field-edit
-  issues.
+  STR-1234, asks what a ticket says, needs a JQL query run, or needs an issue filed or a
+  comment, status change, worklog or attachment written back. Nothing project-specific lives
+  in the script: `create` reads its defaults from a `.claude/jira.json` profile found by
+  walking up from the working directory. Deliberately does NOT delete anything or field-edit
+  an existing issue.
 ---
 
 # Jira
 
 A thin, auditable Jira client: one Python file, standard library only, no MCP server and no
-dependency tree. It covers reading and the four writes that are safe to hand an agent —
-comment, transition, worklog, attach.
+dependency tree. It covers reading and the five writes that are safe to hand an agent —
+create, comment, transition, worklog, attach.
 
 ## Quick start
 
@@ -34,6 +37,9 @@ python3 $J get STR-1234                              # issue detail
 python3 $J get STR-1234 --comments --changelog       # with discussion and history
 python3 $J search 'project = STR AND sprint in openSprints() AND assignee = currentUser()'
 python3 $J transitions STR-1234                      # what moves are legal right now
+python3 $J createmeta --type Bug --required          # what this project demands
+python3 $J sprints                                   # boards and their open sprints
+python3 $J create --summary 'parser drops the Foo header' --description - --field epic=STR-99
 python3 $J comment STR-1234 'Reproduced on 8.14.2.'
 python3 $J transition STR-1234 'In Progress'
 python3 $J worklog STR-1234 '2h 30m' --comment 'Root-caused the reconnect stall.'
@@ -85,6 +91,8 @@ interceptable channel carrying a Personal Access Token.
 | `transitions <KEY>` | The transitions legal from the issue's **current** status, with their numeric IDs. |
 | `projects` | Every project you can see. |
 | `fields` | Every field, with its ID and whether it is custom. `--grep TEXT` filters by name — this is how you map a display name onto its `customfield_NNNNN` ID. |
+| `createmeta` | What a project's create screen requires and permits, per issue type: field ID, name, `required`, schema type, and the permitted values. `--type Bug` narrows it, `--required` hides everything optional. Run this **before** writing a profile, not after a failed create. |
+| `sprints` | Boards on a project and their sprints, so a profile can pin a board ID. `--board N`, `--state active\|future\|closed`. A Kanban board on the same project is listed with the server's refusal in place of a sprint rather than aborting the sweep. |
 
 `search` and `get` carry **separate** default field lists, and that separation is deliberate.
 `search` asks for a compact set (`summary,status,assignee,reporter,issuetype,priority,updated`)
@@ -101,15 +109,71 @@ Each write honours `JIRA_READ_ONLY` and accepts `--dry-run`.
 
 | Command | What it does |
 |---|---|
+| `create` | Files a new issue. `--summary` is required; `--description` may be `-`, meaning read the body from stdin. Everything else comes from the profile, or from `--field NAME=VALUE` / `--field-json NAME=JSON` which override it. Prints the new key and its browse URL. |
 | `comment <KEY> <TEXT>` | Adds a comment. `TEXT` may be `-`, meaning read the body from stdin. |
 | `transition <KEY> <ID-OR-NAME>` | Moves the issue. A name is resolved to its numeric ID by reading the transition list first; if the name is unknown or ambiguous the legal transitions are printed and the command exits 1. `--comment TEXT` attaches a comment to the transition. |
 | `worklog <KEY> <TIMESPENT>` | Logs work, e.g. `'3h 20m'`. `--comment TEXT`, `--started ISO`. |
 | `attach <KEY> <FILE>` | Uploads a file as an attachment. `--name NAME` overrides the displayed filename; it is reduced to a basename either way, so a path cannot be smuggled into it. |
 
-**Out of scope on purpose**: creating issues, deleting anything, and editing arbitrary
-fields. Those need `editmeta` round-trips and per-field value shapes that differ between
-deployments, and they are the operations where a mis-prompted agent does damage that is
-tedious to undo. Use the web UI, or ask for them to be added deliberately.
+**Out of scope on purpose**: deleting anything, and editing arbitrary fields on an issue
+that already exists. Those need `editmeta` round-trips and per-field value shapes that differ
+between deployments, and they are the operations where a mis-prompted agent does damage that
+is tedious to undo. Creating an issue is not in that class — the worst case is one wrong
+ticket, visible, attributable and closable — so `create` is supported, while overwriting a
+ticket somebody else is working in is not.
+
+## Profiles
+
+`create` knows nothing about any project, and that is the design. Which fields a project
+demands, and what it wants in them, is a property of that project: the `customfield_NNNNN`
+IDs are per-instance, the conventions are per-team, and both drift. So the shape lives in a
+profile next to the code it tracks, and one shared CLI never carries one project's habits
+into another's.
+
+The profile is found by walking up from the working directory looking for `.claude/jira.json`,
+stopping at `$HOME`; `--profile PATH` or `JIRA_PROFILE` override the search. **No profile
+anywhere is fine** — a named one that is missing is an error, because naming a path is a
+claim that it exists.
+
+```json
+{
+	"project": "PROJ",
+	"projects": {
+		"PROJ": {
+			"issuetype": "Bug",
+			"board": 1698,
+			"aliases": { "epic": "customfield_11800", "sprint": "customfield_11300" },
+			"require": ["epic"],
+			"fields": {
+				"components": [{ "name": "SomeComponent" }],
+				"priority": { "name": "Moderate" },
+				"assignee": "@me",
+				"sprint": "@active"
+			}
+		}
+	}
+}
+```
+
+- **`aliases`** map a readable name onto a per-instance field ID, and apply both to the
+  profile's own `fields` keys and to `--field`. The numeric IDs then live in one block that a
+  single `fields --grep` run can refresh.
+- **`require`** is checked locally, before anything is sent, and fails with exit 2. It is for
+  the fields a project requires by *convention* rather than by schema — an epic link that is
+  technically optional and socially mandatory. Schema-required fields need no entry here:
+  Jira's own 400 names every one of them at once.
+- **`@me`** resolves to the authenticated user in the shape the deployment wants — Cloud
+  addresses a user by `accountId`, Data Center by `name`. **`@active`** resolves to the open
+  sprint on the pinned board. Both resolve against the server at send time, and a sentinel is
+  always a bare string, wherever it sits in the payload.
+- Everything else in `fields` is written **in its final JSON shape** and sent untouched. There
+  is no inference for custom fields, deliberately: a guess produces a 400 that blames the
+  field rather than the guess. Read a real ticket with `get --json` to see what a field
+  actually holds — though note that a field's read shape is not always its write shape, and
+  only a `--dry-run` followed by a real attempt settles that.
+
+`--dry-run` prints the fully resolved body, sentinels included. Resolving them costs GETs;
+nothing is written.
 
 ## Reading the errors
 
