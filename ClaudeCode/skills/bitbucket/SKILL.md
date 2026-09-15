@@ -126,7 +126,9 @@ and `pr-merge`. Their bodies have been assembled against real pull-request data 
 `--dry-run`, so the URL and payload are known good in shape; what is unproven is that
 the endpoint accepts them. Those sites keep their `# UNVERIFIED` marker. Use
 `--dry-run` first, and treat the first live run of each as the verification it has not
-yet had.
+yet had. Do it on a pull request nobody needs: for `pr-merge` the verification and the
+consequence are the same event, so there is no order in which you learn the endpoint
+accepts the body before it has already merged the branch.
 
 Two defects surfaced on that first live run, both worth knowing because they are the
 shape of mistake this kind of script makes:
