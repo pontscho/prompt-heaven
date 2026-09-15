@@ -19,6 +19,7 @@ links:
   - 0009-the-first-reader-is-a-cold-model
   - 0011-a-truncated-payload-carries-the-first-cookie
   - 0013-the-ceiling-is-a-payload-class
+  - 0016-a-cell-may-not-forge-a-boundary
 ---
 
 # Test Fleet
@@ -202,6 +203,7 @@ is the registry, and the run is the only thing that knows the totals.
 | `read_loop` | every server's read loop carries the shape [[0008-a-serialized-read-loop-looks-like-a-dead-server]] decided: a single-thread reader executor no handler can take, and one task per message — with the pool/coroutine split declared per server rather than inferred |
 | `wire_log` | wire logging is structure only at both sites — protocol metadata and argument *keys*, never a payload body or value (F12/CWE-532) — with the shape each site may log declared per server, and `Scripts/MCP_SKELETON.md`'s own sample lifted by script and run through the same analyser — [[0011-a-truncated-payload-carries-the-first-cookie]] |
 | `handler_crash` | every tool-handler catch-all leaves a traceback at a level the default WARNING configuration emits, at **both** site layers — the `McpServer` wrap, which all fifteen have, and the module-level dispatcher, which nine do — each declared per server, plus one security clause: the format string must be a literal, so a payload cannot be interpolated into the one log that IS written |
+| `table_cells` | every table renderer either escapes its own delimiter and documents the scheme where the model reads it, or is whitespace-delimited and has none to escape — one declared row per renderer carrying the class and the reason, the real escapers imported and round-tripped rather than restated, and reversibility as a **separate** clause because an encoder that does not escape its own escape character still passes a column count — [[0016-a-cell-may-not-forge-a-boundary]] |
 | `smoke` | JSON-RPC plumbing invariants across every server file, including the error-envelope contract ([[scripts]]) |
 
 There is **no auto-discovery**: adding a suite is three edits — the module, a
