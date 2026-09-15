@@ -1,121 +1,18 @@
 #!/usr/bin/env python3
 """Single entry point for the prompt-heaven test suites.
 
-Registered suites (see SUITES below -- that table is the only place a case
-count is written down, and every written-down count is checked against the
-run):
+The registered suites are the SUITES table below, and that table is the only
+place any of it is written down: the name, the one-line subject, and the
+declared case count all live in the same tuple, and every written-down count is
+checked against the run.
 
-  inspect_validate   tests/test_inspect_validate.py   mcp-inspect VALIDATION
-                                                      family (A-O)
-  mcp_first_guard    tests/test_mcp_first_guard.py    ClaudeCode/hooks/
-                                                      mcp-first-guard.py PreToolUse
-                                                      Bash guard (A-N)
-  purity_lsp         tests/test_purity_lsp.py         purity_call semantic
-                                                      navigation vs the retired
-                                                      mcp-clangd / mcp-luals
-                                                      servers (A-J)
-  purity_file_ops    tests/test_purity_file_ops.py    purity_call's gitignore-
-                                                      aware file handlers: the
-                                                      `.claude/tmp` exemption,
-                                                      the inheritance rule that
-                                                      keeps it narrow, and the
-                                                      parameter contract
-                                                      (A-F)
-  mcp_git_params     tests/test_mcp_git_params.py     mcp-git named params ->
-                                                      git argv, fully offline
-                                                      (A-L)
-  name_existence     tests/test_name_existence.py     every MCP name the prompt
-                                                      corpus and the servers'
-                                                      own model-facing text
-                                                      prescribe must exist in
-                                                      the live inventory, and
-                                                      every tool an agent is told
-                                                      to call must be in its
-                                                      `tools:` grant (A-I)
-  spawn_stdin        tests/test_spawn_stdin.py        every subprocess spawn
-                                                      site under Scripts/ must
-                                                      pass an explicit `stdin=`,
-                                                      because an MCP server's
-                                                      stdin IS the JSON-RPC
-                                                      stream (AST-based, A-D)
-  mcp_footprint      tests/test_mcp_footprint.py      what the fleet costs in
-                                                      tokens: the permanent
-                                                      tools/list description
-                                                      tax, the per-call result
-                                                      ceiling, and the fixed
-                                                      boilerplate -- summed over
-                                                      the REGISTERED servers,
-                                                      not the file set (A-G)
-  wiki_recall        tests/test_wiki_recall.py        the mcp-wiki `search`
-                                                      relevance gate on a
-                                                      synthetic corpus that
-                                                      reproduces the measured
-                                                      pathologies: silence, the
-                                                      MEASURED calibration
-                                                      window, floored
-                                                      percentages, and the
-                                                      query-side stopword drop
-                                                      -- plus `get_page`'s
-                                                      section index,
-                                                      `source_to_pages`' per-hit
-                                                      description, the
-                                                      git-MEASURED state in
-                                                      every recall label, the
-                                                      page type as a ranking
-                                                      signal, and the
-                                                      frontmatter `aliases:`
-                                                      synonym field (the mirror
-                                                      of the type signal: it
-                                                      MUST reach coverage), each
-                                                      on its own separate
-                                                      fixture (A-P)
-  read_loop          tests/test_read_loop.py          every Scripts/mcp-*.py
-                                                      read loop carries ADR
-                                                      0008's shape: a
-                                                      single-thread reader
-                                                      executor no handler can
-                                                      take, and one task per
-                                                      message -- with the
-                                                      per-server pool/coroutine
-                                                      split DECLARED in a table
-                                                      rather than inferred from
-                                                      the fleet (AST-based, A-F)
-  wire_log           tests/test_wire_log.py           every Scripts/mcp-*.py
-                                                      logs protocol STRUCTURE
-                                                      at both wire sites and
-                                                      never a payload body or
-                                                      value -- F12/CWE-532, with
-                                                      truncation explicitly not
-                                                      accepted as a mitigation,
-                                                      the shape each site may
-                                                      log DECLARED per server,
-                                                      and MCP_SKELETON.md's own
-                                                      sample lifted by script
-                                                      and run through the same
-                                                      analyser (AST-based, A-F)
-  handler_crash      tests/test_handler_crash.py      every Scripts/mcp-*.py
-                                                      tool-handler catch-all
-                                                      leaves a traceback at a
-                                                      level the default WARNING
-                                                      configuration emits --
-                                                      log.debug reaches nobody,
-                                                      and six servers used it.
-                                                      BOTH site layers are
-                                                      gated, the McpServer wrap
-                                                      and the module-level
-                                                      dispatcher, each DECLARED
-                                                      per server in a table
-                                                      rather than inferred from
-                                                      the fleet, plus one
-                                                      security clause: the
-                                                      format string must be a
-                                                      literal, so a payload
-                                                      cannot be interpolated
-                                                      into a log that IS
-                                                      written (AST-based, A-E)
-  smoke              Scripts/_mcp_smoke_test.py       JSON-RPC plumbing
-                                                      invariants across the
-                                                      whole server fleet
+This docstring used to carry a second copy of that roster -- name, file and
+description, hand-wrapped, ninety lines of it. It listed thirteen of the
+seventeen suites by the time anyone read it against the table: `sbx_gate`,
+`jira_cli`, `checkpoint` and `generated_region` had each been added below and
+not here. A roster whose whole job is completeness is not partly stale, it is
+wrong, and the copy could only ever drift in one direction. Deleting it is the
+file applying to itself the rule it already states.
 
 `purity_lsp` is the slow one (~45 s): it drives live clangd /
 lua-language-server children through a real handshake.  It SKIPs cleanly when

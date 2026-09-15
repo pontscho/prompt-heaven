@@ -403,7 +403,9 @@ on diagnostics grounds would by now be declined on arithmetic. The case pins eac
 spelling against the UNFILTERED answer rather than only against path_prefix's —
 two spellings that agree prove the alias *resolved*, and only a narrower answer
 proves it reached the filter. All of it is pinned by `wiki_recall` group N
-(115 cases) `tests/test_wiki_recall.py`.
+`tests/test_wiki_recall.py`. (The case count is deliberately not repeated here:
+the figure that stood in this sentence said 115, the declared count is 116, and
+it was labelling a GROUP with a SUITE total either way.)
 
 ## Task utilities
 

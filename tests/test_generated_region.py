@@ -61,9 +61,12 @@ writes NOTHING -- not into the repo, not into a sandbox. The generator exposes
 `audit_text` precisely so the control group needs no scratch directory.
 
 Group E is the other half, and it is not optional: a drift gate on its own would
-only ever prove that fourteen files agree on the same bug. E imports every
-canonical module and exercises each block's BEHAVIOUR, so a helper inlined into
-fourteen servers is unit-tested once -- here, and nowhere else in the fleet.
+only ever prove that every host agrees on the same bug. E imports every canonical
+module and exercises each block's BEHAVIOUR, so a shared helper is unit-tested
+once -- here, and nowhere else in the fleet. (These three sentences used to say
+"fourteen" twice, standing in for the fleet. The fleet is fifteen, and per block
+the host count runs from four to fifteen, so one number could never have been
+right for the group as a whole.)
 
 Groups:
   A. GATE:    the live regions in Scripts/mcp-*.py match their canonical source
