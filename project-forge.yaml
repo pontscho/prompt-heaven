@@ -130,6 +130,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
+  bitbucket_cli:
+    description: "The Bitbucket Server/DC CLI, fully offline (transport injected, nothing dialled): the context-path URL join with None-valued query keys dropped and the rest sorted, the two refusals at the door -- an http:// scheme that would hand the bearer PAT to the network in cleartext, and a userinfo base URL whose refusal is asserted NOT to reproduce the secret it exists to protect -- plus the scheme-less spelling that used to reach reject_cloud with hostname None and pass. The same-origin redirect handler is gated component by component (host, scheme, port each on their own row, because urllib's default strips content-length and content-type and leaves Authorization attached), the absent-https-port-is-443 normalisation in both directions, an unparseable port refused rather than raised, and the built opener's redirect chain asserted to contain ONLY SameOriginRedirectHandler -- reached with no socket at all, by calling urllib_fetch with a host-less URL that urllib rejects in do_request_. BITBUCKET_READ_ONLY is gated at BOTH layers, and the row that matters is neither: every entry in HANDLERS is driven through a verb-recording transport and WRITE_COMMANDS is compared against the MEASURED non-GET set, never against a typed list, because the defect being prevented is a subcommand added to one list and forgotten in the other. The four merge refusals are each measured as ZERO requests rather than asserted as statement order -- _target() legitimately runs first, and there is a case showing exactly that. pr-builds pins the verdict precedence, the blank state that made the verdict row VANISH from the document rather than read wrong, and the exit code in Markdown AND --json in ONE case, since the --json branch used to return a hard-coded OK and every gate piping to jq was silently green. A control group plants four mutants -- a reject_cloud comparing only the full hostname, a _build_verdict returning states[0], a WRITE_COMMANDS missing an entry, a redirect handler comparing only the host -- plus the mirror asserting the real implementations pass those same oracles."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py bitbucket_cli
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|READ_ONLY|ORIGIN|VERDICT|UNVERIFIED|control'
+
   checkpoint:
     description: "The checkpoint section reader and TOC writer. Writes only inside a mkdtemp sandbox -- never the live .claude/tmp/checkpoint.md, which is the script's own default target: line ranges, the two-render offset fix point, idempotence, byte preservation, and the refusals."
     requires: [syntax]

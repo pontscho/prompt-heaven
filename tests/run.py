@@ -118,6 +118,10 @@ def run_jira_cli(opts):
     return run_python_suite("test_jira_cli", opts)
 
 
+def run_bitbucket_cli(opts):
+    return run_python_suite("test_bitbucket_cli", opts)
+
+
 def run_checkpoint(opts):
     return run_python_suite("test_checkpoint", opts)
 
@@ -226,6 +230,27 @@ SUITES = [
      "the one-level merge, alias resolution, NAME=VALUE at the first `=`, the "
      "system-field shaping table, and `@active` refusing every ambiguous "
      "board/sprint configuration instead of guessing", 192),
+    # TYPED, and the count is a fixed case table plus ONE derived row: group C
+    # sweeps every entry in the CLI's HANDLERS dict, but it records three cases
+    # regardless of how many subcommands it finds, so adding a subcommand moves
+    # this number by zero.  What DOES move it is adding a case, which is what a
+    # typed count is for.  Unlike `mcp_footprint`, nothing here is a per-server
+    # or per-site multiple, so there is no legitimate change to the thing being
+    # measured that a typed count would punish.
+    ("bitbucket_cli", run_bitbucket_cli,
+     "Bitbucket CLI offline (transport injected): the context-path URL join "
+     "and the two refusals at the door -- an http:// scheme that would put the "
+     "bearer PAT on the wire in cleartext, and a userinfo URL whose refusal is "
+     "asserted NOT to reproduce the secret -- the same-origin redirect handler "
+     "that keeps the Authorization header from following a 30x off this origin, "
+     "BITBUCKET_READ_ONLY at BOTH layers with the write set DERIVED by driving "
+     "every handler through a verb-recording transport rather than typed twice, "
+     "the four merge refusals each measured as zero requests rather than as "
+     "statement order, pr-builds' verdict precedence and its exit code pinned "
+     "in Markdown AND --json in one case, the per-subcommand request contract "
+     "including pr-approve's three requests and paging that follows "
+     "nextPageStart, reviewer flattening in both the documented and the "
+     "OBSERVED shape, and byte parity with jira.py's _profile_path", 128),
     ("checkpoint", run_checkpoint,
      "checkpoint.py section reader + TOC writer: Start/End land on the block "
      "and nothing else, the numbers describe the file AFTER the region was "
