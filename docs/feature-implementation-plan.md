@@ -1,9 +1,9 @@
 ---
 name: feature-implementation-plan
 type: spec
-status: active
+status: deprecated
 title: Sandboxed CLI Runner — sandbox-run skill + sbx helper + PreToolUse gate
-description: Approve-the-wrapper-not-the-command trust-boundary shift — a stdlib-only sbx sandbox helper (Seatbelt/bwrap) plus a grant-only PreToolUse gate that auto-allows only a clean, contained, single sbx invocation and prompts on everything else.
+description: SHIPPED in 1446acb (2026-08-08) and kept as a record rather than a live plan — the approve-the-wrapper-not-the-command trust-boundary shift: a stdlib-only sbx sandbox helper (Seatbelt/bwrap) plus a grant-only PreToolUse gate. Its path:line anchors are deliberately NOT maintained; 10 of 41 had already drifted when the page was audited on 2026-09-15.
 sources:
   - ClaudeCode/skills/sandbox-run/SKILL.md
   - ClaudeCode/skills/sandbox-run/scripts/sbx
@@ -21,9 +21,34 @@ verified:
 links:
   - hooks
   - skills
+  - layer-contract
 ---
 
 # Feature Implementation Plan: Sandboxed CLI Runner (`sandbox-run` skill + `sbx` helper + PreToolUse gate)
+
+> **SHIPPED, AND NOT MAINTAINED. Read this as a record, not as instructions.**
+> The plan was executed: the feature landed in `1446acb` (2026-08-08) with the
+> follow-up `c6af014`. The living WHAT/HOW is the [[skills]] `p:sandbox-run`
+> row, the [[hooks]] roster, and ADR 0005; the frozen WHY is ADR 0005 too. What
+> this page still carries that neither of those does is the *rejected*
+> alternatives and the threat-model reasoning behind the shape of the boundary.
+>
+> **Its `path:line` anchors are deliberately not repaired.** A page-wide audit on
+> 2026-09-15 read all 41 distinct anchors against the tree: 31 still resolve, 10
+> have drifted or point at text that was since deleted. `tests/run.py` alone
+> moved under three different deltas of two signs across 30 commits. Treat every
+> anchor below as a pointer to a FILE and never to a line number.
+>
+> **Several "currently stale — fix this" items in the documentation step are
+> already done**, some of them by the very commit that last stamped `verified:`
+> below. That stamp (`095db60`, 2026-08-10) came from a frontmatter-only commit
+> which reasoned about the diff instead of re-reading the anchors; it is left
+> standing as the honest date of the last real verification, not bumped.
+>
+> One structural note for whoever finds this page: `docs/feature-implementation-plan.md`
+> is the fixed output slot of `/p:feature-plan`, and the planner overwrites it
+> completely on the next run. The path stays put by a decided rule
+> (see [[layer-contract]]), so this record is expected to be transient.
 
 > Synthesized canonical plan. The lead perspective is **risk-first / security** —
 > this feature *is* a security boundary, and its whole value proposition is that
