@@ -86,6 +86,7 @@ Exit code 0 iff every non-informational case passes.
 """
 
 import ast
+import asyncio
 import hashlib
 import json
 import logging
@@ -262,29 +263,35 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
     The imports are not decoration: the block contract check runs against the
     host, and `_result`'s annotation needs `Any`, `encode_lsp_message` needs
     `json`, `_FENCE_LINE_RE` -- the first CONSTANT block -- needs `re`,
-    `_configure_logging` needs `logging`, `os` and `sys`, and the LSP URI pair
+    `_configure_logging` needs `logging`, `os` and `sys`, the LSP URI pair
     needs `pathlib` (`path_to_uri`) plus `urlparse` and `url2pathname`
-    (`uri_to_path`). A fixture without them would be refused for the wrong
-    reason and the tab cases would pass on an error that has nothing to do with
-    tabs.
+    (`uri_to_path`), and the LSP CLIENT half needs `asyncio` (`_request`) on top
+    of `Any` and `pathlib`. A fixture without them would be refused for the
+    wrong reason and the tab cases would pass on an error that has nothing to do
+    with tabs.
 
     `tab-emission-is-all-tabs` drives EVERY tab-safe block through this one
     fixture, so the import list is not "what today's cases happen to need" but
     the union of what every canonical block reads. A block added upstream with
     a new free name lands here as a refusal naming that name.
 
-    That last sentence has now been paid out TWICE rather than merely promised.
-    The logging source arrived with three free names this fixture did not
-    import, and the suite stopped with a refusal naming `logging`, `os` and
+    That last sentence has now been paid out THREE times rather than merely
+    promised. The logging source arrived with three free names this fixture did
+    not import, and the suite stopped with a refusal naming `logging`, `os` and
     `sys`. The LSP URI pair then did the same for `pathlib`, `urlparse` and
-    `url2pathname` -- and that one is the more instructive of the two, because
+    `url2pathname` -- and that one is the more instructive of the three, because
     the same refusal had already fired against three REAL hosts: `mcp-clangd`,
     `mcp-cuda` and `mcp-lua-lsp` each had to be given the two `urllib` imports
-    by hand before their regions would render at all. The fixture is refused on
-    exactly the terms a server is.
+    by hand before their regions would render at all. The LSP CLIENT half paid
+    it a third time, for `asyncio` alone, and that one is the reverse case worth
+    noting: all four real hosts already imported every name those blocks read,
+    so the fixture was the ONLY thing the lift refused. A gate that only ever
+    fires when a server is also broken is a gate nobody has separated from the
+    servers.
     """
     return (
         '"""A tab-indented target."""\n'
+        "import asyncio\n"
         "import json\n"
         "import logging\n"
         "import os\n"
@@ -297,7 +304,7 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "\n\n"
         "def _existing():\n"
         "\tif True:\n"
-        "\t\treturn json, logging, os, pathlib, re, sys, Any\n"
+        "\t\treturn asyncio, json, logging, os, pathlib, re, sys, Any\n"
         "\treturn urlparse, url2pathname\n"
         "\n\n"
         "%s %s :: %s\n" % (BEGIN_PREFIX, source, names)
@@ -1252,6 +1259,200 @@ def group_blocks(suite, blocks, lsp, paging, logmod):
         if got != uri:
             problems.append("%r came back as %r" % (uri, got))
     suite.record(GE, "lsp-uri-passes-a-foreign-scheme-through", problems)
+
+    # THE CLIENT HALF. `_request`, `_notify`, `_abs_uri` and `_abs_path` are
+    # METHODS at their destination -- emitted at an INDENTED marker inside four
+    # differently-named client classes -- so they are driven here with a stub
+    # receiver rather than a real backend. That is the honest shape of the
+    # contract and not a shortcut: the blocks promise nothing about `self`
+    # beyond the four attributes they touch, and a fixture that stood up clangd
+    # would be measuring clangd.
+    #
+    # Group A already proves the four hosts carry the same body; what it cannot
+    # prove is that the body is right. Three of the properties below are exactly
+    # the kind a drift gate RATIFIES rather than checks -- a notification that
+    # is one only because it has no `id`, a timeout that answers instead of
+    # raising, and a pending entry removed on the way out -- and each would read
+    # green in all four servers forever if it were wrong.
+
+    class _Receiver:
+        """Exactly the attributes `_request` and `_notify` reach for."""
+
+        def __init__(self, reply=None):
+            self._next_id = 1
+            self._pending = {}
+            self._reply = reply
+            self.sent = []
+
+        async def _send(self, body):
+            self.sent.append(body)
+            # What the real reader loop does when the answer comes back.
+            if self._reply is not None and "id" in body:
+                self._pending[body["id"]].set_result(self._reply)
+
+    recv = _Receiver(reply={"result": {"symbols": []}})
+    params = {"textDocument": {"uri": "file:///x.c"}}
+    answer = asyncio.run(lsp._request(recv, "textDocument/documentSymbol",
+                                      params))
+    problems = problem_if(
+        answer != {"result": {"symbols": []}},
+        "_request did not hand back the future's value: %r" % (answer,),
+    )
+    problems += problem_if(
+        len(recv.sent) != 1,
+        "_request sent %d message(s), expected exactly one" % len(recv.sent),
+    )
+    if recv.sent:
+        problems += problem_if(
+            recv.sent[0] != {"jsonrpc": "2.0", "id": 1,
+                             "method": "textDocument/documentSymbol",
+                             "params": params},
+            "the request envelope drifted: %r" % (recv.sent[0],),
+        )
+    # The id must be CONSUMED, and the waiter registered under the id that went
+    # out -- the correlation is the whole job, and an envelope carrying an id
+    # the table was never keyed on is a reply nothing can match.
+    problems += problem_if(
+        recv._next_id != 2,
+        "the id counter read %r after one request, expected 2" % recv._next_id,
+    )
+    problems += problem_if(
+        list(recv._pending) != [1],
+        "the waiter was not registered under the id that was sent: %r"
+        % sorted(recv._pending),
+    )
+    suite.record(GE, "lsp-request-allocates-correlates-and-answers", problems,
+                 detail=[str(recv.sent)])
+
+    # The timeout arm, and the two things it owes. It ANSWERS rather than
+    # raising -- a slow backend costs one call, not the handler above it -- and
+    # it takes the future back OUT of `_pending`. The second half is the one a
+    # drift gate would ratify forever: that table has no sweeper, so an entry
+    # left behind is a future nothing will ever resolve or collect.
+    #
+    # Deterministic despite the clock: nothing in this fixture can resolve the
+    # future, so the wait cannot finish early on any machine.
+    recv = _Receiver()
+    answer = None
+    problems = []
+    try:
+        answer = asyncio.run(lsp._request(recv, "textDocument/hover", {},
+                                          timeout=0.05))
+    except Exception as exc:                       # noqa: BLE001 -- the point
+        problems.append("_request RAISED %s instead of answering on timeout: %s"
+                        % (type(exc).__name__, exc))
+    if answer is not None:
+        problems += problem_if(
+            answer != {"error": {"message":
+                                 "timeout waiting for textDocument/hover"}},
+            "the timeout reply drifted: %r" % (answer,),
+        )
+    problems += problem_if(
+        recv._pending,
+        "the timed-out future was left in _pending, where nothing sweeps it: "
+        "%r" % sorted(recv._pending),
+    )
+    suite.record(GE, "lsp-request-timeout-answers-and-unregisters", problems,
+                 detail=[repr(answer)])
+
+    # A notification is a notification BECAUSE it carries no `id`. Give it one
+    # and the backend replies to a request nothing is waiting for: the answer
+    # reaches the reader loop, finds no `_pending` entry and is dropped in
+    # silence. That is the whole of the difference from `_request`, and it is a
+    # key's ABSENCE -- which no amount of "four files agree" can establish.
+    recv = _Receiver()
+    asyncio.run(lsp._notify(recv, "textDocument/didOpen", {"x": 1}))
+    problems = problem_if(
+        len(recv.sent) != 1,
+        "_notify sent %d message(s), expected exactly one" % len(recv.sent),
+    )
+    if recv.sent:
+        problems += problem_if(
+            "id" in recv.sent[0],
+            "a notification carried an id, so the backend will reply to it: %r"
+            % (recv.sent[0],),
+        )
+        problems += problem_if(
+            recv.sent[0] != {"jsonrpc": "2.0", "method": "textDocument/didOpen",
+                             "params": {"x": 1}},
+            "the notification envelope drifted: %r" % (recv.sent[0],),
+        )
+    problems += problem_if(
+        recv._next_id != 1 or recv._pending,
+        "_notify consumed an id or registered a waiter: next_id=%r pending=%r"
+        % (recv._next_id, sorted(recv._pending)),
+    )
+    suite.record(GE, "lsp-notify-carries-no-id", problems)
+
+    # `_abs_uri` and `_abs_path` are ONE resolution with two endings, so they
+    # are driven together: a case exercising either alone would pass on a pair
+    # that had stopped agreeing about the path in the middle.
+    class _Rooted:
+        def __init__(self, root):
+            self.project_root = root
+
+    root = os.path.realpath(H.repo_path("Scripts"))
+    # A leaf that does not exist, deliberately: `resolve()` is non-strict, and a
+    # real file would make this case depend on whether the checkout happens to
+    # sit behind a symlink.
+    rooted = _Rooted(root)
+    joined = lsp._abs_path(rooted, "no_such_translation_unit.c")
+    already = lsp._abs_path(rooted,
+                            os.path.join(root, "no_such_translation_unit.c"))
+    problems = problem_if(
+        joined != os.path.join(root, "no_such_translation_unit.c"),
+        "a relative path was not resolved against project_root: %r" % joined,
+    )
+    problems += problem_if(
+        already != joined,
+        "an already-absolute path was re-rooted: %r against %r"
+        % (already, joined),
+    )
+    problems += problem_if(
+        not lsp._abs_uri(rooted, "no_such_translation_unit.c").startswith(
+            "file://"),
+        "_abs_uri did not answer with a file:// DocumentUri: %r"
+        % lsp._abs_uri(rooted, "no_such_translation_unit.c"),
+    )
+    suite.record(GE, "lsp-abs-resolves-against-project-root", problems,
+                 detail=[joined])
+
+    # The tie between the new pair and the one already in this source, and the
+    # reason both belong to one domain: `_abs_uri` is the WIRE spelling of
+    # exactly what `_abs_path` returns, so `uri_to_path` has to undo it. The
+    # reserved characters are in the fixture deliberately -- `as_uri()`
+    # percent-encodes them, and only a DECODING `uri_to_path` arrives back at
+    # the same string, which is the defect that pair was lifted to fix.
+    #
+    # The `..` in the fixture is what stops this case being satisfied by
+    # `_abs_uri` quietly becoming `path_to_uri` with a root bolted on. That one
+    # uses `absolute()`, which leaves `..` standing, while these two use
+    # `resolve()`, which collapses it -- and on a path without one the two calls
+    # are indistinguishable, so a plain filename here would ratify the
+    # convergence instead of catching it. The difference is not cosmetic: an
+    # uncollapsed `..` is exactly what `uri_to_path`'s own SECURITY note is
+    # about, a traversal reaching `_path_within_root` in a form that check reads
+    # as an ordinary directory name.
+    rooted = _Rooted(os.path.join(root, "a dir", "weird #1 & 2"))
+    wire = lsp._abs_uri(rooted, "sub/../ünïcode.c")
+    local = lsp._abs_path(rooted, "sub/../ünïcode.c")
+    problems = problem_if(
+        "%20" not in wire or "%23" not in wire,
+        "_abs_uri did not percent-encode, so the round trip below would pass "
+        "on a pair that does NEITHER: %r" % wire,
+    )
+    problems += problem_if(
+        "/sub/.." in wire or "/sub/.." in local,
+        "the `..` was not collapsed, so this pair is running absolute() where "
+        "it promises resolve(): %r / %r" % (wire, local),
+    )
+    problems += problem_if(
+        lsp.uri_to_path(wire) != local,
+        "_abs_uri is not the wire spelling of _abs_path: %r decodes to %r, "
+        "not %r" % (wire, lsp.uri_to_path(wire), local),
+    )
+    suite.record(GE, "lsp-abs-uri-is-the-wire-spelling-of-abs-path", problems,
+                 detail=[wire])
 
     # _result/_error are staticmethod DESCRIPTORS here, not callables -- they are
     # methods only at their destination. Reaching through __func__ is the point,

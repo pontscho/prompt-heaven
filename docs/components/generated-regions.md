@@ -75,13 +75,14 @@ A `BEGIN` without an `END` is a hard error rather than a skip, because a region
 that quietly stops being maintained is the whole failure the mechanism exists to
 prevent `Scripts/amalgamate.py`.
 
-As of the verified commit: **103 live regions across the 15 servers, emitting 133
-block instances from 18 canonical blocks** — a single region may name several
-blocks, and that is the whole of the gap between the two counts. Thirty regions
-name two blocks each and every other names one: fourteen `_result, _error`, seven
-`_json_error_window, _ensure_dict`, five
-`DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars`, and four
-`uri_to_path, path_to_uri`. `_json_error_window` and `_configure_logging` are in
+Measured at the last edit to this page: **111 live regions across the 15 servers,
+emitting 149 block instances from 22 canonical blocks** — a single region may
+name several blocks, and that is the whole of the gap between the two counts.
+Thirty-eight regions name two blocks each and every other names one: fourteen
+`_result, _error`, seven `_json_error_window, _ensure_dict`, five
+`DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars`, and four each of
+`uri_to_path, path_to_uri`, `_request, _notify` and `_abs_uri, _abs_path`.
+`_json_error_window` and `_configure_logging` are in
 every server; the `_result` / `_error` pair is in fourteen of fifteen,
 `mcp-webfetch.py` the one holdout.
 
@@ -128,16 +129,16 @@ decides when a sixth source is warranted are
 | `Scripts/_mcp_concurrency.py` | 1 | how many tool calls a server runs at once |
 | `Scripts/_mcp_json.py` | 6 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
 | `Scripts/_mcp_logging.py` | 1 | how a server CONFIGURES logging — level, sink, file mode |
-| `Scripts/_mcp_lsp.py` | 3 | how the LSP wire is spoken — `Content-Length` framing of a message, `file://` DocumentUri of a path |
+| `Scripts/_mcp_lsp.py` | 7 | how the LSP wire is spoken — `Content-Length` framing for a message, the `file://` DocumentUri for a path, the client-side hops that put a message on that wire, and the two spellings of a resolved path |
 | `Scripts/_mcp_paging.py` | 7 | how much of a result a caller gets, and how it is told where the rest is |
 
-Eighteen blocks across five sources, which the suite asserts as a disjointness
+Twenty-two blocks across five sources, which the suite asserts as a disjointness
 check rather than a count. The paging row read `5` until the edit that added the
 logging row: the number was left behind when `_max_answer_chars` was lifted, and
 a stale figure sitting beside a new row is worse than one sitting alone. The
-three moves since are genuine arrivals rather than corrections — `_ensure_dict`
-in the JSON row, `DEFAULT_MAX_CHARS` in the paging one, the DocumentUri pair in
-the LSP one.
+four moves since are genuine arrivals rather than corrections — `_ensure_dict`
+in the JSON row, `DEFAULT_MAX_CHARS` in the paging one, and the DocumentUri pair
+then the client half in the LSP one.
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its three hosts
 were found in. `mcp-git.py`, `mcp-inspect.py` and `mcp-wiki.py` each wrote
@@ -200,8 +201,11 @@ being written on a marker, and an unknown one is already refused by name with th
 source it was asked for `Scripts/amalgamate.py:render`.
 
 A method inside a class still cannot be a block — the walk is over `tree.body`
-and nothing else — which is why `_result` and `_error` are defined at module top
-level in the JSON source despite being methods at their destination.
+and nothing else — which is why every block that lands inside a class body is
+written at module top level in its canonical source: `_result` and `_error` in
+the JSON source, and the four client-side methods in the LSP source, whose `self`
+is an ordinary first parameter the generator has nothing to check about
+`Scripts/_mcp_lsp.py`.
 
 **The host must already import every free name.** `free_names` over-reports
 deliberately, and it catches two holes that were once live: a block calling
@@ -225,6 +229,15 @@ deliberately ignores calls inside a region, had to start asking whether the
 **pair** is reached instead of whether one name is
 `tests/test_generated_region.py:group_gate`. Co-listing is cheap at the marker
 and is not free further out.
+
+The remedy has a hard boundary, and it follows from where the blocks land rather
+than from any check: co-listing works for a **module-level** region and cannot
+work for an indented one. Every block in a region is emitted at the marker's own
+column `Scripts/amalgamate.py:render`, so a dependency co-listed into a class
+body arrives as a class member — where the block's own unqualified global lookup
+would never find it. An indented region's free names must therefore be satisfied
+by the host's imports alone, and a block whose dependency is a module-level `def`
+has no remedy at that column at all.
 
 Admitting constants needed nothing added here, and that is a property of the walk
 rather than luck: `ast.walk` descends the whole tree and every binder is matched
@@ -297,7 +310,12 @@ be a block — its free names include the host's own server class, and host
 provision is imports-only. `_ErrorText` *could* be one — byte-identical copies,
 empty free names — and deliberately is not, because blessing a second mechanism
 as generated infrastructure would buy drift protection for a divergence; see
-[[0010-a-handler-failure-must-reach-iserror]].
+[[0010-a-handler-failure-must-reach-iserror]]. `_send` is the third entry and
+fails on a third rule: it is byte-identical in all four LSP servers and squarely
+inside the LSP source's domain — it is `encode_lsp_message`'s only caller — but
+that is exactly what refuses it, since the name it needs is a module-level `def`
+in every host rather than an import, and the co-listing remedy above cannot reach
+an indented region `Scripts/MCP_SKELETON.md`.
 
 ## The gate
 

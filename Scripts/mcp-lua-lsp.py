@@ -536,6 +536,8 @@ class LuaLsClient:
             self.process.stdin.write(data)
             await self.process.stdin.drain()
 
+    # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+    # BEGIN GENERATED: _mcp_lsp.py :: _request, _notify
     async def _request(self, method: str, params: Any, timeout: float = 10.0) -> dict:
         req_id = self._next_id
         self._next_id += 1
@@ -551,6 +553,7 @@ class LuaLsClient:
 
     async def _notify(self, method: str, params: Any) -> None:
         await self._send({"jsonrpc": "2.0", "method": method, "params": params})
+    # END GENERATED: 9e3a42dc773d
 
     async def open_document(self, path: str) -> bool:
         """Send textDocument/didOpen if not already open.
@@ -736,6 +739,8 @@ class LuaLsClient:
                         self._diag_waiters.pop(uri, None)
         return self._diagnostics.get(uri, [])
 
+    # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+    # BEGIN GENERATED: _mcp_lsp.py :: _abs_uri, _abs_path
     def _abs_uri(self, path: str) -> str:
         p = pathlib.Path(path)
         if not p.is_absolute():
@@ -747,6 +752,7 @@ class LuaLsClient:
         if not p.is_absolute():
             p = pathlib.Path(self.project_root) / p
         return str(p.resolve())
+    # END GENERATED: 736ce2f5cbd9
 
 
 # ============================================================

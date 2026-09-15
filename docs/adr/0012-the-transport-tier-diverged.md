@@ -160,3 +160,33 @@ the two it means before it names a line count.
   all defensible answers to differently-worded questions about the same fifteen
   files. A future claim of the form "N duplicated lines" should say which one it
   means, or it will be re-measured from scratch.
+
+## Correction — one clause in reason Two, not the conclusion
+
+Reason Two refuses the extraction on three separate rules, each stated as enough
+on its own. Two still hold. One has since been disproved by a lift in a
+neighbouring domain, and the disproof is recorded here rather than edited into the
+frozen text above.
+
+The false clause is this: *"the `_result` / `_error` escape works only because
+those are module-level `@staticmethod`s in the canonical source placed at the
+marker's column, and that trick does not transfer to a method taking `self`."*
+`_request`, `_notify`, `_abs_uri` and `_abs_path` are four methods taking `self`,
+written at module top level in `Scripts/_mcp_lsp.py` and emitted at a 4-space
+marker column into three differently-named client classes across four servers, one
+digest each. `self` is an ordinary first parameter; the `@staticmethod` was never
+what made the route work — **the marker's column is.** The sentence immediately
+before it stays true and is a different claim: the block walk is over `tree.body`,
+so a method cannot be harvested *from a host*
+`Scripts/amalgamate.py:load_blocks_text`.
+
+**Nothing follows for the decision.** The other two rules in reason Two are
+untouched and each was stated as sufficient alone — `host_provides` still offers
+module-level imports only, which is what refuses any transport block reading the
+module-level `log` assignment, and `block_is_tab_safe` still refuses a
+bracket-continuing body on the two tab-indented hosts. That first rule was
+demonstrated again by the same lift: `_send` is byte-identical in all four LSP
+hosts and squarely in that domain, and was still refused, because its only free
+name `encode_lsp_message` is a module-level `def` rather than an import
+`Scripts/MCP_SKELETON.md`. Reasons One and Three are not touched. The transport
+tier stays closed.

@@ -214,6 +214,18 @@ divergence as a divergence. `_tool_error` is the precedent for wrap code
 documented here rather than generated: it cannot be a block at all, because its
 `free_names` holds `McpServer`, a name the host defines.
 
+**`_send` is the third entry in that register, and it fails on a different rule.**
+It is byte-identical in all four LSP servers and squarely inside `_mcp_lsp.py`'s
+domain — it is `encode_lsp_message`'s only caller — but that is exactly what
+refuses it: its one free name is `encode_lsp_message`, which every host holds as a
+module-level `def` of its own (a generated region), while `host_provides` offers a
+region only the host's module-level **imports**. The documented remedy, co-listing
+the dependency on the same marker, does not transfer to an **indented** region: it
+would emit a module-level function as a class member, where the block's own global
+lookup would not reach it anyway. Reshaping the body or dropping the module-level
+region would both change behaviour, so `_send` stays a hand copy and is recorded
+as one.
+
 **The control, and what it does not reach.** `Scripts/_mcp_smoke_test.py` check 7
 (`error_envelope_checks`) drives every server over live JSON-RPC with
 `function="__no_such_function__"` and requires `isError is True` — read as the
@@ -594,7 +606,8 @@ for how a server CONFIGURES logging, which is not the same question as what it
 logs (the wire log is a security invariant governed by `tests/test_wire_log.py`
 and deliberately stays hand-written in each server); `Scripts/_mcp_lsp.py`
 for how the LSP wire is spoken by the four language-server hosts — the
-`Content-Length` framing of a message, and the `file://` DocumentUri of a path;
+`Content-Length` framing of a message, the `file://` DocumentUri of a path, and
+the client-side request and notification hops that ride on both;
 `Scripts/_mcp_paging.py` for output capping and the two halves of the pager
 protocol, the `offset=<n> for more` line a payload ends with and the read that
 takes the number back; and `Scripts/_mcp_concurrency.py` for how many tool calls
@@ -714,7 +727,13 @@ three when the list already had four; it is checked now):
   keep its own version while the others share one.
 - **A region is emitted at its BEGIN marker's own column.** Indent the marker and
   the block lands indented, which is what lets a region sit inside a class body —
-  the route by which the `_result` / `_error` methods of §3 are shareable at all.
+  the route by which the `_result` / `_error` methods of §3, and the `_request` /
+  `_notify` / `_abs_uri` / `_abs_path` client methods the four LSP servers share,
+  are shareable at all. The column is the whole mechanism: those four are written
+  at module top level in `_mcp_lsp.py` and land inside three differently-named
+  client classes, so a method taking `self` is no obstacle — `self` is an ordinary
+  first parameter, and the `@staticmethod` on `_result` / `_error` was never what
+  made the route work.
 
 ### Tabs: refused per BLOCK, not per file
 
