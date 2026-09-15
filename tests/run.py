@@ -198,8 +198,9 @@ SUITES = [
      "purity_call semantic navigation: clangd + luals absorption", 152),
     ("purity_file_ops", run_purity_file_ops,
      "purity_call file handlers: the .claude/tmp ignore exemption, the "
-     "inheritance rule that keeps it narrow, and the param contract",
-     39),
+     "inheritance rule that keeps it narrow, the param contract, and the "
+     "glob spellings that can only ever match nothing",
+     53),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 258),
     ("name_existence", run_name_existence,

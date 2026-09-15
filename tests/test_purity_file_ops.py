@@ -37,6 +37,21 @@ rows that pin real behaviour in the same fixture (a basename pattern in the same
 gated.  Group E's fixture deliberately carries one pattern of each shape so the
 asymmetry is visible in a single .gitignore rather than argued about.
 
+Group G is the one group that does not speak JSON-RPC.  It imports the server
+module and calls `_glob_matches` plus the three glob-accepting handlers
+DIRECTLY, because what it gates is invisible from the wire: a glob that matches
+nothing and a glob that was REFUSED render to the same empty reply, and the
+embedded-`**/` question is decided inside one private helper that no parameter
+can reach on its own.  Purity has THREE independent glob engines -- `_glob_
+matches` (fnmatch plus a leading-`**/` special case, used only by search),
+`_compile_path_glob` (a real globstar regex, used only by find_file) and raw
+`fnmatch` on the bare name inside list_dir -- so "the glob semantics" is three
+answers, not one, and a spelling is only safe when all three agree about it.
+The group carries its own must-stay-green controls (a leading `**/`, a
+path-scoped glob that must STAY scoped, a bare filename, a brace group with no
+comma), because every rule it asserts is a WIDENING, and over-reach is the
+characteristic failure of a widening.
+
 No external binary is involved -- these are the pure-stdlib file handlers, so
 there is no skip path and the suite runs everywhere in a couple of seconds.  If
 a case here needs clangd, it is in the wrong file (see test_purity_lsp.py).
@@ -55,6 +70,7 @@ Groups:
      real rejections
   E  path-shaped .gitignore: what the basename matcher does and does not honour
   F  hygiene
+  G  glob semantics -- the spellings that can only ever match nothing
 """
 
 import os
@@ -90,6 +106,16 @@ GITIGNORE_BASENAME = ("tmp", ".claude", "build")
 # slash-bearing one is inert while the bare one still bites.
 GITIGNORE_PATHSHAPED = (".claude/tmp", "build")
 
+# Group G's tree.  No .gitignore at all: the glob question and the ignore
+# question are separate, and mixing them would let a pruned directory pass for a
+# glob that matched nothing.  Two depths exist so a `**/` mask has to reach BOTH
+# (`root.py` and `src/deep/nested.py`); `a.py` and `src/a.py` exist so the
+# character-class divergence can be MEASURED rather than argued about.
+GLOB_FILES = ("root.py", "a.py", "auth.py",
+              "src/a.py", "src/deep/nested.py", "tests/foo.py")
+G_ROOT_PY = "root.py"
+G_NESTED_PY = "src/deep/nested.py"
+
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -103,6 +129,23 @@ def make_fixture(ws, subdir, patterns):
     for rel in ALL_FILES:
         ws.write_text(os.path.join(subdir, rel), LINE)
     return ws.join(subdir)
+
+
+def make_glob_fixture(ws, subdir):
+    """Group G's tree, returned REALPATH'd like the server resolves its own root.
+
+    `McpServer.__init__` does `os.path.realpath(project_root)`
+    (Scripts/mcp-purity.py:6002), and the handlers rely on that: `handle_find_
+    file` / `handle_list_dir` send the search root through `safe_path`, which
+    realpaths, then report each hit as `os.path.relpath(full, project_root)`.
+    Hand them the UNRESOLVED mkdtemp path and on macOS -- where /var is a
+    symlink to /private/var -- every reported path comes back prefixed with six
+    `../`, which is not a bug in the handler, only in how it was called.
+    """
+    ws.subdir(subdir)
+    for rel in GLOB_FILES:
+        ws.write_text(os.path.join(subdir, rel), LINE)
+    return os.path.realpath(ws.join(subdir))
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +233,36 @@ def listing_paths(text):
     return out
 
 
+RX_FOUND_HEADER = re.compile(r"^Found \d+ file\(s\)")
+
+
+def found_paths(text):
+    """Set of paths in a `find_file` reply.
+
+    The reply is a `Found N file(s) matching '<mask>'` header followed by one
+    path per row; a truncation note, if any, is bracketed.  The header is
+    dropped by shape rather than by position, because a zero-hit reply is the
+    header ALONE and an off-by-one would read it as a path.
+    """
+    out = set()
+    for row in text.splitlines():
+        row = row.strip()
+        if not row or row.startswith("[") or RX_FOUND_HEADER.match(row):
+            continue
+        out.add(row)
+    return out
+
+
+def handler_text(reply):
+    """The text of a handler's return value, called in-process (group G).
+
+    The handlers answer with one of two keys -- `__raw_text__` for a
+    pre-rendered body, `text` for a plain one -- and which is used is an
+    internal detail of each handler, not part of what this suite gates.
+    """
+    return reply.get("__raw_text__") or reply.get("text") or ""
+
+
 def polarity(text, is_error, must, must_not, extract):
     """Problems for a must-find / must-not-find pair."""
     problems = []
@@ -243,6 +316,72 @@ def record_error(suite, group, cid, driver, function, params, must_say=(),
             problems.append("error text must not mention %r" % token)
     return suite.record(group, cid, problems,
                         detail=list(detail) + ["reply: %s" % text.strip()[:300]],
+                        text=text, showable=True)
+
+
+def record_glob(suite, gm, cid, rel_path, glob, want, detail=()):
+    """One `_glob_matches(rel_path, glob)` row -- a UNIT row, on purpose.
+
+    Routing these through a fixture would mix the glob answer with gitignore
+    pruning, the walk order and the binary/size skips, and the thing under test
+    here is a pure function of two strings.
+    """
+    try:
+        got = gm(rel_path, glob)
+        raised = None
+    except Exception as exc:                                     # noqa: BLE001
+        got, raised = None, "%s: %s" % (type(exc).__name__, exc)
+    problems = []
+    if raised:
+        problems.append("_glob_matches(%r, %r) raised %s"
+                        % (rel_path, glob, raised))
+    elif got is not want:
+        problems.append("_glob_matches(%r, %r) is %r, want %r"
+                        % (rel_path, glob, got, want))
+    return suite.record("G", cid, problems,
+                        detail=list(detail) + [
+                            "_glob_matches(%r, %r) -> %s (want %s)"
+                            % (rel_path, glob, got, want)])
+
+
+def record_refusal(suite, cid, handler, params, root, must_say=("brace",),
+                   want_error=True, detail=()):
+    """Call a handler IN-PROCESS and assert on the EXCEPTION, not on a reply.
+
+    `record_error` above cannot serve here.  Over the wire a refusal and a glob
+    that simply matched nothing are both a short, unremarkable reply -- and the
+    whole point of the rule being gated is that today they are the SAME reply,
+    so a wire-level assertion would be asserting the defect.  The TYPE is
+    checked as well as the message because `except ValueError` is what the
+    dispatcher's error envelope is written against, and the MESSAGE because a
+    refusal whose text does not name what it refused just moves the silence one
+    layer out: the caller still has to guess which of its globs was the problem.
+    """
+    try:
+        text = handler_text(handler(params, root))
+        raised = None
+    except Exception as exc:                                     # noqa: BLE001
+        raised, text = exc, "%s: %s" % (type(exc).__name__, exc)
+    problems = []
+    if want_error:
+        if raised is None:
+            problems.append("expected ValueError, call was accepted -> %s"
+                            % " | ".join(text.splitlines())[:160])
+        elif not isinstance(raised, ValueError):
+            problems.append("expected ValueError, raised %s: %s"
+                            % (type(raised).__name__, raised))
+        else:
+            low = str(raised).lower()
+            for token in must_say:
+                if token.lower() not in low:
+                    problems.append("refusal does not mention %r" % token)
+    elif raised is not None:
+        problems.append("expected acceptance, raised %s: %s"
+                        % (type(raised).__name__, raised))
+    return suite.record("G", cid, problems,
+                        detail=list(detail) + [
+                            "params : %s" % (params,),
+                            "outcome: %s" % " | ".join(text.splitlines())[:200]],
                         text=text, showable=True)
 
 
@@ -552,6 +691,162 @@ def group_e(suite, drv):
 
 
 # ---------------------------------------------------------------------------
+# Group G -- glob semantics: the spellings that can only ever match nothing
+#
+# Sits above group F because source order is CALL order in this file, and
+# hygiene has to be the last thing that runs: it snapshots the repo tree after
+# every other group has had its chance to dirty it.
+# ---------------------------------------------------------------------------
+
+def group_g(suite, root):
+    """Two silent-zero spellings, gated across all three of purity's globbers.
+
+    Neither spelling is exotic and neither is a typo: both are what a model
+    writes when it has been taught shell/ripgrep globs, and both come back as a
+    clean, confident, EMPTY answer -- the one failure mode a caller cannot
+    distinguish from "there is nothing there".
+
+      (a) an embedded `**/`.  `fnmatch.translate("tests/**/*.py")` is
+          `(?s:tests/(?>.*?/).*\\.py)\\z`: the atomic group DEMANDS a separator,
+          so the spelling silently means "at least one directory deep" and
+          `tests/foo.py` is missed.  `_glob_matches` strips a LEADING `**/`
+          only (mcp-purity.py:1403-1404), so the fix is there and find_file's
+          regex engine is already immune.
+
+      (b) brace alternation.  `fnmatch.translate("*.{js,py}")` is
+          `(?s:.*\\.\\{js,py\\})\\z` -- the braces are ESCAPED TO LITERALS, so
+          the pattern can only match a file literally named `x.{js,py}`.  All
+          THREE engines are affected, which is why the answer is a refusal
+          rather than three separate implementations of brace expansion: one
+          rule, stated once, that cannot leave the three disagreeing.  A brace
+          group with NO comma is not an alternation and is not refused.
+    """
+    mod = H.load_module_from_path("mcp_purity_globs", SERVER)
+    gm = mod._glob_matches
+
+    # -- (a) the embedded globstar --------------------------------------------
+    record_glob(
+        suite, gm, "globstar-embedded-zero-dirs",
+        "tests/foo.py", "tests/**/*.py", True,
+        detail=["`**/` must mean 'zero or more directories' wherever it",
+                "appears, not only at the start of the pattern"])
+    record_glob(
+        suite, gm, "globstar-embedded-one-or-more-dirs",
+        "src/a/b/x.c", "src/**/*.c", True,
+        detail=["the >=1-dir half of the SAME spelling: it already passes,",
+                "and it is here so a fix cannot trade one half for the other"])
+
+    # -- (a) must-stay-green: the widening must not over-reach -----------------
+    record_glob(
+        suite, gm, "globstar-leading-zero-dirs",
+        "foo.py", "**/*.py", True,
+        detail=["CONTROL: the leading-`**/` case the helper already special-",
+                "cases (mcp-purity.py:1403-1404) must survive the general rule"])
+    record_glob(
+        suite, gm, "globstar-leading-nested",
+        "a/b/foo.py", "**/*.py", True,
+        detail=["CONTROL: and its nested half"])
+    record_glob(
+        suite, gm, "scoped-glob-misses-sibling-dir",
+        "other/foo.py", "tests/**/*.py", False,
+        detail=["CONTROL: a path-scoped glob STAYS scoped -- the basename",
+                "of a file in another directory must not spuriously match"])
+    record_glob(
+        suite, gm, "scoped-glob-misses-nested-prefix",
+        "a/tests/foo.py", "tests/**/*.py", False,
+        detail=["CONTROL: the scope is anchored at the project root, so a",
+                "`tests/` segment appearing further down is not a match"])
+    record_glob(
+        suite, gm, "bare-filename-hits-at-any-depth",
+        "a/b/requirements.yaml", "requirements.yaml", True,
+        detail=["CONTROL: the basename fallthrough -- the whole reason this",
+                "helper exists instead of a bare fnmatch call"])
+
+    # -- (b) the brace alternation, refused at all three entry points ----------
+    record_refusal(
+        suite, "brace-refused-search-include-glob",
+        mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE, "paths_include_glob": "*.{js,py}"}, root,
+        detail=["an include glob that can only ever match a file literally",
+                "named `x.{js,py}` narrows the search to nothing, and the",
+                "caller reads that as 'the needle is not in any .js or .py'"])
+    record_refusal(
+        suite, "brace-refused-search-exclude-glob",
+        mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE, "paths_exclude_glob": "*.{md,txt}"}, root,
+        detail=["the exclude side fails in the OPPOSITE direction -- it",
+                "excludes nothing and the caller is handed the noise it",
+                "asked to drop, which is why it needs its own row"])
+    record_refusal(
+        suite, "brace-refused-find_file-mask",
+        mod.handle_find_file,
+        {"file_mask": "**/*auth*.{js,py,php}"}, root,
+        detail=["this exact mask is taught by a shipped skill example, so it",
+                "is not a hypothetical spelling -- it is one already in the",
+                "corpus, returning `Found 0 file(s)` every time it is run"])
+    record_refusal(
+        suite, "brace-refused-list_dir-filter",
+        mod.handle_list_dir,
+        {"filter": "*.{js,py}", "relative_path": ".", "recursive": True}, root,
+        detail=["list_dir is the worst of the three: `_accept_name` applies",
+                "the filter to FILES only, so a brace mask returns a listing",
+                "of pure directories and looks like a populated answer"])
+
+    # -- (b) must-stay-green: the rejector must not become a `{` ban -----------
+    record_refusal(
+        suite, "brace-without-comma-not-refused",
+        mod.handle_find_file,
+        {"file_mask": "{{cookiecutter}}*.py"}, root, want_error=False,
+        detail=["CONTROL: a brace group with no comma is not an alternation,",
+                "it is a literal filename (template scaffolding ships these",
+                "by the thousand).  Refusing it would break callers who are",
+                "asking for exactly what fnmatch already gives them"])
+
+    # -- find_file's own globstar engine, which is NOT the one being widened ---
+    reply = handler_text(mod.handle_find_file({"file_mask": "**/*.py"}, root))
+    got = found_paths(reply)
+    missing = [p for p in (G_ROOT_PY, G_NESTED_PY) if p not in got]
+    suite.record(
+        "G", "find_file-globstar-root-and-nested",
+        [] if not missing else ["MISSING %s (must be found)" % ", ".join(missing)],
+        detail=["CONTROL: `_compile_path_glob` emits `(?:.*/)?` for `**/`",
+                "(mcp-purity.py:1119) and is already immune to spelling (a);",
+                "it must stay immune, at BOTH depths",
+                "must find: %s" % ", ".join((G_ROOT_PY, G_NESTED_PY)),
+                "reported : %s" % (", ".join(sorted(got)) or "-")],
+        text=reply, showable=True)
+
+    # A divergence recorded rather than fixed, so it outlives the conversation
+    # that measured it.  `_compile_path_glob` walks the mask character by
+    # character and sends everything it does not recognise through `re.escape`
+    # (Scripts/mcp-purity.py:1127), so an fnmatch character class becomes a
+    # LITERAL `[ab]` in the path-style branch -- while the bare-mask branch
+    # (Scripts/mcp-purity.py:1159) hands the mask to fnmatch and honours it.
+    # One handler, two answers, and the only thing deciding which is whether the
+    # mask happens to carry a `/`.  INFO, not FAIL: nobody has asked for classes
+    # in a path mask, and inventing a second answer now would be a fix in search
+    # of a caller.
+    bare = found_paths(handler_text(
+        mod.handle_find_file({"file_mask": "[ab].py"}, root)))
+    scoped = found_paths(handler_text(
+        mod.handle_find_file({"file_mask": "src/[ab].py"}, root)))
+    suite.record(
+        "G", "char-class-divergence-inside-find_file", (), status=H.INFO,
+        detail=["`[ab].py` (bare mask -> fnmatch on the basename, "
+                "Scripts/mcp-purity.py:1159) -> %s"
+                % (", ".join(sorted(bare)) or "nothing"),
+                "`src/[ab].py` (path-style -> _compile_path_glob, "
+                "Scripts/mcp-purity.py:1127) -> %s"
+                % (", ".join(sorted(scoped)) or "nothing"),
+                "the re.escape fallthrough at mcp-purity.py:1127 turns `[ab]` "
+                "into a LITERAL, so one handler answers a character class two "
+                "ways and the mask's `/` is what picks the answer",
+                "divergence present: %s"
+                % ("yes" if bare and not scoped else
+                   "NO -- the two branches now agree, update this row")])
+
+
+# ---------------------------------------------------------------------------
 # Group F -- hygiene
 # ---------------------------------------------------------------------------
 
@@ -606,7 +901,8 @@ def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
                     title="purity_call file handlers: gitignore exemption, "
-                          "its narrowness, and the param contract",
+                          "its narrowness, the param contract, and the glob "
+                          "spellings that can only ever match nothing",
                     opts=opts, mode="stream", group_width=3, cid_width=36)
 
     before = H.repo_tree()
@@ -616,11 +912,14 @@ def run(opts=None):
     with H.TempWorkspace("ph-purity-file-ops-", keep=opts.keep) as ws:
         basename_root = make_fixture(ws, "basename", GITIGNORE_BASENAME)
         pathshaped_root = make_fixture(ws, "pathshaped", GITIGNORE_PATHSHAPED)
+        glob_root = make_glob_fixture(ws, "globs")
         suite.note("      server        : %s" % SERVER)
         suite.note("      fixture (A-D) : %s  .gitignore=%s"
                    % (basename_root, list(GITIGNORE_BASENAME)))
         suite.note("      fixture (E)   : %s  .gitignore=%s"
                    % (pathshaped_root, list(GITIGNORE_PATHSHAPED)))
+        suite.note("      fixture (G)   : %s  no .gitignore, files=%s"
+                   % (glob_root, list(GLOB_FILES)))
 
         drv = Driver(basename_root)
         drv_path = Driver(pathshaped_root)
@@ -635,7 +934,11 @@ def run(opts=None):
             drv.close()
             drv_path.close()
 
-        workspaces = [basename_root, pathshaped_root]
+        # Group G starts no child: it imports the server module and calls the
+        # handlers in-process, so it runs outside the driver lifetime entirely.
+        group_g(suite, glob_root)
+
+        workspaces = [basename_root, pathshaped_root, glob_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()

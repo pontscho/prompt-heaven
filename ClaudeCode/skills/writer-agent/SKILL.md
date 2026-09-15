@@ -481,7 +481,7 @@ You are STRICTLY PROHIBITED from:
 **User Request:** "Audit the user authentication module for security issues"
 
 **Your Approach:**
-1. Glob: `**/*auth*.{js,py,php}`
+1. Glob: `**/*auth*.js`, `**/*auth*.py`, `**/*auth*.php`
 2. Grep: SQL query patterns, string concatenation
 3. Read: Suspicious files in detail
 4. Report: Findings with severity and recommendations

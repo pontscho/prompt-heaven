@@ -977,6 +977,32 @@ def _format_mtime(mtime: float) -> str:
     return datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
 
 
+def _reject_brace_glob(glob: str, param: str) -> None:
+    r"""Refuse a brace-alternation glob instead of answering it with nothing.
+
+    None of purity's three matchers implements brace expansion, and neither can:
+    fnmatch escapes the braces to literals (``fnmatch.translate("*.{js,py}")`` is
+    ``.*\.\{js,py\}``) and _compile_path_glob's re.escape fallthrough does the
+    same. So ``*.{js,py}`` matches only a file actually NAMED ``x.{js,py}``.
+
+    A search tool's silent zero is the one wrong answer that propagates: it is
+    indistinguishable from "no such code", so the caller stops looking and
+    reports absence. list_dir makes that worse — its filter applies to files
+    only, so a brace filter returns a listing of pure directories, which does
+    not even look empty. Refusing costs one retry and cannot be misread.
+
+    Only a group carrying a comma is refused; that is the alternation spelling.
+    A literal ``{{cookiecutter}}`` in a filename stays matchable.
+    """
+    if re.search(r"\{[^{}]*,[^{}]*\}", glob):
+        raise ValueError(
+            f"{param}: brace alternation is not supported ({glob!r}). fnmatch has "
+            "no brace expansion, so this pattern would match nothing rather than "
+            "the alternatives you meant. Use one call per alternative, or widen "
+            "the mask (e.g. '*auth*') and narrow the result."
+        )
+
+
 def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path", ".")
     recursive = _bool_param(params.get("recursive", False))
@@ -987,6 +1013,8 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     grep_pattern = params.get("grep", None) or params.get("grep_pattern", None)
     head_limit = _int_param(params.get("head_limit", 0), 0)
     offset = _offset(params)
+    if glob_pattern:
+        _reject_brace_glob(glob_pattern, "filter")
 
     path = safe_path(project_root, rel, strict)
     if not os.path.isdir(path):
@@ -1133,6 +1161,7 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
     file_mask = params.get("file_mask") or params.get("pattern") or params.get("substring_pattern")
     if not file_mask:
         raise ValueError("Missing required parameter: file_mask")
+    _reject_brace_glob(file_mask, "file_mask")
     rel = params.get("relative_path", ".")
     head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
     offset = _offset(params)
@@ -1374,7 +1403,7 @@ def _is_code_file(name: str) -> bool:
 
 
 def _glob_matches(rel_path: str, glob: str) -> bool:
-    """Match a project-relative path against a caller glob with model-friendly,
+    r"""Match a project-relative path against a caller glob with model-friendly,
     ripgrep/git-like semantics layered over Python fnmatch.
 
     Plain ``fnmatch(rel_path, glob)`` has two footguns that repeatedly bite
@@ -1383,25 +1412,34 @@ def _glob_matches(rel_path: str, glob: str) -> bool:
       1. A bare filename (``requirements.yaml``) only matches a root-level file,
          because the relative path of a nested file carries directory segments
          that the pattern lacks.
-      2. The intuitive "any depth" fix ``**/requirements.yaml`` is ALSO wrong —
-         fnmatch has no globstar, so ``**`` is just two ``*`` and the pattern
-         still requires the literal ``/``, matching nested files ONLY and
-         silently missing the root-level one.
+      2. The intuitive "any depth" fix ``**/`` is ALSO wrong, and at EVERY
+         position, not just the first: ``fnmatch.translate("tests/**/*.py")`` is
+         ``tests/(?>.*?/).*\.py`` — an atomic group that DEMANDS a separator. So
+         ``**/requirements.yaml`` misses the root-level file, and
+         ``tests/**/*.py`` silently matches nothing sitting directly in
+         ``tests/``. The zero-directory case is precisely the one a caller who
+         writes ``**/`` means to include.
 
     This helper makes both do what the caller meant:
 
       * matches if EITHER the full relative path OR the basename matches, so a
         bare filename hits at any depth;
-      * a leading ``**/`` is treated as globstar ("zero or more directories"),
-        so ``**/x`` also matches a root-level ``x``.
+      * every ``**/`` is ALSO tried removed, so ``**/x`` matches a root-level
+        ``x`` and ``tests/**/*.py`` matches ``tests/foo.py``. The stripped
+        candidate stays correct for the deeper case too, because fnmatch's ``*``
+        crosses separators — ``tests/*.py`` matches ``tests/sub/foo.py``.
+
+    Brace alternation (``*.{js,py}``) is not handled here: fnmatch escapes the
+    braces to literals, so _reject_brace_glob refuses it before we are reached.
 
     Path-scoped globs (``src/*.c``) stay scoped: the basename of a nested file
     won't spuriously match a glob that carries its own directory component.
     """
     candidates = [glob]
-    # globstar: "**/foo" should also match "foo" (zero intervening dirs).
-    if glob.startswith("**/"):
-        candidates.append(glob[3:])
+    # globstar: "**/" means "zero or more directories" WHEREVER it appears, so
+    # "**/foo" must also match "foo" and "tests/**/*.py" must match "tests/x.py".
+    if "**/" in glob:
+        candidates.append(glob.replace("**/", ""))
     base = os.path.basename(rel_path)
     for pat in candidates:
         if fnmatch.fnmatch(rel_path, pat) or fnmatch.fnmatch(base, pat):
@@ -1426,6 +1464,10 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     ctx_after = int(ctx_after) if ctx_after else 0
     include_glob = params.get("paths_include_glob", "")
     exclude_glob = params.get("paths_exclude_glob", "")
+    if include_glob:
+        _reject_brace_glob(include_glob, "paths_include_glob")
+    if exclude_glob:
+        _reject_brace_glob(exclude_glob, "paths_exclude_glob")
     search_rel = params.get("relative_path", "")
     max_chars = _max_answer_chars(params)
     head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
@@ -5968,8 +6010,13 @@ PURITY_CALL_TOOL = {
         "find_type_definition, find_references,\n"
         "find_implementations, type_at, diagnostics, outline, symbol, symbol_context,\n"
         "inlay_hints, symbol_change_impact. Project-root-scoped, .gitignore-aware, binary-safe.\n"
-        "`find_file` pattern is fnmatch-style (`*.cu`, `test_*.py`, etc.); search\n"
-        "root is the optional `path` (alias of `relative_path`, default = project root).\n\n"
+        "Globs: a bare mask (`*.cu`) matches the BASENAME at any depth; a mask holding\n"
+        "`/` or `**` matches the path, where `**/` means any depth INCLUDING zero, so\n"
+        "`tests/**/*.py` matches `tests/foo.py` as well as `tests/sub/foo.py`. The one\n"
+        "exception is `list_dir`'s filter: bare name, files only, dirs always pass.\n"
+        "Brace alternation (`*.{js,py}`) is REFUSED, never silently empty -- fnmatch\n"
+        "has no brace expansion, so pass one alternative per call. Search root is the\n"
+        "optional `path` (alias of `relative_path`, default = project root).\n\n"
         "Examples:\n"
         "  ls -l:      function=\"ls\", params={\"path\":\"src/\",\"long\":true}\n"
         "  find files: function=\"find_file\", params={\"pattern\":\"*.py\",\"path\":\"src/\"}\n"

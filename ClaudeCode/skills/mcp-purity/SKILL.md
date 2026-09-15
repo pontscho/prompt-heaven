@@ -60,7 +60,7 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 |-|-|-|-|-|
 |`relative_path`|string|no|"."|Directory to list|
 |`recursive`|bool|no|false|Scan subdirectories|
-|`filter`|string|no|""|fnmatch on the bare **name** — `*.py`, `p80-s1*`. Filters files only; directories always pass|
+|`filter`|string|no|""|fnmatch on the bare **name** — `*.py`, `p80-s1*`. Filters files only; directories always pass. No path matching here and no brace alternation (`*.{a,b}` is refused — it would otherwise return a listing of pure directories)|
 |`grep`|string|no|""|Case-insensitive regex applied to the rendered rows (post-filter)|
 |`long`|bool|no|false|Prepend size + mtime to each row|
 |`show_hidden`|bool|no|false|Include dotfiles and dotdirs|
@@ -78,7 +78,7 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 
 |Param|Type|Required|Default|Description|
 |-|-|-|-|-|
-|`file_mask`|string|yes|—|Filename pattern with `*` or `?` wildcards|
+|`file_mask`|string|yes|—|Bare mask (`*.ts`, `t?st.py`) matches the **name**; a mask holding `/` or `**` matches the path below the search root, where `**/` = any depth **including zero**. Brace alternation (`*.{ts,js}`) is refused, not silently empty|
 |`relative_path`|string|no|"."|Directory subtree to search|
 
 ```json
@@ -147,8 +147,8 @@ Existing content at `line` shifts down. Does not replace.
 |`substring_pattern`|string|yes|—|Regex pattern to search for|
 |`context_lines_before`|int|no|0|Context lines before match|
 |`context_lines_after`|int|no|0|Context lines after match|
-|`paths_include_glob`|string|no|""|Glob to include files|
-|`paths_exclude_glob`|string|no|""|Glob to exclude files|
+|`paths_include_glob`|string|no|""|Glob to include files — matches the project-relative **path** OR the basename, and `**/` = any depth **including zero**, so `tests/**/*.py` also matches `tests/foo.py`. Brace alternation refused|
+|`paths_exclude_glob`|string|no|""|Glob to exclude files — same matching rules|
 |`relative_path`|string|no|""|Restrict to a subdirectory **or a single file**|
 |`skip_ignored_files`|bool|no|true|Skip gitignored files — except `.claude/tmp`, never skipped|
 |`max_answer_chars`|int|no|-1|Character limit|
