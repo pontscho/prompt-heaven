@@ -95,7 +95,8 @@ Output
     --json switches stdout to a single JSON document instead.
 
 Exit codes
-    0  the command did what it says
+    0  the command did what it says -- including a reader that closed the pipe
+       before the document ended, which is what `| head -1` is and not a failure
     1  a real finding: an API error, a transition name that resolves to nothing,
        or an empty search under --fail-empty
     2  bad invocation, missing configuration, a malformed issue key, a refused
@@ -144,6 +145,14 @@ MAX_PAGES = 100	# 5000 values -- far past any board, sprint or create screen
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 1.0
 
+# The ceiling on ONE sleep between attempts, and it is the server that decides
+# the number being clamped: `Retry-After: 86400` is a legal header, and obeying
+# it twice under MAX_ATTEMPTS is two days of silence.  DEFAULT_TIMEOUT governs
+# the SOCKET and never the sleep, so without this the CLI is indistinguishable
+# from a dead connection -- same order of magnitude as the timeout on purpose,
+# so the longest silence this file can produce stays one a caller recognises.
+MAX_RETRY_SLEEP = 30.0
+
 # DC's search defaults to *navigable and get-issue defaults to *all, so naming
 # the fields is the only behaviour that means the same thing on both.
 # `reporter` is here because `get` RENDERS it: a rendered row whose field was
@@ -174,6 +183,14 @@ RX_ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9]+-[0-9]+$")
 
 # The same key WITHOUT the issue number -- `STR`, not `STR-1234`.
 RX_PROJECT_KEY = re.compile(r"^[A-Z][A-Z0-9]+$")
+
+# A board id and an issue-type id are NUMBERS, and both are interpolated into a
+# URL PATH -- where `api_url` escapes nothing: it urlencodes the query and
+# concatenates the path.  So `1/../../api/2/issue/PROJ-1` is not a 404, it is a
+# request against a different resource that succeeds, and the value arrives
+# from three directions at once: a checked-in profile, a flag with no type, and
+# the board list the server itself hands back.
+RX_NUMERIC_ID = re.compile(r"^[0-9]+$")
 
 # NOTHING about any particular project is hard-coded in this file, and that is
 # the whole design of `create`: which fields a project demands, and what it
@@ -339,6 +356,32 @@ def _validate_project_key(key: str) -> None:
 	if not RX_PROJECT_KEY.match(key or ""):
 		raise SetupError("invalid project key: %s (expected e.g. PROJ)"
 			% (key if key else "<empty>"))
+
+
+def _is_numeric_id(value: Any) -> bool:
+	"""True when `value` may be concatenated into a URL path as an id.
+
+	Digits and nothing else -- NOT stripped first, because ` 1698 ` would then
+	pass the check and go into the path with the spaces still on it.
+	"""
+	return bool(RX_NUMERIC_ID.match(str(value or "")))
+
+
+def _validate_board_id(board_id: Any) -> None:
+	"""Reject a board id locally, for a sharper reason than a bad issue key.
+
+	A malformed issue key comes back as an ambiguous 404; a malformed board id
+	does not come back wrong at all.  It is concatenated into a REST path, so
+	`1/../../api/2/issue/PROJ-1` re-points the request and the answer looks
+	like a perfectly good one to the wrong question.  Raises SetupError (exit
+	2) whichever of the three directions it arrived from -- the profile,
+	`--board`, or the server's own board list -- because the remedy is the same
+	one the refusals around it name: pin a board that is a number.
+	"""
+	if not _is_numeric_id(board_id):
+		raise SetupError("invalid board id %r — expected a number, e.g. 1698; "
+			"name one as \"board\" in the profile or pass --board"
+			% (board_id,))
 
 
 # ---------------------------------------------------------------------------
@@ -669,7 +712,13 @@ class Jira:
 		"""Token paging: strictly sequential, no total, no startAt.
 
 		The termination condition is the ABSENCE of `nextPageToken` (or
-		`isLast`), not an exhausted count -- there is no count.
+		`isLast`), not an exhausted count -- there is no count.  An EMPTY page
+		is the third, and it is the one that carries the walk: the other two
+		are statements the server has to make, and `seen` advances only inside
+		the issue loop, so a server that makes neither and sends nothing still
+		has to end the walk.  With it, every surviving iteration advances
+		`seen` by at least one and `limit` is the bound -- which is why this
+		pager gets no MAX_PAGES of its own, exactly like _search_server below.
 		"""
 		seen = 0
 		token = None
@@ -680,7 +729,13 @@ class Jira:
 				body["nextPageToken"] = token
 			payload = self.request("POST", API + "/search/jql",
 				body=body) or {}
-			for issue in payload.get("issues") or []:
+			page = payload.get("issues") or []
+			if not page:
+				# `{"issues": [], "nextPageToken": <a new value each time>}`
+				# satisfies none of the three exits below -- isLast absent,
+				# a token present, and it differs -- while `seen` stands still.
+				return
+			for issue in page:
 				yield issue
 				seen += 1
 				if seen >= limit:
@@ -735,12 +790,20 @@ class Jira:
 	# -- projects: a flat array on DC, a paginated envelope on Cloud -----
 
 	def list_projects(self) -> List[dict]:
+		"""Every project: a flat array on DC, a paged envelope on Cloud.
+
+		The Cloud half is the same walk as _paged_values and is bounded for the
+		same measured reason -- a full page every time, no isLast, no total and
+		`startAt` ignored defeats every stop condition below at once, and this
+		one ACCUMULATES, so the 5.58 GB over thirty minutes that bound was
+		written for is reached here and nowhere else in this class.
+		"""
 		if self._deployment() != CLOUD:
 			payload = self.request("GET", API + "/project") or []
 			return list(payload) if isinstance(payload, list) else []
 		out = []		# type: List[dict]
 		start = 0
-		while True:
+		for _ in range(MAX_PAGES):
 			payload = self.request("GET", API + "/project/search",
 				query={"startAt": str(start),
 					"maxResults": str(PAGE_SIZE)}) or {}
@@ -755,11 +818,19 @@ class Jira:
 				page_start = start
 			following = page_start + len(values)
 			total = payload.get("total")
-			if isinstance(total, int) and following >= total:
-				return out
+			# `not isinstance(total, bool)` because a bool IS an int in Python:
+			# a response carrying `"total": true` makes `50 >= True` true, the
+			# walk ends after page one, and a list one page short is
+			# indistinguishable from a complete one at the call site.  Both
+			# siblings carry this guard; this one had drifted without it.
+			if isinstance(total, int) and not isinstance(total, bool):
+				if following >= total:
+					return out
 			if following <= start:
 				return out
 			start = following
+		raise JiraError("the project list did not end after %d pages of %d — "
+			"the server is ignoring startAt" % (MAX_PAGES, PAGE_SIZE))
 
 	def transitions(self, key: str) -> List[dict]:
 		payload = self.request("GET", API + "/issue/%s/transitions" % key,
@@ -769,8 +840,16 @@ class Jira:
 	# -- identity: who the token belongs to, in the right shape ----------
 
 	def myself(self) -> dict:
+		"""The authenticated account, fetched once per process.
+
+		Coerced to a dict on the way in rather than `or {}`: a 200 from an SSO
+		proxy or a misrouted context path can carry a JSON ARRAY, `or {}`
+		defends only against a falsy answer, and `.get` on a list is an
+		AttributeError that leaves main() as a traceback.
+		"""
 		if self._me is None:
-			self._me = self.request("GET", API + "/myself") or {}
+			payload = self.request("GET", API + "/myself")
+			self._me = payload if isinstance(payload, dict) else {}
 		return self._me
 
 	def user_ref(self) -> Dict[str, str]:
@@ -780,11 +859,25 @@ class Jira:
 		GDPR deprecation; DC has no accountId at all and wants `name`.  Sending
 		one deployment the other's shape yields a 400 that names the field and
 		not the reason, so the branch is here rather than in a caller.
+
+		An EMPTY ref is refused rather than sent.  `{"accountId": ""}` is not a
+		400 -- it is a value the server takes, in a field that then belongs to
+		nobody, on a create that reports success and files the work at no one.
 		"""
 		me = self.myself()
 		if self._deployment() == CLOUD:
-			return {"accountId": str(me.get("accountId") or "")}
-		return {"name": str(me.get("name") or me.get("key") or "")}
+			account = str(me.get("accountId") or "")
+			if not account:
+				raise SetupError("the authenticated account carries no "
+					"accountId, so \"%s\" cannot resolve on Cloud — name the "
+					"account id itself instead" % SENTINEL_ME)
+			return {"accountId": account}
+		name = str(me.get("name") or me.get("key") or "")
+		if not name:
+			raise SetupError("the authenticated account carries no name or "
+				"key, so \"%s\" cannot resolve on Server/DC — name the "
+				"username itself instead" % SENTINEL_ME)
+		return {"name": name}
 
 	# -- the paged envelope behind createmeta, boards and sprints --------
 
@@ -860,6 +953,18 @@ class Jira:
 			name = _text(kind.get("name"))
 			if issuetype and name.lower() != issuetype.strip().lower():
 				continue
+			# `project` on the next line is validated and this id was not: a
+			# missing one put the literal string `None` in the PATH, and the
+			# 404 that came back was reported against the subject below --
+			# which names the issue type and never mentions the id, so the
+			# diagnosis pointed at the wrong thing entirely.  Refused rather
+			# than skipped, because an issue type dropped from createmeta is
+			# an ABSENCE: it comes back as a create screen with fewer fields.
+			if not _is_numeric_id(kind.get("id")):
+				raise JiraError("the issue type %s in %s carries no usable id "
+					"(%r), so its create metadata cannot be fetched — the "
+					"legacy createmeta endpoint answers without per-type ids"
+					% (name, project, kind.get("id")))
 			blobs = self._paged_values(
 				API + "/issue/createmeta/%s/issuetypes/%s"
 					% (project, kind.get("id")),
@@ -926,6 +1031,13 @@ class Jira:
 					"ambiguous — pin one as \"board\" in the profile: %s"
 					% (project, len(available), SENTINEL_ACTIVE_SPRINT, listed))
 			board_id = available[0].get("id")
+		# Checked whichever direction it arrived from -- the profile's own
+		# "board" or the board list the server just handed back -- because
+		# both end up concatenated into the same URL path.  SetupError for the
+		# server-supplied one too: it is the sixth member of the refusal family
+		# below, every one of which the reader answers the same way, and
+		# splitting one family across two exit codes buys them nothing.
+		_validate_board_id(board_id)
 		open_sprints = self.sprints(board_id, "active")
 		if not open_sprints:
 			raise SetupError("board %s has no active sprint, so \"%s\" cannot "
@@ -970,14 +1082,21 @@ def _is_retryable(status: int) -> bool:
 
 
 def _retry_delay(response: HttpResponse, attempt: int) -> float:
-	"""Retry-After in seconds when the server names one, else backoff."""
+	"""Retry-After in seconds when the server names one, else backoff.
+
+	Clamped at BOTH ends, and the top is the one that matters: the number is
+	the server's, `Retry-After: 86400` is legal, and MAX_ATTEMPTS would sleep
+	on it twice.  The other documented form -- an HTTP date -- still falls
+	through to the backoff ladder, because float() raises on it and that is
+	the only reading of it this file is prepared to defend.
+	"""
 	raw = response.header("retry-after")
 	if raw:
 		try:
-			return max(0.0, float(raw.strip()))
+			return max(0.0, min(MAX_RETRY_SLEEP, float(raw.strip())))
 		except ValueError:
 			pass
-	return BACKOFF_SECONDS * (2 ** (attempt - 1))
+	return min(MAX_RETRY_SLEEP, BACKOFF_SECONDS * (2 ** (attempt - 1)))
 
 
 def _meta_field(field_id: Any, blob: Any) -> dict:
@@ -1849,6 +1968,11 @@ def cmd_sprints(args: argparse.Namespace, client: Jira) -> int:
 	in the issue API, so it gets a command rather than a note telling somebody
 	to read it out of a browser URL.
 	"""
+	if args.board is not None:
+		# Before the profile is even looked for: `--board` is an invocation,
+		# `--board` carries no type=int, and a bad one is answered without
+		# reading a file or opening a socket.
+		_validate_board_id(args.board)
 	profile, _ = load_profile(args.profile)
 	project = ""
 	if args.board is None:
@@ -1858,6 +1982,18 @@ def cmd_sprints(args: argparse.Namespace, client: Jira) -> int:
 		boards = [{"id": args.board, "name": ""}]
 	entries = []
 	for board in boards:
+		if not _is_numeric_id(board.get("id")):
+			# The sweep is the one place a board id is not the caller's: it
+			# comes off the board list, goes into a URL PATH, and is reported
+			# as a row about THAT board for the same reason the 400 below is.
+			entries.append({
+				"board": board.get("id"),
+				"board_name": _flat(board.get("name"), ""),
+				"id": "",
+				"name": "invalid board id — not a number, nothing was sent",
+				"state": "n/a",
+			})
+			continue
 		try:
 			found = client.sprints(board.get("id"), args.state)
 		except JiraError as exc:
@@ -1865,11 +2001,16 @@ def cmd_sprints(args: argparse.Namespace, client: Jira) -> int:
 			# sprints".  That is an answer about THAT board, not a failure of
 			# the question, and killing the sweep over it would hide every
 			# scrum board listed after it.
+			#
+			# `splitlines()[-1]` indexes `[]` when the message is empty, which
+			# is an IndexError main() does not catch -- so one board's refusal
+			# would become a traceback and an accidental exit 1.
+			reason = (str(exc).splitlines() or [type(exc).__name__])[-1]
 			entries.append({
 				"board": board.get("id"),
 				"board_name": _flat(board.get("name"), ""),
 				"id": "",
-				"name": _flat(str(exc).splitlines()[-1]),
+				"name": _flat(reason),
 				"state": "n/a",
 			})
 			continue
@@ -2082,6 +2223,25 @@ def build_parser() -> argparse.ArgumentParser:
 	return parser
 
 
+def _discard_stdout() -> None:
+	"""Point stdout's DESCRIPTOR at /dev/null, so a later flush cannot fail.
+
+	CPython flushes sys.stdout during interpreter shutdown, which happens after
+	main() has already handed back an exit code.  On a pipe whose reader is
+	gone that flush raises again, and the resulting "Exception ignored in:
+	<_io.TextIOWrapper name='<stdout>'>" is printed by the interpreter itself
+	-- nothing in this file can catch it.  Replacing the fd is what the Python
+	docs recommend; a stdout with no fd (a captured one) has nothing to flush.
+	"""
+	try:
+		fileno = sys.stdout.fileno()
+		devnull = os.open(os.devnull, os.O_WRONLY)
+		os.dup2(devnull, fileno)
+		os.close(devnull)
+	except (AttributeError, ValueError, OSError):
+		pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
 	args = build_parser().parse_args(argv)
 	try:
@@ -2106,6 +2266,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 	except JiraError as exc:
 		sys.stderr.write("%s: %s\n" % (PROG, exc))
 		return FINDING
+	except BrokenPipeError:
+		# `jira.py search ... | head -1` is this: every render path calls a
+		# bare print(), and the reader closes the pipe mid-document.  The
+		# file's own contract is that a pipeline gets the document, so a reader
+		# that stopped reading is not a finding -- it is exit 0, with stdout
+		# dealt with HERE, before the interpreter flushes it on the way out.
+		_discard_stdout()
+		return OK
 	except KeyboardInterrupt:
 		sys.stderr.write("%s: interrupted\n" % PROG)
 		return USAGE

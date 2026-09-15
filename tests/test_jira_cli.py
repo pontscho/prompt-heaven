@@ -24,7 +24,7 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      and falls back to a hostname heuristic when serverInfo cannot answer.  Both
      directions are pinned: the probe overriding the heuristic AND the heuristic
      catching an unreachable probe.
-  C  THREE pagers, two of them behind ONE iterator.  Cloud pages by an opaque
+  C  FOUR pagers, two of them behind ONE iterator.  Cloud pages by an opaque
      `nextPageToken` and has no total; DC pages by `startAt`/`total` and
      documents that a page may legitimately come back EMPTY and that `total` may
      move between pages.  Both stop conditions are gated for DC, both for Cloud,
@@ -35,7 +35,12 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
      re-sending the caller's own query on every page, for stopping on an empty
      page when the envelope carries neither flag -- and for REFUSING, rather
      than growing without limit, against a server that ignores `startAt`
-     altogether.
+     altogether.  The FOURTH is `projects`, which is that same envelope
+     hand-rolled a second time: it is gated against the same endless server,
+     and against a `"total": true` that ends the walk after page one because
+     `50 >= True` is true in Python.  The Cloud search pager is gated on the
+     stop its DC sibling always had and it never did -- an EMPTY page, which
+     is the only exit a server handing back a fresh token every time trips.
   D  config resolution: flag > env > unset, the source string each value
      carries, and the fail-fast that must name both the variable and its flag.
   E  the two write guards: JIRA_READ_ONLY refusing every write subcommand, and
@@ -44,9 +49,19 @@ groups below reproduces a real, named failure mode rather than a hypothetical:
   F  error mapping, which is the whole difference between usable and
      infuriating: an anonymous 200, a 404 that means two different things, an
      HTML login page where JSON was promised, a CAPTCHA lockout, and a retry
-     ladder that must fire on 429/5xx and NEVER on another 4xx.
-  G  issue-key validation -- a local, unambiguous error instead of a round trip
-     that comes back as an ambiguous 404.
+     ladder that must fire on 429/5xx and NEVER on another 4xx -- with a
+     CEILING on the delay, because `Retry-After: 86400` is a header a server
+     may legitimately send and DEFAULT_TIMEOUT governs the socket, not the
+     sleep.  Three more failures live here because they all end the same way,
+     as a traceback where a message was owed: an exception whose text is
+     empty, an output pipe the reader closed, and an id the response did not
+     carry being sent as the literal string `None`.
+  G  issue-key AND board-id validation -- a local, unambiguous error instead of
+     a round trip that comes back as an ambiguous 404.  A board id is the
+     sharper half: it is concatenated into a REST path (api_url urlencodes the
+     query and nothing else), so `1/../../api/2/issue/PROJ-1` does not fail, it
+     succeeds against another resource -- and it arrives from the profile, from
+     `--board`, and from the board list the server itself hands back.
   J  the attachment upload, which is the ONE request in this client whose body
      is not JSON.  Four failures live here and none of them announces itself:
      an LF-only multipart body that some proxies drop, a boundary that also
@@ -91,8 +106,9 @@ An oracle that cannot fail proves nothing about the code it blesses.  Group H
 feeds the SAME oracle functions groups A/C/G/M use a set of deliberately BROKEN
 implementations and results -- an auth helper that ignores the email, a join
 built on urljoin, a pager that over-fetches, a pager that ignores an empty page,
-a key validator that accepts anything, a sprint resolver that takes the first
-candidate instead of refusing -- and FAILS if any of them is accepted.
+a key validator that accepts anything, a board-id validator that accepts a path
+traversal, a sprint resolver that takes the first candidate instead of refusing
+-- and FAILS if any of them is accepted.
 The mirror assertion (the real implementations pass those same oracles) is
 recorded alongside, so a control that silently stopped running is visible.
 Groups J and K carry their own controls for the same reason, against the two
@@ -104,11 +120,12 @@ asserts the repo tree is untouched and that ZERO bytecode was written.
 Groups:
   A  auth header + URL joining
   B  deployment detection: probe, cache, heuristic fallback
-  C  paging: Cloud token model, DC offset model, --limit, agile envelope
+  C  paging: Cloud token model, DC offset model, --limit, agile envelope,
+     projects
   D  configuration resolution and the fail-fast
   E  JIRA_READ_ONLY and --dry-run
   F  error mapping
-  G  issue-key validation
+  G  issue-key and board-id validation
   H  negative control
   I  hygiene
   J  attachment upload: the one non-JSON request body
@@ -145,7 +162,7 @@ GC = "C. search paging"
 GD = "D. config resolution"
 GE = "E. read-only + dry-run"
 GF = "F. error mapping"
-GG = "G. issue key validation"
+GG = "G. issue key + board id validation"
 GH = "H. negative control"
 GI = "I. hygiene"
 GJ = "J. attachment upload"
@@ -488,6 +505,39 @@ def check_key_validator(fn):
         except Exception:
             continue
         problems.append("%r must be rejected, was accepted" % key)
+    return problems
+
+
+# A board id is a NUMBER, and it is interpolated into a URL PATH -- where
+# api_url does no escaping at all: it urlencodes the query and concatenates the
+# path.  So `1/../../api/2/issue/PROJ-1` is not a 404, it is a request against
+# another resource entirely, and the value arrives from three directions: the
+# profile's "board", `--board`, and the board list the server itself hands back.
+BOARD_IDS_OK = ["1", "42", "1698", 7, 1698]
+BOARD_IDS_BAD = ["", None, "1/../../api/2/issue/PROJ-1", "1/sprint", "abc",
+                 "12a", "-1", "1.0", " 1698 ", "1 OR 1=1", "%2e%2e", True]
+
+
+def check_board_id_validator(fn):
+    """Problems for a `_validate_board_id(value)` that raises on a bad id.
+
+    Shared by the live row in group G and by the mutant in group H, for the
+    same reason check_key_validator is shared: a row that blesses the real
+    validator has to be passing an oracle that has been SHOWN to reject one
+    which accepts anything.
+    """
+    problems = []
+    for value in BOARD_IDS_OK:
+        try:
+            fn(value)
+        except Exception as exc:
+            problems.append("%r must be accepted (raised %s)" % (value, exc))
+    for value in BOARD_IDS_BAD:
+        try:
+            fn(value)
+        except Exception:
+            continue
+        problems.append("%r must be rejected, was accepted" % (value,))
     return problems
 
 
@@ -1154,6 +1204,134 @@ def group_c(suite, mod):
                          "because that is the string every caller already "
                          "passes and the rest of this file's errors print"])
 
+    # -- the Cloud search pager has the same hole, reached differently -------
+    #
+    # `seen` advances only inside the issue loop, so a page with nothing in it
+    # satisfies NONE of the three exits under it: `isLast` is absent, a token
+    # is present, and it differs from the last one.  `while seen < limit` then
+    # never advances and the walk never ends.  `_search_server` twenty lines
+    # below already returns on an empty page; the Cloud half never did.
+    #
+    # The ceiling belongs to the TRANSPORT for the same reason as the row
+    # above: a case that can only fail by hanging the suite is not a gate, so
+    # the queue runs out far past any legitimate page count and the exception
+    # it raises is reported as "did not stop".
+    ceiling = 500
+    client, transport = client_with(
+        mod, [response(mod, 200, {"issues": [],
+                                  "nextPageToken": "tok-%d" % i})
+              for i in range(ceiling)],
+        url=BASE_CLOUD, deployment="Cloud")
+    problems = []
+    try:
+        got = keys_of(client.search_issues("project = CLD", limit=50))
+    except Exception as exc:
+        problems.append("did not stop: %s after %d request(s)"
+                        % (type(exc).__name__, len(transport.calls)))
+    else:
+        problems += check_pages(got, transport.calls, [], 1)
+    suite.record(GC, "cloud-stops-on-an-empty-page-with-a-fresh-token",
+                 problems,
+                 detail=["requests made: %d (transport ceiling %d)"
+                         % (len(transport.calls), ceiling),
+                         "an empty page is a stop condition in its own right "
+                         "on BOTH deployments, and on Cloud it is the only one "
+                         "a server handing back a fresh token never trips"])
+
+    # A CONTROL, not a gate: there is no version of this code where a page
+    # carrying an issue fails to advance `seen`, so it cannot be observed red.
+    # It is recorded because it is the measurement behind a REFUSAL -- once an
+    # empty page returns, the Cloud walk is bounded by `--limit` itself, so it
+    # gets no MAX_PAGES ceiling of its own: one would refuse a legitimate
+    # `--limit 10000`, and `_search_server`, the sibling the empty-page return
+    # was copied from, carries no page bound for exactly that reason.
+    ceiling = 200
+    client, transport = client_with(
+        mod, [response(mod, 200, {"issues": issues("CLD", i + 1, 1),
+                                  "nextPageToken": "tok-%d" % i})
+              for i in range(ceiling)],
+        url=BASE_CLOUD, deployment="Cloud")
+    problems = []
+    try:
+        got = keys_of(client.search_issues("project = CLD", limit=5))
+    except Exception as exc:
+        problems.append("did not stop: %s after %d request(s)"
+                        % (type(exc).__name__, len(transport.calls)))
+    else:
+        problems += check_pages(got, transport.calls,
+                                ["CLD-1", "CLD-2", "CLD-3", "CLD-4", "CLD-5"],
+                                5)
+    suite.record(GC, "cloud-one-issue-per-page-forever-is-bounded-by-limit",
+                 problems,
+                 detail=["requests made: %d (transport ceiling %d)"
+                         % (len(transport.calls), ceiling),
+                         "CONTROL: it cannot be red, and it is the reason the "
+                         "Cloud pager is NOT given a MAX_PAGES bound -- every "
+                         "surviving iteration advances `seen` by at least one"])
+
+    # -- projects: the FOURTH pager, and it drifted from the other three -----
+    #
+    # The Cloud half of list_projects accumulates into a list, so the server
+    # shape measured at 5.58 GB over thirty minutes against `_paged_values` is
+    # the SAME shape here: a full page every time, no isLast, no total, and
+    # `startAt` ignored, which leaves `following` advancing on every iteration
+    # so the no-progress guard never fires either.
+    ceiling = 500
+    endless = response(mod, 200, {"values": [{"key": "P%d" % i, "id": i}
+                                             for i in range(mod.PAGE_SIZE)]})
+    client, transport = client_with(mod, [endless] * ceiling,
+                                    url=BASE_CLOUD, deployment="Cloud")
+    bound = getattr(mod, "MAX_PAGES", None)
+    problems = []
+    try:
+        got = client.list_projects()
+    except Exception as exc:
+        if not isinstance(exc, mod.JiraError):
+            problems.append("raised %s after %d request(s) -- the walk has no "
+                            "bound of its own, it stopped only because the "
+                            "transport refused to answer again"
+                            % (type(exc).__name__, len(transport.calls)))
+        else:
+            if bound is not None and len(transport.calls) != bound:
+                problems.append("made %d request(s), want MAX_PAGES (%d)"
+                                % (len(transport.calls), bound))
+            missing = missing_tokens(str(exc), ["project", "startAt"])
+            if missing:
+                problems.append("the refusal does not name %s: %r"
+                                % (missing, str(exc)))
+    else:
+        problems.append("returned %d value(s) after %d request(s) instead of "
+                        "refusing" % (len(got), len(transport.calls)))
+    suite.record(GC, "projects-refuses-a-server-that-never-ends", problems,
+                 detail=["requests made: %d (transport ceiling %d)"
+                         % (len(transport.calls), ceiling),
+                         "three pagers refuse this server and the fourth "
+                         "grows: `while True` with an accumulator is the OOM "
+                         "shape, and `projects` is the one command every "
+                         "onboarding runs first"])
+
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": [{"key": "P%d" % i}
+                                       for i in range(mod.PAGE_SIZE)],
+                            "total": True}),
+        response(mod, 200, {"values": [{"key": "P50"}], "isLast": True}),
+    ], url=BASE_CLOUD, deployment="Cloud")
+    got = client.list_projects()
+    problems = []
+    if len(got) != mod.PAGE_SIZE + 1:
+        problems.append("returned %d project(s), want %d"
+                        % (len(got), mod.PAGE_SIZE + 1))
+    if len(transport.calls) != 2:
+        problems.append("made %d request(s), want 2" % len(transport.calls))
+    suite.record(GC, "projects-a-boolean-total-does-not-truncate", problems,
+                 detail=["`isinstance(True, int)` is True and `50 >= True` is "
+                         "True, so a response carrying `\"total\": true` ends "
+                         "the walk after page one -- SILENTLY, because a short "
+                         "project list is indistinguishable from a complete "
+                         "one at the call site",
+                         "both siblings carry `and not isinstance(total, "
+                         "bool)`: _paged_values and _search_server"])
+
     mod.reset_deployment_cache()
 
 
@@ -1432,7 +1610,52 @@ HTML_BODY = ("<!DOCTYPE html><html><head><title>Sign in</title></head>"
              "single sign-on portal.</body></html>")
 
 
-def group_f(suite, mod):
+class SprintsStub:
+    """The two client methods `cmd_sprints` calls, and nothing else.
+
+    A scripted transport cannot produce what one row below measures: every
+    JiraError the real client raises carries a message, and the defect is what
+    the renderer does with one that does NOT -- `str(exc).splitlines()[-1]` is
+    an IndexError on `[]`.  So the exception is injected rather than provoked.
+    """
+
+    def __init__(self, boards, raises):
+        self._boards = boards
+        self._raises = raises
+        self.sprint_calls = []
+
+    def boards(self, _project):
+        return list(self._boards)
+
+    def sprints(self, board_id, state="active"):
+        self.sprint_calls.append((board_id, state))
+        raise self._raises
+
+
+class BrokenPipe:
+    """A stdout whose reader has gone away -- `jira.py search ... | head -1`.
+
+    `fileno()` refuses the way a captured stdout does rather than handing back
+    a real descriptor: the code under test is expected to deal with stdout
+    before the interpreter flushes it, and a stub that returned this process's
+    own fd would have it dup2()ed over /dev/null for the rest of the run.
+    """
+
+    def __init__(self):
+        self.writes = 0
+
+    def write(self, _text):
+        self.writes += 1
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def fileno(self):
+        raise io.UnsupportedOperation("fileno")
+
+
+def group_f(suite, mod, workspace):
     client, _t = client_with(mod, [response(mod, 404, {"errorMessages": [
         "Issue does not exist or you do not have permission to see it."]})])
     try:
@@ -1663,6 +1886,181 @@ def group_f(suite, mod):
     suite.record(GF, "a-400-is-never-retried",
                  problem_if(len(transport.calls) != 1,
                             "%d attempt(s)" % len(transport.calls)))
+
+    # -- Retry-After is a number the SERVER picks, and nothing clamped it ----
+    ceiling = getattr(mod, "MAX_RETRY_SLEEP", None)
+    slept = []
+    transport = FakeTransport([
+        response(mod, 429, {"errorMessages": ["rate limited"]},
+                 headers={"Retry-After": "86400"}),
+        response(mod, 200, {"ok": True}),
+    ])
+    client = mod.Jira(make_cfg(mod), fetch=transport,
+                      sleep=lambda s: slept.append(s))
+    got = client.request("GET", "/rest/api/2/myself")
+    problems = []
+    if got != {"ok": True}:
+        problems.append("the retry did not succeed: %r" % (got,))
+    if ceiling is None:
+        problems.append("there is no MAX_RETRY_SLEEP declared beside "
+                        "MAX_PAGES, so any bound would be a magic number")
+    if not slept:
+        problems.append("the 429 was not retried at all")
+    elif slept[0] > (ceiling or 0):
+        problems.append("slept %r on `Retry-After: 86400`" % (slept[0],))
+    suite.record(GF, "retry-after-is-clamped-to-a-named-ceiling", problems,
+                 detail=["slept: %r, ceiling: %r" % (slept, ceiling),
+                         "DEFAULT_TIMEOUT governs the SOCKET, never the sleep, "
+                         "so an unclamped header sleeps 24 hours -- twice, "
+                         "under MAX_ATTEMPTS -- and the CLI is at that point "
+                         "indistinguishable from a dead connection",
+                         "the two Retry-After: 7 rows above are the other half "
+                         "of this: a ceiling that swallowed a legitimate delay "
+                         "would fail them"])
+
+    slept = []
+    transport = FakeTransport([
+        response(mod, 503, {"errorMessages": ["down"]},
+                 headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}),
+        response(mod, 200, {"ok": True}),
+    ])
+    client = mod.Jira(make_cfg(mod), fetch=transport,
+                      sleep=lambda s: slept.append(s))
+    client.request("GET", "/rest/api/2/myself")
+    suite.record(GF, "retry-after-as-an-http-date-still-falls-to-backoff",
+                 problem_if(slept != [mod.BACKOFF_SECONDS],
+                            "slept %r, want [%r]"
+                            % (slept, mod.BACKOFF_SECONDS)),
+                 detail=["slept: %r" % slept,
+                         "CONTROL: it passes before the clamp above exists and "
+                         "after, and it is here so the clamp cannot be bought "
+                         "by breaking the OTHER documented header form -- "
+                         "float() raises and the ValueError falls through"])
+
+    # -- an exception carrying no message at all ----------------------------
+    stub = SprintsStub([{"id": 1698, "name": "Platform"}], mod.JiraError(""))
+    args = parse_args(mod, connected(["sprints", "--project", "PROJ"]))
+    problems = []
+    code, text = None, ""
+    with EnvSandbox():
+        with walking_from(os.path.realpath(workspace),
+                          os.path.realpath(workspace)):
+            try:
+                with captured() as (out, err):
+                    code = mod.cmd_sprints(args, stub)
+                text = out.getvalue()
+            except Exception as exc:
+                problems.append("a JiraError with an EMPTY message escaped as "
+                                "%s: str(exc).splitlines() is [] and [-1] "
+                                "indexes it" % type(exc).__name__)
+    if code is not None and code != 0:
+        problems.append("exit %r, want 0" % code)
+    if code is not None and "1698" not in text:
+        problems.append("the board that could not answer is not in the table: "
+                        "%r" % text)
+    suite.record(GF, "an-error-with-no-message-does-not-become-a-traceback",
+                 problems,
+                 detail=text.splitlines()
+                 + ["main() catches SetupError, JiraError and "
+                    "KeyboardInterrupt, so an IndexError here is a traceback "
+                    "and an accidental exit 1"])
+
+    # -- the reader closed the pipe -----------------------------------------
+    def answer(_method, url, _body, _headers):
+        if "/serverInfo" in url:
+            return response(mod, 200, {"deploymentType": "Server"})
+        return response(mod, 200, {"name": "real.user",
+                                   "displayName": "A Person"},
+                        headers={"X-AUSERNAME": "real.user"})
+
+    pipe = BrokenPipe()
+    err = io.StringIO()
+    code, problems = None, []
+    mod.reset_deployment_cache()
+    mod._DEPLOYMENT_CACHE = mod.SERVER
+    with EnvSandbox():
+        with NetworkGuard(mod, responder=answer):
+            try:
+                with contextlib.redirect_stdout(pipe):
+                    with contextlib.redirect_stderr(err):
+                        code = mod.main(connected(["whoami"]))
+            except Exception as exc:
+                problems.append("BrokenPipeError escaped main() as %s, so the "
+                                "pipeline this file's own contract promises "
+                                "gets a traceback" % type(exc).__name__)
+    mod.reset_deployment_cache()
+    if not pipe.writes:
+        problems.append("nothing was written to stdout, so the case never "
+                        "reached the defect")
+    if code is not None and code != 0:
+        problems.append("exit %r, want 0: a reader that stopped reading is "
+                        "not a finding" % (code,))
+    suite.record(GF, "a-closed-output-pipe-is-not-a-traceback", problems,
+                 detail=["writes attempted: %d, exit: %r" % (pipe.writes, code),
+                         "every render path calls bare print(), and `jira.py "
+                         "search ... | head -1` closes the pipe under it",
+                         "a clean exit also has to deal with stdout BEFORE "
+                         "the interpreter flushes it, or CPython prints "
+                         "\"Exception ignored in: <_io.TextIOWrapper ...>\" "
+                         "after main() has already returned its code"])
+
+    # -- an id the response did not carry, reported against the wrong thing --
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": [{"name": "Bug"}], "isLast": True}),
+    ], deployment="Server")
+    problems = []
+    try:
+        got = client._createmeta_split("PROJ", None)
+    except mod.JiraError as exc:
+        missing = missing_tokens(str(exc), ["Bug", "id"])
+        if missing:
+            problems.append("the refusal does not name %s: %r"
+                            % (missing, str(exc)))
+    except Exception as exc:
+        problems.append("raised %s: %s" % (type(exc).__name__, exc))
+    else:
+        problems.append("returned %r instead of refusing" % (got,))
+    if len(transport.calls) != 1:
+        problems.append("made %d request(s): the missing id went into the URL "
+                        "PATH as the literal string `None`, and the 404 that "
+                        "follows is reported against the ISSUE TYPE -- a "
+                        "diagnosis pointing at the wrong thing"
+                        % len(transport.calls))
+    suite.record(GF, "createmeta-refuses-an-issue-type-with-no-id", problems,
+                 detail=["paths: %r" % [c.path for c in transport.calls],
+                         "`project` on the same line IS validated; the id "
+                         "beside it never was"])
+
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": [{"name": "Bug", "id": "10004"}],
+                            "isLast": True}),
+        response(mod, 200, {"values": [{"fieldId": "summary",
+                                        "name": "Summary", "required": True}],
+                            "isLast": True}),
+    ], deployment="Server")
+    problems = []
+    try:
+        got = client._createmeta_split("PROJ", None)
+    except Exception as exc:
+        got = None
+        problems.append("a well-formed issue type was refused: %s(%s)"
+                        % (type(exc).__name__, exc))
+    if got is not None:
+        if [entry.get("issuetype") for entry in got] != ["Bug"]:
+            problems.append("returned %r" % (got,))
+        if len(transport.calls) != 2:
+            problems.append("made %d request(s), want 2" % len(transport.calls))
+        elif not transport.calls[1].path.endswith("/issuetypes/10004"):
+            problems.append("the second request went to %s"
+                            % transport.calls[1].path)
+    suite.record(GF, "createmeta-still-follows-an-issue-type-that-has-one",
+                 problems,
+                 detail=["paths: %r" % [c.path for c in transport.calls],
+                         "CONTROL: it passes before the refusal above exists "
+                         "and after -- ANTI-VACUITY, because a refusal that "
+                         "fired on every entry would satisfy that row and "
+                         "break createmeta outright"])
+
     mod.reset_deployment_cache()
 
 
@@ -1679,7 +2077,7 @@ KEY_SUBCOMMANDS = {
 }
 
 
-def group_g(suite, mod):
+def group_g(suite, mod, workspace):
     suite.record(GG, "accepted-and-rejected-tables",
                  check_key_validator(mod._validate_issue_key),
                  detail=["accepted: %r" % KEYS_OK, "rejected: %r" % KEYS_BAD])
@@ -1724,6 +2122,142 @@ def group_g(suite, mod):
         suite.record(GG, "%s-rejects-a-bad-key-offline" % name, problems,
                      detail=[text.strip(), "requests: %d" % guard.calls])
 
+    # -- the board id: a number that lands in a URL PATH ---------------------
+    validator = getattr(mod, "_validate_board_id", None)
+    if validator is None:
+        problems = ["there is no _validate_board_id at all, so nothing checks "
+                    "the one caller-supplied value that reaches a REST path "
+                    "with neither a regex nor an escape in front of it"]
+    else:
+        problems = check_board_id_validator(validator)
+    suite.record(GG, "board-id-accepted-and-rejected-tables", problems,
+                 detail=["accepted: %r" % (BOARD_IDS_OK,),
+                         "rejected: %r" % (BOARD_IDS_BAD,),
+                         "api_url urlencodes the QUERY and concatenates the "
+                         "PATH, so `1/../../api/2/issue/PROJ-1` does not fail "
+                         "-- it succeeds against another resource"])
+
+    hostile = "1/../../api/2/issue/PROJ-1"
+    code, text = None, ""
+    problems = []
+    with EnvSandbox():
+        with walking_from(os.path.realpath(workspace),
+                          os.path.realpath(workspace)):
+            with NetworkGuard(mod) as guard:
+                try:
+                    with captured() as (out, err):
+                        code = mod.main(connected(["sprints", "--board",
+                                                   hostile]))
+                    text = err.getvalue()
+                except Exception as exc:
+                    problems.append("the network was used before the id was "
+                                    "looked at: %s" % exc)
+    if code is not None and code != 2:
+        problems.append("exit %r, want 2 -- a board id that cannot be one is a "
+                        "bad invocation" % (code,))
+    if guard.calls:
+        problems.append("%d request(s) were made for a malformed board id"
+                        % guard.calls)
+    problems += ["message omits %r" % t for t in missing_tokens(
+        text, ["invalid board id", hostile])]
+    suite.record(GG, "sprints-rejects-a-bad-board-offline", problems,
+                 detail=[text.strip(), "requests: %d" % guard.calls,
+                         "`--board` has no type=int on the parser, so whatever "
+                         "was typed is what goes into the path"])
+
+    client, transport = client_with(mod, [], deployment=mod.SERVER)
+    problems = []
+    try:
+        got = mod.resolve_sentinels(client, "PROJ", {"board": hostile},
+                                    {"customfield_11300": "@active"})
+    except mod.SetupError as exc:
+        missing = missing_tokens(str(exc), ["invalid board id", hostile])
+        if missing:
+            problems.append("the refusal does not name %s: %r"
+                            % (missing, str(exc)))
+    except Exception as exc:
+        problems.append("raised %s, want SetupError: %s"
+                        % (type(exc).__name__, exc))
+    else:
+        problems.append("resolved to %r" % (got,))
+    if transport.calls:
+        problems.append("the board id went into the URL PATH of %d request(s): "
+                        "%s" % (len(transport.calls), transport.calls[0].path))
+    suite.record(GG, "a-profile-board-that-is-not-a-number-is-refused",
+                 problems,
+                 detail=["paths: %r" % [c.path for c in transport.calls],
+                         "`.claude/jira.json` is a checked-in file that this "
+                         "CLI reads out of whatever repository it is standing "
+                         "in, and its \"board\" reaches the path unread"])
+
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": [{"id": hostile, "name": "Evil",
+                                        "type": "scrum"}], "isLast": True}),
+    ], deployment=mod.SERVER)
+    problems = []
+    try:
+        got = client.active_sprint_id("PROJ")
+    except mod.SetupError as exc:
+        if "invalid board id" not in str(exc):
+            problems.append("the refusal does not name the cause: %r"
+                            % str(exc))
+    except Exception as exc:
+        problems.append("raised %s, want SetupError -- anything else escapes "
+                        "main() as a traceback: %s" % (type(exc).__name__, exc))
+    else:
+        problems.append("resolved to %r" % (got,))
+    if len(transport.calls) != 1:
+        problems.append("made %d request(s), want 1 (the board list, and "
+                        "nothing built from what it said)"
+                        % len(transport.calls))
+    suite.record(GG, "a-board-id-the-server-handed-back-is-checked-too",
+                 problems,
+                 detail=["paths: %r" % [c.path for c in transport.calls],
+                         "SetupError and not JiraError: the remedy is the same "
+                         "one the four refusals beside it name -- pin a board "
+                         "in the profile -- and splitting one refusal family "
+                         "across two exit codes buys the caller nothing"])
+
+    client, transport = client_with(mod, [
+        response(mod, 200, {"values": [{"id": hostile, "name": "Evil"},
+                                       {"id": 1698, "name": "Platform"}],
+                            "isLast": True}),
+        response(mod, 200, {"values": [SPRINT_ONE], "isLast": True}),
+    ], deployment=mod.SERVER)
+    args = parse_args(mod, connected(["sprints", "--project", "PROJ"]))
+    code, text = None, ""
+    problems = []
+    with EnvSandbox():
+        with walking_from(os.path.realpath(workspace),
+                          os.path.realpath(workspace)):
+            try:
+                with captured() as (out, err):
+                    code = mod.cmd_sprints(args, client)
+                text = out.getvalue()
+            except Exception as exc:
+                problems.append("the sweep put the id in a URL: %s" % exc)
+    if code is not None and code != 0:
+        problems.append("exit %r, want 0" % (code,))
+    if len(transport.calls) != 2:
+        problems.append("made %d request(s), want 2: the board list, then the "
+                        "ONE board that can be asked" % len(transport.calls))
+    elif "/board/1698/sprint" not in transport.calls[1].path:
+        problems.append("the second request went to %s"
+                        % transport.calls[1].path)
+    if code is not None:
+        problems += ["the table omits %r" % t for t in missing_tokens(
+            text, ["invalid board id", "442"])]
+    suite.record(GG, "sprints-skips-a-server-board-whose-id-is-not-a-number",
+                 problems,
+                 detail=text.splitlines() + ["paths: %r"
+                                             % [c.path
+                                                for c in transport.calls],
+                                             "a row rather than a refusal, for "
+                                             "the same reason the Kanban 400 "
+                                             "is a row: one board that cannot "
+                                             "answer must not hide every board "
+                                             "listed after it"])
+
 
 # ---------------------------------------------------------------------------
 # H. NEGATIVE CONTROL -- the oracles above must be able to fail
@@ -1741,6 +2275,11 @@ def _mutant_join(base, path):
 
 def _mutant_key_validator(_key):
     """Accepts anything, which is what having no validation looks like."""
+    return None
+
+
+def _mutant_board_validator(_board_id):
+    """Accepts anything -- which is what interpolating it raw looks like."""
     return None
 
 
@@ -1764,6 +2303,10 @@ MUTANTS = [
     ("mutant-key-validator-accepts-anything",
      lambda: check_key_validator(_mutant_key_validator),
      "no validation at all"),
+    ("mutant-board-validator-accepts-anything",
+     lambda: check_board_id_validator(_mutant_board_validator),
+     "no board-id validation at all, so `1/../../api/2/issue/PROJ-1` is "
+     "concatenated into the URL path and re-points the request"),
     ("mutant-pager-over-fetches",
      lambda: check_pages(["A-1", "A-2", "A-3"], [1, 2, 3], ["A-1", "A-2"], 2),
      "one page too many: right-looking issues, one extra round trip"),
@@ -1806,6 +2349,9 @@ def group_h(suite, mod):
     problems += ["join: %s" % p for p in check_join(mod.api_url)]
     problems += ["key: %s" % p
                  for p in check_key_validator(mod._validate_issue_key)]
+    problems += ["board: %s" % p
+                 for p in check_board_id_validator(
+                     getattr(mod, "_validate_board_id", lambda _v: None))]
     problems += ["pages: %s" % p
                  for p in check_pages(["A-1", "A-2"], [1, 2], ["A-1", "A-2"], 2)]
     problems += ["sprint: %s" % p
@@ -3174,6 +3720,62 @@ def group_m(suite, mod, workspace):
                          "line in one invocation, and the answer cannot change "
                          "mid-run"])
 
+    # -- and an identity that is EMPTY is refused rather than sent ----------
+    #
+    # Both branches of user_ref() were `str(... or "")`, so a /myself that
+    # carries no accountId on Cloud (or no name and no key on DC) resolved
+    # `@me` to `{"accountId": ""}` -- a value Jira accepts, in a field that
+    # then belongs to nobody, on a create that reports success.
+    for label, deployment, me, absent in (
+            ("cloud", mod.CLOUD,
+             {"displayName": "A Person", "name": "hidden-on-cloud"},
+             "accountId"),
+            ("dc", mod.SERVER,
+             {"displayName": "A Person", "emailAddress": "a@b.example"},
+             "name")):
+        client, transport = routed_client(
+            mod, [("/myself", response(mod, 200, me))], deployment=deployment)
+        problems = []
+        try:
+            got = client.user_ref()
+        except mod.SetupError as exc:
+            missing = missing_tokens(str(exc), [mod.SENTINEL_ME, absent])
+            if missing:
+                problems.append("the refusal does not name %s: %r"
+                                % (missing, str(exc)))
+        except Exception as exc:
+            problems.append("raised %s, want SetupError -- anything else "
+                            "escapes main() as a traceback: %s"
+                            % (type(exc).__name__, exc))
+        else:
+            problems.append("resolved to %r and would have SENT it" % (got,))
+        suite.record(GM, "me-refuses-an-identity-with-no-%s-on-%s"
+                     % (absent, label), problems,
+                     detail=["/myself answered: %r" % (me,),
+                             "every other response value in this file is "
+                             "defended -- _meta_field coerces, _text defaults "
+                             "-- and this one was sent as written"])
+
+    client, transport = routed_client(
+        mod, [("/myself", response(mod, 200, ["not", "an", "object"]))],
+        deployment=mod.SERVER)
+    problems = []
+    try:
+        got = client.user_ref()
+    except mod.SetupError:
+        pass
+    except Exception as exc:
+        problems.append("raised %s: a /myself that is not an object reaches "
+                        ".get() and leaves main() as a traceback"
+                        % type(exc).__name__)
+    else:
+        problems.append("resolved to %r" % (got,))
+    suite.record(GM, "a-myself-that-is-not-an-object-is-refused-not-crashed",
+                 problems,
+                 detail=["behind an SSO proxy or a misrouted context path a "
+                         "200 can carry anything at all, and `or {}` only "
+                         "defends against a FALSY one"])
+
     # -- @active, at depth, against a PINNED board ---------------------------
     #
     # `isLast` for the same reason sprint_resolver carries it: a RoutedTransport
@@ -3455,9 +4057,10 @@ def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
                     title="Jira CLI: auth, URL join, deployment probe, the "
-                          "three pagers, config, write guards, error "
-                          "mapping, Markdown rendering, the profile walk and "
-                          "the create payload",
+                          "four pagers, config, write guards, error mapping "
+                          "and the three tracebacks it used to raise instead, "
+                          "key and board-id validation, Markdown rendering, "
+                          "the profile walk and the create payload",
                     opts=opts, mode="grouped")
 
     before = H.repo_tree()
@@ -3477,8 +4080,8 @@ def run(opts=None):
             group_c(suite, mod)
             group_d(suite, mod)
             group_e(suite, mod)
-            group_f(suite, mod)
-            group_g(suite, mod)
+            group_f(suite, mod, workspace.path)
+            group_g(suite, mod, workspace.path)
             group_h(suite, mod)
             group_j(suite, mod, workspace.path)
             group_k(suite, mod)

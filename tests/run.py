@@ -234,7 +234,15 @@ SUITES = [
      "system-field shaping table, and `@active` refusing every ambiguous "
      "board/sprint configuration instead of guessing -- including a sprint "
      "whose id cannot become an int, which has to refuse as a SetupError "
-     "rather than escape main() as a traceback", 199),
+     "rather than escape main() as a traceback -- plus the FOURTH pager "
+     "(`projects`, bounded, and a `\"total\": true` that must not truncate it "
+     "because `50 >= True`), the Cloud empty page a fresh token every time "
+     "never stops without, the numeric-id check on every board id that reaches "
+     "a URL path from the profile, from --board and from the server's own "
+     "board list, an identity that resolves to nothing being refused rather "
+     "than sent, and the three ways main() owed a message and produced a "
+     "traceback instead: an unclamped Retry-After, an exception with no text, "
+     "and a reader that closed the pipe", 218),
     # TYPED, and the count is a fixed case table plus ONE derived row: group C
     # sweeps every entry in the CLI's HANDLERS dict, but it records three cases
     # regardless of how many subcommands it finds, so adding a subcommand moves
