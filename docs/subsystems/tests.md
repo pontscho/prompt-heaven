@@ -151,15 +151,26 @@ one-line-per-case, or buffered and grouped into `=== group (pass N, fail N, info
 N) ===` blocks.
 
 The harness also owns the fleet's **repo-pollution detectors**, and they are a
-pair: `pycache_snapshot` for bytecode and `repo_tree` for path names
-`tests/_harness.py:repo_tree`. Four suites — `checkpoint`, `jira_cli`,
-`purity_file_ops` and `purity_lsp` — snapshot the tree at their start and again
-in their hygiene group, failing a `no-new-repo-paths` case on `after - before`.
-It lived as four hand copies until one of them independently grew the
-scratch-area exclusion and the other three never learned it; homing it beside
-its twin is what ended that. The `SUITES` table was not touched by that move
-`tests/run.py`, so Idea 1's own gate is what certifies the four suites kept
-their case counts.
+pair with a deliberate asymmetry: `pycache_snapshot` for bytecode
+`tests/_harness.py:pycache_snapshot` and `repo_tree` for path names
+`tests/_harness.py:repo_tree`. Both walk from the repo root and both skip
+`.git`, which churns on its own. Only `repo_tree` also skips the scratch area,
+and that difference is the point rather than an oversight: a write under
+`.claude/tmp` is legitimate work by a suite that owns a sandbox there, while a
+`.pyc` under it is litter like any other — so the bytecode half deliberately
+sees `ClaudeCode/`, `docs/` and the scratch area too.
+
+A suite takes the snapshot at its start and again in its hygiene group, failing
+on `after - before`. Neither set of users is written down here, and both are
+open: every suite that snapshots path names also snapshots bytecode, but not the
+reverse — the bytecode half is strictly the larger set. The case id is not a
+reliable handle either, because the same check is registered as
+`no-new-repo-paths`, `k-no-new-repo-paths` and `no new repo paths` in different
+suites; read the hygiene group, do not grep the name. `repo_tree` lived as four
+hand copies until one of them independently grew the scratch-area exclusion and
+the other three never learned it; homing it beside its twin is what ended that.
+The `SUITES` table was not touched by that move `tests/run.py`, so Idea 1's own
+gate is what certifies those four kept their case counts.
 
 Two details of the homed version are recorded decisions rather than incidental.
 The scratch area is excluded **at any depth** `tests/_harness.py:SCRATCH_DIR`,
@@ -226,6 +237,18 @@ conclusion here — which is why `mcp_footprint` sums only over registered serve
 while the smoke check deliberately ignores the flag: its job is that every server
 file still speaks the protocol, registered or not.
 
+The smoke check is also the fleet's one deliberate exception to the child-env
+rule, and the exception is argued rather than inherited: its `Popen` passes no
+`env=` and no `-B` `Scripts/_mcp_smoke_test.py`. That is safe by **architecture**
+— a server runs as `__main__`, which CPython never caches, and the
+generated-region design means it imports no sibling from this repo
+[[generated-regions]], so there is nothing here for CPython to write bytecode
+for. Measured, not reasoned: a standalone run with `PYTHONDONTWRITEBYTECODE`
+unset starts every server in the launch table and leaves the tree bytecode-free.
+The note records its own expiry condition — the first server to grow a
+repo-local import breaks the premise, and the suites asserting zero absolutely
+are what would say so.
+
 ## Fixtures
 
 `tests/files` holds committed C and Lua fixtures for `purity_lsp` only. They are
@@ -253,11 +276,31 @@ strictly.
   `tests/test_spawn_stdin.py`
 - **AST, never regex, for source-scanning suites** — both regex false-positive
   shapes are live in this repo, so the justification is empirical, not aesthetic.
-- **Bytecode discipline.** `sys.dont_write_bytecode` is set before the first repo
-  import, children inherit the environment variable, and two suites assert
-  **zero** `.pyc` absolutely rather than as a delta — because a file that already
-  existed reads as "1 before, 1 after" and sails through a delta check. This is
-  also why `py_compile` must never be reintroduced.
+- **Bytecode discipline comes in two kinds, and they are not interchangeable.**
+  `sys.dont_write_bytecode` is set before the first repo import `tests/run.py`,
+  and every child process inherits `PYTHONDONTWRITEBYTECODE=1`
+  `tests/_harness.py:child_env`. What backs that up at runtime is two different
+  assertions. Most snapshotting suites check a **delta** — nothing created,
+  nothing touched since the suite started — which stays silent on a file that
+  was already there, because it reads as "1 before, 1 after". A smaller set
+  asserts **zero, absolutely**, so a pre-existing artifact is a finding no
+  matter who wrote it; `tests/test_purity_lsp.py:_pyc_problems` is that check
+  with its reasoning attached, and it reports pre-existing files separately from
+  newly written ones because the fix differs — delete the litter versus stop
+  producing it. Two delta sites carry a note saying which kind they are and
+  where the absolute form lives `tests/test_mcp_footprint.py`
+  `tests/test_spawn_stdin.py`. A third shape exists in exactly one place:
+  `name_existence` pairs its delta FAIL with an INFO row listing stale `.pyc`
+  for the three modules it imports — unattributable to this run, but it must
+  stay visible `tests/test_name_existence.py`.
+- **Neither bytecode set gets a count written down here.** Both move whenever a
+  suite is added, and the number this page used to carry was not a measurement
+  but one stale ancestor copied three ways — the same wrong "two" sat in
+  `project-forge.yaml` and `tests/README.md`. The fleet's sources now state it
+  structurally instead: *a tree every suite that snapshots bytecode asserts
+  stays empty* `project-forge.yaml` `Scripts/MCP_SKELETON.md`, and
+  `tests/README.md` names one example of each kind with no count at all. This
+  is also why `py_compile` must never be reintroduced `project-forge.yaml`.
 - **Two sandbox conventions coexist and are not interchangeable.** Some suites
   use a system temp workspace; three use a per-run `.claude/tmp/<suite>/`
   directory whose escape is structurally gated — a single write path and a single

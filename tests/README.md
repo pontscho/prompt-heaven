@@ -161,8 +161,10 @@ Hard rule, enforced rather than hoped for:
   The per-run subdirectory exists because two concurrent instances at a fixed
   path had one instance's teardown deleting the other's fixtures mid-probe.
 * `_harness.repo_tree()` is the snapshot behind the `no-new-repo-paths` delta
-  check in `checkpoint`, `jira_cli`, `purity_file_ops`, `purity_lsp`,
-  `read_loop` and `wire_log`, and it
+  check in every suite that takes it — a strict subset of the ones that
+  snapshot bytecode, and deliberately not enumerated here, because the set
+  grows whenever a suite is added and a list in prose is checked by nobody —
+  and it
   **excludes `.claude/tmp` at any depth** as well as `.git`. Without that, the
   per-run directories above are visible to a *different* suite's before/after
   window: serially within one fleet run they are harmless, but two overlapping

@@ -40,13 +40,22 @@ else.
 ## Why generation rather than an import
 
 Every server is a self-contained single file, and the rejection of a shared
-import is argued identically in all four canonical sources and in the suite
-`Scripts/_mcp_json.py`, `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`,
-`Scripts/_mcp_paging.py`,
-`tests/test_generated_region.py`. Three reasons: an import would write bytecode
-into a tree the fleet asserts is empty; it would need a `sys.path` entry the test
-harness's loader never adds; and it would move the helpers out of the module
-attributes the footprint suite reaches for.
+import is argued identically in **every** canonical source
+`Scripts/amalgamate.py:CANONICAL_NAMES`, in the suite
+`tests/test_generated_region.py`, and in `Scripts/MCP_SKELETON.md` and
+`project-forge.yaml`. Three reasons: an import would write
+`Scripts/__pycache__` into *a tree every suite that snapshots bytecode asserts
+stays empty*; it would need a `sys.path` entry the test harness's
+`spec_from_file_location` never adds; and it would move the helpers out of the
+module attributes the footprint suite reaches for.
+
+That middle clause is quoted rather than paraphrased, because its wording is
+itself the decision. It names the **property** instead of tallying the suites,
+and it is byte-identical at every site, so the family stays greppable and a
+newly added suite cannot stale it. The tally it replaced said "four", which was
+right only under an unstated reading of which check counts; the suites that
+assert emptiness *absolutely* are five, and the ones that assert only a delta
+are more — both sets open, both in [[tests]].
 
 The cost is accepted openly — duplication is the *mechanism*, and the generator
 plus its gate are what keep the copies from diverging.
