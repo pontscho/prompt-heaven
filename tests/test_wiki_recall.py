@@ -231,6 +231,24 @@ Coverage by group:
      counts an alias regardless of the weight while `hit_terms` needs it, so
      weight 0 leaves the word in every page's denominator and strips only the
      declaring page's credit for it
+  Q  `path_prefix` is a PATH BOUNDARY, not a substring, and it is ONE rule with
+     three callers.  All three filters spelled it `relpath.startswith(prefix)`
+     by hand, so `sub` selected the whole of `subsystems/` -- the same shape
+     that once ate `.gitignore` out of a snapshot because it starts with `.git`
+     (`tests/_harness.py:_is_scratch_dir`).  The group pins each of the four
+     clauses on a page only that clause can reach (an exact page path; a prefix
+     ending at a `/` boundary, in both spellings, reaching a subtree at any
+     depth; a prefix ending inside the LAST component, which keeps `adr/001`
+     legal; and a prefix ending inside an EARLIER one, which selects nothing),
+     drives every one of them through `search`, `list` AND `freshness` because
+     three handlers disagreeing is the worse defect adr 0018 refused to create,
+     reads the SOURCE to prove no handler re-spells the test beside the shared
+     predicate, and holds the refusal to two rules: a scope nobody is in is
+     refused by name and NAMES the scopes that do exist (built from the corpus,
+     measured by adding a directory and watching the list grow), while an answer
+     that is legitimately empty INSIDE a populated scope -- the relevance gate's
+     own silence, a `type` nothing carries -- keeps its own words and is never
+     turned into an error
 
 Group J runs on its OWN six-page fixture in a SECOND workspace (group N adds a
 SEVENTH page to that same workspace -- `get_page` resolves by slug, so a page
@@ -254,12 +272,23 @@ or CLOSE -- the very window group D derives, which is precisely the effect group
 measures on a corpus of its own.  A group that shared the fixture would be
 measuring its own contamination.
 
+Group Q takes an ELEVENTH, and its reason is the corpus SHAPE rather than the
+scoring: every fixture above is FLAT, and on a flat corpus the substring bug and
+the boundary rule agree on every page, because a path with no `/` in it has only
+one component to end inside.  Group Q's is the only tree in this file -- two
+top-level directories sharing a leading substring, a page two levels down, and
+three numbered records whose stems diverge at the fourth character.  It is also
+the only group that must not be merged into another: adding those directories to
+an existing fixture would change what `iter_pages` yields for every case that
+already reads a path.
+
 Usage:
   python3 tests/test_wiki_recall.py
   python3 tests/test_wiki_recall.py --brief
 Exit code 0 iff every non-informational case passes.
 """
 
+import ast
 import math
 import os
 import re
@@ -744,6 +773,19 @@ class Driver:
         test believes it wrote."""
         fm, _body = self.mod.read_page(os.path.join(self.abs_wiki, fname))
         return fm
+
+    def listing(self, **params):
+        """The rendered `list` answer, raw.
+
+        Group Q needs the THIRD `path_prefix` filter driven the same way as the
+        other two: the one rule now lives in one function, so a case that could
+        only reach two of its three callers would leave the third free to drift
+        back -- which is precisely the state adr 0018 recorded and declined to
+        repair one handler at a time.
+        """
+        res = self.mod.handle_wiki_call(
+            {"function": "list", "params": params}, self.root, WIKI_REL)
+        return res.get("__raw_text__") or res.get("error") or ""
 
     def freshness(self, **params):
         """The rendered `freshness` report, raw."""
@@ -1717,6 +1759,14 @@ COLLISION_SENTINEL = "Ambiguous parameters"
 # applied to the rendered rows leaves `gating:` describing a corpus the caller
 # never asked about.  A page renamed out of the slice fails the premise here
 # instead of quietly hollowing the case out.
+#
+# Under the boundary rule group Q owns, `st-p` is a CLAUSE 3 spelling -- it ends
+# inside the last (here: only) path component, and this fixture is flat, so the
+# remainder carries no `/`.  It therefore kept its meaning when the three filters
+# stopped being `str.startswith`, which is the point of that clause: the rule was
+# not narrowed to whole components, because a stem is how a numbered corpus is
+# actually browsed.  Nothing here ever encoded the substring bug -- the bug needs
+# two directories to merge, and this corpus has none.
 L_FRESH_PREFIX = "st-p"
 L_FRESH_NOMATCH = "zz-no-such-prefix/"
 # A wiki root holding no page at all, written beside group L's fixture (never
@@ -2267,6 +2317,217 @@ def hit_for(answer, slug):
     """The one rendered hit line for `slug`, or None."""
     found = [h for h in answer["hits"] if h["slug"] == slug]
     return found[0] if found else None
+
+
+# ---------------------------------------------------------------------------
+# Group Q's fixture: `path_prefix` is a PATH BOUNDARY, not a substring.
+#
+# An ELEVENTH workspace, and the reason is the corpus SHAPE rather than the
+# scoring: every other fixture in this file is flat, and a flat corpus cannot
+# express the defect at all.  The bug being gated is that
+# `relpath.startswith(prefix)` merges directories whose names share a leading
+# substring, so the fixture needs two of them -- `subsystems/` and `subtle/` --
+# plus a page two levels deep, plus a numbered-record directory whose stems
+# diverge at the fourth character.  Written as a tree here, so each clause of
+# the rule has a page that can only be selected by that clause.
+#
+# The pages carry `sources:` and NO `verified:` block on purpose: that is the
+# one `_classify_page` branch which touches neither git nor the filesystem, so
+# every page classifies `unverified` -- a DETAIL status, hence listed BY PATH in
+# the rendered report, which is what lets a freshness case assert the selected
+# SET rather than only its size.
+# ---------------------------------------------------------------------------
+
+(Q_FILE, Q_SLUG, Q_TITLE, Q_TYPE) = range(4)
+
+# The term every page carries, so one query reaches the whole corpus and any
+# narrowing visible in an answer is the prefix's doing and nothing else's.
+Q_TERM = "qscope"
+Q_SOURCE = "src/q.py"
+
+Q_PAGES = [
+    ("overview.md", "q-overview", "The page at the wiki root", "reference"),
+    ("subsystems/alpha.md", "q-alpha", "Alpha under subsystems", "subsystem"),
+    ("subsystems/beta.md", "q-beta", "Beta under subsystems", "subsystem"),
+    # Depth 2: a directory scope has to reach it, and a prefix that stops inside
+    # the LAST component must not, or clause 2 and clause 3 are indistinguishable.
+    ("subsystems/deep/gamma.md", "q-gamma", "Gamma two levels down", "subsystem"),
+    # The whole point of the group.  `subtle/` and `subsystems/` share the four
+    # characters `sub`, so under the old rule ONE prefix selected both trees --
+    # exactly the `.gitignore`-eaten-by-`.git` shape, one level up.
+    ("subtle/delta.md", "q-delta", "Delta in the OTHER sub directory", "concept"),
+    # Numbered records whose stems diverge at the fourth character: `records/001`
+    # must take the first two and leave the third, which is the mid-component
+    # spelling the rule deliberately keeps legal.
+    ("records/0010-one.md", "q-0010", "Record ten", "adr"),
+    ("records/0011-two.md", "q-0011", "Record eleven", "adr"),
+    ("records/0020-three.md", "q-0020", "Record twenty", "adr"),
+]
+
+Q_BY_FILE = {p[Q_FILE]: p for p in Q_PAGES}
+Q_PATHS = [p[Q_FILE] for p in Q_PAGES]
+Q_LIMIT = len(Q_PAGES)
+
+# The probe prefixes, each named for the clause it exercises.  Kept in one table
+# so every case below runs the SAME spellings through all three functions and a
+# divergence shows up as a disagreement rather than as a missing case.
+Q_EXACT = "overview.md"                 # 1: a whole page path
+Q_EXACT_NESTED = "subsystems/alpha.md"  # 1: a whole page path, nested
+Q_DIR_BARE = "subsystems"               # 2: boundary, no trailing slash
+Q_DIR_SLASH = "subsystems/"             # 2: boundary, trailing slash
+Q_DIR_DEEP = "subsystems/deep"          # 2: boundary, one level down
+Q_STEM = "records/001"                  # 3: inside the LAST component
+Q_MERGE = "sub"                         # 4: inside an EARLIER component
+Q_ABSENT = "zzno-such-scope/"           # 4-adjacent: nothing starts with it
+
+# Every spelling above, so the three-functions-agree case sweeps the whole table
+# rather than a hand-picked pair of it.
+Q_PROBES = (Q_EXACT, Q_EXACT_NESTED, Q_DIR_BARE, Q_DIR_SLASH, Q_DIR_DEEP,
+            Q_STEM, Q_MERGE, Q_ABSENT)
+
+# `list`'s ORDINARY empty answer, which the scope refusal must never replace: a
+# type nothing carries is a real census result, a scope nobody is in is not.
+LIST_EMPTY_MSG = "no pages match the filter"
+# The two words the tool description has to use, because they are the two halves
+# of the distinction: a prefix is a path BOUNDARY and not a SUBSTRING.  Typed
+# here for the same reason GATE_MSG is -- a rendered sentence has no constant on
+# the module to read it from.
+DESC_RULE_WORDS = ("boundary", "substring")
+
+# A top-level directory that does NOT exist when the fixture is written.  The
+# last case adds a page under it and re-asks, so "the scope list is built from
+# the corpus" is a MEASURED difference rather than a claim about a comprehension.
+Q_LATE_DIR = "runbooks"
+Q_LATE_FILE = "%s/late.md" % Q_LATE_DIR
+
+_LIST_HEAD_RE = re.compile(
+    r"^# wiki pages: (?P<n>\d+) in (?P<root>[^\s]+?)/"
+    r"(?: — path_prefix (?P<prefix>'[^']*'|\"[^\"]*\"))?$", re.M)
+_LIST_ROW_RE = re.compile(r"^- .*?`(?P<path>[^`]+)`")
+_SCOPES_RE = re.compile(r"^scopes that exist: (?P<rest>.+)$", re.M)
+
+
+def q_page_text(page):
+    """One group-Q page.  `sources` with no `verified:` is the git-free branch."""
+    return "\n".join([
+        "---",
+        "name: %s" % page[Q_SLUG],
+        "title: %s" % page[Q_TITLE],
+        "type: %s" % page[Q_TYPE],
+        "sources:",
+        "  - %s" % Q_SOURCE,
+        "---",
+        "",
+        "# %s" % page[Q_TITLE],
+        "",
+        "This %s page is reachable by the %s term." % (page[Q_TYPE], Q_TERM),
+        "",
+    ])
+
+
+def build_scope_fixture(work):
+    """Write group Q's tree; return the project root to hand the server."""
+    for page in Q_PAGES:
+        work.write_text(os.path.join(WIKI_REL, page[Q_FILE]), q_page_text(page))
+    return os.path.realpath(work.path)
+
+
+def parse_listing(text):
+    """The rendered `list` answer, split into the parts a scope moves."""
+    out = {"header": None, "root": None, "prefix": None, "paths": []}
+    m = _LIST_HEAD_RE.search(text)
+    if m:
+        out["header"] = int(m.group("n"))
+        out["root"] = m.group("root")
+        if m.group("prefix"):
+            out["prefix"] = m.group("prefix")[1:-1]
+    for line in text.split("\n"):
+        row = _LIST_ROW_RE.match(line)
+        if row:
+            out["paths"].append(row.group("path"))
+    return out
+
+
+def answer_scopes(text):
+    """The `scopes that exist:` list an empty-scope refusal names, or None."""
+    m = _SCOPES_RE.search(text)
+    return _csv(m.group("rest")) if m else None
+
+
+Q_FUNCTIONS = ("search", "list", "freshness")
+
+
+def q_selected(drv, prefix):
+    """What each of the three functions selects for `prefix`, as sorted paths.
+
+    ONE probe driving all three, because the claim the group exists for is that
+    they agree -- a case per function could pass three times over three
+    different rules.  `search` is read through its hit slugs and mapped back
+    through the fixture table; `list` and `freshness` print the path directly.
+    """
+    by_slug = {p[Q_SLUG]: p[Q_FILE] for p in Q_PAGES}
+    hits = drv.search(Q_TERM, path_prefix=prefix, limit=Q_LIMIT)
+    list_txt = drv.listing(path_prefix=prefix)
+    fresh_txt = drv.freshness(path_prefix=prefix)
+    return {
+        "search": sorted(by_slug[h["slug"]] for h in hits["hits"]
+                         if h["slug"] in by_slug),
+        "list": sorted(parse_listing(list_txt)["paths"]),
+        "freshness": sorted(parse_freshness(fresh_txt)["listed"]),
+        "error": hits["error"],
+        "texts": {"search": hits["text"], "list": list_txt,
+                  "freshness": fresh_txt},
+    }
+
+
+def q_check(drv, prefix, want, clause):
+    """`(problems, rows, got)` for one prefix against the set it must select."""
+    got = q_selected(drv, prefix)
+    problems, rows = [], []
+    for fn in Q_FUNCTIONS:
+        rows.append("%-10s %-22r -> %s" % (fn, prefix, got[fn] or "(nothing)"))
+        if got[fn] != sorted(want):
+            problems.append("%s: %r selected %r, want %r (clause %s)"
+                            % (fn, prefix, got[fn], sorted(want), clause))
+    return problems, rows, got
+
+
+def q_rule_sites(path):
+    """Per filter: does it CALL the shared predicate, and does it re-spell it?
+
+    Read out of the server SOURCE with `ast` rather than off the imported
+    module, because the claim is structural: one rule, one home.  The runtime
+    cases above can only show that today's three agree -- only the syntax can
+    show that a fourth hand copy has not landed beside one of them, which is the
+    exact state adr 0018 recorded and the reason all three moved together.
+
+    A re-spelling is `<x>.startswith(<name containing 'prefix'>)` or
+    `relpath.startswith(...)` -- targeted at the shape that caused the defect
+    rather than at the method name, so an unrelated string test is not flagged.
+    """
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read(), filename=path)
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name not in ("_fn_search", "_fn_list", "freshness_analyze"):
+            continue
+        uses, copies = False, []
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and sub.id == "_path_prefix_matches":
+                uses = True
+            if not (isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "startswith"):
+                continue
+            recv = sub.func.value
+            arg = sub.args[0] if sub.args else None
+            if ((isinstance(recv, ast.Name) and recv.id == "relpath")
+                    or (isinstance(arg, ast.Name) and "prefix" in arg.id)):
+                copies.append("line %d" % sub.lineno)
+        out[node.name] = {"uses": uses, "copies": copies}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -4717,9 +4978,12 @@ def run(opts=None):
                      text=by_status)
 
         # `path` a SECOND time, and on a FILTER rather than on a lookup.  Both
-        # search and list take a path_prefix, and the filter they run is
-        # relpath.startswith(prefix) -- so a whole docs-relative path was always
-        # a legal value of it, selecting exactly the one page it spells.  Same
+        # search and list take a path_prefix, and the FIRST clause of the rule
+        # they filter by is an exact match on the docs-relative path -- so a
+        # whole path has always been a legal value of it, selecting exactly the
+        # one page it spells.  (It was a bare `relpath.startswith(prefix)` when
+        # this case was written; group Q owns the four clauses that replaced
+        # it, and clause 1 is why this case still reads the same.)  Same
         # reflex and the same cause as the case above: the answer hands the
         # caller `tall-page.md` and never once says path_prefix, so the word
         # they send back is the word they were shown.
@@ -4785,10 +5049,10 @@ def run(opts=None):
                                              "line(s) -> %d"
                                 % (wide["header_hits"], narrow["header_hits"],
                                    wide_l.count("\n- "), narrow_l.count("\n- "))),
-                             _d("why", "the filter is relpath.startswith(prefix), so a "
-                                       "whole path names the page it selects and only "
-                                       "its KEY was turned away -- and that key's own "
-                                       "word is the one every hit line prints"),
+                             _d("why", "an exact path is clause 1 of the prefix rule, "
+                                       "so a whole path names the page it selects and "
+                                       "only its KEY was turned away -- and that key's "
+                                       "own word is the one every hit line prints"),
                              _d("scope", "per-function, because path reaches a "
                                          "different canonical name in every row that "
                                          "owns it: slug in get_page, source in "
@@ -5833,7 +6097,18 @@ def run(opts=None):
         narrow_txt = ldrv.freshness(path_prefix=L_FRESH_PREFIX)
         wide_f = parse_freshness(wide_txt)
         narrow_f = parse_freshness(narrow_txt)
+        # The oracle stays `str.startswith`, deliberately INDEPENDENT of the
+        # rule the server applies -- this case is about where the filter runs,
+        # not about what it means, and an oracle borrowed from the
+        # implementation could not fail with it.  That independence is only
+        # sound because the two provably agree HERE (flat corpus, clause-3
+        # prefix), so the agreement is asserted rather than assumed: group Q
+        # owns the rule, and this line is what stops the two drifting apart
+        # unnoticed.
         want_pages = [p for p in L_PAGES if p[L_FILE].startswith(L_FRESH_PREFIX)]
+        by_rule = sorted(p[L_FILE] for p in L_PAGES
+                         if ldrv.mod._path_prefix_matches(p[L_FILE],
+                                                          L_FRESH_PREFIX))
         detail_states = set(ldrv.mod.DETAIL_STATUSES)
         # Read off the ANSWER's own parentheses, never typed: the report prints
         # the definition of what it counts.
@@ -5854,6 +6129,14 @@ def run(opts=None):
                             "not a proper non-empty slice, so nothing below is "
                             "measuring a filter"
                             % (L_FRESH_PREFIX, len(want_pages), len(L_PAGES)))
+        if by_rule != sorted(p[L_FILE] for p in want_pages):
+            problems.append("this case's independent oracle (str.startswith) and "
+                            "the server's rule no longer agree on %r: %r against "
+                            "%r -- pick a prefix they both read the same way, or "
+                            "this group starts failing for a reason that belongs "
+                            "to group Q"
+                            % (L_FRESH_PREFIX, sorted(p[L_FILE] for p in want_pages),
+                               by_rule))
         if not gating_states:
             problems.append("the report stopped naming what `gating` counts, so "
                             "this case has no oracle left but a second copy of "
@@ -7381,6 +7664,404 @@ def run(opts=None):
         alias_base.cleanup()
         alias_good.cleanup()
         alias_bad.cleanup()
+
+    # ============ Q: `path_prefix` is a PATH BOUNDARY, not a substring =======
+    # An ELEVENTH workspace, and the first one in this file with a TREE in it.
+    # Every other fixture is flat, and on a flat corpus the defect is invisible:
+    # `relpath.startswith(prefix)` and the boundary rule agree on every page
+    # whose path has no `/` in it.  Group Q's corpus holds two top-level
+    # directories sharing the leading `sub`, one page two levels down, and three
+    # numbered records whose stems diverge at the fourth character, so each
+    # clause of the rule has a page only that clause can reach.
+    #
+    # The group drives all THREE filters on every probe.  That is the point
+    # rather than thoroughness: adr 0018 declined to repair `freshness` alone
+    # because three handlers disagreeing about what a prefix means is worse than
+    # the substring bug itself, so a case that measured one of them would be
+    # measuring the wrong thing.
+    scope_work = H.TempWorkspace("ph-wiki-scope-", keep=opts.keep)
+    try:
+        q_root = build_scope_fixture(scope_work)
+        qdrv = Driver(q_root, name="mcp_wiki_scope")
+        # The same stubbed boundary group L uses: these pages classify through
+        # the one `_classify_page` branch that asks git nothing, but
+        # `freshness_analyze` still resolves a head sha, and this suite spawns
+        # no git it does not have to.
+        patch_git_boundary(qdrv.mod, q_root)
+        qmod = qdrv.mod
+        q_scopes = qmod._corpus_scopes(Q_PATHS)
+
+        # ---- clause 1: an exact page path is a scope ------------------------
+        problems, rows = [], []
+        for prefix in (Q_EXACT, Q_EXACT_NESTED):
+            got_p, got_r, _got = q_check(qdrv, prefix, [prefix], "1 (exact)")
+            problems += got_p
+            rows += got_r
+        suite.record("Q", "clause-1-a-whole-page-path-is-a-scope", problems,
+                     detail=[_d("prefixes", "%r (root) and %r (nested)"
+                                % (Q_EXACT, Q_EXACT_NESTED)),
+                             _d("why", "this is what makes the `path` alias on "
+                                       "all three functions honest: a hit line "
+                                       "prints the docs-relative path, and "
+                                       "sending it back must select that page "
+                                       "and no other")]
+                            + ["        " + r for r in rows],
+                     text="")
+
+        # ---- clause 2: a boundary prefix is a directory scope ---------------
+        # BOTH spellings, and the depth-2 page: a rule that matched only the
+        # directory's immediate children would pass every other case in this
+        # group and silently hide a subtree.
+        under_subsystems = [p for p in Q_PATHS if p.startswith("subsystems/")]
+        problems, rows = [], []
+        for prefix in (Q_DIR_BARE, Q_DIR_SLASH):
+            got_p, got_r, _got = q_check(qdrv, prefix, under_subsystems,
+                                         "2 (boundary)")
+            problems += got_p
+            rows += got_r
+        deep_p, deep_r, _deep = q_check(qdrv, Q_DIR_DEEP,
+                                        [p for p in Q_PATHS
+                                         if p.startswith("subsystems/deep/")],
+                                        "2 (boundary, nested)")
+        problems += deep_p
+        rows += deep_r
+        bare_txt = qdrv.listing(path_prefix=Q_DIR_BARE)
+        slash_txt = qdrv.listing(path_prefix=Q_DIR_SLASH)
+        if bare_txt != slash_txt:
+            problems.append("%r and %r render different answers, so a caller has "
+                            "to learn which spelling this server prefers"
+                            % (Q_DIR_BARE, Q_DIR_SLASH))
+        if not any(p.count("/") > 1 for p in under_subsystems):
+            problems.append("fixture drift: nothing under %r sits more than one "
+                            "level down, so 'at any depth' is untested"
+                            % Q_DIR_SLASH)
+        suite.record("Q", "clause-2-a-boundary-prefix-is-a-directory-scope",
+                     problems,
+                     detail=[_d("prefixes", "%r, %r and %r"
+                                % (Q_DIR_BARE, Q_DIR_SLASH, Q_DIR_DEEP)),
+                             _d("subtree", "%r" % under_subsystems),
+                             _d("spellings", "with and without the trailing "
+                                             "slash render byte-identically: %r"
+                                % (bare_txt == slash_txt)),
+                             _d("why", "a directory scope must reach the whole "
+                                       "subtree, or a page one level deeper "
+                                       "vanishes from a report that claims to "
+                                       "cover the directory")]
+                            + ["        " + r for r in rows],
+                     text=slash_txt)
+
+        # ---- clause 3: a prefix inside the LAST component still selects -----
+        # The spelling this rule deliberately keeps legal.  Matching whole
+        # components and nothing else would have been the simpler rule and would
+        # have deleted `records/001`, which is how a numbered-record wiki is
+        # actually browsed.
+        want_stem = [p for p in Q_PATHS if p.startswith(Q_STEM)]
+        problems, rows, _got = q_check(qdrv, Q_STEM, want_stem,
+                                       "3 (inside the last component)")
+        excluded = [p for p in Q_PATHS
+                    if p.startswith("records/") and p not in want_stem]
+        if not excluded:
+            problems.append("fixture drift: %r selects every record, so the "
+                            "case cannot show the stem NARROWING anything"
+                            % Q_STEM)
+        if len(want_stem) < 2:
+            problems.append("fixture drift: %r selects %d record(s); a stem that "
+                            "reaches one page is indistinguishable from clause 1"
+                            % (Q_STEM, len(want_stem)))
+        suite.record("Q", "clause-3-a-prefix-inside-the-last-component-selects",
+                     problems,
+                     detail=[_d("prefix", "%r" % Q_STEM),
+                             _d("selected", "%r" % want_stem),
+                             _d("excluded", "%r, in the same directory" % excluded),
+                             _d("why", "whole-component matching alone would be "
+                                       "the simpler rule and would delete the "
+                                       "one spelling a numbered-record wiki is "
+                                       "browsed by")]
+                            + ["        " + r for r in rows],
+                     text="")
+
+        # ---- clause 4: a prefix inside an EARLIER component selects nothing --
+        # The defect, stated as a measurement.  `str.startswith` is run here on
+        # the fixture's own paths so the case can say WHAT the old rule would
+        # have returned -- and it is not one stray page, it is two directories
+        # merged into one answer.  Same shape as `.gitignore` being eaten by a
+        # `.git` prefix in tests/_harness.py, one level up the tree.
+        old_rule = sorted(p for p in Q_PATHS if p.startswith(Q_MERGE))
+        merged_dirs = sorted({p.split("/")[0] for p in old_rule})
+        problems, rows, got_merge = q_check(qdrv, Q_MERGE, [], "4 (earlier "
+                                            "component)")
+        if len(merged_dirs) < 2:
+            problems.append("fixture drift: %r reaches %r under the OLD rule, so "
+                            "the case no longer shows two directories being "
+                            "merged and would pass on a corpus that never had "
+                            "the bug" % (Q_MERGE, merged_dirs))
+        if got_merge["error"]:
+            problems.append("search returned an ERROR for %r; an unreachable "
+                            "scope is a refusal the caller can read, not a "
+                            "fault" % Q_MERGE)
+        suite.record("Q", "clause-4-a-prefix-inside-an-earlier-component-selects-nothing",
+                     problems,
+                     detail=[_d("prefix", "%r" % Q_MERGE),
+                             _d("old rule", "%d page(s) across %r: %r"
+                                % (len(old_rule), merged_dirs, old_rule)),
+                             _d("new rule", "nothing, on all three functions"),
+                             _d("precedent", "tests/_harness.py:_is_scratch_dir "
+                                             "-- a startswith on path names ate "
+                                             ".gitignore because it starts with "
+                                             ".git, and the repair there was to "
+                                             "match whole path components")]
+                            + ["        " + r for r in rows],
+                     text=got_merge["texts"]["list"])
+
+        # ---- one rule, one home, three callers ------------------------------
+        # Two halves, and neither is sufficient.  The RUNTIME half sweeps every
+        # probe spelling and demands the three answers agree with each other and
+        # with the predicate itself -- which the four cases above pinned against
+        # typed expectations, so it is not circular.  The STRUCTURAL half reads
+        # the source: the copy-paste is half the defect, and only the syntax can
+        # say whether a fourth hand copy landed beside one of the three.
+        sites = q_rule_sites(SERVER)
+        problems, rows = [], []
+        for name in sorted(sites):
+            site = sites[name]
+            rows.append("%-18s uses-predicate=%-5r own-copies=%r"
+                        % (name, site["uses"], site["copies"] or "none"))
+            if not site["uses"]:
+                problems.append("%s does not call the shared predicate, so its "
+                                "idea of a prefix is its own again" % name)
+            if site["copies"]:
+                problems.append("%s re-spells the path test itself at %s -- the "
+                                "copy-paste is what adr 0018 refused to repair "
+                                "one handler at a time"
+                                % (name, ", ".join(site["copies"])))
+        for name in ("_fn_search", "_fn_list", "freshness_analyze"):
+            if name not in sites:
+                problems.append("%s is gone from the server, so this case is "
+                                "measuring two filters and calling it three"
+                                % name)
+        for prefix in Q_PROBES:
+            got = q_selected(qdrv, prefix)
+            oracle = sorted(p for p in Q_PATHS
+                            if qmod._path_prefix_matches(p, prefix))
+            rows.append("%-22r -> %r" % (prefix, oracle))
+            for fn in Q_FUNCTIONS:
+                if got[fn] != oracle:
+                    problems.append("%s: %r selected %r, the predicate says %r"
+                                    % (fn, prefix, got[fn], oracle))
+        suite.record("Q", "one-rule-one-home-and-all-three-route-through-it",
+                     problems,
+                     detail=[_d("filters", "%d found in the source" % len(sites)),
+                             _d("probes", "%d spelling(s) x %d function(s)"
+                                % (len(Q_PROBES), len(Q_FUNCTIONS))),
+                             _d("why", "three handlers agreeing today is not the "
+                                       "claim; the claim is that there is only "
+                                       "one place left where they could stop "
+                                       "agreeing")]
+                            + ["        " + r for r in rows],
+                     text="")
+
+        # ---- an empty scope is refused, and the refusal names what exists ----
+        # adr 0017's rule, reaching the two functions that did not have it: a
+        # silent zero is the defect.  `freshness` already refused here and said
+        # nothing useful; adr 0018 left "the refusal does not name the prefixes
+        # that would have matched" open, and the scopes are read off the CORPUS
+        # so the suggestion cannot drift away from the tree it describes.
+        sentinel = qmod.NO_SCOPE_SENTINEL
+        problems, rows = [], []
+        for prefix in (Q_MERGE, Q_ABSENT):
+            got = q_selected(qdrv, prefix)
+            for fn in Q_FUNCTIONS:
+                text = got["texts"][fn]
+                named = answer_scopes(text)
+                rows.append("%-10s %-22r sentinel=%-5r scopes=%r"
+                            % (fn, prefix, sentinel in text, named))
+                if sentinel not in text:
+                    problems.append("%s: %r renders no refusal at all -- an "
+                                    "empty answer over a scope nobody is in "
+                                    "reads as a fact about the wiki"
+                                    % (fn, prefix))
+                if repr(prefix) not in text and prefix not in text:
+                    problems.append("%s: the answer for %r never repeats the "
+                                    "prefix, so a typo and an empty section "
+                                    "read identically" % (fn, prefix))
+                if named != q_scopes:
+                    problems.append("%s: %r names scopes %r, the corpus holds %r"
+                                    % (fn, prefix, named, q_scopes))
+            if LIST_EMPTY_MSG in got["texts"]["list"]:
+                problems.append("list fell back to %r for %r, which is the "
+                                "answer for a FILTER that matched nothing, not "
+                                "for a place nobody is in"
+                                % (LIST_EMPTY_MSG, prefix))
+            for msg in (GATE_MSG, NO_MATCH_MSG):
+                if msg in got["texts"]["search"]:
+                    problems.append("search answered %r with %r -- the ranking "
+                                    "never ran, so it has nothing to report"
+                                    % (prefix, msg))
+            if parse_freshness(got["texts"]["freshness"])["gating"] is not None:
+                problems.append("freshness still renders a gating line for %r; "
+                                "`gating: 0` over a set nobody looked at reads "
+                                "as 'nothing is stale'" % prefix)
+        if len(q_scopes) < 3:
+            problems.append("fixture drift: the corpus offers %d scope(s), so "
+                            "'names what exists' is a claim about almost "
+                            "nothing" % len(q_scopes))
+        suite.record("Q", "an-empty-scope-is-refused-and-names-the-scopes-that-exist",
+                     problems,
+                     detail=[_d("prefixes", "%r and %r" % (Q_MERGE, Q_ABSENT)),
+                             _d("sentinel", "%r, read off the module" % sentinel),
+                             _d("scopes", "%r" % q_scopes),
+                             _d("why", "the refusal was right and unhelpful: adr "
+                                       "0018 left it naming nothing, while the "
+                                       "comparable refusal in purity builds its "
+                                       "suggestion from the set it is refusing "
+                                       "against")]
+                            + ["        " + r for r in rows],
+                     text=q_selected(qdrv, Q_MERGE)["texts"]["freshness"])
+
+        # ---- the refusal must not eat the answers that are already right -----
+        # The narrow half of the decision, and the one that keeps this from
+        # being a regression: `search` already has three silences, and the
+        # relevance gate's is a REAL ANSWER the tool description tells the model
+        # to accept and stop.  A scope that HOLDS pages must therefore keep
+        # every one of them, and `list` must keep saying `no pages match the
+        # filter` when a type -- not a place -- is what emptied the answer.
+        in_scope = qdrv.search(Q_NONSENSE, path_prefix=Q_DIR_SLASH,
+                               limit=Q_LIMIT)
+        absent_txt = qdrv.listing(path_prefix=Q_DIR_SLASH,
+                                  type=Q_BY_FILE[Q_EXACT][Q_TYPE])
+        absent_type = parse_listing(absent_txt)
+        problems = []
+        if in_scope["error"]:
+            problems.append("search failed inside a real scope: %s"
+                            % in_scope["text"][:160])
+        if sentinel in in_scope["text"]:
+            problems.append("a query that found nothing INSIDE a populated "
+                            "scope was answered with the empty-scope refusal: "
+                            "the scope is not what was empty")
+        if not in_scope["has_no_match_msg"]:
+            problems.append("the lexical silence lost its own words (%r), so "
+                            "the caller cannot tell a typo in the query from a "
+                            "typo in the scope" % NO_MATCH_MSG)
+        if sentinel in absent_txt:
+            problems.append("list answered a type filter with the empty-scope "
+                            "refusal: a wiki with no page of that type in this "
+                            "subtree is a census result, not a bad place")
+        if LIST_EMPTY_MSG not in absent_txt:
+            problems.append("list lost %r for a filter that legitimately "
+                            "matched nothing" % LIST_EMPTY_MSG)
+        if absent_type["paths"]:
+            problems.append("the type filter selected %r, so the premise (no "
+                            "page of that type under %r) is gone"
+                            % (absent_type["paths"], Q_DIR_SLASH))
+        suite.record("Q", "a-legitimate-empty-answer-is-not-a-scope-refusal",
+                     problems,
+                     detail=[_d("search", "%r inside %r -> no-match=%r "
+                                          "scope-refusal=%r"
+                                % (Q_NONSENSE, Q_DIR_SLASH,
+                                   in_scope["has_no_match_msg"],
+                                   sentinel in in_scope["text"])),
+                             _d("list", "type=%r inside %r -> %r"
+                                % (Q_BY_FILE[Q_EXACT][Q_TYPE], Q_DIR_SLASH,
+                                   LIST_EMPTY_MSG in absent_txt)),
+                             _d("why", "the relevance gate's silence is an "
+                                       "ANSWER the tool description tells the "
+                                       "model to take and stop; turning it into "
+                                       "an error would repeal the gate")],
+                     text=in_scope["text"])
+
+        # ---- the scope list is built from the corpus, never from a literal ---
+        # Runs LAST because it changes the corpus.  A typed suggestion list is
+        # right until the first directory is added, and a refusal naming a scope
+        # that no longer exists is worse than one naming none -- so the claim is
+        # measured as a DIFFERENCE: add a page in a directory that did not exist
+        # and the same refusal has to grow exactly that one entry.
+        before = {fn: answer_scopes(q_selected(qdrv, Q_MERGE)["texts"][fn])
+                  for fn in Q_FUNCTIONS}
+        scope_work.write_text(
+            os.path.join(WIKI_REL, Q_LATE_FILE),
+            q_page_text((Q_LATE_FILE, "q-late", "A page nobody declared",
+                         "runbook")))
+        after = {fn: answer_scopes(q_selected(qdrv, Q_MERGE)["texts"][fn])
+                 for fn in Q_FUNCTIONS}
+        want_after = sorted(q_scopes + ["%s/" % Q_LATE_DIR])
+        problems, rows = [], []
+        for fn in Q_FUNCTIONS:
+            rows.append("%-10s before=%r after=%r" % (fn, before[fn], after[fn]))
+            if before[fn] != q_scopes:
+                problems.append("%s named %r before the page was written, the "
+                                "corpus held %r" % (fn, before[fn], q_scopes))
+            if after[fn] != want_after:
+                problems.append("%s names %r after a page landed under %r, want "
+                                "%r -- a suggestion list that cannot learn is a "
+                                "literal with extra steps"
+                                % (fn, after[fn], Q_LATE_DIR, want_after))
+        if "%s/" % Q_LATE_DIR in q_scopes:
+            problems.append("fixture drift: %r already existed, so the case is "
+                            "comparing a scope list with itself" % Q_LATE_DIR)
+        suite.record("Q", "the-scope-list-is-derived-from-the-corpus", problems,
+                     detail=[_d("added", "%r, a directory the fixture never "
+                                         "declared" % Q_LATE_FILE),
+                             _d("before", "%r" % q_scopes),
+                             _d("after", "%r" % want_after),
+                             _d("why", "built from the pages the walk just "
+                                       "yielded, so it cannot name a scope the "
+                                       "tree does not have")]
+                            + ["        " + r for r in rows],
+                     text="")
+
+        # ---- the rule is visible where the MODEL reads it --------------------
+        # One paragraph at column 0 rather than three copies inside three
+        # function entries: the rule is shared, so the text that carries it must
+        # be reachable from whichever entry the model happened to read.
+        desc = qmod.WIKI_CALL_TOOL["description"]
+        para = [ln for ln in desc.split("\n") if ln.startswith("path_prefix")]
+        block = ""
+        if para:
+            lines = desc.split("\n")
+            start = lines.index(para[0])
+            for line in lines[start:]:
+                if not line.strip():
+                    break
+                block += line + " "
+        problems = []
+        if not block:
+            problems.append("the description carries no shared path_prefix "
+                            "paragraph, so the boundary rule is learnable only "
+                            "by calling the filter and looking")
+        for word in DESC_RULE_WORDS:
+            # Case-folded: the description SHOUTS the load-bearing half of a
+            # sentence throughout (PATH BOUNDARY, NOT CHECKABLE, MEASURED), and
+            # a case that failed on capitalisation would be pinning a typeface.
+            if word not in block.lower():
+                problems.append("the paragraph never says %r, and the two words "
+                                "ARE the distinction being drawn" % word)
+        for fn in Q_FUNCTIONS:
+            if fn not in block:
+                problems.append("the shared paragraph does not name %r, so a "
+                                "model reading it cannot tell which functions "
+                                "the rule governs" % fn)
+        for fn in Q_FUNCTIONS:
+            if "path_prefix" not in tool_paragraph(desc, fn):
+                problems.append("the %s entry no longer names path_prefix, so "
+                                "the param is invisible to a model that reads "
+                                "only its own function" % fn)
+        if "`path_prefix`" in desc:
+            problems.append("path_prefix is BACKTICKED in the description: the "
+                            "name_existence suite reads backticked identifiers "
+                            "in server text as function-name prescriptions")
+        suite.record("Q", "the-boundary-rule-is-documented-where-the-model-reads-it",
+                     problems,
+                     detail=[_d("paragraph", "%d chars at column 0" % len(block)),
+                             _d("words", "%r" % (DESC_RULE_WORDS,)),
+                             _d("entries", "search / list / freshness each still "
+                                           "name the param"),
+                             _d("why", "the rule belongs to three functions, so "
+                                       "a copy inside one entry would be read "
+                                       "by a model that never opened the other "
+                                       "two")],
+                     text=block)
+    finally:
+        scope_work.cleanup()
 
     # ============ H: hygiene ============
     pyc_after = H.pycache_snapshot()

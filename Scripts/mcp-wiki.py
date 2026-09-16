@@ -737,6 +737,122 @@ def _file_line_window(text: str, start: int, count: int) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# The page scope — ONE rule, read by `search`, `list` and `freshness`
+#
+# All three take `path_prefix`, and all three used to spell the filter as a bare
+# `relpath.startswith(prefix)` copied from whichever of them was written first.
+# That is not a path filter, it is a substring filter that happens to be anchored
+# at the left: `sub` selected the whole of `subsystems/`, and any future
+# directory sharing a leading substring with another would have been silently
+# folded into it. This repo has already paid for that exact shape once, in
+# `tests/_harness.py:_is_scratch_dir`, where a `startswith` on path names ate
+# `.gitignore` because it starts with `.git`; the repair there was to match whole
+# path COMPONENTS, and the comment above it ends "Do not reintroduce it."
+#
+# It is written once here rather than corrected in three places because the three
+# disagreeing about what a prefix means is a worse defect than the one it repairs
+# (adr 0018) -- a caller who learns a spelling from `list` must get the same set
+# from `freshness`.
+# ---------------------------------------------------------------------------
+
+def _scope_prefix(value) -> str:
+    """The docs-relative scope a caller asked for, normalized to a string.
+
+    A prefix that is not a string is a request that matches nothing, which every
+    one of the three answers can SAY -- where `startswith` would raise a
+    TypeError and turn a harmless `path_prefix: 5` into a server error.
+    """
+    return str(value) if value else ""
+
+
+def _path_prefix_matches(relpath: str, prefix) -> bool:
+    """Does `relpath` (docs-relative, `/`-separated) fall inside `prefix`?
+
+    Four clauses, and each one is a decision rather than a leftover:
+
+    1. EXACT -- `relpath == prefix` matches. A whole page path is a legal scope
+       selecting the one page it names, which is what makes the `path` alias on
+       all three functions honest: a search hit prints `subsystems/scripts.md`,
+       and sending that back must select that page.
+    2. COMPONENT BOUNDARY -- a prefix ending at a `/` boundary matches everything
+       beneath it, at any depth. `adr`, `adr/` and `subsystems/` are therefore
+       all directory scopes, and a caller need not learn which spelling this
+       server prefers.
+    3. INSIDE THE FINAL COMPONENT -- a prefix whose remainder carries no `/`
+       still matches, so `adr/001` selects the 0010-0019 records. That spelling
+       is real and useful, and it is the reason the rule is not simply "match
+       whole components": a numbered-record wiki is browsed by number stem.
+    4. INSIDE A NON-FINAL COMPONENT -- everything else is refused. `sub` leaves
+       the remainder `systems/x.md`, which crosses a boundary, so it selects
+       NOTHING rather than the whole of `subsystems/`. This is the clause the
+       `.gitignore`/`.git` precedent buys: a name is not a path.
+
+    An empty prefix is no scope at all and admits every page, so the three call
+    sites need no `if prefix and ...` guard of their own.
+    """
+    if not prefix:
+        return True
+    if not relpath.startswith(prefix):
+        return False
+    remainder = relpath[len(prefix):]
+    if not remainder:
+        return True                                  # 1: exact
+    if prefix.endswith("/") or remainder.startswith("/"):
+        return True                                  # 2: at a boundary
+    return "/" not in remainder                      # 3 if inside the last
+    #                                                # component, else 4
+
+
+def _corpus_scopes(relpaths) -> List[str]:
+    """The scopes that DO exist, built from the corpus rather than typed.
+
+    Every top-level directory (with its trailing `/`, the spelling clause 2 makes
+    unambiguous) plus every page sitting at the wiki root. Deriving it from the
+    pages the walk just yielded is the whole point: a suggestion list written by
+    hand goes stale the first time a directory is added, and a refusal that names
+    a scope which no longer exists is worse than one that names none.
+
+    Listing every page path would be noise on a corpus of any size -- the
+    top-level scopes are few, and each one is a value the caller can send back
+    verbatim.
+    """
+    scopes = set()
+    for relpath in relpaths:
+        head, sep, _tail = relpath.partition("/")
+        scopes.add(head + "/" if sep else head)
+    return sorted(scopes)
+
+
+NO_SCOPE_SENTINEL = "NOTHING was selected"
+
+
+def _no_scope_lines(prefix: str, scopes, claim: str) -> List[str]:
+    """The shared body of the three empty-selection refusals.
+
+    One condition, one wording: whichever function the caller reached, a prefix
+    that admits no page is the same mistake with the same next move, so the
+    answer states the boundary rule that refused it and then names the scopes
+    that would have worked.
+
+    `claim` is the one thing each function's empty answer would otherwise be
+    read as -- `freshness` renders `gating: 0`, which over a set nobody looked
+    at says nothing is stale; `search` renders a silence, which says the wiki
+    has no answer. Same refusal, and each one denies its own false reading.
+    """
+    return ["no page is inside %r — %s, which is not the same as %s."
+            % (prefix, NO_SCOPE_SENTINEL, claim),
+            "",
+            "A prefix is matched against the docs-relative path and must end "
+            "either at a `/` boundary or inside the LAST component: "
+            "`adr`, `adr/` and a whole page path all select; `adr/001` selects "
+            "the records whose names start that way; `sub` selects nothing, "
+            "because `subsystems/` is not a page called `sub`.",
+            "",
+            ("scopes that exist: %s" % ", ".join(scopes)) if scopes
+            else "this wiki root holds no page at all."]
+
+
+# ---------------------------------------------------------------------------
 # Freshness (ports p:wiki/scripts/freshness.py)
 # ---------------------------------------------------------------------------
 
@@ -968,16 +1084,27 @@ def freshness_analyze(root: str, head: str, path_prefix=None) -> dict:
     # corpus while the list above them describes a slice of it — a report whose
     # totals answer a question nobody asked is the one way this function can lie.
     #
-    # Same rule as `search` and `list`: `relpath.startswith(prefix)` over the
-    # docs-relative path, so a whole path selects the single page it names.
-    # `str()` because a prefix that is not a string is a request matching nothing,
-    # which this report can say — not a TypeError out of `startswith`.
-    prefix = str(path_prefix) if path_prefix else ""
+    # Same rule as `search` and `list`, and now literally the same function:
+    # `_path_prefix_matches` over the docs-relative path. It was three hand
+    # copies of `relpath.startswith(prefix)` until adr 0018's declared gap was
+    # closed; correcting one of the three alone would have left them disagreeing
+    # about what a prefix means, which is why they moved together.
+    prefix = _scope_prefix(path_prefix)
     cache: dict = {}
-    pages = [_classify_page(relpath, fm, repo,
-                            lambda c: _changed_files(c, head, repo, cache))
-             for relpath, fm, _body in iter_pages(root)
-             if not prefix or relpath.startswith(prefix)]
+    # The walk is materialized rather than filtered in a comprehension because
+    # the REFUSAL needs the paths the filter rejected: a prefix that selects
+    # nothing has to name the scopes that exist, and those can only be built
+    # from the corpus. Only the relpaths are kept -- the frontmatter and body of
+    # an excluded page are dropped as they always were, and `_classify_page`,
+    # the expensive step, still runs on the selected set alone.
+    seen: List[str] = []
+    pages = []
+    for relpath, fm, _body in iter_pages(root):
+        seen.append(relpath)
+        if not _path_prefix_matches(relpath, prefix):
+            continue
+        pages.append(_classify_page(
+            relpath, fm, repo, lambda c: _changed_files(c, head, repo, cache)))
 
     summary: dict = {}
     for page in pages:
@@ -987,6 +1114,14 @@ def freshness_analyze(root: str, head: str, path_prefix=None) -> dict:
         # Declared only when there IS one, so an unfiltered report is the same
         # dict it has always been; `freshness_render` reads it with `.get`.
         report["path_prefix"] = prefix
+        if not pages:
+            # Same reason, one level deeper: the scope list is carried only when
+            # the refusal will actually spend it, so no well-formed report grows
+            # a key for an answer it is not giving. Computed HERE rather than in
+            # the renderer because `root` is what knows the corpus, and a
+            # renderer that had to re-walk the disk would be a second authority
+            # on what a page is.
+            report["scopes"] = _corpus_scopes(seen)
     return report
 
 
@@ -1013,12 +1148,17 @@ def freshness_render(report) -> str:
         # "nothing is stale" when what actually happened is that nothing was
         # looked at. A prefix that selects nothing is a question this answer can
         # only decline, and it declines in the caller's own word.
-        return ("# freshness @ %s — path_prefix %r\n\n"
-                "no page's path starts with %r — NOTHING was checked, which is "
-                "not the same as nothing being stale. The prefix is matched "
-                "against the docs-relative path (subsystems/, adr/0007-), the "
-                "same value `list` prints and `search` filters on.\n"
-                % (report["head"], prefix, prefix))
+        #
+        # It also names the scopes that WOULD have worked, from `scopes`, which
+        # the analyser derived from the corpus. That half is what adr 0018 left
+        # unresolved -- the refusal was right and unhelpful, where the comparable
+        # refusal in purity_call builds its suggestion from the set it is
+        # refusing against, so the caller's second call is a correction rather
+        # than a guess.
+        return "\n".join(
+            ["# freshness @ %s — path_prefix %r" % (report["head"], prefix), ""]
+            + _no_scope_lines(prefix, report.get("scopes") or [],
+                              "nothing being stale")) + "\n"
     by_status: dict = {}
     for page in report["pages"]:
         by_status.setdefault(page["status"], []).append(page)
@@ -1334,7 +1474,7 @@ def _fn_search(params, project_root, wiki_root, strict):
             % (query, rel_root, ", ".join(dropped)), params)
     f_type = params.get("type")
     f_status = params.get("status")
-    prefix = params.get("path_prefix")
+    prefix = _scope_prefix(params.get("path_prefix"))
     # OverflowError here and on `depth` below: `1e999` and the bare `Infinity`
     # token arrive as a float infinity, which `int()` refuses with neither a
     # TypeError nor a ValueError. The `float()` coercions that follow need no
@@ -1361,6 +1501,29 @@ def _fn_search(params, project_root, wiki_root, strict):
     # Corpus stats are GLOBAL (over all pages, pre-filter) so a term's rarity
     # does not shift with the caller's type/status/prefix filter.
     corpus, avgfl, n_docs = _build_corpus_cached(abs_root)
+    # A FOURTH silence, and the only one that is not about the query at all.
+    #
+    # The other three -- nothing matched, nothing passed the gate, the query was
+    # all function words -- are real answers ABOUT THE CORPUS, and adr 0017's
+    # rule is that a silent zero is the defect, not the question. A scope holding
+    # no page is the case where the zero is not about the corpus: the ranking ran
+    # over an empty set, so "no matching pages" would blame the wiki for a
+    # mistyped directory name. Refused BEFORE `_repo_root_cached` and the df loop,
+    # so a scope nobody is in costs no git and no scoring.
+    #
+    # Deliberately narrow: it fires only when the PREFIX alone admits nothing.
+    # A prefix that selects pages which then lose to the relevance gate, or to
+    # `type`/`status`, still renders the gate's own silence -- that silence is a
+    # real answer and turning it into an error would repeal the gate.
+    if prefix and not any(_path_prefix_matches(pd["relpath"], prefix)
+                          for pd in corpus):
+        return _finalize("\n".join(
+            ["# search: %r — 0 hit(s) in %s/ — path_prefix %r"
+             % (query, rel_root, prefix), ""]
+            + _no_scope_lines(prefix,
+                              _corpus_scopes(pd["relpath"] for pd in corpus),
+                              "the wiki having no answer to your query")
+        ) + "\n", params)
     # W11: the state shown per hit is MEASURED against git, not read from the
     # frontmatter. Prepared here, spent only on pages that actually match — the
     # diff is the expensive part and a query with no hits must pay nothing.
@@ -1381,7 +1544,7 @@ def _fn_search(params, project_root, wiki_root, strict):
     results = []
     for pd in corpus:
         fm, relpath = pd["fm"], pd["relpath"]
-        if prefix and not relpath.startswith(prefix):
+        if not _path_prefix_matches(relpath, prefix):
             continue
         if f_type and (fm.get("type") or "") != f_type:
             continue
@@ -1697,12 +1860,18 @@ def _fn_list(params, project_root, wiki_root, strict):
     abs_root, rel_root = _resolve_root(params, project_root, wiki_root, strict)
     f_type = params.get("type")
     f_status = params.get("status")
-    prefix = params.get("path_prefix")
+    prefix = _scope_prefix(params.get("path_prefix"))
 
     entries = []
+    # Every page the walk saw, for the refusal below: the scopes that exist can
+    # only be derived from the corpus, and this walk is the one that has it.
+    seen: List[str] = []
+    in_scope = 0
     for relpath, fm, _body in iter_pages(abs_root):
-        if prefix and not relpath.startswith(prefix):
+        seen.append(relpath)
+        if not _path_prefix_matches(relpath, prefix):
             continue
+        in_scope += 1
         if f_type and (fm.get("type") or "") != f_type:
             continue
         if f_status and (fm.get("status") or "") != f_status:
@@ -1713,6 +1882,18 @@ def _fn_list(params, project_root, wiki_root, strict):
             "slug": fm.get("name") or relpath,
             "description": fm.get("description") or "", "status": fm.get("status") or "",
         })
+
+    if prefix and not in_scope:
+        # Same refusal as `search` and `freshness`, and it is counted on
+        # `in_scope` rather than on `entries` on purpose: an empty answer under
+        # a type/status filter is a real census result ("this wiki has no
+        # runbook"), and only the PREFIX admitting nothing means the caller
+        # named a place instead of a set. The two are different mistakes with
+        # different fixes, so `no pages match the filter` below keeps its job.
+        return _finalize("\n".join(
+            ["# wiki pages: 0 in %s/ — path_prefix %r" % (rel_root, prefix), ""]
+            + _no_scope_lines(prefix, _corpus_scopes(seen),
+                              "the wiki holding no such page")) + "\n", params)
 
     groups: dict = {}
     for e in entries:
@@ -1876,8 +2057,11 @@ PARAM_ALIASES = {
 # right and why none of them may be global. Every one is the same trade: the
 # handler already took a docs-relative path as a VALUE and was turning away only
 # its KEY. _fn_get_page matches `relpath == slug`; _fn_search, _fn_list and
-# _fn_freshness filter on `relpath.startswith(prefix)`, where a WHOLE path
-# selects the single page it names. And the key the caller reaches for is the one
+# _fn_freshness filter through `_path_prefix_matches`, whose FIRST clause is that
+# same equality, so a WHOLE path is a scope selecting the single page it names.
+# (It was `relpath.startswith(prefix)` in all three when these rows were written,
+# and that is what made `sub` select `subsystems/`.) And the key the caller
+# reaches for is the one
 # the answers taught them -- a search hit prints `subsystems/scripts.md`,
 # get_page's own header answers `- **path**: subsystems/scripts.md`, and nothing
 # the server renders ever says path_prefix.
@@ -2125,9 +2309,7 @@ WIKI_CALL_TOOL = {
         "                   path_prefix\n"
         "  freshness        git-only staleness report; params: head — the git REF\n"
         "                   to compare the wiki against (default HEAD), never a\n"
-        "                   count or a limit — and path_prefix, the same\n"
-        "                   docs-relative prefix search and list filter on\n"
-        "                   (subsystems/, or a whole path for one page). Every\n"
+        "                   count or a limit — and path_prefix (see below). Every\n"
         "                   count in the report, ok: and gating: included, then\n"
         "                   describes that subset and nothing else; a prefix\n"
         "                   matching no page says so instead of reporting clean.\n"
@@ -2137,6 +2319,18 @@ WIKI_CALL_TOOL = {
         "  stats            page counts by type/status + dup/orphan/malformed\n"
         "                   audit; also answers to status, which is the word most\n"
         "                   callers reach for\n\n"
+        "path_prefix — one scope, one rule, shared by search, list and freshness "
+        "(spell it prefix, dir or path if you prefer; all three accept all four). "
+        "It is matched against the docs-relative path a hit line prints, and it is "
+        "a PATH BOUNDARY, not a substring: adr, adr/ and subsystems/ are directory "
+        "scopes selecting everything beneath them; a whole page path selects that "
+        "one page; a prefix ending inside the LAST component still selects, so "
+        "adr/001 gives you the 0010-0019 records; and a prefix ending inside any "
+        "EARLIER component selects nothing, so sub is not a way to spell "
+        "subsystems/. A prefix no page is inside is refused by name and the "
+        "refusal lists the scopes that do exist — it is never answered with an "
+        "empty result, because zero pages in a scope nobody is in would read as a "
+        "fact about the wiki.\n\n"
         "Common params: root (wiki root override — a different wiki root, never a "
         "filter and never a git ref), max_answer_chars (default 100000). "
         "Markdown output.\n\n"

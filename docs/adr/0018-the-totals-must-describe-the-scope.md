@@ -150,3 +150,42 @@ time it is issued.
   suggestion from the set it is refusing against. Listing 31 page paths would be
   noise, but the top-level directories are few and cheap. Nobody has argued it
   either way yet.
+
+## Update — both open items are closed in the commit carrying this note
+
+Appended rather than rewritten: the decision above stands as taken, and this
+records what happened to the two things it left open.
+
+**The separate decision got made.** The known gap said the three filters must
+move together and that moving them was not this decision's business. It was put
+to the reader as an open item, and the reader's answer was to ask why it was
+still open — which is the right answer, because it was never a decision. Three
+call sites carrying one copy-pasted rule is one repair, and framing a repair as
+a decision is how work gets parked.
+
+The rule is now written once and used by all three
+`Scripts/mcp-wiki.py:_path_prefix_matches`, in four clauses: an exact path
+matches; a prefix ending at a component boundary matches everything under it, so
+`adr` and `adr/` behave alike; a prefix ending **inside the final component**
+matches, which keeps `adr/001` selecting the 0010–0019 records — a real spelling
+that a component-only rule would have taken away; and a prefix ending inside any
+**earlier** component matches nothing, so `sub` no longer selects `subsystems/`.
+The empty-scope refusal now names the scopes that do exist, built from the
+corpus the walk just yielded `Scripts/mcp-wiki.py:_corpus_scopes`, which closes
+the unresolved item above on the terms it asked for.
+
+**The half worth keeping is why the gap survived.** No existing case in the
+suite encoded the old behaviour, and that is not luck: the substring bug needs
+two directories whose names share a leading run, and **every fixture in the file
+was flat**. A path with no separator has one component, and a one-component path
+cannot demonstrate a rule about ending inside an earlier one. The suite could
+not have caught this defect at any point in its history, and the new group's
+fixture is the file's first tree. The clause pinning the negative case was
+checked against a deliberately reverted predicate rather than assumed to bite —
+`sub` selects four pages across both directories with the old rule, and the case
+reports three problems.
+
+Three statements of the old rule were found and repaired as part of this, two in
+the suite and one in a comment beside the alias table. That is the cost of
+writing an implementation detail into prose: the rule had four homes and only
+one of them was executable.
