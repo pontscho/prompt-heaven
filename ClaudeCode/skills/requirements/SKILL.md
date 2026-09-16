@@ -104,9 +104,11 @@ When this skill is activated:
    - After updating status, optionally show updated task list to confirm progress
 
 2. **Read the requirements file for detailed information**
-   - Read the project's own `requirements.yaml` — the one in the project root, or
-     the nearest one found by walking up from the working directory, which is the
-     same file the scripts above resolve
+   - Read the project's own `requirements.yaml`, the one in the project root
+   - Run the scripts above from the project root. They do not agree on how they
+     find the file: only `task-show-details.py` walks up from the working
+     directory, `task-plan.py` takes the path as an argument, and
+     `task-update.py` resolves it against the working directory with no override
    - This file contains the complete project requirements specification
 
 3. **Analyze the structure**
