@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "measurements": {
+    "mcp-server-roster": {
+      "description": "Every MCP server file git tracks, one path per line. Its LENGTH is the fleet size the corpus states in prose in a dozen places (\"all fifteen servers\", \"fifteen servers had inlined it\") and which two commits have already had to correct by hand.",
+      "command": ["git", "ls-files", "--", "Scripts/mcp-*.py"]
+    }
+  }
+}

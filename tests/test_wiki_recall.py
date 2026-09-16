@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Mechanical suite for the `search` relevance gate, the `get_page` section
 index, the `source_to_pages` per-hit description, the MEASURED state in every
-recall reply's `[type/state]` label, the page TYPE as a ranking signal and the
-frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (groups A-P).
+recall reply's `[type/state]` label, the page TYPE as a ranking signal, the
+frontmatter `aliases:` synonym field, the shared `path_prefix` boundary rule and
+the MEASURED REGION / `verify` mechanism, in Scripts/mcp-wiki.py (groups A-R).
 
 The case COUNT is deliberately absent from this docstring: it is written down
 once, in the SUITES table in tests/run.py, which checks it against the run.  A
@@ -14,17 +15,26 @@ Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/, with ONE declared exception
 named below.  Nothing is written outside mkdtemp.
 
-Three spawn sites exist, all in group L and all deliberate.  (1) `git show
-HEAD:Scripts/mcp-wiki.py`, which is the only way to compare the worktree's
-`freshness` output against the code that shipped.  (2) The unpatched-driver
-case, which MEASURES what the recall path costs in a directory git does not
-track -- production spawns there, so a stub would hide the finding.  (3) The
-unresolvable-`head` case, which drives the REAL repository -- and reads, never
-writes, the real docs/ -- because its premise is a contradiction only a real
-repository can hold: git must ANSWER for `HEAD` and REFUSE the caller's ref
-within one call, where the stubbed boundary answers nothing at all.  Every
-other group-L driver has the git boundary replaced by a lookup table, so
-`stale` and `orphaned-source` are reachable offline and deterministically.
+Four spawn sites exist, three in group L and one in group R, all deliberate.
+(1) `git show HEAD:Scripts/mcp-wiki.py`, which is the only way to compare the
+worktree's `freshness` output against the code that shipped.  (2) The
+unpatched-driver case, which MEASURES what the recall path costs in a directory
+git does not track -- production spawns there, so a stub would hide the finding.
+(3) The unresolvable-`head` case, which drives the REAL repository -- and reads,
+never writes, the real docs/ -- because its premise is a contradiction only a
+real repository can hold: git must ANSWER for `HEAD` and REFUSE the caller's ref
+within one call, where the stubbed boundary answers nothing at all.  Every other
+group-L driver has the git boundary replaced by a lookup table, so `stale` and
+`orphaned-source` are reachable offline and deterministically.
+
+(4) Group R runs the MEASUREMENT COMMANDS its own `measurements.json` names --
+`sys.executable -c ...` for the three that must answer, and a name that is on no
+machine for the one that must not.  A stubbed subprocess would prove nothing
+there, because the property under test IS "who is allowed to start one": the
+rendering half has to reach a real child, and the read-path half is asserted
+over the SOURCE (the call graph of every name in `READ_ONLY_FUNCTIONS`, which
+must not reach `_measure_run`) rather than by watching today's `search` happen
+not to spawn.
 
 The fixture is not decoration.  It reproduces, in miniature, the measured
 pathologies the gate and the query-side stoplist exist for:
@@ -69,6 +79,13 @@ Everything numeric is DERIVED, never typed:
     promoted this page" is a difference between two runs rather than a score
     anybody typed -- and a case asserts the shipped weight is not 0, or the
     whole group would pass by comparing an answer with itself;
+  * group R types no count at all: the digest length, the marker heads, the
+    state names, the gating vocabulary, the read-path register and the granted
+    register all come off the module, and every expectation about the corpus is
+    derived from the fixture tables (`R_PAGES`, `R_BODY_ANCHORS`,
+    `R_SOURCE_KINDS`).  The ONE thing typed there on purpose is the formula
+    `gating` used to be, because the case asserts the rendered number is no
+    longer it -- and an oracle read off the module could never say that;
   * group P names ONE thing, the field `aliases`, and reads everything else off
     the module: its membership in `_SEARCH_FIELDS` is ASSERTED (an edit dropping
     it fails there, not silently), its weight comes from `FIELD_WEIGHTS`, its
@@ -149,8 +166,12 @@ Coverage by group:
      which is also, dict for dict, what `freshness` publishes), the two
      invariants of the cross-call diff memo (it spans calls, it dies with HEAD,
      and two repos never share one changed-file set), the two claims the
-     refactor itself makes (`freshness` is byte-identical to the committed
-     server, and moving the `status` filter to AFTER the scoring loop moved no
+     refactor itself makes (`freshness_analyze` still returns the committed
+     server's dict and every rendered line that is not one of the two SUMMARY
+     lines is still byte-identical to what shipped -- the MEASUREMENT did not
+     move, only the word for it did, and the case asserts the summary lines DID
+     change, because a rename no caller can observe has repealed nothing; and
+     moving the `status` filter to AFTER the scoring loop moved no
      score, no coverage and no `best coverage N%`), the `freshness` PREFIX
      filter (it narrows the rendered rows AND the `ok:`/`gating:` counts above
      them, which is what pins the filter to the page set going in rather than
@@ -249,6 +270,32 @@ Coverage by group:
      that is legitimately empty INSIDE a populated scope -- the relevance gate's
      own silence, a `type` nothing carries -- keeps its own words and is never
      turned into an error
+  R  the MEASURED REGION, `verify`, and what `freshness` now CALLS things.  A
+     page block whose body is rendered from a command in `measurements.json`
+     rather than typed, carrying `amalgamate.py`'s contract verbatim: the digest
+     over the emitted body alone, three states, a hand edit REFUSED and not
+     overwritten (asserted by reading the page back and finding the edit intact),
+     a BEGIN without an END a hard error.  The group pins INERTNESS in five
+     spellings -- backtick fence, tilde fence, inline span, four-space block,
+     list bullet -- because Markdown has no `tokenize` and the property had to be
+     obtained from two mechanical rules instead, and it pins the NEAR MISS as
+     loud rather than skipped, since a typo inside an HTML comment is invisible
+     in every rendered view of the page.  The TRUST BOUNDARY is asserted
+     STRUCTURALLY, over the call graph of the server's own AST and in BOTH
+     directions: no name in `READ_ONLY_FUNCTIONS` may reach `_measure_run`, both
+     names in `MEASURE_GRANTED_FUNCTIONS` must, every handler must be in exactly
+     one of the two registers, and the whole file may spawn from exactly the two
+     declared sites.  The registry's two failure modes are driven for real (a
+     command that is on no machine, one that exits non-zero) and neither may
+     write a page.  `verify` resolves every anchor, and the DECLARED-vs-
+     DISCOVERED split is the load-bearing half: a `sources:` entry is checked as
+     written, while a body span must begin at a real repo-root entry to be an
+     anchor at all -- measured on the real corpus, that one rule took the finding
+     count from 30 to 4, and 26 of the 30 were sentences, not claims.  Finally
+     the renamed vocabulary: `gating` counts what `verify` PROVES, on a fixture
+     where that number differs from the old `stale + orphaned-source +
+     unverified` sum, and git lag becomes an `advisory:` line that says in those
+     words that it is a measurement and not a verdict
 
 Group J runs on its OWN six-page fixture in a SECOND workspace (group N adds a
 SEVENTH page to that same workspace -- `get_page` resolves by slug, so a page
@@ -272,6 +319,16 @@ or CLOSE -- the very window group D derives, which is precisely the effect group
 measures on a corpus of its own.  A group that shared the fixture would be
 measuring its own contamination.
 
+Group R takes a TWELFTH and a THIRTEENTH, and its reason is the strongest of
+all of them: it writes a `measurements.json` at the wiki root and then RUNS the
+commands that file names.  A registry dropped into any corpus above would make
+every other group's `freshness` call reach a registry loader -- and one of group
+R's own cases is that a MALFORMED registry is a finding rather than a crash,
+which in a shared fixture would become a finding about somebody else's pages.
+The thirteenth holds the malformed-marker corpus alone, because a page whose
+markers cannot be read is reported per page and would otherwise land in the
+counts of every case that reads a region total.
+
 Group Q takes an ELEVENTH, and its reason is the corpus SHAPE rather than the
 scoring: every fixture above is FLAT, and on a flat corpus the substring bug and
 the boundary rule agree on every page, because a path with no `/` in it has only
@@ -289,6 +346,7 @@ Exit code 0 iff every non-informational case passes.
 """
 
 import ast
+import json
 import math
 import os
 import re
@@ -792,6 +850,29 @@ class Driver:
         res = self.mod.handle_wiki_call(
             {"function": "freshness", "params": params}, self.root, WIKI_REL)
         return res.get("__raw_text__") or res.get("error") or ""
+
+    def call(self, function, **params):
+        """(text, is_error) for any function, driven through the dispatcher.
+
+        Group R reaches `measure` and `verify` through this rather than through
+        the handlers directly, because half of what it asserts is dispatcher
+        work: the param table, the aliases, and the clean error a malformed
+        registry has to become instead of a traceback.
+        """
+        res = self.mod.handle_wiki_call(
+            {"function": function, "params": params}, self.root, WIKI_REL)
+        return (res.get("__raw_text__") or res.get("error") or "",
+                "error" in res)
+
+    def page_text(self, relpath):
+        """One fixture page's bytes, read back from disk after a write."""
+        with open(os.path.join(self.abs_wiki, relpath), encoding="utf-8") as fh:
+            return fh.read()
+
+    def write_page(self, relpath, text):
+        with open(os.path.join(self.abs_wiki, relpath), "w",
+                  encoding="utf-8") as fh:
+            fh.write(text)
 
     def classify(self, relpath):
         """`_classify_page` for ONE page, driven the way the recall path drives
@@ -1833,6 +1914,24 @@ def parse_freshness(text):
     return out
 
 
+def split_verdict_lines(text, mod):
+    """A freshness report split into (measurement lines, verdict lines).
+
+    The VERDICT half is `gating:`, `advisory:` and the indented detail rows
+    under the first -- the three shapes the vocabulary change owns, and the only
+    lines in the report that begin that way.  Everything else is the
+    MEASUREMENT: the header, every status bucket, every `- name \\`path\\`` row
+    and `ok:`.  The prefixes come off the module rather than being typed, so a
+    renamed line moves this split with it instead of silently falling into the
+    half it must not be in.
+    """
+    verdict_heads = (mod.GATING_LINE_PREFIX, mod.ADVISORY_LINE_PREFIX, "  ")
+    rows, verdict = [], []
+    for line in text.split("\n"):
+        (verdict if line.startswith(verdict_heads) else rows).append(line)
+    return rows, verdict
+
+
 def fresh_total(parsed):
     """How many pages the rendered report accounts for: the ones it lists, plus
     the ones it only counts.  A filter that narrowed the rows and left the
@@ -2492,7 +2591,7 @@ def q_check(drv, prefix, want, clause):
     return problems, rows, got
 
 
-def q_rule_sites(path):
+def q_rule_sites(path, names=("_fn_search", "_fn_list", "freshness_analyze")):
     """Per filter: does it CALL the shared predicate, and does it re-spell it?
 
     Read out of the server SOURCE with `ast` rather than off the imported
@@ -2511,7 +2610,7 @@ def q_rule_sites(path):
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
-        if node.name not in ("_fn_search", "_fn_list", "freshness_analyze"):
+        if node.name not in names:
             continue
         uses, copies = False, []
         for sub in ast.walk(node):
@@ -2527,6 +2626,464 @@ def q_rule_sites(path):
                     or (isinstance(arg, ast.Name) and "prefix" in arg.id)):
                 copies.append("line %d" % sub.lineno)
         out[node.name] = {"uses": uses, "copies": copies}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Group R: the MEASURED REGION, `verify`, and the renamed freshness vocabulary.
+#
+# Its own workspace (the TWELFTH), and for the reason every fixture split in
+# this file has: group R writes a `measurements.json` at the wiki root and then
+# RUNS the commands it names.  A registry dropped into any corpus above would
+# make every other group's `freshness` call reach a registry loader, and one of
+# group R's own cases is that a MALFORMED registry is a finding rather than a
+# crash -- which would become a finding about somebody else's fixture.
+#
+# A THIRTEENTH holds the malformed-marker corpus on its own, because a page
+# whose markers cannot be read is reported per page and would otherwise appear
+# in the counts of every case that reads a region total.
+#
+# Two nested claims, and they pull in opposite directions, which is why the
+# group is structured the way it is:
+#
+#   * RENDERING IS EXECUTION.  `measurements.json` is a checked-in file naming
+#     argv, so a region is rendered by starting a child process.  The cases
+#     therefore run REAL commands -- a stubbed subprocess would prove nothing
+#     about the boundary, since the boundary is exactly "who may start one".
+#   * THE READ PATHS MAY NEVER REACH ONE.  That claim cannot be made by
+#     observing that today's `search` happens not to spawn.  It is made over
+#     the SOURCE: the call graph of every name in `READ_ONLY_FUNCTIONS` is
+#     walked and `_measure_run` must be unreachable from all of them, while
+#     being reachable from `measure` and `verify` -- so the case cannot pass by
+#     the mechanism having been deleted.
+#
+# The git seam is stubbed exactly as group L stubs it, and for the same reason:
+# `stale` has to be reachable offline and deterministically, because the whole
+# point of the vocabulary change is that `gating` and git LAG are now different
+# numbers, and a case where they coincide proves nothing.
+# ---------------------------------------------------------------------------
+
+(R_FILE, R_SLUG, R_TYPE, R_SRCS, R_COMMIT, R_STATE, R_REGION) = range(7)
+
+# The measurement names.  Four, because four things can happen to one: it
+# renders, the registry has never heard of it, its command does not exist, and
+# its command answers non-zero.
+R_NAME = "fleet-roster"
+R_ABSENT = "never-registered"
+R_MISSING_CMD = "no-such-binary"
+R_FAILING_CMD = "always-fails"
+R_INERT_NAME = "inert-never-registered"
+
+# What R_NAME's command prints.  The argv is BUILT from these lines below, so
+# the body the suite expects and the command that produces it cannot drift --
+# a typed expected-output beside a typed command is two copies of one fact.
+R_BODY_LINES = ("alpha", "beta", "gamma")
+R_WANT_BODY = "".join(line + "\n" for line in R_BODY_LINES)
+R_RENDER_ARGV = [sys.executable, "-c",
+                 "; ".join("print(%r)" % line for line in R_BODY_LINES)]
+R_FAIL_CODE = 3
+R_FAIL_ARGV = [sys.executable, "-c",
+               "import sys; sys.stderr.write('boom\\n'); sys.exit(%d)"
+               % R_FAIL_CODE]
+R_MISSING_ARGV = ["ph-no-such-command-anywhere-on-this-machine", "--please"]
+
+# The marker spelling the fixture WRITES.  Typed here and then asserted against
+# `MEASURED_BEGIN_HEAD` / `MEASURED_END_HEAD` on the module, which is the only
+# way a fixture can both produce the bytes and be checked against the producer.
+R_BEGIN = "<!-- BEGIN MEASURED: %s -->"
+R_END = "<!-- END MEASURED: %s -->"
+
+# The git stub's table.  R_C_MOVED is the commit whose diff carries the one
+# source file the corpus anchors, which is what makes ONE page `stale` -- the
+# advisory number -- while nothing about it is broken.
+R_C_CLEAN = "cafe001"
+R_C_MOVED = "cafe002"
+R_SRC_REAL = "src/real.py"
+R_SRC_LUA = "src/real.lua"
+R_SRC_GONE = "src/gone.py"
+R_SRC_ELSEWHERE = "elsewhere/ghost.py"      # first component is NOT top-level
+R_MD_REAL = "notes/real.md"
+R_MD_HEADING = "Alpha"
+R_DIFFS = {R_C_CLEAN: {"src/never-anchored.py"}, R_C_MOVED: {R_SRC_REAL}}
+
+R_ANCHOR_FILE = "anchored.md"
+R_FENCED_FILE = "fenced.md"
+R_MEASURED_FILE = "measured.md"
+
+# Every anchor the anchor page writes, and what `_resolve_anchor` must answer.
+# `not-an-anchor` is not a resolution at all: the span must never enter the
+# checked set, which is a stronger claim than "it resolves" and the one that
+# decides whether a report is readable -- measured on the real corpus, the
+# top-level rule alone is the difference between 30 findings and 4, and 26 of
+# the 30 were sentences nobody wrote as a claim about code.
+R_BODY_ANCHORS = [
+    (R_SRC_REAL, "ok"),
+    ("%s:real_function" % R_SRC_REAL, "ok"),
+    ("%s:R_CONST" % R_SRC_REAL, "ok"),
+    ("%s:12-20" % R_SRC_REAL, "line-ref"),
+    ("%s:absent_symbol" % R_SRC_REAL, "missing-symbol"),
+    ("%s:%s" % (R_MD_REAL, R_MD_HEADING), "ok"),
+    ("%s:Omega" % R_MD_REAL, "missing-symbol"),
+    ("%s:lua_thing" % R_SRC_LUA, "weak"),
+    (R_SRC_GONE, "missing-path"),
+    ("nowhere/gone.py", "not-an-anchor"),     # first component not at the root
+    ("src/*.py", "not-an-anchor"),            # a glob
+    ("~/.claude/settings.json", "not-an-anchor"),   # outside the repo
+    ("src/../src/real.py", "not-an-anchor"),  # a traversal
+    ("_resolve_anchor", "not-an-anchor"),     # a bare identifier
+]
+
+# The `sources:` half of the DECLARED-vs-DISCOVERED split.  R_SRC_ELSEWHERE has
+# the same shape as the body's `nowhere/gone.py` and the opposite fate: a
+# frontmatter entry is a CLAIM and is checked as written, a body span is a guess
+# and must earn its way in.
+R_ANCHOR_SOURCES = [R_SRC_REAL, R_SRC_GONE, R_SRC_ELSEWHERE]
+
+R_PAGES = [
+    (R_MEASURED_FILE, "r-measured", "reference", [], None, "no-sources", R_NAME),
+    ("unregistered.md", "r-unregistered", "reference", [], None, "no-sources",
+     R_ABSENT),
+    ("nocmd.md", "r-nocmd", "reference", [], None, "no-sources", R_MISSING_CMD),
+    ("failcmd.md", "r-failcmd", "reference", [], None, "no-sources",
+     R_FAILING_CMD),
+    (R_FENCED_FILE, "r-fenced", "reference", [], None, "no-sources", None),
+    (R_ANCHOR_FILE, "r-anchored", "component", R_ANCHOR_SOURCES, R_C_CLEAN,
+     "orphaned-source", None),
+    ("lagged.md", "r-lagged", "component", [R_SRC_REAL], R_C_MOVED, "stale",
+     None),
+    ("unstamped.md", "r-unstamped", "component", [R_SRC_REAL], None,
+     "unverified", None),
+]
+R_BY_FILE = {p[R_FILE]: p for p in R_PAGES}
+
+# The pages `verify` must find something wrong with: the anchor page (two dead
+# `sources:` entries and one dead body span), the region naming nothing in the
+# registry, and the two whose commands cannot answer.
+R_GATING_PAGES = {R_ANCHOR_FILE, "unregistered.md", "nocmd.md", "failcmd.md"}
+
+# What the trust boundary is actually VISIBLE as, and it is not the gating set.
+# A region whose END digest is empty was never rendered by anybody, which is
+# provable without starting a process, so it reads `stale` either way.  What
+# execution buys is the NAME: `stale` ("re-run me") becomes `failed` ("your
+# command is broken"), and `not-rendered` ("I did not check") becomes `ok`.
+# Asserting the two maps is therefore strictly stronger than asserting a count,
+# because a server that ran the commands from the read path would produce the
+# SECOND map where the first is owed.
+R_STATE_WITHOUT_RENDER = {R_MEASURED_FILE: "not-rendered",
+                          "unregistered.md": "unregistered",
+                          "nocmd.md": "stale", "failcmd.md": "stale"}
+R_STATE_WITH_RENDER = {R_MEASURED_FILE: "ok",
+                       "unregistered.md": "unregistered",
+                       "nocmd.md": "failed", "failcmd.md": "failed"}
+
+# What each `sources:` entry of the anchor page must resolve to.  Kept beside
+# R_BODY_ANCHORS rather than derived from it: the whole claim is that the two
+# halves are treated DIFFERENTLY, so one table deriving the other would be the
+# claim asserting itself.
+R_SOURCE_KINDS = {R_SRC_REAL: "ok", R_SRC_GONE: "missing-path",
+                  R_SRC_ELSEWHERE: "missing-path"}
+
+# The formula `gating` used to be.  Typed here precisely BECAUSE it is the thing
+# being replaced: the case asserts the rendered number is not this one, and an
+# oracle read off the module could never say that.
+R_OLD_GATING_STATES = ("stale", "orphaned-source", "unverified")
+
+# The malformed-marker corpus (the THIRTEENTH workspace).
+R_BROKEN_GOOD = "good.md"
+R_BROKEN_OPEN = "open.md"
+R_BROKEN_NEARMISS = "nearmiss.md"
+
+# The spawn sites this file is allowed to have.  DECLARED, with the reason, so a
+# third one is a named failure rather than a silent widening of the boundary:
+# `git` runs a fixed argv this server writes, `_measure_run` runs one a repo
+# file named, and there is no third kind of child process a wiki server needs.
+R_SPAWN_SITES = {"git", "_measure_run"}
+
+_R_MEASURE_ROW_RE = re.compile(
+    r"^(?P<verdict>[A-Z-]+|updated): (?P<path>[^\s\[]+) \[(?P<name>[^\]]+)\]")
+_R_MEASURE_SUMMARY_RE = re.compile(r"^summary \(as found\): (?P<rest>.+)$", re.M)
+_R_VERIFY_ANCHOR_RE = re.compile(
+    r"^anchors: (?P<checked>\d+) checked, (?P<resolved>\d+) resolved"
+    r".*?, (?P<unresolved>\d+) unresolved$", re.M)
+_R_VERIFY_GATING_RE = re.compile(r"^gating: (?P<n>\d+)$", re.M)
+_R_ADVISORY_RE = re.compile(
+    r"^advisory: (?P<moved>\d+) page\(s\) [^,]+, (?P<unchecked>\d+) ", re.M)
+
+
+def r_page_text(page):
+    """One group-R page, region markers and anchor spans included."""
+    out = ["---",
+           "name: %s" % page[R_SLUG],
+           "title: Group R page %s" % page[R_SLUG],
+           "type: %s" % page[R_TYPE],
+           "status: active",
+           "description: A group R fixture page carrying rstatepage."]
+    if page[R_SRCS]:
+        out.append("sources:")
+        out += ["  - %s" % s for s in page[R_SRCS]]
+    if page[R_COMMIT]:
+        out += ["verified:", "  commit: %s" % page[R_COMMIT],
+                "  date: 2026-01-01"]
+    out += ["---", "", "# Group R page %s" % page[R_SLUG], "",
+            "This rstatepage is part of the measured-region fixture.", ""]
+    if page[R_FILE] == R_ANCHOR_FILE:
+        for span, _kind in R_BODY_ANCHORS:
+            out.append("A claim anchored at `%s`." % span)
+        out.append("")
+    elif page[R_FILE] == R_FENCED_FILE:
+        out += r_inert_body()
+    elif page[R_REGION]:
+        # An EMPTY recorded digest: nothing has ever rendered this region, which
+        # is `stale` by definition and provable without running anything.
+        out += [R_BEGIN % page[R_REGION], R_END % "", ""]
+    return "\n".join(out) + "\n"
+
+
+def r_inert_body():
+    """Every spelling of a marker that must NOT be one.
+
+    Five, one per way Markdown can carry text that looks like a marker: inside a
+    backtick fence, inside a tilde fence, inside an inline code span, indented
+    into a four-space code block, and after a list bullet.  The first two are
+    inertness rule 2 and need the fence tracker; the last three are rule 1 and
+    need only the column-0 test -- which is exactly why the rule is written as
+    two rules and not as one.
+    """
+    return [
+        "A marker inside a backtick fence is not a marker:",
+        "",
+        "```",
+        R_BEGIN % R_INERT_NAME,
+        R_END % "deadbeefcafe",
+        "```",
+        "",
+        "Nor inside a tilde fence:",
+        "",
+        "~~~markdown",
+        R_BEGIN % R_INERT_NAME,
+        R_END % "deadbeefcafe",
+        "~~~",
+        "",
+        "Nor inline: `%s`." % (R_BEGIN % R_INERT_NAME),
+        "",
+        "Nor indented into a code block:",
+        "",
+        "    " + (R_BEGIN % R_INERT_NAME),
+        "    " + (R_END % "deadbeefcafe"),
+        "",
+        "- Nor after a bullet: %s" % (R_BEGIN % R_INERT_NAME),
+        "",
+    ]
+
+
+def r_registry_text():
+    """The fixture's `measurements.json`, built from the argv tables above."""
+    return json.dumps({
+        "version": 1,
+        "measurements": {
+            R_NAME: {"description": "Three fixed lines, so the rendered body is "
+                                    "a fact rather than a race.",
+                     "command": R_RENDER_ARGV},
+            R_MISSING_CMD: {"description": "Names a program that is not on this "
+                                           "machine, on purpose.",
+                            "command": R_MISSING_ARGV},
+            R_FAILING_CMD: {"description": "Exits %d with one line on stderr."
+                                           % R_FAIL_CODE,
+                            "command": R_FAIL_ARGV},
+        },
+    }, indent=2) + "\n"
+
+
+def build_region_fixture(work):
+    """Write group R's corpus, its registry and the files its anchors resolve to."""
+    for page in R_PAGES:
+        work.write_text(os.path.join(WIKI_REL, page[R_FILE]), r_page_text(page))
+    work.write_text(os.path.join(WIKI_REL, "measurements.json"),
+                    r_registry_text())
+    work.write_text(R_SRC_REAL, "\n".join([
+        "R_CONST = 1", "", "", "def real_function():", "    return R_CONST",
+        "", "", "class RealClass:", "    pass", ""]))
+    work.write_text(R_SRC_LUA, "local function lua_thing()\nend\n")
+    work.write_text(R_MD_REAL, "# Notes\n\n## %s\n\nBody.\n" % R_MD_HEADING)
+    return os.path.realpath(work.path)
+
+
+def patch_git_table(mod, repo, diffs):
+    """Group L's `patch_git_boundary`, parameterized on the diff table.
+
+    Same three seams and the same reasons -- see that function.  Written apart
+    rather than reused so group R's table cannot move group L's fixture, which
+    is the coupling every fixture split in this file exists to prevent.
+    """
+    def changed_files(commit, head, repo_arg, cache):
+        if commit in cache:
+            val = cache[commit]
+            return None if val == mod._INVALID else val
+        value = diffs.get(commit)
+        cache[commit] = mod._INVALID if value is None else value
+        return value
+
+    mod._REPO_ROOT_CACHE.clear()
+    mod.repo_root = lambda start=None: repo
+    mod._changed_files = changed_files
+    mod.git = lambda args, cwd: (1, "", "stubbed: no git in this fixture")
+
+
+def build_broken_marker_fixture(work):
+    """Three pages: one readable region, one open region, one near-miss marker.
+
+    The point is the CO-EXISTENCE.  A walk that raised on the first bad page
+    would report nothing about the good one, and a report that says nothing is
+    indistinguishable from a report that says everything is fine.
+    """
+    header = ("---\nname: %s\ntype: reference\nstatus: active\n"
+              "title: %s\ndescription: A broken-marker fixture page.\n---\n\n")
+    work.write_text(
+        os.path.join(WIKI_REL, R_BROKEN_GOOD),
+        (header % ("b-good", "Good")) + R_BEGIN % R_NAME + "\n" + R_END % "" + "\n")
+    work.write_text(
+        os.path.join(WIKI_REL, R_BROKEN_OPEN),
+        (header % ("b-open", "Open")) + R_BEGIN % R_NAME + "\n"
+        + "a body nobody ever closes\n")
+    work.write_text(
+        os.path.join(WIKI_REL, R_BROKEN_NEARMISS),
+        (header % ("b-nearmiss", "Near miss"))
+        + "<!--  BEGIN MEASURED: %s -->\n" % R_NAME + R_END % "" + "\n")
+    work.write_text(os.path.join(WIKI_REL, "measurements.json"),
+                    r_registry_text())
+    return os.path.realpath(work.path)
+
+
+def r_region_report(mod, abs_wiki, render=False):
+    """`verify_analyze` over a corpus, optionally with the commands RUN.
+
+    The render half goes through `_ExecutionGrant` and `_measure_bodies`, i.e.
+    exactly the path `verify measure: true` takes -- a test that reached the
+    subprocess by another route would be proving something about itself.
+    """
+    registry, registry_error = mod.load_measurements_safe(abs_wiki)
+    rendered = errors = None
+    if render:
+        rows, _malformed = mod.measure_scan(abs_wiki)
+        rendered, errors = mod._measure_bodies(
+            registry, mod._repo_root_cached(abs_wiki),
+            mod._ExecutionGrant("verify"),
+            names={row["name"] for row in rows})
+    return mod.verify_analyze(abs_wiki, registry=registry,
+                              registry_error=registry_error,
+                              rendered=rendered, errors=errors)
+
+
+def r_state_counts(want_map):
+    """{state: count} for one of the two R_STATE_* maps."""
+    out = {}
+    for state in want_map.values():
+        out[state] = out.get(state, 0) + 1
+    return out
+
+
+def r_raises(mod, text):
+    """The MeasuredRegionError message `measured_regions` produces, or ''."""
+    try:
+        mod.measured_regions("probe.md", text)
+    except mod.MeasuredRegionError as exc:
+        return str(exc)
+    return ""
+
+
+def r_measure_rows(text):
+    """The rendered `measure` answer as {(path, name): verdict}."""
+    rows = {}
+    for line in text.split("\n"):
+        match = _R_MEASURE_ROW_RE.match(line)
+        if match:
+            rows[(match.group("path"), match.group("name"))] = \
+                match.group("verdict")
+    return rows
+
+
+def r_measure_summary(text):
+    """The `summary (as found):` line as {state: count}."""
+    match = _R_MEASURE_SUMMARY_RE.search(text)
+    out = {}
+    if not match:
+        return out
+    for chunk in match.group("rest").split(", "):
+        count, _sp, state = chunk.partition(" ")
+        if count.isdigit():
+            out[state] = int(count)
+    return out
+
+
+def r_verify_numbers(text):
+    """The `anchors:` and `gating:` numbers `verify` publishes."""
+    anchors = _R_VERIFY_ANCHOR_RE.search(text)
+    gating = _R_VERIFY_GATING_RE.search(text)
+    return {
+        "checked": int(anchors.group("checked")) if anchors else None,
+        "resolved": int(anchors.group("resolved")) if anchors else None,
+        "unresolved": int(anchors.group("unresolved")) if anchors else None,
+        "gating": int(gating.group("n")) if gating else None,
+    }
+
+
+def r_region_of(mod, text, name):
+    """The one region called `name` in a page's text, or None."""
+    for region in mod.measured_regions("probe.md", text):
+        if region["name"] == name:
+            return region
+    return None
+
+
+def r_call_graph(path):
+    """Every `def` in the file -> the NAMES and ATTRIBUTES its body mentions.
+
+    Names collide across scopes (two `__init__`s), and the collision is resolved
+    by UNION on purpose: a merged node has strictly MORE edges, so the
+    unreachability claim below becomes harder to satisfy rather than easier.
+    Erring toward more edges is the only safe direction for a negative claim.
+    """
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read(), filename=path)
+    graph = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        used = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name):
+                used.add(sub.id)
+            elif isinstance(sub, ast.Attribute):
+                used.add(sub.attr)
+        graph.setdefault(node.name, set()).update(used)
+    return graph
+
+
+def r_reachable(graph, start):
+    """Every name reachable from `start` through the call graph."""
+    seen, stack = set(), [start]
+    while stack:
+        for name in graph.get(stack.pop(), ()):
+            if name not in seen:
+                seen.add(name)
+                stack.append(name)
+    return seen
+
+
+def r_spawn_sites(path):
+    """Every `def` whose body calls `subprocess.<anything>`."""
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read(), filename=path)
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and isinstance(sub.func.value, ast.Name)
+                    and sub.func.value.id == "subprocess"):
+                out.add(node.name)
     return out
 
 
@@ -6034,16 +6591,27 @@ def run(opts=None):
                             + ["        " + r for r in rows],
                      text=s2p["text"])
 
-        # ---- the extraction changed nothing: `freshness`, byte for byte ------
+        # ---- the MEASUREMENT did not move; only the vocabulary did -----------
         # HEAD's copy of the server, driven against the SAME workspace with the
-        # SAME stubbed git boundary.  The claim is not "freshness still works" --
-        # it is that lifting the if/else chain out of `freshness_analyze` into
-        # `_classify_page` did not move one character of its output.
+        # SAME stubbed git boundary.  This case used to claim the rendered report
+        # was BYTE-IDENTICAL to the committed one, and that claim is now
+        # deliberately false: `gating` was renamed, because counting "git says a
+        # source moved" and calling it gating read a MEASUREMENT as a verdict.
+        #
+        # What replaces it is strictly stronger about the half that had to
+        # survive.  `freshness_analyze` must still return the SAME DICT -- the
+        # git measurement is untouched -- and every rendered line that is not one
+        # of the two summary lines must still be byte-identical, which is the
+        # header, every status bucket, every page row and `ok:`.  Only
+        # `gating:`/`advisory:` and the indented detail under them may differ,
+        # and the case asserts they DO: a rename nobody can observe would leave
+        # this green while having repealed nothing.
         rc, blob, err = H.run_process(
             ["git", "show", "HEAD:Scripts/mcp-wiki.py"], cwd=H.REPO_ROOT)
         problems = []
         b_text = c_text = ""
         b_report = c_report = None
+        b_verdict = c_verdict = []
         differs = None
         if rc != 0 or not blob:
             problems.append("could not read HEAD's copy of the server (rc=%d, "
@@ -6059,29 +6627,43 @@ def run(opts=None):
             b_text, c_text = bsdrv.freshness(), ldrv.freshness()
             b_report = bsdrv.mod.freshness_analyze(bsdrv.abs_wiki, "HEAD")
             c_report = ldrv.mod.freshness_analyze(ldrv.abs_wiki, "HEAD")
-            if b_text != c_text:
-                problems.append("the rendered report is NOT byte-identical:\n"
-                                "  HEAD %r\n  work %r" % (b_text, c_text))
+            b_rows, b_verdict = split_verdict_lines(b_text, ldrv.mod)
+            c_rows, c_verdict = split_verdict_lines(c_text, ldrv.mod)
+            if b_rows != c_rows:
+                problems.append("a line that is NOT a summary line moved -- the "
+                                "measurement was supposed to be untouched:\n"
+                                "  HEAD %r\n  work %r" % (b_rows, c_rows))
             if b_report != c_report:
-                problems.append("freshness_analyze returns a different dict:\n"
-                                "  HEAD %r\n  work %r" % (b_report, c_report))
+                problems.append("freshness_analyze returns a different dict, so "
+                                "the git MEASUREMENT moved and not just the word "
+                                "for it:\n  HEAD %r\n  work %r"
+                                % (b_report, c_report))
+            if b_verdict == c_verdict:
+                problems.append("the summary lines are unchanged (%r), so either "
+                                "the rename never landed or it is invisible to a "
+                                "caller -- and an invisible rename repeals "
+                                "nothing" % b_verdict)
             states = set((c_report or {}).get("summary", {}))
             if len(states) < 5:
                 problems.append("the report covers only %r, so most of the "
                                 "extracted if/else chain was never executed and "
                                 "the identity claim is thin" % sorted(states))
-        suite.record("L", "freshness-is-byte-identical-to-the-committed-server",
+        suite.record("L", "freshness-keeps-its-measurement-and-renames-its-verdict",
                      problems,
                      detail=[_d("baseline", "git show HEAD:Scripts/mcp-wiki.py "
                                             "(%d chars, differs from the "
                                             "worktree: %r)" % (len(blob), differs)),
-                             _d("identical", "%r" % (b_text == c_text)),
-                             _d("summary", "%r"
-                                % ((c_report or {}).get("summary"),)),
-                             _d("note", "vacuous when the worktree is clean -- the "
-                                        "DURABLE form of this claim is the "
-                                        "one-authority case below, which needs no "
-                                        "baseline at all")],
+                             _d("rows", "identical: %r"
+                                % (split_verdict_lines(b_text, ldrv.mod)[0]
+                                   == split_verdict_lines(c_text, ldrv.mod)[0])),
+                             _d("HEAD said", "%r" % b_verdict),
+                             _d("work says", "%r" % c_verdict),
+                             _d("why", "adr 0002's rule is that nothing may claim "
+                                       "a freshness it cannot measure; git lag "
+                                       "CAN measure that a file moved and cannot "
+                                       "measure that a page is wrong, so the "
+                                       "word `gating` was the residual "
+                                       "over-claim")],
                      text=c_text)
 
         # ---- `path_prefix` narrows the ROWS and every COUNT above them -------
@@ -8062,6 +8644,728 @@ def run(opts=None):
                      text=block)
     finally:
         scope_work.cleanup()
+
+    # ============ R: measured regions, verify, freshness vocabulary ============
+    region_work = H.TempWorkspace("ph-wiki-region-", keep=opts.keep)
+    try:
+        rroot = build_region_fixture(region_work)
+        rdrv = Driver(rroot, name="mcp_wiki_region")
+        rmod = rdrv.mod
+        patch_git_table(rmod, rroot, R_DIFFS)
+
+        # ---- the fixture writes the module's OWN marker spelling -------------
+        problems = []
+        if not (R_BEGIN % "x").startswith(rmod.MEASURED_BEGIN_HEAD):
+            problems.append("the fixture writes %r, the module publishes %r"
+                            % (R_BEGIN % "x", rmod.MEASURED_BEGIN_HEAD))
+        if not (R_END % "x").startswith(rmod.MEASURED_END_HEAD):
+            problems.append("the fixture writes %r, the module publishes %r"
+                            % (R_END % "x", rmod.MEASURED_END_HEAD))
+        sample = rmod.measured_digest("anything at all")
+        if len(sample) != rmod.MEASURED_DIGEST_LEN:
+            problems.append("measured_digest returned %d chars, the module "
+                            "declares %d" % (len(sample), rmod.MEASURED_DIGEST_LEN))
+        if rmod.measured_digest("a") == rmod.measured_digest("b"):
+            problems.append("two different bodies hash the same, so the "
+                            "hand-edit detector cannot detect anything")
+        suite.record("R", "the-marker-spelling-is-the-module's-own", problems,
+                     detail=[_d("begin", "%r" % rmod.MEASURED_BEGIN_HEAD),
+                             _d("end", "%r" % rmod.MEASURED_END_HEAD),
+                             _d("digest", "%d chars, e.g. %s"
+                                % (rmod.MEASURED_DIGEST_LEN, sample)),
+                             _d("why", "a fixture that produced its own bytes "
+                                       "and was never compared to the producer "
+                                       "would pass a rename of the marker")])
+
+        before_all = {p[R_FILE]: rdrv.page_text(p[R_FILE]) for p in R_PAGES}
+
+        # ---- check mode: classify, write NOTHING -----------------------------
+        check_txt, check_err = rdrv.call("measure")
+        check_rows = r_measure_rows(check_txt)
+        touched = sorted(f for f, text in before_all.items()
+                         if rdrv.page_text(f) != text)
+        problems = []
+        if check_err:
+            problems.append("the call failed: %s" % check_txt[:200])
+        if check_rows.get((R_MEASURED_FILE, R_NAME)) != "CHANGED":
+            problems.append("a region whose END digest is EMPTY reported %r, "
+                            "want CHANGED -- nothing has ever rendered it, which "
+                            "is stale by construction"
+                            % check_rows.get((R_MEASURED_FILE, R_NAME)))
+        if touched:
+            problems.append("check mode wrote to %r" % touched)
+        if "check only" not in check_txt:
+            problems.append("the answer does not say it wrote nothing")
+        suite.record("R", "check-mode-classifies-and-writes-nothing", problems,
+                     detail=[_d("rows", "%r" % sorted(check_rows.items())),
+                             _d("summary", "%r" % r_measure_summary(check_txt)),
+                             _d("touched", "%r" % touched),
+                             _d("why", "modelled on amalgamate.py --check: the "
+                                       "verdict is the report, never a repair")],
+                     text=check_txt)
+
+        # ---- write mode: the body is RENDERED and the digest RECORDED --------
+        wrote_txt, wrote_err = rdrv.call("measure", write=True)
+        wrote_rows = r_measure_rows(wrote_txt)
+        after = rdrv.page_text(R_MEASURED_FILE)
+        region = r_region_of(rmod, after, R_NAME)
+        outside_before = before_all[R_MEASURED_FILE].replace(R_END % "", "")
+        outside_after = after.replace(
+            R_WANT_BODY + (R_END % rmod.measured_digest(R_WANT_BODY)), "")
+        problems = []
+        if wrote_err:
+            problems.append("the call failed: %s" % wrote_txt[:200])
+        if wrote_rows.get((R_MEASURED_FILE, R_NAME)) != "updated":
+            problems.append("write mode reported %r for the stale region"
+                            % wrote_rows.get((R_MEASURED_FILE, R_NAME)))
+        if region is None:
+            problems.append("the region is gone from the page after a write")
+        else:
+            if region["body"] != R_WANT_BODY:
+                problems.append("the body is %r, the command prints %r"
+                                % (region["body"], R_WANT_BODY))
+            if region["recorded"] != rmod.measured_digest(R_WANT_BODY):
+                problems.append("the END records %r, the body hashes to %r"
+                                % (region["recorded"],
+                                   rmod.measured_digest(R_WANT_BODY)))
+        if outside_before != outside_after:
+            problems.append("the prose OUTSIDE the region moved:\n  before %r"
+                            "\n  after  %r" % (outside_before, outside_after))
+        suite.record("R", "write-renders-the-body-and-records-its-digest",
+                     problems,
+                     detail=[_d("command", "%r" % (R_RENDER_ARGV[:2] + ["..."])),
+                             _d("body", "%r" % (region or {}).get("body")),
+                             _d("digest", "%r" % (region or {}).get("recorded")),
+                             _d("why", "the digest is over the EMITTED BODY "
+                                       "ALONE -- markers excluded, exactly as "
+                                       "amalgamate.py:body_hash does it")],
+                     text=wrote_txt)
+
+        # ---- a command that cannot run, and one that answers non-zero --------
+        problems = []
+        for fname, name, token in (("nocmd.md", R_MISSING_CMD, R_MISSING_ARGV[0]),
+                                   ("failcmd.md", R_FAILING_CMD,
+                                    "exit %d" % R_FAIL_CODE)):
+            if wrote_rows.get((fname, name)) != "FAILED":
+                problems.append("%s reported %r, want FAILED"
+                                % (fname, wrote_rows.get((fname, name))))
+            if token not in wrote_txt:
+                problems.append("the answer never says %r, so the caller cannot "
+                                "tell WHICH way the command broke" % token)
+            if rdrv.page_text(fname) != before_all[fname]:
+                problems.append("%s was written despite its command failing -- "
+                                "a body nobody produced is worse than a stale "
+                                "one" % fname)
+        suite.record("R", "a-command-that-cannot-answer-is-reported-not-written",
+                     problems,
+                     detail=[_d("missing", "%r" % R_MISSING_ARGV[0]),
+                             _d("failing", "exits %d with one line on stderr"
+                                % R_FAIL_CODE),
+                             _d("why", "a failure is RETURNED, never raised: one "
+                                       "broken entry must not blind the report "
+                                       "about every other region")],
+                     text=wrote_txt)
+
+        # ---- a name the registry never heard of ------------------------------
+        registry, registry_error = rmod.load_measurements_safe(rdrv.abs_wiki)
+        problems = []
+        if wrote_rows.get(("unregistered.md", R_ABSENT)) != "UNREGISTERED":
+            problems.append("reported %r, want UNREGISTERED -- it is not stale, "
+                            "because nothing could ever render it"
+                            % wrote_rows.get(("unregistered.md", R_ABSENT)))
+        if rmod.MEASUREMENTS_FILE not in wrote_txt:
+            problems.append("the refusal never names %r, so the caller does not "
+                            "know which file to edit" % rmod.MEASUREMENTS_FILE)
+        for name in registry:
+            if name not in wrote_txt:
+                problems.append("the refusal does not list %r among the "
+                                "measurements that DO exist" % name)
+        if registry_error:
+            problems.append("fixture drift: the registry did not load (%s)"
+                            % registry_error)
+        suite.record("R", "an-unregistered-region-is-its-own-state", problems,
+                     detail=[_d("region", "%r" % R_ABSENT),
+                             _d("registry", "%r" % sorted(registry)),
+                             _d("why", "`stale` tells a caller to re-run; this "
+                                       "one can never succeed, so it must not "
+                                       "borrow that word")],
+                     text=wrote_txt)
+
+        # ---- a second write is a byte-for-byte no-op --------------------------
+        again_txt, _err = rdrv.call("measure", write=True)
+        recheck_txt, _err2 = rdrv.call("measure")
+        problems = []
+        if rdrv.page_text(R_MEASURED_FILE) != after:
+            problems.append("a second write changed the page, so the render is "
+                            "not a fixed point")
+        if r_measure_rows(recheck_txt).get((R_MEASURED_FILE, R_NAME)):
+            problems.append("check still reports a row for a region it just "
+                            "rendered: %r"
+                            % r_measure_rows(recheck_txt)[(R_MEASURED_FILE,
+                                                           R_NAME)])
+        if r_measure_summary(recheck_txt).get("ok") != 1:
+            problems.append("the summary says %r, want exactly one `ok`"
+                            % r_measure_summary(recheck_txt))
+        suite.record("R", "a-rendered-region-is-a-fixed-point", problems,
+                     detail=[_d("summary", "%r" % r_measure_summary(recheck_txt)),
+                             _d("why", "the three states only mean anything if "
+                                       "`ok` is reachable and sticks")],
+                     text=recheck_txt)
+
+        # ---- a HAND EDIT is refused, never silently overwritten ---------------
+        edited = after.replace(R_BODY_LINES[0], "TYPED-BY-A-HUMAN")
+        rdrv.write_page(R_MEASURED_FILE, edited)
+        refuse_txt, _err = rdrv.call("measure", write=True)
+        survived = rdrv.page_text(R_MEASURED_FILE)
+        problems = []
+        if edited == after:
+            problems.append("fixture drift: the edit changed nothing, so the "
+                            "case is comparing a page with itself")
+        if r_measure_rows(refuse_txt).get((R_MEASURED_FILE, R_NAME)) \
+                != "HAND-EDITED":
+            problems.append("write mode reported %r for a body that no longer "
+                            "hashes to its recorded digest"
+                            % r_measure_rows(refuse_txt).get((R_MEASURED_FILE,
+                                                              R_NAME)))
+        if survived != edited:
+            problems.append("the hand edit was OVERWRITTEN -- the one thing this "
+                            "mechanism promises not to do")
+        if "force" not in refuse_txt:
+            problems.append("the refusal does not name the way out, so a caller "
+                            "who meant the edit has nowhere to go")
+        suite.record("R", "a-hand-edit-is-refused-never-overwritten", problems,
+                     detail=[_d("edit", "%r -> %r" % (R_BODY_LINES[0],
+                                                      "TYPED-BY-A-HUMAN")),
+                             _d("verdict", "%r" % r_measure_rows(refuse_txt).get(
+                                 (R_MEASURED_FILE, R_NAME))),
+                             _d("survived", "%r" % (survived == edited)),
+                             _d("why", "the file gets exactly ONE writer, and a "
+                                       "human who typed inside a generated block "
+                                       "is owed a refusal rather than a silent "
+                                       "loss (amalgamate.py's rule, restated)")],
+                     text=refuse_txt)
+
+        # ---- force discards it, and only then ---------------------------------
+        forced_txt, _err = rdrv.call("measure", write=True, force=True)
+        restored = rdrv.page_text(R_MEASURED_FILE)
+        forced_region = r_region_of(rmod, restored, R_NAME)
+        problems = []
+        if restored != after:
+            problems.append("force did not restore the rendered page:\n"
+                            "  want %r\n  got  %r" % (after, restored))
+        if forced_region and forced_region["body"] != R_WANT_BODY:
+            problems.append("the body after force is %r" % forced_region["body"])
+        if r_measure_rows(forced_txt).get((R_MEASURED_FILE, R_NAME)) != "updated":
+            problems.append("force reported %r"
+                            % r_measure_rows(forced_txt).get((R_MEASURED_FILE,
+                                                              R_NAME)))
+        suite.record("R", "force-discards-the-hand-edit", problems,
+                     detail=[_d("restored", "%r" % (restored == after)),
+                             _d("why", "the escape hatch has to exist or the "
+                                       "refusal above becomes a dead end -- and "
+                                       "it has to be ASKED for, or the refusal "
+                                       "was never a refusal")],
+                     text=forced_txt)
+
+        # ---- INERTNESS: a marker that is not on its own line at column 0 ------
+        fenced_text = rdrv.page_text(R_FENCED_FILE)
+        fenced_regions = rmod.measured_regions(R_FENCED_FILE, fenced_text)
+        problems = []
+        if R_BEGIN % R_INERT_NAME not in fenced_text:
+            problems.append("fixture drift: the page carries no marker text at "
+                            "all, so nothing is being held inert")
+        if fenced_regions:
+            problems.append("%d region(s) found on a page whose every marker is "
+                            "quoted: %r"
+                            % (len(fenced_regions),
+                               [r["name"] for r in fenced_regions]))
+        if any(name == R_INERT_NAME for (_p, name) in check_rows):
+            problems.append("the inert name reached a measure row, so a quoted "
+                            "marker became a live region")
+        if R_INERT_NAME in wrote_txt:
+            problems.append("write mode named the inert region, so the fence is "
+                            "not holding")
+        suite.record("R", "a-quoted-marker-is-inert", problems,
+                     detail=[_d("spellings", "backtick fence, tilde fence, "
+                                             "inline span, 4-space block, "
+                                             "list bullet"),
+                             _d("regions", "%r" % fenced_regions),
+                             _d("rule 1", "a marker is the WHOLE line at column "
+                                          "0 -- which is what makes the last "
+                                          "three inert"),
+                             _d("rule 2", "a fenced code block is skipped -- "
+                                          "which is what makes the first two "
+                                          "inert, and what lets a page document "
+                                          "the mechanism"),
+                             _d("declared", "Markdown has no tokenize(), so this "
+                                            "is two mechanical rules rather than "
+                                            "a grammar; an HTML comment cannot "
+                                            "nest and is NOT covered")],
+                     text=fenced_text)
+
+        # ---- BEGIN without END, and the other two malformed pairs -------------
+        closed = "%s\nbody\n%s\n" % (R_BEGIN % R_NAME, R_END % "")
+        probes = {
+            "begin-without-end": "%s\nbody\n" % (R_BEGIN % R_NAME),
+            "end-without-begin": "%s\n" % (R_END % ""),
+            "begin-inside-begin": "%s\n%s\nbody\n%s\n" % (
+                R_BEGIN % R_NAME, R_BEGIN % R_ABSENT, R_END % ""),
+        }
+        problems, rows = [], []
+        for label, text in probes.items():
+            message = r_raises(rmod, text)
+            rows.append("%-20s %s" % (label, message or "(NOT REFUSED)"))
+            if not message:
+                problems.append("%s was accepted silently -- a region nobody "
+                                "closes swallows every line below it" % label)
+        if r_raises(rmod, closed):
+            problems.append("a well-formed pair was refused: %s"
+                            % r_raises(rmod, closed))
+        if len(rmod.measured_regions("probe.md", closed)) != 1:
+            problems.append("the control pair did not yield exactly one region")
+        suite.record("R", "an-unbalanced-marker-pair-is-a-hard-error", problems,
+                     detail=[_d("control", "a closed pair yields 1 region"),
+                             _d("why", "a BEGIN whose END never arrives is the "
+                                       "silent form of the failure this whole "
+                                       "mechanism exists to prevent")]
+                            + ["        " + r for r in rows])
+
+        # ---- a NEAR MISS is refused, not skipped ------------------------------
+        near = "<!--  BEGIN MEASURED: %s -->\n%s\n" % (R_NAME, R_END % "")
+        legal = "%s\n%s\n" % (R_BEGIN % "a.name-with_1", R_END % "")
+        near_msg = r_raises(rmod, near)
+        problems = []
+        if not near_msg:
+            problems.append("a marker with a doubled space was SKIPPED, so a "
+                            "typo inside an HTML comment silently retires a "
+                            "measured region and nothing ever says so")
+        elif R_NAME not in near_msg and "MEASURED" not in near_msg:
+            problems.append("the refusal does not show the line it refused: %r"
+                            % near_msg)
+        if r_raises(rmod, legal):
+            problems.append("a legal name was refused: %s" % r_raises(rmod, legal))
+        suite.record("R", "a-near-miss-marker-is-refused-not-skipped", problems,
+                     detail=[_d("probe", "%r" % near.splitlines()[0]),
+                             _d("message", "%s" % (near_msg or "(none)")),
+                             _d("why", "invisible in every rendered view of the "
+                                       "page, so silence here is permanent")])
+
+        # ---- one malformed page does not blind the walk -----------------------
+        broken_work = H.TempWorkspace("ph-wiki-broken-", keep=opts.keep)
+        try:
+            broot = build_broken_marker_fixture(broken_work)
+            bdrv = Driver(broot, name="mcp_wiki_broken")
+            patch_git_table(bdrv.mod, broot, {})
+            btxt, berr = bdrv.call("measure")
+            brows = r_measure_rows(btxt)
+            bverify = r_region_report(bdrv.mod, bdrv.abs_wiki)
+            bmalformed = sorted(p["path"] for p in bverify["gating"]
+                                if p["malformed"])
+            problems = []
+            if berr:
+                problems.append("the whole call failed on a corpus with two bad "
+                                "pages: %s" % btxt[:200])
+            if brows.get((R_BROKEN_GOOD, R_NAME)) != "CHANGED":
+                problems.append("the READABLE page was not classified (%r) -- a "
+                                "walk that stops at the first bad page reports "
+                                "nothing, which reads exactly like clean"
+                                % brows.get((R_BROKEN_GOOD, R_NAME)))
+            for fname in (R_BROKEN_OPEN, R_BROKEN_NEARMISS):
+                if "MALFORMED: %s" % fname not in btxt:
+                    problems.append("%s is not reported malformed" % fname)
+            if bmalformed != sorted((R_BROKEN_OPEN, R_BROKEN_NEARMISS)):
+                problems.append("verify names %r as malformed, want %r"
+                                % (bmalformed,
+                                   sorted((R_BROKEN_OPEN, R_BROKEN_NEARMISS))))
+            suite.record("R", "one-malformed-page-does-not-blind-the-walk",
+                         problems,
+                         detail=[_d("rows", "%r" % sorted(brows.items())),
+                                 _d("malformed", "%r" % bmalformed),
+                                 _d("why", "reported PER PAGE, because a report "
+                                           "that says nothing cannot be told "
+                                           "from one that says all is well")],
+                         text=btxt)
+        finally:
+            broken_work.cleanup()
+
+        # ---- STRUCTURAL: no read path can reach an execution ------------------
+        graph = r_call_graph(SERVER)
+        read_reach = {fn: sorted(r_reachable(graph, rmod.HANDLERS[fn].__name__)
+                                 & {"_measure_run", "_ExecutionGrant"})
+                      for fn in rmod.READ_ONLY_FUNCTIONS}
+        grant_reach = {fn: sorted(r_reachable(graph, rmod.HANDLERS[fn].__name__)
+                                  & {"_measure_run", "_ExecutionGrant"})
+                       for fn in sorted(rmod.MEASURE_GRANTED_FUNCTIONS)}
+        problems = []
+        for fn, hits in sorted(read_reach.items()):
+            if hits:
+                problems.append("the read path %r reaches %r -- a corpus file "
+                                "naming argv is one call away from a handler "
+                                "nobody asked to execute anything" % (fn, hits))
+        for fn, hits in sorted(grant_reach.items()):
+            if "_measure_run" not in hits:
+                problems.append("%r can no longer reach _measure_run, so the "
+                                "read-path claim above passes because the "
+                                "mechanism is gone, not because it is fenced"
+                                % fn)
+        missing = sorted((set(rmod.READ_ONLY_FUNCTIONS)
+                          | set(rmod.MEASURE_GRANTED_FUNCTIONS))
+                         ^ set(rmod.HANDLERS))
+        if missing:
+            problems.append("these handlers are in neither register, so nobody "
+                            "decided whether they may execute: %r" % missing)
+        suite.record("R", "no-read-path-can-reach-an-execution", problems,
+                     detail=[_d("read paths", "%r" % list(rmod.READ_ONLY_FUNCTIONS)),
+                             _d("granted", "%r" % sorted(rmod.MEASURE_GRANTED_FUNCTIONS)),
+                             _d("reach", "%r" % grant_reach),
+                             _d("how", "the call graph of this file's AST, not "
+                                       "an observation that today's search "
+                                       "happens not to spawn -- and asserted in "
+                                       "BOTH directions, so deleting the "
+                                       "mechanism cannot turn the gate green")])
+
+        # ---- STRUCTURAL: the spawn sites are the two declared -----------------
+        sites = r_spawn_sites(SERVER)
+        problems = []
+        if sites != R_SPAWN_SITES:
+            problems.append("subprocess is called from %r, the declared set is "
+                            "%r -- a third child process in a wiki server is a "
+                            "decision, not a detail"
+                            % (sorted(sites), sorted(R_SPAWN_SITES)))
+        suite.record("R", "the-spawn-sites-are-the-two-declared", problems,
+                     detail=[_d("measured", "%r" % sorted(sites)),
+                             _d("declared", "%r" % sorted(R_SPAWN_SITES)),
+                             _d("why", "git runs a fixed argv this server "
+                                       "writes; _measure_run runs one a repo "
+                                       "file named; there is no third kind")])
+
+        # ---- the grant cannot be improvised ----------------------------------
+        problems = []
+        try:
+            rmod._ExecutionGrant("search")
+            problems.append("a grant was minted for a read path")
+        except ValueError:
+            pass
+        entry = registry[R_NAME]
+        for bad in (None, "measure", object()):
+            try:
+                rmod._measure_run(R_NAME, entry, rroot, bad)
+                problems.append("_measure_run accepted %r as a grant" % (bad,))
+            except TypeError:
+                pass
+        body, error = rmod._measure_run(R_NAME, entry, rroot,
+                                        rmod._ExecutionGrant("measure"))
+        if error or body != R_WANT_BODY:
+            problems.append("a real grant did not render: %r / %r" % (body, error))
+        suite.record("R", "the-execution-grant-cannot-be-improvised", problems,
+                     detail=[_d("refused", "a grant for a read function, and "
+                                           "None / a string / a bare object as "
+                                           "the argument"),
+                             _d("accepted", "_ExecutionGrant(%r)" % "measure"),
+                             _d("why", "the capability has no default anywhere, "
+                                       "so the spawn cannot be reached by "
+                                       "forgetting a parameter")])
+
+        # ---- every anchor resolves the way the table says ---------------------
+        anchor_cache = {}
+        problems, rows = [], []
+        for span, want in R_BODY_ANCHORS:
+            if want == "not-an-anchor":
+                continue
+            kind, reason = rmod._resolve_anchor(span, rroot, anchor_cache)
+            rows.append("%-34s %-16s %s" % (span, kind, reason))
+            if kind != want:
+                problems.append("%r resolved %r, want %r (%s)"
+                                % (span, kind, want, reason))
+        for span, want in sorted(R_SOURCE_KINDS.items()):
+            kind, reason = rmod._resolve_anchor(span, rroot, anchor_cache)
+            rows.append("%-34s %-16s %s  (sources)" % (span, kind, reason))
+            if kind != want:
+                problems.append("sources %r resolved %r, want %r"
+                                % (span, kind, want))
+        suite.record("R", "an-anchor-resolves-or-is-named", problems,
+                     detail=[_d("py", "def / class / single-target assignment"),
+                             _d("md", "a heading carrying the symbol"),
+                             _d("other", "a whole-word MENTION, reported as weak "
+                                         "-- it proves the file names the symbol, "
+                                         "never that it defines it"),
+                             _d("line ref", "path:12-20 resolves the FILE and "
+                                            "does not check the range")]
+                            + ["        " + r for r in rows])
+
+        # ---- DECLARED vs DISCOVERED ------------------------------------------
+        anchored_body = rdrv.page_text(R_ANCHOR_FILE)
+        top_level = rmod._repo_top_level(rroot)
+        found = rmod._anchor_candidates(anchored_body, top_level)
+        want_found = [s for s, k in R_BODY_ANCHORS if k != "not-an-anchor"]
+        rejected = [s for s, k in R_BODY_ANCHORS if k == "not-an-anchor"]
+        vreport = r_region_report(rmod, rdrv.abs_wiki)
+        anchor_page = [p for p in vreport["gating"] if p["path"] == R_ANCHOR_FILE]
+        broken_sources = sorted(b["anchor"] for p in anchor_page
+                                for b in p["broken"] if b["where"] == "sources")
+        problems = []
+        if found != want_found:
+            problems.append("the body yielded %r, want %r" % (found, want_found))
+        for span in rejected:
+            if span in found:
+                problems.append("%r was treated as an anchor; it is prose" % span)
+        if R_SRC_ELSEWHERE not in broken_sources:
+            problems.append("a DECLARED source under a directory that does not "
+                            "exist at the repo root was not reported (%r) -- the "
+                            "top-level rule belongs to body spans alone, because "
+                            "frontmatter is a claim and not a guess"
+                            % broken_sources)
+        if any(s.startswith("nowhere/") for p in anchor_page
+               for b in p["broken"] for s in [b["anchor"]]):
+            problems.append("a body span under a directory that does not exist "
+                            "at the repo root was reported as a dead anchor")
+        suite.record("R", "a-source-is-declared-a-body-span-is-discovered",
+                     problems,
+                     detail=[_d("checked", "%d body span(s)" % len(found)),
+                             _d("rejected", "%r" % rejected),
+                             _d("sources", "%r" % broken_sources),
+                             _d("measured", "on the real corpus the top-level "
+                                            "rule alone took the finding count "
+                                            "from 30 to 4, and 26 of the 30 were "
+                                            "sentences, not claims")])
+
+        # ---- verify reports only what it can prove without executing ----------
+        plain = r_region_report(rmod, rdrv.abs_wiki)
+        run_it = r_region_report(rmod, rdrv.abs_wiki, render=True)
+        plain_states = {s: plain["summary"].get(s, 0)
+                        for s in rmod.MEASURED_STATES if plain["summary"].get(s)}
+        run_states = {s: run_it["summary"].get(s, 0)
+                      for s in rmod.MEASURED_STATES if run_it["summary"].get(s)}
+        problems = []
+        if plain["rendered"]:
+            problems.append("the default report claims it rendered")
+        if not run_it["rendered"]:
+            problems.append("the opt-in report does not claim it rendered")
+        if plain_states != r_state_counts(R_STATE_WITHOUT_RENDER):
+            problems.append("without execution the states are %r, want %r"
+                            % (plain_states,
+                               r_state_counts(R_STATE_WITHOUT_RENDER)))
+        if run_states != r_state_counts(R_STATE_WITH_RENDER):
+            problems.append("with execution the states are %r, want %r"
+                            % (run_states, r_state_counts(R_STATE_WITH_RENDER)))
+        if plain_states == run_states:
+            problems.append("the two reports are identical, so the opt-in bought "
+                            "nothing and the boundary is untestable here")
+        suite.record("R", "verify-reports-only-what-it-can-prove", problems,
+                     detail=[_d("default", "%r" % plain_states),
+                             _d("measure=true", "%r" % run_states),
+                             _d("why", "`not-rendered` is neither a pass nor a "
+                                       "defect: it is `I did not check`, which "
+                                       "is the only honest word for a command "
+                                       "nobody authorized")])
+
+        # ---- the gating SET, and the answer that names it ---------------------
+        verify_txt, verify_err = rdrv.call("verify")
+        nums = r_verify_numbers(verify_txt)
+        gating_paths = sorted(p["path"] for p in plain["gating"])
+        want_checked = (len([s for s, k in R_BODY_ANCHORS if k != "not-an-anchor"])
+                        + len(R_SOURCE_KINDS)
+                        + sum(len(p[R_SRCS]) for p in R_PAGES
+                              if p[R_FILE] != R_ANCHOR_FILE))
+        dead = ("missing-symbol", "missing-path", "unreadable")
+        want_unres = (len([s for s, k in R_BODY_ANCHORS if k in dead])
+                      + len([s for s, k in R_SOURCE_KINDS.items() if k in dead]))
+        problems = []
+        if verify_err:
+            problems.append("the call failed: %s" % verify_txt[:200])
+        if gating_paths != sorted(R_GATING_PAGES):
+            problems.append("verify gates %r, want %r"
+                            % (gating_paths, sorted(R_GATING_PAGES)))
+        if nums["checked"] != want_checked:
+            problems.append("it checked %r anchors, the fixture declares %d"
+                            % (nums["checked"], want_checked))
+        if nums["unresolved"] != want_unres:
+            problems.append("it reports %r unresolved, the fixture declares %d"
+                            % (nums["unresolved"], want_unres))
+        if nums["gating"] != rmod.verify_gating_count(plain):
+            problems.append("the rendered gating (%r) is not what the module "
+                            "computes (%r)"
+                            % (nums["gating"], rmod.verify_gating_count(plain)))
+        suite.record("R", "verify-names-every-page-it-gates", problems,
+                     detail=[_d("gating", "%r" % gating_paths),
+                             _d("anchors", "%r" % nums),
+                             _d("why", "this is the job a human does one anchor "
+                                       "at a time; the report is only worth "
+                                       "anything if it names the page AND the "
+                                       "anchor")],
+                     text=verify_txt)
+
+        # ---- freshness: `gating` is what verify PROVES ------------------------
+        fresh_txt = rdrv.freshness()
+        fresh = parse_freshness(fresh_txt)
+        old_formula = sum(fresh["buckets"].get(s, []).__len__()
+                          for s in R_OLD_GATING_STATES)
+        problems = []
+        if fresh["gating_states"] != list(rmod.GATING_CLASSES):
+            problems.append("the report defines gating as %r, the module "
+                            "publishes %r" % (fresh["gating_states"],
+                                              list(rmod.GATING_CLASSES)))
+        if fresh["gating"] != rmod.verify_gating_count(plain):
+            problems.append("freshness says gating %r, verify proves %r"
+                            % (fresh["gating"], rmod.verify_gating_count(plain)))
+        if fresh["gating"] == old_formula:
+            problems.append("the new number equals the old formula (%d), so "
+                            "this fixture cannot tell the rename from a no-op"
+                            % old_formula)
+        for page in sorted(R_GATING_PAGES):
+            if page not in fresh_txt:
+                problems.append("the gating detail never names %r" % page)
+        suite.record("R", "freshness-gating-is-what-verify-proves", problems,
+                     detail=[_d("gating", "%r %r" % (fresh["gating"],
+                                                     fresh["gating_states"])),
+                             _d("old formula", "%d (%s)"
+                                % (old_formula, " + ".join(R_OLD_GATING_STATES))),
+                             _d("why", "git lag cannot tell a moved comma from a "
+                                       "reversed decision, so it was never a "
+                                       "verdict -- measured on the real wiki, 22 "
+                                       "of 32 pages gated at a median lag of 61 "
+                                       "commits")],
+                     text=fresh_txt)
+
+        # ---- freshness: git lag is an ADVISORY that says what it is -----------
+        adv = _R_ADVISORY_RE.search(fresh_txt)
+        want_moved = len([p for p in R_PAGES if p[R_STATE] == "stale"])
+        want_unchecked = len([p for p in R_PAGES if p[R_STATE] == "unverified"])
+        problems = []
+        if not adv:
+            problems.append("there is no advisory line at all, so git lag is "
+                            "either gone or still masquerading as a verdict")
+        else:
+            if int(adv.group("moved")) != want_moved:
+                problems.append("the advisory counts %s moved-source page(s), "
+                                "the fixture has %d"
+                                % (adv.group("moved"), want_moved))
+            if int(adv.group("unchecked")) != want_unchecked:
+                problems.append("the advisory counts %s not-checkable page(s), "
+                                "the fixture has %d"
+                                % (adv.group("unchecked"), want_unchecked))
+        for word in ("MEASUREMENT", "not a verdict"):
+            if word not in fresh_txt:
+                problems.append("the advisory never says %r, and that phrase IS "
+                                "the claim being withdrawn" % word)
+        for status in rmod.ADVISORY_STATUSES:
+            if "%s (" % status not in fresh_txt:
+                problems.append("%r lost its own detail bucket -- the "
+                                "measurement was supposed to survive the "
+                                "rename untouched" % status)
+        suite.record("R", "git-lag-is-an-advisory-that-says-it-is-one", problems,
+                     detail=[_d("advisory", "%r" % (adv.group(0) if adv else None)),
+                             _d("fixture", "%d moved, %d not checkable"
+                                % (want_moved, want_unchecked)),
+                             _d("adr 0002", "consistent: nothing is STORED and "
+                                            "nothing claims a freshness it "
+                                            "cannot measure -- what changed is "
+                                            "the word attached to a number that "
+                                            "was already being published")],
+                     text=fresh_txt)
+
+        # ---- the two new functions are wired like every other one -------------
+        problems = []
+        for fn in ("verify", "measure"):
+            if fn not in rmod.HANDLER_ACCEPTED_PARAMS:
+                problems.append("%r has no row in HANDLER_ACCEPTED_PARAMS, so "
+                                "every param it takes is unvalidated" % fn)
+            text, is_err = rdrv.call(fn, no_such_param=1)
+            if not is_err or "Unknown params" not in text:
+                problems.append("%r accepted an unknown param: %r" % (fn, text[:120]))
+        for alias, canonical in (("audit", "verify"), ("anchors", "verify"),
+                                 ("measurements", "measure")):
+            if rmod._canonical_function(alias) != canonical:
+                problems.append("%r does not resolve to %r" % (alias, canonical))
+        collisions = sorted(set(rmod.FUNCTION_ALIASES) & set(rmod.HANDLERS))
+        if collisions:
+            problems.append("these alias keys shadow a real function: %r"
+                            % collisions)
+        text, is_err = rdrv.call("verify", path_prefix="x", dir="y")
+        if not is_err or COLLISION_SENTINEL not in text:
+            problems.append("two spellings of one param were not refused: %r"
+                            % text[:160])
+        suite.record("R", "the-new-functions-are-wired-like-the-others", problems,
+                     detail=[_d("verify", "%r" % sorted(
+                         rmod.HANDLER_ACCEPTED_PARAMS.get("verify", ()))),
+                             _d("measure", "%r" % sorted(
+                                 rmod.HANDLER_ACCEPTED_PARAMS.get("measure", ()))),
+                             _d("why", "adr 0015: an alias collision is an "
+                                       "error, never a precedence")])
+
+        # ---- both new filters take the ONE prefix rule ------------------------
+        new_sites = q_rule_sites(SERVER, ("verify_analyze", "measure_scan"))
+        scoped = rdrv.call("verify", path_prefix=R_ANCHOR_FILE)[0]
+        nowhere_txt, nowhere_err = rdrv.call("verify",
+                                             path_prefix="zz-no-such-scope/")
+        problems = []
+        for name in ("verify_analyze", "measure_scan"):
+            info = new_sites.get(name)
+            if info is None:
+                problems.append("%s is gone, so the scope claim has no subject"
+                                % name)
+                continue
+            if not info["uses"]:
+                problems.append("%s does not call the shared predicate, so a "
+                                "fifth spelling of what a prefix means has "
+                                "landed" % name)
+            if info["copies"]:
+                problems.append("%s re-spells the prefix test at %r"
+                                % (name, info["copies"]))
+        for page in sorted(R_GATING_PAGES - {R_ANCHOR_FILE}):
+            if page in scoped:
+                problems.append("a scope naming one page reported %r too" % page)
+        if R_ANCHOR_FILE not in scoped:
+            problems.append("a whole page path selected nothing")
+        if nowhere_err or rmod.NO_SCOPE_SENTINEL not in nowhere_txt:
+            problems.append("a scope nobody is in was not refused by name: %r"
+                            % nowhere_txt[:200])
+        suite.record("R", "verify-and-measure-take-the-one-prefix-rule", problems,
+                     detail=[_d("scope", "%r selects itself alone" % R_ANCHOR_FILE),
+                             _d("refusal", "%r" % nowhere_txt.split("\n")[0]),
+                             _d("why", "adr 0018: three handlers disagreeing "
+                                       "about what a prefix means is the worse "
+                                       "defect, and a fifth caller is not a "
+                                       "reason to re-open it")],
+                     text=scoped)
+
+        # ---- a MALFORMED registry: a finding, not a crash ---------------------
+        # Runs LAST because it breaks the registry the cases above depend on.
+        region_work.write_text(os.path.join(WIKI_REL, "measurements.json"),
+                               "{ this is not json")
+        bad_fresh = rdrv.freshness()
+        bad_measure, measure_err = rdrv.call("measure")
+        bad_verify, verify_err2 = rdrv.call("verify")
+        bad_parsed = parse_freshness(bad_fresh)
+        problems = []
+        if not measure_err:
+            problems.append("measure ran against a registry it could not read -- "
+                            "it is about to WRITE, so it may not")
+        if rmod.MEASUREMENTS_FILE not in bad_measure:
+            problems.append("the measure error does not name the file: %r"
+                            % bad_measure[:160])
+        if verify_err2:
+            problems.append("verify refused instead of reporting: %r"
+                            % bad_verify[:160])
+        if bad_parsed["gating"] != fresh["gating"] + 1:
+            problems.append("a registry nothing can parse moved gating from %r "
+                            "to %r -- it breaks every region in the corpus at "
+                            "once, so it has to count"
+                            % (fresh["gating"], bad_parsed["gating"]))
+        if rmod.MEASUREMENTS_FILE not in bad_fresh:
+            problems.append("freshness never names the unreadable registry")
+        suite.record("R", "an-unreadable-registry-is-a-finding-not-a-crash",
+                     problems,
+                     detail=[_d("measure", "error=%r" % measure_err),
+                             _d("verify", "error=%r" % verify_err2),
+                             _d("gating", "%r -> %r" % (fresh["gating"],
+                                                        bad_parsed["gating"])),
+                             _d("why", "the raising loader where a write is "
+                                       "next, the reporting one where a census "
+                                       "is")],
+                     text=bad_measure)
+    finally:
+        region_work.cleanup()
 
     # ============ H: hygiene ============
     pyc_after = H.pycache_snapshot()

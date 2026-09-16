@@ -27,14 +27,28 @@ Functions:
                    lines, or — when the section misses or the body is declined —
                    just its section index) by slug/path
   list             list pages, grouped by type, with type/status/prefix filters
-  freshness        git-only staleness report (ports freshness.py logic)
+  freshness        corpus report: what verify can PROVE broken (gating) plus git
+                   lag, which is now an advisory line that says it is a
+                   measurement and not a verdict
   reindex          regenerate INDEX.md + structural audit (ports reindex.py logic)
   stats            page counts by type/status + dup/orphan/malformed audit
+  verify           resolve every `path` / `path:symbol` anchor in the corpus and
+                   report the ones that do not — the job a human currently does
+                   one anchor at a time — plus every measured region's state
+  measure          re-render the MEASURED REGIONS of the corpus: a page block
+                   whose body comes from a command in docs/measurements.json
+                   rather than from a human's keyboard. Check mode by default;
+                   a hand edit is refused, never silently overwritten
 
 The stdlib-only frontmatter parser is vendored from the p:wiki `_wikilib.py`
 (kept in sync by hand — the p:wiki schema's §5 parseable subset is the contract).
-Symbol-level anchor verification (broken/drifted) is deliberately NOT done here;
-that stays with the LLM (p:minion-librarian) via the language MCP servers.
+Symbol-level anchor verification is the WEAK half here on purpose: `verify` runs
+a stdlib text matcher and declares its own limits, while the authoritative
+resolution stays with the LLM (p:minion-librarian) via the language MCP servers.
+
+`measure` and `verify` are the only two functions that may execute anything, and
+that boundary is structural rather than conventional — see the TRUST BOUNDARY
+note above `_ExecutionGrant`.
 
 Output is always Markdown (no JSON/YAML).
 
@@ -50,6 +64,7 @@ Call `wiki_call` with no `function` to print the function list.
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -131,6 +146,50 @@ STATUS_FORBIDDEN = ("current", "stale")
 DETAIL_STATUSES = ["stale", "orphaned-source", "unverified", "promotable"]
 # Page types not bound to code sources and never freshness-tracked.
 UNTRACKED_TYPES = {"overview", "adr", "glossary"}
+
+# What `freshness` CALLS things — the vocabulary, not the measurement.
+#
+# `gating` used to mean `stale + orphaned-source + unverified`, where `stale`
+# means only that git saw one of a page's listed sources move since the page was
+# verified. Measured on this wiki, that put 22 of 32 pages in the gate at a
+# MEDIAN LAG OF 61 COMMITS: any commit touching any listed source stales a page,
+# so the number counted commits and was read as a verdict. Git lag cannot tell a
+# moved comma from a reversed decision. It is a MEASUREMENT.
+#
+# The measurement does not change — every git figure the report published it
+# still publishes, page by page, under the same status names. What changed is
+# the CLAIM attached to it:
+#
+#   * `gating` now counts what `verify` can PROVE — a `sources:` or inline
+#     anchor that does not resolve, or a measured region that is stale,
+#     hand-edited, unregistered or malformed. Those are defects; a human fixes
+#     them, or the page is wrong.
+#   * git lag moves to an `advisory:` line that says what it is, in those words.
+#     It is the honest end of the same sentence: these pages have sources that
+#     moved, a human read may be owed, and nothing here claims they are wrong.
+#
+# CONSISTENT WITH adr 0002 rather than a departure from it. That decision's rule
+# is that nothing may claim a freshness it cannot measure — it renamed a
+# hand-written `current` and suppressed it in INDEX.md because a generated file
+# cannot track HEAD. Git lag CAN measure that a file moved; what it cannot
+# measure is that a page is wrong, and calling it `gating` was exactly that
+# over-claim, one layer further in than adr 0002 reached. Nothing is stored,
+# nothing is written into a file, and freshness is still asked per call.
+#
+# `orphaned-source` appears in BOTH vocabularies and that is not a collision:
+# the state means a `sources:` path is gone from the tree, which is precisely a
+# broken anchor, reached by the git path instead of by `verify`'s walk. The two
+# agree by construction.
+GATING_CLASSES = ("orphaned-source", "broken-anchor", "measured-region")
+GATING_LINE_PREFIX = "gating: "
+ADVISORY_LINE_PREFIX = "advisory: "
+# The git-lag statuses the advisory line accounts for, in the order it names
+# them: a source that moved, and a page nothing can be compared against at all.
+ADVISORY_STATUSES = ("stale", "unverified")
+# How many gating pages `freshness` names before it defers to `verify`. The
+# report is a census with a summary; the per-defect list is `verify`'s answer,
+# and a freshness report that grew into one would be two functions.
+GATING_DETAIL_LIMIT = 10
 
 # Files / dirs that are not wiki pages (mirrors _wikilib.py).
 SKIP_FILES = {"INDEX.md"}
@@ -853,6 +912,971 @@ def _no_scope_lines(prefix: str, scopes, claim: str) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# Measured regions — a page block RENDERED from a command, never typed
+#
+# The measured shape of this wiki is what asks for this. Over its last twelve
+# documentation commits 70.5% of the work-items (31 of 44) were re-measurement
+# or stamp/INDEX bookkeeping and 11.4% (5 of 44) were new reasoning; the corpus
+# carries 352 typed tree-measurements across 7,569 lines of prose — one every
+# ~21 lines — and of the ten densest pages SIX cite numbers a script or a suite
+# in this repo already computes. A number a human re-types is a number that
+# rots. A number a command prints cannot. So a page may carry a block whose
+# body is rendered rather than written:
+#
+#     <!-- BEGIN MEASURED: mcp-server-roster -->
+#     Scripts/mcp-clangd.py
+#     ...
+#     <!-- END MEASURED: 3f9a1c2b7d40 -->
+#
+# HTML comments, so a rendered page shows nothing at all.
+#
+# The contract is `Scripts/amalgamate.py`'s, deliberately and line for line:
+# the same marker pair, the same 12-char SHA-256 over the EMITTED BODY ALONE
+# (markers excluded), the same three states — ok / stale / hand-edited — a hand
+# edit REFUSED rather than silently overwritten, and a BEGIN without an END a
+# hard error and never a skip. It is re-stated here instead of imported because
+# the two differ on the one property that cannot be shared (see INERTNESS), and
+# because `amalgamate.py` is a CLI over Python source while this is a handler
+# over Markdown; an abstraction spanning both would have to re-declare every
+# difference at run time anyway. `docs/components/generated-regions.md` is the
+# WHY of the original, and it is the WHY of this one too.
+#
+# INERTNESS — the question Markdown cannot answer the way Python does.
+# `amalgamate.py` finds its markers with `tokenize`, so a marker quoted inside
+# a docstring is a STRING token and is structurally invisible; that file's own
+# module docstring carries a full BEGIN/END pair for exactly that reason.
+# Markdown has no tokenizer and no grammar this server may assume. The property
+# is therefore obtained from two mechanical rules instead, stated here beside
+# the code that implements them:
+#
+#   1. A MARKER IS THE WHOLE LINE, AT COLUMN 0. Nothing may precede it and
+#      nothing but trailing blanks may follow. That one rule makes every inline
+#      mention inert: a marker written in prose, a marker inside a `code span`,
+#      a marker indented into a four-space code block, a marker nested under a
+#      list item — none of them is a marker. It costs a feature the Python
+#      generator has: a measured region cannot sit inside a list item, because
+#      the indentation that would place it is the same indentation that starts
+#      an indented code block, and a scanner cannot tell the two apart. The
+#      trade is deliberate. On a documentation page inertness is worth more
+#      than nesting.
+#   2. A FENCED CODE BLOCK IS INERT. ``` and ~~~ fences are tracked while
+#      scanning — CommonMark's rules: an opening fence indented at most three
+#      spaces, a closing fence of the same character and at least as long with
+#      an empty info string, an unterminated fence running to the end of the
+#      document — and every line inside one is skipped. This is what lets a
+#      page DOCUMENT the mechanism: quote the marker pair inside a fence and
+#      nothing is ever written into the example.
+#
+# DECLARED LIMITATION, because an undefined limitation is worse than a stated
+# one: HTML comments DO NOT NEST, so a marker sitting at column 0 inside
+# another multi-line `<!-- ... -->` block is NOT inert. The first `-->` has
+# already closed the outer comment as far as any HTML parser is concerned, and
+# this scanner agrees with it rather than inventing a nesting rule the format
+# does not have. Nothing else in Markdown can hide a column-0 line from rule 2.
+#
+# A NEAR MISS IS LOUD. A line that starts `<!-- BEGIN MEASURED` or
+# `<!-- END MEASURED` at column 0 and does not match the one spelling is a hard
+# error naming the line, never a silent skip. A marker that quietly stops being
+# a marker is the entire failure this mechanism exists to prevent, and a typo
+# inside an HTML comment is invisible in every rendered view of the page.
+#
+# TRUST BOUNDARY — rendering a region RUNS A COMMAND OUT OF A REPO FILE.
+# `measurements.json` is a checked-in file that names argv, so rendering is
+# execution, and execution is reachable from exactly two functions a caller has
+# to ask for by name — `measure` and `verify` — and from nowhere else. The
+# boundary is STRUCTURAL rather than a convention nobody enforces, in three
+# layers that each fail closed:
+#
+#   * ONE SPAWN SITE. `_measure_run` is the only place in this file that starts
+#     a child process for a command a repo file named. (`git()` is the file's
+#     other spawn site and it runs a fixed argv written here, never one the
+#     corpus supplies.)
+#   * A CAPABILITY ARGUMENT WITH NO DEFAULT. `_measure_run` refuses anything
+#     but an `_ExecutionGrant`, and `_ExecutionGrant` refuses to exist for a
+#     function outside MEASURE_GRANTED_FUNCTIONS. A caller cannot reach the
+#     spawn by forgetting a parameter, because the parameter is required and
+#     the value cannot be improvised.
+#   * THE READ PATHS NEVER HOLD A RENDERER. `search`, `source_to_pages`,
+#     `get_page`, `list`, `freshness`, `reindex` and `stats` never construct a
+#     grant, and — the part that makes this checkable instead of asserted —
+#     nothing they call does either. `verify_analyze`, which `freshness` DOES
+#     call, takes the rendered bodies as a plain `{name: str}` dict and has no
+#     way to produce one; handed None it reports only the region states it can
+#     prove WITHOUT running anything (hand-edited, unregistered, malformed) and
+#     says so in the answer. The wiki suite walks the call graph of every read
+#     handler over this file's AST and fails if `_measure_run` is reachable —
+#     which is a claim about the code's shape, not about today's call order.
+# ---------------------------------------------------------------------------
+
+MEASUREMENTS_FILE = "measurements.json"
+MEASURED_DIGEST_LEN = 12
+MEASURED_BEGIN_HEAD = "<!-- BEGIN MEASURED:"
+MEASURED_END_HEAD = "<!-- END MEASURED:"
+
+# Wall-clock ceiling on ONE measurement command. Deliberately far above
+# GIT_TIMEOUT_SEC: a measurement is allowed to be a whole test suite or a tree
+# walk, where every git call in this file is a single local query. What it is
+# NOT allowed to be is unbounded — `subprocess.run` with no timeout waits
+# forever, and forever is not a duration a server may spend inside a request.
+MEASURE_TIMEOUT_SEC = 120
+
+# The two functions that may turn a registry NAME into a child process. Written
+# as a set rather than checked at each call site so the grant itself can refuse,
+# which is what keeps the rule in one place; see the TRUST BOUNDARY note above.
+MEASURE_GRANTED_FUNCTIONS = frozenset(("measure", "verify"))
+
+# Every state one measured region can be in. The first three are
+# `amalgamate.py`'s; the last three are what a Markdown corpus adds — a name
+# with no registry entry, a command that could not answer, and a region nobody
+# re-rendered because the caller did not authorize execution.
+MEASURED_STATES = ("ok", "stale", "hand-edited", "unregistered", "failed",
+                   "not-rendered")
+# The subset that GATES. `not-rendered` is deliberately out: it means "this was
+# not checked", which is the one thing a freshness report must never dress up
+# as either a pass or a defect.
+MEASURED_GATING_STATES = ("stale", "hand-edited", "unregistered", "failed")
+
+_MEASURED_LOOSE_RE = re.compile(r"^<!--\s*(?:BEGIN|END) MEASURED\b")
+_MEASURED_BEGIN_RE = re.compile(
+    r"^<!-- BEGIN MEASURED: (?P<name>[A-Za-z0-9][A-Za-z0-9._-]*) -->[ \t]*$")
+_MEASURED_END_RE = re.compile(
+    r"^<!-- END MEASURED: (?P<digest>[0-9a-f]*) -->[ \t]*$")
+_FENCE_RE = re.compile(r"^(?P<mark>`{3,}|~{3,})(?P<info>.*)$")
+
+
+class MeasuredRegionError(ValueError):
+    """A page's measured markers cannot be read as a region pair.
+
+    A ValueError subclass on purpose: `handle_wiki_call` already turns a
+    ValueError into a clean tool error, so a malformed marker reaches the
+    caller as a sentence naming the page and the line instead of a traceback.
+    """
+
+
+def measured_digest(body: str) -> str:
+    """The recorded hash: SHA-256 over the emitted body ALONE, first 12 chars.
+
+    Identical rule to `amalgamate.py:body_hash`, and the markers are excluded
+    for the same reason: the hash answers "did a human edit inside the region",
+    and a hash covering its own END line could never be written.
+    """
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:MEASURED_DIGEST_LEN]
+
+
+def _fenced_line_indices(lines: List[str]) -> set:
+    """The 0-based indices of every line inside a fenced code block.
+
+    Inertness rule 2, implemented. CommonMark, as far as a documentation page
+    can use it: an opening fence is three or more backticks or tildes indented
+    at most three spaces; a backtick fence's info string may not itself contain
+    a backtick; a closing fence is the same character, at least as long, and
+    carries no info string; an UNTERMINATED fence runs to the end of the
+    document. That last clause is a real consequence and it is the right one —
+    a stray fence makes the rest of the page inert rather than making a marker
+    inside the broken block live.
+
+    The fence lines themselves are included in the set, so a marker that IS the
+    fence line (it cannot be, but the set is also read by nothing else) never
+    slips through on an off-by-one.
+    """
+    inside = set()
+    fence_char = ""
+    fence_len = 0
+    for idx, raw in enumerate(lines):
+        stripped = raw.rstrip("\n")
+        token = stripped.lstrip(" ")
+        indented = len(stripped) - len(token)
+        match = _FENCE_RE.match(token) if indented <= 3 else None
+        mark = match.group("mark") if match else ""
+        info = match.group("info") if match else ""
+        if mark and mark[0] == "`" and "`" in info:
+            match, mark = None, ""      # not a fence: info strings may not
+        if not fence_char:              # carry the fence character
+            if mark:
+                fence_char, fence_len = mark[0], len(mark)
+                inside.add(idx)
+            continue
+        inside.add(idx)
+        if mark and mark[0] == fence_char and len(mark) >= fence_len \
+                and not info.strip():
+            fence_char, fence_len = "", 0
+    return inside
+
+
+def measured_regions(label: str, text: str) -> List[dict]:
+    """Locate every measured region in *text*, or raise naming the line.
+
+    *label* is what a refusal calls the document — the docs-relative path at
+    every real call site. Split from any file reading so the scanner can be
+    exercised on a synthetic string: this repo's negative-control rule wants a
+    checker proven against mutated inputs, and a checker that needs a scratch
+    directory to prove itself has a second failure mode of its own.
+
+    Three refusals, and each is a state that must never be reachable silently:
+    a BEGIN inside an open region, an END with no BEGIN, and a BEGIN whose END
+    never arrives. The last one is the important one — a region that quietly
+    stops being maintained is the whole failure this mechanism prevents.
+    """
+    lines = text.splitlines(keepends=True)
+    fenced = _fenced_line_indices(lines)
+    regions: List[dict] = []
+    open_at: Optional[int] = None
+    open_name = ""
+    for idx, raw in enumerate(lines):
+        line = raw.rstrip("\n")
+        # Inertness rule 1: column 0, whole line. A leading space, a backtick,
+        # a `- ` bullet or any prose before the marker and it is not one.
+        if not line.startswith("<!--") or not _MEASURED_LOOSE_RE.match(line):
+            continue
+        if idx in fenced:
+            continue                    # Inertness rule 2: inside a fence
+        begin = _MEASURED_BEGIN_RE.match(line)
+        end = None if begin else _MEASURED_END_RE.match(line)
+        if begin is None and end is None:
+            raise MeasuredRegionError(
+                "%s:%d: a measured marker this server cannot read: %r. The one "
+                "spelling is '%s <name> -->' / '%s <digest> -->', at column 0, "
+                "one space around each field, the name matching "
+                "[A-Za-z0-9][A-Za-z0-9._-]*. A marker that is ALMOST right is "
+                "refused rather than skipped: a skipped one is a region nobody "
+                "updates again."
+                % (label, idx + 1, line, MEASURED_BEGIN_HEAD, MEASURED_END_HEAD))
+        if begin is not None:
+            if open_at is not None:
+                raise MeasuredRegionError(
+                    "%s:%d: BEGIN MEASURED inside the region opened at line %d"
+                    % (label, idx + 1, open_at + 1))
+            open_at, open_name = idx, begin.group("name")
+            continue
+        if open_at is None:
+            raise MeasuredRegionError(
+                "%s:%d: END MEASURED without a BEGIN" % (label, idx + 1))
+        regions.append({
+            "name": open_name,
+            "begin": open_at,
+            "end": idx,
+            "recorded": end.group("digest"),
+            "body": "".join(lines[open_at + 1:idx]),
+        })
+        open_at = None
+    if open_at is not None:
+        raise MeasuredRegionError(
+            "%s:%d: BEGIN MEASURED %r without an END — the region is open, so "
+            "everything below it would be swallowed by the next render"
+            % (label, open_at + 1, open_name))
+    return regions
+
+
+def measured_state(region: dict, rendered: Optional[str]) -> str:
+    """ok / stale / hand-edited / not-rendered for ONE region.
+
+    The first three are `amalgamate.py:Region.state`, restated rather than
+    re-derived so the two stay comparable:
+
+      * the recorded digest matches the body AND the body matches what the
+        command produced -> `ok`;
+      * a recorded digest that does NOT match the body means a human typed
+        inside the region -> `hand-edited`, which is REFUSED, never overwritten;
+      * anything else -> `stale`.
+
+    `not-rendered` is what a Markdown corpus adds and it is the honest answer to
+    the trust boundary: when nobody authorized execution, a region whose digest
+    still matches its body is UNCHECKED, not clean. Saying `ok` there would be
+    a claim about a command that was never run.
+
+    An EMPTY recorded digest classifies `stale` without rendering anything, and
+    that is provable rather than assumed: the field has never been written, so
+    nothing has ever rendered this region.
+    """
+    recorded = region["recorded"]
+    body = region["body"]
+    if not recorded:
+        return "stale"
+    if recorded != measured_digest(body):
+        return "hand-edited"
+    if rendered is None:
+        return "not-rendered"
+    return "ok" if body == rendered else "stale"
+
+
+def measured_region_state(region: dict, registry: Optional[dict],
+                          rendered: Optional[dict],
+                          errors: Optional[dict]) -> str:
+    """`measured_state` plus the two conditions that precede a render.
+
+    A region naming a measurement the registry does not define can never be
+    rendered at all, and a command that could not answer did not produce a body
+    to compare against — both are defects of the mechanism rather than states
+    of the text, so they are reported as themselves instead of collapsing into
+    `stale`, which a caller would try to fix by re-running.
+    """
+    name = region["name"]
+    if registry is not None and name not in registry:
+        return "unregistered"
+    if errors and errors.get(name):
+        return "failed"
+    return measured_state(region, (rendered or {}).get(name))
+
+
+def load_measurements(abs_root: str) -> Dict[str, dict]:
+    """Read `<wiki root>/measurements.json` — the name -> command registry.
+
+    JSON and not TOML on purpose: `tomllib` is 3.11+ and this fleet treats it as
+    optional, while `json` is already imported here and needs nothing. The file
+    is the portable half of this mechanism — another repo inheriting it should
+    have to learn one boring format, not a dependency.
+
+    Shape:
+
+        {"version": 1,
+         "measurements": {
+           "<name>": {"description": "what the number MEANS",
+                      "command": ["git", "ls-files", "--", "Scripts/mcp-*.py"]}}}
+
+    `description` is required rather than optional, and that is the one rule
+    here that is not plumbing: a rendered block with no sentence saying what it
+    counts is a number nobody can check, which is the defect this mechanism
+    exists to remove rather than automate.
+
+    An ABSENT file is not an error — a wiki with no measured region needs no
+    registry. A malformed one is, because the alternative is a region silently
+    reported `unregistered` for a reason that has nothing to do with the page.
+    """
+    path = os.path.join(abs_root, MEASUREMENTS_FILE)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise ValueError("%s cannot be read: %s" % (MEASUREMENTS_FILE, exc))
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        # Deliberately NOT `_json_error_window`. That helper exists because a
+        # character offset ("char 1530") is unactionable to a caller who built
+        # the string on the wire and cannot count to it. This one is a FILE the
+        # reader can open, and `JSONDecodeError` already carries `line N
+        # column M` -- the coordinates an editor understands. Quoting bytes back
+        # would be the worse answer AND a second wording of a sentence the fleet
+        # keeps identical in sixteen places.
+        raise ValueError(
+            "%s is not valid JSON: %s (line %d, column %d)"
+            % (MEASUREMENTS_FILE, exc.msg, exc.lineno, exc.colno))
+    entries = data.get("measurements") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        raise ValueError(
+            "%s must be an object carrying a 'measurements' object mapping a "
+            "name to {'description': str, 'command': [argv]}" % MEASUREMENTS_FILE)
+    registry: Dict[str, dict] = {}
+    for name, entry in entries.items():
+        where = "%s: measurement %r" % (MEASUREMENTS_FILE, name)
+        if not isinstance(entry, dict):
+            raise ValueError("%s is not an object" % where)
+        command = entry.get("command")
+        if (not isinstance(command, list) or not command
+                or not all(isinstance(arg, str) for arg in command)):
+            raise ValueError(
+                "%s has no 'command': it must be a non-empty argv list of "
+                "strings, run with shell=False — a string would need a shell to "
+                "split it, and a shell is a second interpreter nobody audited"
+                % where)
+        description = str(entry.get("description") or "").strip()
+        if not description:
+            raise ValueError(
+                "%s has no 'description': one line saying what the number MEANS. "
+                "A rendered block nobody can read is the defect being removed, "
+                "not the one being automated" % where)
+        registry[str(name)] = {"command": list(command),
+                               "description": description}
+    return registry
+
+
+def load_measurements_safe(abs_root: str) -> Tuple[Dict[str, dict], str]:
+    """`load_measurements` for a caller that must report rather than fail.
+
+    `freshness` walks the whole corpus and publishes counts; a malformed
+    registry there is a finding about the wiki, not a reason to refuse the
+    report. `measure` keeps the raising form: it is about to WRITE, and it may
+    not write against a file it could not read.
+    """
+    try:
+        return load_measurements(abs_root), ""
+    except ValueError as exc:
+        return {}, str(exc)
+
+
+class _ExecutionGrant:
+    """The capability that turns a registry name into a child process.
+
+    There is no default value for it anywhere, and `_measure_run` accepts
+    nothing else, so the ability to execute is carried explicitly from the one
+    handler that asked for it down to the one function that spawns. A read
+    handler cannot reach the spawn by omission — the parameter is required and
+    its value cannot be improvised.
+
+    The constructor refuses a function outside MEASURE_GRANTED_FUNCTIONS, so
+    widening the boundary is an edit to that one frozenset rather than a new
+    call site nobody reviews.
+    """
+
+    __slots__ = ("function",)
+
+    def __init__(self, function: str):
+        if function not in MEASURE_GRANTED_FUNCTIONS:
+            raise ValueError(
+                "rendering a measured region runs a command named by a file in "
+                "the repo, so it is reachable only from %s; %r is not one of "
+                "them" % (", ".join(sorted(MEASURE_GRANTED_FUNCTIONS)),
+                          function))
+        self.function = function
+
+
+def _measure_run(name: str, entry: dict, repo: str,
+                 grant: "_ExecutionGrant") -> Tuple[Optional[str], str]:
+    """Run ONE measurement command; return (stdout, error).
+
+    THE only place in this file that starts a child for an argv the corpus
+    named. Every knob is the conservative one and each is a decision:
+
+      * `shell=False` (the default, kept by passing a list) — a shell is a
+        second interpreter nobody audited, and a registry string would need one
+        to be split at all.
+      * `cwd=repo` — a measurement is about the repository, so it runs where
+        the repository is, whatever directory the server was started in.
+      * `stdin=DEVNULL` — this server's stdin is the JSON-RPC stream. A command
+        that read it would eat protocol messages and desync the session, which
+        is the same fix `git()` above carries and for the same reason.
+      * an explicit timeout — see MEASURE_TIMEOUT_SEC.
+
+    A failure is RETURNED, never raised: one broken entry must not blind a
+    corpus-wide report about the other regions, and the caller renders the
+    reason beside the region it belongs to.
+    """
+    if not isinstance(grant, _ExecutionGrant):
+        raise TypeError(
+            "_measure_run needs an _ExecutionGrant: rendering a measured region "
+            "executes a command named by a repo file, and that capability is "
+            "passed explicitly from the handler the caller asked for")
+    argv = list(entry["command"])
+    try:
+        proc = subprocess.run(
+            argv, cwd=repo,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=MEASURE_TIMEOUT_SEC,
+        )
+    except FileNotFoundError:
+        return None, "no such command: %s" % argv[0]
+    except PermissionError:
+        return None, "not executable: %s" % argv[0]
+    except OSError as exc:
+        return None, "cannot run %s: %s" % (argv[0], exc)
+    except subprocess.TimeoutExpired:
+        return None, ("timed out after %ds — a measurement is allowed to be "
+                      "slow, not unbounded" % MEASURE_TIMEOUT_SEC)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return None, "exit %d%s" % (proc.returncode,
+                                    (": " + detail[-1]) if detail else "")
+    return _measure_normalize(proc.stdout), ""
+
+
+def _measure_normalize(out: str) -> str:
+    """The emitted body for a command's stdout: no trailing blank line runs.
+
+    The body is what sits BETWEEN the markers, so it either ends in exactly one
+    newline or is empty. Normalizing here rather than at the write site means
+    the digest, the comparison and the file all see the same bytes — a
+    normalization applied on only one of the three is how a region reports
+    `stale` forever while its body is already correct.
+    """
+    trimmed = out.rstrip("\n")
+    return (trimmed + "\n") if trimmed else ""
+
+
+def _measure_bodies(registry: Dict[str, dict], repo: str,
+                    grant: "_ExecutionGrant",
+                    names=None) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Render the named measurements; return (bodies, errors), both by name.
+
+    `names` defaults to every registry entry. Callers pass the names the corpus
+    actually USES, so a registry entry no page references costs no subprocess.
+    """
+    wanted = sorted(registry) if names is None else sorted(set(names))
+    bodies: Dict[str, str] = {}
+    errors: Dict[str, str] = {}
+    for name in wanted:
+        entry = registry.get(name)
+        if entry is None:
+            continue                    # classified `unregistered`, not run
+        body, error = _measure_run(name, entry, repo, grant)
+        if error:
+            errors[name] = error
+        else:
+            bodies[name] = body
+    return bodies, errors
+
+
+def _page_text(abs_root: str, relpath: str) -> str:
+    """One page's WHOLE file text, frontmatter included.
+
+    `read_page` hands back the body alone, which is the right unit for search
+    and for anchors. A measured region is located by FILE line index, because
+    that is the coordinate the writer has to slice with, so this reads the file
+    rather than re-deriving an offset that `_body_line_offset` already proves
+    is easy to get wrong.
+    """
+    with open(os.path.join(abs_root, relpath), "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def measure_scan(abs_root: str, path_prefix=None) -> Tuple[List[dict], List[dict]]:
+    """Every measured region in the corpus, unrendered, plus the unreadable pages.
+
+    Returns (rows, malformed). A row carries the region dict plus the page it
+    came from; `malformed` carries one entry per page whose markers could not be
+    read, because ONE broken page must not hide the state of every other.
+    """
+    prefix = _scope_prefix(path_prefix)
+    rows: List[dict] = []
+    malformed: List[dict] = []
+    for relpath, _fm, _body in iter_pages(abs_root):
+        if not _path_prefix_matches(relpath, prefix):
+            continue
+        try:
+            regions = measured_regions(relpath, _page_text(abs_root, relpath))
+        except MeasuredRegionError as exc:
+            malformed.append({"path": relpath, "error": str(exc)})
+            continue
+        except OSError as exc:
+            malformed.append({"path": relpath,
+                              "error": "cannot be read: %s" % exc})
+            continue
+        for region in regions:
+            row = dict(region)
+            row["path"] = relpath
+            rows.append(row)
+    return rows, malformed
+
+
+def measure_apply(abs_root: str, relpath: str, rows: List[dict]) -> None:
+    """Rewrite one page, replacing each region's body and its END digest.
+
+    Back to front, so an earlier region's line indices stay valid — the same
+    ordering `amalgamate.py:apply_regions` uses and for the same reason.
+    """
+    text = _page_text(abs_root, relpath)
+    lines = text.splitlines(keepends=True)
+    for row in sorted(rows, key=lambda r: r["begin"], reverse=True):
+        body = row["rendered"]
+        lines[row["begin"] + 1:row["end"] + 1] = [
+            body,
+            "%s %s -->\n" % (MEASURED_END_HEAD, measured_digest(body)),
+        ]
+    with open(os.path.join(abs_root, relpath), "w", encoding="utf-8") as fh:
+        fh.write("".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# `verify` — the anchors, resolved by a script instead of by hand
+#
+# A page's factual claims carry anchors (p:wiki schema §4): `path` or
+# `path:symbol`, repo-root-relative, in the frontmatter `sources:` list and
+# inline in the body beside the sentence that depends on them. Re-checking them
+# is a job a human currently does one anchor at a time — and the corpus holds
+# 689 body spans shaped like one, so doing it by hand is the bookkeeping this
+# whole line of work is removing.
+#
+# WHAT THE MATCHER CAN AND CANNOT PROVE, declared rather than implied. This is
+# a stdlib-only text matcher and it is deliberately the WEAK half of the pair:
+# the fleet's language servers (purity_call's clangd and luals backends) are the
+# real resolver, and the schema already says symbol-level verification belongs
+# to them. So this one errs toward NOT reporting a defect — in a report a human
+# acts on, a false BROKEN costs more than a missed one.
+#
+#   * DECLARED vs DISCOVERED, and it is the split that decides everything else.
+#     A `sources:` entry is a DECLARATION: the page says "this is what I am
+#     about", so every entry is checked exactly as written and a path that is
+#     not there is a defect. A body span is DISCOVERED — the matcher has to
+#     decide whether a backticked string is an anchor at all — so it is held to
+#     the schema's own definition: an anchor is repo-root-relative, therefore
+#     its FIRST PATH COMPONENT must be a real entry at the repo root. Measured
+#     on this corpus, that one rule is the difference between 30 findings and 2:
+#     `subsystems/`, `adr/`, `_lib/`, `hooks/`, `sandbox-run/` are wiki- or
+#     skill-relative names used in prose; `src/deep/`, `cwd/.git`, `a/tests/`,
+#     `other/foo.py` are worked examples inside an argument; and
+#     `lite.duckduckgo.com/lite/` is a URL. None of them is an anchor and all of
+#     them would have been reported as one.
+#   * A body anchor must carry a `/`. A backticked bare word is overwhelmingly
+#     an identifier, and a bare filename is ambiguous against the repo root.
+#   * A span carrying anything outside [A-Za-z0-9_./:+-], or starting with `~`,
+#     `/` or `.`, or carrying `..` anywhere, is not a candidate: a glob
+#     (`Scripts/mcp-*.py`), a home path (`~/.claude`), an absolute path, a
+#     parent traversal and an ELIDED one (`docs/adr/0003-...`) each name
+#     something that is not a file in this tree.
+#   * A `path:<digits>` or `path:<digits>-<digits>` tail is a LINE REFERENCE,
+#     not a symbol. The file is resolved and the range is not — a line number is
+#     exactly the kind of anchor this mechanism exists to stop trusting.
+#   * For a `.py` file a symbol resolves on a def / class / single-target
+#     assignment at any indentation. For a `.md` file, on a heading carrying it.
+#   * For EVERY OTHER extension the fallback is a whole-word occurrence, which
+#     proves the file MENTIONS the symbol and NOT that it defines it. Those are
+#     counted separately and reported as `by mention only`, so the report never
+#     silently converts a weak pass into a strong one.
+# ---------------------------------------------------------------------------
+
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+_ANCHOR_SHAPE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./:+-]*$")
+_LINE_REF_RE = re.compile(r"^\d+(?:-\d+)?$")
+
+
+def _anchor_shaped(span: str, need_slash: bool = True) -> bool:
+    """Is this code span SHAPED like a repo-relative anchor? See the notes above."""
+    span = span.strip()
+    if not span or ".." in span or not _ANCHOR_SHAPE_RE.match(span):
+        return False
+    if need_slash and "/" not in span:
+        return False
+    head = span.split(":", 1)[0]
+    if head.endswith("/"):
+        return True
+    return "." in head.rsplit("/", 1)[-1]
+
+
+def _repo_top_level(repo: str) -> set:
+    """The names at the repo root — the vocabulary a body anchor may start with.
+
+    Read off the filesystem rather than typed, because a hand-written list is
+    wrong the first time a directory is added, and its failure mode here is the
+    worst one available: a real anchor silently demoted to prose.
+    """
+    try:
+        return set(os.listdir(repo))
+    except OSError:
+        return set()
+
+
+def _anchor_candidates(body: str, top_level: set) -> List[str]:
+    """Every inline code span in a page body that is an anchor.
+
+    `top_level` is the repo root's own entry names — see the DECLARED vs
+    DISCOVERED note above. A span whose first component is not one of them is
+    not an anchor at all and is not counted as one: prose full of worked
+    examples (`src/deep/`, `a/tests/foo.py`) and of wiki-relative directory
+    names (`adr/`, `subsystems/`) would otherwise fill the report with findings
+    about sentences nobody wrote as a claim about code.
+    """
+    out: List[str] = []
+    for span in _CODE_SPAN_RE.findall(body):
+        span = span.strip()
+        if not _anchor_shaped(span) or span in out:
+            continue
+        if span.split("/", 1)[0] not in top_level:
+            continue
+        out.append(span)
+    return out
+
+
+def _symbol_defined(path: str, text: str, symbol: str) -> Tuple[bool, str]:
+    """Does *text* define *symbol*, and by which rule? See the matcher notes."""
+    word = re.escape(symbol)
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".py", ".pyi"):
+        for pattern, rule in (
+                (r"^[ \t]*(?:async[ \t]+)?def[ \t]+%s\b" % word, "def"),
+                (r"^[ \t]*class[ \t]+%s\b" % word, "class"),
+                (r"^[ \t]*%s[ \t]*(?::[^=\n]+)?=[^=]" % word, "assignment")):
+            if re.search(pattern, text, re.M):
+                return True, rule
+        return False, "no def, class or assignment of %r" % symbol
+    if ext in (".md", ".markdown"):
+        if re.search(r"^#{1,6}[ \t]+.*%s" % word, text, re.M):
+            return True, "heading"
+        return False, "no heading carrying %r" % symbol
+    if re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % word, text):
+        return True, "mention"
+    return False, "%r does not occur in the file" % symbol
+
+
+def _resolve_anchor(anchor: str, repo: str, cache: dict) -> Tuple[str, str]:
+    """(kind, reason) for one anchor. `kind` is `ok`, `weak`, `line-ref`, or a
+    failure name; `reason` is what the report prints beside a failure."""
+    path = _source_path(anchor, repo)
+    symbol = anchor[len(path):].lstrip(":") or None
+    abs_path = os.path.join(repo, path)
+    if not os.path.exists(abs_path):
+        return "missing-path", "no such path in the repo"
+    if symbol is None:
+        return "ok", ""
+    if _LINE_REF_RE.match(symbol):
+        return "line-ref", ""
+    if os.path.isdir(abs_path):
+        return ("missing-symbol",
+                "%s is a directory, so it carries no symbol %r" % (path, symbol))
+    if path not in cache:
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
+                cache[path] = fh.read()
+        except OSError as exc:
+            cache[path] = None
+            return "unreadable", "cannot be read: %s" % exc
+    text = cache[path]
+    if text is None:
+        return "unreadable", "cannot be read"
+    found, rule = _symbol_defined(path, text, symbol)
+    if not found:
+        return "missing-symbol", "%s: %s" % (path, rule)
+    return ("weak" if rule == "mention" else "ok"), rule
+
+
+def verify_analyze(root: str, registry=None, registry_error: str = "",
+                   rendered=None, errors=None, path_prefix=None) -> dict:
+    """Resolve every anchor and classify every measured region, page by page.
+
+    `rendered` maps a measurement NAME to the body its command produced, and it
+    is the ONLY way a `stale` measured region becomes visible here. This
+    function cannot produce one — it takes strings — which is the structural
+    half of the trust boundary: `freshness` calls it with None and gets the
+    states that are provable without running anything.
+
+    `path_prefix` reuses `_path_prefix_matches`, the one rule `search`, `list`
+    and `freshness` already share. A second spelling of what a prefix means is
+    the defect adr 0018 refused to create, and a fourth caller is not a reason
+    to re-open it.
+    """
+    # A registry that could not be READ is one defect, named once. Classifying
+    # against the empty dict it degrades to would instead report every region in
+    # the corpus as `unregistered` -- N findings about pages nobody touched, for
+    # a fault none of them has. `None` is the value `measured_region_state`
+    # already reads as "nobody can say", so the regions fall back to what is
+    # still provable about them (an empty digest is stale either way) and the
+    # one real defect is counted by `verify_gating_count`.
+    if registry_error:
+        registry = None
+    repo = _repo_root_cached(root)
+    top_level = _repo_top_level(repo)
+    prefix = _scope_prefix(path_prefix)
+    cache: dict = {}
+    seen: List[str] = []
+    pages: List[dict] = []
+    summary = {"pages": 0, "anchors": 0, "resolved": 0, "unresolved": 0,
+               "weak": 0, "line_refs": 0, "regions": 0}
+    for state in MEASURED_STATES:
+        summary[state] = 0
+    for relpath, fm, body in iter_pages(root):
+        seen.append(relpath)
+        if not _path_prefix_matches(relpath, prefix):
+            continue
+        summary["pages"] += 1
+        row = {"path": relpath, "name": fm.get("name") or relpath,
+               "broken": [], "regions": [], "malformed": ""}
+        anchors = [("sources", str(a)) for a in as_list(fm.get("sources"))
+                   if _anchor_shaped(str(a), need_slash=False)]
+        anchors += [("body", a) for a in _anchor_candidates(body, top_level)]
+        for where, anchor in anchors:
+            summary["anchors"] += 1
+            kind, reason = _resolve_anchor(anchor, repo, cache)
+            if kind == "ok":
+                summary["resolved"] += 1
+            elif kind == "weak":
+                summary["resolved"] += 1
+                summary["weak"] += 1
+            elif kind == "line-ref":
+                summary["resolved"] += 1
+                summary["line_refs"] += 1
+            else:
+                summary["unresolved"] += 1
+                row["broken"].append({"anchor": anchor, "where": where,
+                                      "kind": kind, "reason": reason})
+        try:
+            regions = measured_regions(relpath, _page_text(root, relpath))
+        except MeasuredRegionError as exc:
+            row["malformed"] = str(exc)
+            regions = []
+        except OSError as exc:
+            row["malformed"] = "cannot be read: %s" % exc
+            regions = []
+        for region in regions:
+            summary["regions"] += 1
+            state = measured_region_state(region, registry, rendered, errors)
+            summary[state] = summary.get(state, 0) + 1
+            row["regions"].append({
+                "name": region["name"], "state": state,
+                "recorded": region["recorded"],
+                "found": measured_digest(region["body"]),
+                "error": (errors or {}).get(region["name"], "")})
+        if (row["broken"] or row["malformed"]
+                or any(r["state"] in MEASURED_GATING_STATES
+                       for r in row["regions"])):
+            pages.append(row)
+    report = {"root": root, "repo": repo, "gating": pages, "summary": summary,
+              "registry_error": registry_error, "rendered": rendered is not None}
+    if prefix:
+        report["path_prefix"] = prefix
+        if not summary["pages"]:
+            report["scopes"] = _corpus_scopes(seen)
+    return report
+
+
+def verify_gating_count(report) -> int:
+    """How many things `verify` can PROVE are broken in this report.
+
+    Pages plus, when it is unreadable, the registry itself: a `measurements.json`
+    nothing can parse breaks every region in the corpus at once, so counting it
+    as zero would publish a clean number over a mechanism that is not running.
+    """
+    report = report or {}
+    return len(report.get("gating") or []) + (1 if report.get("registry_error")
+                                              else 0)
+
+
+def _verify_page_reasons(page) -> List[str]:
+    """One human line per defect on one page, in the order they were found."""
+    out = []
+    if page.get("malformed"):
+        out.append("measured markers: %s" % page["malformed"])
+    for broken in page.get("broken", []):
+        out.append("%s: %s — %s" % (broken["where"], broken["anchor"],
+                                    broken["reason"] or broken["kind"]))
+    for region in page.get("regions", []):
+        if region["state"] not in MEASURED_GATING_STATES:
+            continue
+        detail = region.get("error") or ""
+        if region["state"] == "hand-edited":
+            detail = ("recorded %s, found %s; re-run measure with force: true "
+                      "to discard the edit"
+                      % (region["recorded"] or "—", region["found"]))
+        elif region["state"] == "unregistered":
+            detail = "%s defines no such measurement" % MEASUREMENTS_FILE
+        elif region["state"] == "stale" and not detail:
+            detail = "the rendered body is not what the page carries"
+        out.append("measured region %s — %s: %s"
+                   % (region["name"], region["state"], detail))
+    return out
+
+
+def verify_render(report, rel_root: str) -> str:
+    """The `verify` answer. Not paged: it is an audit, and a cut audit misleads."""
+    summary = report["summary"]
+    prefix = report.get("path_prefix") or ""
+    head = "# verify: %d page(s) in %s/" % (summary["pages"], rel_root)
+    if prefix:
+        head += " — path_prefix %r" % prefix
+    if prefix and not summary["pages"]:
+        return "\n".join([head, ""] + _no_scope_lines(
+            prefix, report.get("scopes") or [],
+            "the wiki having nothing broken")) + "\n"
+    lines = [head, ""]
+    if report.get("registry_error"):
+        lines += ["registry (1):", "- %s" % report["registry_error"], ""]
+    if report["gating"]:
+        lines.append("gating pages (%d):" % len(report["gating"]))
+        for page in report["gating"]:
+            lines.append("- %s `%s`" % (page["name"], page["path"]))
+            for reason in _verify_page_reasons(page):
+                lines.append("    %s" % reason)
+        lines.append("")
+    extra = []
+    if summary["weak"]:
+        extra.append("%d by mention only" % summary["weak"])
+    if summary["line_refs"]:
+        extra.append("%d line reference(s)" % summary["line_refs"])
+    lines.append("anchors: %d checked, %d resolved%s, %d unresolved"
+                 % (summary["anchors"], summary["resolved"],
+                    (" (%s)" % ", ".join(extra)) if extra else "",
+                    summary["unresolved"]))
+    region_bits = ["%d %s" % (summary[state], state) for state in MEASURED_STATES
+                   if summary.get(state)]
+    lines.append("measured regions: %d%s"
+                 % (summary["regions"],
+                    (" — " + ", ".join(region_bits)) if region_bits else ""))
+    if not report["rendered"]:
+        lines.append("  not re-rendered: rendering runs the commands "
+                     "%s names, so it is opt-in — pass measure: true, or call "
+                     "measure. Everything above is provable without executing "
+                     "anything." % MEASUREMENTS_FILE)
+    lines.append("gating: %d" % verify_gating_count(report))
+    lines += ["",
+              "The symbol matcher is stdlib text: a .py symbol resolves on a "
+              "def/class/assignment, a .md symbol on a heading, and every other "
+              "extension falls back to a whole-word MENTION — which proves the "
+              "file names the symbol, not that it defines it. Those are the "
+              "`by mention only` count above. clangd and luals, via purity_call, "
+              "are the real resolver; this one errs toward reporting nothing, "
+              "because a false BROKEN costs a human more than a missed one.",
+              "A frontmatter sources: entry is checked as WRITTEN. A body span "
+              "is only treated as an anchor when its first path component is a "
+              "real entry at the repo root, which is what the schema means by "
+              "repo-root-relative — so wiki-relative directory names and worked "
+              "examples in prose are not reported. The residue that rule cannot "
+              "remove: an illustrative path under a REAL top-level directory is "
+              "indistinguishable from a dead anchor by shape, and is reported."]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def measure_render(rows, malformed, registry, rel_root: str, wrote: bool,
+                   forced: bool) -> str:
+    """The `measure` answer: one line per region that is not `ok`.
+
+    Modelled on `amalgamate.py`'s CLI — `CHANGED:` in check mode, `updated:` when
+    it wrote, `HAND-EDITED:` for the edit it refuses. A clean check prints its
+    counts and nothing else, which is the same verdict-by-silence that file's
+    `--check` gives a hook.
+    """
+    counts: Dict[str, int] = {}
+    for row in rows:
+        counts[row["state"]] = counts.get(row["state"], 0) + 1
+    names = sorted({row["name"] for row in rows})
+    head = ("# measure: %d region(s) over %d name(s) in %s/ — %s"
+            % (len(rows), len(names), rel_root,
+               "wrote" if wrote else "check only"))
+    lines = [head, ""]
+    for item in malformed:
+        lines.append("MALFORMED: %s — %s" % (item["path"], item["error"]))
+    for row in rows:
+        label = "%s [%s]" % (row["path"], row["name"])
+        state = row["state"]
+        if state == "ok":
+            continue
+        if state == "hand-edited" and not forced:
+            lines.append("HAND-EDITED: %s — recorded %s, found %s; re-run with "
+                         "force: true to discard the edit"
+                         % (label, row["recorded"] or "—", row["found"]))
+        elif state == "unregistered":
+            lines.append("UNREGISTERED: %s — %s defines no such measurement%s"
+                         % (label, MEASUREMENTS_FILE,
+                            ("; it defines: " + ", ".join(sorted(registry)))
+                            if registry else " (the registry is empty)"))
+        elif state == "failed":
+            lines.append("FAILED: %s — %s" % (label, row["error"]))
+        elif row.get("written"):
+            lines.append("updated: %s — %s -> %s"
+                         % (label, row["recorded"] or "—",
+                            measured_digest(row["rendered"])))
+        else:
+            lines.append("CHANGED: %s — recorded %s, rendered %s; call measure "
+                         "with write: true"
+                         % (label, row["recorded"] or "—",
+                            measured_digest(row["rendered"] or "")))
+    if len(lines) > 2:
+        lines.append("")
+    # AS FOUND, and it says so: in write mode the states above were measured
+    # BEFORE the write, so `1 stale` beside `updated:` is the finding this call
+    # acted on, not a claim about the file that is now on disk. Re-run to see
+    # the after; that is what makes the second run's `1 ok` mean something.
+    lines.append("summary (as found): %s" % (", ".join(
+        "%d %s" % (counts.get(state, 0), state) for state in MEASURED_STATES
+        if counts.get(state)) or "no measured region under this scope"))
+    for name in names:
+        entry = registry.get(name)
+        if entry:
+            lines.append("  %s — %s" % (name, entry["description"]))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
 # Freshness (ports p:wiki/scripts/freshness.py)
 # ---------------------------------------------------------------------------
 
@@ -1181,8 +2205,39 @@ def freshness_render(report) -> str:
     if clean:
         lines.append("ok: " + ", ".join("%d %s" % (v, k) for k, v in sorted(clean.items())))
     summary = report["summary"]
-    gating = summary.get("stale", 0) + summary.get("orphaned-source", 0) + summary.get("unverified", 0)
-    lines.append("gating: %d (stale + orphaned-source + unverified)" % gating)
+    # `gating` counts what can be PROVEN broken; git lag is the advisory below.
+    # See the GATING_CLASSES note for the whole argument and for how it squares
+    # with adr 0002. `verify` is absent only when this renderer is driven
+    # directly, which no handler does -- `_fn_freshness` always attaches it.
+    verify = report.get("verify")
+    gating_pages = (verify or {}).get("gating") or []
+    lines.append("%s%d (%s)" % (GATING_LINE_PREFIX, verify_gating_count(verify),
+                                " + ".join(GATING_CLASSES)))
+    # Indented and WITHOUT a leading dash on purpose: these are not status
+    # buckets and must not read as more of them. The per-defect answer is
+    # `verify`; this is the pointer to it.
+    if (verify or {}).get("registry_error"):
+        lines.append("  %s — %s" % (MEASUREMENTS_FILE, verify["registry_error"]))
+    for page in gating_pages[:GATING_DETAIL_LIMIT]:
+        reasons = _verify_page_reasons(page)
+        # ONE reason per page, and the count of the rest: this is a census with
+        # a pointer, not the defect list. A page with four broken anchors that
+        # rendered four rows here would have turned the summary into `verify`.
+        more = (" (+%d more)" % (len(reasons) - 1)) if len(reasons) > 1 else ""
+        lines.append("  %s `%s` — %s%s" % (page["name"], page["path"],
+                                           reasons[0] if reasons else "gating",
+                                           more))
+    if len(gating_pages) > GATING_DETAIL_LIMIT:
+        lines.append("  … and %d more — call verify for the whole list"
+                     % (len(gating_pages) - GATING_DETAIL_LIMIT))
+    moved, unchecked = (summary.get(s, 0) for s in ADVISORY_STATUSES)
+    if moved or unchecked:
+        lines.append(
+            "%s%d page(s) list a source git says moved since they were "
+            "verified, %d cannot be compared at all — git lag is a MEASUREMENT, "
+            "not a verdict: it cannot tell a moved comma from a reversed "
+            "decision. A human read may be owed; nothing here is claimed wrong."
+            % (ADVISORY_LINE_PREFIX, moved, unchecked))
     if not report["pages"]:
         lines.append("no pages found")
     return "\n".join(lines).rstrip() + "\n"
@@ -1941,7 +2996,81 @@ def _fn_freshness(params, project_root, wiki_root, strict):
             "(default 'HEAD'), not a count or a limit; this repo cannot resolve "
             "%r" % head)
     report = freshness_analyze(abs_root, head, params.get("path_prefix"))
+    # Attached HERE rather than inside `freshness_analyze`, and that placement is
+    # load-bearing twice over. It keeps the analyser's return value the dict it
+    # has always been -- a git measurement and nothing else, which is what the
+    # suite pins against the committed server. And it keeps the provable half in
+    # `verify_analyze`, which takes rendered bodies as strings and cannot make
+    # one: `rendered` is None here, so this read path reports the region states
+    # that need no subprocess and says so in the answer.
+    registry, registry_error = load_measurements_safe(abs_root)
+    report["verify"] = verify_analyze(abs_root, registry=registry,
+                                      registry_error=registry_error,
+                                      path_prefix=params.get("path_prefix"))
     return _finalize(freshness_render(report), params)
+
+
+def _fn_verify(params, project_root, wiki_root, strict):
+    abs_root, rel_root = _resolve_root(params, project_root, wiki_root, strict)
+    registry, registry_error = load_measurements_safe(abs_root)
+    rendered = errors = None
+    # OPT-IN, and the default is the conservative one: everything `verify`
+    # reports by default is provable without starting a process. Re-rendering a
+    # measured region runs a command a repo file named, so it happens only when
+    # the caller asks for it in as many words -- and then through the same grant
+    # `measure` uses, never through a second door.
+    if _bool_param(params.get("measure", False), False):
+        rows, _malformed = measure_scan(abs_root, params.get("path_prefix"))
+        rendered, errors = _measure_bodies(
+            registry, _repo_root_cached(abs_root), _ExecutionGrant("verify"),
+            names={row["name"] for row in rows})
+    report = verify_analyze(abs_root, registry=registry,
+                            registry_error=registry_error, rendered=rendered,
+                            errors=errors,
+                            path_prefix=params.get("path_prefix"))
+    return _finalize(verify_render(report, rel_root), params)
+
+
+def _fn_measure(params, project_root, wiki_root, strict):
+    abs_root, rel_root = _resolve_root(params, project_root, wiki_root, strict)
+    # The RAISING loader here, not the tolerant one `freshness` uses: this
+    # handler is about to write, and it may not write against a registry it
+    # could not read. The ValueError reaches the caller as a clean tool error.
+    registry = load_measurements(abs_root)
+    write = _bool_param(params.get("write", False), False)
+    force = _bool_param(params.get("force", False), False)
+    only = str(params.get("name") or "").strip()
+    rows, malformed = measure_scan(abs_root, params.get("path_prefix"))
+    if only:
+        rows = [row for row in rows if row["name"] == only]
+        if not rows:
+            raise ValueError(
+                "no measured region named %r under this scope; the corpus "
+                "carries %s" % (only, ", ".join(sorted(
+                    {r["name"] for r in measure_scan(abs_root)[0]})) or "none"))
+    rendered, errors = _measure_bodies(registry, _repo_root_cached(abs_root),
+                                       _ExecutionGrant("measure"),
+                                       names={row["name"] for row in rows})
+    pending: Dict[str, List[dict]] = {}
+    for row in rows:
+        row["state"] = measured_region_state(row, registry, rendered, errors)
+        row["found"] = measured_digest(row["body"])
+        row["rendered"] = rendered.get(row["name"])
+        row["error"] = errors.get(row["name"], "")
+        row["written"] = False
+        if not write or row["rendered"] is None:
+            continue
+        if row["state"] == "ok":
+            continue
+        if row["state"] == "hand-edited" and not force:
+            continue                    # refused, never silently overwritten
+        row["written"] = True
+        pending.setdefault(row["path"], []).append(row)
+    for relpath, page_rows in pending.items():
+        measure_apply(abs_root, relpath, page_rows)
+    return _finalize(
+        measure_render(rows, malformed, registry, rel_root, write, force),
+        params)
 
 
 def _fn_reindex(params, project_root, wiki_root, strict):
@@ -1994,7 +3123,18 @@ HANDLERS: Dict[str, Callable[..., dict]] = {
     "freshness": _fn_freshness,
     "reindex": _fn_reindex,
     "stats": _fn_stats,
+    "verify": _fn_verify,
+    "measure": _fn_measure,
 }
+
+# The read paths — every function whose answer is derived from the corpus alone
+# and which may therefore NEVER reach `_measure_run`. Written down here rather
+# than inferred from "the ones that happen not to", because the suite walks this
+# file's call graph from each of these names and a handler added to HANDLERS
+# without a decision about this list is exactly the drift it is checking for.
+# `verify` and `measure` are the complement: see MEASURE_GRANTED_FUNCTIONS.
+READ_ONLY_FUNCTIONS = ("search", "source_to_pages", "get_page", "list",
+                       "freshness", "reindex", "stats")
 
 _COMMON_PARAMS = {"root", "max_answer_chars"}
 HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
@@ -2007,6 +3147,8 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "freshness": _COMMON_PARAMS | {"head", "path_prefix"},
     "reindex": _COMMON_PARAMS | {"check"},
     "stats": set(_COMMON_PARAMS),
+    "verify": _COMMON_PARAMS | {"path_prefix", "measure"},
+    "measure": _COMMON_PARAMS | {"path_prefix", "name", "write", "force"},
 }
 
 # Function-name aliases -> canonical handler name.
@@ -2034,6 +3176,15 @@ FUNCTION_ALIASES = {
     # functions -- and a caller asking for `status` wants the CORPUS's state, not
     # the process's.
     "status": "stats",
+    # `anchors` is what the job is CALLED in the schema and in the librarian's
+    # own checklist ("verify anchors"), and `audit` is the word a caller reaches
+    # for when they want to know what is broken. Neither collides: a row here
+    # can only collide with another row or with a HANDLERS key, and both are
+    # new. `measurements` is the file's name, which is the other spelling
+    # somebody will try.
+    "anchors": "verify",
+    "audit": "verify",
+    "measurements": "measure",
 }
 
 # Global param aliases — applied regardless of function.
@@ -2092,6 +3243,19 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     "get_page": {"name": "slug", "path": "slug", "heading": "section",
                  "body": "include_body", "count": "lines", "start": "from"},
     "reindex": {"check_only": "check", "dry_run": "check"},
+    # The same three prefix spellings the other three filters take, for the same
+    # reason: a caller who learned `dir` from `list` must not have it rejected
+    # here. `verify` spells the execution opt-in `render`/`run` as well, because
+    # `measure: true` inside `verify` reads as a function name to anyone who has
+    # met the other function.
+    "verify": {"prefix": "path_prefix", "dir": "path_prefix",
+               "path": "path_prefix", "render": "measure", "run": "measure"},
+    # `write` is the inverse of reindex's `check`, so the two spellings a caller
+    # brings from there both land: `apply`/`fix` mean write, and `measurement`
+    # is the longer word for the one name to re-render.
+    "measure": {"prefix": "path_prefix", "dir": "path_prefix",
+                "path": "path_prefix", "apply": "write", "fix": "write",
+                "measurement": "name"},
 }
 
 
@@ -2307,20 +3471,55 @@ WIKI_CALL_TOOL = {
         "                   section and over include_body, and says so.\n"
         "  list             list pages grouped by type; params: type, status,\n"
         "                   path_prefix\n"
-        "  freshness        git-only staleness report; params: head — the git REF\n"
-        "                   to compare the wiki against (default HEAD), never a\n"
-        "                   count or a limit — and path_prefix (see below). Every\n"
-        "                   count in the report, ok: and gating: included, then\n"
-        "                   describes that subset and nothing else; a prefix\n"
-        "                   matching no page says so instead of reporting clean.\n"
-        "                   This report is not paged.\n"
+        "  freshness        corpus report; params: head — the git REF to compare\n"
+        "                   the wiki against (default HEAD), never a count or a\n"
+        "                   limit — and path_prefix (see below). Every count in\n"
+        "                   the report, ok: and gating: included, then describes\n"
+        "                   that subset and nothing else; a prefix matching no\n"
+        "                   page says so instead of reporting clean. Read the two\n"
+        "                   summary lines as what they are: gating counts what\n"
+        "                   verify can PROVE is broken — an anchor that does not\n"
+        "                   resolve, a measured region that is stale or hand-\n"
+        "                   edited. advisory counts GIT LAG: pages whose listed\n"
+        "                   sources moved since they were verified. Lag is a\n"
+        "                   measurement, not a verdict — it cannot tell a moved\n"
+        "                   comma from a reversed decision — so it says a human\n"
+        "                   read may be owed and claims nothing more. This report\n"
+        "                   is not paged.\n"
+        "  verify           resolve every source anchor in the corpus and report\n"
+        "                   the ones that do not; params: path_prefix, measure\n"
+        "                   (default false). Every frontmatter sources: entry and\n"
+        "                   every inline path or path:symbol span is resolved\n"
+        "                   against the repo, and every measured region is\n"
+        "                   classified. The symbol matcher is stdlib text — a .py\n"
+        "                   symbol resolves on a def/class/assignment, a .md one\n"
+        "                   on a heading, and any other extension falls back to a\n"
+        "                   whole-word MENTION, counted separately and never\n"
+        "                   silently promoted. purity_call is the real resolver.\n"
+        "                   measure: true additionally RE-RENDERS every measured\n"
+        "                   region, which runs the commands measurements.json\n"
+        "                   names; without it nothing is executed and the answer\n"
+        "                   says which regions it therefore did not check.\n"
+        "  measure          re-render the measured regions of the corpus; params:\n"
+        "                   write (default false = check only, writes nothing),\n"
+        "                   force (discard a hand edit), name (one measurement),\n"
+        "                   path_prefix. A page may carry a block whose body is\n"
+        "                   rendered from a command instead of typed, between an\n"
+        "                   HTML-comment marker pair carrying a digest of the\n"
+        "                   emitted body; a body that no longer hashes to its\n"
+        "                   recorded digest was edited by hand and is REFUSED,\n"
+        "                   never overwritten, unless force says otherwise. THIS\n"
+        "                   RUNS COMMANDS named by docs/measurements.json, which\n"
+        "                   is why it and verify are the only two functions that\n"
+        "                   can: no read path reaches an execution.\n"
         "  reindex          regenerate INDEX.md + audit; params: check (true =\n"
         "                   audit only, write nothing). WRITES docs/INDEX.md by default.\n"
         "  stats            page counts by type/status + dup/orphan/malformed\n"
         "                   audit; also answers to status, which is the word most\n"
         "                   callers reach for\n\n"
         "path_prefix — one scope, one rule, shared by search, list and freshness "
-        "(spell it prefix, dir or path if you prefer; all three accept all four). "
+        "(and by verify and measure, which were written against it rather than "
+        "beside it; spell it prefix, dir or path if you prefer, everywhere). "
         "It is matched against the docs-relative path a hit line prints, and it is "
         "a PATH BOUNDARY, not a substring: adr, adr/ and subsystems/ are directory "
         "scopes selecting everything beneath them; a whole page path selects that "
