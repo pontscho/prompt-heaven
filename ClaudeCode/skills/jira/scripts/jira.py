@@ -695,7 +695,7 @@ class Jira:
 
 		# 3. 204 No Content is the SUCCESS answer for a transition, and
 		#    json.loads("") would explode on it.
-		if response.status == 204 or not response.body.strip():
+		if response.status == 204 or not body:
 			return None
 		try:
 			return json.loads(response.text)
