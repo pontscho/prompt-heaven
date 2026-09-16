@@ -104,7 +104,9 @@ When this skill is activated:
    - After updating status, optionally show updated task list to confirm progress
 
 2. **Read the requirements file for detailed information**
-   - Read `/mnt/nvme/imaginarium/poluah/requirements.yaml`
+   - Read the project's own `requirements.yaml` — the one in the project root, or
+     the nearest one found by walking up from the working directory, which is the
+     same file the scripts above resolve
    - This file contains the complete project requirements specification
 
 3. **Analyze the structure**
