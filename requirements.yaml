@@ -1,3 +1,29 @@
+archived: true
+archived_note: |
+  SHIPPED in 1446acb on 2026-08-08. Read this as a record of finished work, not
+  as a live task graph. The landing commit was never written down here, which is
+  why it is written down now.
+
+  The plan this graph was built from, docs/feature-implementation-plan.md, was
+  marked status: deprecated on 2026-09-15 and its banner declares its own
+  path:line anchors unmaintained (31 of 41 still resolved when they were audited).
+  This file cites that page seventeen times by absolute path. Every one of those
+  references points at a record, and none of them points at instructions to
+  follow.
+
+  This is the fixed output slot of /p:task-plan, which overwrites the file
+  completely on its next run with no prompt and no backup. The slot has already
+  consumed two finished graphs that way: the luals Phase 1 record that stood
+  here, itself complete and inspector-verified, was discarded wholesale by
+  1446acb. So this marker is a statement about the present, and the graph below
+  survives its own deletion only in 1446acb.
+
+  One repair went with the marker on 2026-09-16: task-011, the wiki-sync task,
+  still read pending while documentation_updated below asserted that exact work
+  had shipped. All four of its deliverables exist, and the verified stamps its
+  description asked to be bumped no longer carry the e242624 placeholder that
+  documentation_open_items recorded, so the status was stale bookkeeping and was
+  closed rather than left to contradict the record around it.
 original_request: |
   A sandbox-run skill + a stdlib-only sbx sandbox helper (macOS Seatbelt / Linux
   bwrap) + a grant-only PreToolUse gate sbx-gate.py that auto-allows ONLY a clean,
@@ -1040,7 +1066,7 @@ implementation_plan:
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0005-approve-the-wrapper-not-the-command.md
       function_name: null
       type: create
-      status: pending
+      status: completed
       size: l
       size_rationale: "Four coordinated doc changes: two roster-table edits + verified bumps, an INDEX regeneration/audit, and a full new ADR carrying the trust-boundary rationale, residual-risk record, and accepted-assumption note. The ADR alone is substantial WHY prose."
       implementation_details: |
