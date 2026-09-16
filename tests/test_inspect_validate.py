@@ -22,7 +22,9 @@ Coverage by group:
   J  batch mode via `paths`: mixed verdicts and row count
   K  real repo files validate clean
   L  no regression in the non-validation functions (host stat sha256 pstree ...)
-  M  python source encoding: PEP-263 cookie, latin-1 body, UTF-8 BOM, garbage
+  M  python source encoding: PEP-263 cookie, latin-1 body, UTF-8 BOM, garbage,
+     then note rows cross-checking the p:verify skill's bundled validator --
+     the MCP-free path -- on the python AND shell fixtures
   N  robustness: hostile input must not kill the server, and a script handed to
      `bash -n` is parsed and not executed
   O  envelope discipline, and every canonical handler either gated or skipped
@@ -262,7 +264,12 @@ def row_for(text, target):
 
 
 def _skill_verdict(path):
-    """Cross-check a python fixture against the p:verify skill's validator."""
+    """Cross-check a fixture against the p:verify skill's bundled validator.
+
+    No `--format` is passed on purpose: the skill script has to infer the format
+    from the extension exactly as the server does, so a `.sh`/`.bash` that came
+    back SKIP here would be an EXT_MAP that drifted from `_VALIDATE_EXT`.
+    """
     if not os.path.exists(SKILL):
         return "(skill validator not present)"
     rc, out, err = H.run_process([sys.executable, SKILL, path],
@@ -369,10 +376,18 @@ def run(opts=None):
              must=["OK", "**PASSED**"], must_not=["FAIL"])
         case(suite, cli, "M", "py-garbage", "python", {"path": f("py_garbage.py")},
              must=["FAIL", "**FAILED**"])
-        # cross-check against the p:verify skill's standalone validator
+        # Cross-check against the p:verify skill's standalone validator -- the
+        # OTHER path to the same verdicts, which ships MCP-free for hooks and CI
+        # and so cannot be exercised through `cli`.  The shell fixtures are here
+        # rather than in F because this is the only place the two paths are put
+        # side by side, and `bash` is the format they most recently disagreed
+        # about: the server grew `bash -n` first and the bundled script followed.
+        # `valid.bash` earns its row by extension alone -- it is the one fixture
+        # whose verdict depends on BOTH ext maps carrying the second spelling.
         for name in ["py_cookie_utf8.py", "py_latin1.py", "py_bom.py",
                      "py_garbage.py", "py_break.py", "py_return.py",
-                     "py_escape.py", "valid.py", "bad.py"]:
+                     "py_escape.py", "valid.py", "bad.py",
+                     "valid.sh", "valid.bash", "bad.sh"]:
             suite.note("      skill-validate %-20s -> %s"
                        % (name, _skill_verdict(f(name))))
 

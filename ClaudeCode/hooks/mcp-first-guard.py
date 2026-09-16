@@ -13,13 +13,19 @@ allowed even as the primary command (see ALLOW_FLAGS: `tail -f`).
 Specific INVOCATIONS are denied too, even when the binary itself is innocent:
 `python3 -m py_compile` writes __pycache__/*.pyc into the tree as a side effect
 of a mere syntax check, `python3 -m compileall` does exactly that across a
-whole directory tree, and `node --check` / `node -c` is a syntax check with an
-exact MCP equivalent (see BLOCKED_FORMS).  Deliberately NOT generalised to
-`python3 -c`, `python3 -m json.tool` or a plain `node file.js`: the first two are
-read-only and have far too much legitimate use to pay the false-positive price,
-and the third RUNS the file, which no MCP tool here does.  The node rule also
-fires ONLY when `node` is installed — with no node there is nothing to redirect
-to either, since that validator FAILs without it.
+whole directory tree, `node --check` / `node -c` is a syntax check with an
+exact MCP equivalent, and so is `bash -n` / `sh -n`, bash's own
+read-but-do-not-execute mode (see BLOCKED_FORMS).  Deliberately NOT generalised
+to `python3 -c`, `python3 -m json.tool`, a plain `node file.js`, `bash -c`,
+`bash file.sh` or an interactive `bash`: the first two are read-only and have
+far too much legitimate use to pay the false-positive price, and the rest RUN
+the code, which no MCP tool here does.  `zsh -n` is left out for the opposite
+reason — the validator behind the steer parses with BASH whichever spelling was
+asked for, and bash rejects valid zsh (measured: `foreach x (a b); echo $x; end`
+is rc=0 under `zsh -n` and a syntax error under `bash -n`), so that redirect
+would answer a real question with a false FAIL.  The node and bash rules also
+fire ONLY when their binary is installed — with no node / no bash there is
+nothing to redirect to either, since those two validators FAIL without them.
 
 WRAPPERS are peeled before the check, because the primary command can hide one
 layer down:
@@ -116,6 +122,15 @@ BLOCKED_FORMS = {
         "in one call via params.paths). Only the SYNTAX-CHECK mode is redirected: "
         "`node file.js`, `node -e`, `npm`/`npx` and `node --version` are untouched"
     ),
+    "bash -n": (
+        "inspect_call(function=bash, params={path: <file>}) — equivalently "
+        "inspect_call(function=validate, params={path: <file>, format: \"bash\"}), "
+        "where `sh` and `shell` name that SAME bash parser. It runs the very same "
+        "`bash -n` and reports status + the failing line (a LIST of files in one "
+        "call via params.paths, an unsaved snippet via params.content). Only the "
+        "SYNTAX-CHECK mode is redirected: `bash script.sh`, `bash -c`, an "
+        "interactive `bash`, `bash --version` and `zsh -n` are untouched"
+    ),
 }
 
 # `python -m MODULE` values that map onto a BLOCKED_FORMS label. Every entry
@@ -156,6 +171,33 @@ NODE_ARG_LETTERS = "epr"
 # validator FAILs with no node — so a deny would trade one dead end for another.
 # Resolved once per process: this hook is spawned per Bash call and exits.
 NODE_PRESENT = shutil.which("node") is not None
+
+# Shells whose `-n` names the mode the MCP validator implements — EXACTLY the
+# format spellings mcp-inspect accepts (`bash`/`sh`/`shell`, one bash parser).
+# `sh` is in because bash's grammar is a SUPERSET of POSIX sh's, so an `sh -n`
+# steered here can miss a defect but can never invent one. `zsh`/`ksh` are OUT
+# because there the parser would be wrong in the FAIL direction (measured:
+# `foreach x (a b); echo $x; end` is valid under `zsh -n` and a syntax error
+# under `bash -n`), and `dash`/`mksh`/`ash` only because the validator never
+# names them — every one of those omissions errs ALLOW-wards.
+NOEXEC_SHELLS = {"bash", "sh"}
+
+# bash invocation options that take an ARGUMENT — as the NEXT WORD, never glued,
+# and WITHOUT ending the short cluster. Measured on bash 5.2.15 rather than
+# carried over from python's and node's rule, because bash parses its own
+# invocation line: `bash -onoexec` is rejected (`-c: invalid option name` — it
+# read the next WORD as the option name), while `bash -on nounset -c 'echo RAN'`
+# printed nothing, so the `n` AFTER the `o` was still read as `-n`. `c` is
+# deliberately absent: bash's `-c` takes the first OPERAND, not a cluster letter.
+BASH_ARG_LETTERS = "oO"
+
+# bash long options that consume the NEXT word
+BASH_ARG_OPTS = {"--rcfile", "--init-file"}
+
+# Same gate as NODE_PRESENT, for the same reason: inspect_call(function=bash)
+# FAILs with no bash in PATH. It gates the `sh -n` half too — that validator
+# parses with BASH whichever of the three format spellings was asked for.
+BASH_PRESENT = shutil.which("bash") is not None
 
 # longest-first, so `&&` is consumed before the bare `&` (and `||` before `|`)
 STMT_SEPS = ["&&", "||", ";", "\n", "&"]
@@ -258,15 +300,19 @@ def has_opinion(name):
     """True if this guard treats the lower-case `name` specially AT ALL.
 
     The one place the guard's whole vocabulary is stated, and the sole gate on
-    the ALL-CAPS fold in primary(). Four things the guard does with a command
+    the ALL-CAPS fold in primary(). Five things the guard does with a command
     name:
 
-        BLOCKED       the name is denied outright as a primary command
-        SHELL_C       the name's `-c STRING` payload is unwrapped and re-scanned
-        PY_INTERP_RE  the name's `-m MODULE` is checked against BLOCKED_MODULES
-        node          its `--check`/`-c` MODE is denied (node_check_mode)
+        BLOCKED        the name is denied outright as a primary command
+        SHELL_C        the name's `-c STRING` payload is unwrapped and re-scanned
+        PY_INTERP_RE   the name's `-m MODULE` is checked against BLOCKED_MODULES
+        node           its `--check`/`-c` MODE is denied (node_check_mode)
+        NOEXEC_SHELLS  its `-n` MODE is denied (bash_noexec_mode)
 
-    Written as a predicate over all four rather than as a chain of special
+    The last one needs no disjunct of its own: NOEXEC_SHELLS is a subset of
+    SHELL_C, so `BASH -n f.sh` folds on the clause that was already there.
+
+    Written as a predicate over those four disjuncts rather than a chain of special
     cases, because that is what makes the fold's safety argument a single
     sentence: folding can only ever reach a name the guard was already going to
     act on, so it cannot change the meaning of anything else. Measured on this
@@ -421,6 +467,56 @@ def node_check_mode(argv):
     return False
 
 
+def bash_noexec_mode(argv):
+    """True if this bash/sh argv selects `-n`, the parse-but-do-not-execute mode.
+
+    The MODE is what has an MCP equivalent, not the binary: `bash script.sh`
+    RUNS the script, `bash -c STRING` runs the string and an interactive `bash`
+    runs whatever is typed next — all three must stay allowed, and none of them
+    carries an `-n`. `-n` is the one mode that only parses, which is exactly
+    what inspect_call(function=bash) does.
+
+    Three departures from node_check_mode(), each MEASURED on bash 5.2.15 rather
+    than carried over, because bash parses its own invocation line and does not
+    behave like getopt here:
+      * an argument-taking letter does NOT end the cluster — `bash -on nounset
+        -c 'echo RAN'` printed nothing, so the `n` after the `o` was read as
+        `-n`; the loop therefore reads the WHOLE cluster and only skips the
+        following WORD;
+      * `c` is not argument-taking in the cluster sense at all (bash's command
+        string is the first OPERAND), so `bash -cn 'echo RAN'` is `-c -n` and
+        printed nothing. That IS a syntax check of an inline string, and the
+        steer answers it with params.content — only a `-c` with no `-n`
+        anywhere, the ordinary `bash -c`, stays allowed;
+      * `-o noexec` is `-n` spelled long and is matched, while `--noexec` is not
+        a bash option at all (`bash: --noexec: invalid option`, rc=2) and is
+        deliberately NOT matched: denying it would redirect a command that
+        cannot run in the first place.
+    Scanning stops at the first operand, like every other rule here: past the
+    script name an `-n` belongs to the SCRIPT (`bash deploy.sh -n` is that
+    script's dry-run flag, not a syntax check).
+    """
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--" or not tok.startswith("-") or tok == "-":
+            break  # operand (or the end-of-options marker): bash's region is over
+        if tok.startswith("--"):
+            i += 2 if tok in BASH_ARG_OPTS else 1
+            continue
+        step = 1
+        for letter in tok[1:]:
+            if letter == "n":
+                return True
+            if letter in BASH_ARG_LETTERS:
+                nxt = argv[i + 1] if i + 1 < len(argv) else None
+                if letter == "o" and nxt == "noexec":
+                    return True  # `-o noexec` IS `-n`, spelled long
+                step = 2  # the argument is the next WORD; the cluster goes on
+        i += step
+    return False
+
+
 # The lookarounds keep a HERESTRING (`cmd <<<WORD`) from being read as a
 # heredoc: without them the regex matches at the SECOND `<`, takes WORD for a
 # delimiter and swallows every following line — hiding real commands from the
@@ -551,6 +647,8 @@ def scan(cmd, depth=0):
                 hits.append(label)
         if name == "node" and NODE_PRESENT and node_check_mode(argv):
             hits.append("node --check")
+        if name in NOEXEC_SHELLS and BASH_PRESENT and bash_noexec_mode(argv):
+            hits.append("bash -n")
     if depth < MAX_DEPTH:
         for text in substitutions(cmd) + [p for p in payloads if p]:
             hits += scan(text, depth + 1)

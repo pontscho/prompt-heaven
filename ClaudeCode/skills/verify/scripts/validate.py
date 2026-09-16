@@ -17,9 +17,9 @@ Format is auto-detected from the extension; override with --format. Use '-' as a
 path to read from stdin (then --format is required).
 
 Coverage. No pip dependencies: every format below is validated with the Python 3.9
-standard library alone, EXCEPT javascript -- nothing in the stdlib parses
-JavaScript, so that one runs the external `node` BINARY via `subprocess` (stdlib
-itself; the binary is not, and its absence FAILS rather than skips).
+standard library alone, EXCEPT javascript and bash -- nothing in the stdlib parses
+either language, so those two run an external BINARY via `subprocess` (stdlib
+itself; the binaries are not, and an absent one FAILS rather than skips).
     json   -> json                full parse
     python -> compile()           syntax + symtable, IN MEMORY (never py_compile,
                                   which would write __pycache__/*.pyc)
@@ -36,6 +36,12 @@ itself; the binary is not, and its absence FAILS rather than skips).
                                   .js/.mjs/.cjs -- NOT .jsx/.ts/.tsx (node parses
                                   neither JSX nor TypeScript). FAILED, not
                                   skipped, when `node` is not in PATH.
+    bash   -> `bash -n`           SYNTAX ONLY, and the script is never executed.
+                                  .sh/.bash -- NOT .zsh/.fish/.ksh (bash reports
+                                  those dialects' own syntax as a bogus error).
+                                  `sh` and `shell` are accepted spellings of this
+                                  same parser. FAILED, not skipped, when `bash`
+                                  is not in PATH.
 
 Output: one line per file. Exit code 0 when nothing FAILED; non-zero if any file
 FAILED (and, with --strict, if any file was LIMITED or SKIPPED). Usable as a
@@ -102,17 +108,37 @@ EXT_MAP = {
 	# .jsx/.ts/.tsx/.mts/.cts stay unmapped on purpose: an honest "unknown format"
 	# SKIP beats a bogus FAIL on a file that is perfectly fine.
 	".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+	# .sh/.bash ONLY, and both land on the BASH parser. .zsh/.fish/.ksh stay
+	# unmapped on purpose: bash would report their own-dialect syntax as a bogus
+	# FAIL, and an extension-less script -- the common case for a shell tool on
+	# PATH -- has nothing to infer from, so pass --format there.
+	".sh": "bash", ".bash": "bash",
 }
 
-# Same set the mcp-inspect server exposes, so `--list-formats` and that server's
-# function list cannot drift apart.
+# Same set the mcp-inspect server exposes as per-format FUNCTIONS, so
+# `--list-formats` and that server's function list cannot drift apart.
 KNOWN_FORMATS = ["json", "python", "yaml", "toml", "xml", "ini", "csv", "tsv",
-	"plist", "javascript"]
+	"plist", "javascript", "bash"]
+
+# Extra SPELLINGS of a format already listed above -- never formats of their own,
+# which is why `--list-formats` does not print them. The server keeps exactly
+# these two as aliases, for the reason its own table gives: the word a caller
+# reaches for ("sh", "shell") must not be the word that gets rejected, and an
+# `unsupported format: sh` for a file bash reads perfectly is a refusal nobody
+# can act on. Nothing lies about what ran -- every verdict names `bash -n` -- and
+# the `[...]` label echoes the spelling that was asked for, not the one it
+# resolved to.
+FORMAT_ALIASES = {"sh": "bash", "shell": "bash"}
 
 
 def detect_format(path: str) -> Optional[str]:
 	ext = os.path.splitext(path)[1].lower()
 	return EXT_MAP.get(ext)
+
+
+def resolve_format(fmt: Optional[str]) -> Optional[str]:
+	"""An accepted spelling -> the name VALIDATORS is keyed on."""
+	return FORMAT_ALIASES.get(fmt, fmt)
 
 
 # --- text decoding ----------------------------------------------------------
@@ -414,10 +440,13 @@ def _yaml_precheck(text: str) -> Result:
 		"install PyYAML for real YAML validation" % ", ".join(checks))
 
 
-# --- JavaScript: the one format with no stdlib parser (external `node`) -------
+# --- JavaScript: the first format with no stdlib parser (external `node`) -----
 
-def _run_node(argv: List[str], stdin_text: Optional[str] = None):
+def _run_tool(argv: List[str], stdin_text: Optional[str] = None):
 	"""(returncode, stderr) for a fixed argv. Never raises. shell=False.
+
+	Shared by the two validators with no stdlib parser behind them -- `node
+	--check` and `bash -n`. Nothing in here is specific to either binary.
 
 	`stdin=` / `input=` is always passed explicitly: the two are mutually
 	exclusive in subprocess.run, so the choice is spelled out per branch rather
@@ -483,10 +512,10 @@ def _node_error(err: str, target: str, rc: int) -> Result:
 def v_javascript(data: bytes, path: Optional[str] = None) -> Result:
 	"""`node --check` -- a PARSE, and never an execution.
 
-	The one validator that shells out, because no stdlib module parses
-	JavaScript. `--check` only: `node -e`/`--eval`/`-p`, or requiring/importing
-	the file, would RUN it, so none of them appear here -- and no temp file is
-	written for stdin input either.
+	The first of the two validators that shell out, because no stdlib module
+	parses JavaScript. `--check` only: `node -e`/`--eval`/`-p`, or requiring or
+	importing the file, would RUN it, so none of them appear here -- and no temp
+	file is written for stdin input either.
 
 	A missing `node` is a FAIL, not the SKIP a missing tomllib/PyYAML gets. The
 	asymmetry is deliberate: those are optional PARSERS whose absence is a
@@ -503,7 +532,7 @@ def v_javascript(data: bytes, path: Optional[str] = None) -> Result:
 		# node decides script-vs-module ITSELF -- extension, nearest package.json
 		# "type", and on newer node its own syntax detection. Not re-implemented.
 		target = os.path.abspath(path)
-		rc, err = _run_node([node, "--check", target])
+		rc, err = _run_tool([node, "--check", target])
 		if rc == 0:
 			return ok("valid JavaScript syntax (node --check)")
 		return _node_error(err, target, rc)
@@ -516,12 +545,100 @@ def v_javascript(data: bytes, path: Optional[str] = None) -> Result:
 	first = None
 	for goal, argv in (("ES module", [node, "--input-type=module", "--check"]),
 			("CommonJS", [node, "--check"])):
-		rc, err = _run_node(argv, text)
+		rc, err = _run_tool(argv, text)
 		if rc == 0:
 			return ok("valid JavaScript syntax (parsed as %s)" % goal)
 		if first is None:
 			first = _node_error(err, "[stdin]", rc)  # the module goal's: precise
 	return first
+
+
+# --- Bash: the second format with no stdlib parser (external `bash`) ----------
+
+def _bash_error(err: str, target: str, rc: int) -> Result:
+	"""bash's stderr -> a FAIL result. The FIRST diagnostic wins; the rest echoes.
+
+	`bash -n` prints `<prefix>: line N: <message>`, where <prefix> is the script
+	path it was given or -- on stdin -- its own argv[0], which is why the caller
+	passes whichever of the two it used. A token error adds a SECOND line that
+	merely re-prints the offending source, and an unterminated construct can add
+	a trailing `syntax error: unexpected end of file` pointing at the LAST line
+	of the file rather than at the defect. The first line is the one that points
+	AT the defect on every bash this was tried on, so taking it keeps the answer
+	stable across bash versions -- which the last line demonstrably is not: for
+	an unterminated quote, 5.2 reports one line and 3.2 reports two.
+
+	bash never reports a column, so `col` stays None.
+	"""
+	import re
+
+	if rc == 127:  # bash vanished between which() and the spawn
+		return fail(" ".join(err.split()) or "bash: not found in PATH")
+	if rc == 124:  # timed out, so nothing was actually checked
+		return limited(" ".join(err.split()) or "bash -n timed out")
+	# matched on the basename so a realpath'd target still lands -- and for the
+	# stdin form that basename is the BASH BINARY's, since bash prefixes those
+	# lines with argv[0] and there is no filename to name. Anchored on
+	# `: line N:` so a `bash: warning: ...` preamble cannot be read as a position.
+	head = re.compile(r"^.*" + re.escape(os.path.basename(target))
+		+ r": line (\d+): (.*)$")
+	for ln in err.splitlines():
+		m = head.match(ln)
+		if m:
+			return fail(" ".join(m.group(2).split()), line=int(m.group(1)))
+	msg = next((" ".join(ln.split()) for ln in err.splitlines() if ln.strip()),
+		"bash -n failed (rc=%d)" % rc)
+	return fail(msg)
+
+
+def v_bash(data: bytes, path: Optional[str] = None) -> Result:
+	"""`bash -n` -- a PARSE, and never an execution.
+
+	The second validator that shells out, because no stdlib module parses shell.
+	`-n` is bash's own read-but-do-not-execute mode: it builds the command list
+	and stops. `bash -c`, `bash -i`, `source`, or a plain `bash <file>` would RUN
+	the script, so none of them appear here, and no temp file is written for
+	stdin input either. The argv is fixed in this function; a caller can never
+	add to it.
+
+	Three spellings, ONE parser: `bash`, `sh` and `shell` all arrive here, and
+	every verdict names `bash -n` so nothing lies about which parser ran. The
+	asymmetry that buys: an `sh` script carrying a bashism can come back OK -- a
+	false OK -- but a correct `sh` script can never come back FAIL, because
+	bash's grammar is a superset of POSIX sh's. A missed defect degrades to "not
+	checked"; an invented one would send the caller after a bug that is not there.
+
+	A missing `bash` is a FAIL, not the SKIP a missing tomllib/PyYAML gets --
+	the same call `v_javascript` makes above, for the same reason: those are
+	optional PARSERS whose absence is a property of this interpreter, and a SKIP
+	still exits 0, whereas here the caller asked whether a script parses and got
+	no answer at all.
+	"""
+	import shutil
+
+	bash = shutil.which("bash")
+	if bash is None:
+		return fail("no `bash` in PATH (install Bash to validate shell scripts)")
+	if path is not None:
+		# `--` ends the option region: a file named `-x` or `--norc` is then a
+		# FILENAME and nothing else. It costs one argument and removes the only
+		# way a path could ever turn into a flag.
+		target = os.path.abspath(path)
+		rc, err = _run_tool([bash, "-n", "--", target])
+		if rc == 0:
+			return ok("valid Bash syntax (bash -n)")
+		return _bash_error(err, target, rc)
+	# stdin: bash reads a script from there just as happily, which is the only
+	# way to check content that is not on disk. The error prefix is then bash's
+	# own argv[0], so that is what the parser is told to match on.
+	try:
+		text = decode_text(data)
+	except UnicodeDecodeError as e:
+		return fail("not valid UTF-8: %s" % e)
+	rc, err = _run_tool([bash, "-n"], text)
+	if rc == 0:
+		return ok("valid Bash syntax (bash -n)")
+	return _bash_error(err, bash, rc)
 
 
 VALIDATORS = {
@@ -535,7 +652,14 @@ VALIDATORS = {
 	"toml": v_toml,
 	"yaml": v_yaml,
 	"javascript": v_javascript,
+	"bash": v_bash,
 }
+
+# The validators that need the PATH and not just the bytes. node reads the
+# extension and the nearest package.json to pick script-vs-module; bash is handed
+# the file so its own diagnostics carry that filename. Stdin ('-') gives neither
+# a path, and both tools read a script from stdin too.
+PATH_AWARE = frozenset(["javascript", "bash"])
 
 
 # --- driver -----------------------------------------------------------------
@@ -548,7 +672,7 @@ def read_bytes(path: str) -> bytes:
 
 
 def validate_one(path: str, fmt: Optional[str]) -> Result:
-	resolved = fmt or detect_format(path)
+	resolved = resolve_format(fmt or detect_format(path))
 	if resolved is None:
 		return skipped("unknown format for %r (pass --format)"
 			% os.path.splitext(path)[1])
@@ -559,11 +683,8 @@ def validate_one(path: str, fmt: Optional[str]) -> Result:
 		data = read_bytes(path)
 	except OSError as e:
 		return fail("cannot read: %s" % e)
-	if resolved == "javascript":
-		# The only validator that needs the PATH and not just the bytes: node
-		# reads the extension and the nearest package.json to pick script vs
-		# module. Stdin ('-') has neither, and node --check reads stdin too.
-		return v_javascript(data, None if path == "-" else path)
+	if resolved in PATH_AWARE:
+		return VALIDATORS[resolved](data, None if path == "-" else path)
 	return VALIDATORS[resolved](data)
 
 
@@ -583,8 +704,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 		description="Validate structured-data files for formal/structural "
 			"correctness (stdlib-first).")
 	ap.add_argument("files", nargs="*", help="files to validate ('-' = stdin)")
-	ap.add_argument("--format", choices=KNOWN_FORMATS,
-		help="force a format instead of detecting from the extension")
+	ap.add_argument("--format", choices=KNOWN_FORMATS + sorted(FORMAT_ALIASES),
+		help="force a format instead of detecting from the extension "
+			"('sh' and 'shell' are spellings of 'bash')")
 	ap.add_argument("--strict", action="store_true",
 		help="treat LIMITED and SKIP results as failures too")
 	ap.add_argument("--quiet", action="store_true",

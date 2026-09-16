@@ -41,7 +41,7 @@ test:
       grep: 'SUITE|AGGREGATE|cases|servers|ALL PASS|FAIL|INFO|SKIP|DRIFT|declared'
 
   inspect_validate:
-    description: "mcp-inspect VALIDATION family (validate + 9 format wrappers)"
+    description: "mcp-inspect VALIDATION family (validate + 11 format wrappers)"
     requires: [syntax]
     commands:
       - python3 tests/run.py inspect_validate
@@ -153,6 +153,14 @@ test:
       - python3 tests/run.py generated_region
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
+  amalgamate_check:
+    description: "The generator's OWN staleness gate: `Scripts/amalgamate.py --check` over every Scripts/mcp-*.py, writing nothing and exiting 1 if a region is stale or hand-edited. It neither subsumes the generated_region suite nor is subsumed by it -- that suite re-renders every region in memory from the canonical source its own marker names and demands byte identity, this one gates the CLI's exit code, the thing a human or a hook actually runs. A clean tree prints NOTHING; the exit code is the verdict. Only --check is wrapped: --force and the bare rewriting form stay unreachable from forge, because a target that repairs the tree it is measuring has no verdict left to report."
+    requires: [syntax]
+    commands:
+      - python3 -B Scripts/amalgamate.py --check
+    filter:
+      grep: 'CHANGED|HAND-EDITED|Error|error|Traceback'
 
   read_loop:
     description: "The ADR 0008 read-loop gate: every Scripts/mcp-*.py must run sys.stdin.readline on its OWN single-thread ThreadPoolExecutor that no handler can enter, and must hand each message to its own task rather than awaiting the handler on the read loop. The per-server concurrency split is DECLARED in a table (eight servers run handlers in a worker pool, seven keep them as coroutines because their id-counter safety depends on a single event-loop thread) and measured against it, never inferred from the fleet -- inferring it would only prove the fleet agrees with itself. A synthetic control group plants each defect in turn: the reader on the default pool, the reader on the handler pool, a two-thread reader, an inline handler await, a reader leaked into _serve, an executor nobody shuts down. AST only -- starts nothing, writes only its sandbox."

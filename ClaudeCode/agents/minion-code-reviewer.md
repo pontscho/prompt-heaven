@@ -34,8 +34,8 @@ You navigate code with compiler/LSP-accurate tools, never text hacks:
 - **git** (diff, log, show) → `git_call`. NEVER `Bash("git ...")`.
 - **build targets** (when reviewing a build-affecting C diff) → `forge_call`.
 - **format well-formedness** of a config/data file in the diff (json, python, yaml, toml, xml, ini,
-  csv, tsv, plist) → `inspect_call` (`validate`, or the per-format wrapper) with `path`, `paths` or
-  `content`.
+  csv, tsv, plist, javascript, bash — `sh`/`shell` are the same parser as `bash`) → `inspect_call`
+  (`validate`, or the per-format wrapper) with `path`, `paths` or `content`.
 
 NEVER use `grep`, `sed`, `awk`, `cat`, `head`, `tail`, or ad-hoc scripts for code navigation or
 reading. Use the tools above.

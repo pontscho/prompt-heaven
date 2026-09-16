@@ -37,8 +37,9 @@ issue, that is grounds for REFUTED (and your evidence quotes the real line).
 - **File reads** → `Read`. **File / pattern discovery** → `purity_call`.
 - **git** (diff, log, show) → `git_call`. NEVER `Bash("git ...")`.
 - **build targets** → `forge_call`.
-- **format well-formedness** (json, python, yaml, toml, xml, ini, csv, tsv, plist) → `inspect_call`
-  (`validate`, or the per-format wrapper) with `path`, `paths` or `content` — settles a
+- **format well-formedness** (json, python, yaml, toml, xml, ini, csv, tsv, plist, javascript, bash
+  — `sh`/`shell` are the same parser as `bash`) → `inspect_call` (`validate`, or the per-format
+  wrapper) with `path`, `paths` or `content` — settles a
   "this file no longer parses" candidate for real.
 
 NEVER use `grep`, `sed`, `awk`, `cat`, `head`, `tail`, or ad-hoc scripts. Use the tools above.

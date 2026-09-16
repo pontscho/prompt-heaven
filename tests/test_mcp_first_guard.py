@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Suite for ClaudeCode/hooks/mcp-first-guard.py, the PreToolUse Bash guard
-(groups A-N).
+(groups A-O).
 
 The case COUNT is deliberately absent from this docstring: it is written down
 once, in the SUITES table in tests/run.py, which checks it against the run. A
@@ -46,6 +46,13 @@ Coverage by group:
      must stay ALLOW (`node file.js`, `-e`, `-p`, `-pc`, `--version`, npm/npx,
      a `--check` past the script operand). The rule is GATED on node being
      installed, so on a host without node the DENY rows assert the gate instead
+  O  `bash -n` / `sh -n` -> inspect_call(function=bash), the same shape as N and
+     gated the same way (on BASH, for BOTH spellings -- that validator parses
+     with bash whichever format name it is given). Weighted towards the NEGATIVE
+     controls, because a false DENY here fires on the user's own shell work:
+     `bash -c`, `bash script.sh`, an interactive `bash`, `bash --noexec`, an
+     `-n` past the script operand, an `-n` belonging to another program, and
+     `zsh`/`dash`/`ksh -n`, which are OUT of the rule on purpose
 
 The hook is never imported in the default run -- only `--whitebox` imports it,
 and then only via a loader that cannot write __pycache__ into the repo.
@@ -885,6 +892,184 @@ CASES += [
          "git show node", ALLOW, note="an operand is not a command name"),
 ]
 
+# ---------------------------------------------------------------------------
+# `bash -n` -> inspect_call(function=bash).
+#
+# Group N's shape, one binary over: the MODE has an MCP equivalent, the BINARY
+# does not.  `bash script.sh` runs the script, `bash -c STRING` runs the string
+# and an interactive `bash` runs whatever is typed -- none of which any tool
+# here does -- while `-n` only PARSES, which is exactly what the validator does.
+#
+# The rule's domain is {bash, sh}: EXACTLY the format spellings mcp-inspect
+# accepts (`bash`/`sh`/`shell` are one bash parser).  The gate is therefore BASH
+# for both spellings, not "the shell that was typed".
+#
+# What is deliberately OUT, and why (each measured on this host, bash 5.2.15 /
+# zsh 5.9):
+#   zsh -n    the steer would parse zsh with BASH, and bash rejects valid zsh --
+#             `foreach x (a b); echo $x; end` is rc=0 under `zsh -n` and a
+#             syntax error under `bash -n`.  That is a FALSE FAIL, the one
+#             direction a validator must never move in.  mcp-inspect leaves
+#             `.zsh` unmapped for this same reason.
+#   ksh -n    same argument, same direction.
+#   dash -n   would be SAFE by the superset argument (bash's grammar covers
+#             POSIX sh), but the validator never names dash, so the rule stops
+#             at the vocabulary it can honestly cite.  The miss is ALLOW-wards.
+#   bash --noexec   not a bash option AT ALL: `bash: --noexec: invalid option`,
+#             rc=2.  Denying it would redirect a command that cannot run.
+#   bash -o noexec  IS in -- that one is `-n` spelled long, and it runs.
+#
+# The cluster readings below are measured, not inferred from node's rule, which
+# reads the opposite way: `bash -cn 'echo RAN'` and `bash -on nounset -c 'echo
+# RAN'` each printed NOTHING, so in bash an argument-taking letter neither
+# consumes the rest of the cluster nor ends it.
+# ---------------------------------------------------------------------------
+
+BASH_PRESENT = shutil.which("bash") is not None
+BASH_EXPECT = DENY if BASH_PRESENT else ALLOW
+# the steer must name the exact invocation AND the format value, so one read is
+# enough to act on it
+BASH_MUST = [only("bash -n"), "inspect_call(function=bash", 'format: "bash"'] \
+    if BASH_PRESENT else []
+B_GATE = ("bash is installed, so the rule fires"
+          if BASH_PRESENT else
+          "bash is NOT installed on this host: the rule is gated off, so the "
+          "guard must stay out of the way")
+
+O_GROUP = "O. `bash -n` -> inspect_call(bash), gated on bash"
+CASES += [
+    # -- the syntax-check form (DENY only when bash exists) ------------------
+    case(O_GROUP, "bash -n f.sh", "bash -n f.sh", BASH_EXPECT, must=BASH_MUST,
+         note=B_GATE),
+    case(O_GROUP, "sh -n f.sh (the second spelling in the rule)", "sh -n f.sh",
+         BASH_EXPECT, must=BASH_MUST,
+         note="gated on BASH, not on sh: the validator parses with bash under "
+              "all three format names"),
+    case(O_GROUP, "bash -n on stdin (no operand)", "bash -n", BASH_EXPECT,
+         must=BASH_MUST, note="the mode, not the operand, is what is redirected"),
+    case(O_GROUP, "bash -n with a redirected stdin", "bash -n < f.sh",
+         BASH_EXPECT, must=BASH_MUST),
+    case(O_GROUP, "cluster `-en`", "bash -en f.sh", BASH_EXPECT, must=BASH_MUST,
+         note="letterwise inside the cluster, like every other flag decision here"),
+    case(O_GROUP, "cluster `-nc` is `-n -c`", "bash -nc 'echo hi'", BASH_EXPECT,
+         must=BASH_MUST,
+         note="measured: `bash -nc 'echo RAN'` printed nothing, so this parses "
+              "an inline string and never runs it — params.content answers it"),
+    case(O_GROUP, "cluster `-cn` is ALSO `-c -n`", "bash -cn 'echo hi'",
+         BASH_EXPECT, must=BASH_MUST,
+         note="the opposite reading from node's `-pc`: bash's `-c` takes the "
+              "first OPERAND, not a cluster letter, so the `n` is still `-n` "
+              "(measured: printed nothing)"),
+    case(O_GROUP, "`-on nounset` still carries the -n", "bash -on nounset f.sh",
+         BASH_EXPECT, must=BASH_MUST,
+         note="measured: `bash -on nounset -c 'echo RAN'` printed nothing — an "
+              "argument-taking letter does NOT end a bash cluster"),
+    case(O_GROUP, "the long spelling `-o noexec`", "bash -o noexec f.sh",
+         BASH_EXPECT, must=BASH_MUST,
+         note="`set -o noexec` IS `-n`; measured to suppress execution"),
+    case(O_GROUP, "long option consuming its word, then -n",
+         "bash --rcfile /dev/null -n f.sh", BASH_EXPECT, must=BASH_MUST,
+         note="--rcfile eats /dev/null, so the operand boundary is not reached "
+              "there and the -n is still read"),
+    case(O_GROUP, "`-O shopt` consuming its word, then -n",
+         "bash -O extglob -n f.sh", BASH_EXPECT, must=BASH_MUST),
+    case(O_GROUP, "absolute path `/bin/bash -n f.sh`", "/bin/bash -n f.sh",
+         BASH_EXPECT, must=BASH_MUST, note="the basename is what is matched"),
+    case(O_GROUP, "ALL-CAPS `BASH -n f.sh`", "BASH -n f.sh", BASH_EXPECT,
+         must=BASH_MUST,
+         note="NOEXEC_SHELLS is a SUBSET of SHELL_C, so the fold that already "
+              "unwrapped `BASH -c` covers this rule with no new disjunct"),
+    case(O_GROUP, "ALL-CAPS `SH -n f.sh`", "SH -n f.sh", BASH_EXPECT,
+         must=BASH_MUST),
+    case(O_GROUP, "sudo bash -n f.sh", "sudo bash -n f.sh", BASH_EXPECT,
+         must=BASH_MUST, note="wrapper peeled first, like every other rule"),
+    case(O_GROUP, "VAR=1 bash -n f.sh", "VAR=1 bash -n f.sh", BASH_EXPECT,
+         must=BASH_MUST),
+    case(O_GROUP, "inside a `bash -c` payload", "bash -c 'bash -n f.sh'",
+         BASH_EXPECT, must=BASH_MUST,
+         note="the OUTER `bash -c` is innocent; the payload it carries is not"),
+    case(O_GROUP, "inside a substitution", "echo $(bash -n f.sh)", BASH_EXPECT,
+         must=BASH_MUST),
+    case(O_GROUP, "with a blocked sibling", "bash -n f.sh && ls", DENY,
+         must=[only("bash -n", "ls")] if BASH_PRESENT else [only("ls")],
+         note="two labels coexist in one reason, sorted — and `ls` denies "
+              "regardless of the bash gate"),
+    case(O_GROUP, "dedup: the two spellings named once",
+         "bash -n a.sh; sh -n b.sh", BASH_EXPECT, must=BASH_MUST,
+         note="one label covers both spellings, so the reason says it once"),
+    # -- false-positive probes: unconditional, bash gate or not --------------
+    # These outnumber the DENY rows on purpose: a false DENY here lands on the
+    # user's own shell work, which is the expensive direction to be wrong in.
+    case(O_GROUP, "`bash script.sh` RUNS the script -> ALLOW", "bash script.sh",
+         ALLOW, note="execution has no MCP equivalent; only the parse mode does"),
+    case(O_GROUP, "`bash -c 'git status'` -> ALLOW", "bash -c 'git status'",
+         ALLOW,
+         note="the ordinary `-c` EXECUTES — deliberately out of scope, and the "
+              "payload is still scanned on its own merits"),
+    case(O_GROUP, "`bash -c` with a blocked payload denies the PAYLOAD only",
+         "bash -c 'cat f'", DENY, must=[only("cat")], must_not=["`bash -n`"],
+         note="the pre-existing SHELL_C behaviour must survive the new rule: "
+              "the reason names `cat`, never the shell"),
+    case(O_GROUP, "`bash` alone (interactive) -> ALLOW", "bash", ALLOW),
+    case(O_GROUP, "`bash -i` (interactive) -> ALLOW", "bash -i", ALLOW,
+         note="`i` is not `n`"),
+    case(O_GROUP, "`bash -l` (login shell) -> ALLOW", "bash -l", ALLOW),
+    case(O_GROUP, "`bash -lc 'git status'` -> ALLOW", "bash -lc 'git status'",
+         ALLOW, note="a cluster with no `n` in it"),
+    case(O_GROUP, "`bash --version` -> ALLOW", "bash --version", ALLOW),
+    case(O_GROUP, "`bash --login -c 'git status'` -> ALLOW",
+         "bash --login -c 'git status'", ALLOW),
+    case(O_GROUP, "`bash -x script.sh` (trace) -> ALLOW", "bash -x script.sh",
+         ALLOW, note="tracing still RUNS the script"),
+    case(O_GROUP, "`bash --noexec f.sh` -> ALLOW", "bash --noexec f.sh", ALLOW,
+         note="measured: `bash: --noexec: invalid option`, rc=2 — bash has no "
+              "such long option, so denying it would redirect a command that "
+              "cannot run"),
+    case(O_GROUP, "`bash -o nounset f.sh` -> ALLOW", "bash -o nounset f.sh",
+         ALLOW, note="only `-o noexec` is the parse mode; other `-o` values run"),
+    case(O_GROUP, "`bash --rcfile noexec script.sh` -> ALLOW",
+         "bash --rcfile noexec script.sh", ALLOW,
+         note="the word `noexec` as ANOTHER option's argument is not the mode — "
+              "only `-o`'s own argument is read"),
+    case(O_GROUP, "`-n` AFTER the script is the SCRIPT's", "bash deploy.sh -n",
+         ALLOW,
+         note="bash's option region ends at the script operand — `-n` is that "
+              "script's own dry-run flag, the mirror of `node tool.js --check`"),
+    case(O_GROUP, "`--` ends the option region", "bash -- -n", ALLOW),
+    case(O_GROUP, "`zsh -n f.zsh` -> ALLOW", "zsh -n f.zsh", ALLOW,
+         note="DELIBERATE exclusion: the steer parses with BASH, and bash "
+              "rejects valid zsh (measured: `foreach x (a b); echo $x; end` is "
+              "rc=0 under `zsh -n`, a syntax error under `bash -n`), so the "
+              "redirect would produce a FALSE FAIL"),
+    case(O_GROUP, "`ksh -n f.ksh` -> ALLOW", "ksh -n f.ksh", ALLOW,
+         note="same wrong-parser argument as zsh"),
+    case(O_GROUP, "`dash -n f.sh` -> ALLOW", "dash -n f.sh", ALLOW,
+         note="would be SAFE to redirect (bash's grammar is a superset of POSIX "
+              "sh's), but the validator never names dash — the rule stops at the "
+              "format vocabulary it can cite, and the miss is ALLOW-wards"),
+    case(O_GROUP, "`ssh -n host cmd` -> ALLOW", "ssh -n host cmd", ALLOW,
+         note="argv[0] is matched WHOLE: `ssh` is not `sh`, and this is the "
+              "`-n` that belongs to a different program"),
+    case(O_GROUP, "`sort -n f.txt` -> ALLOW", "sort -n f.txt", ALLOW,
+         note="another program's `-n`; the guard has no opinion on sort"),
+    case(O_GROUP, "`cat -n f.txt` names ONLY cat", "cat -n f.txt", DENY,
+         must=[only("cat")], must_not=["`bash -n`"],
+         note="a `-n` on a BLOCKED binary must not pick up the shell label"),
+    case(O_GROUP, "Mixed case `Bash -n f.sh` stays ALLOW", "Bash -n f.sh", ALLOW,
+         note="only an ALL-CAPS spelling folds — group M's policy, unchanged"),
+    case(O_GROUP, "`bash -n` as a quoted argument to echo",
+         "echo 'bash -n f.sh'", ALLOW,
+         note="a quoted argument is not a command — `echo` is the primary"),
+    case(O_GROUP, "bash -n inside a heredoc BODY stays data",
+         "git commit -F - <<'EOF'\nbash -n f.sh\nEOF", ALLOW,
+         note="heredoc bodies are DATA, like every other rule"),
+    case(O_GROUP, "downstream bash -n stage not inspected",
+         "foo | bash -n f.sh", ALLOW,
+         note="only stage 0 is the primary command — same asymmetry as py_compile"),
+    case(O_GROUP, "a file literally named `bash` passed to a runner",
+         "git show bash", ALLOW, note="an operand is not a command name"),
+]
+
 
 # ---------------------------------------------------------------------------
 # execution
@@ -987,6 +1172,29 @@ def whitebox():
         name, argv = g.primary(s)
         print(f"  {s!r:34s} -> name={name!r} check_mode={g.node_check_mode(argv)} "
               f"hits={g.scan(s)}")
+    # Same argument as node's, one step stronger: bash's cluster readings
+    # (`-cn`, `-on`) are the counterintuitive ones -- they were MEASURED against
+    # the real bash and read the OPPOSITE way from node's `-pc` -- and a DENY
+    # reason cannot show which way the loop went.  bash_noexec_mode()'s own
+    # return value is the only thing that does.  The last column carries the
+    # LABELS beside it, which is how the domain is shown to be doing the
+    # excluding rather than the parser: `zsh -n` returns True here and still
+    # produces no hit, because zsh is not in NOEXEC_SHELLS.
+    print("--- white-box: bash_noexec_mode() (BASH_PRESENT=%s) ---"
+          % g.BASH_PRESENT)
+    for s in ["bash -n f.sh", "sh -n f.sh", "bash -n", "bash -en f.sh",
+              "bash -nc 'echo hi'", "bash -cn 'echo hi'", "bash -on nounset f.sh",
+              "bash -o noexec f.sh", "bash -o nounset f.sh",
+              "bash --rcfile /dev/null -n f.sh", "bash --rcfile noexec script.sh",
+              "bash -O extglob -n f.sh", "bash --noexec f.sh", "bash -c 'cat f'",
+              "bash -lc 'git status'", "bash -i", "bash -x script.sh",
+              "bash deploy.sh -n", "bash -- -n", "bash", "zsh -n f.zsh",
+              "dash -n f.sh", "ssh -n host cmd", "BASH -n f.sh", "Bash -n f.sh"]:
+        name, argv = g.primary(s)
+        print(f"  {s!r:36s} -> name={name!r} noexec={g.bash_noexec_mode(argv)} "
+              f"hits={g.scan(s)}")
+    print("  NOEXEC_SHELLS = %r (subset of SHELL_C: %s)"
+          % (sorted(g.NOEXEC_SHELLS), g.NOEXEC_SHELLS <= g.SHELL_C))
 
 
 def run(opts=None):

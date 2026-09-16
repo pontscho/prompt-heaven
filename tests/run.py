@@ -195,7 +195,7 @@ SUITES = [
     ("inspect_validate", run_inspect_validate,
      "mcp-inspect VALIDATION family", 131),
     ("mcp_first_guard", run_mcp_first_guard,
-     "mcp-first-guard PreToolUse Bash hook", 335),
+     "mcp-first-guard PreToolUse Bash hook", 381),
     ("sbx_gate", run_sbx_gate,
      "sbx PreToolUse grant-only gate", 91),
     ("purity_lsp", run_purity_lsp,

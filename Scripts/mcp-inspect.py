@@ -1266,8 +1266,11 @@ _V_FAIL = "FAIL"
 _V_LIMITED = "LIMITED"
 _V_SKIP = "SKIP"
 
-# extension -> format. Parity with ClaudeCode/skills/verify/scripts/validate.py,
-# plus .py/.pyi and the .js/.mjs/.cjs trio which that script does not cover.
+# extension -> format. Parity with ClaudeCode/skills/verify/scripts/validate.py:
+# the two tables are EQUAL, key for key, and the two paths accept the same
+# thirteen format spellings. The claim used to carry an exception list (.py/.pyi
+# and the .js/.mjs/.cjs trio "which that script does not cover"); that script
+# grew all of them, so the exception is gone rather than restated.
 _VALIDATE_EXT = {
     ".json": "json",
     ".yaml": "yaml", ".yml": "yaml",
