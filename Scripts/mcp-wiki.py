@@ -1797,7 +1797,7 @@ def verify_render(report, rel_root: str) -> str:
                      "%s names, so it is opt-in — pass measure: true, or call "
                      "measure. Everything above is provable without executing "
                      "anything." % MEASUREMENTS_FILE)
-    lines.append("gating: %d" % verify_gating_count(report))
+    lines.append("%s%d" % (GATING_LINE_PREFIX, verify_gating_count(report)))
     lines += ["",
               "The symbol matcher is stdlib text: a .py symbol resolves on a "
               "def/class/assignment, a .md symbol on a heading, and every other "
@@ -2998,8 +2998,8 @@ def _fn_freshness(params, project_root, wiki_root, strict):
     report = freshness_analyze(abs_root, head, params.get("path_prefix"))
     # Attached HERE rather than inside `freshness_analyze`, and that placement is
     # load-bearing twice over. It keeps the analyser's return value the dict it
-    # has always been -- a git measurement and nothing else, which is what the
-    # suite pins against the committed server. And it keeps the provable half in
+    # has always been -- a git measurement and nothing else, which the suite pins
+    # as a KEY SET, absence included. And it keeps the provable half in
     # `verify_analyze`, which takes rendered bodies as strings and cannot make
     # one: `rendered` is None here, so this read path reports the region states
     # that need no subprocess and says so in the answer.

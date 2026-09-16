@@ -219,7 +219,7 @@ SUITES = [
      "floored percentages, query-side stopwords, get_page section index, "
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
-     "the frontmatter aliases synonym field", 153),
+     "the frontmatter aliases synonym field", 154),
     ("jira_cli", run_jira_cli,
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "
@@ -302,7 +302,7 @@ SUITES = [
      140),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
-     "a region's BEGIN line is the one its names resolve against", 88),
+     "a region's BEGIN line is the one its names resolve against", 92),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That

@@ -15,17 +15,24 @@ Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/, with ONE declared exception
 named below.  Nothing is written outside mkdtemp.
 
-Four spawn sites exist, three in group L and one in group R, all deliberate.
-(1) `git show HEAD:Scripts/mcp-wiki.py`, which is the only way to compare the
-worktree's `freshness` output against the code that shipped.  (2) The
-unpatched-driver case, which MEASURES what the recall path costs in a directory
-git does not track -- production spawns there, so a stub would hide the finding.
-(3) The unresolvable-`head` case, which drives the REAL repository -- and reads,
-never writes, the real docs/ -- because its premise is a contradiction only a
-real repository can hold: git must ANSWER for `HEAD` and REFUSE the caller's ref
-within one call, where the stubbed boundary answers nothing at all.  Every other
-group-L driver has the git boundary replaced by a lookup table, so `stale` and
-`orphaned-source` are reachable offline and deterministically.
+Three spawn sites exist, two in group L and one in group R, all deliberate.
+(1) The unpatched-driver case, which MEASURES what the recall path costs in a
+directory git does not track -- production spawns there, so a stub would hide
+the finding.  (2) The unresolvable-`head` case, which drives the REAL repository
+-- and reads, never writes, the real docs/ -- because its premise is a
+contradiction only a real repository can hold: git must ANSWER for `HEAD` and
+REFUSE the caller's ref within one call, where the stubbed boundary answers
+nothing at all.  Every other group-L driver has the git boundary replaced by a
+lookup table, so `stale` and `orphaned-source` are reachable offline and
+deterministically.
+
+A fourth site was REMOVED rather than renumbered, and the reason belongs here
+because it is the kind of instrument this file must not reach for again: `git
+show HEAD:Scripts/mcp-wiki.py`, which rendered `freshness` from the committed
+server beside the worktree's and asserted the two differed.  A baseline read out
+of git measures the CHECKOUT, not the code.  It went red the moment the rename
+it asserted was committed, and could be green only while that one file was
+dirty.  What replaced it is pinned in this file -- see `L_FRESH_ROWS`.
 
 (4) Group R runs the MEASUREMENT COMMANDS its own `measurements.json` names --
 `sys.executable -c ...` for the three that must answer, and a name that is on no
@@ -772,15 +779,19 @@ def parse_answer(text):
 class Driver:
     """One in-process wiki server pointed at the synthetic corpus.
 
-    `server` exists for group L alone: the same class drives HEAD's copy of the
-    server beside the worktree's, so "the extraction changed nothing" is a
-    comparison against the code that shipped rather than against a description
-    of it.  Each Driver holds its OWN module instance, which is what makes
-    patching one module's git seam invisible to every other group.
+    Each Driver holds its OWN module instance, which is what makes patching one
+    module's git seam invisible to every other group.
+
+    It used to take a `server` path as well, for group L alone: the same class
+    drove HEAD's copy of the server beside the worktree's.  That parameter is
+    gone with its one caller, because a baseline read out of git measures the
+    checkout rather than the code -- see the spawn-site note in the module
+    docstring.  Every Driver now loads the worktree's server, which is the only
+    copy under test.
     """
 
-    def __init__(self, project_root, server=None, name="mcp_wiki_under_test"):
-        self.mod = H.load_module_from_path(name, server or SERVER)
+    def __init__(self, project_root, name="mcp_wiki_under_test"):
+        self.mod = H.load_module_from_path(name, SERVER)
         self.root = project_root
         self.abs_wiki = os.path.join(project_root, WIKI_REL)
 
@@ -1821,6 +1832,68 @@ L_LIMIT = len(L_PAGES)
 L_NOT_CHECKABLE = {"unverified", "promotable", "planned", "untracked",
                    "no-sources"}
 L_ALL_STATES = sorted({p[L_STATE] for p in L_PAGES})
+# The state census `freshness_analyze` must reproduce, derived from the table
+# above so a page added there cannot leave this number behind.
+L_STATE_CENSUS = {s: sum(1 for p in L_PAGES if p[L_STATE] == s)
+                  for s in L_ALL_STATES}
+# The keys `freshness_analyze` returns.  Pinned as a KEY SET rather than a value
+# -- `root` is a temp path, and `pages`/`summary` are the census above -- and the
+# load-bearing half is the ABSENCE.  The analyser is a git measurement and
+# nothing else; `verify` is attached one layer out, in `_fn_freshness`, which is
+# what keeps the provable half out of it.  An analyser that grew a verdict key
+# would mean the rename reached the measurement after all.
+L_FRESH_REPORT_KEYS = ["head", "pages", "root", "summary"]
+# The MEASUREMENT half of group L's rendered `freshness` report: every line that
+# is NOT `gating:`, NOT `advisory:` and NOT an indented detail row under the
+# first, which is exactly what `split_verdict_lines` puts in `rows`.
+#
+# THIS IS THE BASELINE, and it lives here because the previous one did not.  The
+# old one was `git show HEAD:Scripts/mcp-wiki.py` rendered through a second
+# Driver -- a baseline that moves when you commit, i.e. a measurement of the
+# working tree rather than of the code, and one that went red the moment the
+# rename it existed to assert was committed.  This block cannot move that way.
+# The render is a pure function of L_PAGES and the renderer: `iter_pages` sorts
+# its walk, the git boundary is a lookup table, and `head` falls back to the
+# literal because git fails inside a temp dir.
+#
+# The source paths and the commit are interpolated from the constants above
+# rather than spelled again -- a fixture rename must move this pin with it, not
+# leave a second copy to be discovered by a confusing failure.
+L_FRESH_ROWS = [
+    "# freshness @ HEAD",
+    "",
+    "stale (1):",
+    "- st-stale `st-stale.md` — changed: %s (verified %s)"
+    % (L_SRC_CHANGED, L_C_CHANGED),
+    "",
+    "orphaned-source (1):",
+    "- st-orphan `st-orphan.md` — missing: %s" % L_SRC_ABSENT,
+    "",
+    "unverified (2):",
+    "- st-lostcommit `st-lostcommit.md` — verified.commit not in history",
+    "- st-unverified `st-unverified.md` — no verified.commit",
+    "",
+    "promotable (2):",
+    "- st-promotable `st-promotable.md` — materialized: %s "
+    "(promote targets→sources)" % L_SRC_CLEAN,
+    "- st-promoted `st-promoted.md` — materialized: %s "
+    "(promote targets→sources)" % L_SRC_CHANGED,
+    "",
+    "ok: 1 current, 2 no-sources, 1 planned, 1 untracked",
+    "",
+]
+# The ONE sentence this file types instead of reading it off the module.
+# `GATING_LINE_PREFIX`, `ADVISORY_LINE_PREFIX`, `GATING_CLASSES` and
+# `ADVISORY_STATUSES` are all published and are all read; the disclaimer is
+# inlined in `freshness_render` and published nowhere -- and it is precisely the
+# claim under test, because a line that published git lag WITHOUT saying it is
+# not a verdict would be the over-claim the rename removed.  Two fragments, not
+# the whole sentence: the wording may be improved, the disclaimer may not vanish.
+#
+# ONE copy, read by BOTH groups that assert it -- L on the state fixture and R
+# on the measured-region fixture.  It was typed twice for as long as there were
+# two of them, which is the shape this file keeps refusing everywhere else.
+ADVISORY_DISCLAIMER = ("MEASUREMENT", "not a verdict")
 
 _FM_DISAGREE_RE = re.compile(
     r"^frontmatter status: disagrees on (?P<n>\d+) of (?P<m>\d+) "
@@ -1865,6 +1938,12 @@ _FRESH_BUCKET_RE = re.compile(r"^(?P<status>[a-z][a-z-]*) \((?P<n>\d+)\):$")
 _FRESH_PAGE_RE = re.compile(r"^- .*?`(?P<path>[^`]+)`")
 _FRESH_OK_RE = re.compile(r"^ok: (?P<rest>.+)$")
 _FRESH_GATING_RE = re.compile(r"^gating: (?P<n>\d+) \((?P<states>[^)]*)\)$")
+# The indented rows under `gating:` in a freshness report, and the two shapes
+# `verify` renders its own gating block with.  Both are read back off the
+# ANSWER: what a caller can see is the whole claim the rename made.
+_FRESH_GATING_ROW_RE = re.compile(r"^  \S+ `(?P<path>[^`]+)` — ")
+_VERIFY_GATING_HEAD_RE = re.compile(r"^gating pages \((?P<n>\d+)\):$")
+_VERIFY_GATING_ROW_RE = re.compile(r"^- \S+ `(?P<path>[^`]+)`$")
 
 
 def parse_freshness(text):
@@ -1930,6 +2009,45 @@ def split_verdict_lines(text, mod):
     for line in text.split("\n"):
         (verdict if line.startswith(verdict_heads) else rows).append(line)
     return rows, verdict
+
+
+def freshness_gating_paths(verdict_lines):
+    """The pages `freshness` NAMES under its `gating:` line.
+
+    The indented rows, which `split_verdict_lines` already separated out.  What
+    the caller sees, read back off the answer rather than off the report dict:
+    the claim is about what the report SAYS.
+    """
+    return [m.group("path") for m in
+            (_FRESH_GATING_ROW_RE.match(ln) for ln in verdict_lines) if m]
+
+
+def verify_gating_paths(text):
+    """The pages `verify` lists under `gating pages (N):`.
+
+    The SECOND OPINION on what is provably broken, and deliberately taken from
+    the `verify` FUNCTION through the dispatcher rather than from
+    `verify_analyze` called directly: `freshness` renders a count it was handed,
+    `verify` renders a list it computed for itself, so the only way the two can
+    be wrong together is a change a caller would see.  That is what replaces the
+    committed-server baseline -- a second live answer, not a former one.
+
+    The block ends at the first blank line, so the `- ` rows of the `registry`
+    section above it can never be swept in; the per-defect reasons under each
+    page are indented four spaces and do not match the row shape.
+    """
+    out, inside = [], False
+    for line in text.split("\n"):
+        if _VERIFY_GATING_HEAD_RE.match(line):
+            inside = True
+            continue
+        if inside:
+            if not line.strip():
+                break
+            m = _VERIFY_GATING_ROW_RE.match(line)
+            if m:
+                out.append(m.group("path"))
+    return out
 
 
 def fresh_total(parsed):
@@ -6592,72 +6710,153 @@ def run(opts=None):
                      text=s2p["text"])
 
         # ---- the MEASUREMENT did not move; only the vocabulary did -----------
-        # HEAD's copy of the server, driven against the SAME workspace with the
-        # SAME stubbed git boundary.  This case used to claim the rendered report
-        # was BYTE-IDENTICAL to the committed one, and that claim is now
-        # deliberately false: `gating` was renamed, because counting "git says a
-        # source moved" and calling it gating read a MEASUREMENT as a verdict.
+        # The claim is that the rename changed what the report CALLS a verdict
+        # and changed nothing it MEASURES.  Three parts, each asserted against
+        # something that cannot move underneath it -- the fixture table above, a
+        # constant the module publishes, or a second live answer from a
+        # different function.
         #
-        # What replaces it is strictly stronger about the half that had to
-        # survive.  `freshness_analyze` must still return the SAME DICT -- the
-        # git measurement is untouched -- and every rendered line that is not one
-        # of the two summary lines must still be byte-identical, which is the
-        # header, every status bucket, every page row and `ok:`.  Only
-        # `gating:`/`advisory:` and the indented detail under them may differ,
-        # and the case asserts they DO: a rename nobody can observe would leave
-        # this green while having repealed nothing.
-        rc, blob, err = H.run_process(
-            ["git", "show", "HEAD:Scripts/mcp-wiki.py"], cwd=H.REPO_ROOT)
+        # This case used to reach for `git show HEAD:Scripts/mcp-wiki.py`, drive
+        # a second Driver on the blob, and assert the two renders DIFFERED.  That
+        # was an instrument error rather than a wrong claim: the claim is about
+        # what the report says, and a git blob can only say what it USED to say.
+        # The baseline moved when the rename was committed, so the case could be
+        # green only while Scripts/mcp-wiki.py was dirty -- and a test that
+        # passes only on an uncommitted tree goes red on a clean checkout and
+        # teaches its reader to ignore it.
+        #
+        #   1. THE ANALYSER IS UNTOUCHED.  `freshness_analyze` returns the same
+        #      key set and the same per-page census, and carries no verdict key
+        #      at all: `verify` is attached one layer out, in `_fn_freshness`.
+        #   2. THE MEASUREMENT HALF OF THE RENDER IS UNCHANGED, byte for byte,
+        #      against L_FRESH_ROWS -- which is where the baseline now lives, in
+        #      the fixture, where committing cannot move it.
+        #   3. THE SUMMARY LINES SAY THE NEW THING.  `gating:` names the
+        #      GATING_CLASSES and gates exactly the pages `verify` -- a different
+        #      function, reached through the dispatcher -- proves broken, while
+        #      git lag sits on an `advisory:` line that counts ADVISORY_STATUSES
+        #      and disclaims being a verdict.  Group R asserts the same rename on
+        #      its own fixture against the formula the old code used; what is
+        #      only reachable HERE is the cross-function agreement, because group
+        #      L is the corpus with every git state on it.
+        #
+        # The fixture is what keeps part 3 falsifiable: the gating count and the
+        # git-lag total are DIFFERENT numbers here and stand on disjoint pages,
+        # so a renderer that put git lag back under `gating:` cannot pass.  Both
+        # facts are asserted below rather than trusted.
+        lmod = ldrv.mod
+        c_text = ldrv.freshness()
+        c_report = lmod.freshness_analyze(ldrv.abs_wiki, "HEAD")
+        c_rows, c_verdict = split_verdict_lines(c_text, lmod)
         problems = []
-        b_text = c_text = ""
-        b_report = c_report = None
-        b_verdict = c_verdict = []
-        differs = None
-        if rc != 0 or not blob:
-            problems.append("could not read HEAD's copy of the server (rc=%d, "
-                            "stderr=%r) -- without it this case has no baseline "
-                            "to compare against" % (rc, err[:120]))
-        else:
-            with open(SERVER, "r", encoding="utf-8") as fh:
-                differs = fh.read() != blob
-            base_path = st_work.write_text("baseline_server.py", blob)
-            bsdrv = Driver(st_root, server=base_path,
-                           name="mcp_wiki_state_baseline")
-            patch_git_boundary(bsdrv.mod, st_root)
-            b_text, c_text = bsdrv.freshness(), ldrv.freshness()
-            b_report = bsdrv.mod.freshness_analyze(bsdrv.abs_wiki, "HEAD")
-            c_report = ldrv.mod.freshness_analyze(ldrv.abs_wiki, "HEAD")
-            b_rows, b_verdict = split_verdict_lines(b_text, ldrv.mod)
-            c_rows, c_verdict = split_verdict_lines(c_text, ldrv.mod)
-            if b_rows != c_rows:
-                problems.append("a line that is NOT a summary line moved -- the "
-                                "measurement was supposed to be untouched:\n"
-                                "  HEAD %r\n  work %r" % (b_rows, c_rows))
-            if b_report != c_report:
-                problems.append("freshness_analyze returns a different dict, so "
-                                "the git MEASUREMENT moved and not just the word "
-                                "for it:\n  HEAD %r\n  work %r"
-                                % (b_report, c_report))
-            if b_verdict == c_verdict:
-                problems.append("the summary lines are unchanged (%r), so either "
-                                "the rename never landed or it is invisible to a "
-                                "caller -- and an invisible rename repeals "
-                                "nothing" % b_verdict)
-            states = set((c_report or {}).get("summary", {}))
-            if len(states) < 5:
-                problems.append("the report covers only %r, so most of the "
-                                "extracted if/else chain was never executed and "
-                                "the identity claim is thin" % sorted(states))
+
+        # 1 -- the analyser still returns the git measurement and nothing else.
+        if sorted(c_report) != L_FRESH_REPORT_KEYS:
+            problems.append("freshness_analyze returns %r, the measurement is "
+                            "%r -- a key gained or lost here means the rename "
+                            "reached the ANALYSER, which is the one half it was "
+                            "not allowed to touch"
+                            % (sorted(c_report), L_FRESH_REPORT_KEYS))
+        if c_report["summary"] != L_STATE_CENSUS:
+            problems.append("the per-page census is %r, the fixture declares %r "
+                            "-- the status vocabulary moved, so this is no "
+                            "longer a rename" % (c_report["summary"],
+                                                 L_STATE_CENSUS))
+        if ([s for s in lmod.DETAIL_STATUSES if s not in L_STATE_CENSUS]
+                or set(L_ALL_STATES) <= set(lmod.DETAIL_STATUSES)):
+            problems.append("fixture drift: the corpus covers %r, so the "
+                            "renderer's %r buckets are not all exercised or "
+                            "`ok:` has nothing left to hold, and the identity "
+                            "claim is thin" % (L_ALL_STATES,
+                                               lmod.DETAIL_STATUSES))
+
+        # 2 -- every line that is not a summary line, byte for byte.
+        if c_rows != L_FRESH_ROWS:
+            drift = [(i,
+                      L_FRESH_ROWS[i] if i < len(L_FRESH_ROWS) else None,
+                      c_rows[i] if i < len(c_rows) else None)
+                     for i in range(max(len(L_FRESH_ROWS), len(c_rows)))]
+            problems.append("a MEASUREMENT line moved -- only the two summary "
+                            "lines were allowed to: %r"
+                            % [d for d in drift if d[1] != d[2]])
+
+        # 3 -- the two summary lines, against what the module publishes.
+        gating = [ln for ln in c_verdict
+                  if ln.startswith(lmod.GATING_LINE_PREFIX)]
+        advisory = [ln for ln in c_verdict
+                    if ln.startswith(lmod.ADVISORY_LINE_PREFIX)]
+        parsed = parse_freshness(c_text)
+        lag = [c_report["summary"].get(s, 0) for s in lmod.ADVISORY_STATUSES]
+        named = freshness_gating_paths(c_verdict)
+        lagged = sorted(p["path"] for p in c_report["pages"]
+                        if p["status"] in lmod.ADVISORY_STATUSES)
+        v_text, v_error = ldrv.call("verify")
+        v_named = verify_gating_paths(v_text)
+        if len(gating) != 1 or len(advisory) != 1:
+            problems.append("the report carries %d %r and %d %r line(s); the "
+                            "split the rename created is exactly one of each"
+                            % (len(gating), lmod.GATING_LINE_PREFIX,
+                               len(advisory), lmod.ADVISORY_LINE_PREFIX))
+        if parsed["gating_states"] != list(lmod.GATING_CLASSES):
+            problems.append("%r names %r; what verification can PROVE is %r"
+                            % (lmod.GATING_LINE_PREFIX, parsed["gating_states"],
+                               list(lmod.GATING_CLASSES)))
+        if advisory and [int(n) for n in re.findall(r"\d+", advisory[0])] != lag:
+            problems.append("%r publishes %r; the git measurement for %r is %r "
+                            "-- the advisory is the ONLY place those numbers are "
+                            "still allowed to be published"
+                            % (lmod.ADVISORY_LINE_PREFIX,
+                               [int(n) for n in re.findall(r"\d+", advisory[0])],
+                               list(lmod.ADVISORY_STATUSES), lag))
+        for word in ADVISORY_DISCLAIMER:
+            if advisory and word not in advisory[0]:
+                problems.append("the advisory line never says %r, so it "
+                                "publishes git lag without withdrawing the "
+                                "claim -- and a rename no caller can observe "
+                                "repeals nothing" % word)
+        if v_error:
+            problems.append("`verify` refused (%r), so `gating:` has no second "
+                            "opinion to agree with" % v_text[:120])
+        elif sorted(named) != sorted(v_named):
+            problems.append("%r gates %r, `verify` gates %r -- one claim, two "
+                            "functions, and a caller cannot tell which of them "
+                            "moved" % (lmod.GATING_LINE_PREFIX, sorted(named),
+                                       sorted(v_named)))
+        if parsed["gating"] != len(v_named):
+            problems.append("%r counts %r while `verify` lists %d page(s); they "
+                            "diverge only on a registry error, and this fixture "
+                            "has none" % (lmod.GATING_LINE_PREFIX,
+                                          parsed["gating"], len(v_named)))
+        # The two vacuity guards.  Without them a renderer that published git lag
+        # as the verdict could pass every clause above.
+        if parsed["gating"] == sum(lag):
+            problems.append("fixture drift: `gating:` and the git lag are both "
+                            "%d, so this corpus can no longer tell the verdict "
+                            "from the measurement" % sum(lag))
+        if set(v_named) & set(lagged):
+            problems.append("fixture drift: %r is BOTH git-lagged and provably "
+                            "broken, so naming it under `gating:` proves nothing "
+                            "about which of the two the line reports"
+                            % sorted(set(v_named) & set(lagged)))
         suite.record("L", "freshness-keeps-its-measurement-and-renames-its-verdict",
                      problems,
-                     detail=[_d("baseline", "git show HEAD:Scripts/mcp-wiki.py "
-                                            "(%d chars, differs from the "
-                                            "worktree: %r)" % (len(blob), differs)),
-                             _d("rows", "identical: %r"
-                                % (split_verdict_lines(b_text, ldrv.mod)[0]
-                                   == split_verdict_lines(c_text, ldrv.mod)[0])),
-                             _d("HEAD said", "%r" % b_verdict),
-                             _d("work says", "%r" % c_verdict),
+                     detail=[_d("baseline", "L_FRESH_ROWS, %d line(s) pinned in "
+                                            "this file -- no git, no HEAD, no "
+                                            "sha, nothing that a commit moves"
+                                % len(L_FRESH_ROWS)),
+                             _d("analyser", "keys %r, census %r"
+                                % (sorted(c_report), c_report["summary"])),
+                             _d("gating", "%r" % (gating[0] if gating else None)),
+                             _d("advisory", "%r" % (advisory[0] if advisory
+                                                    else None)),
+                             _d("cross-check", "freshness gates %r, verify gates "
+                                               "%r" % (sorted(named),
+                                                       sorted(v_named))),
+                             _d("falsifiable", "gating %r vs git lag %r on "
+                                               "disjoint pages, so publishing "
+                                               "the measurement as the verdict "
+                                               "fails here"
+                                % (parsed["gating"], sum(lag))),
                              _d("why", "adr 0002's rule is that nothing may claim "
                                        "a freshness it cannot measure; git lag "
                                        "CAN measure that a file moved and cannot "
@@ -9244,7 +9443,7 @@ def run(opts=None):
                 problems.append("the advisory counts %s not-checkable page(s), "
                                 "the fixture has %d"
                                 % (adv.group("unchecked"), want_unchecked))
-        for word in ("MEASUREMENT", "not a verdict"):
+        for word in ADVISORY_DISCLAIMER:
             if word not in fresh_txt:
                 problems.append("the advisory never says %r, and that phrase IS "
                                 "the claim being withdrawn" % word)
@@ -9328,6 +9527,64 @@ def run(opts=None):
                                        "defect, and a fifth caller is not a "
                                        "reason to re-open it")],
                      text=scoped)
+
+        # ---- THIS REPO's registry, rendered for real --------------------------
+        # Every case above drives the FIXTURE registry, which is the right way
+        # to prove the mechanism: four entries, each shaped to make one state
+        # reachable.  None of them says anything about `docs/measurements.json`,
+        # the file a page in this repo actually renders from -- and the failure
+        # there is not a mechanism failure at all.  An entry naming an argv this
+        # machine cannot run, or a flag the script no longer accepts, renders a
+        # page `failed` for a reason invisible from the page, and the page author
+        # sees only a block that stopped updating.
+        #
+        # A FRESH module, not `rmod`: that one's git seam is stubbed for the
+        # fixture, and the claim here is about the committed server reading the
+        # committed registry with nothing patched.
+        #
+        # RENDERED TWICE, and that is the load-bearing half.  The digest on an
+        # END marker is over the body, so an entry whose command answers
+        # differently on two runs makes its page permanently `stale` -- the one
+        # failure that looks like a documentation problem and is not.  This
+        # cannot be asserted about the mechanism, only about the entries.
+        real_mod = H.load_module_from_path("mcp_wiki_real_registry", SERVER)
+        real_root = H.repo_path("docs")
+        real_registry, real_error = real_mod.load_measurements_safe(real_root)
+        first, first_errors = real_mod._measure_bodies(
+            real_registry, H.REPO_ROOT, real_mod._ExecutionGrant("measure"))
+        second, _again = real_mod._measure_bodies(
+            real_registry, H.REPO_ROOT, real_mod._ExecutionGrant("measure"))
+        problems = []
+        if real_error:
+            problems.append("docs/%s did not load: %s"
+                            % (real_mod.MEASUREMENTS_FILE, real_error))
+        if not real_registry:
+            problems.append("the repo's registry defines no measurement at all, "
+                            "so this case asserts nothing")
+        for name in sorted(real_registry):
+            argv = real_registry[name]["command"]
+            if first_errors.get(name):
+                problems.append("%s (%s) did not answer: %s"
+                                % (name, argv[0], first_errors[name]))
+            elif not (first.get(name) or "").strip():
+                problems.append("%s rendered an EMPTY body: a region that says "
+                                "nothing where a number is owed is worse than "
+                                "the typed number it replaced" % name)
+            elif first.get(name) != second.get(name):
+                problems.append("%s rendered two different bodies on two runs, "
+                                "so every page carrying it is permanently stale"
+                                % name)
+        suite.record("R", "every-registry-entry-in-this-repo-renders", problems,
+                     detail=[_d("registry", "docs/%s"
+                                % real_mod.MEASUREMENTS_FILE)]
+                            + [_d(name, "%d byte(s) from %r"
+                                  % (len(first.get(name) or ""),
+                                     " ".join(real_registry[name]["command"])))
+                               for name in sorted(real_registry)]
+                            + [_d("why", "the fixture proves the MECHANISM; only "
+                                         "the real entries can prove that the "
+                                         "commands this corpus names still run "
+                                         "and still answer the same way twice")])
 
         # ---- a MALFORMED registry: a finding, not a crash ---------------------
         # Runs LAST because it breaks the registry the cases above depend on.

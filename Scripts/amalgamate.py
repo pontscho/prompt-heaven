@@ -44,6 +44,8 @@ Usage:
     python3 Scripts/amalgamate.py                 # rewrite every region
     python3 Scripts/amalgamate.py --check         # write nothing, exit 1 if stale
     python3 Scripts/amalgamate.py --force         # discard a hand edit
+    python3 Scripts/amalgamate.py --census fleet  # count the live regions
+    python3 Scripts/amalgamate.py --census sources  # count what the sources define
     python3 Scripts/amalgamate.py Scripts/mcp-purity.py
 """
 
@@ -73,6 +75,17 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 CANONICAL_NAMES = ("_mcp_concurrency.py", "_mcp_json.py", "_mcp_logging.py",
                    "_mcp_lsp.py", "_mcp_paging.py")
 CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
+
+# The repo root, derived the same way `SCRIPTS_DIR` is and for the same reason:
+# `Scripts/` is a directory of this repository, so its parent is the root that
+# every anchor in the wiki is relative to. Used only by the census, to spell a
+# path the way a documentation page spells one.
+REPO_ROOT = SCRIPTS_DIR.parent
+
+# The census subjects. Two, because the fleet and the sources answer different
+# questions and change on different events: a region is added when a SERVER is
+# converted, a block when a canonical SOURCE grows. See `census_text`.
+CENSUS_KINDS = ("fleet", "sources")
 
 
 class Region(NamedTuple):
@@ -556,6 +569,200 @@ def apply_regions(path: Path, regions: List[Region]) -> None:
     path.write_text("".join(lines), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# `--census` -- the numbers a page states in prose, printed by the one thing
+# that already knows them
+#
+# Every count `docs/components/generated-regions.md` makes about this mechanism
+# is already derivable from the walk above: how many regions are live, how many
+# block instances they emit, which markers name two blocks, which blocks reach
+# every server, what each canonical source defines. Typed into prose those
+# numbers rot -- two of them had been found stale and corrected by hand before
+# this flag existed -- so the wiki RENDERS them from here instead, through
+# `docs/measurements.json`, which names this argv.
+#
+# Three properties, each a requirement of that consumer rather than a taste:
+#
+#   * IT WRITES NOTHING, AND IT IS THE ONLY MODE THAT CANNOT. The branch in
+#     `main` returns before the staleness loop, so the one mode a documentation
+#     page runs unattended can neither repair nor rewrite the tree it is
+#     describing. `--check` and `--force` are IGNORED beside it rather than
+#     combined with it: a pair of flags meaning "report" and "write" has no
+#     useful intersection, and the safe reading of the pair is the read one.
+#   * IT IS SORTED, NOT MERELY STABLE. The body is hashed and the digest is
+#     compared against a page, so an iteration order that merely happens to
+#     come out the same way today turns every page carrying it into a false
+#     `stale` tomorrow. Every list here is sorted by name, and the one
+#     frequency table is sorted by count descending with ties broken by name --
+#     an order a test can ASSERT, where "it came out the same twice" is only a
+#     run it reproduced.
+#   * EVERY NUMBER CARRIES ITS SUBJECT. This body lands inside a page, where
+#     "111 regions" is a number no reader can check. What is being counted is
+#     written beside each count, once.
+#
+# A CELL CANNOT FORGE A COLUMN (adr 0016). Every cell rendered here is a Python
+# identifier or a repo-relative path, and neither can contain a `|`, so these
+# tables have no escaping scheme because they need none -- which is a declared
+# answer, not an omission. Names and paths are rendered in the wiki's own anchor
+# spelling, backticked and repo-root-relative, so `wiki_call verify` resolves
+# them against the tree instead of taking the rendered page's word for them.
+# ---------------------------------------------------------------------------
+
+
+def repo_relative(path: Path) -> str:
+    """*path* as a repo-root-relative POSIX string -- the wiki's anchor spelling.
+
+    A path outside the repo falls back to its bare name rather than raising: the
+    census is a report, and a target somebody passed from elsewhere is a thing
+    to name, not a reason to refuse the whole count.
+    """
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.name
+
+
+def census_names(names: Collection[str]) -> str:
+    """A list of names as backticked code spans, in the order given.
+
+    The ORDER IS THE CALLER'S. Every caller here sorts, and sorts for the reason
+    in the note above; taking the sort away from this helper keeps the one place
+    that could silently unsort everything from being a shared default.
+    """
+    return ", ".join("`%s`" % name for name in names)
+
+
+def census_fleet(sources: Dict[str, Dict[str, str]],
+                 targets: List[Path]) -> List[str]:
+    """What the LIVE regions are, across the servers -- one page body, as lines."""
+    servers = sorted(targets, key=lambda p: p.name)
+    server_names = [repo_relative(path) for path in servers]
+    rows: List[Tuple[str, Region]] = []
+    for path, host in zip(servers, server_names):
+        for region in audit(path, sources):
+            rows.append((host, region))
+
+    defined = {name for blocks in sources.values() for name in blocks}
+    named = {name for _host, region in rows for name in region.names}
+    hosting = {host for host, _region in rows}
+    instances = sum(len(region.names) for _host, region in rows)
+
+    arity: Dict[int, int] = {}
+    markers: Dict[Tuple[str, ...], int] = {}
+    hosts: Dict[str, Set[str]] = {}
+    for host, region in rows:
+        size = len(region.names)
+        arity[size] = arity.get(size, 0) + 1
+        if size > 1:
+            key = tuple(region.names)
+            markers[key] = markers.get(key, 0) + 1
+        for name in region.names:
+            hosts.setdefault(name, set()).add(host)
+
+    out = [
+        "- MCP servers matching `Scripts/%s`: %d, of which %d carry at least "
+        "one generated region" % (TARGET_GLOB, len(servers), len(hosting)),
+        "- live generated regions in them: %d" % len(rows),
+        "- block instances those regions emit: %d" % instances,
+        "- distinct canonical blocks named on a marker: %d, out of the %d "
+        "defined by the %d canonical sources" % (len(named), len(defined),
+                                                 len(sources)),
+        "",
+        "Regions by how many blocks one marker names: %s."
+        % "; ".join("%d name %d block%s"
+                    % (count, size, "" if size == 1 else "s")
+                    for size, count in sorted(arity.items())),
+    ]
+
+    if markers:
+        # Sorted by frequency and then by the name list, so the table reads as a
+        # ranking AND cannot reorder on a tie. The names keep the marker's own
+        # order -- dependency first, which is the order every co-listed region
+        # is required to spell -- so two markers that disagree about the order
+        # tally as the two different spellings they are.
+        out += ["",
+                "The %d region(s) that name more than one block, by the list "
+                "written on the marker:" % sum(markers.values()),
+                "",
+                "| Blocks named on one marker | Regions |",
+                "|---|---|"]
+        out += ["| %s | %d |" % (census_names(key), count)
+                for key, count in sorted(markers.items(),
+                                         key=lambda kv: (-kv[1], kv[0]))]
+
+    total = len(servers)
+    everywhere = sorted(name for name, seen in hosts.items()
+                        if len(seen) == total)
+    out += ["",
+            "Generated into every one of the %d servers: %s."
+            % (total, census_names(everywhere) if everywhere
+               else "no block at all")]
+
+    # "In all but one" is reported WITH the holdout named, because the count
+    # alone does not say whether the missing server keeps a hand copy or simply
+    # has no use for the block -- and the name is what a reader checks.
+    holdouts: Dict[str, List[str]] = {}
+    for name, seen in hosts.items():
+        if len(seen) == total - 1:
+            holdouts.setdefault(sorted(set(server_names) - seen)[0],
+                                []).append(name)
+    if holdouts:
+        out += ["Generated into every server but `%s`: %s."
+                % (missing, census_names(sorted(holdouts[missing])))
+                for missing in sorted(holdouts)]
+    else:
+        out.append("No block is generated into all but exactly one server.")
+    return out
+
+
+def census_sources(sources: Dict[str, Dict[str, str]]) -> List[str]:
+    """What the canonical sources DEFINE -- one page body, as lines."""
+    out = ["| Canonical source | Blocks | Block names |", "|---|---|---|"]
+    owners: Dict[str, List[str]] = {}
+    total = 0
+    for name in sorted(sources):
+        blocks = sorted(sources[name])
+        total += len(blocks)
+        for block in blocks:
+            owners.setdefault(block, []).append(name)
+        path = CANONICAL_SOURCES.get(name)
+        out.append("| `%s` | %d | %s |"
+                   % (repo_relative(path) if path else name,
+                      len(blocks), census_names(blocks)))
+    # Disjointness is REPORTED, not assumed. A name defined by two sources makes
+    # the marker's source field decorative for it, which is the one property the
+    # multi-source design exists to protect -- so it is named here rather than
+    # left to be inferred from a total that still adds up.
+    shared = sorted(block for block, held in owners.items() if len(held) > 1)
+    out += ["",
+            "%d canonical sources define %d blocks between them, and %s."
+            % (len(sources), total,
+               "no name is defined by two of them" if not shared
+               else "these names are defined by more than one: %s"
+                    % census_names(shared))]
+    return out
+
+
+def census_text(kind: str, sources: Dict[str, Dict[str, str]],
+                targets: List[Path]) -> str:
+    """One census body, ending in exactly one newline.
+
+    The unknown-kind refusal is not dead code behind argparse's `choices`: the
+    suite calls this function directly, and a census kind that silently printed
+    nothing would render an EMPTY region into a page -- a block that says
+    nothing where a number is owed, which is worse than the typed number it
+    replaced.
+    """
+    if kind == "fleet":
+        lines = census_fleet(sources, targets)
+    elif kind == "sources":
+        lines = census_sources(sources)
+    else:
+        raise SystemExit("unknown census %r; the subjects are %s"
+                         % (kind, ", ".join(CENSUS_KINDS)))
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Inline the shared blocks from the canonical sources "
@@ -567,10 +774,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="write nothing; exit 1 if any region is stale")
     ap.add_argument("--force", action="store_true",
                     help="overwrite a hand-edited region instead of refusing")
+    ap.add_argument("--census", choices=CENSUS_KINDS,
+                    help="write NOTHING and print a census: 'fleet' counts the "
+                         "live regions in the targets, 'sources' counts what "
+                         "the canonical sources define. Returns before any "
+                         "staleness check, so --check and --force do not apply")
     args = ap.parse_args(argv)
 
     sources = load_all_blocks()
     targets = args.targets or sorted(SCRIPTS_DIR.glob(TARGET_GLOB))
+
+    # THE READ PATH, and it is first on purpose: nothing below this line runs
+    # for a census, so there is no ordering, no flag combination and no later
+    # edit to this function that can make the reporting mode write.
+    if args.census:
+        print(census_text(args.census, sources, targets), end="")
+        return 0
 
     stale = refused = 0
     for path in targets:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generated-region drift gate -- groups A-F.
+"""Generated-region drift gate -- groups A-G.
 
 `Scripts/_mcp_concurrency.py`, `Scripts/_mcp_json.py`,
 `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` and
@@ -78,6 +78,23 @@ Groups:
   F. TABS:    which blocks may be re-indented for a tab-indented host, decided
               per BLOCK and mechanically; one that may not is refused by name;
               a space-indented host is served exactly what it was served before
+  G. CENSUS:  `--census`, the generator's READ path -- the counts a page used to
+              type, derived from the same walk, sorted rather than merely
+              stable, and unable to write
+
+THE CENSUS IS GATED ON THREE PROPERTIES, NOT ON ITS PROSE. Its consumer is
+`docs/measurements.json`, which hands the argv to `mcp-wiki`'s `measure`: the
+body is rendered INTO a page and a digest of it is recorded on the page's END
+marker. So the output must be DERIVED (group G re-does the arithmetic and
+refuses a number this walk cannot produce), SORTED (asserted by re-rendering
+with the targets reversed and the block maps re-inserted backwards -- byte
+identity across two input ORDERS, where identity across two runs would pass a
+renderer that iterates a set), and UNABLE TO WRITE (`apply_regions` is replaced
+by a recorder for the duration, so the case can fail without the suite having
+rewritten fifteen servers to discover it). The sentences themselves are not
+pinned: a typed copy of them would fail on every rewording nobody is gating, and
+would pass the one defect that matters -- the right sentence carrying the wrong
+number.
 
 Usage:
   python3 tests/test_generated_region.py            # standalone
@@ -90,7 +107,9 @@ Exit code 0 iff every non-informational case passes.
 
 import ast
 import asyncio
+import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -141,6 +160,13 @@ GC = "C. CONTROL: mutations detected, quoted markers inert, sources not crossed"
 GD = "D. HYGIENE: no bytecode, no source touched"
 GE = "E. BLOCKS: what each shared block actually does"
 GF = "F. TABS: per-block safety, host detection, space hosts untouched"
+GG = "G. CENSUS: the read path a page renders -- derived, sorted, writes nothing"
+
+# The census subjects, mirrored here for the reason CANONICAL_NAMES is: a third
+# subject added to the generator and not to this tuple leaves the new one with
+# no case at all, which is the failure a census silently rendering an empty
+# block would produce on a page.
+CENSUS_KINDS = ("fleet", "sources")
 
 # --- synthetic material for group C -------------------------------------------
 
@@ -1724,6 +1750,297 @@ def group_tabs(suite, mod):
                          % sum(1 for s in styles.values() if s == "space")])
 
 
+# --- group G helpers ----------------------------------------------------------
+#
+# The census output is READ back here rather than compared against a typed copy
+# of its sentences. A typed copy would fail on every rewording of prose nobody
+# is gating, and would pass a renderer that printed the right sentence with the
+# wrong number in it -- which is the only defect that matters, because the body
+# is written into a page a human then quotes.
+#
+# Parsed with `str` methods and not with `re`, deliberately, and for the reason
+# in this file's docstring: the fleet's rule is that SOURCE is read with `ast`,
+# and what is read here is neither source nor a place a regex earns anything. A
+# block name cannot contain a backtick and a table cell cannot contain a pipe
+# (adr 0016, and the census relies on the same fact), so splitting on those two
+# characters is exact rather than approximate.
+
+def census_spans(line):
+    """The backticked code spans of *line*, in order; [] if they are unbalanced."""
+    parts = line.split("`")
+    return parts[1::2] if len(parts) % 2 else []
+
+
+def census_block_spans(line):
+    """The spans of *line* that are BLOCK names -- a path is a host, not a block.
+
+    Structural rather than positional: a block name is a Python identifier and
+    can never contain a `/`, so the holdout line's leading server path filters
+    itself out without the case having to know the sentence's word order.
+    """
+    return [span for span in census_spans(line) if "/" not in span]
+
+
+def census_cells(line):
+    """The cells of a Markdown table row, or None when *line* is not one."""
+    if not (line.startswith("| ") and line.endswith(" |")):
+        return None
+    return [cell.strip() for cell in line[1:-1].split("|")]
+
+
+def census_numbers(text):
+    """Every integer in *text* that is NOT inside a code span.
+
+    A block name or a path may legitimately carry a digit; a COUNT is what this
+    group audits, and every count is written outside the spans.
+    """
+    out = []
+    for line in text.splitlines():
+        digits = ""
+        for ch in "".join(line.split("`")[0::2]) + " ":
+            if ch.isdigit():
+                digits += ch
+            elif digits:
+                out.append(int(digits))
+                digits = ""
+    return out
+
+
+def group_census(suite, mod):
+    """`--census`: the numbers a page renders, and the three properties it owes.
+
+    The consumer is `docs/measurements.json`, which hands this argv to
+    `mcp-wiki`'s `measure`: the body is rendered into a page and a digest of it
+    is recorded on the END marker. That makes two ordinary-looking properties
+    load-bearing -- the output must be DERIVED (a number nobody can re-derive is
+    the defect being removed, not automated) and SORTED (an iteration order that
+    merely happens to repeat turns every page carrying the block into a false
+    `stale`) -- and one that is a safety property: the mode a documentation tool
+    runs unattended must not be able to write.
+    """
+    sources = mod.load_all_blocks()
+    targets = sorted(Path(SCRIPTS).glob(TARGET_GLOB))
+
+    # The oracle: the same walk, done here. Not a second implementation of the
+    # RENDERER -- that is the thing under test -- but of the arithmetic, so a
+    # census that dropped a count or invented one is visible as a number.
+    walked = {path.name: mod.audit(path, sources) for path in targets}
+    hosting = [name for name, regions in walked.items() if regions]
+    region_count = sum(len(regions) for regions in walked.values())
+    instances = sum(len(r.names) for regions in walked.values() for r in regions)
+    named = {n for regions in walked.values() for r in regions for n in r.names}
+    defined = {n for blocks in sources.values() for n in blocks}
+    arity, markers, hosts = {}, {}, {}
+    for name, regions in walked.items():
+        for region in regions:
+            size = len(region.names)
+            arity[size] = arity.get(size, 0) + 1
+            if size > 1:
+                markers[tuple(region.names)] = \
+                    markers.get(tuple(region.names), 0) + 1
+            for block in region.names:
+                hosts.setdefault(block, set()).add("Scripts/%s" % name)
+
+    fleet = mod.census_text("fleet", sources, targets)
+    source_text = mod.census_text("sources", sources, targets)
+
+    # ---- every number is derived, and every number has a subject -------------
+    subjects = [(len(targets), "servers scanned"),
+                (len(hosting), "servers carrying a region"),
+                (region_count, "live regions"),
+                (instances, "block instances emitted"),
+                (len(named), "distinct blocks named on a marker"),
+                (len(defined), "blocks the sources define"),
+                (len(sources), "canonical sources")]
+    legitimate = ({value for value, _subject in subjects} | set(arity)
+                  | set(arity.values()) | set(markers.values())
+                  | {sum(markers.values())})
+    printed = census_numbers(fleet)
+    problems = ["the census prints %d, which this walk cannot produce -- a "
+                "count nobody can re-derive is the defect being removed, not "
+                "the one being automated" % value
+                for value in sorted(set(printed) - legitimate)]
+    problems += ["the census never prints %d, so the count of %s is missing"
+                 % (value, subject) for value, subject in subjects
+                 if value not in printed]
+    problems += ["%r carries a number and not one word, so the count has no "
+                 "subject" % line for line in fleet.splitlines()
+                 if any(ch.isdigit() for ch in line)
+                 and not any(ch.isalpha() for ch in line)]
+
+    # A TYPED NUMBER THAT IS RIGHT TODAY is invisible to every check above, and
+    # it is the precise defect this mechanism exists to remove: the page's three
+    # headline counts were typed for as long as they were right, and two of them
+    # had to be corrected by hand once they were not. The only way to see it is
+    # to hand the census a DIFFERENT input and require the numbers to move, so
+    # the census is rendered again over a proper subset of the servers.
+    few = targets[:3]
+    few_names = [path.name for path in few]
+    subset = census_numbers(mod.census_text("fleet", sources, few))
+    problems += ["rendered over %d of the %d servers the census still does not "
+                 "print %d, the %s it was handed -- a number that does not move "
+                 "with its input was typed, not counted"
+                 % (len(few), len(targets), value, subject)
+                 for value, subject in (
+                     (len(few), "server count"),
+                     (sum(len(walked[name]) for name in few_names),
+                      "live region count"),
+                     (sum(len(r.names) for name in few_names
+                          for r in walked[name]), "block instance count"))
+                 if value not in subset]
+    suite.record(GG, "census-counts-are-the-region-walk", problems,
+                 detail=["%s: %d" % (subject, value)
+                         for value, subject in subjects] +
+                        ["over %s alone: %r" % (", ".join(few_names), subset)],
+                 text=fleet)
+
+    # ---- sorted, not merely stable ------------------------------------------
+    # Byte identity across two RUNS is the weak half and it is asserted first.
+    # The strong half is byte identity across two input ORDERS: a renderer that
+    # iterated a set would agree with itself all afternoon and disagree the
+    # moment a filename or a hash seed moved, which on a measured page reads as
+    # a stale region nobody can explain.
+    problems = []
+    if fleet != mod.census_text("fleet", sources, targets):
+        problems.append("two fleet renders in one process differ")
+    if source_text != mod.census_text("sources", sources, targets):
+        problems.append("two source renders in one process differ")
+    if fleet != mod.census_text("fleet", sources, list(reversed(targets))):
+        problems.append("the fleet census depends on the ORDER its targets "
+                        "arrive in, so it is stable rather than sorted")
+    if source_text != mod.census_text(
+            "sources", dict(reversed(list(sources.items()))), targets):
+        problems.append("the source census depends on the INSERTION ORDER of "
+                        "the block maps, so it is stable rather than sorted")
+
+    rows = []
+    for line in fleet.splitlines():
+        cells = census_cells(line)
+        if cells and len(cells) == 2 and cells[1].isdigit():
+            rows.append((tuple(census_spans(cells[0])), int(cells[1])))
+    if rows != sorted(rows, key=lambda row: (-row[1], row[0])):
+        problems.append("the multi-name table is not ordered by count "
+                        "descending with ties broken by name: %r" % (rows,))
+    if dict(rows) != markers:
+        problems.append("the multi-name table is %r, the walk finds %r"
+                        % (dict(rows), markers))
+    for line in fleet.splitlines():
+        blocks = census_block_spans(line)
+        if line.startswith("|") or len(blocks) < 2:
+            continue                    # the table keeps the MARKER's order
+        if blocks != sorted(blocks):
+            problems.append("a block list is unsorted: %r" % line)
+    source_rows = []
+    for line in source_text.splitlines():
+        cells = census_cells(line)
+        if cells and len(cells) == 3 and cells[1].isdigit():
+            source_rows.append((census_spans(cells[0])[0], int(cells[1]),
+                                census_spans(cells[2])))
+    if [row[0] for row in source_rows] != sorted(row[0] for row in source_rows):
+        problems.append("the source rows are not in path order: %r"
+                        % [row[0] for row in source_rows])
+    problems += ["%s lists its blocks unsorted: %r" % (path, names)
+                 for path, _count, names in source_rows if names != sorted(names)]
+    suite.record(GG, "census-is-sorted-not-merely-stable", problems,
+                 detail=["two runs identical, and identical again with the "
+                         "targets reversed and the block maps re-inserted "
+                         "backwards",
+                         "multi-name rows: %d, ordered by count desc then name"
+                         % len(rows),
+                         "the table alone keeps the MARKER's order "
+                         "(dependency first), which is why it is asserted "
+                         "against the walk rather than against sorted()"])
+
+    # ---- the read path cannot write -----------------------------------------
+    # `apply_regions` is REPLACED for the duration, so a census that fell
+    # through into the rewrite loop is caught by a recorder instead of by a
+    # diff of the repository. The case must be able to fail without the suite
+    # having edited fifteen servers to find out.
+    digests_before = {path: H.sha256_file(str(path))
+                      for path in sorted(Path(SCRIPTS).glob("*.py"))}
+    recorded, real_apply = [], mod.apply_regions
+    mod.apply_regions = lambda path, regions: recorded.append(str(path))
+    printed_by_main = {}
+    try:
+        for argv in (["--census", "fleet"], ["--census", "sources"],
+                     ["--census", "fleet", "--check", "--force"]):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = mod.main(argv)
+            printed_by_main[tuple(argv)] = (code, buf.getvalue())
+    finally:
+        mod.apply_regions = real_apply
+
+    problems = ["a census run reached apply_regions: %r" % recorded] \
+        if recorded else []
+    problems += ["%s returned %d, not 0" % (" ".join(argv), code)
+                 for argv, (code, _out) in printed_by_main.items() if code]
+    for argv, want in ((("--census", "fleet"), fleet),
+                       (("--census", "sources"), source_text),
+                       (("--census", "fleet", "--check", "--force"), fleet)):
+        got = printed_by_main[argv][1]
+        if got != want:
+            problems.append("%s printed %d bytes, census_text produces %d"
+                            % (" ".join(argv), len(got), len(want)))
+    changed = [str(path) for path, digest in digests_before.items()
+               if H.sha256_file(str(path)) != digest]
+    if changed:
+        problems.append("the census modified %r" % [os.path.basename(p)
+                                                    for p in changed])
+    suite.record(GG, "census-writes-nothing-and-preempts-the-writers", problems,
+                 detail=["apply_regions calls during three census runs: %d"
+                         % len(recorded),
+                         "--check and --force alongside --census: still a "
+                         "report, still rc=0",
+                         "%d file(s) under Scripts/ re-digested, 0 changed"
+                         % len(digests_before)])
+
+    # ---- the source census is the source registry ---------------------------
+    # The row set is asserted against `CANONICAL_SOURCES`, not against whatever
+    # the census found: a source that stopped being rendered would otherwise
+    # agree with a census that stopped rendering it.
+    problems = []
+    if len(source_rows) != len(CANONICAL_NAMES):
+        problems.append("%d row(s) for %d canonical source(s)"
+                        % (len(source_rows), len(CANONICAL_NAMES)))
+    by_path = {row[0]: row for row in source_rows}
+    for name in CANONICAL_NAMES:
+        want_path = "Scripts/%s" % name
+        row = by_path.get(want_path)
+        if row is None:
+            problems.append("no row for %s; the census rendered %r"
+                            % (want_path, sorted(by_path)))
+            continue
+        if not os.path.isfile(H.repo_path(*want_path.split("/"))):
+            problems.append("%s is rendered as an anchor and is not a file"
+                            % want_path)
+        if row[1] != len(sources[name]) or row[2] != sorted(sources[name]):
+            problems.append("%s: the row says %d %r, the block map holds %d %r"
+                            % (want_path, row[1], row[2], len(sources[name]),
+                               sorted(sources[name])))
+    total = sum(row[1] for row in source_rows)
+    if total not in census_numbers(source_text.splitlines()[-1]):
+        problems.append("the closing line does not state the %d-block total: %r"
+                        % (total, source_text.splitlines()[-1]))
+    if total != len(defined):
+        problems.append("the rows sum to %d and the sources define %d distinct "
+                        "names, so two sources share one" % (total, len(defined)))
+    for kind in CENSUS_KINDS:
+        if not mod.census_text(kind, sources, targets).strip():
+            problems.append("the %r census renders an EMPTY body, which on a "
+                            "page is a block that says nothing where a number "
+                            "is owed" % kind)
+    unknown = expect_exit(lambda: mod.census_text("no-such-kind", sources,
+                                                  targets))
+    if not unknown or "no-such-kind" not in str(unknown):
+        problems.append("an unknown census subject was not refused by name: %r"
+                        % unknown)
+    suite.record(GG, "census-sources-is-the-registry", problems,
+                 detail=["rows: %d, blocks: %d" % (len(source_rows), total),
+                         "refusal: %s" % unknown],
+                 text=source_text)
+
+
 def group_hygiene(suite, pyc_before, digests_before):
     pyc_after = H.pycache_snapshot()
     suite.record(GD, "pycache-zero", problem_if(
@@ -1762,6 +2079,7 @@ def run(opts=None):
     group_control(suite, mod)
     group_blocks(suite, blocks, lsp, paging, logmod)
     group_tabs(suite, mod)
+    group_census(suite, mod)
     group_hygiene(suite, pyc_before, digests_before)
 
     suite.print_summary()

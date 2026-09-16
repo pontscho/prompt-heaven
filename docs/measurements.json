@@ -4,6 +4,14 @@
     "mcp-server-roster": {
       "description": "Every MCP server file git tracks, one path per line. Its LENGTH is the fleet size the corpus states in prose in a dozen places (\"all fifteen servers\", \"fifteen servers had inlined it\") and which two commits have already had to correct by hand.",
       "command": ["git", "ls-files", "--", "Scripts/mcp-*.py"]
+    },
+    "generated-region-census": {
+      "description": "How much of the MCP fleet is GENERATED rather than hand-written, counted by the generator that writes it: how many servers carry a region, how many regions are live, how many block instances they emit between them, which markers name two blocks at once and how often, and which blocks reach every server (and which reach all but one, naming the holdout). These are the numbers the prose of docs/components/generated-regions.md used to type: two of them had already been found stale and corrected by hand, having read 70 and 84 since before the logging source existed.",
+      "command": ["python3", "-B", "Scripts/amalgamate.py", "--census", "fleet"]
+    },
+    "canonical-source-blocks": {
+      "description": "What each canonical generation source DEFINES -- one row per source with its block count and the names, and a closing line saying whether any name is defined by two sources. That last clause is the disjointness a marker's source field depends on: a name resolves only against the source its own region names, so two sources sharing one would make that field decorative. This is the Blocks column of the source table in docs/components/generated-regions.md, whose paging row read 5 for as long as it was typed by hand.",
+      "command": ["python3", "-B", "Scripts/amalgamate.py", "--census", "sources"]
     }
   }
 }

@@ -46,7 +46,7 @@ time `ClaudeCode/.claude-plugin/plugin.json`.
 | Documentation wiki engine (skill + MCP server + librarian) | `ClaudeCode/skills/wiki/`, `Scripts/mcp-wiki.py` | [[wiki-engine]] |
 | Layer contract: what may be a skill, an agent, or a fragment | `ClaudeCode/ARCHITECTURE.md` | [[layer-contract]] |
 
-The former `/p:` slash-command tree (`ClaudeCode/commands/`) has been dissolved:
+The former `/p:` slash-command tree (ClaudeCode/commands/) has been dissolved:
 each command was migrated into a skill under `ClaudeCode/skills/` — see [[skills]].
 
 ## Entry points for a newcomer
