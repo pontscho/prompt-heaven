@@ -190,6 +190,11 @@ One registry entry per suite in `tests/run.py`: the in-process Python suites
 listed below plus `smoke`, which runs `Scripts/_mcp_smoke_test.py` as a
 subprocess and reports *servers* rather than cases. Every suite has a matching
 `forge` target in `project-forge.yaml`, each requiring the `syntax` prerequisite.
+That direction does **not** invert, and the table below is keyed on suites only:
+forge's `test` group also carries targets that are not suites and have no row
+here — `test.amalgamate_check` wraps `Scripts/amalgamate.py --check`, the
+generator's own CLI staleness gate, which takes the same `syntax` prerequisite
+but reports an exit code rather than a case count `project-forge.yaml`.
 
 There is no suite count in that sentence on purpose. The one it used to carry was
 two suites behind by the time anyone noticed — Idea 1's own failure mode, showing

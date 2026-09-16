@@ -13,14 +13,15 @@ sources:
   - Scripts/_mcp_paging.py
   - tests/test_generated_region.py
 verified:
-  commit: 8d56b6d
-  date: 2026-09-14
+  commit: db63229
+  date: 2026-09-16
 links:
   - scripts
   - tests
   - 0009-the-first-reader-is-a-cold-model
   - 0010-a-handler-failure-must-reach-iserror
   - 0014-a-canonical-source-is-a-domain
+  - 0015-ambiguity-is-the-defect
 ---
 
 # Generated regions
@@ -345,6 +346,19 @@ precedence question — is frozen in [[0015-ambiguity-is-the-defect]], and it is
 gated behaviourally rather than structurally, by
 `Scripts/_mcp_smoke_test.py:alias_collision_checks` driving all ten over live
 JSON-RPC.
+
+Which ten, though, is decided **textually**: that gate pairs its per-server probe
+row against a search of the server's source for the resolver's *definition line*,
+and asserts the two agree. A text search cannot tell a definition from a
+quotation of one, so a server that defines no resolver can be made to look like a
+host merely by writing that line into a docstring — measured, on the one server
+that had reason to: `Scripts/mcp-git.py` reaches the same collision rule through
+no resolver at all, its aliasing being structural rather than table-driven, and
+explaining that in prose tripped the gate's own consistency row until the name
+was spelled around rather than out `Scripts/mcp-git.py:_passthrough_args`. So the
+ten is a census of a *spelling*, not of a mechanism, and the page-level claim it
+supports is the narrower one: ten files write this function, while the contract
+it implements is met by more — see [[scripts]].
 
 That count is why the entry earns its space. ADR 0015 and section 7c of
 `Scripts/MCP_SKELETON.md` both record **nine** bodies with only clangd and cuda
