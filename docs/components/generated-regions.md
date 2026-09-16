@@ -33,10 +33,12 @@ between servers, no shared package, and no import that could carry a helper from
 one file to another.
 
 **Scope note.** This page is about the *MCP fleet's* generated regions. The repo
-contains a second, unrelated marker-delimited generation mechanism — the
-checkpoint file's table of contents, whose one-writer design is recorded in
-[[0009-the-first-reader-is-a-cold-model]]. The two share a pattern and nothing
-else.
+contains two other marker-delimited generation mechanisms and neither is this
+one: the checkpoint file's table of contents, whose one-writer design is recorded
+in [[0009-the-first-reader-is-a-cold-model]], and the wiki's own **measured
+regions** `Scripts/mcp-wiki.py`, which render a page block from a command named
+in `docs/measurements.json`. This page carries two of those, and they are where
+its counts come from. All three share a pattern and nothing else.
 
 ## Why generation rather than an import
 
@@ -85,21 +87,52 @@ A `BEGIN` without an `END` is a hard error rather than a skip, because a region
 that quietly stops being maintained is the whole failure the mechanism exists to
 prevent `Scripts/amalgamate.py`.
 
-Measured at the last edit to this page: **111 live regions across the 15 servers,
-emitting 149 block instances from 22 canonical blocks** — a single region may
-name several blocks, and that is the whole of the gap between the two counts.
-Thirty-eight regions name two blocks each and every other names one: fourteen
-`_result, _error`, seven `_json_error_window, _ensure_dict`, five
-`DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars`, and four each of
-`uri_to_path, path_to_uri`, `_request, _notify` and `_abs_uri, _abs_path`.
-`_json_error_window` and `_configure_logging` are in
-every server; the `_result` / `_error` pair is in fourteen of fifteen,
-`mcp-webfetch.py` the one holdout.
+How much of the fleet this actually is, the generator counts on demand
+`Scripts/amalgamate.py:census_fleet` — and the block below is that count rendered
+into the page rather than typed into it, by the wiki's measured-region mechanism
+writing between its own pair of markers:
 
-Those three numbers are measured at each edit rather than incremented, and the
-reason is the state they were just found in: the first two had read `70` and `84`
-since before the logging source existed, and the third read `11` against a table
-that summed to thirteen further down this same page.
+```markdown
+<!-- BEGIN MEASURED: generated-region-census -->
+the command's stdout lands here, rendered on demand and never typed
+<!-- END MEASURED: 3f9a1c2b7d40 -->
+```
+
+That example is a specimen, not a region: a fenced code block is inert to the
+scanner, which is the rule that lets a page document the marker it also carries
+`Scripts/mcp-wiki.py:_fenced_line_indices`.
+
+<!-- BEGIN MEASURED: generated-region-census -->
+- MCP servers matching `Scripts/mcp-*.py`: 15, of which 15 carry at least one generated region
+- live generated regions in them: 111
+- block instances those regions emit: 149
+- distinct canonical blocks named on a marker: 22, out of the 22 defined by the 5 canonical sources
+
+Regions by how many blocks one marker names: 73 name 1 block; 38 name 2 blocks.
+
+The 38 region(s) that name more than one block, by the list written on the marker:
+
+| Blocks named on one marker | Regions |
+|---|---|
+| `_result`, `_error` | 14 |
+| `_json_error_window`, `_ensure_dict` | 7 |
+| `DEFAULT_MAX_ANSWER_CHARS`, `_max_answer_chars` | 5 |
+| `_abs_uri`, `_abs_path` | 4 |
+| `_request`, `_notify` | 4 |
+| `uri_to_path`, `path_to_uri` | 4 |
+
+Generated into every one of the 15 servers: `_configure_logging`, `_json_error_window`.
+Generated into every server but `Scripts/mcp-webfetch.py`: `_error`, `_result`.
+<!-- END MEASURED: b9b14f6e3338 -->
+
+A single region may name several blocks, and that is the whole of the gap between
+the region count and the block-instance count.
+
+Those three counts — live regions, block instances, distinct canonical blocks —
+are rendered rather than incremented, and the reason is the state hand-typing had
+left them in: the first two had read `70` and `84` since before the logging
+source existed, and the third read `11` against a table that summed to thirteen
+further down this same page.
 
 ## Five canonical sources, and why five
 
@@ -134,21 +167,41 @@ naming complaint that measurement redirected at the container, and the test that
 decides when a sixth source is warranted are
 [[0014-a-canonical-source-is-a-domain]].
 
-| Source | Blocks | Domain |
-|---|---|---|
-| `Scripts/_mcp_concurrency.py` | 1 | how many tool calls a server runs at once |
-| `Scripts/_mcp_json.py` | 6 | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
-| `Scripts/_mcp_logging.py` | 1 | how a server CONFIGURES logging — level, sink, file mode |
-| `Scripts/_mcp_lsp.py` | 7 | how the LSP wire is spoken — `Content-Length` framing for a message, the `file://` DocumentUri for a path, the client-side hops that put a message on that wire, and the two spellings of a resolved path |
-| `Scripts/_mcp_paging.py` | 7 | how much of a result a caller gets, and how it is told where the rest is |
+| Source | Domain |
+|---|---|
+| `Scripts/_mcp_concurrency.py` | how many tool calls a server runs at once |
+| `Scripts/_mcp_json.py` | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
+| `Scripts/_mcp_logging.py` | how a server CONFIGURES logging — level, sink, file mode |
+| `Scripts/_mcp_lsp.py` | how the LSP wire is spoken — `Content-Length` framing for a message, the `file://` DocumentUri for a path, the client-side hops that put a message on that wire, and the two spellings of a resolved path |
+| `Scripts/_mcp_paging.py` | how much of a result a caller gets, and how it is told where the rest is |
 
-Twenty-two blocks across five sources, which the suite asserts as a disjointness
-check rather than a count. The paging row read `5` until the edit that added the
-logging row: the number was left behind when `_max_answer_chars` was lifted, and
-a stale figure sitting beside a new row is worse than one sitting alone. The
-four moves since are genuine arrivals rather than corrections — `_ensure_dict`
-in the JSON row, `DEFAULT_MAX_CHARS` in the paging one, and the DocumentUri pair
-then the client half in the LSP one.
+That column is the half no command can print: a domain is a decision about what a
+source is *for*. What each source actually **defines** is measured
+`Scripts/amalgamate.py:census_sources`, and the two tables are deliberately not
+merged into one. The rendered one is the authority on which sources exist, so a
+source appearing there with no row above it is a domain nobody has argued yet —
+which is the question [[0014-a-canonical-source-is-a-domain]] makes a person
+answer, and the one thing this page must not let a generator answer for them.
+
+<!-- BEGIN MEASURED: canonical-source-blocks -->
+| Canonical source | Blocks | Block names |
+|---|---|---|
+| `Scripts/_mcp_concurrency.py` | 1 | `MAX_INFLIGHT_REQUESTS` |
+| `Scripts/_mcp_json.py` | 6 | `_bool_param`, `_ensure_dict`, `_error`, `_int_param`, `_json_error_window`, `_result` |
+| `Scripts/_mcp_logging.py` | 1 | `_configure_logging` |
+| `Scripts/_mcp_lsp.py` | 7 | `_abs_path`, `_abs_uri`, `_notify`, `_request`, `encode_lsp_message`, `path_to_uri`, `uri_to_path` |
+| `Scripts/_mcp_paging.py` | 7 | `DEFAULT_MAX_ANSWER_CHARS`, `DEFAULT_MAX_CHARS`, `PAGE_LINE_RESERVE`, `_FENCE_LINE_RE`, `_max_answer_chars`, `_offset`, `_rows_note` |
+
+5 canonical sources define 22 blocks between them, and no name is defined by two of them.
+<!-- END MEASURED: 4fbc5733fdeb -->
+
+Its closing line is the disjointness the suite gates as a check rather than a
+count. The paging row read `5` until the edit that added the logging row: the
+number was left behind when `_max_answer_chars` was lifted, and a stale figure
+sitting beside a new row is worse than one sitting alone. The four moves since
+are genuine arrivals rather than corrections — `_ensure_dict` in the JSON row,
+`DEFAULT_MAX_CHARS` in the paging one, and the DocumentUri pair then the client
+half in the LSP one.
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its three hosts
 were found in. `mcp-git.py`, `mcp-inspect.py` and `mcp-wiki.py` each wrote
