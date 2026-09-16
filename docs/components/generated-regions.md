@@ -13,13 +13,14 @@ sources:
   - Scripts/_mcp_paging.py
   - tests/test_generated_region.py
 verified:
-  commit: db63229
+  commit: baa3a68
   date: 2026-09-16
 links:
   - scripts
   - tests
   - 0009-the-first-reader-is-a-cold-model
   - 0010-a-handler-failure-must-reach-iserror
+  - 0019-only-gate-on-what-you-can-prove
   - 0014-a-canonical-source-is-a-domain
   - 0015-ambiguity-is-the-defect
 ---
@@ -37,8 +38,9 @@ contains two other marker-delimited generation mechanisms and neither is this
 one: the checkpoint file's table of contents, whose one-writer design is recorded
 in [[0009-the-first-reader-is-a-cold-model]], and the wiki's own **measured
 regions** `Scripts/mcp-wiki.py`, which render a page block from a command named
-in `docs/measurements.json`. This page carries two of those, and they are where
-its counts come from. All three share a pattern and nothing else.
+in `docs/measurements.json` and whose WHY is
+[[0019-only-gate-on-what-you-can-prove]]. This page carries two of those, and
+they are where its counts come from. All three share a pattern and nothing else.
 
 ## Why generation rather than an import
 

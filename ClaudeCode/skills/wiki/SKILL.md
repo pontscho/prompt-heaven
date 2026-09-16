@@ -206,6 +206,12 @@ The janitor drives the wiki through the **`mcp-wiki` MCP server** (one tool,
 | `freshness` | git-only staleness report (stale / unverified / orphaned-source, with a `gating:` count) |
 | `reindex` | regenerate `INDEX.md`; `check: true` audits (dup slugs, malformed) without writing |
 | `stats` | page counts by type/status + dup/orphan/malformed audit |
+| `verify` | resolve every `sources:` entry and every inline `path` / `path:symbol` span against the repo, and classify every measured region; params: `path_prefix`, `measure` (default `false`). `measure: true` additionally RE-RENDERS the regions, which runs the commands `docs/measurements.json` names — without it nothing is executed and the answer says which regions it therefore did **not** check. The symbol matcher is stdlib text and declares its own limits; purity_call stays the real resolver (Schema §7) |
+| `measure` | re-render the measured regions (Schema §4b); params: `write` (default `false` = check only, writes nothing), `force`, `name`, `path_prefix`. A body that no longer hashes to its recorded digest was edited by hand and is **REFUSED**, never overwritten, unless `force` says otherwise |
+
+`measure` and `verify` are the only two functions that may execute anything; no
+read path can reach a child process. Both are still the janitor's to run — they
+are `wiki_call` functions like every other.
 
 The underlying logic still lives in two stdlib-only, Python 3.9+ scripts that
 never call an LLM and only ever write `INDEX.md`. They remain as a **CLI CI
@@ -223,6 +229,29 @@ gate** (exit codes drive PR checks); `wiki_call` is the interactive/agentic path
 Use the CLI scripts ONLY for a CI gate or a quick main-context sanity check.
 All interactive work (freshness, reindex, search, page reads, anchor
 verification) goes through the janitor and `wiki_call`.
+
+**The bootstrap, and it is a third thing — neither the server nor a CI gate.**
+
+```bash
+python3 -B ~/.claude/skills/p/skills/wiki/scripts/measure_cli.py --help
+```
+
+A repo's FIRST measured-region migration cannot use `measure` / `verify`,
+because the `mcp-wiki` process the session is talking to was started before that
+code existed, and a migration cannot restart the server it is running inside.
+`measure_cli.py` closes that one gap: it loads the **committed**
+`Scripts/mcp-wiki.py` off disk and calls the same `handle_wiki_call` the MCP
+process would (`measure`, `verify`, plus two diagnostics `wiki_call` has no
+function for — `regions`, which lists a page's regions **with each marker line's
+fenced flag**, and `body`, which prints one region verbatim). Pass `--server` if
+the server does not sit under the project root; `server` prints the search
+order.
+
+Unlike `freshness.py` and `reindex.py`, it is **not** a hand-mirrored copy and
+must never become one: it restates no marker grammar, digest, fence or state
+rule — it calls every one of them on the module it loads. After the first
+migration, use `wiki_call`; a session whose server already has `measure` has no
+use for this file.
 
 ## Self-check (MUST run before reporting any operation done)
 
@@ -333,6 +362,12 @@ in the project's `scripts/` directory. **Agents do not shell out** — the janit
 has no `Bash` tool. Every interactive freshness/index run goes through `wiki_call`
 (§7). Where an operation in §6 says "reindex" or "freshness", it means the
 `wiki_call` function, not the script.
+
+A third script sits beside them, `measure_cli.py`, and it is neither a CI gate
+nor a mirrored copy: it is the **one-time bootstrap** for a repo whose running
+`mcp-wiki` server predates `measure` / `verify` (§4b). It loads the committed
+server and calls it; it restates none of its rules. Once the session's server has
+the functions, use `wiki_call`.
 
 ### 2. Page types
 
@@ -521,6 +556,101 @@ curation step: move the anchor `targets:` → `sources:`, set
 a real gating condition on a page's sources. Neither `planned` nor `promotable`
 gates CI.
 
+### 4b. Measured regions (a number is never typed)
+
+**The rule, and it is law like the rest of this schema: a number that describes
+the tree is NEVER typed into a page.** It is one of exactly two things — a
+**measured region**, whose body a command renders, or an **anchor** pointing at
+the code that computes it. There is no third option, and "I checked it just now"
+is not one.
+
+This is §0's "every claim about code is verifiable", applied to arithmetic. An
+unanchored sentence about a symbol is already a violation; a count of servers,
+regions, pages or call sites is the same kind of claim, differing only in that no
+lint pass can re-check it by resolving a name. A typed count is right on the day
+it is written and silently wrong forever after — and measured on this corpus, it
+does not even survive the day: two numbers in one page had already been
+hand-corrected once and were stale again, and `INDEX.md` printed `[current]` for
+ten pages while git measured nine of them stale.
+
+**Three carve-outs, measured on the real corpus. A number stays typed when:**
+
+1. **It is history, not a measurement.** A claim about what a page or a file
+   *used to say* — "this line read `116 cases` until the commit that added the
+   freshness cases", "the paging row read `5` for as long as it was typed by
+   hand" — is a **quotation**. Re-rendering it would destroy the very thing it
+   reports. Verbatim, always, and never inside a measured region.
+2. **It is a frozen record.** An `adr` is append-only (§2) and its numbers are
+   the measurement *at the moment of the decision* — which is what makes the
+   decision auditable years later. An ADR whose census silently re-rendered would
+   be today's data arguing for a choice made against different data. ADRs keep
+   their dated numbers; if the LIVE value matters, it belongs in a measured
+   region on the living page the ADR links to.
+3. **It is a section heading.** A heading is an anchor surface: `#heading-slug`
+   links, `get_page`'s `section` param and the section index all key on its text,
+   so re-rendering a number inside one breaks every link that names it. Put the
+   measured region in the body *under* the heading; leave the heading alone.
+
+Everything else — a count in a sentence, a table cell, a bullet — is a measured
+region or an anchor.
+
+**The registry.** `docs/measurements.json`: `{"version": 1, "measurements":
+{"<name>": {"description": ..., "command": [...]}}}`. `command` is an argv LIST
+(no shell), run with the repo root as its working directory. `description` is
+REQUIRED, and it is the one field here that is not plumbing: a rendered block
+with no sentence saying what it counts is a number nobody can check, which is the
+defect this mechanism removes rather than automates.
+
+**The markers.** A region is an HTML-comment pair at **column 0**, each on a line
+of its own, the END carrying the first 12 hex chars of the SHA-256 of the body
+between them:
+
+```markdown
+<!-- BEGIN MEASURED: generated-region-census -->
+…rendered body…
+<!-- END MEASURED: b9b14f6e3338 -->
+```
+
+**Opening a region by hand — copy this literal, do not retype it:**
+
+```
+<!-- END MEASURED:  -->
+```
+
+**That is TWO spaces between the colon and `-->`.** The digest field is empty and
+the surrounding single spaces are both still required, so the empty spelling has
+two. One space is not a lenient near-miss, it is a **hard refusal**: the scanner
+reads `<!-- END MEASURED: -->` as a marker it cannot parse and aborts the whole
+page by name and line — deliberately, because a marker that is ALMOST right, if
+skipped, is a region nobody ever updates again. It is also the single easiest
+thing to mistype and it is **invisible in every rendered view**, so verify it in
+the raw bytes, never in a preview. An empty digest classifies `stale` without
+executing anything, which is the correct opening state: nothing has rendered this
+region yet.
+
+**Two inertness rules, and a page documenting this mechanism depends on both:**
+
+1. A marker must start at **column 0** and be the whole line. A leading space, a
+   backtick, a `- ` bullet or any prose before it, and it is not a marker.
+2. A marker **inside a fenced code block is inert** — which is exactly what lets
+   a page show the syntax (as this section does) without opening a region.
+
+A clean `measure` does NOT prove that a marker the page *shows* is inert; it only
+proves the scanner did not accept it as a region, which is also what a silently
+malformed marker looks like. Check the flag explicitly — `regions` in the
+bootstrap CLI prints every marker-shaped line with its verdict.
+
+**The states.** `ok` (digest matches the body AND the body matches what the
+command produced) / `stale` / `hand-edited` (the body no longer hashes to its
+recorded digest — a human typed inside the region, so it is **REFUSED**, never
+silently overwritten, unless `force` says otherwise) / `unregistered` (no
+registry entry) / `failed` (the command could not answer) / `not-rendered`
+(nobody authorized execution, so the region is UNCHECKED — which is neither a
+pass nor a defect and is the one state that must never be dressed up as either).
+`stale`, `hand-edited`, `unregistered` and `failed` GATE. `ok` and
+`not-rendered` do not — and they do not for opposite reasons, which is why they
+are two words and not one.
+
 ### 5. Frontmatter format (stdlib-parseable subset)
 
 The scripts use a minimal hand-written parser, not a full YAML engine. Pages
@@ -596,6 +726,7 @@ Anchor resolution and code reading use the MCP servers, never grep / find / sed:
 - File existence / text presence -> purity MCP (`find_file`, `search_for_pattern`).
 - Wiki page search / read / structure -> `mcp-wiki` `wiki_call` (`search`, `get_page`, `list`, `source_to_pages`, `stats`).
 - Git freshness / index (did sources change since a commit; regenerate INDEX) -> `mcp-wiki` `wiki_call` (`freshness`, `reindex`). The CLI `~/.claude/skills/p/skills/wiki/scripts/freshness.py` / `reindex.py` remain as the pre-PR CI gate.
+- Corpus-wide anchor resolution + measured-region state (§4b) -> `mcp-wiki` `wiki_call` (`verify`, `measure`). `verify` is the cheap sweep that says WHICH anchors to re-resolve properly; the language MCP above is still the authority on any symbol it flags. Only when the session's server predates those two functions, `~/.claude/skills/p/skills/wiki/scripts/measure_cli.py` drives the committed server instead.
 
 ### 8. Anti-scope (do NOT document)
 
