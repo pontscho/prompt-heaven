@@ -8,14 +8,16 @@ sources:
   - requirements.yaml
   - Scripts/task-validator.py
 verified:
-  commit: 9eeb66c
-  date: 2026-08-10
+  commit: 2663d02
+  date: 2026-09-16
 links:
   - scripts
   - skills
   - feature-implementation-plan
   - tests
   - 0002-index-claims-no-freshness
+  - spec-purity-unification
+  - spec-purity-luals-phase1
 ---
 
 # requirements.yaml
@@ -117,10 +119,12 @@ reviewers cleared the work — not that its author believes it is done.
 None of the keys `/p:implement` writes *after* the gate appear in the validator's
 top-level allowlist `Scripts/task-validator.py:TOP_LEVEL_KEYS`, and an unrecognised
 top-level key draws an "unknown top-level key (typo?)" warning. Measured against the
-file at this commit: of its 19 top-level keys, 8 are in the allowlist and **11 are
-not** — every implementation-record and documentation-record field. Re-running the
-validator on a post-implementation file therefore emits eleven warnings, and
-`--strict` turns them into a non-zero exit.
+file at this commit: of its 21 top-level keys, 8 are in the allowlist and **13 are
+not** — every implementation-record and documentation-record field, plus the
+two-key `archived:` / `archived_note:` marker the file grew once its graph was
+finished `requirements.yaml`. Re-running the validator on a post-implementation
+file therefore emits thirteen warnings, and `--strict` turns them into a non-zero
+exit.
 
 That is a consequence of the two-phase design rather than a decision about it: no
 rationale is recorded for leaving the implementation record outside the validator's
@@ -135,3 +139,47 @@ Those open items are real work rather than bookkeeping: the set recorded at this
 commit included a note that three pages carried a placeholder `verified.commit`
 predating the code they described `requirements.yaml` — exactly the false-freshness
 claim [[0002-index-claims-no-freshness]] exists to prevent. It has since been closed.
+
+## Where the file is: one name, three resolutions
+
+The path is the one part of this contract that nothing enforces. Three `task-*.py`
+helpers read the same file name and none of them agrees with the others on how to
+find it: `task-show-details.py` walks up from the working directory, bounded by a
+hop count rather than by an owner — five levels, so where it stops is a function of
+how deep the working directory happens to be `Scripts/task-show-details.py:main`;
+`task-plan.py` takes the path as a positional argument and falls back to the working
+directory `Scripts/task-plan.py:main`; and `task-update.py` resolves it against the
+working directory with no override of any kind `Scripts/task-update.py`. The
+operational consequence is the reader's, and it is written where instructions
+belong rather than here `ClaudeCode/skills/requirements/SKILL.md`.
+
+What belongs here is the asymmetry, because no single file shows it. In the same
+repo in the same week, the *other* family of upward file-walks was hardened rather
+than merely described: the Jira and Bitbucket profile lookups climb only while the
+**next** directory up is still inside `$HOME`, with both sides resolved through
+`realpath` before anything is compared, and the boundary driven through a real
+symlinked `$HOME` by a test rather than asserted as text
+`ClaudeCode/skills/jira/scripts/jira.py:_profile_path`
+`ClaudeCode/skills/bitbucket/scripts/bitbucket.py:_profile_path`. Those two walks
+were asked what they must not read. This one was not, and no rationale for the
+difference is **recorded** — the same shape as the three unrecorded choices above,
+and it gets the same treatment: stated, not invented.
+
+## One slot, one writer, no history
+
+`requirements.yaml` is a fixed output slot rather than a document with versions.
+`/p:task-plan` writes it at one well-known path and the next planning run overwrites
+it whole — no prompt, no backup, no second file, and nothing in the pipeline reads
+the previous contents first. The file now says so about itself `requirements.yaml`.
+
+The cost is measured rather than hypothetical: this path has held three task graphs
+and consumed two of them. The Phase 0 clangd/cuda graph was replaced wholesale by
+the luals Phase 1 graph (`75d3d26`, 937 lines in and 1131 out), and that Phase 1
+graph — itself complete and inspector-verified — was replaced by the sandbox-run
+graph (`1446acb`, 1071 in and 953 out), which is what the file carries today. Each
+displaced graph survives only inside the commit that deleted it.
+
+That is the plainest argument for this wiki that the repo makes on its own. Both
+displaced *features* still have readable designs here — [[spec-purity-unification]]
+and [[spec-purity-luals-phase1]] — because the durable half of each plan was moved
+into a page before the slot was reused. Whatever stayed only in the slot is gone.
