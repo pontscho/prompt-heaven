@@ -631,8 +631,28 @@ def _cut_head(text: str, room: int) -> Tuple[str, str]:
     return text[:keep], _TRUNCATED % (keep, total)
 
 
-# Keys in params that are handled specially (not forwarded as git CLI flags)
-_META_KEYS = {"args", "cwd", "timeout", "max_answer_chars"}
+# Keys naming the RAW PASSTHROUGH slot: a list of arguments handed to git
+# verbatim, behind the semantic flags. `args` is the canonical spelling and the
+# only one the tool description used to name, but the slot has the same problem
+# every positional slot here had — a caller who reaches for a different word for
+# it does not get the slot, it gets the fall-through, and the fall-through is a
+# bogus flag. Measured:
+#     params={"max_count": 6, "extra_args": ["--stat", "master..HEAD"]}
+#   -> git log --max-count=6 --extra-args=--stat --extra-args=master..HEAD
+#   -> fatal: unrecognized argument: --extra-args=--stat
+# Both list elements became their own `--extra-args=` flag, so even the range
+# was lost. `extra_args` is the spelling a caller actually reached for; `extra`,
+# `argv` and `git_args` are the neighbouring guesses, claimed for the same
+# reason the repository aliases were — none of them is a real git flag on any
+# subcommand of this whitelist, so claiming the name costs no working behaviour.
+# camelCase spellings come for free: `extraArgs` normalises to `extra_args`
+# before the membership test, exactly like every other key set here.
+_ARGS_KEYS = {"args", "extra_args", "extra", "argv", "git_args"}
+
+# Keys in params that are handled specially (not forwarded as git CLI flags).
+# Every passthrough spelling has to be here, not just `args`: whatever the
+# conversion loop does not drop, it turns into a flag.
+_META_KEYS = _ARGS_KEYS | {"cwd", "timeout", "max_answer_chars"}
 
 # Keys naming a revision or revision RANGE. These are positional args in git
 # (`git log A..B`), so they need an entry here — otherwise the generic conversion
@@ -843,6 +863,67 @@ def _semantic_params_to_args(params: dict) -> Tuple[List[str], List[str]]:
     return flags + repos + revisions, paths
 
 
+def _passthrough_args(params: dict) -> List[str]:
+    """Return the caller's raw CLI arguments, whichever spelling named them.
+
+    One slot, several accepted names (_ARGS_KEYS), normalized through
+    _camel_to_snake first so `extraArgs` reaches it too. The value contract is
+    the one `args` always had and is deliberately unchanged: a list, or a string
+    that is shlex.split (a model that writes "--oneline -5" means two arguments,
+    not one), or null/absent for none. Elements are str()-ed rather than
+    type-checked, because subprocess needs strings and a number in an args list
+    is a legible request.
+
+    TWO SPELLINGS AT ONCE IS AN ERROR, not a precedence question — this fleet's
+    rule, argued in docs/adr/0015-ambiguity-is-the-defect.md. Both last-wins and
+    first-wins read the WIRE ORDER, so the same two keys sent the other way
+    round would silently make a different call, and a model that sends two
+    spellings has hedged rather than mistyped. The message names the spellings
+    the caller WROTE (not their normalized forms — reporting that `extra_args`
+    collided with `extra_args` is not actionable) and sorts them, so the
+    sentence is order-independent too, not just the verdict. The rule is
+    presence-based: `{"args": null, "extra": [...]}` is refused as well, because
+    a caller who wrote both keys still has to be told which one is read.
+
+    Same key twice cannot happen — a dict has one of each — so this is purely
+    the two-spellings case.
+
+    This is NOT the fleet's alias-resolver mechanism and must not be named after
+    it: this server has no alias table, its aliasing is structural
+    (_camel_to_snake plus the key sets), and Scripts/_mcp_smoke_test.py decides
+    whether to run the fleet's alias-collision probe against a server by TEXT
+    SEARCH for that resolver's definition line in the source. So the name is
+    reserved here — and so is quoting it in full, which is why this paragraph
+    spells it around rather than out.
+
+    Raises ValueError on a collision or a value of the wrong type.
+    """
+    found: List[Tuple[str, Any]] = [(key, value) for key, value in params.items()
+                                    if _camel_to_snake(key) in _ARGS_KEYS]
+    if len(found) > 1:
+        names = sorted(key for key, _ in found)
+        listed = ", ".join(f"'{n}'" for n in names[:-1]) + f" and '{names[-1]}'"
+        raise ValueError(
+            f"Ambiguous parameters: {listed} "
+            f"{'both' if len(names) == 2 else 'all'} set 'args'. "
+            "Pass exactly one."
+        )
+    if not found:
+        return []
+
+    key, value = found[0]
+    if value is None:
+        return []
+    if isinstance(value, str):
+        import shlex
+        value = shlex.split(value)
+    if not isinstance(value, list):
+        # Named with the caller's own spelling: `params.args must be...` would
+        # point at a key they never wrote.
+        raise ValueError(f"params.{key} must be a list of strings")
+    return [str(a) for a in value]
+
+
 # Subcommands that must not receive a `--` even when a path was named. `git
 # rev-parse` prints every `--` it is handed as an OUTPUT LINE (measured), so the
 # separator would arrive in the caller's answer as data.
@@ -1040,18 +1121,14 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
 
     try:
         semantic_args, semantic_paths = _semantic_params_to_args(params)
+        # Every accepted spelling of the passthrough slot lands here, and it
+        # lands in the SAME position it always did — behind the semantic flags,
+        # in front of the path separator — so which word the caller used cannot
+        # change the argv. See _passthrough_args.
+        args = _passthrough_args(params)
     except ValueError as exc:
         return {"error": str(exc)}
 
-    args = params.get("args", [])
-    if args is None:
-        args = []
-    if isinstance(args, str):
-        import shlex
-        args = shlex.split(args)
-    if not isinstance(args, list):
-        return {"error": "params.args must be a list of strings"}
-    args = [str(a) for a in args]
     args = semantic_args + args
     # Paths join HERE, before the validator — it has to judge the argv git will
     # actually get. See _append_path_positionals.
@@ -1252,7 +1329,8 @@ GIT_CALL_TOOL = {
         "      the user explicitly asks).\n"
         "    - Do NOT pass `--no-verify`, `--no-gpg-sign`, or any hook bypass\n"
         "      unless the user explicitly requests it.\n\n"
-        "Params: args (CLI args list), cwd (sub-repo, default project root), "
+        "Params: args (CLI args list — also spelled extra_args / extra / argv /\n"
+        "git_args; a string is shlex-split), cwd (sub-repo, default project root), "
         "max_answer_chars (default 100000), timeout (default 60s, capped at 300s). "
         "Markdown output.\n\n"
         "NAMED PARAMS (alternative to args). The SAME key set applies to EVERY\n"
@@ -1280,12 +1358,22 @@ GIT_CALL_TOOL = {
         "    A positional key given a BOOLEAN becomes a FLAG instead: refs=true\n"
         "    is git's own ls-remote --refs (hide peeled tags), not a ref named\n"
         "    'true'.\n"
+        "  - The RAW PASSTHROUGH slot also has a dedicated key: `args`\n"
+        "    (canonical). Aliases: extra_args, extra, argv, git_args. A list, or\n"
+        "    a string that is shlex-split. Emitted AFTER the named flags and\n"
+        "    BEFORE any `--`, whichever spelling was used. TWO of these keys in\n"
+        "    one call is an ERROR naming both — not a silent pick.\n"
+        "  - camelCase is normalized: maxCount, revRange, extraArgs all reach\n"
+        "    the same slot as their snake_case spelling.\n"
         "  - ANY OTHER key is forwarded verbatim as `--key[=value]`, so an\n"
         "    invented or misspelled param name reaches git as an unknown flag.\n\n"
         "Examples:\n"
         "  function=\"log\", params={\"args\":[\"--oneline\",\"-20\"]}\n"
         "  function=\"log\", params={\"range\":\"master..HEAD\",\"stat\":true}\n"
         "    -> git log --stat master..HEAD   (diffstat-annotated range log)\n"
+        "  function=\"log\", params={\"max_count\":6,\"extra_args\":[\"--stat\","
+        "\"master..HEAD\"]}\n"
+        "    -> git log --max-count=6 --stat master..HEAD   (extra_args IS args)\n"
         "  function=\"ls-remote\", params={\"remote\":\"origin\",\"heads\":true}\n"
         "    -> git ls-remote --heads origin\n"
         "  function=\"log\", params={\"range\":\"master..HEAD\",\"paths\":\"src/x.c\"}\n"

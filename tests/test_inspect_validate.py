@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Functional suite for the mcp-inspect VALIDATION family (94 cases, groups A-N).
+"""Functional suite for the mcp-inspect VALIDATION family (groups A-O).
 
 Spawns ONE long-lived `python3 Scripts/mcp-inspect.py` child, speaks
 line-delimited JSON-RPC 2.0 to it, and asserts on `isError` plus substrings of
@@ -8,12 +8,14 @@ into a tempfile.mkdtemp() sandbox, so the suite is idempotent and never writes
 inside the repo tree.
 
 Coverage by group:
-  A  one valid fixture per format          json yaml toml xml ini csv tsv plist python
+  A  one valid fixture per format     json yaml toml xml ini csv tsv plist python bash
   B  one invalid fixture per format, and the reported error LINE NUMBER
   C  python depth: compile() catches that ast.parse() misses, SyntaxWarning
-  D  read-only contract: no new/touched .pyc, fixtures byte-identical after
+  D  read-only contract: no new/touched .pyc, fixtures byte-identical after,
+     and nothing the `bash -n` validator was pointed at ever ran
   E  xml security: internal entity, external entity (XXE), plain DOCTYPE
-  F  parameter error matrix + unreadable / directory / unknown-format paths
+  F  parameter error matrix + unreadable / directory / unknown-format paths,
+     plus the .sh/.bash extension pair and the sh/shell format spellings
   G  every function alias routes to a real handler
   H  max_mb cap semantics (0 = no cap, cap hit, default, negative, non-int)
   I  strict mode turns SKIP into NOT VERIFIED
@@ -21,7 +23,10 @@ Coverage by group:
   K  real repo files validate clean
   L  no regression in the non-validation functions (host stat sha256 pstree ...)
   M  python source encoding: PEP-263 cookie, latin-1 body, UTF-8 BOM, garbage
-  N  robustness: hostile input must not kill the server
+  N  robustness: hostile input must not kill the server, and a script handed to
+     `bash -n` is parsed and not executed
+  O  envelope discipline, and every canonical handler either gated or skipped
+     with a written reason
 
 Usage:
   python3 tests/test_inspect_validate.py
@@ -34,6 +39,7 @@ import ast
 import os
 import plistlib
 import re
+import shutil
 import sys
 
 sys.dont_write_bytecode = True
@@ -67,6 +73,27 @@ FIXTURES = {
         "</dict>\n</plist>\n"
     ),
     "valid.py": "import os\n\n\ndef f(a, b=2):\n    return a + b\n\n\nclass C:\n    pass\n",
+    "valid.sh": (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "\n"
+        "greet() {\n"
+        '  local who="${1:-world}"\n'
+        '  echo "hello, ${who}"\n'
+        "}\n"
+        "\n"
+        "for n in 1 2 3; do\n"
+        '  greet "$n"\n'
+        "done\n"
+    ),
+    # the .bash extension, which must infer the same format as .sh
+    "valid.bash": (
+        "#!/usr/bin/env bash\n"
+        'case "${1:-}" in\n'
+        "  a) echo A ;;\n"
+        "  *) echo other ;;\n"
+        "esac\n"
+    ),
 
     # ---- invalid; planted error line noted per case below ----
     # line 3: bare token `nope` is not a JSON value
@@ -92,6 +119,12 @@ FIXTURES = {
     ),
     # line 3: `def f(:`
     "bad.py": "x = 1\n\ndef f(:\n    pass\n",
+    # line 4: `for` on line 3 never says `do`, so bash faults on the token that
+    # follows it.  Chosen over an unterminated quote or a missing `fi` because
+    # both bashes on the supported platforms agree on line 4 here, while the
+    # end-of-file family is reported at the opening construct by bash 5 and
+    # ALSO at the last line by bash 3.2 -- a planted line that would move.
+    "bad.sh": "#!/usr/bin/env bash\necho one\nfor x in 1 2 3\necho $x\ndone\n",
 
     # ---- python depth ----
     # line 4: `break` outside a loop -> compile() rejects, ast.parse accepts
@@ -126,8 +159,17 @@ PLANTED = {
     "bad.json": 3, "bad.yaml": 3, "bad.toml": 3, "bad.xml": 4,
     "bad.ini": 4, "bad_nosection.ini": 1, "bad.csv": 3, "bad.tsv": 3,
     "bad.plist": 5, "bad.py": 3, "py_break.py": 4, "py_return.py": 4,
-    "py_escape.py": 3, "py_nonlocal.py": 3,
+    "py_escape.py": 3, "py_nonlocal.py": 3, "bad.sh": 4,
 }
+
+# The bash validator shells out, so the binary is a hard dependency of the
+# `bash` rows below -- unlike `node`, which group O skips for exactly that
+# reason.  It is NOT gated here: bash exists on both platforms this server
+# supports, eight of this repo's own post-edit hooks ARE bash scripts, and a
+# host without it could not run the product these suites test.  Recorded as a
+# note per run so a red row on such a host reads as the missing binary rather
+# than as a broken validator.
+BASH_BIN = shutil.which("bash")
 
 # byte-exact fixtures: encoding cookies / BOM / undecodable garbage
 BIN_FIXTURES = {
@@ -142,12 +184,28 @@ BIN_FIXTURES = {
 }
 
 
+MARKER = "bash-must-not-run.marker"
+
+
+def side_effect_script(work):
+    """A VALID bash script that leaves a file behind -- if anything runs it.
+
+    `bash -n` is supposed to parse and stop, so the marker must not appear.
+    The redirect target is absolute and inside the sandbox on purpose: the
+    server child runs with cwd=REPO_ROOT, so a relative one would aim this at
+    the repo itself.
+    """
+    return ('#!/usr/bin/env bash\nprintf \'ran\\n\' > "%s"\n'
+            % work.join(MARKER))
+
+
 def build_fixtures(work):
     """Materialise every fixture into the temp workspace; return the big.json path."""
     for name, body in FIXTURES.items():
         work.write_text(name, body)
     for name, blob in BIN_FIXTURES.items():
         work.write_bytes(name, blob)
+    work.write_text("side_effect.sh", side_effect_script(work))
     with open(work.join("valid_binary.plist"), "wb") as fh:
         plistlib.dump({"k": "v", "n": [1, 2, 3]}, fh, fmt=plistlib.FMT_BINARY)
     work.subdir("adir")
@@ -230,7 +288,11 @@ def _ast_ok(path):
 # ---------------------------------------------------------------------------
 
 def run(opts=None):
-    """Build fixtures, drive the server, record all 94 cases; return the Suite."""
+    """Build fixtures, drive the server, record every case; return the Suite.
+
+    The case COUNT is declared once, in tests/run.py's SUITES table, and the
+    runner asserts it against the run -- it is deliberately not repeated here.
+    """
     opts = opts or H.Options()
     suite = H.Suite(NAME, title="mcp-inspect validation family", opts=opts,
                     mode="stream", group_width=3, cid_width=28)
@@ -251,7 +313,7 @@ def run(opts=None):
                           ("valid.toml", "toml"), ("valid.xml", "xml"),
                           ("valid.ini", "ini"), ("valid.csv", "csv"),
                           ("valid.tsv", "tsv"), ("valid.plist", "plist"),
-                          ("valid.py", "python")]:
+                          ("valid.py", "python"), ("valid.sh", "bash")]:
             case(suite, cli, "A", "valid-" + fmt, "validate", {"path": f(name)},
                  must=["OK", "**PASSED**", fmt], must_not=["FAIL", "SKIP"])
 
@@ -260,7 +322,7 @@ def run(opts=None):
                           ("bad.toml", "toml"), ("bad.xml", "xml"),
                           ("bad.ini", "ini"), ("bad.csv", "csv"),
                           ("bad.tsv", "tsv"), ("bad.plist", "plist"),
-                          ("bad.py", "python")]:
+                          ("bad.py", "python"), ("bad.sh", "bash")]:
             text = case(suite, cli, "B", "bad-" + fmt, "validate",
                         {"path": f(name)}, must=["FAIL", "**FAILED**"])
             # the `at` column must carry the planted line number
@@ -355,6 +417,28 @@ def run(opts=None):
              {"path": f("asjson.txt"), "format": "json"},
              must=["OK", "**PASSED**"], must_not=["SKIP"])
 
+        # -- shell scripts: the extension PAIR, and the three spellings of the
+        # one parser.  Group A already covers `.sh` inference (it passes no
+        # format either); `.bash` has to land on the same validator or the
+        # second extension is decoration.  A caller who says `sh` or `shell`
+        # must reach that same validator too -- proven by the verdict naming
+        # `bash -n` while the format column echoes the word they actually used.
+        case(suite, cli, "F", "dotbash-inferred", "validate",
+             {"path": f("valid.bash")}, must=["OK", "bash -n"],
+             must_not=["SKIP", "unknown format"])
+        case(suite, cli, "F", "format-sh-spelling", "validate",
+             {"path": f("valid.sh"), "format": "sh"},
+             must=["OK", "sh", "bash -n"], must_not=["unsupported"])
+        case(suite, cli, "F", "format-shell-spelling", "validate",
+             {"path": f("valid.sh"), "format": "shell"},
+             must=["OK", "shell", "bash -n"], must_not=["unsupported"])
+        # `zsh` is NOT one of them -- bash would misreport zsh's own dialect --
+        # and the refusal has to advertise the spellings that DO work, or it
+        # sends the caller away from a validator that would have answered.
+        case(suite, cli, "F", "format-zsh-refused", "validate",
+             {"path": f("valid.sh"), "format": "zsh"}, want_error=True,
+             must=["unsupported format", "bash", "shell"])
+
         # ================= G: aliases =================
         for al in ["lint", "check", "verify", "syntax", "parse", "wellformed"]:
             case(suite, cli, "G", "alias-" + al, al,
@@ -372,6 +456,12 @@ def run(opts=None):
         case(suite, cli, "G", "alias-plutil", "plutil",
              {"content": FIXTURES["valid.plist"]},
              must=["OK"], must_not=["unknown function"])
+        # the FUNCTION half of the same two spellings group F checks as a
+        # FORMAT: `function="sh"` and `params.format="sh"` may not disagree
+        # about which parser they name, so both are asserted on `bash -n`
+        for al in ["sh", "shell"]:
+            case(suite, cli, "G", "alias-" + al, al, {"content": "echo hi\n"},
+                 must=["OK", "bash -n"], must_not=["unknown function"])
 
         # ================= H: max_mb =================
         case(suite, cli, "H", "maxmb-0-means-nocap", "validate",
@@ -427,6 +517,16 @@ def run(opts=None):
              must=["FAIL", "nested parentheses"])
         case(suite, cli, "N", "py-null-byte", "python", {"content": "x = 1\x00\n"},
              must=["FAIL", "null bytes"])
+        # `bash -n` must PARSE and stop.  This fixture is VALID bash whose only
+        # statement would create a file, so a validator that executed anything
+        # leaves evidence; both entry points are driven, because the path form
+        # hands bash a filename and the content form hands it stdin.  The
+        # marker's absence is asserted in group D, after the child is gone, so
+        # a late write cannot slip past the check.
+        case(suite, cli, "N", "bash-side-effect-path", "bash",
+             {"path": f("side_effect.sh")}, must=["OK", "**PASSED**"])
+        case(suite, cli, "N", "bash-side-effect-content", "bash",
+             {"content": side_effect_script(work)}, must=["OK", "**PASSED**"])
         case(suite, cli, "N", "alive-after-stress", "host", {},
              must=["hostname"])
 
@@ -495,10 +595,13 @@ def run(opts=None):
             "json": "thin wrapper over `validate`", "python": "ditto",
             "yaml": "ditto", "toml": "ditto", "xml": "ditto", "ini": "ditto",
             "csv": "ditto", "tsv": "ditto", "plist": "ditto",
-            "javascript": "thin wrapper over `validate`, and the only one that "
-                          "needs an external binary: without `node` it FAILs by "
-                          "design, and this suite cannot assume node is "
-                          "installed",
+            "javascript": "thin wrapper over `validate`, and one of the two "
+                          "that need an external binary: without `node` it "
+                          "FAILs by design, and this suite cannot assume node "
+                          "is installed",
+            "bash": "thin wrapper over `validate`; it also shells out, but "
+                    "unlike node its binary is assumed present (see BASH_BIN), "
+                    "so groups A/B/F/N drive this validator for real",
         }
         for fn, params in gate:
             err, t = cli.call_tool(fn, params)
@@ -547,13 +650,22 @@ def run(opts=None):
                          if pyc_after[k] != pyc_before[k])
         changed = sorted(k for k in dig_before
                          if dig_after.get(k) != dig_before[k])
+        # A NEW file is invisible to the digest diff above -- that compares the
+        # keys it already knew -- so the one thing `bash -n` could have created
+        # is named and checked by hand.
+        ran = [f(MARKER)] if os.path.exists(f(MARKER)) else []
         for cid, bad, label in [("pycache-new", new_pyc, "new .pyc"),
                                 ("pycache-touched", touched, "touched .pyc"),
-                                ("fixtures-unchanged", changed, "changed fixture")]:
+                                ("fixtures-unchanged", changed, "changed fixture"),
+                                ("bash-n-executed-nothing", ran,
+                                 "the validated script RAN and left")]:
             suite.record("D", cid,
                          [] if not bad else ["%s: %s" % (label, bad)])
         suite.note("      pyc files before=%d after=%d"
                    % (len(pyc_before), len(pyc_after)))
+        suite.note("      bash binary: %s"
+                   % (BASH_BIN or "MISSING -- the `bash` rows above are red "
+                                  "for that reason, not for a validator bug"))
     finally:
         work.cleanup()
 

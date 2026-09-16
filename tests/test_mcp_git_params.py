@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline suite for the mcp-git params -> git argv conversion (groups A-M).
+"""Offline suite for the mcp-git params -> git argv conversion (groups A-N).
 
 The case count is declared in ONE place, the SUITES table in tests/run.py, which
 asserts it against what this run reports -- so it is not repeated here.
@@ -75,6 +75,19 @@ Coverage by group:
      already-snake key normalization is an IDENTITY, so the group C traps do
      not shift.  Those three rows PASS rather than repeating C's INFO, because
      "unchanged" is an invariant where C's "deliberately bogus" is a record.
+  N  the RAW PASSTHROUGH slot has aliases too, for the reason every positional
+     slot got them: a caller who reaches for a different word for `args` used
+     to get the flag fall-through, and for a LIST that is one bogus flag PER
+     ELEMENT (`extra_args` lost the range as well as the --stat).  Every
+     spelling lands in the same argv POSITION -- behind the semantic flags, in
+     front of the `--` -- so the choice of word cannot change the command; two
+     spellings at once is an ERROR naming both (ADR 0015), sorted so the
+     sentence is order-independent, and presence-based so a null still counts;
+     the wrong-type error names the key the CALLER wrote; and the fall-through
+     itself is pinned as a negative control, because it is now the only thing
+     between a typo and a confusing git error.  The security boundary is a case
+     of its own: a new spelling must reach the dual-use validators exactly like
+     `args` does, or it is a filter bypass rather than a convenience.
 
 Three layers, deliberately, because each sees something the others cannot:
   exact rendering (F)  pins the policy; catches every class
@@ -110,6 +123,7 @@ RANGE_ALIASES = ["range", "revision_range", "rev_range", "rev", "revs",
                  "object", "tree_ish", "treeish"]
 REPO_ALIASES = ["remote", "repository", "repo"]
 PATH_ALIASES = ["path", "paths", "pathspec"]
+ARGS_ALIASES = ["args", "extra_args", "extra", "argv", "git_args"]
 
 REV_REJECT = "must be a revision or range"
 REPO_REJECT = "must be a remote name or URL"
@@ -1384,6 +1398,191 @@ def run(opts=None):
               {"revison": "HEAD"}, argv=["git", "log", "--revison=HEAD"],
               note="the `revison` typo has no uppercase, so it stays a bogus flag "
                    "exactly as before -- one typo, one bogus flag")
+
+        # ====== N: the raw passthrough slot and its spellings ======
+        # The slot always existed and was always called `args`. What it lacked
+        # was every other word a caller reaches for -- and the fall-through
+        # punishes a passthrough alias harder than any positional one, because
+        # a LIST becomes one bogus flag per element. Measured before the fix:
+        #   {"max_count": 6, "extra_args": ["--stat", "master..HEAD"]}
+        #   -> git log --max-count=6 --extra-args=--stat --extra-args=master..HEAD
+        #   -> fatal: unrecognized argument: --extra-args=--stat
+        # so the range was lost too, not just the flag.
+        args_argvs = []
+        for key in ARGS_ALIASES:
+            rep = check(suite, drv, "N", "alias-" + key, "log",
+                        {key: ["--oneline", "-20"]},
+                        argv=["git", "log", "--oneline", "-20"],
+                        cmdline="git log --oneline -20",
+                        must_not=["--%s=" % key.replace("_", "-")])
+            args_argvs.append(rep["argv"])
+        identity(suite, "N", "all-args-aliases-identical", args_argvs,
+                 "every passthrough spelling -> the same raw argv")
+        # Pinned like _REVISION_KEYS / _REPO_KEYS / _PATH_KEYS, and for the same
+        # reason as _PATH_KEYS: this set does not merely pick a spelling, it
+        # decides whether a value is handed to git VERBATIM or rendered as a
+        # flag. A key added here silently stops becoming `--key=value`.
+        pinned_set(suite, "N", "args-key-set", drv.mod._ARGS_KEYS, ARGS_ALIASES,
+                   "_ARGS_KEYS")
+        # Every passthrough spelling must also be stripped from the flag
+        # fall-through, which is a SEPARATE fact from reaching the slot: a key
+        # read by the handler but left in the conversion loop would be emitted
+        # twice -- once verbatim, once as `--key=value`.
+        pinned_set(suite, "N", "args-keys-are-meta",
+                   drv.mod._ARGS_KEYS - drv.mod._META_KEYS, [],
+                   "_ARGS_KEYS not dropped by the conversion loop")
+
+        check(suite, drv, "N", "live-log-max-count-extra-args", "log",
+              {"max_count": 6, "extra_args": ["--stat", "master..HEAD"]},
+              argv=["git", "log", "--max-count=6", "--stat", "master..HEAD"],
+              cmdline="git log --max-count=6 --stat master..HEAD",
+              must_not=["--extra-args", "unrecognized argument"],
+              note="the reported invocation, verbatim: was `git log "
+                   "--max-count=6 --extra-args=--stat "
+                   "--extra-args=master..HEAD` -> fatal: unrecognized argument")
+        check(suite, drv, "N", "camel-extraArgs-reaches-the-slot", "log",
+              {"extraArgs": ["--oneline"]}, argv=["git", "log", "--oneline"],
+              must_not=["--extraArgs", "--extra-args"],
+              note="extraArgs -> extra_args before the membership test, exactly "
+                   "like maxCount and revRange -- the sets stay snake_case")
+        check(suite, drv, "N", "camel-gitArgs-reaches-the-slot", "log",
+              {"gitArgs": "--oneline -5"},
+              argv=["git", "log", "--oneline", "-5"],
+              note="camelCase AND the string form in one call: normalization "
+                   "runs before the slot, shlex.split after it")
+        check(suite, drv, "N", "alias-string-shlex-split", "log",
+              {"extra_args": "--oneline -5"},
+              argv=["git", "log", "--oneline", "-5"],
+              note="the value contract is unchanged from `args`: a string is "
+                   "shlex.split, because a model writing \"--oneline -5\" means "
+                   "two arguments")
+        check(suite, drv, "N", "alias-string-quoted-word-stays-one-arg", "log",
+              {"argv": "--grep 'a b'"},
+              argv=["git", "log", "--grep", "a b"],
+              note="shlex, not str.split: the quoted word survives as ONE argv "
+                   "element")
+        check(suite, drv, "N", "alias-null-is-no-args", "log",
+              {"extra_args": None, "stat": True}, argv=["git", "log", "--stat"],
+              note="null means 'no passthrough', as it always did for `args` -- "
+                   "and it is NOT the positional-key reading, where null becomes "
+                   "the string \"None\" (group C)")
+        check(suite, drv, "N", "alias-empty-list-adds-nothing", "log",
+              {"git_args": []}, argv=["git", "log"])
+        check(suite, drv, "N", "alias-elements-str-coerced", "log",
+              {"extra": [-20]}, argv=["git", "log", "-20"],
+              note="elements are str()-ed rather than type-checked, exactly as "
+                   "under `args`: subprocess needs strings and a number in an "
+                   "args list is a legible request")
+
+        # POSITION, not just presence. The whole point of landing in the
+        # existing slot is that the argv is byte-identical to the `args`
+        # spelling -- including the two places position is load-bearing.
+        check(suite, drv, "N", "alias-after-semantic-flags", "log",
+              {"range": "A..B", "extra_args": ["--oneline"]},
+              argv=["git", "log", "A..B", "--oneline"],
+              note="same argv as the `args` spelling in group D "
+                   "(semantic-args-precede-params-args): named params first, "
+                   "passthrough behind them")
+        check(suite, drv, "N", "alias-flags-stay-in-front-of-separator", "log",
+              {"paths": "x", "extra_args": ["--oneline"]},
+              argv=["git", "log", "--oneline", "--", "x"],
+              note="the separator is appended AFTER the passthrough, whichever "
+                   "spelling carried it -- behind a `--` that flag would be a "
+                   "pathspec")
+        check(suite, drv, "N", "alias-dashdash-in-alias-not-doubled", "log",
+              {"paths": "b.c", "extra": ["--", "a.c"]},
+              argv=["git", "log", "--", "a.c", "b.c"],
+              note="the 'caller already opened the pathspec section' carve-out "
+                   "reads the ASSEMBLED argv, so it sees a `--` written through "
+                   "any spelling")
+
+        # THE SECURITY BOUNDARY. The dual-use validators run on the assembled
+        # argv, so a new spelling of the passthrough cannot be a filter bypass.
+        # This is the `args` case from group H (hash-object-bundled-w-refused)
+        # re-asked through each alias: if any of them reached git without
+        # passing validate_hash_object, this repo would write a blob through a
+        # read-only server.
+        for key in ARGS_ALIASES:
+            check(suite, drv, "N", "validator-sees-" + key, "hash-object",
+                  {key: ["-wt", "blob", "x"]}, error="bundled short options")
+        check(suite, drv, "N", "validator-sees-camel-extraArgs", "config",
+              {"extraArgs": ["user.name", "evil"]}, error="mutates",
+              note="normalization happens before the slot, so even the "
+                   "camelCase spelling of an alias is judged by the validator")
+
+        # AMBIGUITY IS THE DEFECT, NOT THE PRECEDENCE (ADR 0015). Both
+        # last-wins and first-wins read the WIRE ORDER, so the same two keys
+        # sent the other way round would silently make a different call.
+        COLLISION = "Ambiguous parameters: 'args' and 'extra_args' both set 'args'"
+        check(suite, drv, "N", "collision-two-spellings-refused", "log",
+              {"args": ["--oneline"], "extra_args": ["--stat"]},
+              error=COLLISION,
+              note="a model that sends two spellings has hedged, not mistyped; "
+                   "honouring half a hedge is unobservable from the reply")
+        check(suite, drv, "N", "collision-message-order-independent", "log",
+              {"extra_args": ["--stat"], "args": ["--oneline"]},
+              error=COLLISION,
+              note="the SAME sentence from the reversed key order: the pair is "
+                   "sorted, so the message is order-independent too and not "
+                   "only the verdict")
+        check(suite, drv, "N", "collision-two-aliases-no-canonical", "log",
+              {"extra": ["--stat"], "git_args": ["--oneline"]},
+              error="Ambiguous parameters: 'extra' and 'git_args' both set 'args'",
+              note="neither key is the canonical one -- the case a "
+                   "prefer-the-canonical-spelling rule could not decide "
+                   "(ADR 0015, Option 3)")
+        check(suite, drv, "N", "collision-camel-vs-snake", "log",
+              {"extraArgs": ["--stat"], "extra_args": ["--oneline"]},
+              error="'extraArgs' and 'extra_args' both set 'args'",
+              note="the message names what the CALLER WROTE, not the normalized "
+                   "form: reporting that extra_args collided with extra_args is "
+                   "not actionable")
+        check(suite, drv, "N", "collision-is-presence-based-not-value-based",
+              "log", {"args": None, "extra_args": ["--stat"]}, error=COLLISION,
+              note="a null is still a key the caller wrote. A value-based rule "
+                   "would make the same call shape pass or fail on its data, "
+                   "which is not a contract a caller can predict")
+        check(suite, drv, "N", "collision-refused-even-when-values-are-empty",
+              "log", {"range": "A..B", "args": [], "argv": []},
+              error="Ambiguous parameters: 'args' and 'argv' both set 'args'",
+              note="refused even where both values are empty and the argv would "
+                   "have been identical -- presence, not consequence")
+
+        check(suite, drv, "N", "alias-wrong-type-names-the-callers-key", "log",
+              {"extra_args": 5}, error="params.extra_args must be a list",
+              must_not=["params.args must"],
+              note="the value contract is the one `args` always had; only the "
+                   "key in the message moved, because pointing at a key the "
+                   "caller never wrote is not actionable")
+        check(suite, drv, "N", "alias-wrong-type-keeps-the-camel-spelling", "log",
+              {"extraArgs": {"a": 1}}, error="params.extraArgs must be a list",
+              note="the RAW spelling, not the normalized one -- the caller has "
+                   "to find the key in their own call")
+        check(suite, drv, "N", "canonical-wrong-type-message-unchanged", "log",
+              {"args": 5}, error="params.args must be a list of strings",
+              note="regression: the existing wording for the canonical key is "
+                   "byte-for-byte what it was")
+
+        # NEGATIVE CONTROL. The fall-through is a feature and must not regress
+        # -- and it is now the ONLY thing between a typo and a confusing git
+        # error, since five more names have been claimed out of it.
+        check(suite, drv, "N", "unknown-key-still-becomes-a-flag", "log",
+              {"unknown_key": "value"},
+              argv=["git", "log", "--unknown-key=value"],
+              note="the control: claiming five passthrough spellings must not "
+                   "turn the generic `--key[=value]` fall-through off")
+        check(suite, drv, "N", "trap-extra_arg-near-miss", "log",
+              {"extra_arg": ["--stat"]},
+              argv=["git", "log", "--extra-arg=--stat"], status=H.INFO,
+              note="the singular is NOT a claimed spelling, so it still becomes "
+                   "a bogus flag -- one typo, one bogus flag, exactly like "
+                   "trap-remote_name next to `remote`")
+        check(suite, drv, "N", "trap-arguments-near-miss", "log",
+              {"arguments": ["--stat"]},
+              argv=["git", "log", "--arguments=--stat"], status=H.INFO,
+              note="`arguments` is a plausible guess that was deliberately NOT "
+                   "claimed; recorded so the boundary of the set is visible "
+                   "rather than assumed")
 
         stub_ok = drv.mod.subprocess is drv.stub
         non_git = [c for c in drv.stub.calls if not c or c[0] != "git"]

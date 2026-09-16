@@ -2,7 +2,13 @@
 """Mechanical suite for the `search` relevance gate, the `get_page` section
 index, the `source_to_pages` per-hit description, the MEASURED state in every
 recall reply's `[type/state]` label, the page TYPE as a ranking signal and the
-frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (116 cases, A-P).
+frontmatter `aliases:` synonym field, in Scripts/mcp-wiki.py (groups A-P).
+
+The case COUNT is deliberately absent from this docstring: it is written down
+once, in the SUITES table in tests/run.py, which checks it against the run.  A
+second copy here is a number nothing measures -- this line read `116 cases`
+until the commit that added the `freshness` prefix cases, and had it been left
+untouched no case would have failed for it.
 
 Drives `handle_wiki_call` IN-PROCESS against a SYNTHETIC six-page wiki built in
 a temp workspace -- never the repo's real docs/, with ONE declared exception
@@ -145,7 +151,13 @@ Coverage by group:
      and two repos never share one changed-file set), the two claims the
      refactor itself makes (`freshness` is byte-identical to the committed
      server, and moving the `status` filter to AFTER the scoring loop moved no
-     score, no coverage and no `best coverage N%`), and WHOSE fault an
+     score, no coverage and no `best coverage N%`), the `freshness` PREFIX
+     filter (it narrows the rendered rows AND the `ok:`/`gating:` counts above
+     them, which is what pins the filter to the page set going in rather than
+     the rows coming out; it is spelled the way `search` and `list` spell it;
+     and a prefix matching nothing says so in words that are not the
+     empty-CORPUS answer, since `gating: 0` over a set nobody looked at reads as
+     "nothing is stale"), and WHOSE fault an
      unresolvable `freshness` head is: a ref the repo cannot resolve is refused
      by NAME before the corpus is walked, because reporting it page by page
      accuses every commit in the wiki of a defect the parameter had -- while a
@@ -163,7 +175,10 @@ Coverage by group:
      outside counts (they must close against the total), the default height read
      off the module rather than typed, the clamp at the end and the refusal past
      it, the `count`/`start` aliases (`count` means `limit` globally, so
-     `get_page` has to override it), six values that are not coordinates, the
+     `get_page` has to override it), the SPELLINGS a caller reaches for more
+     generally -- `path` on a lookup and on a filter, `read` for `get_page`,
+     `status` for `stats`, that last one asserted NOT to have taken the
+     no-function liveness reply's job -- six values that are not coordinates, the
      precedence over `section` and `include_body` WITH the disclosure of which
      selector lost, and the index's advert for the window wherever it printed an
      L to point at
@@ -1688,6 +1703,92 @@ _FM_DISAGREE_RE = re.compile(
     r"^frontmatter status: disagrees on (?P<n>\d+) of (?P<m>\d+) "
     r"(?:hit|page)\(s\) — ", re.M)
 FM_DISAGREE_SENTINEL = "frontmatter status:"
+# What `_resolve_aliases` refuses two spellings of one param with.  The same
+# words the fleet-wide gate in Scripts/_mcp_smoke_test.py keys on, because the
+# rule is fleet-wide (adr 0015): a collision is an error, never a precedence.
+COLLISION_SENTINEL = "Ambiguous parameters"
+
+# The docs-relative prefix the `freshness` filter cases narrow with, and the one
+# that must match nothing.  `st-p` is chosen for the property the cases ASSERT
+# from L_PAGES rather than trust: the slice it selects is a proper, non-empty
+# subset carrying NO gating state, while the corpus carries several.  That gap is
+# the only thing that can tell the two possible implementations apart -- a filter
+# applied on the way INTO the analysis narrows the counts with the rows, one
+# applied to the rendered rows leaves `gating:` describing a corpus the caller
+# never asked about.  A page renamed out of the slice fails the premise here
+# instead of quietly hollowing the case out.
+L_FRESH_PREFIX = "st-p"
+L_FRESH_NOMATCH = "zz-no-such-prefix/"
+# A wiki root holding no page at all, written beside group L's fixture (never
+# inside it -- `iter_pages` walks only the wiki dir).  It exists so the
+# prefix-matched-nothing answer can be compared against the OTHER empty answer
+# rather than against a typed sentence: an empty CORPUS and an empty SELECTION
+# imply opposite next moves, exactly as group B's two silences do.
+L_EMPTY_ROOT = "empty-wiki"
+
+_FRESH_HEAD_RE = re.compile(
+    r"^# freshness @ (?P<head>\S+)"
+    r"(?: — path_prefix (?P<prefix>'[^']*'|\"[^\"]*\")"
+    r"(?:, (?P<n>\d+) page\(s\))?)?$", re.M)
+_FRESH_BUCKET_RE = re.compile(r"^(?P<status>[a-z][a-z-]*) \((?P<n>\d+)\):$")
+_FRESH_PAGE_RE = re.compile(r"^- .*?`(?P<path>[^`]+)`")
+_FRESH_OK_RE = re.compile(r"^ok: (?P<rest>.+)$")
+_FRESH_GATING_RE = re.compile(r"^gating: (?P<n>\d+) \((?P<states>[^)]*)\)$")
+
+
+def parse_freshness(text):
+    """The rendered `freshness` report, split into the parts a filter moves.
+
+    `gating_states` is read out of the answer's OWN parentheses -- the report
+    prints the definition of what it counts -- so a case can check the number
+    against the fixture without keeping a second copy of the rule the renderer
+    applies.  `listed` is only the pages the DETAIL buckets name; a state that
+    renders as `ok: N <state>` is counted and not listed, which is why the total
+    below adds the two.
+    """
+    out = {"head": None, "prefix": None, "header_pages": None, "buckets": {},
+           "listed": [], "ok": {}, "gating": None, "gating_states": []}
+    m = _FRESH_HEAD_RE.search(text)
+    if m:
+        out["head"] = m.group("head")
+        if m.group("prefix"):
+            out["prefix"] = m.group("prefix")[1:-1]
+        if m.group("n"):
+            out["header_pages"] = int(m.group("n"))
+    bucket = None
+    for line in text.split("\n"):
+        mb = _FRESH_BUCKET_RE.match(line)
+        if mb:
+            bucket = mb.group("status")
+            out["buckets"].setdefault(bucket, [])
+            continue
+        mp = _FRESH_PAGE_RE.match(line)
+        if mp and bucket:
+            out["buckets"][bucket].append(mp.group("path"))
+            out["listed"].append(mp.group("path"))
+            continue
+        mo = _FRESH_OK_RE.match(line)
+        if mo:
+            bucket = None
+            for chunk in mo.group("rest").split(", "):
+                count, _sp, state = chunk.partition(" ")
+                out["ok"][state] = int(count)
+            continue
+        mg = _FRESH_GATING_RE.match(line)
+        if mg:
+            bucket = None
+            out["gating"] = int(mg.group("n"))
+            out["gating_states"] = [s.strip()
+                                    for s in mg.group("states").split("+")]
+    return out
+
+
+def fresh_total(parsed):
+    """How many pages the rendered report accounts for: the ones it lists, plus
+    the ones it only counts.  A filter that narrowed the rows and left the
+    summary alone shows up here as a total larger than the slice."""
+    return (sum(len(v) for v in parsed["buckets"].values())
+            + sum(parsed["ok"].values()))
 
 
 def l_page_text(page, agree=False):
@@ -1730,6 +1831,11 @@ def build_state_fixture(work, agree=False):
                         l_page_text(page, agree))
     for rel in L_ON_DISK:
         work.write_text(rel, "# materialized source file\n")
+    # The empty-CORPUS control, a sibling of the wiki rather than a page in it.
+    # The file is deliberately not a `.md`: `iter_pages` yields only those, so
+    # the directory resolves as a wiki root and holds nothing.
+    work.write_text(os.path.join(L_EMPTY_ROOT, "not-a-page.txt"),
+                    "a wiki root with no pages in it\n")
     return os.path.realpath(work.path)
 
 
@@ -4551,6 +4657,65 @@ def run(opts=None):
                                        "call whose every half was right")],
                      text="")
 
+        # A FUNCTION name this time, and the same reflex: `status` is the word a
+        # caller reaches for, `stats` is the function that exists, and the census
+        # is the only thing `status` could mean here -- the word is already this
+        # server's search/list PARAM, its frontmatter field and its measured
+        # state, none of which is a function.  The no-function reply keeps its own
+        # job: it answers for the SERVER (up, and here is the inventory), while
+        # this one answers for the CORPUS.
+        by_stats = raw_page("stats", {})[0]
+        by_status, status_err = raw_page("status", {})
+        live = sdrv.mod.handle_wiki_call({}, sdrv.root, WIKI_REL)
+        live_txt = live.get("__raw_text__") or live.get("error") or ""
+        shadow = sorted(set(sdrv.mod.FUNCTION_ALIASES) & set(sdrv.mod.HANDLERS))
+        dead = sorted(k for k, v in sdrv.mod.FUNCTION_ALIASES.items()
+                      if v not in sdrv.mod.HANDLERS)
+        stats_para = tool_paragraph(sdrv.mod.WIKI_CALL_TOOL["description"], "stats")
+        problems = []
+        if status_err:
+            problems.append("status did not reach stats: %s" % by_status[:200])
+        elif by_status != by_stats:
+            problems.append("status and stats render different answers, so the "
+                            "alias landed on something other than the function it "
+                            "names")
+        if sdrv.mod.FUNCTION_ALIASES.get("status") != "stats":
+            problems.append("status no longer names stats")
+        if shadow:
+            problems.append("%r is both a FUNCTION_ALIASES key and a HANDLERS key: "
+                            "the alias can never be reached, and which of the two "
+                            "wins is a precedence question this fleet answers by "
+                            "refusing to have one" % shadow)
+        if dead:
+            problems.append("%r alias(es) name a function that does not exist, so "
+                            "the caller is answered with the unknown-function "
+                            "error under a name they never sent" % dead)
+        if "status" not in stats_para:
+            problems.append("the stats entry in the tool description never "
+                            "mentions status, so the spelling is discoverable "
+                            "only by trying it")
+        if "`status`" in sdrv.mod.WIKI_CALL_TOOL["description"]:
+            problems.append("status is BACKTICKED in the description: the "
+                            "name_existence suite reads backticked identifiers in "
+                            "server text as function-name prescriptions")
+        if not live_txt or "error" in live:
+            problems.append("the no-function reply is gone: %r" % live_txt[:200])
+        elif live_txt == by_stats:
+            problems.append("the no-function reply and the stats report are the "
+                            "same answer -- one of the two questions is no longer "
+                            "answerable")
+        suite.record("N", "status-reaches-stats-and-leaves-the-liveness-reply-alone",
+                     problems,
+                     detail=[_d("call", 'function="status", params={} -- the '
+                                        "reported call, verbatim"),
+                             _d("identical", "%r" % (by_status == by_stats)),
+                             _d("no function", "%r" % live_txt.split("\n")[0]),
+                             _d("why", "an alias-key collision is an error in this "
+                                       "fleet, not a precedence (adr 0015), so the "
+                                       "row is only writable because `status` is "
+                                       "neither a handler name nor another alias")],
+                     text=by_status)
+
         # `path` a SECOND time, and on a FILTER rather than on a lookup.  Both
         # search and list take a path_prefix, and the filter they run is
         # relpath.startswith(prefix) -- so a whole docs-relative path was always
@@ -5654,6 +5819,223 @@ def run(opts=None):
                                         "one-authority case below, which needs no "
                                         "baseline at all")],
                      text=c_text)
+
+        # ---- `path_prefix` narrows the ROWS and every COUNT above them -------
+        # The filter runs on the way INTO `freshness_analyze`, before
+        # `_classify_page`: `summary` is derived from the page list and both
+        # summary lines are derived from `summary`, so that is the only position
+        # where `ok:` and `gating:` can describe the set the caller asked about.
+        # The slice is chosen to carry NO gating state while the corpus carries
+        # several, because that is exactly the pair a row-level filter gets
+        # wrong: it would narrow the list and still print the corpus's
+        # `gating: N` above it -- the one number this report exists to publish.
+        wide_txt = ldrv.freshness()
+        narrow_txt = ldrv.freshness(path_prefix=L_FRESH_PREFIX)
+        wide_f = parse_freshness(wide_txt)
+        narrow_f = parse_freshness(narrow_txt)
+        want_pages = [p for p in L_PAGES if p[L_FILE].startswith(L_FRESH_PREFIX)]
+        detail_states = set(ldrv.mod.DETAIL_STATUSES)
+        # Read off the ANSWER's own parentheses, never typed: the report prints
+        # the definition of what it counts.
+        gating_states = set(narrow_f["gating_states"] or wide_f["gating_states"])
+        want_listed = sorted(p[L_FILE] for p in want_pages
+                             if p[L_STATE] in detail_states)
+        want_gating = sum(1 for p in want_pages if p[L_STATE] in gating_states)
+        corpus_gating = sum(1 for p in L_PAGES if p[L_STATE] in gating_states)
+        problems = []
+        rows = []
+        for page in L_PAGES:
+            inside = page[L_FILE].startswith(L_FRESH_PREFIX)
+            rows.append("%-18s %-16s slice=%-5r listed=%-5r"
+                        % (page[L_FILE], page[L_STATE], inside,
+                           page[L_FILE] in narrow_f["listed"]))
+        if not want_pages or len(want_pages) == len(L_PAGES):
+            problems.append("fixture drift: %r selects %d of %d page(s), which is "
+                            "not a proper non-empty slice, so nothing below is "
+                            "measuring a filter"
+                            % (L_FRESH_PREFIX, len(want_pages), len(L_PAGES)))
+        if not gating_states:
+            problems.append("the report stopped naming what `gating` counts, so "
+                            "this case has no oracle left but a second copy of "
+                            "the renderer's own rule")
+        if want_gating or not corpus_gating:
+            problems.append("fixture drift: the slice carries %d gating page(s) "
+                            "and the corpus %d -- the two have to DISAGREE, or a "
+                            "`gating:` line copied straight off the unfiltered "
+                            "report would pass" % (want_gating, corpus_gating))
+        if narrow_f["prefix"] != L_FRESH_PREFIX:
+            problems.append("the header never says which prefix it answered (%r), "
+                            "so every count under it reads as the whole corpus's"
+                            % narrow_txt.split("\n")[0])
+        if narrow_f["header_pages"] != len(want_pages):
+            problems.append("the header claims %r page(s), the prefix selects %d"
+                            % (narrow_f["header_pages"], len(want_pages)))
+        stray = [p for p in narrow_f["listed"]
+                 if not p.startswith(L_FRESH_PREFIX)]
+        if stray:
+            problems.append("the filtered report lists %r, which the prefix "
+                            "excludes" % stray)
+        if sorted(narrow_f["listed"]) != want_listed:
+            problems.append("the filtered report lists %r, want %r"
+                            % (sorted(narrow_f["listed"]), want_listed))
+        if fresh_total(narrow_f) != len(want_pages):
+            problems.append("the filtered report accounts for %d page(s) over a "
+                            "slice of %d -- `ok:` and `gating:` are still "
+                            "counting pages its rows do not show"
+                            % (fresh_total(narrow_f), len(want_pages)))
+        if narrow_f["gating"] != want_gating:
+            problems.append("the filtered report says gating %r, the slice "
+                            "carries %d" % (narrow_f["gating"], want_gating))
+        if fresh_total(wide_f) != len(L_PAGES) or wide_f["gating"] != corpus_gating:
+            problems.append("the UNFILTERED report accounts for %d page(s) at "
+                            "gating %r against %d and %d -- the control the "
+                            "narrowing is measured against is itself wrong"
+                            % (fresh_total(wide_f), wide_f["gating"],
+                               len(L_PAGES), corpus_gating))
+        if wide_f["prefix"] is not None:
+            problems.append("a call carrying no prefix rendered one anyway: %r"
+                            % wide_f["prefix"])
+        dropped = sorted(set(wide_f["listed"]) - set(narrow_f["listed"]))
+        if not dropped:
+            problems.append("the filtered report lists everything the unfiltered "
+                            "one does, so nothing was narrowed and the counts "
+                            "agreeing proves nothing")
+        suite.record("L", "freshness-path-prefix-narrows-the-report-and-its-counts",
+                     problems,
+                     detail=[_d("call", "freshness path_prefix=%r" % L_FRESH_PREFIX),
+                             _d("slice", "%d of %d page(s), %d gating vs the "
+                                         "corpus's %d"
+                                % (len(want_pages), len(L_PAGES), want_gating,
+                                   corpus_gating)),
+                             _d("gating", "%r counts %r, read off the answer"
+                                % (narrow_f["gating"], sorted(gating_states))),
+                             _d("accounted", "%d page(s) listed + counted, slice "
+                                             "is %d"
+                                % (fresh_total(narrow_f), len(want_pages))),
+                             _d("dropped", "%r" % dropped),
+                             _d("why", "filtering the rendered ROWS would leave "
+                                       "ok:/gating: describing a corpus the "
+                                       "caller did not ask about -- and it would "
+                                       "pay a git diff per page it then throws "
+                                       "away")]
+                            + ["        " + r for r in rows],
+                     text=narrow_txt)
+
+        # ---- a prefix matching nothing is not a clean report -----------------
+        # Measured against the OTHER empty answer rather than against a typed
+        # sentence: an empty CORPUS and an empty SELECTION imply opposite next
+        # moves -- write a page versus fix the prefix -- so the two must never be
+        # the same words.  The empty-corpus answer is also the premise: it is the
+        # one that renders `gating: 0`, and that line over a set nobody looked at
+        # is precisely what must not appear above.
+        none_txt = ldrv.freshness(path_prefix=L_FRESH_NOMATCH)
+        none_f = parse_freshness(none_txt)
+        empty_txt = ldrv.freshness(root=L_EMPTY_ROOT)
+        empty_f = parse_freshness(empty_txt)
+        problems = []
+        if any(p[L_FILE].startswith(L_FRESH_NOMATCH) for p in L_PAGES):
+            problems.append("fixture drift: %r selects a page, so the empty arm "
+                            "is not being exercised" % L_FRESH_NOMATCH)
+        if empty_f["gating"] is None:
+            problems.append("the empty-CORPUS report carries no gating line, so "
+                            "the clean-looking number this case keeps OUT of the "
+                            "empty-selection answer is not there to begin with "
+                            "and the comparison below is vacuous: %r" % empty_txt)
+        if empty_f["prefix"] is not None:
+            problems.append("the empty-corpus control rendered a prefix (%r) "
+                            "although it was called without one" % empty_f["prefix"])
+        if none_f["prefix"] != L_FRESH_NOMATCH:
+            problems.append("the answer never repeats the prefix that matched "
+                            "nothing (%r), so a typo and an empty section read "
+                            "identically" % none_txt.split("\n")[0])
+        if none_f["listed"] or none_f["buckets"]:
+            problems.append("the empty selection listed %r"
+                            % (none_f["listed"] or sorted(none_f["buckets"])))
+        if none_f["gating"] is not None or none_f["ok"]:
+            problems.append("the empty selection still renders a count line "
+                            "(gating=%r, ok=%r) -- `gating: 0` over a set nobody "
+                            "looked at reads as 'nothing is stale', which is the "
+                            "one thing this answer cannot claim"
+                            % (none_f["gating"], none_f["ok"]))
+        if none_txt == empty_txt:
+            problems.append("a prefix matching nothing and a wiki holding nothing "
+                            "render the SAME answer, and the caller's next move "
+                            "differs between them")
+        suite.record("L", "freshness-prefix-matching-nothing-is-not-a-clean-report",
+                     problems,
+                     detail=[_d("call", "freshness path_prefix=%r"
+                                % L_FRESH_NOMATCH),
+                             _d("answer", "%r" % none_txt),
+                             _d("empty wiki", "%r" % empty_txt),
+                             _d("why", "nothing was CHECKED, which is not the "
+                                       "same as nothing being stale -- the same "
+                                       "distinction the eight states draw "
+                                       "between `current` and the five that mean "
+                                       "NOT CHECKABLE")],
+                     text=none_txt)
+
+        # ---- one field, one set of spellings, across all three filters -------
+        spellings = sorted({k for fn in ("search", "list")
+                            for k, v in ldrv.mod.PARAM_ALIASES_BY_FUNC[fn].items()
+                            if v == "path_prefix"})
+        fresh_row = ldrv.mod.PARAM_ALIASES_BY_FUNC.get("freshness", {})
+        accepted = ldrv.mod.HANDLER_ACCEPTED_PARAMS["freshness"]
+        desc = ldrv.mod.WIKI_CALL_TOOL["description"]
+        para = tool_paragraph(desc, "freshness")
+        problems = []
+        rows = []
+        if len(spellings) < 2:
+            problems.append("premise gone: search and list define %d prefix "
+                            "spelling(s) between them, so 'the same spellings' "
+                            "is a claim about almost nothing" % len(spellings))
+        if "path_prefix" not in accepted:
+            problems.append("path_prefix is not in "
+                            "HANDLER_ACCEPTED_PARAMS['freshness'], so every call "
+                            "carrying it is rejected as an unknown param")
+        for spelling in spellings:
+            got = ldrv.freshness(**{spelling: L_FRESH_PREFIX})
+            rows.append("%-8s -> %-12s same-as-canonical=%-5r narrowed=%-5r"
+                        % (spelling, fresh_row.get(spelling), got == narrow_txt,
+                           got != wide_txt))
+            if fresh_row.get(spelling) != "path_prefix":
+                problems.append("freshness does not spell %r as path_prefix: a "
+                                "caller who learned the word from search or list "
+                                "is turned away by the third function filtering "
+                                "the same field the same way" % spelling)
+            if got != narrow_txt:
+                problems.append("%r renders a different answer than path_prefix "
+                                "does: %r" % (spelling, got[:200]))
+            elif got == wide_txt:
+                problems.append("%r rendered the UNFILTERED report, so the value "
+                                "reached the handler and not its filter" % spelling)
+        if spellings:
+            both = ldrv.freshness(**{spellings[0]: L_FRESH_PREFIX,
+                                     "path_prefix": L_FRESH_PREFIX})
+            if COLLISION_SENTINEL not in both:
+                problems.append("two spellings of ONE filter were accepted "
+                                "quietly (%r) -- the ambiguity is the defect, not "
+                                "the precedence" % both[:160])
+        if "path_prefix" not in para:
+            problems.append("the freshness entry in the tool description never "
+                            "names path_prefix, so the only way to learn the "
+                            "filter exists is to call it and look -- the same "
+                            "invisibility min_coverage had")
+        if "`path_prefix`" in desc:
+            problems.append("path_prefix is BACKTICKED in the description: the "
+                            "name_existence suite reads backticked identifiers in "
+                            "server text as function-name prescriptions")
+        suite.record("L", "freshness-spells-the-prefix-the-way-search-and-list-do",
+                     problems,
+                     detail=[_d("spellings", "%r, taken from search + list"
+                                % spellings),
+                             _d("accepted", "%r" % sorted(accepted)),
+                             _d("why", "three handlers filter one field by one "
+                                       "rule; a word that works on two of them "
+                                       "and is rejected by the third is the "
+                                       "divergence these per-function tables "
+                                       "exist to prevent")]
+                            + ["        " + r for r in rows],
+                     text=para)
 
         # ---- one authority: `_classify_page` IS what freshness reports -------
         # The durable half of the case above: no matter what the two callers do

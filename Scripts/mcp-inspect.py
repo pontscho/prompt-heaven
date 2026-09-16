@@ -11,7 +11,7 @@ READ-ONLY — it inspects live system state (processes, process tree, open files
 sockets, network interfaces/routes, memory, disk, mounts, file metadata,
 services, resource limits, toolchain versions, host, environment) or the FORMAL
 well-formedness of a file (json, python, yaml, toml, xml, ini, csv, tsv, plist,
-javascript), and NEVER mutates anything. There is no way
+javascript, bash), and NEVER mutates anything. There is no way
 to pass a raw shell string: each function builds a fixed argv (shell=False),
 filters are applied in Python, and numeric params (pid/port) are int-validated,
 so there is no shell-injection surface.
@@ -20,16 +20,19 @@ Purpose: let the model run the common non-invasive `ps` / `lsof` / `netstat` /
 `ss` / `df` / `du` / `free` / `env` / `stat` / `ifconfig` / `pstree` / `ulimit` /
 `launchctl` / `<tool> --version` / `shasum` / `md5sum` inspections — and the
 `python3 -c "import ast; ast.parse(...)"` / `py_compile` / `json.tool` / `jq .` /
-`xmllint --noout` / `node --check` validation one-liners — through a single
-pre-approved MCP tool instead of per-call Bash prompts. Validators run in-process
-(stdlib parsers), so nothing is written: `py_compile` in particular would leave a
-__pycache__/*.pyc. JavaScript is the one format with no stdlib parser: it spawns
-`node --check`, which PARSES ONLY — never `-e`/`-p`/require/import, so the code
-under validation is never executed, and nothing is written there either.
+`xmllint --noout` / `node --check` / `bash -n` validation one-liners — through a
+single pre-approved MCP tool instead of per-call Bash prompts. Validators run
+in-process (stdlib parsers), so nothing is written: `py_compile` in particular
+would leave a __pycache__/*.pyc. JavaScript and Bash are the two formats with no
+stdlib parser, so they are the two that spawn something: `node --check` and
+`bash -n`, both PARSE-ONLY modes — never `node -e`/`-p`/require/import, never
+`bash -c` or a plain `bash <file>` — so the code under validation is never
+executed, and nothing is written there either.
 
 The execution-shaped functions are `versions`, which probes only an ALLOW-LISTED
-set of binary NAMES (_VERSION_TOOLS) with fixed flags, and the javascript
-validator's fixed `node --check` argv; the caller can never supply argv.
+set of binary NAMES (_VERSION_TOOLS) with fixed flags, and the javascript and
+bash validators' fixed `node --check` / `bash -n` argv; the caller can never
+supply argv.
 
 Cross-platform: macOS (Darwin) and Linux. Commands are selected per platform;
 missing underlying binaries degrade to a clear error, never a crash.
@@ -1249,11 +1252,12 @@ def h_md5(p: dict) -> str:
 #     function and module-level `nonlocal` are caught too.
 #   * XML entity declarations are refused (XXE + billion-laughs guard), so the
 #     validator is safe on untrusted input.
-#   * JavaScript is the ONE format with no stdlib parser, so it is the one that
-#     does shell out — to `node --check`, which parses and stops. `node -e` /
-#     `--eval` / `-p` / requiring the file would EXECUTE it, which is why none
-#     of them appear here, and why no temp file is written for `content` either
-#     (stdin carries it instead).
+#   * JavaScript and Bash are the two formats with no stdlib parser, so they are
+#     the two that do shell out — to `node --check` and `bash -n`, each of which
+#     parses and stops. `node -e` / `--eval` / `-p` / requiring the file, and
+#     `bash -c` / a plain `bash <file>`, would EXECUTE it, which is why none of
+#     them appear here, and why no temp file is written for `content` either
+#     (stdin carries it to both).
 # This is FORMAL well-formedness (does it parse), NOT schema validation.
 # Verdict vocabulary matches the p:verify skill: OK / FAIL / LIMITED / SKIP.
 
@@ -1278,6 +1282,11 @@ _VALIDATE_EXT = {
     # .jsx/.ts/.tsx/.mts/.cts stay unmapped on purpose: an honest "unknown
     # format for this extension" SKIP beats a bogus FAIL on a file that is fine.
     ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    # .sh/.bash ONLY, and both land on the BASH parser. .zsh/.fish/.ksh stay
+    # unmapped on purpose: bash would report their own-dialect syntax as a
+    # bogus FAIL, and an extension-less script (the common case for a shell
+    # tool on PATH) has nothing to infer from -- pass format explicitly there.
+    ".sh": "bash", ".bash": "bash",
 }
 
 _VALIDATE_MAX_MB = 32        # parsers build a full in-memory tree, and hold one
@@ -1620,6 +1629,89 @@ def _v_javascript(data: bytes, name: str) -> _VResult:
     return failures[0]      # the module goal's: the precise one of the two
 
 
+def _v_bash_error(err: str, target: str, rc: int) -> _VResult:
+    """bash's stderr -> a FAIL row. The FIRST diagnostic wins; the rest is echo.
+
+    `bash -n` prints `<prefix>: line N: <message>`, where <prefix> is the script
+    path it was given or -- on stdin -- its own argv[0], which is why the caller
+    passes whichever of the two it used. A token error adds a SECOND line that
+    merely re-prints the offending source (``foo.sh: line 4: `echo $x'``), and
+    an unterminated construct can add a trailing `syntax error: unexpected end
+    of file` pointing at the LAST line of the file rather than at the defect.
+    Measured on both bashes of this host: for an unterminated quote 5.2 reports
+    ONE line, at the opening quote, while 3.2 reports that same line and then
+    adds a second complaint at the last line of the file. The first line is the
+    one that points AT the defect on both, so reporting it keeps the answer
+    stable across bash versions -- which the last line demonstrably is not.
+
+    bash never reports a column, so `col` stays None and `at` carries the bare
+    line number.
+    """
+    if rc == 127:               # _run's own code: bash vanished after which()
+        return _v_fail(" ".join(err.split()) or "bash: not found in PATH")
+    if rc == 124:               # ditto: timed out, so nothing was checked
+        return _v_limited(" ".join(err.split()) or "bash -n timed out")
+    # matched on the basename so a realpath'd/symlinked target still lands --
+    # and for the stdin form that basename is the BASH BINARY's, since bash
+    # prefixes those lines with argv[0] (an absolute path here) and no filename
+    # exists to name. Anchored on `: line N:` so a `bash: warning: ...` preamble
+    # cannot be mistaken for a position.
+    head = re.compile(r"^.*" + re.escape(os.path.basename(target))
+                      + r": line (\d+): (.*)$")
+    for ln in err.splitlines():
+        m = head.match(ln)
+        if m:
+            return _v_fail(" ".join(m.group(2).split()), int(m.group(1)))
+    msg = next((" ".join(ln.split()) for ln in err.splitlines() if ln.strip()),
+               f"bash -n failed (rc={rc})")
+    return _v_fail(msg)
+
+
+def _v_bash(data: bytes, name: str) -> _VResult:
+    """`bash -n` -- a PARSE, and never an execution.
+
+    The second validator with no stdlib parser behind it (see the JavaScript
+    note at the top of this section). `-n` is bash's own read-but-do-not-execute
+    mode: it builds the command list and stops. Measured rather than assumed,
+    because "syntax check" tools have a habit of running startup files -- and
+    BASH_ENV is one a NON-interactive bash does read: pointed at a script that
+    writes a marker, a plain `bash <file>` produced the marker and
+    `bash -n <file>` did not, and a `$(...)` in the validated source produced
+    nothing under `-n` either. No `-c`, no `-i`, no `source`: the argv is fixed
+    here and the caller can never add to it.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        # FAIL, not SKIP -- the same call `_v_javascript` makes above, for the
+        # same reason: the caller asked whether a script parses and got NO
+        # answer, and a SKIP row would let **PASSED** stand over an unchecked
+        # file. An absent PARSER (PyYAML/tomllib) is the thing that may degrade;
+        # an absent ANSWER is not.
+        return _v_fail("no `bash` in PATH (install Bash to validate shell "
+                       "scripts)")
+    if name != "<content>":
+        path = os.path.abspath(name)
+        # `--` ends the option region: a file called `-x` or `--norc` is then a
+        # FILENAME and nothing else. It costs one argument and removes the only
+        # way a path could ever turn into a flag.
+        rc, _out, err = _run([bash, "-n", "--", path], 15)
+        if rc == 0:
+            return _v_ok("valid Bash syntax (bash -n)")
+        return _v_bash_error(err, path, rc)
+    # Inline content has no path. bash reads a script from STDIN just as
+    # happily, which is the only way to check it here: writing a temp file would
+    # break this server's read-only contract. The error prefix is bash's own
+    # argv[0] in that mode, so that is what the parser is told to match on.
+    try:
+        text = _v_decode(data)
+    except UnicodeDecodeError as exc:
+        return _v_fail(f"not valid UTF-8: {exc}")
+    rc, _out, err = _run([bash, "-n"], 15, stdin_text=text)
+    if rc == 0:
+        return _v_ok("valid Bash syntax (bash -n)")
+    return _v_bash_error(err, bash, rc)
+
+
 _VALIDATORS = {
     "json":   _v_json,
     "python": _v_python,
@@ -1631,6 +1723,19 @@ _VALIDATORS = {
     "tsv":    _v_tsv,
     "plist":  _v_plist,
     "javascript": _v_javascript,
+    # THREE spellings, ONE parser, on purpose: the word a caller reaches for
+    # ("sh", "shell") must not be the word that gets rejected, and an
+    # `unsupported format 'sh'` for a file bash can read perfectly is a refusal
+    # the caller can do nothing useful with. Nothing lies about what ran: every
+    # verdict names `bash -n`, and the `format` column echoes the spelling that
+    # was asked for. The asymmetry that buys: a `sh` script parsed by bash can
+    # yield a FALSE OK (a bashism like `[[ ... ]]` passes here and would die
+    # under dash), but it can never yield a false FAIL, because bash's grammar
+    # is a superset of POSIX sh's. A missed defect degrades to "not checked";
+    # an invented one would send the caller after a bug that is not there.
+    "bash":  _v_bash,
+    "sh":    _v_bash,
+    "shell": _v_bash,
 }
 
 
@@ -1779,6 +1884,10 @@ def h_javascript(p: dict) -> str:
     return h_validate(p, "javascript")
 
 
+def h_bash(p: dict) -> str:
+    return h_validate(p, "bash")
+
+
 # canonical -> (handler, one-line description)
 HANDLERS: Dict[str, Tuple[Any, str]] = {
     "processes":   (h_processes, "List processes (params: filter, user, sort=cpu|mem|pid, limit)"),
@@ -1814,6 +1923,7 @@ HANDLERS: Dict[str, Tuple[Any, str]] = {
     "tsv":         (h_tsv, "Validate TSV + column-count consistency (params: path | paths | content)"),
     "plist":       (h_plist, "Validate binary or XML plist (params: path | paths | content)"),
     "javascript":  (h_javascript, "Validate JavaScript syntax via `node --check` — parses only, never runs the code; FAIL without node; .jsx/.ts NOT covered (params: path | paths | content)"),
+    "bash":        (h_bash, "Validate shell-script syntax via `bash -n` — parses only, never runs the script; .sh/.bash, and `sh`/`shell` are the same parser (params: path | paths | content)"),
 }
 
 # alias -> canonical
@@ -1847,6 +1957,9 @@ ALIASES = {
     "yml": "yaml", "jsonlint": "json", "xmllint": "xml", "plutil": "plist",
     "js": "javascript", "mjs": "javascript", "cjs": "javascript",
     "node": "javascript", "nodejs": "javascript",
+    # the same two spellings the FORMAT table accepts, so `function="sh"` and
+    # `params.format="sh"` cannot disagree about which parser they mean
+    "sh": "bash", "shell": "bash",
 }
 
 
@@ -1865,11 +1978,13 @@ def _status_text(project_root: Optional[str]) -> str:
     lines.append(
         "Optional validation parsers (✗ = missing, that format degrades to "
         f"LIMITED/SKIP): PyYAML{'' if _mod_present('yaml') else '✗'}, "
-        f"tomllib/tomli{'' if has_toml else '✗'}. External binary: "
-        f"node{'' if _have('node') else '✗'} — javascript is validated by "
-        "`node --check`, and its absence FAILS the row instead of degrading it "
-        "(an unchecked file must not read as PASSED). Everything else "
-        "(json/python/xml/ini/csv/tsv/plist) is stdlib.\n")
+        f"tomllib/tomli{'' if has_toml else '✗'}. External binaries: "
+        f"node{'' if _have('node') else '✗'}, "
+        f"bash{'' if _have('bash') else '✗'} — javascript is validated by "
+        "`node --check` and bash/sh/shell by `bash -n`, and an absent binary "
+        "FAILS the row instead of degrading it (an unchecked file must not read "
+        "as PASSED). Everything else (json/python/xml/ini/csv/tsv/plist) is "
+        "stdlib.\n")
     lines.append("Functions (all READ-ONLY):\n")
     for name, (_, desc) in HANDLERS.items():
         al = [a for a, c in ALIASES.items() if c == name]
@@ -1928,7 +2043,8 @@ INSPECT_CALL_TOOL = {
         "Read-only, non-invasive system inspection: processes, open files, "
         "sockets, memory, disk, host, file metadata, file digests, network topology, "
         "services, toolchain versions, environment — plus SYNTAX/FORMAT VALIDATION "
-        "of json, python, yaml, toml, xml, ini, csv, tsv, plist and javascript. "
+        "of json, python, yaml, toml, xml, ini, csv, tsv, plist, javascript and "
+        "bash/sh shell scripts. "
         "PREFER THIS over Bash for `ps`, `lsof`, "
         "`netstat`, `ss`, `df`, `du`, `free`, `env`, `stat`, `ifconfig`/`ip addr`, "
         "`pstree`, `ulimit`, `launchctl`/`systemctl`, `<tool> --version` as the "
@@ -1936,8 +2052,8 @@ INSPECT_CALL_TOOL = {
         "structured Markdown. (Piping a stream into grep/etc. in Bash is still "
         "fine — that is not what this replaces.)\n\n"
         "Also replaces the validate-by-shell one-liners (`ast.parse`, "
-        "`py_compile`, `json.tool`, `jq .`, `xmllint --noout`, `node --check`): "
-        "reports line:col and writes nothing.\n\n"
+        "`py_compile`, `json.tool`, `jq .`, `xmllint --noout`, `node --check`, "
+        "`bash -n`): reports line:col and writes nothing.\n\n"
         "Single-tool dispatcher: pass `function` + `params` (or `f` + `p`). "
         "Called without `function` → server status + full function list.\n\n"
         "Functions (aliases in parens):\n"
@@ -1969,11 +2085,13 @@ INSPECT_CALL_TOOL = {
         "  validate (lint/check) params: path | paths (a LIST — check many files "
         "in ONE call) | content+format; format (else from the extension), "
         "strict, max_mb (0 = no cap)\n"
-        "  json python yaml toml xml ini csv tsv plist javascript — each is also "
-        "its own function, same params, format pinned; aliases "
-        "py/ast/yml/xmllint/plutil/js. javascript is `node --check` (syntax "
-        "only, never executed; .js/.mjs/.cjs — NOT .jsx/.ts; FAIL if node is "
-        "not installed). Per-format detail: the p:mcp-inspect skill.\n\n"
+        "  json python yaml toml xml ini csv tsv plist javascript bash — each is "
+        "also its own function, same params, format pinned; aliases "
+        "py/ast/yml/xmllint/plutil/js/sh/shell. javascript is `node --check` "
+        "(syntax only, never executed; .js/.mjs/.cjs — NOT .jsx/.ts; FAIL if "
+        "node is not installed). bash (= sh = shell) is `bash -n` (syntax only, "
+        "never executed; .sh/.bash; FAIL if bash is not installed). Per-format "
+        "detail: the p:mcp-inspect skill.\n\n"
         "Everything is READ-ONLY (no mutation, shell=False, no injection surface). "
         "Example: function=\"processes\", params={\"filter\":\"node\",\"sort\":\"mem\"}"
     ),

@@ -14,9 +14,12 @@ format. For schema checks, see *When NOT to use* below.
 ## Quick start — if you are an agent with MCP access, THIS is the way
 
 All ten formats are exposed by the pre-approved `mcp-inspect` server: no
-permission prompt, a Markdown table back, and a batch of files in one call. Both
-paths cover the same ten — the tenth, JavaScript, needs the `node` **binary** in
-PATH (`node --check`, syntax only) and FAILS rather than skips without it.
+permission prompt, a Markdown table back, and a batch of files in one call. The
+tenth, JavaScript, needs the `node` **binary** in PATH (`node --check`, syntax
+only) and FAILS rather than skips without it. The MCP path carries **one format
+the bundled script does not**: `bash`/`sh`/`shell` (`.sh`/`.bash`, validated by
+`bash -n` — same binary rule, same FAIL-without-it policy). For everything else
+the two paths agree.
 
 ```
 inspect_call {function: "validate", params: {path: "settings.json"}}          # auto-detect
@@ -24,6 +27,7 @@ inspect_call {function: "python",   params: {path: "hooks/guard.py"}}
 inspect_call {function: "validate", params: {paths: ["a.json", "b.yaml"]}}    # batch: ONE call
 inspect_call {function: "json",     params: {content: "{\"a\":1}"}}           # inline, no file
 inspect_call {function: "javascript", params: {path: "web/app.mjs"}}         # node --check
+inspect_call {function: "bash",     params: {path: "hooks/post-edit-lint.sh"}}  # bash -n, MCP only
 ```
 
 Reach for Bash **only** when MCP is genuinely unavailable. Never validate by

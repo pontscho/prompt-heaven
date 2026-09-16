@@ -52,9 +52,25 @@ path-scoped glob that must STAY scoped, a bare filename, a brace group with no
 comma), because every rule it asserts is a WIDENING, and over-reach is the
 characteristic failure of a widening.
 
-No external binary is involved -- these are the pure-stdlib file handlers, so
-there is no skip path and the suite runs everywhere in a couple of seconds.  If
-a case here needs clangd, it is in the wrong file (see test_purity_lsp.py).
+Group H is the multi-root contract: `path`/`paths` as a LIST.  It is a whitelist
+(`MULTI_PATH_FUNCTIONS`), not a widening -- every other handler reads
+`relative_path` as a scalar, so the refusal is still the default and the group
+gates BOTH sides: the two functions that serve a list, and the ones that must
+keep refusing it with a message naming the way out.  The paging rows are the
+load-bearing ones.  `head_limit` and `offset` have to span the CONCATENATION of
+the roots, not restart at each one, or the resume hint a caller pastes back
+means something different depending on which root the previous page ended in --
+so `head_limit=4` over a 3-match root and a 3-match root must return 4 rows, not
+4 per root, and `offset=3` must land inside the SECOND root.
+
+No external binary is involved in groups A-G -- these are the pure-stdlib file
+handlers, so there is no skip path and they run everywhere in a couple of
+seconds.  Group H's `clang_tidy` rows are the one exception and they are split
+accordingly: the half that gates the ALIAS RESOLVER (the list reaches the
+handler at all) needs no binary and is always gated, while the half that reads
+the rendered report degrades to INFO when `clang-tidy` is not on PATH, the same
+convention test_purity_lsp.py uses for a missing clangd.  If a case here needs
+clangd, it is in the wrong file (see test_purity_lsp.py).
 
 Fixtures live in a `tempfile.mkdtemp()` workspace and the servers'
 `--project-root` points there, never into the repo tree.  Group F asserts that,
@@ -71,10 +87,13 @@ Groups:
   E  path-shaped .gitignore: what the basename matcher does and does not honour
   F  hygiene
   G  glob semantics -- the spellings that can only ever match nothing
+  H  a LIST of paths: one result stream where it is served, a refusal that
+     names the way out everywhere else
 """
 
 import os
 import re
+import shutil
 import sys
 import threading
 
@@ -116,6 +135,32 @@ GLOB_FILES = ("root.py", "a.py", "auth.py",
 G_ROOT_PY = "root.py"
 G_NESTED_PY = "src/deep/nested.py"
 
+# Group H's tree.  No .gitignore, for the same reason group G has none: a pruned
+# directory and a root that was never visited render identically, so mixing the
+# two questions would let either one pass for the other.
+#
+# The match COUNTS are the point.  Several matches per file is what makes
+# "`head_limit` spans the concatenation" a different observable from "`head_limit`
+# restarts per root" -- with one match each, 4-across-two-roots and 4-per-root
+# return the same rows and the suite would gate nothing.  `two/sub/c.txt` sits
+# under `two/` so a parent and a child can be named in the SAME call, which is
+# the dedupe case; `three/d.txt` is under a root nobody names, so scoping is
+# proven rather than assumed.
+MULTI_FILES = (
+    ("one/a.txt", 3),
+    ("two/b.txt", 3),
+    ("two/sub/c.txt", 2),
+    ("three/d.txt", 1),
+)
+M_A, M_B, M_C, M_D = (rel for rel, _ in MULTI_FILES)
+M_A_HITS, M_B_HITS, M_C_HITS, M_D_HITS = (n for _, n in MULTI_FILES)
+M_TWO = "two"                           # the directory root M_C lives under
+
+# Two real translation units for the clang_tidy rows.  Trivial on purpose: what
+# is under test is that TWO paths survive the alias resolver and reach one
+# invocation, not anything clang-tidy has an opinion about.
+M_CFILES = ("one/x.c", "one/y.c")
+
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -145,6 +190,25 @@ def make_glob_fixture(ws, subdir):
     ws.subdir(subdir)
     for rel in GLOB_FILES:
         ws.write_text(os.path.join(subdir, rel), LINE)
+    return os.path.realpath(ws.join(subdir))
+
+
+def make_multi_fixture(ws, subdir):
+    """Group H's tree, REALPATH'd for the same reason group G's is.
+
+    Each file carries its declared number of matching lines, tagged with its own
+    path so a row read out of order is legible in the failure detail rather than
+    being an anonymous `NEEDLE_ALPHA`.
+    """
+    ws.subdir(subdir)
+    for rel, count in MULTI_FILES:
+        body = "".join("%s %s hit %d\n" % (NEEDLE, rel, i + 1)
+                       for i in range(count))
+        ws.write_text(os.path.join(subdir, rel), body)
+    for rel in M_CFILES:
+        stem = os.path.splitext(os.path.basename(rel))[0]
+        ws.write_text(os.path.join(subdir, rel),
+                      "int %s_fn(void) { return 0; }\n" % stem)
     return os.path.realpath(ws.join(subdir))
 
 
@@ -216,6 +280,37 @@ def search_paths(text):
         if m:
             out.add(m.group("path"))
     return out
+
+
+def search_row_paths(text):
+    """The paths of a `content`-mode search reply IN REPLY ORDER, with repeats.
+
+    `search_paths` above is a SET, which is exactly wrong for group H: order is
+    the contract there (roots are scanned in the order given) and so is
+    multiplicity (a file reached through two overlapping roots must appear its
+    own number of times, not twice that).  A set answers neither question.
+    """
+    out = []
+    for row in text.splitlines():
+        m = RX_MATCH_ROW.match(row.strip())
+        if m:
+            out.append(m.group("path"))
+    return out
+
+
+RX_MATCH_HEADER = re.compile(r"^(?P<n>\d+)(?P<approx>\+?) match\(es\)")
+
+
+def match_header(text):
+    """`(count, approx)` from a search reply's header line, or `(None, None)`.
+
+    `approx` is the `+` the handler appends when the SCAN stopped early, so the
+    count is a lower bound.  Read rather than ignored: a dedupe that merely
+    hides duplicate ROWS while still counting them twice leaves the rows right
+    and the header wrong, and only this tells the two apart.
+    """
+    m = RX_MATCH_HEADER.match(text.strip().splitlines()[0] if text.strip() else "")
+    return (int(m.group("n")), m.group("approx")) if m else (None, None)
 
 
 def listing_paths(text):
@@ -691,6 +786,243 @@ def group_e(suite, drv):
 
 
 # ---------------------------------------------------------------------------
+# Group H -- a LIST of paths
+#
+# Sits between E and G because source order is CALL order here: H drives a
+# server child of its own, so it belongs with the wire-driven groups, while G
+# runs in-process after every child has been closed.
+# ---------------------------------------------------------------------------
+
+def group_h(suite, drv, root):
+    """`path`/`paths` as a list: served where it was whitelisted, refused where
+    it was not, and paged as ONE stream either way.
+
+    The refusal is the DEFAULT and stays that way, so this group has to gate two
+    opposite things at once.  `relative_path` is a GLOBAL alias of
+    `path`/`paths`/`file`/`root`, which means a list let through indiscriminately
+    would reach a dozen handlers that read it as a scalar -- and those do not
+    fail loudly, they interpolate a Python list repr into a path or a message and
+    answer about a file nobody named.  So the whitelist is hand-written
+    (`MULTI_PATH_FUNCTIONS`), the last two rows here gate that it names real
+    handlers and is advertised where the model reads it, and the two refusal rows
+    gate that everything else still says no -- while naming the way out, because
+    a caller who is told only "no" spends the round trip finding out where "yes"
+    lives.
+
+    The paging rows are where a plausible implementation goes wrong.  Looping the
+    roots and calling the existing single-root scan once per root passes
+    `list-two-files-both-reported` and `list-order-is-call-order` and still
+    breaks `head_limit`/`offset`: each root would start its own page, `head_limit=4`
+    would return 4 rows PER root, and the `offset=N for more` hint at the bottom
+    would resume inside whichever root the last page ended in.  Hence the exact
+    expected row lists rather than counts of distinct paths.
+    """
+    mod = H.load_module_from_path("mcp_purity_multipath", SERVER)
+
+    # -- the list is served, in the order given, and stays scoped --------------
+    record_polarity(
+        suite, "H", "list-two-files-both-reported", drv, "search",
+        {"substring_pattern": NEEDLE, "paths": [M_A, M_B]},
+        must=[M_A, M_B], must_not=[M_C, M_D],
+        detail=["two roots in ONE call: both contribute rows, and the files",
+                "under neither of them stay out -- a list must not quietly",
+                "widen back to the whole project root"])
+
+    _, fwd = drv.call("search", {"substring_pattern": NEEDLE,
+                                 "paths": [M_A, M_B]})
+    _, rev = drv.call("search", {"substring_pattern": NEEDLE,
+                                 "paths": [M_B, M_A]})
+    fwd_rows, rev_rows = search_row_paths(fwd), search_row_paths(rev)
+    want_fwd = [M_A] * M_A_HITS + [M_B] * M_B_HITS
+    want_rev = [M_B] * M_B_HITS + [M_A] * M_A_HITS
+    problems = []
+    if fwd_rows != want_fwd:
+        problems.append("forward order is %s, want %s" % (fwd_rows, want_fwd))
+    if rev_rows != want_rev:
+        problems.append("reversed order is %s, want %s" % (rev_rows, want_rev))
+    suite.record(
+        "H", "list-order-is-call-order", problems,
+        detail=["the SAME two roots, both ways round: the rows follow the",
+                "CALL, never the filesystem or a set's iteration order",
+                "[%s] -> %s" % (", ".join([M_A, M_B]), fwd_rows),
+                "[%s] -> %s" % (", ".join([M_B, M_A]), rev_rows)],
+        text=fwd, showable=True)
+
+    # -- a parent and its own child named in one call -------------------------
+    _, text = drv.call("search", {"substring_pattern": NEEDLE,
+                                  "paths": [M_TWO, M_C]})
+    rows = search_row_paths(text)
+    count, approx = match_header(text)
+    want = [M_B] * M_B_HITS + [M_C] * M_C_HITS
+    problems = []
+    if rows != want:
+        problems.append("rows are %s, want %s" % (rows, want))
+    if count != len(want) or approx:
+        problems.append("header says %r match(es), want %d exactly"
+                        % ("%s%s" % (count, approx), len(want)))
+    suite.record(
+        "H", "overlapping-roots-deduped", problems,
+        detail=["`%s` is reached BOTH by walking `%s` and by being named"
+                % (M_C, M_TWO),
+                "outright; it is one file and must be reported once",
+                "the header is checked too: a dedupe that drops the duplicate",
+                "ROW while still counting the match leaves the rows right and",
+                "the total wrong, and only the header tells those apart",
+                "rows: %s" % (rows,)],
+        text=text, showable=True)
+
+    # -- the page is over the CONCATENATION, not over each root ---------------
+    _, text = drv.call("search", {"substring_pattern": NEEDLE,
+                                  "paths": [M_A, M_B], "head_limit": 4})
+    rows = search_row_paths(text)
+    want = [M_A] * M_A_HITS + [M_B]
+    suite.record(
+        "H", "head_limit-spans-the-list",
+        [] if rows == want else ["rows are %s, want %s" % (rows, want)],
+        detail=["head_limit=4 over a %d-match root and a %d-match root:"
+                % (M_A_HITS, M_B_HITS),
+                "4 rows TOTAL -- all of the first root and one of the second",
+                "a per-root limit returns 4 from EACH and passes every other",
+                "row in this group, which is why the expectation is the exact",
+                "row list and not a count of distinct paths",
+                "rows: %s" % (rows,)],
+        text=text, showable=True)
+
+    _, text = drv.call("search", {"substring_pattern": NEEDLE,
+                                  "paths": [M_A, M_B],
+                                  "offset": M_A_HITS, "head_limit": 2})
+    rows = search_row_paths(text)
+    want = [M_B] * 2
+    problems = [] if rows == want else ["rows are %s, want %s" % (rows, want)]
+    note_row = [r for r in text.splitlines() if r.strip().startswith("[")]
+    if not any("rows %d-%d" % (M_A_HITS + 1, M_A_HITS + 2) in r for r in note_row):
+        problems.append("accounting line does not number the page against the "
+                        "whole stream: %s" % (note_row or ["<none>"]))
+    suite.record(
+        "H", "offset-spans-the-list", problems,
+        detail=["offset=%d lands exactly on the boundary between the two"
+                % M_A_HITS,
+                "roots, so the page STARTS in the second one -- a per-root",
+                "offset would skip %d matches in each and return nothing"
+                % M_A_HITS,
+                "the accounting line has to number the page against the whole",
+                "stream too, because the caller pastes that offset back",
+                "rows: %s | note: %s" % (rows, note_row or ["<none>"])],
+        text=text, showable=True)
+
+    # -- the property to protect above all: the scalar call is untouched -------
+    problems = []
+    for label, target, want in (("file target", M_A, [M_A] * M_A_HITS),
+                                ("directory target", M_TWO,
+                                 [M_B] * M_B_HITS + [M_C] * M_C_HITS)):
+        _, scalar_text = drv.call("search", {"substring_pattern": NEEDLE,
+                                             "path": target})
+        _, one_text = drv.call("search", {"substring_pattern": NEEDLE,
+                                          "paths": [target]})
+        got = search_row_paths(scalar_text)
+        if got != want:
+            problems.append("%s: scalar reply is %s, want %s"
+                            % (label, got, want))
+        if scalar_text != one_text:
+            problems.append("%s: scalar and 1-element list replies differ\n"
+                            "  scalar: %r\n  list  : %r"
+                            % (label, scalar_text[:200], one_text[:200]))
+    suite.record(
+        "H", "scalar-and-1-element-list-identical", problems,
+        detail=["a 1-element list MEANS the scalar and is collapsed to it in",
+                "the alias resolver, so the two replies must be byte-identical",
+                "-- not merely equivalent -- for a file target AND a directory",
+                "one.  The expected row list is asserted as well, so a handler",
+                "that broke both spellings the same way cannot pass on equality"])
+
+    record_polarity(
+        suite, "H", "empty-list-means-project-root", drv, "search",
+        {"substring_pattern": NEEDLE, "paths": []},
+        must=[M_A, M_B, M_C, M_D], must_not=[],
+        detail=["an empty list is DROPPED, not served as zero roots: the",
+                "handler then applies its own default, which is the project",
+                "root -- the same thing omitting the parameter does"])
+
+    # -- and the refusal is still the default ---------------------------------
+    record_error(
+        suite, "H", "refusal-preserved-for-read_file", drv, "read_file",
+        {"paths": [M_A, M_B]},
+        must_say=["multi-element list", "read_file",
+                  "search_for_pattern", "clang_tidy"],
+        detail=["read_file reads relative_path as a SCALAR, so a list there",
+                "is not a feature waiting to be enabled -- it is a call that",
+                "cannot be answered.  The message must name the functions",
+                "that DO take a list, or the caller's next move is a guess"])
+    record_error(
+        suite, "H", "refusal-names-canonical-function", drv, "ls",
+        {"paths": ["one", "two"]},
+        must_say=["multi-element list", "list_dir"],
+        detail=["called by its ALIAS `ls`; the whitelist is keyed on the",
+                "CANONICAL name, so the refusal has to say `list_dir` -- and",
+                "a whitelist keyed on the raw name would let `grep` through",
+                "while refusing `search_for_pattern`, or the reverse"])
+
+    # -- clang_tidy: the resolver half needs no binary ------------------------
+    ct_paths = list(M_CFILES)
+    _, ct_text = drv.call("clang_tidy", {"paths": ct_paths, "timeout": 45})
+    low = ct_text.lower()
+    problems = []
+    if "multi-element list" in low:
+        problems.append("the alias resolver still refuses clang_tidy's list")
+    if "unknown params" in low:
+        problems.append("clang_tidy rejected the aliased `paths` key")
+    suite.record(
+        "H", "clang_tidy-list-past-the-resolver", problems,
+        detail=["`rels = rel if isinstance(rel, list) else [rel]` has been in",
+                "handle_clang_tidy from the start, and the resolver made the",
+                "list branch UNREACHABLE for len > 1 -- a documented contract",
+                "no caller could exercise.  This row gates the reachability",
+                "only, so it needs no clang-tidy on PATH",
+                "reply: %s" % " | ".join(ct_text.splitlines())[:200]],
+        text=ct_text, showable=True)
+
+    binary = shutil.which("clang-tidy")
+    missing = [p for p in ct_paths if p not in ct_text]
+    suite.record(
+        "H", "clang_tidy-reports-every-path",
+        [] if not missing else
+        ["the report names neither or only one of %s" % (ct_paths,)],
+        status=None if binary else H.INFO,
+        detail=["clang-tidy on PATH: %s" % (binary or "NO -- row is INFO, the "
+                                            "same convention a missing clangd "
+                                            "gets in test_purity_lsp.py"),
+                "every path handed in must appear in the rendered report: one",
+                "invocation over both files, which is what the binary's own",
+                "CLI takes",
+                "reply head: %s" % " | ".join(ct_text.splitlines()[:3])],
+        text=ct_text, showable=True)
+
+    # -- the whitelist itself, in-process -------------------------------------
+    names = sorted(mod.MULTI_PATH_FUNCTIONS)
+    unknown = [n for n in names if n not in mod.HANDLERS]
+    suite.record(
+        "H", "whitelist-names-a-real-handler",
+        [] if not unknown else
+        ["MULTI_PATH_FUNCTIONS names no handler: %s" % unknown],
+        detail=["a misspelled entry is invisible: the refusal simply keeps",
+                "firing for a function the table claims is served",
+                "MULTI_PATH_FUNCTIONS = %s" % (names,)])
+
+    desc = mod.PURITY_CALL_TOOL["description"]
+    unadvertised = [n for n in names if n not in desc]
+    suite.record(
+        "H", "whitelist-advertised-in-description",
+        [] if not unadvertised else
+        ["served by the code, absent from the tool description: %s"
+         % unadvertised],
+        detail=["the description is where the model reads the contract, so a",
+                "function that accepts a list and does not say so is a feature",
+                "nobody will call -- and one that says so without accepting it",
+                "is worse.  Only the first direction is checkable from here;",
+                "the row above checks the other"])
+
+
+# ---------------------------------------------------------------------------
 # Group G -- glob semantics: the spellings that can only ever match nothing
 #
 # Sits above group F because source order is CALL order in this file, and
@@ -901,8 +1233,9 @@ def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
                     title="purity_call file handlers: gitignore exemption, "
-                          "its narrowness, the param contract, and the glob "
-                          "spellings that can only ever match nothing",
+                          "its narrowness, the param contract, the glob "
+                          "spellings that can only ever match nothing, and a "
+                          "list of paths served as one paged result stream",
                     opts=opts, mode="stream", group_width=3, cid_width=36)
 
     before = H.repo_tree()
@@ -913,6 +1246,7 @@ def run(opts=None):
         basename_root = make_fixture(ws, "basename", GITIGNORE_BASENAME)
         pathshaped_root = make_fixture(ws, "pathshaped", GITIGNORE_PATHSHAPED)
         glob_root = make_glob_fixture(ws, "globs")
+        multi_root = make_multi_fixture(ws, "multiroot")
         suite.note("      server        : %s" % SERVER)
         suite.note("      fixture (A-D) : %s  .gitignore=%s"
                    % (basename_root, list(GITIGNORE_BASENAME)))
@@ -920,25 +1254,33 @@ def run(opts=None):
                    % (pathshaped_root, list(GITIGNORE_PATHSHAPED)))
         suite.note("      fixture (G)   : %s  no .gitignore, files=%s"
                    % (glob_root, list(GLOB_FILES)))
+        suite.note("      fixture (H)   : %s  no .gitignore, files=%s"
+                   % (multi_root,
+                      ["%s x%d" % (rel, n) for rel, n in MULTI_FILES]
+                      + list(M_CFILES)))
 
         drv = Driver(basename_root)
         drv_path = Driver(pathshaped_root)
+        drv_multi = Driver(multi_root)
         try:
             group_a(suite, drv)
             group_b(suite, drv)
             group_c(suite, drv)
             group_d(suite, drv)
             group_e(suite, drv_path)
-            stderr_bytes = len(drv.stderr_text) + len(drv_path.stderr_text)
+            group_h(suite, drv_multi, multi_root)
+            stderr_bytes = (len(drv.stderr_text) + len(drv_path.stderr_text)
+                            + len(drv_multi.stderr_text))
         finally:
             drv.close()
             drv_path.close()
+            drv_multi.close()
 
         # Group G starts no child: it imports the server module and calls the
         # handlers in-process, so it runs outside the driver lifetime entirely.
         group_g(suite, glob_root)
 
-        workspaces = [basename_root, pathshaped_root, glob_root]
+        workspaces = [basename_root, pathshaped_root, glob_root, multi_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()

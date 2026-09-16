@@ -245,6 +245,25 @@ FUNCTION_ALIASES = {
     "mktemp": "create_temp_dir",
 }
 
+# The functions that can honestly serve SEVERAL paths in one call, keyed on the
+# CANONICAL name (so `grep`/`search`/`search_content` are covered by the one
+# `search_for_pattern` row). Hand-written and deliberately short: `relative_path`
+# is a GLOBAL alias of `path`/`paths`/`file`/`root`, so a list arriving at a
+# handler that reads it as a scalar would be stringified into a path nobody
+# named — `os.path.join(root, ['a','b'])` raises, but `str(['a','b'])` inside an
+# error message or a glob would not, and either way the caller is told something
+# false. Widening this set means widening the HANDLER first:
+#   * search_for_pattern — iterates the roots in order, one result stream
+#     (handle_search_for_pattern);
+#   * clang_tidy — passes every path to one clang-tidy invocation
+#     (handle_clang_tidy), which is what the binary's own CLI takes.
+# Everything else keeps the refusal below, which names these two so a caller
+# learns the way out in one round trip rather than one per path.
+MULTI_PATH_FUNCTIONS: frozenset = frozenset({
+    "search_for_pattern",
+    "clang_tidy",
+})
+
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_json.py :: _bool_param
@@ -725,20 +744,34 @@ def _resolve_aliases(params: Any, function: Optional[str] = None) -> dict:
         claimed[canonical] = key
 
     # `paths`/`path` are occasionally sent as a list (grep-style multi-root).
-    # purity searches a single root, so normalize: a 1-element list collapses to
-    # its element, an empty list is dropped (downstream applies the default /
-    # required-param rule), and a multi-element list is a hard error since
-    # multi-root search is unsupported.
+    # A 1-element list collapses to its element and an empty list is dropped
+    # (downstream applies the default / required-param rule) — both are true for
+    # EVERY function, and collapsing keeps a 1-element list byte-identical to the
+    # scalar it means.
+    #
+    # A LONGER list is a per-function question, and the default answer is still
+    # no. Only MULTI_PATH_FUNCTIONS reads `relative_path` as a sequence; every
+    # other handler reads it as a scalar, so letting a list through there would
+    # not widen anything — it would hand a list to `os.path.join` and turn a
+    # clear refusal into an internal error, or worse, into a plausible-looking
+    # answer about a path nobody named. The refusal NAMES the functions that do
+    # accept a list, because the caller's next move is otherwise a guess.
     rp = resolved.get("relative_path")
     if isinstance(rp, list):
         if len(rp) == 1:
             resolved["relative_path"] = rp[0]
         elif not rp:
             resolved.pop("relative_path")
-        else:
+        elif function not in MULTI_PATH_FUNCTIONS:
+            # `function` is unsanitized caller input here: _resolve_aliases runs
+            # BEFORE the handler lookup, so an unknown name reaches this string
+            # verbatim (CWE-117 / F10).
+            named = f" to '{_sanitize_log(function)}'" if function else ""
             raise ValueError(
-                "relative_path/paths received a multi-element list; purity "
-                "searches a single root. Pass one path or issue separate calls."
+                f"relative_path/paths received a multi-element list{named}, "
+                "which searches a single root. The functions that accept a list "
+                f"of paths are: {', '.join(sorted(MULTI_PATH_FUNCTIONS))}. "
+                "Pass one path here, or issue separate calls."
             )
     return resolved
 
@@ -1473,8 +1506,39 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
     offset = _offset(params)
 
-    search_root = safe_path(project_root, search_rel, strict) if search_rel else project_root
-    search_single_file = os.path.isfile(search_root)
+    # One root or several — `relative_path` may be a LIST here (see
+    # MULTI_PATH_FUNCTIONS, which is what lets one past the alias resolver). The
+    # roots are scanned IN THE ORDER GIVEN and their hits concatenated into ONE
+    # result stream: `offset`, `head_limit` and the row budget below are spent
+    # across the whole concatenation, never restarted per root, or a page
+    # boundary would silently mean something different depending on which root
+    # the previous page happened to end in.
+    #
+    # An empty list means the project root, exactly as a missing param does.
+    # Each element is resolved through safe_path exactly as the scalar was, so
+    # containment is decided per root and one bad path still refuses the call.
+    search_rels = list(search_rel) if isinstance(search_rel, list) else [search_rel]
+    if not search_rels:
+        search_rels = [""]
+    search_roots: List[str] = []
+    _seen_roots = set()
+    for _rel in search_rels:
+        _root = safe_path(project_root, _rel, strict) if _rel else project_root
+        # The same root spelled twice is not two roots. Overlapping-but-distinct
+        # roots (a parent and its child) still reach the same files, which is
+        # what the per-file dedupe below is for; this only skips the walk that
+        # would provably repeat itself.
+        _key = os.path.realpath(_root)
+        if _key in _seen_roots:
+            continue
+        _seen_roots.add(_key)
+        search_roots.append(_root)
+
+    # A file reachable through two overlapping roots is ONE hit, not two. Only
+    # armed for a multi-root call: a single os.walk never revisits a file, so the
+    # scalar path keeps its exact behaviour AND pays no extra realpath per file.
+    dedupe_files = len(search_roots) > 1
+    seen_files: set = set()
 
     # Smart default: switch to "content" mode when context-line params are set
     # or when the search target is a single file — otherwise the user-passed
@@ -1554,12 +1618,29 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     # multi-file scan is bounded even when no per-line match fires.
     _deadline = time.monotonic() + _SEARCH_DEADLINE_SECS
 
-    if search_single_file:
-        file_iter = [(os.path.dirname(search_root), [], [os.path.basename(search_root)])]
-    else:
-        file_iter = os.walk(search_root)
+    def _walk_roots():
+        """Yield (is_single_file, dirpath, dirnames, filenames) for every root.
 
-    for dirpath, dirnames, filenames in file_iter:
+        A generator that CONCATENATES the roots rather than a loop nested around
+        the scan below, for two reasons. The scan stays ONE loop over ONE stream,
+        so every accumulator it owns — `offset`, `head_limit`, the row budget,
+        the deadline, the counts — keeps spanning the whole call with no second
+        `break` to forget. And `dirnames[:] = ...` pruning still reaches os.walk:
+        the list object is handed through untouched and the consumer mutates it
+        in place before this generator resumes, which is exactly the contract
+        os.walk documents.
+
+        With one root this yields precisely what `os.walk(root)` yielded before,
+        in the same order — the scalar case is unchanged, not merely equivalent.
+        """
+        for root in search_roots:
+            if os.path.isfile(root):
+                yield True, os.path.dirname(root), [], [os.path.basename(root)]
+            else:
+                for dirpath_, dirnames_, filenames_ in os.walk(root):
+                    yield False, dirpath_, dirnames_, filenames_
+
+    for search_single_file, dirpath, dirnames, filenames in _walk_roots():
         if not search_single_file:
             dirnames[:] = [d for d in dirnames if d != ".git"]
             if skip_ignored:
@@ -1590,6 +1671,16 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
             if not _path_within_root(pathlib.Path(full), project_root):
                 log.debug("Skipping out-of-root symlink in search walk: %s", full)
                 continue
+
+            # Overlapping roots ("src", "src/lib") reach the same file twice.
+            # Report it ONCE — on the RESOLVED path, so two spellings of one file
+            # are one file. Off entirely for a single root (see dedupe_files), so
+            # the scalar call pays nothing for a case it cannot have.
+            if dedupe_files:
+                real_full = os.path.realpath(full)
+                if real_full in seen_files:
+                    continue
+                seen_files.add(real_full)
 
             if include_glob and not _glob_matches(file_rel, include_glob):
                 continue
@@ -5463,6 +5554,12 @@ def _resolve_clang_tidy_binary(override: Optional[str],
 async def handle_clang_tidy(params: dict, project_root: str, strict: bool = False) -> dict:
     """Run clang-tidy on one or more C/C++ files.
 
+    `relative_path` may be a LIST — one clang-tidy invocation over every file,
+    which is what the binary's own CLI takes. The plural was implemented here
+    from the start but was UNREACHABLE for more than one element until
+    clang_tidy joined MULTI_PATH_FUNCTIONS: the alias resolver refused the list
+    before dispatch, so this branch only ever saw the 1-element collapse.
+
     Auto-parameterizes against a compile database: if a build dir with a
     compile_commands.json exists (explicit `build_dir`, else <root>/build, else
     <root>), clang-tidy is invoked with `-p <dir>` so it sees the project's real
@@ -6016,7 +6113,13 @@ PURITY_CALL_TOOL = {
         "exception is `list_dir`'s filter: bare name, files only, dirs always pass.\n"
         "Brace alternation (`*.{js,py}`) is REFUSED, never silently empty -- fnmatch\n"
         "has no brace expansion, so pass one alternative per call. Search root is the\n"
-        "optional `path` (alias of `relative_path`, default = project root).\n\n"
+        "optional `path` (alias of `relative_path`, default = project root).\n"
+        "`path`/`paths` may be a LIST for search_for_pattern (grep/search) and\n"
+        "clang_tidy ONLY: the roots are scanned in the order given and answered as ONE\n"
+        "result stream -- a file reached through two overlapping roots appears once, and\n"
+        "`head_limit`/`offset` page the whole concatenation, not each root. Every other\n"
+        "function takes exactly one path and REFUSES a longer list rather than guess\n"
+        "which one you meant.\n\n"
         "Examples:\n"
         "  ls -l:      function=\"ls\", params={\"path\":\"src/\",\"long\":true}\n"
         "  find files: function=\"find_file\", params={\"pattern\":\"*.py\",\"path\":\"src/\"}\n"

@@ -193,7 +193,7 @@ def run_smoke(opts):
 #     Adding or retiring a server would trip a typed count for no defect.
 SUITES = [
     ("inspect_validate", run_inspect_validate,
-     "mcp-inspect VALIDATION family", 119),
+     "mcp-inspect VALIDATION family", 131),
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 335),
     ("sbx_gate", run_sbx_gate,
@@ -204,9 +204,9 @@ SUITES = [
      "purity_call file handlers: the .claude/tmp ignore exemption, the "
      "inheritance rule that keeps it narrow, the param contract, and the "
      "glob spellings that can only ever match nothing",
-     53),
+     66),
     ("mcp_git_params", run_mcp_git_params,
-     "mcp-git named params -> git argv, offline", 258),
+     "mcp-git named params -> git argv, offline", 295),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,
@@ -219,7 +219,7 @@ SUITES = [
      "floored percentages, query-side stopwords, get_page section index, "
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
-     "the frontmatter aliases synonym field", 116),
+     "the frontmatter aliases synonym field", 120),
     ("jira_cli", run_jira_cli,
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "

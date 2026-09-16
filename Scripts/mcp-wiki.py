@@ -949,20 +949,45 @@ def _head_resolves(head: str, repo: str) -> bool:
     return code == 0
 
 
-def freshness_analyze(root: str, head: str) -> dict:
+def freshness_analyze(root: str, head: str, path_prefix=None) -> dict:
     repo = repo_root(root)
     code, head_sha, _ = git(["rev-parse", "--short", head], cwd=repo)
     head_sha = head_sha.strip() if code == 0 else head
 
+    # The prefix filters on the way IN, never the rendered rows, and BOTH halves
+    # of that are load-bearing.
+    #
+    # Cost: `_classify_page` is the expensive step — one `git diff` per distinct
+    # `verified.commit` — so a page the caller excluded must never be classified.
+    # This is the earliest point the data allows: `relpath` is what `iter_pages`
+    # yields, and nothing before it knows which page it is looking at.
+    #
+    # Honesty: `summary` is derived from `pages` immediately below, and every
+    # count the report renders (`ok:`, `gating:`) is derived from `summary`.
+    # Filter the rows afterwards and those two lines keep describing the whole
+    # corpus while the list above them describes a slice of it — a report whose
+    # totals answer a question nobody asked is the one way this function can lie.
+    #
+    # Same rule as `search` and `list`: `relpath.startswith(prefix)` over the
+    # docs-relative path, so a whole path selects the single page it names.
+    # `str()` because a prefix that is not a string is a request matching nothing,
+    # which this report can say — not a TypeError out of `startswith`.
+    prefix = str(path_prefix) if path_prefix else ""
     cache: dict = {}
     pages = [_classify_page(relpath, fm, repo,
                             lambda c: _changed_files(c, head, repo, cache))
-             for relpath, fm, _body in iter_pages(root)]
+             for relpath, fm, _body in iter_pages(root)
+             if not prefix or relpath.startswith(prefix)]
 
     summary: dict = {}
     for page in pages:
         summary[page["status"]] = summary.get(page["status"], 0) + 1
-    return {"root": root, "head": head_sha, "pages": pages, "summary": summary}
+    report = {"root": root, "head": head_sha, "pages": pages, "summary": summary}
+    if prefix:
+        # Declared only when there IS one, so an unfiltered report is the same
+        # dict it has always been; `freshness_render` reads it with `.get`.
+        report["path_prefix"] = prefix
+    return report
 
 
 def _fresh_detail(page) -> str:
@@ -981,10 +1006,29 @@ def _fresh_detail(page) -> str:
 
 
 def freshness_render(report) -> str:
+    prefix = report.get("path_prefix") or ""
+    if prefix and not report["pages"]:
+        # NOT the "no pages found" sentence below, and emphatically not an empty
+        # report: a report with no rows still renders `gating: 0`, which reads as
+        # "nothing is stale" when what actually happened is that nothing was
+        # looked at. A prefix that selects nothing is a question this answer can
+        # only decline, and it declines in the caller's own word.
+        return ("# freshness @ %s — path_prefix %r\n\n"
+                "no page's path starts with %r — NOTHING was checked, which is "
+                "not the same as nothing being stale. The prefix is matched "
+                "against the docs-relative path (subsystems/, adr/0007-), the "
+                "same value `list` prints and `search` filters on.\n"
+                % (report["head"], prefix, prefix))
     by_status: dict = {}
     for page in report["pages"]:
         by_status.setdefault(page["status"], []).append(page)
-    lines = ["# freshness @ %s" % report["head"], ""]
+    head_line = "# freshness @ %s" % report["head"]
+    if prefix:
+        # The scope belongs in the HEADER because every number under it — each
+        # bucket size, `ok:`, `gating:` — counts the filtered set alone.
+        head_line += " — path_prefix %r, %d page(s)" % (prefix,
+                                                        len(report["pages"]))
+    lines = [head_line, ""]
     for status in DETAIL_STATUSES:
         bucket = by_status.get(status, [])
         if not bucket:
@@ -1715,7 +1759,7 @@ def _fn_freshness(params, project_root, wiki_root, strict):
             "freshness 'head' is the git ref to compare the wiki against "
             "(default 'HEAD'), not a count or a limit; this repo cannot resolve "
             "%r" % head)
-    report = freshness_analyze(abs_root, head)
+    report = freshness_analyze(abs_root, head, params.get("path_prefix"))
     return _finalize(freshness_render(report), params)
 
 
@@ -1779,7 +1823,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "get_page": _COMMON_PARAMS | {"slug", "section", "include_body", "depth",
                                   "from", "lines"},
     "list": _COMMON_PARAMS | {"type", "status", "path_prefix"},
-    "freshness": _COMMON_PARAMS | {"head"},
+    "freshness": _COMMON_PARAMS | {"head", "path_prefix"},
     "reindex": _COMMON_PARAMS | {"check"},
     "stats": set(_COMMON_PARAMS),
 }
@@ -1797,6 +1841,18 @@ FUNCTION_ALIASES = {
     "index": "reindex",
     "ls": "list",
     "fresh": "freshness",
+    # `status` is the spelling a caller reaches for; `stats` is the function that
+    # exists. The word is already in this server's vocabulary three times over --
+    # a search/list PARAM, the frontmatter field, and the git-measured state --
+    # and as a FUNCTION name it can only mean the census, so there is nothing for
+    # it to be ambiguous against (a row here collides only with another row here
+    # or with a HANDLERS key, and `status` is neither).
+    #
+    # It does NOT take the no-function reply's job: `wiki_call()` with no
+    # function at all stays the liveness answer -- server up, here are the
+    # functions -- and a caller asking for `status` wants the CORPUS's state, not
+    # the process's.
+    "status": "stats",
 }
 
 # Global param aliases — applied regardless of function.
@@ -1815,28 +1871,34 @@ PARAM_ALIASES = {
 
 # Function-specific aliases — applied BEFORE the global PARAM_ALIASES.
 #
-# `path` occupies FOUR of the rows below and reaches THREE different canonical
+# `path` occupies FIVE of the rows below and reaches THREE different canonical
 # names -- `slug`, `source`, path_prefix -- which is at once why each row is
 # right and why none of them may be global. Every one is the same trade: the
 # handler already took a docs-relative path as a VALUE and was turning away only
-# its KEY. _fn_get_page matches `relpath == slug`; _fn_search and _fn_list filter
-# on `relpath.startswith(prefix)`, where a WHOLE path selects the single page it
-# names. And the key the caller reaches for is the one the answers taught them --
-# a search hit prints `subsystems/scripts.md`, get_page's own header answers
-# `- **path**: subsystems/scripts.md`, and nothing the server renders ever says
-# path_prefix.
+# its KEY. _fn_get_page matches `relpath == slug`; _fn_search, _fn_list and
+# _fn_freshness filter on `relpath.startswith(prefix)`, where a WHOLE path
+# selects the single page it names. And the key the caller reaches for is the one
+# the answers taught them -- a search hit prints `subsystems/scripts.md`,
+# get_page's own header answers `- **path**: subsystems/scripts.md`, and nothing
+# the server renders ever says path_prefix.
+#
+# The three prefix rows are spelled IDENTICALLY on purpose. A caller who learned
+# `dir` from `list` must not have it rejected by `freshness`, which filters the
+# same field the same way: a spelling that works on one of the three and not on
+# the next is the divergence these tables exist to prevent.
 #
 # What a GLOBAL row would cost is now visible rather than argued. A global
 # `path` -> `slug` would make search's row -- the SAME word, a different
-# canonical name -- unwritable; and it would answer the three handlers that take
-# no path under any name (freshness, reindex, stats) with `Unknown params for
-# 'freshness': slug`, renaming the caller's word inside another handler's
-# rejection.
+# canonical name -- unwritable; and it would answer the two handlers that take
+# no path under any name (reindex, stats) with `Unknown params for 'stats':
+# slug`, renaming the caller's word inside another handler's rejection.
 PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     "search": {"prefix": "path_prefix", "dir": "path_prefix",
                "path": "path_prefix", "pattern": "query"},
     "list": {"prefix": "path_prefix", "dir": "path_prefix",
              "path": "path_prefix"},
+    "freshness": {"prefix": "path_prefix", "dir": "path_prefix",
+                  "path": "path_prefix"},
     "source_to_pages": {"file": "source", "path": "source", "anchor": "source"},
     # `count` -> `lines` is NOT redundant with the global table, it OVERRIDES it:
     # globally `count` means `limit`, the search result count, and get_page has no
@@ -2063,14 +2125,24 @@ WIKI_CALL_TOOL = {
         "                   path_prefix\n"
         "  freshness        git-only staleness report; params: head — the git REF\n"
         "                   to compare the wiki against (default HEAD), never a\n"
-        "                   count or a limit. This report is not paged.\n"
+        "                   count or a limit — and path_prefix, the same\n"
+        "                   docs-relative prefix search and list filter on\n"
+        "                   (subsystems/, or a whole path for one page). Every\n"
+        "                   count in the report, ok: and gating: included, then\n"
+        "                   describes that subset and nothing else; a prefix\n"
+        "                   matching no page says so instead of reporting clean.\n"
+        "                   This report is not paged.\n"
         "  reindex          regenerate INDEX.md + audit; params: check (true =\n"
         "                   audit only, write nothing). WRITES docs/INDEX.md by default.\n"
-        "  stats            page counts by type/status + dup/orphan/malformed audit\n\n"
-        "Common params: root (wiki root override, default from --wiki-root), "
-        "max_answer_chars (default 100000). Markdown output.\n\n"
+        "  stats            page counts by type/status + dup/orphan/malformed\n"
+        "                   audit; also answers to status, which is the word most\n"
+        "                   callers reach for\n\n"
+        "Common params: root (wiki root override — a different wiki root, never a "
+        "filter and never a git ref), max_answer_chars (default 100000). "
+        "Markdown output.\n\n"
         "Example: function=\"search\", params={\"query\":\"stream proxy\",\"type\":\"component\"}\n"
-        "Call without 'function' for the function list."
+        "Call without 'function' for the function list — that reply is the "
+        "server's own liveness, not a report about the wiki."
     ),
     "inputSchema": {
         "type": "object",

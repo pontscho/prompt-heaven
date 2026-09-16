@@ -6,15 +6,15 @@ description: >-
   `ulimit`, `launchctl`/`systemctl`, `<tool> --version`, `shasum`/`md5sum` — and every
   "is this file valid" one-liner (`python3 -c "import ast; ast.parse(...)"`,
   `python3 -m py_compile`, `python3 -m json.tool`, `jq .`, `xmllint --noout`,
-  `node --check`) — are
+  `node --check`, `bash -n`) — are
   DEPRECATED as primary Bash commands. Use `inspect_call` instead: it is pre-approved
   (no permission prompt), read-only, shell=False, and returns structured Markdown.
   Full API reference for the mcp-inspect MCP server. The server exposes ONE tool in
-  tools/list: `inspect_call` (universal dispatcher). All 33 functions are invoked
+  tools/list: `inspect_call` (universal dispatcher). All 34 functions are invoked
   through it. Called with no `function`, it returns server status + the live function
   list. Covers system/process/network inspection, file metadata, file digests, and
   FORMAL well-formedness validation of json, python, yaml, toml, xml, ini, csv, tsv,
-  plist and javascript.
+  plist, javascript and bash/sh shell scripts.
 triggers:
   - mcp-inspect
   - inspect_call
@@ -39,6 +39,8 @@ triggers:
   - xmllint
   - node --check
   - is this valid JavaScript
+  - bash -n
+  - is this valid shell script
 ---
 
 # mcp-inspect — read-only inspection + format validation
@@ -46,14 +48,15 @@ triggers:
 Two capability families behind **one** MCP tool:
 
 1. **System inspection** — live process/network/disk/host state, file metadata, digests.
-2. **Validation** — does a file *parse* for its format (10 formats, Python and
-   JavaScript included).
+2. **Validation** — does a file *parse* for its format (11 formats, Python, JavaScript
+   and Bash included).
 
 Everything is READ-ONLY: no mutation, `shell=False`, fixed argv per function, no way
 to pass a raw shell string, numeric params int-validated. There is no injection
-surface and nothing on disk is ever written or touched. JavaScript is the one format
-validated by a subprocess (`node --check`), and `--check` **parses only** — never
-`node -e`/`-p`, never a require/import of the file, so validating a file cannot run it.
+surface and nothing on disk is ever written or touched. JavaScript and Bash are the
+two formats validated by a subprocess (`node --check`, `bash -n`), and both of those
+modes **parse only** — never `node -e`/`-p`, never a require/import, never `bash -c`
+or a plain `bash <file>` — so validating a script cannot run it.
 
 ## The rule
 
@@ -85,6 +88,7 @@ If you are about to type any of these as the **primary** Bash command, STOP and 
 | `python3 -m json.tool f.json`, `jq . f.json` | `inspect_call {function:"json", params:{path:"f.json"}}` |
 | `xmllint --noout f.xml` | `inspect_call {function:"xml", params:{path:"f.xml"}}` |
 | `node --check f.js` | `inspect_call {function:"javascript", params:{path:"f.js"}}` |
+| `bash -n f.sh`, `sh -n f.sh` | `inspect_call {function:"bash", params:{path:"f.sh"}}` |
 | "is this YAML valid?" | `inspect_call {function:"yaml", params:{path:"f.yaml"}}` |
 
 **Still fine in Bash:** piping a stream into a filter (`python3 x.py | grep foo`) — the
@@ -110,7 +114,7 @@ function, missing binary). Unknown/typo'd params are **silently ignored** — th
 accepted-params table on this server, so `{pdi: 123}` behaves like `{}`. Re-read the
 signature if a filter seems to have had no effect.
 
-## Function index (33)
+## Function index (34)
 
 **Processes / network**
 `processes` (ps, proc, procs) · `process` · `ports` (netstat, ss, listening, port) ·
@@ -133,7 +137,7 @@ daemons) · `interfaces` (ifconfig, ip, interface, nics, addr) ·
 `validate` (lint, check, verify, syntax, parse, wellformed) · `json` (jsonlint) ·
 `python` (py, ast, py_compile, pycompile, python3) · `yaml` (yml) · `toml` ·
 `xml` (xmllint) · `ini` · `csv` · `tsv` · `plist` (plutil) ·
-`javascript` (js, mjs, cjs, node, nodejs)
+`javascript` (js, mjs, cjs, node, nodejs) · `bash` (sh, shell)
 
 ---
 
@@ -155,14 +159,19 @@ params:{content: "{\"a\":1}", format: "json"}       # inline text, no file neede
 - `content` **requires** `format` — there is no filename to detect from.
 - With `validate`, `format` is optional and auto-detected from the extension:
   `.json` · `.yaml`/`.yml` · `.toml` · `.xml`/`.svg`/`.xsd`/`.rss` · `.plist` ·
-  `.ini`/`.cfg` · `.csv` · `.tsv` · `.py`/`.pyi` · `.js`/`.mjs`/`.cjs`. An unknown
+  `.ini`/`.cfg` · `.csv` · `.tsv` · `.py`/`.pyi` · `.js`/`.mjs`/`.cjs` ·
+  `.sh`/`.bash`. An unknown
   extension yields `SKIP` — pass `format` explicitly to force it (that is how you
   validate a `.txt` holding JSON, or a `.jsonc`-style file you know is plain JSON).
   **`.jsx`/`.ts`/`.tsx`/`.mts`/`.cts` are deliberately NOT mapped**: `node --check`
   parses neither JSX nor TypeScript, so they `SKIP` rather than report a bogus `FAIL`.
   Forcing `format:"javascript"` on one of them will fail on the first type
   annotation or tag — that is the tool's limit, not a defect in the file.
-- The 10 format-named functions are thin wrappers that pin `format`; everything else is
+  **`.zsh`/`.fish`/`.ksh` are NOT mapped either**, for the same reason: bash would
+  report another shell's dialect as a bogus `FAIL`. An extension-less script — the
+  usual shape of a tool on `PATH` — has nothing to infer from, so pass
+  `format:"bash"` there.
+- The 11 format-named functions are thin wrappers that pin `format`; everything else is
   identical. Use them when you already know the format, `validate` when you do not.
 
 **Optional params:** `format`, `strict` (bool, default false), `max_mb` (default 32;
@@ -176,14 +185,14 @@ the first error, plus one overall verdict line and a count summary.
 | Status | Meaning |
 |---|---|
 | `OK` | Parses cleanly. |
-| `FAIL` | Does not parse (or cannot be read) — **or JavaScript was asked for and `node` is not installed**. `at` carries the position. |
-| `LIMITED` | Only a partial check ran because a parser is absent (YAML without PyYAML), or `node --check` timed out. **Not a guarantee.** |
+| `FAIL` | Does not parse (or cannot be read) — **or JavaScript/Bash was asked for and `node`/`bash` is not installed**. `at` carries the position (`bash -n` reports a line, never a column). |
+| `LIMITED` | Only a partial check ran because a parser is absent (YAML without PyYAML), or `node --check`/`bash -n` timed out. **Not a guarantee.** |
 | `SKIP` | Not validated: unknown extension, a directory, over `max_mb`, or no TOML parser. |
 
-**Missing PyYAML/tomllib degrades to `LIMITED`/`SKIP`; missing `node` FAILs.** That
-asymmetry is deliberate: those two are optional *parsers* and their absence is a
-property of this host's Python, while a `SKIP`ped `.js` would leave the batch verdict
-at `**PASSED**` over a file nobody ever checked.
+**Missing PyYAML/tomllib degrades to `LIMITED`/`SKIP`; a missing `node` or `bash`
+FAILs.** That asymmetry is deliberate: those two are optional *parsers* and their
+absence is a property of this host's Python, while a `SKIP`ped `.js`/`.sh` would leave
+the batch verdict at `**PASSED**` over a file nobody ever checked.
 
 | Verdict | When |
 |---|---|
@@ -207,8 +216,11 @@ Use `strict:true` whenever a `LIMITED`/`SKIP` must not quietly read as success.
 | `plist` | `plistlib` | Full parse, binary and XML plist. |
 | `javascript` | `node --check` (subprocess) | **Syntax only** — not type checking, not linting, and TypeScript/JSX are not JavaScript (see the extension note above). `--check` parses and stops: the file is never executed. With a `path`, node picks script-vs-module itself — extension, nearest `package.json` `"type"`, plus its own module-syntax detection on Node ≥22 — so ESM passes in a `.mjs`, in a `"type":"module"` package, and (on a recent node) in a plain `.js`. With `content` there is no extension, so it is checked as an ES module and, failing that, as CommonJS — valid under either goal is `OK`. **`FAIL` when `node` is not in PATH** (not `SKIP` — see the status table). |
 
-Call `inspect_call` with no `function` to see whether PyYAML, tomllib/tomli and `node`
-are actually present on this host before trusting a YAML/TOML/JavaScript verdict.
+| `bash` | `bash -n` (subprocess) | **Syntax only** — not shellcheck, not a style or portability review. `-n` is bash's own read-but-do-not-execute mode: it parses and stops, so nothing in the script runs (measured: with `BASH_ENV` set, a plain `bash <file>` sources it and `bash -n <file>` does not). Reports a **line, never a column**, and the FIRST diagnostic — bash likes to add a second line re-printing the offending source, and an unterminated construct is also reported at end-of-file by older bashes. `sh` and `shell` are the same validator under a different name, which is honest in one direction only: a `sh` script is parsed by **bash**, whose grammar is a superset, so a bashism (`[[ ... ]]`) passes here and would still die under `dash` — a missed defect, never an invented one. **`FAIL` when `bash` is not in PATH** (not `SKIP` — see the status table). |
+
+Call `inspect_call` with no `function` to see whether PyYAML, tomllib/tomli, `node` and
+`bash` are actually present on this host before trusting a YAML/TOML/JavaScript/Bash
+verdict.
 
 ## Examples
 
@@ -221,6 +233,9 @@ inspect_call {function:"python", params:{path:"ClaudeCode/hooks/mcp-first-guard.
 
 # a .js/.mjs/.cjs you just wrote — `node --check` parses it, never runs it
 inspect_call {function:"javascript", params:{path:"web/app.mjs"}}
+
+# a shell script — `bash -n` parses it, never runs it (`sh`/`shell` name the same one)
+inspect_call {function:"bash", params:{path:"ClaudeCode/hooks/post-edit-lint.sh"}}
 
 # everything you touched, in one call
 inspect_call {function:"validate", params:{paths:["a.json","b.yaml","c.py"], strict:true}}
