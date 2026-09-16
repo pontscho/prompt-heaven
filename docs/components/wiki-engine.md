@@ -9,8 +9,8 @@ sources:
   - ClaudeCode/skills/wiki
   - ClaudeCode/agents/minion-librarian.md
 verified:
-  commit: f80dc90
-  date: 2026-09-11
+  commit: 35f4a89
+  date: 2026-09-16
 links:
   - scripts
   - skills
@@ -19,6 +19,7 @@ links:
   - 0002-index-claims-no-freshness
   - 0003-the-trigger-travels-with-the-tool
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
+  - 0018-the-totals-must-describe-the-scope
 ---
 
 # Documentation Wiki Engine
@@ -53,6 +54,34 @@ the pages that document it (used by `ingest`). Search ranking is BM25F:
 per-field weighted pseudo-TF with per-field length normalization, a single
 global saturation, and global IDF, with prefix token matching and tunable
 `k1`/`b` `Scripts/mcp-wiki.py:_fn_search`.
+
+## One scope, one rule: `path_prefix`
+
+`search`, `list` and `freshness` all narrow to a subtree with `path_prefix` —
+and accept `prefix`, `dir` or `path` as spellings of it, identically on all
+three `Scripts/mcp-wiki.py:PARAM_ALIASES_BY_FUNC`. The value is matched against
+the docs-relative path the answers themselves print, through one shared
+predicate `Scripts/mcp-wiki.py:_path_prefix_matches`, so a scope learned from
+one function selects the same pages on the other two. Four clauses: a whole page
+path matches exactly, which makes a path copied off a search hit a legal scope
+for the one page it names; a prefix ending at a `/` boundary matches everything
+beneath it at any depth, so `adr` and `adr/` behave alike; a prefix ending
+inside the **final** component still matches, which is what keeps `adr/001`
+selecting the 0010–0019 records; and a prefix ending inside any **earlier**
+component matches nothing, so `sub` is not a way to spell `subsystems/`.
+
+A prefix that admits no page is refused, never answered with an empty result.
+The three refusals share one body that states the boundary rule and then names
+the scopes that do exist, derived from the corpus the walk just yielded rather
+than typed `Scripts/mcp-wiki.py:_corpus_scopes`, and each denies the particular
+false reading its own silence would carry `Scripts/mcp-wiki.py:_no_scope_lines`
+— `gating: 0` over a set nobody looked at reads as *nothing is stale*, an empty
+search as *the wiki has no answer*. In `freshness` the scope is applied where
+the totals are computed rather than to the rendered rows
+`Scripts/mcp-wiki.py:freshness_analyze`, so the header, `ok:` and `gating:`
+describe the subset the caller asked for and a pasted report cannot be mistaken
+for a corpus-wide verdict. Why that placement is the decision, and the boundary
+rule the repair it left open, is in [[0018-the-totals-must-describe-the-scope]].
 
 ## The trigger ships with the tool
 
@@ -155,12 +184,15 @@ renders only into `Scripts/mcp-*.py` `Scripts/amalgamate.py:TARGET_GLOB`, so it
 never reaches the skill's copies — a change to either copy must still be
 mirrored in the other by hand.
 
-Hand-maintained is no longer the whole story for this file, though. Three spans
-of `Scripts/mcp-wiki.py` are now generated regions rendered from the canonical
-`Scripts/_mcp_json.py` — `_bool_param`, `_json_error_window`, and the
-`_result`/`_error` pair — each fenced by `BEGIN GENERATED` / `END GENERATED`
-markers that carry the canonical file, the block names, and a hash of the
-rendered text. Editing inside those markers is overwritten on the next generator
-run; the fix belongs in the canonical file. The four rules that decide what may
-travel that way, and the two registers of deliberate exclusion, are in
+Hand-maintained is no longer the whole story for this file, though. Several
+spans of `Scripts/mcp-wiki.py` are rendered into it from the fleet's canonical
+`Scripts/_mcp_*.py` sources rather than written here — the in-flight bound this
+page anchors above is one of them `Scripts/mcp-wiki.py:MAX_INFLIGHT_REQUESTS`.
+Each is fenced by `BEGIN GENERATED` / `END GENERATED` markers carrying the
+canonical file, the block names and a hash of the rendered text, so the markers
+in the file are themselves the list of what travels and from where; a tally
+written into this page would go stale the next time a domain is shared, as one
+did. Editing inside those markers is overwritten on the next generator run; the
+fix belongs in the canonical file. The four rules that decide what may travel
+that way, and the two registers of deliberate exclusion, are in
 [[generated-regions]].

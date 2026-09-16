@@ -8,7 +8,7 @@ sources:
   - Scripts/mcp-wiki.py
   - tests/test_wiki_recall.py
 verified:
-  commit: 57c1bda
+  commit: 35f4a89
   date: 2026-09-16
 links:
   - 0017-a-silent-zero-is-the-defect
@@ -189,3 +189,33 @@ Three statements of the old rule were found and repaired as part of this, two in
 the suite and one in a comment beside the alias table. That is the cost of
 writing an implementation detail into prose: the rule had four homes and only
 one of them was executable.
+
+## Update 2 — the Decision named a shape, and the shape changed
+
+Found by a reader auditing this page against the code, and appended rather than
+repaired in place.
+
+The Decision above says the filter guards the `iter_pages` **comprehension**.
+There is no comprehension any more: the same commit that closed the gap
+materializes the walk and filters in an explicit loop, because the refusal has
+to name the scopes that do exist and therefore needs the paths the filter
+rejected — which a comprehension throws away. The code states that reason where
+it is `Scripts/mcp-wiki.py:freshness_analyze`.
+
+The decision itself is intact. The filter still runs before `_classify_page`,
+which is where the totals are computed, and that position is the whole of what
+was decided. What went stale is one word.
+
+It is recorded because the failure is this page's own, and it is the same one
+the page criticises two paragraphs above. A decision record named an
+implementation **shape** where it only had to name a **position**. The shape
+belongs to the code and may change whenever the code has a reason; the position
+is the decision and may not. Every shape-word in a frozen record is a claim that
+must eventually age, and this one aged in the very commit that closed the gap
+the record had declared.
+
+One claim in the Decision was checked in the same audit and survives: an
+unfiltered report is still dict-for-dict what it always was. The report dict now
+gains a second conditional key, `scopes`, but only inside the prefix branch and
+only when the selection came back empty, so neither the unfiltered guarantee nor
+the suite's byte-identity case is touched.
