@@ -22,6 +22,7 @@ links:
   - 0015-ambiguity-is-the-defect
   - 0017-a-silent-zero-is-the-defect
   - 0018-the-totals-must-describe-the-scope
+  - 0021-contain-by-the-admitted-root
 ---
 
 # Scripts & MCP Servers
@@ -427,7 +428,10 @@ the thing that says no. The fixture that pins it carries one link and two roots
 `tests/test_purity_file_ops.py:group_k` — rooted at `src` the link escapes and is
 dropped, rooted one level up the same link is inside and is read — because a
 drop with no matching read cannot tell an enforced boundary from a fixture that
-was never built.
+was never built. The decision, the refusal that was implemented first and
+overruled, the gate-removal rejected beside it, and the symlink back into the
+project that an out-of-root search drops on purpose are frozen in
+[[0021-contain-by-the-admitted-root]].
 
 The two globs, `paths_include_glob` and `paths_exclude_glob`, take a **string or
 a list of strings** `Scripts/mcp-purity.py:_glob_list`. The list is what a
@@ -437,8 +441,9 @@ reported call `exclude: ["build/**", ".git/**", "vendor/**"]` died as a bare
 exclude drops a file matching **any** element, and `[]` means no filter, the same
 way an empty `relative_path` list means the project root. Inside a list a
 non-string or an **empty** element is refused rather than skipped: an empty
-include element matches nothing, which is the silent zero again. Every element
-still goes through `Scripts/mcp-purity.py:_reject_brace_glob`, so a list is not a
+include element matches nothing, which is the silent zero again. That refusal
+is recorded as a decision of its own in [[0021-contain-by-the-admitted-root]].
+Every element still goes through `Scripts/mcp-purity.py:_reject_brace_glob`, so a list is not a
 way around the brace rule. The widening is search-only on purpose. `find_file`'s
 mask and `list_dir`'s filter stay one glob each, and a non-string handed to
 either is now a `ValueError` naming the parameter, raised by that same function
