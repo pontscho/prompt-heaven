@@ -305,9 +305,16 @@ SUITES = [
      "inserted, a second write is a byte-for-byte no-op, every byte outside "
      "the region survives, `prepend` lands the block and the table it "
      "describes in ONE os.replace, a stale or duplicate-id segment is refused "
-     "on content, and every refusal exits 2 with one line on stderr, leaving "
-     "the file alone",
-     140),
+     "on content, a segment whose sessions are not each immediately followed "
+     "by their own `## ACTIVATION S<NNN>` block is refused on shape, the "
+     "activation block gets its own A<NNN> row that `session` reads back, "
+     "`activate` prints it paste-ready and `nexts` prints MISSION + newest "
+     "SESSION + its ACTIVATION -- falling back, read-only, to the old "
+     "`### ACTIVATION` subsection -- an empty prompt is refused on write and "
+     "on read alike, a file that is not UTF-8 is refused rather than crashed "
+     "on, and every refusal exits 2 with one line on stderr, leaving the file "
+     "alone",
+     203),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against", 92),

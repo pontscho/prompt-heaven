@@ -20,9 +20,11 @@ The checkpoint is an **append-only stack of self-contained session blocks** abov
 <!-- TOC:BEGIN ... -->                           <- generated region; rewritten after every write
 | Session | When             | Branch | Start | End |
 |---------|------------------|--------|-------|-----|
-| S002    | 2026-08-04 12:30 | master |    10 |  94 |
-| S001    | 2026-08-04 11:44 | master |    96 | 150 |
-| MISSION |                  |        |   152 | 168 |
+| S002    | 2026-08-04 12:30 | master |    12 |  90 |
+| A002    |                  |        |    92 |  97 |
+| S001    | 2026-08-04 11:44 | master |    99 | 150 |
+| A001    |                  |        |   152 | 157 |
+| MISSION |                  |        |   159 | 175 |
 <!-- TOC:END -->
 
 ## SESSION S002 | 2026-08-04 12:30 | master      <- newest block; every checkpoint inserts here
@@ -33,11 +35,14 @@ The checkpoint is an **append-only stack of self-contained session blocks** abov
 ### THREADS        open threads / risks
 ### NEXT           next steps (ordered)
 ### MODEL          mental model / non-obvious context
-### ACTIVATION     activation prompt (plain text, no emoji)
+
+## ACTIVATION S002                               <- the session's activation prompt, its OWN block, right below it
 
 ## SESSION S001 | 2026-08-04 11:44 | master
 ### LOG
 ...
+
+## ACTIVATION S001
 
 ## MISSION                                       <- written once in S001, NEVER rewritten
 ### WHY
@@ -47,9 +52,9 @@ The checkpoint is an **append-only stack of self-contained session blocks** abov
 **Header contract (the script depends on it -- do not drift):**
 
 - `#` -- the one-line file title. Exactly one, always line 1.
-- The **TOC region** -- marker comments plus a markdown table, between the H1 and the first block. It is GENERATED -- by `prepend` on every checkpoint, or by `toc --write` for a retrofit -- never hand-written, and it must never contain a `## ` line: the parser treats everything above the first `## ` as preamble, which is exactly what keeps the TOC invisible to `latest` / `session` / `mission`.
-- `##` -- block level. Prefix `SESSION S<NNN> | <YYYY-MM-DD HH:MM> | <branch>` for a session block, or `MISSION` for the frozen tail. Fields are pipe-separated ASCII so `toc` can tabulate them -- which is also why a pipe must never appear inside a field.
-- `###` -- subsection level, with a stable UPPERCASE ENGLISH prefix token: `LOG`, `FILES`, `DECISIONS`, `STATE`, `THREADS`, `NEXT`, `MODEL`, `ACTIVATION` inside a SESSION block; `WHY`, `SCOPE` inside MISSION. The prefix is a machine label; the body under it is written in English too (Critical Rule 8).
+- The **TOC region** -- marker comments plus a markdown table, between the H1 and the first block. It is GENERATED -- by `prepend` on every checkpoint, or by `toc --write` for a retrofit -- never hand-written, and it must never contain a `## ` line: the parser treats everything above the first `## ` as preamble, which is exactly what keeps the TOC invisible to `latest` / `session` / `mission` / `activate` / `nexts`.
+- `##` -- block level. Prefix `SESSION S<NNN> | <YYYY-MM-DD HH:MM> | <branch>` for a session block, `ACTIVATION S<NNN>` for that session's activation prompt (same id, exactly one per session, placed IMMEDIATELY below its session block), or `MISSION` for the frozen tail. Session fields are pipe-separated ASCII so `toc` can tabulate them -- which is also why a pipe must never appear inside a field. The TOC labels an activation block `A<NNN>` (never `S<NNN>`, which would collide with its own session), and `session A<NNN>` prints it verbatim.
+- `###` -- subsection level, with a stable UPPERCASE ENGLISH prefix token: `LOG`, `FILES`, `DECISIONS`, `STATE`, `THREADS`, `NEXT`, `MODEL` inside a SESSION block; `WHY`, `SCOPE` inside MISSION. The prefix is a machine label; the body under it is written in English too (Critical Rule 8). `ACTIVATION` is NOT a `###` token any more: checkpoints written before the change carry it as a subsection inside the session, and the readers still fall back to that, but `prepend` refuses a new session block that contains one.
 - Session ids are zero-padded to three digits (`S001`..`S999`) so they sort and grep cleanly and are easy to cite ("see S042").
 
 Three properties make this cheap and safe, and every rule exists to protect them:
@@ -65,13 +70,17 @@ Stdlib-only markdown section reader, and the ONLY writer of the TOC region. Use 
 ```
 python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py prepend           # insert the staged block + regenerate the TOC in ONE atomic write -- the ONLY way to add a session
 python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py next-number      # next session id (S003), or S001 if the file is missing/empty -- WRITE side
-python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py latest           # the newest SESSION block, whole -- the primary resume payload
+python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py nexts            # MISSION + the newest SESSION + its ACTIVATION block, in that order -- THE resume command
+python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py activate         # the newest session's activation prompt, paste-ready (`> ` stripped); `activate S042` for another
+python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py latest           # the newest SESSION block, whole
 python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py mission          # the frozen MISSION block -- the "why"
 python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py toc              # table of contents: id | when | branch | start | end
 python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py toc --write      # retrofit or repair the TOC region -- NOT part of a normal checkpoint
 python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py list             # alias for `toc` -- kept so older activation prompts keep working
-python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py session S042     # one specific block by id -- on-demand history
+python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py session S042     # one specific block by its TOC label -- S042 a session, A042 its activation block, verbatim
 ```
+
+`nexts` and `activate` read an old checkpoint too: when a session has no `## ACTIVATION` block, they take the prompt from the `### ACTIVATION` subsection inside it (and `nexts` then prints only MISSION + SESSION, because the session already carries the prompt). Both refuse -- exit 2, one line on stderr, nothing on stdout -- when there is no prompt in either form.
 
 Default target is `.claude/tmp/checkpoint.md`; override with `--file PATH`. This is why the header contract must not drift: the script keys entirely off header level + prefix.
 
@@ -96,7 +105,7 @@ Aliases for `--overwrite`: `--force`, `--fresh`, `felulir`, `felulirni`, `ujra`.
 3. **Default is PREPEND, never rewrite prior blocks**: if `.claude/tmp/checkpoint.md` already exists, insert ONE new session block at the top and leave every existing block and the mission tail byte-for-byte untouched. Learn the next session id from `checkpoint.py next-number`, not by regenerating the file.
 4. **Overwrite only on explicit request**: only rebuild the whole file when the user passes `--overwrite` / `--force` / `--fresh` (or the Hungarian equivalents above). If unsure, ASK before overwriting -- never silently destroy a working checkpoint.
 5. **The mission tail is write-once**: the `## MISSION` tail is written in S001 and NEVER rewritten. If the mission is clarified mid-stream, record that clarification inside the current session block (under `LOG` or `DECISIONS`), not by editing the frozen tail. This keeps the append-only invariant exception-free.
-6. **Header contract is load-bearing**: emit exactly the header levels and prefix tokens from the file model above. The helper script parses them literally; a renamed or re-leveled header silently breaks `latest` / `session` / `mission`.
+6. **Header contract is load-bearing**: emit exactly the header levels and prefix tokens from the file model above. The helper script parses them literally; a renamed or re-leveled header silently breaks `latest` / `session` / `mission` / `activate` / `nexts`.
 7. **Tool routing -- MANDATORY.** `checkpoint.md` has exactly ONE writer: `checkpoint.py`. Never write, edit or patch it with `purity_call`, with built-in Write/Edit, or with anything else -- not the blocks, and least of all the TOC, whose line numbers are computed from the file and are therefore wrong the moment they are typed by hand. What `mcp-purity` writes is the BLOCK FILE: `create_text_file` the new block's text under `.claude/tmp/`, then hand that path to `prepend`. Everything else routes as usual: `mcp-purity` for file ops, built-in Read for reading, `mcp-git` for status/log/diff, and no Bash for `git status` / `git log` / `git diff`.
 8. **Language -- ENGLISH, WHOLE FILE, NO EXCEPTIONS.** Every line written into `checkpoint.md` is English, whatever language the conversation is in: `LOG`, `FILES`, `DECISIONS`, `STATE`, `THREADS`, `NEXT`, `MODEL`, `MISSION` and the `ACTIVATION` prompt alike. The file is a machine-reread artifact, not a chat message -- one language keeps it greppable, keeps a cold model on its strongest footing, and stops the language from drifting block to block when the conversation switches. Two carve-outs, both narrow: (a) **verbatim quotes are never translated** -- the `--note` value, a quoted user sentence, error output, commit messages, paths and identifiers stay exactly as they are; add a short English gloss beside a non-English quote if its meaning is not obvious; (b) the **Step 6 chat reply** stays in the conversation language, because that is a message to the user, not part of the file. Do NOT write the body in Hungarian just because the conversation is Hungarian -- and do not worry that an English `ACTIVATION` prompt will flip the next session to English: the working language comes from that session's own instructions, not from the language of the pasted text.
 9. **Be VERY detailed**: the whole point is that the next session can pick up cold. Err on the side of more context, not less. The user explicitly asked for *NAGYON reszletes* -- honor that.
@@ -125,9 +134,9 @@ Only if you are in fresh/overwrite mode do you also need the frozen mission cont
 
 All three write modes are the SAME command -- `prepend --block-file <path>`. What differs is only what goes into the block file, and whether `--overwrite` is passed:
 
-- **No existing file** -> the block file holds the `S001` block AND the `## MISSION` tail (a segment may contain several `## ` blocks). No flag needed: `prepend` creates the file, writes the H1 title, and generates the TOC region itself.
-- **Existing file + overwrite flag** -> same fresh content in the block file (`S001` + mission tail), plus `--overwrite`, which replaces everything below the H1. Mention in the output that the previous checkpoint was overwritten.
-- **Existing file + NO overwrite flag** -> the block file holds ONE new `## SESSION <next-number>` block. `prepend` places it above the current top block and leaves everything else -- older blocks, mission tail -- byte-for-byte. You do NOT compute the insertion line; hand-computing it was the old failure mode.
+- **No existing file** -> the block file holds the `S001` session block, its `## ACTIVATION S001` block, AND the `## MISSION` tail (a segment may contain several `## ` blocks). No flag needed: `prepend` creates the file, writes the H1 title, and generates the TOC region itself.
+- **Existing file + overwrite flag** -> same fresh content in the block file (`S001` + `ACTIVATION S001` + mission tail), plus `--overwrite`, which replaces everything below the H1. Mention in the output that the previous checkpoint was overwritten.
+- **Existing file + NO overwrite flag** -> the block file holds ONE new `## SESSION <next-number>` block followed by its `## ACTIVATION <next-number>` block. `prepend` places them above the current top block and leaves everything else -- older blocks, mission tail -- byte-for-byte. You do NOT compute the insertion line; hand-computing it was the old failure mode.
 - **Ambiguous case** (file exists, user invocation is ambiguous in the conversation language): ASK before overwriting. One short question, default to "prepend" if no clear answer.
 
 ### Step 4 -- Synthesize THIS session into one block
@@ -142,6 +151,8 @@ Walk the current session start to end and distill it into the single new block. 
 - **NEXT**: the concrete, ordered TODO list.
 - **MODEL**: things learned this session that are NOT obvious from the code alone (ownership, invariants, generated targets, tool gotchas). Highest-leverage content for a cold resume.
 
+The activation prompt is NOT a subsection of the session: it is the separate `## ACTIVATION S<NNN>` block written right below it (Step 5).
+
 If the session is too long to summarize in the main context, delegate the conversation review to `p:minion-explorer`; otherwise do it inline.
 
 ### Step 5 -- Write the block
@@ -153,9 +164,9 @@ Two calls, always the same two, in this order:
 
 The second call inserts the segment at the right line and regenerates the TOC inside ONE atomic replace, then prints the fresh table -- which is where Step 6 gets the new block's line range, with no extra call needed.
 
-`prepend` refuses, exits 2, and leaves the target untouched if the segment does not start with a `## ` header, contains a `# ` H1 line, is empty, if `--block-file` and `--file` resolve to the same path, or if any id in the segment ALREADY EXISTS in the target -- a duplicate `S0xx`, or a second `## MISSION`. That last gate is what makes a stale block file harmless: the block file survives between checkpoints, so a `prepend` that ran without a fresh step 1 above would otherwise re-insert the previous block, silently and with a duplicate id. A refusal means the BLOCK FILE is wrong: fix it and call again. Never route around a refusal by writing `checkpoint.md` yourself (Critical Rule 7).
+`prepend` refuses, exits 2, and leaves the target untouched if the segment does not start with a `## ` header, contains a `# ` H1 line, is empty, if `--block-file` and `--file` resolve to the same path, if its SHAPE is wrong -- a `## SESSION S0xx` not immediately followed by its own `## ACTIVATION S0xx`, an `## ACTIVATION` with no session directly above it, with a misspelled header, or with an empty prompt (a `>`-only body counts as empty), an id repeated inside the segment, or a session block still carrying the old `### ACTIVATION` subsection (one quoted inside a fenced code sample does not count) -- or if any id in the segment ALREADY EXISTS in the target: a duplicate `S0xx` / `A0xx`, or a second `## MISSION`. The shape rules apply in every mode, `--overwrite` included, and read only the segment: older blocks already in the file are never re-judged. The duplicate gate is what makes a stale block file harmless: the block file survives between checkpoints, so a `prepend` that ran without a fresh step 1 above would otherwise re-insert the previous block, silently and with a duplicate id. A refusal means the BLOCK FILE is wrong: fix it and call again. Never route around a refusal by writing `checkpoint.md` yourself (Critical Rule 7).
 
-Each session block is self-contained -- it carries its own `STATE` snapshot and its own `ACTIVATION` prompt, so the newest block alone is enough to resume from. Emit every `###` subsection in order; if one has no content, write the heading and `_(none)_` rather than dropping it, so blocks stay uniform and the script always finds them.
+Each session is self-contained -- its block carries its own `STATE` snapshot, and its own `## ACTIVATION` block sits directly below it, so the newest session plus its activation block (exactly what `nexts` prints, after the mission) is enough to resume from. Emit every `###` subsection in order; if one has no content, write the heading and `_(none)_` rather than dropping it, so blocks stay uniform and the script always finds them.
 
 ```markdown
 ## SESSION S002 | 2026-08-04 12:30 | master
@@ -190,14 +201,15 @@ _note: <--note value, omit this line if none>_
 ### MODEL
 - <implicit knowledge built this session, e.g. "forge_call needs function + params top-level keys; targets=[...] at top level silently fails">
 
-### ACTIVATION
+## ACTIVATION S002
 > Resuming the work started on branch `<branch>`. The context lives in `.claude/tmp/checkpoint.md`.
-> Pull the essentials:
-> `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py mission` and `... latest`.
+> Run ONE command first: `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py nexts`
 > For details, same script: `toc`, then `session S0xx`.
 > In short: <one-sentence mission>. Last state: <one-sentence status>.
 > Next step: <one-sentence next step>. If anything is unclear, ask -- do not guess.
 ```
+
+The `## ACTIVATION` block carries the SAME id as the session above it and comes IMMEDIATELY after it -- no other block in between. Its body is the prompt as a `>` blockquote, 4-6 lines, plain text, no emoji; `activate` strips the `> ` markers when it prints it.
 
 The **mission tail** (written once in fresh/overwrite mode, then frozen forever):
 
@@ -227,18 +239,18 @@ After writing, produce a SHORT user-facing message in the conversation language.
 **Aktivalo prompt -- masold be uj sessionbe:**
 
 ```
-<the verbatim ACTIVATION block from the block you just wrote>
+<the output of `checkpoint.py activate`, verbatim>
 ```
 
-**Tipp:** uj sessionben eloszor `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py latest` (es `... mission`) -- ez adja a lenyeget a teljes fajl beolvasasa nelkul; `... toc` a blokk-terkep, ha egy regebbi sessionra kell visszanezni.
+**Tipp:** uj sessionben eloszor `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py nexts` -- egy hivas: mission + a legujabb session + az aktivalo blokk, a teljes fajl beolvasasa nelkul; `... toc` a blokk-terkep, ha egy regebbi sessionra kell visszanezni.
 ```
 
-The triple-backtick wrapping around the activation prompt is intentional -- it makes copy-paste trivial. The activation prompt you echo here is the one from the block you just prepended (the new top block), never an older one.
+The prompt in that reply is NOT retyped: run `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py activate` after the `prepend` and paste its output. The file is the single source -- a prompt typed a second time into the reply is a second copy that can differ from the one the file carries, and `activate` already prints it paste-ready (header dropped, `> ` markers stripped). With no argument it prints the newest session's prompt, which after a `prepend` is the one you just wrote, never an older one. The triple-backtick wrapping around it is intentional -- it makes copy-paste trivial.
 
 ## Quality bar
 
-- **Detail level**: a competent dev who has NEVER seen this session should be able to resume from `checkpoint.py latest` + `checkpoint.py mission` alone, without re-reading the prior conversation.
-- **Self-contained blocks**: the newest block must stand on its own -- `STATE`, `NEXT`, and `ACTIVATION` all inside it. Do not write a block that only makes sense once you have read the ones below it.
+- **Detail level**: a competent dev who has NEVER seen this session should be able to resume from `checkpoint.py nexts` alone (mission + newest session + its activation block), without re-reading the prior conversation.
+- **Self-contained sessions**: the newest session must stand on its own -- `STATE` and `NEXT` inside its block, its prompt in the `## ACTIVATION` block directly below it. Do not write a block that only makes sense once you have read the ones below it.
 - **Honesty over polish**: if something is half-done or unclear, say so. Do not paper over gaps with optimistic phrasing.
 - **No invented progress**: only document what actually happened. A file planned but not written goes under `STATE` "Not started" / `THREADS`, NOT under "Done".
 - **Append-only discipline**: never rewrite, reconcile, or reorder an existing block. Superseded decisions are annotated in the NEW block, not edited in the old one.
@@ -266,5 +278,5 @@ The triple-backtick wrapping around the activation prompt is intentional -- it m
 12. **Using Bash for git** when `mcp-git` is connected, or built-in Read/Write when `mcp-purity` is.
 13. **Writing the file in the conversation language** -> the file is English, whole, always (Critical Rule 8). The only non-English text inside it is a verbatim quote; the only non-English text in the whole interaction is the Step 6 chat reply.
 14. **Writing `checkpoint.md` with `purity_call`, Write or Edit** -> that is the old two-writer workflow, and it is precisely the hole `prepend` closed. `purity_call` writes the BLOCK FILE; `checkpoint.py` writes the checkpoint. If a `prepend` refuses, fix the block file -- routing around a refusal re-creates the stale-TOC state by hand.
-15. **Hand-editing the TOC region** -> hand-typed line numbers are wrong the moment they are typed, and a `## ` line left inside the region would break `latest` / `session` / `mission` outright. If it looks wrong, run `toc --write`; never patch it.
+15. **Hand-editing the TOC region** -> hand-typed line numbers are wrong the moment they are typed, and a `## ` line left inside the region would break `latest` / `session` / `mission` / `activate` / `nexts` outright. If it looks wrong, run `toc --write`; never patch it.
 16. **Reaching for `toc --write` during a normal checkpoint** -> `prepend` already regenerated the TOC, atomically. The extra call is a harmless no-op, but wanting it means you took the two-step path somewhere -- go back and find where.

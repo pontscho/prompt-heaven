@@ -3,12 +3,24 @@
 Read sections out of a checkpoint markdown file by markdown header structure,
 write a new session block to the top of it, and maintain its line-range table
 of contents.
-Usage: checkpoint.py {next-number|latest|mission|toc|list|session <ID>} [--file PATH]
+Usage: checkpoint.py {next-number|latest|mission|nexts|activate [ID]|toc|list|session <ID>} [--file PATH]
        checkpoint.py prepend [--block-file PATH] [--file PATH] [--overwrite]
 
 The parser keys entirely off markdown header level (`## `) plus a prefix token
-(SESSION / MISSION); it never regexes arbitrary body content. A "block" runs from
-its `## ` header line up to (but not including) the next `## ` line, or EOF.
+(SESSION / ACTIVATION / MISSION); it never regexes arbitrary body content. A
+"block" runs from its `## ` header line up to (but not including) the next `## `
+line, or EOF.
+
+Each session carries its activation prompt as its OWN block, `## ACTIVATION
+S<NNN>`, directly below the `## SESSION S<NNN>` it belongs to. It used to be a
+`### ACTIVATION` subsection inside the session, which made the one thing a user
+pastes the one thing no command could address: `latest` printed it buried in
+the whole session, and the TOC had no row for it. As a block it gets a TOC row
+(`A<NNN>`), `activate` prints it paste-ready, and `nexts` prints the three
+blocks a resuming session needs -- MISSION, the newest SESSION, its ACTIVATION --
+in one call. Files written before the change keep their `### ACTIVATION`
+subsections, and both readers fall back to them; only a NEW segment handed to
+`prepend` is held to the new shape.
 
 `toc` reports each block's 1-indexed start and end line, so a cold reader can
 Read one block by offset instead of the whole file. `toc --write` rewrites the
@@ -34,9 +46,12 @@ up until one of them was changed.
 `prepend` also refuses a segment carrying an id the file already has. That gate
 is CONTENT-based on purpose: the block file has a default path and therefore
 survives between checkpoints, so a segment nobody rewrote would otherwise be
-inserted a second time -- silently, under a duplicate id. It also turns "the
-new block's id comes from next-number, do not hand-guess it" from a rule
-somebody has to follow into one the script enforces.
+inserted a second time -- silently, under a duplicate id. The same gate
+enforces HALF of "the new block's id comes from next-number, do not hand-guess
+it": a guessed id that COLLIDES with one already in the file is refused. A
+guessed id that skips one (S001 then S003) collides with nothing and goes
+through -- the gate catches collisions, not gaps, and following `next-number`
+is still the caller's job.
 """
 
 import argparse
@@ -57,7 +72,8 @@ DEFAULT_FILE = ".claude/tmp/checkpoint.md"
 # DEFAULT_FILE, so a `checkpoint*` glob would return two files, and the temp
 # files write_atomic leaves mid-write are `.checkpoint-*.tmp` -- three things
 # one word apart from each other is one confusion waiting to happen. `session`
-# is the skill's own word for what is in this file: one `## SESSION` block.
+# is the skill's own word for what is in this file: one `## SESSION` block and
+# the `## ACTIVATION` block that belongs to it.
 DEFAULT_BLOCK_FILE = ".claude/tmp/session-block.md"
 
 # The title a file gets when it is created from nothing. Only ever used when
@@ -66,6 +82,20 @@ DEFAULT_BLOCK_FILE = ".claude/tmp/session-block.md"
 H1_TITLE = "# Session Checkpoint"
 
 SESSION_RE = re.compile(r"^SESSION\s+S(\d+)\b")
+# The id is the SESSION's own id, not a counter of its own: an activation block
+# is addressed through the session it belongs to, and `next-number` stays a
+# function of the SESSION ids alone.
+ACTIVATION_RE = re.compile(r"^ACTIVATION\s+S(\d+)\b")
+# The pre-block form, a subsection inside a SESSION. Read-only from here on:
+# `activate` and `nexts` still find it in an old file, `prepend` refuses it in a
+# new segment. Case-insensitive, because the refusal must not be dodged by a
+# `### Activation` that a reader would still take for the prompt.
+LEGACY_ACTIVATION_RE = re.compile(r"^###\s+ACTIVATION\b", re.IGNORECASE)
+# A fence opener or closer: three or more backticks or tildes after optional
+# indentation. A block that DOCUMENTS this format quotes `### ACTIVATION` inside
+# a fence, and taking that quote for the real subsection would refuse a correct
+# segment -- or, in an old file, hand the user the quote as their prompt.
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 # Markers are matched by PREFIX, never by full text, so the generated-by note
 # can be reworded without orphaning regions written by an older version.
@@ -90,9 +120,20 @@ def read_lines(path):
     re-encodes the WHOLE file. Under LC_ALL=C the locale encoding is ASCII, so
     the default would make reading the user's own checkpoint fail -- and, worse
     on a lenient platform, silently rewrite bytes outside the TOC region.
+
+    Strict decoding, and a byte that is not UTF-8 is a refusal on the `die`
+    route rather than a traceback: every other failure in this script is one
+    line on stderr and exit 2, and a reader that crashed with exit 1 would be
+    the one exception. Decoding with errors="replace" instead would be worse
+    than either -- `toc --write` would then write the replacement characters
+    back, silently changing bytes inside an immutable block.
     """
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read().splitlines()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().splitlines()
+    except UnicodeDecodeError as exc:
+        die("%s is not valid UTF-8 (byte 0x%02x at offset %d) -- refusing to "
+            "read it" % (path, exc.object[exc.start], exc.start))
 
 
 def parse_blocks(lines):
@@ -142,8 +183,102 @@ def session_num(block):
     return int(m.group(1)) if m else None
 
 
+def activation_num(block):
+    """Integer session id if this block is an `ACTIVATION S<NNN>` header, else
+    None -- the id of the session the prompt belongs to."""
+    m = ACTIVATION_RE.match(header_of(block))
+    return int(m.group(1)) if m else None
+
+
 def is_mission(block):
     return header_of(block) == "MISSION"
+
+
+def unfenced(lines):
+    """(index, line) for every line of `lines` OUTSIDE a fenced code block.
+
+    Only the `### ACTIVATION` scans use this; `parse_blocks` deliberately does
+    not, because changing what counts as a `## ` header would move the block
+    boundaries of files already on disk. A fence closes only on the character
+    that opened it, so a ``` quoted inside a ~~~ fence does not end it.
+
+    Known limits, kept on purpose because this only has to tell a quoted
+    `### ACTIVATION` from a real one:
+      * looser than CommonMark -- any indentation opens or closes a fence (not
+        just up to three spaces), and neither the closer's length nor an info
+        string on it is checked, so ```` can be closed by ```;
+      * `parse_blocks` does not track fences at all, so a `## ` line inside a
+        fence is still a block header. A session therefore cannot quote a
+        `## ACTIVATION S0xx` or `## SESSION ...` header even inside a fence:
+        the quote becomes a real block, and the shape gate refuses the segment.
+    """
+    opener = None
+    for index, line in enumerate(lines):
+        m = FENCE_RE.match(line)
+        if m:
+            char = m.group(1)[0]
+            if opener is None:
+                opener = char
+                continue
+            if char == opener:
+                opener = None
+                continue
+        if opener is None:
+            yield index, line
+
+
+def legacy_activation(block):
+    """The body lines of a SESSION block's old `### ACTIVATION` subsection, or
+    None if it has none: from the line after that header up to the next `### `
+    header or the end of the block. Fence-aware, so a quoted header inside a
+    code sample is neither the start nor the end of it."""
+    body = block.lines[1:]
+    start = None
+    for index, line in unfenced(body):
+        if start is None:
+            if LEGACY_ACTIVATION_RE.match(line):
+                start = index + 1
+        elif line.startswith("### "):
+            return body[start:index]
+    return None if start is None else body[start:]
+
+
+def dequote(lines):
+    """The prompt PASTE-READY: a leading `> ` or bare `>` removed from each line,
+    blank lines trimmed at both ends. A line with no `>` passes through as it
+    is, because some old checkpoints wrote the prompt as plain text."""
+    out = []
+    for line in lines:
+        if line.startswith("> "):
+            line = line[2:]
+        elif line.startswith(">"):
+            line = line[1:]
+        out.append(line)
+    start = 0
+    while start < len(out) and not out[start].strip():
+        start += 1
+    return trim_trailing_blanks(out[start:])
+
+
+def parse_session_id(raw_id, allow_activation=False):
+    """(kind, number) for an id as a user types it, or None if it is not one.
+
+    ONE parser for both readers, so `session` and `activate` cannot come to
+    disagree on what `S042` means. Session spellings are S042, s042, 42 and
+    042; with `allow_activation`, A042 / a042 name the ACTIVATION block of
+    session 42, which is what makes every TOC label a valid `session` argument.
+    """
+    token = raw_id.strip()
+    kind = "S"
+    if token[:1] in ("S", "s"):
+        token = token[1:]
+    elif allow_activation and token[:1] in ("A", "a"):
+        kind = "A"
+        token = token[1:]
+    try:
+        return kind, int(token)
+    except ValueError:
+        return None
 
 
 def die(message):
@@ -167,7 +302,13 @@ def require_file(path):
 
 
 def toc_rows(blocks):
-    """One row per SESSION / MISSION block: (label, when, branch, start, end).
+    """One row per SESSION / ACTIVATION / MISSION block: (label, when, branch,
+    start, end).
+
+    An ACTIVATION block is labelled `A%03d`, never `S%03d`: the labels feed the
+    duplicate-id gate, and a session and its own prompt sharing a label would
+    read as a collision on every prepend. When and Branch stay empty -- the
+    session row directly above already says both.
 
     The when/branch fields come from the pipe-separated header, and the split is
     BOUNDED at two so the third field keeps whatever it contains. This used to
@@ -188,13 +329,17 @@ def toc_rows(blocks):
             fields = [field.strip() for field in header_of(block).split("|", 2)]
             fields += [""] * (3 - len(fields))
             rows.append(("S%03d" % number, fields[1], fields[2], block.start, end_of(block)))
+        elif activation_num(block) is not None:
+            rows.append(("A%03d" % activation_num(block), "", "", block.start, end_of(block)))
         elif is_mission(block):
             rows.append(("MISSION", "", "", block.start, end_of(block)))
     return rows
 
 
 def block_labels(lines):
-    """The TOC labels a body carries: S%03d per session, MISSION for the tail.
+    """The TOC labels a body carries: S%03d per session, A%03d per activation
+    prompt, MISSION for the tail. A stale session+activation segment therefore
+    clashes on BOTH of its labels.
 
     Deliberately routed through toc_rows -- the same single parse `toc` and
     `next-number` use. A second id parser here could disagree with the one that
@@ -390,6 +535,98 @@ def cmd_mission(path):
     die("no MISSION block in %s" % path)
 
 
+def find_block(blocks, id_of, wanted):
+    """The first block whose `id_of` is `wanted`, or None."""
+    return next((b for b in blocks if id_of(b) == wanted), None)
+
+
+def cmd_activate(path, raw_id=None):
+    """Print one session's activation prompt, paste-ready.
+
+    Default is the newest session -- the first SESSION block in file order, the
+    same one `latest` prints. The `## ACTIVATION S<NNN>` block wins; only a
+    session that has none falls back to its old `### ACTIVATION` subsection,
+    which is the only form any checkpoint written before the block existed has.
+    """
+    require_file(path)
+    blocks = load_blocks(path)
+    if raw_id is None:
+        session = next((b for b in blocks if session_num(b) is not None), None)
+        if session is None:
+            die("no SESSION block in %s" % path)
+        wanted = session_num(session)
+    else:
+        parsed = parse_session_id(raw_id)
+        if parsed is None:
+            die("%r is not a session id -- expected S042, s042, 42 or 042"
+                % raw_id)
+        wanted = parsed[1]
+        session = find_block(blocks, session_num, wanted)
+
+    _block, prompt = resolve_prompt(blocks, wanted, session, path)
+    print("\n".join(prompt))
+    return 0
+
+
+def resolve_prompt(blocks, wanted, session, path):
+    """(activation block or None, de-quoted prompt lines) for session `wanted`.
+
+    The ONE place that decides whether a session has a usable prompt, so
+    `activate` and `nexts` cannot disagree about it: the `## ACTIVATION` block
+    wins, the old `### ACTIVATION` subsection inside `session` is the fallback,
+    and a prompt that is missing in both forms -- or present but empty once
+    de-quoted -- is a refusal. The block comes back as None in legacy mode,
+    which is how `nexts` knows the session already carries the prompt.
+    """
+    block = find_block(blocks, activation_num, wanted)
+    if block is not None:
+        raw = block.lines[1:]
+    elif session is not None:
+        raw = legacy_activation(session)
+    else:
+        die("session S%03d not found in %s" % (wanted, path))
+    if raw is None:
+        die("no activation prompt for S%03d in %s -- neither an `## ACTIVATION "
+            "S%03d` block nor a `### ACTIVATION` subsection in the session"
+            % (wanted, path, wanted))
+    prompt = dequote(raw)
+    if not prompt:
+        # An empty answer on exit 0 reads as "there is nothing to paste" -- the
+        # one thing the user asked for. `prepend` refuses to write one; this is
+        # for a file that got one some other way.
+        die("the activation prompt for S%03d in %s is empty" % (wanted, path))
+    return block, prompt
+
+
+def cmd_nexts(path):
+    """Print what a resuming session needs, in the order it needs it: MISSION,
+    the newest SESSION, that session's ACTIVATION block -- each verbatim, so
+    the output stays a sequence of self-labelled blocks.
+
+    Everything is looked up BEFORE anything is printed: a partial answer (the
+    mission, then a refusal) is exactly what a caller skimming stdout would take
+    for the whole thing. On an old file the prompt lives INSIDE the session
+    block, so printing it again would show it twice; there the session alone
+    carries it. A missing or empty prompt is refused exactly as `activate`
+    refuses it -- both go through `resolve_prompt`.
+    """
+    require_file(path)
+    blocks = load_blocks(path)
+    mission = next((b for b in blocks if is_mission(b)), None)
+    if mission is None:
+        die("no MISSION block in %s" % path)
+    session = next((b for b in blocks if session_num(b) is not None), None)
+    if session is None:
+        die("no SESSION block in %s" % path)
+    wanted = session_num(session)
+    parts = [text_of(mission), text_of(session)]
+    block, _prompt = resolve_prompt(blocks, wanted, session, path)
+    if block is not None:
+        parts.append(text_of(block))
+    print("\n\n".join(parts))
+    return 0
+
+
 def cmd_toc(path, write=False):
     require_file(path)
     raw = read_lines(path)
@@ -418,7 +655,8 @@ def read_segment(block_path, path):
     that decide whether the inserted text is addressable at all afterwards --
     a segment that does not start with a `## ` header is invisible to the
     parser, and a second `# ` H1 would give the file two titles and put the
-    generated region above the wrong one.
+    generated region above the wrong one. The last rule, `check_segment_shape`,
+    is the one that decides whether `activate` / `nexts` can find the prompt.
     """
     if os.path.realpath(block_path) == os.path.realpath(path):
         # The footgun: --block-file pointing at the checkpoint itself would
@@ -442,7 +680,77 @@ def read_segment(block_path, path):
     if title is not None:
         die("the block carries an H1 title (%r) -- a checkpoint has exactly "
             "one, on line 1" % title[:60])
+    check_segment_shape(segment, block_path)
     return segment
+
+
+def check_segment_shape(segment, block_path):
+    """Refuse a segment whose blocks do not pair every session with its prompt.
+
+    A shape rule, not a collision rule, so it runs on every write path -- fresh,
+    --overwrite and normal alike -- and before the duplicate gate: a segment
+    that is malformed AND stale is reported for the thing that is wrong with
+    the segment itself. It reads ONLY the segment. The file's existing blocks
+    were written under whatever rule held at the time, and an old checkpoint
+    whose sessions carry `### ACTIVATION` subsections is still a valid one.
+
+    The order of the checks is the order of their usefulness: a misspelled
+    header first (otherwise it surfaces as "session without its activation",
+    which names the symptom), then the old in-block form (the likeliest mistake,
+    a template from before the change), then repetition, then adjacency, then
+    an activation block whose prompt is empty.
+    """
+    blocks = parse_blocks(segment)
+    for block in blocks:
+        header = header_of(block)
+        if header[:10].upper() == "ACTIVATION" and activation_num(block) is None:
+            die("%s: malformed header %r -- an activation block is spelled "
+                "`## ACTIVATION S<NNN>`, with the id of the session it belongs to"
+                % (block_path, "## " + header[:60]))
+    for block in blocks:
+        number = session_num(block)
+        if number is None:
+            continue
+        if any(LEGACY_ACTIVATION_RE.match(line)
+               for _index, line in unfenced(block.lines[1:])):
+            die("%s: SESSION S%03d carries a `### ACTIVATION` subsection -- the "
+                "activation prompt is its own block now: move it below the "
+                "session as `## ACTIVATION S%03d`" % (block_path, number, number))
+    labels = block_labels(segment)
+    repeated = sorted({label for label in labels if labels.count(label) > 1})
+    if repeated:
+        die("%s: the segment carries %s more than once -- every block id is "
+            "unique" % (block_path, " and ".join(repeated)))
+    for index, block in enumerate(blocks):
+        number = session_num(block)
+        if number is not None:
+            following = blocks[index + 1] if index + 1 < len(blocks) else None
+            if following is None or activation_num(following) != number:
+                die("%s: SESSION S%03d is not immediately followed by its "
+                    "`## ACTIVATION S%03d` block (next is %s) -- every session "
+                    "carries exactly one activation prompt, as its own block "
+                    "right below it"
+                    % (block_path, number, number,
+                       "the end of the segment" if following is None
+                       else repr("## " + header_of(following)[:60])))
+        number = activation_num(block)
+        if number is not None:
+            preceding = blocks[index - 1] if index > 0 else None
+            if preceding is None or session_num(preceding) != number:
+                die("%s: ACTIVATION S%03d is not immediately preceded by "
+                    "SESSION S%03d -- an activation block belongs to the "
+                    "session right above it" % (block_path, number, number))
+    # Last, because it judges a block the rules above have already placed. The
+    # readers refuse an empty prompt, so writing one would be accepting on the
+    # write side what the read side rejects -- found only at resume time, by
+    # whoever needed the prompt. Judged through `dequote`, the same function
+    # the readers use, so a `>`-only body counts as empty on both sides.
+    for block in blocks:
+        number = activation_num(block)
+        if number is not None and not dequote(block.lines[1:]):
+            die("%s: ACTIVATION S%03d has an empty prompt -- write the "
+                "activation text under the header, as a `>` blockquote"
+                % (block_path, number))
 
 
 def cmd_prepend(path, block_path, overwrite=False):
@@ -503,17 +811,18 @@ def cmd_prepend(path, block_path, overwrite=False):
 
 
 def cmd_session(path, raw_id):
+    """Print one block verbatim by any label the TOC shows: S042 (and its
+    other spellings) for a session, A042 for that session's ACTIVATION block --
+    so every row of the table can be read back by the label it carries."""
     require_file(path)
-    token = raw_id.strip()
-    if token[:1] in ("S", "s"):
-        token = token[1:]
-    try:
-        wanted = int(token)
-    except ValueError:
+    parsed = parse_session_id(raw_id, allow_activation=True)
+    if parsed is None:
         sys.stderr.write("checkpoint: session %s not found\n" % raw_id)
         return 2
+    kind, wanted = parsed
+    id_of = session_num if kind == "S" else activation_num
     for block in load_blocks(path):
-        if session_num(block) == wanted:
+        if id_of(block) == wanted:
             print(text_of(block))
             return 0
     sys.stderr.write("checkpoint: session %s not found\n" % raw_id)
@@ -535,6 +844,21 @@ def build_parser():
     sub.add_parser("next-number", parents=[parent], help="print the next session id (S%%03d)")
     sub.add_parser("latest", parents=[parent], help="print the newest SESSION block")
     sub.add_parser("mission", parents=[parent], help="print the MISSION block")
+    sub.add_parser(
+        "nexts",
+        parents=[parent],
+        help="print MISSION, the newest SESSION and its ACTIVATION block, in that "
+        "order -- everything a resuming session needs, in one call",
+    )
+    act = sub.add_parser(
+        "activate",
+        parents=[parent],
+        help="print a session's activation prompt, paste-ready (quote markers "
+        "stripped); default: the newest session",
+    )
+    act.add_argument(
+        "id", nargs="?", default=None, help="session id, e.g. S042, s042, 42, 042"
+    )
     toc = sub.add_parser(
         "toc", parents=[parent], help="print the table of contents (id | when | branch | lines)"
     )
@@ -564,8 +888,12 @@ def build_parser():
         help="replace the whole file with the segment instead of prepending "
         "(only needed for a file that EXISTS; a missing one is just created)",
     )
-    sp = sub.add_parser("session", parents=[parent], help="print a specific SESSION block")
-    sp.add_argument("id", help="session id, e.g. S042, s042, 42, 042")
+    sp = sub.add_parser(
+        "session",
+        parents=[parent],
+        help="print one block by its TOC label: a SESSION (S042) or its ACTIVATION (A042)",
+    )
+    sp.add_argument("id", help="block id, e.g. S042, s042, 42, 042, or A042 / a042")
     return parser
 
 
@@ -578,6 +906,10 @@ def main():
         code = cmd_latest(path)
     elif args.command == "mission":
         code = cmd_mission(path)
+    elif args.command == "nexts":
+        code = cmd_nexts(path)
+    elif args.command == "activate":
+        code = cmd_activate(path, args.id)
     elif args.command in ("toc", "list"):
         code = cmd_toc(path, getattr(args, "write", False))
     elif args.command == "prepend":
