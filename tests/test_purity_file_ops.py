@@ -98,7 +98,12 @@ Groups:
      `skip_ignored_files` / `no_ignore` to turn it on, `.git` never listed
   K  a missing directory -- or a file where one is expected -- reaches the
      caller as an error, not as an empty reply; search_for_pattern's missing
-     root too, while the file root it legitimately takes keeps working
+     root too, while the file root it legitimately takes keeps working; and
+     search's root OUTSIDE the project root, which it admitted and then read
+     nothing of: now searched (file, directory, and in a list beside an
+     in-root root), each file contained by the root it was admitted under so
+     a symlink escaping THAT root is still dropped -- and refused under
+     --strict, where safe_path stops the escape before any walk
   L  an offset at or past the last row answers with `_rows_note`'s
      past-the-end form in list_dir and find_file, never an inverted header
      range; search's pagers as the controls that already did
@@ -140,6 +145,12 @@ ALL_FILES = (P_SCRATCH, P_LEAK, P_SETTINGS, P_KEEP, P_GEN)
 # under `.git`, which every walk prunes unconditionally (group J).
 P_LOG = "src/debug.log"
 P_GITFILE = ".git/HEAD"
+
+# Group K's out-of-root tree (make_outside_fixture), relative to ITS own root.
+O_SRC = "src"
+O_KEEP = "src/keep.txt"                  # a plain file under the search root
+O_ESC = "src/esc.txt"                    # symlink -> ../escape.txt
+O_ESCAPE = "escape.txt"                  # the escaping symlink's target
 
 # Basename-shaped patterns: what `_is_ignored` actually matches on, since it is
 # handed a bare name at the prune sites.  This is the hostile shape.
@@ -249,6 +260,21 @@ def make_multi_fixture(ws, subdir):
     return os.path.realpath(ws.join(subdir))
 
 
+def make_outside_fixture(ws, subdir):
+    """Group K's out-of-root tree: a sibling of every server's project root.
+
+    `src/esc.txt` is a file symlink to `escape.txt` one level up, so it ESCAPES a
+    search rooted at `src` but stays INSIDE one rooted at the tree -- the pair
+    of rows that tells a dropped escape from a fixture that never existed.
+    """
+    ws.subdir(subdir)
+    ws.write_text(os.path.join(subdir, O_KEEP), LINE)
+    ws.write_text(os.path.join(subdir, O_ESCAPE), LINE)
+    os.symlink(os.path.join("..", os.path.basename(O_ESCAPE)),
+               ws.join(os.path.join(subdir, O_ESC)))
+    return os.path.realpath(ws.join(subdir))
+
+
 def make_read_fixture(ws, subdir):
     """Group I's tree: two numbered files and nothing else to get in the way."""
     ws.subdir(subdir)
@@ -272,10 +298,11 @@ class Driver:
     stderr PIPE nobody reads, and a full pipe would present as a mystery hang.
     """
 
-    def __init__(self, project_root, timeout=RPC_TIMEOUT):
+    def __init__(self, project_root, timeout=RPC_TIMEOUT, strict=False):
         self.root = project_root
         self.cli = H.JsonRpcClient(
-            [sys.executable, SERVER, "--project-root", project_root],
+            [sys.executable, SERVER, "--project-root", project_root]
+            + (["--strict"] if strict else []),
             tool="purity_call", cwd=H.REPO_ROOT, timeout=timeout,
             client_name="ph-purity-file-ops")
         self._err = []
@@ -526,6 +553,34 @@ def record_refusal(suite, cid, handler, params, root, must_say=("brace",),
                         detail=list(detail) + [
                             "params : %s" % (params,),
                             "outcome: %s" % " | ".join(text.splitlines())[:200]],
+                        text=text, showable=True)
+
+
+def record_inproc_polarity(suite, cid, handler, params, root, must, must_not,
+                           extract=search_paths, detail=()):
+    """`record_polarity`'s in-process twin, for group G.
+
+    A raised exception is recorded as the failure it is rather than allowed to
+    abort the group: the defect this was written for WAS an exception -- a
+    TypeError out of the glob layer -- and a case that crashed the suite would
+    hide every row after it.
+    """
+    try:
+        text = handler_text(handler(params, root))
+        raised = None
+    except Exception as exc:                                     # noqa: BLE001
+        raised, text = exc, "%s: %s" % (type(exc).__name__, exc)
+    if raised is not None:
+        problems = ["raised %s: %s" % (type(raised).__name__, raised)]
+    else:
+        problems = polarity(text, False, must, must_not, extract)
+    return suite.record("G", cid, problems,
+                        detail=list(detail) + [
+                            "params       : %s" % (params,),
+                            "must find    : %s" % (", ".join(must) or "-"),
+                            "must not find: %s" % (", ".join(must_not) or "-"),
+                            "reported     : %s"
+                            % (", ".join(sorted(extract(text))) or "-")],
                         text=text, showable=True)
 
 
@@ -1394,7 +1449,7 @@ def group_j(suite, drv, root):
 # key (`text`) the wire layer never reads, so what arrived was "".
 # ---------------------------------------------------------------------------
 
-def group_k(suite, drv):
+def group_k(suite, drv, drv_strict, outside_root):
     for fn, params in (
             ("find_file", {"file_mask": "*"}),
             ("list_dir", {"recursive": True})):
@@ -1438,6 +1493,60 @@ def group_k(suite, drv):
         {"substring_pattern": NEEDLE, "relative_path": "src"},
         must=[P_KEEP], must_not=[P_SCRATCH, P_GEN],
         detail=["CONTROL: a directory root is scoped exactly as before"])
+
+    # A root OUTSIDE the project root.  safe_path admits it for a read-only
+    # handler (non --strict), but search's per-file symlink gate used to
+    # re-contain every walked file against the PROJECT root, so every file of
+    # the admitted root was dropped and the reply was `0 match(es)` -- for a
+    # scope that was never searched, although the file holds the needle.  The
+    # gate now measures each file against the root it was ADMITTED under, so
+    # the out-of-root root is searched, and a symlink escaping THAT root is
+    # still dropped.  `outside_root` is a sibling fixture workspace (see
+    # make_outside_fixture), so the path is out-of-root and real; hits are
+    # reported relative to the project root, hence the `../outside/` spelling.
+    out_file = os.path.join(outside_root, O_KEEP)
+    out_dir = os.path.join(outside_root, O_SRC)
+    up = os.path.join("..", os.path.basename(outside_root))
+    r_keep = os.path.join(up, O_KEEP)
+    r_esc = os.path.join(up, O_ESC)
+    r_escape = os.path.join(up, O_ESCAPE)
+    record_polarity(
+        suite, "K", "search-outside-root-file-finds", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": out_file},
+        must=[r_keep], must_not=[],
+        detail=["an out-of-root FILE holding the needle answered `0 match(es)`"])
+    record_polarity(
+        suite, "K", "search-outside-root-dir-finds", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": out_dir},
+        must=[r_keep], must_not=[r_esc, r_escape],
+        detail=["an out-of-root DIRECTORY walked every file and read none;",
+                "its file symlink escaping THAT root must stay dropped"])
+    record_polarity(
+        suite, "K", "search-outside-root-symlink-in-root", drv,
+        "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": outside_root},
+        must=[r_keep, r_esc, r_escape], must_not=[],
+        detail=["CONTROL for the row above: rooted one level up, the same",
+                "symlink resolves INSIDE its search root and is read -- so the",
+                "drop above is the escape, not a dead fixture"])
+    record_polarity(
+        suite, "K", "search-outside-root-in-list-finds", drv,
+        "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": ["src", out_dir]},
+        must=[P_KEEP, r_keep], must_not=[r_esc],
+        detail=["a LIST mixing an in-root and an out-of-root root answers",
+                "from BOTH; it used to be a partial answer hiding one"])
+    record_error(
+        suite, "K", "read-outside-root-file-unchanged", drv, "read_file",
+        {"relative_path": out_file}, must_say=[NEEDLE], want_error=False,
+        detail=["CONTROL: read_file reads an out-of-root file outside --strict"])
+    record_error(
+        suite, "K", "search-outside-root-strict-is-error", drv_strict,
+        "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": out_dir},
+        must_say=["escapes project root", out_dir],
+        detail=["--strict is the hard sandbox: safe_path refuses the escape",
+                "before any walk, so the permissive gate is never reached"])
 
 
 # ---------------------------------------------------------------------------
@@ -1773,6 +1882,76 @@ def group_g(suite, root):
                 "by the thousand).  Refusing it would break callers who are",
                 "asking for exactly what fnmatch already gives them"])
 
+    # -- (c) a LIST of globs -------------------------------------------------
+    # The reported call was `exclude: ["build/**", ".git/**", "vendor/**"]`,
+    # and it died as `TypeError: expected string or bytes-like object, got
+    # 'list'` inside _reject_brace_glob -- the list reached `re.search` whole.
+    # A list of globs is what a ripgrep-taught caller writes (`-g` repeats), so
+    # search_for_pattern's two globs take one: include keeps a file matching
+    # ANY element, exclude drops a file matching ANY element.
+    top = [p for p in GLOB_FILES if "/" not in p]
+    nested = [p for p in GLOB_FILES if "/" in p]
+    record_inproc_polarity(
+        suite, "glob-list-search-exclude", mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE,
+         "paths_exclude_glob": ["src/**", "tests/**"]}, root,
+        must=top, must_not=nested,
+        detail=["the reported shape: exclude as a LIST drops a file that",
+                "matches ANY element, instead of raising a TypeError"])
+    record_inproc_polarity(
+        suite, "glob-list-search-include", mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE,
+         "paths_include_glob": ["src/**", "tests/*.py"]}, root,
+        must=nested, must_not=top,
+        detail=["the include side shares the crash and the fix: a file is",
+                "kept when it matches ANY element"])
+    record_inproc_polarity(
+        suite, "glob-list-empty-means-no-filter", mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE, "paths_exclude_glob": []}, root,
+        must=list(GLOB_FILES), must_not=[],
+        detail=["CONTROL: an empty list is an absent filter, exactly as an",
+                "empty `relative_path` list is the project root"])
+    record_inproc_polarity(
+        suite, "glob-scalar-exclude-unchanged", mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE, "paths_exclude_glob": "src/**"}, root,
+        must=[p for p in GLOB_FILES if not p.startswith("src/")],
+        must_not=["src/a.py", "src/deep/nested.py"],
+        detail=["CONTROL: the string spelling keeps its exact behaviour"])
+    record_refusal(
+        suite, "glob-list-non-string-element-refused",
+        mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE, "paths_exclude_glob": ["*.md", 5]}, root,
+        must_say=("paths_exclude_glob", "int"),
+        detail=["a non-string element is a caller error named as one -- a",
+                "ValueError that names the parameter and the type, never the",
+                "TypeError the glob layer would raise on its own"])
+    record_refusal(
+        suite, "glob-list-empty-element-refused",
+        mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE, "paths_include_glob": ["*.py", ""]}, root,
+        must_say=("paths_include_glob", "empty"),
+        detail=["an empty glob inside a list cannot be meant: as an include",
+                "element it matches nothing, the silent zero ADR 0017 refuses"])
+    record_refusal(
+        suite, "glob-list-brace-element-refused",
+        mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE,
+         "paths_exclude_glob": ["*.md", "*.{js,py}"]}, root,
+        detail=["the brace rule reaches EVERY element; a list must not be",
+                "the way around it"])
+    record_refusal(
+        suite, "glob-non-string-refused-find_file-mask",
+        mod.handle_find_file, {"file_mask": ["*.py"]}, root,
+        must_say=("file_mask", "string"),
+        detail=["find_file's mask is ONE glob and stays one; a list is",
+                "refused by name, not answered with a TypeError"])
+    record_refusal(
+        suite, "glob-non-string-refused-list_dir-filter",
+        mod.handle_list_dir,
+        {"filter": ["*.py"], "relative_path": ".", "recursive": True}, root,
+        must_say=("filter", "string"),
+        detail=["list_dir's filter is ONE bare-name glob and stays one"])
+
     # -- find_file's own globstar engine, which is NOT the one being widened ---
     reply = handler_text(mod.handle_find_file({"file_mask": "**/*.py"}, root))
     got = found_paths(reply)
@@ -1888,6 +2067,7 @@ def run(opts=None):
         multi_root = make_multi_fixture(ws, "multiroot")
         read_root = make_read_fixture(ws, "readfile")
         git_root = make_git_fixture(ws, "gitwalk")
+        outside_root = make_outside_fixture(ws, "outside")
         suite.note("      server        : %s" % SERVER)
         suite.note("      fixture (A-D,J-L): %s  .gitignore=%s"
                    % (basename_root, list(GITIGNORE_BASENAME)))
@@ -1903,8 +2083,11 @@ def run(opts=None):
                    % (read_root, R_FILE, R_LINES))
         suite.note("      fixture (M)   : %s  no .gitignore, files=%s"
                    % (git_root, list(GIT_FILES)))
+        suite.note("      fixture (K)   : %s  out-of-root, files=%s"
+                   % (outside_root, [O_KEEP, O_ESCAPE, O_ESC + " -> symlink"]))
 
         drv = Driver(basename_root)
+        drv_strict = Driver(basename_root, strict=True)
         drv_path = Driver(pathshaped_root)
         drv_multi = Driver(multi_root)
         drv_read = Driver(read_root)
@@ -1918,15 +2101,17 @@ def run(opts=None):
             group_h(suite, drv_multi, multi_root)
             group_i(suite, drv_read)
             group_j(suite, drv, basename_root)
-            group_k(suite, drv)
+            group_k(suite, drv, drv_strict, outside_root)
             group_l(suite, drv)
             group_m(suite, drv_git)
             stderr_bytes = (len(drv.stderr_text) + len(drv_path.stderr_text)
                             + len(drv_multi.stderr_text)
                             + len(drv_read.stderr_text)
-                            + len(drv_git.stderr_text))
+                            + len(drv_git.stderr_text)
+                            + len(drv_strict.stderr_text))
         finally:
             drv.close()
+            drv_strict.close()
             drv_path.close()
             drv_multi.close()
             drv_read.close()
@@ -1937,7 +2122,7 @@ def run(opts=None):
         group_g(suite, glob_root)
 
         workspaces = [basename_root, pathshaped_root, glob_root, multi_root,
-                      read_root, git_root]
+                      read_root, git_root, outside_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()

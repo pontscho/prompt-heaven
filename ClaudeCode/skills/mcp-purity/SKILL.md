@@ -170,8 +170,8 @@ Existing content at `line` shifts down. Does not replace.
 |`substring_pattern`|string|yes|—|Regex pattern to search for|
 |`context_lines_before`|int|no|0|Context lines before match|
 |`context_lines_after`|int|no|0|Context lines after match|
-|`paths_include_glob`|string|no|""|Glob to include files — matches the project-relative **path** OR the basename, and `**/` = any depth **including zero**, so `tests/**/*.py` also matches `tests/foo.py`. Brace alternation refused|
-|`paths_exclude_glob`|string|no|""|Glob to exclude files — same matching rules|
+|`paths_include_glob`|string or list of strings|no|""|Glob to include files — matches the project-relative **path** OR the basename, and `**/` = any depth **including zero**, so `tests/**/*.py` also matches `tests/foo.py`. A **list** keeps a file matching **any** element. Brace alternation refused, in every element|
+|`paths_exclude_glob`|string or list of strings|no|""|Glob to exclude files — same matching rules; a **list** drops a file matching **any** element (`["build/**","vendor/**"]`). `[]` = no filter; a non-string or empty element is an **error**|
 |`relative_path`|string|no|""|Restrict to a subdirectory **or a single file**. A path that does not exist is an **error** (`Path does not exist`), never `0 match(es)`; so is one at or inside `.git`|
 |`skip_ignored_files`|bool|no|true|Skip gitignored files — except `.claude/tmp`, never skipped. `no_ignore` (ripgrep's spelling) is its **inverse**; passing both with opposite meanings is refused|
 |`max_answer_chars`|int|no|-1|Character limit|
@@ -260,7 +260,7 @@ All errors return `{"error":"message"}` in the tool response with `isError: true
 
 ## Security
 
-All paths are sandboxed under `--project-root`. Symlinks are resolved before validation. Attempts to escape the project root via `..` or absolute paths are rejected.
+Paths are resolved against `--project-root`, symlinks first. Destructive functions (create/replace/delete/insert) never leave the root. Without `--strict`, the non-destructive ones (`read_file`, `list_dir`, `find_file`, `search_for_pattern`, semantic) may resolve a path outside it; `--strict` refuses every escape and every absolute path. A `search_for_pattern` walk skips any file symlink that resolves outside the root it was given (the project root for an in-root search).
 
 ## Semantic / Symbol Navigation (clangd-backed)
 

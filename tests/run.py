@@ -210,9 +210,12 @@ SUITES = [
      "glob spellings that can only ever match nothing, read_file's "
      "line-count `limit` and its past-EOF note, find_file's ignore filter, "
      "a missing directory or search root reaching the caller as an error, "
+     "a search root outside the project root searched rather than read as "
+     "empty (and refused under --strict), "
      "an offset past the last row answered with the past-the-end note "
-     "rather than an inverted range, and a walk rooted in `.git` refused",
-     131),
+     "rather than an inverted range, a walk rooted in `.git` refused, and "
+     "search's globs taken as a string or a list of strings",
+     146),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 295),
     ("name_existence", run_name_existence,

@@ -400,14 +400,49 @@ row budget, the wall-clock deadline — keeps spanning the whole call with no
 second `break` to forget, and the paging that was already there sees a single
 result stream. The generator yields `os.walk`'s `dirnames` list untouched, so
 the consumer's in-place `dirnames[:] = …` pruning still reaches `os.walk` —
-exactly the contract `os.walk` documents. With one root it yields precisely what
-`os.walk(root)` yielded before, in the same order: unchanged, not merely
+exactly the contract `os.walk` documents. With one root it walks precisely what
+`os.walk(root)` walked before, in the same order: unchanged, not merely
 equivalent. Overlapping roots (`src`, `src/lib`) reach the same file twice, so a
 hit is deduped on `os.path.realpath` — two spellings of one file are one file —
 and the dedupe is **armed only above one root**, so a scalar call pays no
 realpath per file for a collision it cannot have. `clang_tidy` needed no code
 change to join the whitelist: its list branch was already written, and the
 resolver had simply made it unreachable for more than one element.
+
+Each root the generator yields also carries the **bound** its files are
+contained by, and that is a fix, not a feature. The scan re-contains every
+walked file through `realpath`, so a file symlink resolving outside the tree is
+never opened (F6 / CWE-22) `Scripts/mcp-purity.py:handle_search_for_pattern` —
+but it used to measure against the project root alone, while without `--strict`
+`Scripts/mcp-purity.py:safe_path` deliberately admits an out-of-root root for a
+read-only handler. Every file of such a root then failed the gate, and the reply
+was `0 match(es)` for a scope that was never read: the silent zero
+[[0017-a-silent-zero-is-the-defect]] refuses, reached through containment
+instead of a glob. The bound is now the project root when the search root lies
+inside it and the admitted root itself otherwise
+`Scripts/mcp-purity.py:_walk_roots`, so an out-of-root root is searched and a
+symlink escaping *that* root is still dropped. `--strict` is untouched:
+`safe_path` refuses the escape before any walk, so the per-file gate is never
+the thing that says no. The fixture that pins it carries one link and two roots
+`tests/test_purity_file_ops.py:group_k` — rooted at `src` the link escapes and is
+dropped, rooted one level up the same link is inside and is read — because a
+drop with no matching read cannot tell an enforced boundary from a fixture that
+was never built.
+
+The two globs, `paths_include_glob` and `paths_exclude_glob`, take a **string or
+a list of strings** `Scripts/mcp-purity.py:_glob_list`. The list is what a
+ripgrep-taught caller writes, since `-g` repeats, and before it was accepted the
+reported call `exclude: ["build/**", ".git/**", "vendor/**"]` died as a bare
+`TypeError` naming no parameter. Include keeps a file matching **any** element,
+exclude drops a file matching **any** element, and `[]` means no filter, the same
+way an empty `relative_path` list means the project root. Inside a list a
+non-string or an **empty** element is refused rather than skipped: an empty
+include element matches nothing, which is the silent zero again. Every element
+still goes through `Scripts/mcp-purity.py:_reject_brace_glob`, so a list is not a
+way around the brace rule. The widening is search-only on purpose. `find_file`'s
+mask and `list_dir`'s filter stay one glob each, and a non-string handed to
+either is now a `ValueError` naming the parameter, raised by that same function
+before anything reaches `re.search`.
 
 **A name a tool prints in its answers is a name it has to accept in its asks.**
 mcp-wiki reached the same table from a third direction: `get_page` refused `path`

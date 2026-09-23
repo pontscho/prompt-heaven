@@ -22,7 +22,9 @@ Usage:
                   Without --strict (default): destructive ops (create/replace/
                   delete/insert) stay sandboxed to the root, but non-destructive
                   ops (read/search/list/glob/semantic) MAY resolve paths
-                  outside the root.
+                  outside the root. A search walk contains each file by the
+                  root it was admitted under, so a symlink escaping that root
+                  is still skipped.
 """
 
 import argparse
@@ -1076,7 +1078,17 @@ def _reject_brace_glob(glob: str, param: str) -> None:
 
     Only a group carrying a comma is refused; that is the alternation spelling.
     A literal ``{{cookiecutter}}`` in a filename stays matchable.
+
+    Every glob entry point passes through here first, so this is also where a
+    non-string glob is refused BY NAME: left alone, a JSON list reached
+    ``re.search`` whole and surfaced as a bare ``TypeError`` naming no
+    parameter. search_for_pattern's two globs take a list, but through
+    _glob_list, which hands this function one string at a time.
     """
+    if not isinstance(glob, str):
+        raise ValueError(
+            f"{param} must be a string glob, got {type(glob).__name__}."
+        )
     if re.search(r"\{[^{}]*,[^{}]*\}", glob):
         raise ValueError(
             f"{param}: brace alternation is not supported ({glob!r}). fnmatch has "
@@ -1084,6 +1096,49 @@ def _reject_brace_glob(glob: str, param: str) -> None:
             "the alternatives you meant. Use one call per alternative, or widen "
             "the mask (e.g. '*auth*') and narrow the result."
         )
+
+
+def _glob_list(value: Any, param: str) -> List[str]:
+    """Normalise one of search_for_pattern's globs to a list of string globs.
+
+    A string is one glob and a list is several: ripgrep repeats ``-g``, so a
+    caller taught by it writes ``exclude: ["build/**", "vendor/**"]``, and that
+    call used to die as a ``TypeError`` out of _reject_brace_glob. The caller
+    ORs the result: include keeps a file matching ANY element, exclude drops a
+    file matching ANY element.
+
+    Absent, ``None``, ``""`` and ``[]`` all mean "no filter" -- the empty list
+    mirrors an empty ``relative_path`` list meaning the project root. Inside a
+    list, a non-string or an EMPTY element is refused rather than skipped: an
+    empty include element matches nothing, the silent zero ADR 0017 refuses.
+    Every element goes through _reject_brace_glob, so a list is not a way
+    around the brace rule.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        _reject_brace_glob(value, param)
+        return [value] if value else []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            f"{param} must be a string glob or a list of string globs, "
+            f"got {type(value).__name__}."
+        )
+    globs: List[str] = []
+    for i, glob in enumerate(value):
+        name = f"{param}[{i}]"
+        if not isinstance(glob, str):
+            raise ValueError(
+                f"{name} must be a string glob, got {type(glob).__name__}. "
+                f"Pass {param} as a glob or a list of globs."
+            )
+        if not glob:
+            raise ValueError(
+                f"{name} is an empty glob; it can match nothing. Drop it."
+            )
+        _reject_brace_glob(glob, name)
+        globs.append(glob)
+    return globs
 
 
 def _require_dir(path: str, rel: str, allow_file: bool = False) -> None:
@@ -1618,12 +1673,9 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
         ctx_after = ctx_both
     ctx_before = int(ctx_before) if ctx_before else 0
     ctx_after = int(ctx_after) if ctx_after else 0
-    include_glob = params.get("paths_include_glob", "")
-    exclude_glob = params.get("paths_exclude_glob", "")
-    if include_glob:
-        _reject_brace_glob(include_glob, "paths_include_glob")
-    if exclude_glob:
-        _reject_brace_glob(exclude_glob, "paths_exclude_glob")
+    # Each glob is a string OR a list of strings (see _glob_list).
+    include_globs = _glob_list(params.get("paths_include_glob"), "paths_include_glob")
+    exclude_globs = _glob_list(params.get("paths_exclude_glob"), "paths_exclude_glob")
     search_rel = params.get("relative_path", "")
     max_chars = _max_answer_chars(params)
     head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
@@ -1747,7 +1799,11 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     _deadline = time.monotonic() + _SEARCH_DEADLINE_SECS
 
     def _walk_roots():
-        """Yield (is_single_file, dirpath, dirnames, filenames) for every root.
+        """Yield (is_single_file, bound, dirpath, dirnames, filenames) per root.
+
+        ``bound`` is the root each walked file is contained by (see the F6 gate
+        below): the project root when the search root lies inside it, else the
+        search root itself -- the one safe_path admitted, already realpath'd.
 
         A generator that CONCATENATES the roots rather than a loop nested around
         the scan below, for two reasons. The scan stays ONE loop over ONE stream,
@@ -1762,13 +1818,17 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
         in the same order — the scalar case is unchanged, not merely equivalent.
         """
         for root in search_roots:
+            bound = (project_root
+                     if _path_within_root(pathlib.Path(root), project_root)
+                     else root)
             if os.path.isfile(root):
-                yield True, os.path.dirname(root), [], [os.path.basename(root)]
+                yield (True, bound, os.path.dirname(root), [],
+                       [os.path.basename(root)])
             else:
                 for dirpath_, dirnames_, filenames_ in os.walk(root):
-                    yield False, dirpath_, dirnames_, filenames_
+                    yield False, bound, dirpath_, dirnames_, filenames_
 
-    for search_single_file, dirpath, dirnames, filenames in _walk_roots():
+    for search_single_file, bound, dirpath, dirnames, filenames in _walk_roots():
         if not search_single_file:
             dirnames[:] = [d for d in dirnames if d != ".git"]
             if skip_ignored:
@@ -1793,11 +1853,15 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                 )
 
             # F6 fix / CWE-22: re-contain walked path via realpath so a regular-
-            # file symlink inside the repo that resolves outside project_root is
-            # NOT opened/read.  In-root files and in-root-resolving symlinks
-            # pass the check (realpath is contained under project_root).
-            if not _path_within_root(pathlib.Path(full), project_root):
-                log.debug("Skipping out-of-root symlink in search walk: %s", full)
+            # file symlink that resolves outside the root it was walked under is
+            # NOT opened/read. That root is `bound`: project_root for an in-root
+            # search, the admitted search root for an out-of-root one (non
+            # --strict only; safe_path refuses the escape under --strict).
+            # Measured against project_root alone, every file of an admitted
+            # out-of-root root failed here and the reply was `0 match(es)` for a
+            # scope never searched -- the silent zero ADR 0017 refuses.
+            if not _path_within_root(pathlib.Path(full), bound):
+                log.debug("Skipping escaping symlink in search walk: %s", full)
                 continue
 
             # Overlapping roots ("src", "src/lib") reach the same file twice.
@@ -1810,9 +1874,10 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                     continue
                 seen_files.add(real_full)
 
-            if include_glob and not _glob_matches(file_rel, include_glob):
+            if include_globs and not any(
+                    _glob_matches(file_rel, g) for g in include_globs):
                 continue
-            if exclude_glob and _glob_matches(file_rel, exclude_glob):
+            if any(_glob_matches(file_rel, g) for g in exclude_globs):
                 continue
             if code_only and not _is_code_file(name):
                 continue
@@ -6242,7 +6307,9 @@ PURITY_CALL_TOOL = {
         "`tests/**/*.py` matches `tests/foo.py` as well as `tests/sub/foo.py`. The one\n"
         "exception is `list_dir`'s filter: bare name, files only, dirs always pass.\n"
         "Brace alternation (`*.{js,py}`) is REFUSED, never silently empty -- fnmatch\n"
-        "has no brace expansion, so pass one alternative per call. Search root is the\n"
+        "has no brace expansion, so pass one alternative per call -- or, for\n"
+        "search_for_pattern's `include`/`exclude` ONLY, a LIST of globs (ANY element\n"
+        "matching counts). Search root is the\n"
         "optional `path` (alias of `relative_path`, default = project root).\n"
         "`path`/`paths` may be a LIST for search_for_pattern (grep/search) and\n"
         "clang_tidy ONLY: the roots are scanned in the order given and answered as ONE\n"
