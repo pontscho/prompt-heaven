@@ -1,7 +1,7 @@
 ---
 name: 0020-the-prompt-is-its-own-block
 type: adr
-status: draft
+status: active
 title: The activation prompt is its own block
 description: Decision to promote the checkpoint's activation prompt from a ### subsection inside each session to its own ## ACTIVATION S<NNN> block with its own TOC row, so one command can resume and the reply can quote the file -- with the in-block alternative that was recommended and overruled, the four review findings that shaped the prepend shape gate, the read-only legacy fallback, and the three limits left declared. Supersedes the in-block ACTIVATION part of ADR 0009.
 sources:
@@ -9,7 +9,7 @@ sources:
   - ClaudeCode/skills/checkpoint/SKILL.md
   - tests/test_checkpoint.py
 verified:
-  commit: 0598b54
+  commit: e8b4909
   date: 2026-09-23
 links:
   - 0009-the-first-reader-is-a-cold-model
@@ -19,7 +19,8 @@ links:
 
 # ADR 0020: The activation prompt is its own block
 
-**Status:** draft. Supersedes one part of [[0009-the-first-reader-is-a-cold-model]]:
+**Status:** accepted (implemented, `0598b54`; `migrate` in `e8b4909`). Append-only
+from here. Supersedes one part of [[0009-the-first-reader-is-a-cold-model]]:
 the activation prompt as a `### ACTIVATION` subsection inside each SESSION block,
 and resuming via `latest` + `mission`. Everything else in 0009 stands: English
 throughout, the persisted TOC, one writer. The living WHAT/HOW is
@@ -118,6 +119,23 @@ subsection, read-only and fence-aware
 mode `nexts` prints only MISSION + SESSION, because the session already carries the
 prompt and printing it twice would duplicate it. Content already in the file is
 never shape-checked; only a new segment is held to the new shape.
+
+The fallback reads the old form; it does not retire it. Retiring it takes a
+command, `migrate`, because the alternative is a hand edit of every legacy block
+plus a TOC nobody regenerated -- the two-writer path 0009 closed
+`ClaudeCode/skills/checkpoint/scripts/checkpoint.py:cmd_migrate`. It moves each
+legacy subsection into its own block below its session and writes once. That
+makes it the one command that edits blocks already written, so the exception to
+append-only is named where the rule is stated `ClaudeCode/skills/checkpoint/SKILL.md`,
+and it is explicit and user-invoked, never part of a checkpoint. It moves lines and
+never changes what a block says. A session it cannot convert unambiguously is
+skipped and reported rather than half converted, and the one case review caught
+converting halfway -- two subsections in one session, where the shared locator
+stops at the second -- is among the skips
+`ClaudeCode/skills/checkpoint/scripts/checkpoint.py:migrate_session`. Migrate and
+the legacy reader find the subsection through the same locator, so `activate`
+cannot disagree with what `migrate` moves
+`ClaudeCode/skills/checkpoint/scripts/checkpoint.py:legacy_span`.
 
 ## Consequences
 
