@@ -545,7 +545,7 @@ def record_glob(suite, gm, cid, rel_path, glob, want, detail=()):
 
 
 def record_refusal(suite, cid, handler, params, root, must_say=("brace",),
-                   want_error=True, detail=()):
+                   want_error=True, detail=(), must_not_say=()):
     """Call a handler IN-PROCESS and assert on the EXCEPTION, not on a reply.
 
     `record_error` above cannot serve here.  Over the wire a refusal and a glob
@@ -556,6 +556,9 @@ def record_refusal(suite, cid, handler, params, root, must_say=("brace",),
     dispatcher's error envelope is written against, and the MESSAGE because a
     refusal whose text does not name what it refused just moves the silence one
     layer out: the caller still has to guess which of its globs was the problem.
+    `must_not_say` is the other half of that: advice the refusal must NOT give,
+    because advice naming a spelling the parameter does not take costs the
+    caller a second failed retry.
     """
     try:
         text = handler_text(handler(params, root))
@@ -575,6 +578,9 @@ def record_refusal(suite, cid, handler, params, root, must_say=("brace",),
             for token in must_say:
                 if token.lower() not in low:
                     problems.append("refusal does not mention %r" % token)
+            for token in must_not_say:
+                if token.lower() in low:
+                    problems.append("refusal wrongly mentions %r" % token)
     elif raised is not None:
         problems.append("expected acceptance, raised %s: %s"
                         % (type(raised).__name__, raised))
@@ -1894,17 +1900,27 @@ def group_g(suite, root):
                 "helper exists instead of a bare fnmatch call"])
 
     # -- (b) the brace alternation, refused at all three entry points ----------
+    # The ADVICE differs by whether the parameter takes a list.  search_for_
+    # pattern's two globs do (via _glob_list), so their refusal names the list
+    # form -- the one-retry answer to a brace call.  find_file's mask and
+    # list_dir's filter do not, so theirs must NOT advise a list (that retry
+    # would fail too) and keep "one call per alternative" instead.
     record_refusal(
         suite, "brace-refused-search-include-glob",
         mod.handle_search_for_pattern,
         {"substring_pattern": NEEDLE, "paths_include_glob": "*.{js,py}"}, root,
+        must_say=("brace", "as a list"),
+        must_not_say=("one call per alternative",),
         detail=["an include glob that can only ever match a file literally",
                 "named `x.{js,py}` narrows the search to nothing, and the",
-                "caller reads that as 'the needle is not in any .js or .py'"])
+                "caller reads that as 'the needle is not in any .js or .py'",
+                "-- the refusal points at the list form this parameter takes"])
     record_refusal(
         suite, "brace-refused-search-exclude-glob",
         mod.handle_search_for_pattern,
         {"substring_pattern": NEEDLE, "paths_exclude_glob": "*.{md,txt}"}, root,
+        must_say=("brace", "as a list"),
+        must_not_say=("one call per alternative",),
         detail=["the exclude side fails in the OPPOSITE direction -- it",
                 "excludes nothing and the caller is handed the noise it",
                 "asked to drop, which is why it needs its own row"])
@@ -1912,16 +1928,22 @@ def group_g(suite, root):
         suite, "brace-refused-find_file-mask",
         mod.handle_find_file,
         {"file_mask": "**/*auth*.{js,py,php}"}, root,
+        must_say=("brace", "one call per alternative"),
+        must_not_say=("as a list",),
         detail=["this exact mask is taught by a shipped skill example, so it",
                 "is not a hypothetical spelling -- it is one already in the",
-                "corpus, returning `Found 0 file(s)` every time it is run"])
+                "corpus, returning `Found 0 file(s)` every time it is run;",
+                "file_mask takes no list, so the refusal must not advise one"])
     record_refusal(
         suite, "brace-refused-list_dir-filter",
         mod.handle_list_dir,
         {"filter": "*.{js,py}", "relative_path": ".", "recursive": True}, root,
+        must_say=("brace", "one call per alternative"),
+        must_not_say=("as a list",),
         detail=["list_dir is the worst of the three: `_accept_name` applies",
                 "the filter to FILES only, so a brace mask returns a listing",
-                "of pure directories and looks like a populated answer"])
+                "of pure directories and looks like a populated answer;",
+                "filter takes no list, so the refusal must not advise one"])
 
     # -- (b) must-stay-green: the rejector must not become a `{` ban -----------
     record_refusal(
@@ -1988,8 +2010,10 @@ def group_g(suite, root):
         mod.handle_search_for_pattern,
         {"substring_pattern": NEEDLE,
          "paths_exclude_glob": ["*.md", "*.{js,py}"]}, root,
+        must_say=("brace", "paths_exclude_glob[1]", "as a list"),
+        must_not_say=("one call per alternative",),
         detail=["the brace rule reaches EVERY element; a list must not be",
-                "the way around it"])
+                "the way around it -- and the refusal names the element index"])
     record_refusal(
         suite, "glob-non-string-refused-find_file-mask",
         mod.handle_find_file, {"file_mask": ["*.py"]}, root,

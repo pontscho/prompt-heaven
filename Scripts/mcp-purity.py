@@ -1062,7 +1062,7 @@ def _format_mtime(mtime: float) -> str:
     return datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
 
 
-def _reject_brace_glob(glob: str, param: str) -> None:
+def _reject_brace_glob(glob: str, param: str, accepts_list: bool = False) -> None:
     r"""Refuse a brace-alternation glob instead of answering it with nothing.
 
     None of purity's three matchers implements brace expansion, and neither can:
@@ -1084,17 +1084,26 @@ def _reject_brace_glob(glob: str, param: str) -> None:
     ``re.search`` whole and surfaced as a bare ``TypeError`` naming no
     parameter. search_for_pattern's two globs take a list, but through
     _glob_list, which hands this function one string at a time.
+
+    ``accepts_list`` is set by _glob_list alone: there the refusal names the
+    list form, which answers the brace call in ONE retry. list_dir's globs take
+    no list, so advising one there would cost a second failed retry.
     """
     if not isinstance(glob, str):
         raise ValueError(
             f"{param} must be a string glob, got {type(glob).__name__}."
         )
     if re.search(r"\{[^{}]*,[^{}]*\}", glob):
+        if accepts_list:
+            advice = ("Pass the alternatives as a list instead, e.g. "
+                      "[\"*.js\", \"*.py\"]; a file matching ANY element is kept.")
+        else:
+            advice = ("Use one call per alternative, or widen the mask "
+                      "(e.g. '*auth*') and narrow the result.")
         raise ValueError(
             f"{param}: brace alternation is not supported ({glob!r}). fnmatch has "
             "no brace expansion, so this pattern would match nothing rather than "
-            "the alternatives you meant. Use one call per alternative, or widen "
-            "the mask (e.g. '*auth*') and narrow the result."
+            f"the alternatives you meant. {advice}"
         )
 
 
@@ -1117,7 +1126,7 @@ def _glob_list(value: Any, param: str) -> List[str]:
     if value is None:
         return []
     if isinstance(value, str):
-        _reject_brace_glob(value, param)
+        _reject_brace_glob(value, param, accepts_list=True)
         return [value] if value else []
     if not isinstance(value, (list, tuple)):
         raise ValueError(
@@ -1136,7 +1145,7 @@ def _glob_list(value: Any, param: str) -> List[str]:
             raise ValueError(
                 f"{name} is an empty glob; it can match nothing. Drop it."
             )
-        _reject_brace_glob(glob, name)
+        _reject_brace_glob(glob, name, accepts_list=True)
         globs.append(glob)
     return globs
 
