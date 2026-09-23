@@ -167,7 +167,8 @@ Existing content at `line` shifts down. Does not replace.
 
 |Param|Type|Required|Default|Description|
 |-|-|-|-|-|
-|`substring_pattern`|string|yes|—|Regex pattern to search for|
+|`substring_pattern`|string|yes|—|Regex pattern to search for — or a literal string with `regex: false`|
+|`regex`|bool|no|true|`false` = literal match: the pattern is `re.escape`d, so `size(` needs no escaping (see below)|
 |`context_lines_before`|int|no|0|Context lines before match|
 |`context_lines_after`|int|no|0|Context lines after match|
 |`paths_include_glob`|string or list of strings|no|""|Glob to include files — matches the project-relative **path** OR the basename, and `**/` = any depth **including zero**, so `tests/**/*.py` also matches `tests/foo.py`. A **list** keeps a file matching **any** element. Brace alternation refused, in every element|
@@ -180,12 +181,16 @@ Existing content at `line` shifts down. Does not replace.
 {"f":"search_for_pattern","p":{"substring_pattern":"TODO|FIXME","context_lines_after":1,"paths_include_glob":"**/*.py"}}
 ```
 
-`regex` and `line_numbers` are accepted as ripgrep-compatibility **no-ops**:
-`substring_pattern` is always a regex and `content` rows always carry
-`path:line:`, so passing them `true` changes nothing. Passing `false` is a hard
-error — purity has no literal-match mode, and silently regex-matching a pattern
-meant literally is the failure that would follow. For rows without line numbers
-use `output_mode: "files_with_matches"` or `"count"`.
+`regex: true` is the default and a no-op. `regex: false` is a **literal** search:
+the pattern is `re.escape`d, and the regex-mode rewrite of `\|` to `|` (which
+exists because LLMs over-escape alternation) is skipped, so a literal `a\|b`
+matches only `a\|b`. In regex mode a pattern that does not compile is an error
+naming `regex:false` as the way out.
+
+`line_numbers` is accepted as a ripgrep-compatibility **no-op**: `content` rows
+always carry `path:line:`, so passing it `true` changes nothing. Passing `false`
+in content mode is a hard error — for rows without line numbers use
+`output_mode: "files_with_matches"` or `"count"`.
 
 **The gitignore filter never hides `.claude/tmp`.** The scratch area is
 gitignored on purpose but is exactly where the fleet's working files land, so a

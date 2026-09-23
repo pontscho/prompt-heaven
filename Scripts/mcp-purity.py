@@ -1735,19 +1735,13 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     if output_mode not in ("files_with_matches", "content", "count"):
         raise ValueError("Parameter 'output_mode' must be 'files_with_matches', 'content', or 'count'")
 
-    # ripgrep/Grep-style flags callers reach for. Both are unconditionally TRUE
-    # here already — the pattern is always regex-compiled, and `content` rows are
-    # always `path:line: text` — so accepting them costs nothing, while rejecting
-    # them cost a whole round trip on a call that asked for what it was getting.
-    # Passing FALSE is a different question: it asks for behaviour purity does not
-    # have, and silently ignoring THAT is how a literal search quietly becomes a
-    # regex one. So: tolerated as a no-op, never silently disobeyed.
-    if "regex" in params and not _bool_param(params["regex"], True):
-        raise ValueError(
-            "Parameter 'regex' cannot be false: substring_pattern is ALWAYS compiled "
-            "as a regex; there is no literal mode. Escape the metacharacters in the "
-            "pattern instead."
-        )
+    # ripgrep/Grep-style flags callers reach for. `regex` TRUE is the default and
+    # a no-op; FALSE is a real literal mode — the pattern is re.escape()d below, so
+    # `size(` is five characters, not an unterminated group. `line_numbers` TRUE
+    # is what `content` rows always carry (`path:line: text`); FALSE asks for
+    # behaviour purity does not have, and silently ignoring it would hand back
+    # line numbers the caller asked to drop. So: never silently disobeyed.
+    literal = not _bool_param(params.get("regex", True), True)
     if (output_mode == "content" and "line_numbers" in params
             and not _bool_param(params["line_numbers"], True)):
         raise ValueError(
@@ -1763,15 +1757,25 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     # search everything, matching Serena's default.
     code_only = _bool_param(params.get("restrict_search_to_code_files", False))
 
+    # Measured on the pattern AS GIVEN, in both modes: escaping can double its
+    # length without adding any backtracking, so the escaped form would refuse
+    # a harmless literal the same ceiling admits as a regex.
     _check_regex_len(pattern_str, "substring_pattern")
 
-    # LLMs frequently escape | as \| which turns alternation into a literal pipe
-    pattern_str = pattern_str.replace(r"\|", "|")
+    if literal:
+        # No `\|` rewrite here: a literal `\|` is exactly those two characters.
+        pattern_str = re.escape(pattern_str)
+    else:
+        # LLMs frequently escape | as \| which turns alternation into a literal pipe
+        pattern_str = pattern_str.replace(r"\|", "|")
 
     try:
         pattern = re.compile(pattern_str)
     except re.error as exc:
-        raise ValueError(f"Invalid regex pattern: {exc}")
+        raise ValueError(
+            f"Invalid regex pattern: {exc}; substring_pattern is a regex: escape "
+            "metacharacters, or pass regex:false for a literal search"
+        )
 
     ignore_patterns: List[str] = []
     if skip_ignored:
@@ -6031,8 +6035,9 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         "paths_include_glob", "paths_exclude_glob", "relative_path",
         "max_answer_chars", "head_limit", "offset", "output_mode",
         "max_file_size", "skip_ignored_files", "restrict_search_to_code_files",
-        # Tolerated ripgrep-style no-ops; the handler rejects them only when set
-        # to false, which would be a request purity cannot honour.
+        # ripgrep-style flags: `regex` false = literal search (re.escape), true =
+        # the default no-op; `line_numbers` is a no-op the handler rejects only
+        # when false in content mode, a request purity cannot honour.
         "regex", "line_numbers",
         # ripgrep's `--no-ignore`, the INVERSE of skip_ignored_files. Flipped in
         # _skip_ignored_param, not in the alias table — see the docstring there.
@@ -6274,8 +6279,9 @@ PURITY_CALL_TOOL = {
         "  clang_tidy             - clang-tidy static analysis; auto -p from compile_commands.json\n\n"
         "The clangd and luals LSPs spin up lazily on first use. For symbol work PREFER these\n"
         "over grepping source - text matching misses overloads, macros, and\n"
-        "indirect references. search_for_pattern remains free-text (literal/regex)\n"
-        "search over ANY filetype (comments, log strings, build text) - use it when\n"
+        "indirect references. search_for_pattern remains free-text search over ANY\n"
+        "filetype (comments, log strings, build text): substring_pattern is a regex\n"
+        "by default; pass regex:false for a literal match (`size(` needs no escaping) - use it when\n"
         "you want text, not a symbol. The former standalone clangd_call / cuda_call /\n"
         "luals_call TOOLS are retired and unregistered - they do not exist in any\n"
         "session, and purity_call is the only entry point. Their legacy\n"
@@ -6562,7 +6568,7 @@ HANDLER_DESCRIPTIONS = {
     "delete_lines":        "Delete a range of lines",
     "replace_lines":       "Replace a range of lines with new content",
     "insert_at_line":      "Insert content before a given line",
-    "search_for_pattern":  "Regex search across project files (output_mode: files_with_matches|content|count, head_limit, offset)",
+    "search_for_pattern":  "Regex search across project files (regex:false for a literal match; output_mode: files_with_matches|content|count, head_limit, offset)",
     "find_definition":     "Find a symbol's definition by name OR file position (symbol/at)",
     "find_type_definition": "Find where the TYPE at a file position is defined (textDocument/typeDefinition)",
     "find_references":      "Find references to a symbol by name OR file position",

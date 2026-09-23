@@ -83,7 +83,8 @@ Groups:
   C  list_dir, both branches, with and without skip_ignored_files
   D  the parameter contract: aliases (function and param, global and
      per-function), the inverted `no_ignore` spelling, tolerated no-ops,
-     real rejections
+     real rejections, and search's `regex:false` literal mode (a `(` and a
+     `\\|` taken literally) with the regex-mode compile error naming it
   E  path-shaped .gitignore: what the basename matcher does and does not honour
   F  hygiene
   G  glob semantics -- the spellings that can only ever match nothing
@@ -209,6 +210,26 @@ R_LINES = 10
 R_WIDE = "wide.txt"
 R_WIDE_PAD = "x" * 60
 
+# Group D's literal-mode tree (make_literal_fixture): one file per line shape, so
+# a literal and a regex reading of the same pattern are told apart by WHICH
+# files match rather than by counting rows.  Its own root and its own child,
+# because adding files to the basename fixture would move every row-counting
+# case in groups J and L.  `L_CALL` is the reported pattern's real line; the
+# three pipe files are `\|` read literally, `|` read literally, and a bare `a`
+# that only the regex alternation `a|b` reaches.
+L_CALL = "call.txt"
+L_NOCALL = "nocall.txt"
+L_ESCPIPE = "escpipe.txt"
+L_PIPE = "pipe.txt"
+L_ALT = "alt.txt"
+LITERAL_FILES = (
+    (L_CALL, "n = size(const amflite_amf0_value_t *v);\n"),
+    (L_NOCALL, "size is not a call here\n"),
+    (L_ESCPIPE, "a\\|b\n"),
+    (L_PIPE, "a|b\n"),
+    (L_ALT, "just a\n"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -283,6 +304,14 @@ def make_read_fixture(ws, subdir):
     ws.write_text(os.path.join(subdir, R_WIDE),
                   "".join("row %d %s\n" % (i + 1, R_WIDE_PAD)
                           for i in range(R_LINES)))
+    return os.path.realpath(ws.join(subdir))
+
+
+def make_literal_fixture(ws, subdir):
+    """Group D's literal-mode tree: one line shape per file, no .gitignore."""
+    ws.subdir(subdir)
+    for rel, body in LITERAL_FILES:
+        ws.write_text(os.path.join(subdir, rel), body)
     return os.path.realpath(ws.join(subdir))
 
 
@@ -721,7 +750,7 @@ def group_c(suite, drv):
 # Group D -- the parameter contract
 # ---------------------------------------------------------------------------
 
-def group_d(suite, drv):
+def group_d(suite, drv, drv_lit):
     # `query` is a PER-FUNCTION alias: it cannot be global, because `symbol`
     # takes `query` as its own canonical parameter (see the last case).
     case = record_polarity(
@@ -738,14 +767,36 @@ def group_d(suite, drv):
         suite, "D", "regex-and-line_numbers-true-ok", drv, "search",
         {"query": NEEDLE, "regex": True, "line_numbers": True},
         must=[P_SCRATCH, P_KEEP], must_not=[P_GEN],
-        detail=["both flags are already unconditionally true here, so",
-                "accepting them costs nothing and saves a round trip"])
+        detail=["regex=true is the default and line_numbers=true is what",
+                "content rows always carry, so both are accepted as no-ops"])
+    # `regex:false` is a real literal mode: the pattern is re.escape()d, and the
+    # `\|` -> `|` rewrite that serves regex mode is skipped.  The first row is
+    # the reported pattern, whose `(` used to fail to compile.
+    record_polarity(
+        suite, "D", "regex-false-literal-paren", drv_lit, "search",
+        {"substring_pattern": "size(const amflite_amf0_value_t",
+         "regex": False},
+        must=[L_CALL], must_not=[L_NOCALL],
+        detail=["`(` is a literal character in literal mode, not an",
+                "unterminated group"])
+    record_polarity(
+        suite, "D", "regex-false-literal-escaped-pipe", drv_lit, "search",
+        {"substring_pattern": "a\\|b", "regex": False},
+        must=[L_ESCPIPE], must_not=[L_PIPE, L_ALT],
+        detail=["literal `a\\|b` is the three characters it spells; the",
+                "regex-mode `\\|` -> `|` rewrite would widen it to `a|b`"])
+    record_polarity(
+        suite, "D", "regex-true-pipe-still-alternation", drv_lit, "search",
+        {"substring_pattern": "a\\|b", "regex": True},
+        must=[L_ESCPIPE, L_PIPE, L_ALT], must_not=[],
+        detail=["CONTROL: regex mode keeps the `\\|` -> `|` rewrite, so the",
+                "same pattern is the alternation `a|b` and reaches `just a`"])
     record_error(
-        suite, "D", "regex-false-rejected", drv, "search",
-        {"substring_pattern": NEEDLE, "regex": False},
-        must_say=["regex", "cannot be false"],
-        detail=["the pattern is ALWAYS regex-compiled; silently ignoring",
-                "regex=false is how a literal search becomes a regex one"])
+        suite, "D", "regex-invalid-names-literal-mode", drv_lit, "search",
+        {"substring_pattern": "size(const amflite_amf0_value_t"},
+        must_say=["Invalid regex pattern", "regex:false"],
+        detail=["a regex that does not compile must name the way out,",
+                "not only the position of the unterminated group"])
     record_error(
         suite, "D", "line_numbers-false-rejected", drv, "search",
         {"substring_pattern": NEEDLE, "line_numbers": False},
@@ -2068,6 +2119,7 @@ def run(opts=None):
         read_root = make_read_fixture(ws, "readfile")
         git_root = make_git_fixture(ws, "gitwalk")
         outside_root = make_outside_fixture(ws, "outside")
+        literal_root = make_literal_fixture(ws, "literal")
         suite.note("      server        : %s" % SERVER)
         suite.note("      fixture (A-D,J-L): %s  .gitignore=%s"
                    % (basename_root, list(GITIGNORE_BASENAME)))
@@ -2085,6 +2137,8 @@ def run(opts=None):
                    % (git_root, list(GIT_FILES)))
         suite.note("      fixture (K)   : %s  out-of-root, files=%s"
                    % (outside_root, [O_KEEP, O_ESCAPE, O_ESC + " -> symlink"]))
+        suite.note("      fixture (D lit): %s  no .gitignore, files=%s"
+                   % (literal_root, [rel for rel, _ in LITERAL_FILES]))
 
         drv = Driver(basename_root)
         drv_strict = Driver(basename_root, strict=True)
@@ -2092,11 +2146,12 @@ def run(opts=None):
         drv_multi = Driver(multi_root)
         drv_read = Driver(read_root)
         drv_git = Driver(git_root)
+        drv_lit = Driver(literal_root)
         try:
             group_a(suite, drv)
             group_b(suite, drv)
             group_c(suite, drv)
-            group_d(suite, drv)
+            group_d(suite, drv, drv_lit)
             group_e(suite, drv_path)
             group_h(suite, drv_multi, multi_root)
             group_i(suite, drv_read)
@@ -2108,8 +2163,10 @@ def run(opts=None):
                             + len(drv_multi.stderr_text)
                             + len(drv_read.stderr_text)
                             + len(drv_git.stderr_text)
+                            + len(drv_lit.stderr_text)
                             + len(drv_strict.stderr_text))
         finally:
+            drv_lit.close()
             drv.close()
             drv_strict.close()
             drv_path.close()
@@ -2122,7 +2179,7 @@ def run(opts=None):
         group_g(suite, glob_root)
 
         workspaces = [basename_root, pathshaped_root, glob_root, multi_root,
-                      read_root, git_root, outside_root]
+                      read_root, git_root, outside_root, literal_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()
