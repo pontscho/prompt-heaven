@@ -35,10 +35,13 @@ Returns server status and list of available functions.
 |`relative_path`|string|yes|—|Relative path to file|
 |`start_line`|int|no|1|1-based first line index|
 |`end_line`|int|no|null|1-based last line (inclusive); null = read to end|
+|`offset`|int|no|0|0-based first line, used when `start_line` is absent; negative = from the end (`-20` = last 20 lines). Past EOF is not an error: the reply is `0 lines of N` plus `[no rows at offset <n> of N]`|
+|`limit`|int|no|null|At most this many lines from the resolved start (like the built-in Read's `limit`); a cut before EOF ends with an `offset=<n> for more` hint. Must be a positive integer (`3`, `3.0`, `"3"`); a fractional float (`2.5`) or a bool is refused, never truncated. Mutually exclusive with `end_line`|
 |`max_answer_chars`|int|no|-1|Character limit; -1 = unlimited|
 
 ```json
 {"f":"read_file","p":{"relative_path":"src/main.py","start_line":1,"end_line":50}}
+{"f":"read_file","p":{"path":"src/main.py","offset":200,"limit":100}}
 ```
 
 ### 2. `create_text_file` — Create or overwrite a file
@@ -66,8 +69,11 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 |`show_hidden`|bool|no|false|Include dotfiles and dotdirs|
 |`head_limit`|int|no|0|Max rows; 0 = all|
 |`offset`|int|no|0|Skip the first N rows (paged by row, never mid-path)|
-|`skip_ignored_files`|bool|no|false|Skip gitignored files — except `.claude/tmp`, never skipped|
+|`skip_ignored_files`|bool|no|false|Skip gitignored files — except `.claude/tmp`, never skipped. `no_ignore` (ripgrep's spelling) is its **inverse**; passing both with opposite meanings is refused|
 |`max_answer_chars`|int|no|-1|Character limit|
+
+A missing `relative_path`, or one naming a file, is an **error** (`Directory
+does not exist` / `Not a directory`), never an empty listing.
 
 ```json
 {"f":"list_dir","p":{"relative_path":"src","recursive":true,"skip_ignored_files":true}}
@@ -79,10 +85,27 @@ Creates parent directories automatically. **Destructive** — overwrites existin
 |Param|Type|Required|Default|Description|
 |-|-|-|-|-|
 |`file_mask`|string|yes|—|Bare mask (`*.ts`, `t?st.py`) matches the **name**; a mask holding `/` or `**` matches the path below the search root, where `**/` = any depth **including zero**. Brace alternation (`*.{ts,js}`) is refused, not silently empty|
-|`relative_path`|string|no|"."|Directory subtree to search|
+|`relative_path`|string|no|"."|Directory subtree to search. Missing, or a file: an **error**, never an empty result|
+|`skip_ignored_files`|bool|no|false|Skip gitignored files and prune ignored dirs — except `.claude/tmp`, never skipped. Off by default, as in `list_dir`|
+|`no_ignore`|bool|no|—|ripgrep's spelling, the **inverse** of `skip_ignored_files`; both with opposite meanings is refused|
+|`head_limit`|int|no|0|Max rows; 0 = all|
+|`offset`|int|no|0|Skip the first N rows (paged by row, never mid-path)|
+
+`.git` is never listed or searched, whatever the filter says: every walk
+(`list_dir`, `find_file`, `search_for_pattern`) prunes it, and a `relative_path`
+at or inside one (`.git`, `.git/refs`, `sub/.git`, any spelling) is an **error**,
+not an empty result. Only a whole path component counts — `.github` and `x.git`
+are ordinary directories. `read_file` is not a walk: it still reads one named
+file such as `.git/HEAD`.
+
+An `offset` at or past the last row is not an error: the reply keeps its count
+header and ends in `[no rows at offset <n> of N]`, the same form `read_file`
+uses past EOF — never an inverted `showing 21-20` range. Applies to `list_dir`
+too.
 
 ```json
 {"f":"find_file","p":{"file_mask":"*.test.ts","relative_path":"src"}}
+{"f":"find_file","p":{"file_mask":"*.ts","skip_ignored_files":true}}
 ```
 
 ### 5. `replace_content` — Replace content in a file
@@ -149,8 +172,8 @@ Existing content at `line` shifts down. Does not replace.
 |`context_lines_after`|int|no|0|Context lines after match|
 |`paths_include_glob`|string|no|""|Glob to include files — matches the project-relative **path** OR the basename, and `**/` = any depth **including zero**, so `tests/**/*.py` also matches `tests/foo.py`. Brace alternation refused|
 |`paths_exclude_glob`|string|no|""|Glob to exclude files — same matching rules|
-|`relative_path`|string|no|""|Restrict to a subdirectory **or a single file**|
-|`skip_ignored_files`|bool|no|true|Skip gitignored files — except `.claude/tmp`, never skipped|
+|`relative_path`|string|no|""|Restrict to a subdirectory **or a single file**. A path that does not exist is an **error** (`Path does not exist`), never `0 match(es)`; so is one at or inside `.git`|
+|`skip_ignored_files`|bool|no|true|Skip gitignored files — except `.claude/tmp`, never skipped. `no_ignore` (ripgrep's spelling) is its **inverse**; passing both with opposite meanings is refused|
 |`max_answer_chars`|int|no|-1|Character limit|
 
 ```json
@@ -167,8 +190,8 @@ use `output_mode: "files_with_matches"` or `"count"`.
 **The gitignore filter never hides `.claude/tmp`.** The scratch area is
 gitignored on purpose but is exactly where the fleet's working files land, so a
 search that skipped it would hide the artifacts a minion wrote seconds earlier.
-Applies to `search_for_pattern` and `list_dir` alike; `find_file` never
-ignore-filters at all. The exemption is *narrow*: if `.claude` itself is
+Applies to `search_for_pattern`, `list_dir` and `find_file` alike (only search
+filters by default; the other two filter when asked). The exemption is *narrow*: if `.claude` itself is
 gitignored, only `.claude/tmp` comes back — the rest of the ignored subtree stays
 ignored.
 

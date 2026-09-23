@@ -202,6 +202,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|CONSTANT|VERSION|INITIALIZE|MCPSERVER|control'
 
+  forge_dispatch:
+    description: "forge_call's own dispatcher, imported in-process: function=status answers exactly what the empty call answers on all four of its paths (missing config, YAML parse error, validation errors, the ordinary status reply), each path with a control proving the fixture reached it, and status is named in the unknown-function error, the tool description and the inputSchema. mkdtemp fixtures only -- starts no server."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py forge_dispatch
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]

@@ -892,6 +892,37 @@ def handle_read_file(params: dict, project_root: str, strict: bool = False) -> d
         start = _int_param(params.get("offset", 0), 0) + 1
     start = _int_param(start, 1)
     end = params.get("end_line")          # 1-based, inclusive
+
+    # `limit` is the built-in Read's spelling: at most N lines from wherever the
+    # start resolved to. A canonical param rather than an alias of `end_line`,
+    # because it is a COUNT and end_line is a POSITION — and only a count still
+    # means something after a negative offset has resolved from the tail. The two
+    # together are refused rather than reconciled: whichever one silently lost
+    # would disobey half the request.
+    limit = params.get("limit")
+    if limit is not None:
+        if end is not None:
+            raise ValueError(
+                "Parameters 'limit' and 'end_line' are mutually exclusive: "
+                "'limit' is a line COUNT from the start, 'end_line' a 1-based "
+                "inclusive POSITION. Pass one, not both."
+            )
+        # Refused: a bool (int(True) is 1, but a flag is not a count) and a float
+        # with a fractional part (int(2.5) is 2 -- a line count silently
+        # truncated). Accepted like every other int param: an integer-valued
+        # float (3.0) and a digit string ("3"), where nothing is lost.
+        if isinstance(limit, bool) or (isinstance(limit, float)
+                                       and not limit.is_integer()):
+            parsed = None
+        else:
+            parsed = _int_param(limit, None)
+        if parsed is None or parsed <= 0:
+            raise ValueError(
+                "Parameter 'limit' must be a positive integer (a line count); "
+                f"got {str(limit)[:40]!r}."
+            )
+        limit = parsed
+
     idx_start = start - 1
     if end is not None:
         end = _int_param(end, len(lines))
@@ -899,6 +930,11 @@ def handle_read_file(params: dict, project_root: str, strict: bool = False) -> d
     else:
         selected = lines[idx_start:]
         end = len(lines)
+    # The 0-based index the slice REALLY started at. A negative idx_start is a
+    # from-the-end slice, and printing it raw put negative line numbers in the
+    # header and the resume hint; a non-negative one is kept verbatim, which is
+    # what lets the past-the-end branch below name the offset the caller sent.
+    first = idx_start if idx_start >= 0 else max(0, len(lines) + idx_start)
 
     # A file is row-shaped by definition, so its share of the ceiling is spent by
     # dropping whole LINES: a half line of source is not something the caller can
@@ -907,6 +943,12 @@ def handle_read_file(params: dict, project_root: str, strict: bool = False) -> d
     max_chars = _max_answer_chars(params)
     total = min(end, len(lines))
     note = ""
+    if limit is not None and len(selected) > limit:
+        # Applied AFTER the slice, so a negative offset has already resolved to
+        # its tail window. Lines remain past the cut, so the caller gets the same
+        # `offset=<n> for more` hint the character ceiling below prints.
+        selected = selected[:limit]
+        note = _rows_note(first, len(selected), total)
     if max_chars > 0 and sum(len(line) for line in selected) > max_chars:
         # The header is not built yet (its line range depends on what survives),
         # so its width is bounded rather than measured: the fixed text plus the
@@ -920,10 +962,18 @@ def handle_read_file(params: dict, project_root: str, strict: bool = False) -> d
             kept.append(line)
             used += len(line)
         selected = kept
-        note = _rows_note(idx_start, len(selected), total)
+        note = _rows_note(first, len(selected), total)
+
+    if not selected and first > 0 and first >= len(lines):
+        # Past EOF: an empty window, answered the way list_dir and find_file
+        # answer an offset past their last row (_row_page) -- not an error, and
+        # with _rows_note's past-the-end form rather than a 1-based range, which
+        # can only print INVERTED here (`lines 21-20 of 10`).
+        return {"__raw_text__": f"[{rel}] 0 lines of {len(lines)}\n"
+                                f"{_rows_note(first, 0, len(lines))}"}
 
     content = "".join(selected)
-    header = f"[{rel}] lines {start}-{start + len(selected) - 1} of {len(lines)}"
+    header = f"[{rel}] lines {first + 1}-{first + len(selected)} of {len(lines)}"
     if note:
         sep = "" if content.endswith("\n") else "\n"
         return {"__raw_text__": f"{header}\n{content}{sep}{note}"}
@@ -1036,6 +1086,53 @@ def _reject_brace_glob(glob: str, param: str) -> None:
         )
 
 
+def _require_dir(path: str, rel: str, allow_file: bool = False) -> None:
+    """Raise unless *path* is a directory -- the walk root of list_dir/find_file.
+
+    Both handlers used to RETURN the message under a `text` key, which the wire
+    layer never reads (it renders `__raw_text__` or `error`), so the caller got
+    an empty reply: indistinguishable from "nothing matched", the silent zero
+    ADR 0017 refuses. Raised instead, as read_file's `File not found` is, so it
+    arrives flagged isError with the path in it.
+
+    ``allow_file`` is search_for_pattern's root: a FILE is a legitimate one
+    there, so only absence is refused -- and it had to be, because os.walk
+    yields nothing for a missing root and the reply was `0 match(es)`.
+    """
+    if os.path.isdir(path) or (allow_file and os.path.exists(path)):
+        return
+    if os.path.exists(path):
+        raise NotADirectoryError(f"Not a directory: {_sanitize_log(rel)}")
+    what = "Path" if allow_file else "Directory"
+    raise FileNotFoundError(f"{what} does not exist: {_sanitize_log(rel)}")
+
+
+def _refuse_git_root(path: str, rel: str, project_root: str) -> None:
+    """Raise when a walk root is `.git` or lies inside one.
+
+    Every walker prunes a CHILD named `.git`, but a walk ROOTED there never
+    meets that child, so `list_dir .git` listed the object store. Refused
+    rather than answered empty: an empty listing of a directory that plainly
+    exists is the silent zero ADR 0017 refuses.
+
+    Checked on BOTH spellings of the root, component-wise. The normalised
+    request catches `./.git`, `.git/` and `src/../.git` and a `.git` that is a
+    symlink elsewhere; the resolved path, taken relative to the root, catches a
+    symlink INTO `.git`. A whole component must equal `.git`, so `.github` and
+    `x.git` pass. read_file is not a walker and does not call this.
+    """
+    spellings = [os.path.normpath(rel)]
+    root = os.path.realpath(project_root)
+    spellings.append(os.path.relpath(path, root))
+    for spelling in spellings:
+        if ".git" in spelling.replace(os.sep, "/").split("/"):
+            raise ValueError(
+                f"Refused: .git internals are never listed or searched "
+                f"(relative_path: {_sanitize_log(rel)}). Use read_file to "
+                "read one named file under .git."
+            )
+
+
 def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> dict:
     rel = params.get("relative_path", ".")
     recursive = _bool_param(params.get("recursive", False))
@@ -1050,8 +1147,8 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
         _reject_brace_glob(glob_pattern, "filter")
 
     path = safe_path(project_root, rel, strict)
-    if not os.path.isdir(path):
-        return {"text": f"(directory does not exist: {_sanitize_log(rel)})", "count": 0}
+    _refuse_git_root(path, rel, project_root)
+    _require_dir(path, rel)
 
     if grep_pattern:
         _check_regex_len(grep_pattern, "grep_pattern")
@@ -1154,7 +1251,10 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     header = f"[{rel}] {len(raw)} entries"
     if grep_re:
         header += f", {total} matched"
-    if offset or head_limit > 0:
+    # Only a window that HAS rows gets a 1-based range: an empty one can only
+    # print it inverted (`showing 21-20 of 10`). Past the end, _row_page's note
+    # already says `[no rows at offset N of M]` -- read_file's form.
+    if (offset or head_limit > 0) and lines:
         header += f" (showing {offset+1}-{offset+len(lines)} of {total})"
     body = f"{header}\n{listing}"
     return {"__raw_text__": f"{body}\n{note}" if note else body}
@@ -1198,9 +1298,16 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
     rel = params.get("relative_path", ".")
     head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
     offset = _offset(params)
+    # list_dir's default (False), not search's (True): a finder that started
+    # hiding `build/` would change the answer every existing caller gets.
+    skip_ignored = _skip_ignored_param(params, False)
     path = safe_path(project_root, rel, strict)
-    if not os.path.isdir(path):
-        return {"text": f"(directory does not exist: {rel})", "count": 0}
+    _refuse_git_root(path, rel, project_root)
+    _require_dir(path, rel)
+
+    ignore_patterns: List[str] = []
+    if skip_ignored:
+        ignore_patterns = _parse_gitignore(os.path.join(project_root, ".gitignore"))
 
     # A mask containing a separator or a recursive ** is matched against each
     # file's path relative to the search root (Glob semantics); a bare mask
@@ -1211,9 +1318,24 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
 
     matches: List[str] = []
     for dirpath, dirnames, filenames in os.walk(path):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
+        # The same two checks as list_dir's recursive walk, on the same
+        # targets: a prune on the BARE dir name, then each file on its
+        # root-relative path -- so exempt/inherited semantics match exactly.
+        if skip_ignored:
+            dir_rel = os.path.relpath(dirpath, project_root)
+            dirnames[:] = [
+                d for d in dirnames
+                if d != ".git"
+                and not _ignore_skips(d, os.path.join(dir_rel, d), ignore_patterns)
+            ]
+        else:
+            dirnames[:] = [d for d in dirnames if d != ".git"]
         for name in filenames:
             full = os.path.join(dirpath, name)
+            if skip_ignored:
+                entry_rel = os.path.relpath(full, project_root)
+                if _ignore_skips(entry_rel, entry_rel, ignore_patterns):
+                    continue
             if path_style:
                 cand = os.path.relpath(full, path).replace(os.sep, "/")
                 hit = path_re.match(cand) is not None
@@ -1231,7 +1353,8 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
     matches, note = _row_page(matches, offset, head_limit, budget)
 
     header = f"Found {total} file(s) matching '{_sanitize_log(file_mask)}'"
-    if note or offset:
+    # A range only over rows that exist; see list_dir for the inverted one.
+    if (note or offset) and matches:
         header += f" (showing {offset+1}-{offset+len(matches)} of {total})"
     body = f"{header}\n" + "\n".join(matches) if matches else header
     return {"__raw_text__": f"{body}\n{note}" if note else body}
@@ -1524,6 +1647,11 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     _seen_roots = set()
     for _rel in search_rels:
         _root = safe_path(project_root, _rel, strict) if _rel else project_root
+        if _rel:
+            # Per root, like containment: one `.git` or missing root refuses
+            # the call rather than dropping out of it silently.
+            _refuse_git_root(_root, _rel, project_root)
+            _require_dir(_root, _rel, allow_file=True)
         # The same root spelled twice is not two roots. Overlapping-but-distinct
         # roots (a parent and its child) still reach the same files, which is
         # what the per-file dedupe below is for; this only skips the walk that
@@ -5801,6 +5929,7 @@ _READONLY_HANDLERS: frozenset = frozenset({
 HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "read_file": {
         "relative_path", "start_line", "end_line", "max_answer_chars", "offset",
+        "limit",
     },
     "create_text_file": {
         "relative_path", "content", "overwrite", "max_answer_chars",
@@ -5815,6 +5944,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     },
     "find_file": {
         "file_mask", "pattern", "substring_pattern", "relative_path",
+        "skip_ignored_files", "no_ignore",
         "head_limit", "offset", "max_answer_chars",
     },
     "replace_content": {
@@ -6357,10 +6487,10 @@ class McpServer:
 # ---------------------------------------------------------------------------
 
 HANDLER_DESCRIPTIONS = {
-    "read_file":           "Read file contents (with optional line range)",
+    "read_file":           "Read file contents (start_line+end_line for a 1-based inclusive range, offset 0-based with negative = tail, limit for a line count; offset=<n> hint when cut)",
     "create_text_file":    "Create or overwrite a file",
     "list_dir":            "List directory contents (recursive, long for size+mtime, glob for fnmatch filter, grep for regex on output, show_hidden for dotfiles, head_limit+offset for pagination; alias: ls)",
-    "find_file":           "Find files by wildcard pattern",
+    "find_file":           "Find files by wildcard pattern (bare mask matches the name, a mask with / or ** the path; skip_ignored_files or its inverse no_ignore for gitignore filtering, off by default; head_limit+offset for pagination; alias: glob)",
     "replace_content":     "Replace text in a file (literal or regex)",
     "delete_lines":        "Delete a range of lines",
     "replace_lines":       "Replace a range of lines with new content",

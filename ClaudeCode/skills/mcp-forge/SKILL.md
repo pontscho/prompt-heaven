@@ -67,9 +67,12 @@ operations is forbidden.
 
 ## Quick Start
 
-**Check what is available** (call with no `function`):
+**Check what is available** (call with no `function`, or `function="status"`
+— the two are the same call, on every path including a missing or broken
+config):
 ```
 mcp__mcp-forge__forge_call(function="", params={})
+mcp__mcp-forge__forge_call(function="status")
 ```
 Returns server status, config path, target counts, validation summary.
 
@@ -646,7 +649,7 @@ When you create or edit `project-forge.yaml`:
 ## Quick reference card
 
 ```
-# status                    forge_call(function="")
+# status                    forge_call(function="")  or  forge_call(function="status")
 # list targets              forge_call(function="list")
 # describe target           forge_call(function="describe", params={"target":"X"})
 # validate YAML             forge_call(function="validate")

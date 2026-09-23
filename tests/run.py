@@ -150,6 +150,10 @@ def run_protocol_version(opts):
     return run_python_suite("test_protocol_version", opts)
 
 
+def run_forge_dispatch(opts):
+    return run_python_suite("test_forge_dispatch", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -203,8 +207,12 @@ SUITES = [
     ("purity_file_ops", run_purity_file_ops,
      "purity_call file handlers: the .claude/tmp ignore exemption, the "
      "inheritance rule that keeps it narrow, the param contract, and the "
-     "glob spellings that can only ever match nothing",
-     66),
+     "glob spellings that can only ever match nothing, read_file's "
+     "line-count `limit` and its past-EOF note, find_file's ignore filter, "
+     "a missing directory or search root reaching the caller as an error, "
+     "an offset past the last row answered with the past-the-end note "
+     "rather than an inverted range, and a walk rooted in `.git` refused",
+     131),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 295),
     ("name_existence", run_name_existence,
@@ -357,6 +365,10 @@ SUITES = [
      "string is indistinguishable on the wire from one reading the constant, "
      "with the fleet's agreement asserted BETWEEN the files so the suite "
      "never holds a copy of the number it polices", 71),
+    ("forge_dispatch", run_forge_dispatch,
+     "forge_call dispatch: `status` answers exactly what the empty call "
+     "answers on all four of its paths, each with a control proving the "
+     "fixture took it, and is advertised wherever the function list is", 13),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

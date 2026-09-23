@@ -89,6 +89,22 @@ Groups:
   G  glob semantics -- the spellings that can only ever match nothing
   H  a LIST of paths: one result stream where it is served, a refusal that
      names the way out everywhere else
+  I  read_file's `limit`: a line count from the resolved start (negative
+     offset included), a resume hint when it cuts before EOF and one that
+     round-trips from a negative offset, refusals for the spellings that have
+     no honest answer (a fractional float, a bool), and an offset past EOF
+     answered with `_rows_note`'s past-the-end form, not an inverted range
+  J  find_file and the ignore filter: off by default (list_dir's default),
+     `skip_ignored_files` / `no_ignore` to turn it on, `.git` never listed
+  K  a missing directory -- or a file where one is expected -- reaches the
+     caller as an error, not as an empty reply; search_for_pattern's missing
+     root too, while the file root it legitimately takes keeps working
+  L  an offset at or past the last row answers with `_rows_note`'s
+     past-the-end form in list_dir and find_file, never an inverted header
+     range; search's pagers as the controls that already did
+  M  a walk rooted at or inside `.git` is refused, in all three walkers and
+     every spelling of the path; `.github` / `x.git` are not, and read_file
+     still reads one file under `.git`
 """
 
 import os
@@ -117,9 +133,17 @@ P_KEEP = "src/keep.txt"                  # never ignored
 P_GEN = "build/gen.txt"                  # unrelated ignored subtree
 ALL_FILES = (P_SCRATCH, P_LEAK, P_SETTINGS, P_KEEP, P_GEN)
 
+# Written by make_fixture but kept OUT of ALL_FILES, so no older row's path set
+# moves.  P_LOG is ignored by its OWN name (`*.log`) rather than by a pruned
+# ancestor -- the one shape groups A-C never had, and the one a file filter can
+# get wrong while a directory prune still looks right.  P_GITFILE is a file
+# under `.git`, which every walk prunes unconditionally (group J).
+P_LOG = "src/debug.log"
+P_GITFILE = ".git/HEAD"
+
 # Basename-shaped patterns: what `_is_ignored` actually matches on, since it is
 # handed a bare name at the prune sites.  This is the hostile shape.
-GITIGNORE_BASENAME = ("tmp", ".claude", "build")
+GITIGNORE_BASENAME = ("tmp", ".claude", "build", "*.log")
 
 # One pattern of each shape in a single file, so group E can show that the
 # slash-bearing one is inert while the bare one still bites.
@@ -161,6 +185,19 @@ M_TWO = "two"                           # the directory root M_C lives under
 # invocation, not anything clang-tidy has an opinion about.
 M_CFILES = ("one/x.c", "one/y.c")
 
+# Group I's file: every line names its own 1-based number, so a window read
+# from the wrong place is legible in the failure detail instead of being one
+# anonymous row among identical ones.  Ten rows is enough to put a window in
+# the middle, at the tail, and past the end.
+R_FILE = "ten.txt"
+R_LINES = 10
+# The same numbering with a wide tail, for the one row that needs the handler's
+# character ceiling to engage while the dispatcher's own cap (which enforces
+# the same number on the WHOLE reply) still lets the result through.  `row N`
+# stays the first token, so one parser reads both files.
+R_WIDE = "wide.txt"
+R_WIDE_PAD = "x" * 60
+
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -171,7 +208,7 @@ def make_fixture(ws, subdir, patterns):
     ws.subdir(subdir)
     ws.write_text(os.path.join(subdir, ".gitignore"),
                   "\n".join(patterns) + "\n")
-    for rel in ALL_FILES:
+    for rel in ALL_FILES + (P_LOG, P_GITFILE):
         ws.write_text(os.path.join(subdir, rel), LINE)
     return ws.join(subdir)
 
@@ -209,6 +246,17 @@ def make_multi_fixture(ws, subdir):
         stem = os.path.splitext(os.path.basename(rel))[0]
         ws.write_text(os.path.join(subdir, rel),
                       "int %s_fn(void) { return 0; }\n" % stem)
+    return os.path.realpath(ws.join(subdir))
+
+
+def make_read_fixture(ws, subdir):
+    """Group I's tree: two numbered files and nothing else to get in the way."""
+    ws.subdir(subdir)
+    ws.write_text(os.path.join(subdir, R_FILE),
+                  "".join("row %d\n" % (i + 1) for i in range(R_LINES)))
+    ws.write_text(os.path.join(subdir, R_WIDE),
+                  "".join("row %d %s\n" % (i + 1, R_WIDE_PAD)
+                          for i in range(R_LINES)))
     return os.path.realpath(ws.join(subdir))
 
 
@@ -351,9 +399,10 @@ def found_paths(text):
 def handler_text(reply):
     """The text of a handler's return value, called in-process (group G).
 
-    The handlers answer with one of two keys -- `__raw_text__` for a
-    pre-rendered body, `text` for a plain one -- and which is used is an
-    internal detail of each handler, not part of what this suite gates.
+    The file handlers answer under `__raw_text__`.  `text` is still read as a
+    fallback, but it is NOT a key the wire renders: list_dir and find_file used
+    to return their missing-directory message under it, and it reached the
+    caller as an empty reply (group K).
     """
     return reply.get("__raw_text__") or reply.get("text") or ""
 
@@ -1023,6 +1072,596 @@ def group_h(suite, drv, root):
 
 
 # ---------------------------------------------------------------------------
+# Group I -- read_file's `limit`
+#
+# Wire-driven like H, so it sits with the wire groups and runs before G.
+# ---------------------------------------------------------------------------
+
+RX_READ_HEADER = re.compile(r"^\[[^\]]*\] lines (?P<a>-?\d+)-(?P<b>-?\d+) "
+                            r"of (?P<n>\d+)$")
+RX_READ_ROW = re.compile(r"^row (?P<n>\d+)(?: x+)?$")
+
+
+def read_parts(text):
+    """(header (a, b, n) or None, row numbers in reply order, accounting note).
+
+    Parsed rather than substring-tested: `row 1` is a prefix of `row 10`, and
+    the header's range and the rows it describes have to be checked AGAINST
+    EACH OTHER, which only a parse can do.
+    """
+    lines = text.splitlines()
+    m = RX_READ_HEADER.match(lines[0]) if lines else None
+    header = (int(m.group("a")), int(m.group("b")), int(m.group("n"))) if m else None
+    rows = [int(r.group("n")) for r in map(RX_READ_ROW.match, lines[1:]) if r]
+    notes = [ln for ln in lines[1:] if ln.startswith("[")]
+    return header, rows, (notes[-1] if notes else "")
+
+
+def record_read(suite, cid, driver, params, want_rows, want_note=None,
+                detail=()):
+    """One read_file window: exact rows, a header that numbers them, the note.
+
+    `want_note` is a substring the accounting line must carry, `""` asserts
+    there is NO accounting line (the whole window was delivered), and None
+    leaves the note unchecked.  An empty `want_rows` also asserts the header
+    prints NO line range, since an empty window can only print an inverted one.
+    """
+    is_error, text = driver.call("read_file", params)
+    header, rows, note = read_parts(text)
+    problems = []
+    if is_error:
+        problems.append("server returned an error")
+    if rows != want_rows:
+        problems.append("rows are %s, want %s" % (rows, want_rows))
+    want_header = ((want_rows[0], want_rows[-1], R_LINES) if want_rows
+                   else None)
+    if want_header and header != want_header:
+        problems.append("header says %s, want lines %d-%d of %d"
+                        % (header, want_header[0], want_header[1], R_LINES))
+    if not want_rows and header is not None:
+        # An empty window has no range to print; one that prints anyway can
+        # only print an INVERTED one (`lines 21-20 of 10`).
+        problems.append("header prints a line range for an empty window: %s"
+                        % (header,))
+    if want_note == "" and note:
+        problems.append("unexpected accounting line: %s" % note)
+    elif want_note and want_note not in note:
+        problems.append("accounting line %r does not carry %r"
+                        % (note or "<none>", want_note))
+    return suite.record("I", cid, problems,
+                        detail=list(detail) + [
+                            "params : %s" % (params,),
+                            "header : %s | rows: %s | note: %s"
+                            % (header, rows, note or "-")],
+                        text=text, showable=True)
+
+
+def group_i(suite, drv):
+    """`limit` is the built-in Read's: at most N lines from the resolved start.
+
+    It is applied AFTER the start has resolved, which is what keeps a negative
+    offset meaning "the tail" -- a limit folded into the slice bounds instead
+    would turn `offset=-4, limit=2` into a slice that ends before it starts.
+    And a cut before EOF must print the same `offset=<n> for more` hint the
+    character ceiling prints, or the caller has no way to ask for the rest.
+    """
+    rng = lambda a, b: list(range(a, b + 1))                     # noqa: E731
+
+    record_read(
+        suite, "limit-alone-from-the-top", drv,
+        {"path": R_FILE, "limit": 3}, rng(1, 3),
+        detail=["no start given: the window opens at line 1"])
+    record_read(
+        suite, "offset-plus-limit", drv,
+        {"path": R_FILE, "offset": 4, "limit": 3}, rng(5, 7),
+        detail=["offset is 0-based, so offset=4 is line 5"])
+    record_read(
+        suite, "start_line-plus-limit", drv,
+        {"path": R_FILE, "start_line": 2, "limit": 2}, rng(2, 3))
+    record_read(
+        suite, "negative-offset-plus-limit", drv,
+        {"path": R_FILE, "offset": -4, "limit": 2}, rng(7, 8),
+        want_note="offset=8 for more",
+        detail=["offset=-4 resolves to the last four lines FIRST, then the",
+                "limit keeps two of them -- and the header and the hint are",
+                "real line numbers, not the negative index they came from"])
+    record_read(
+        suite, "negative-offset-header-is-positive", drv,
+        {"path": R_FILE, "offset": -3}, rng(8, 10), want_note="",
+        detail=["without a limit too: the header used to print the raw",
+                "index (`lines -2-0 of 10`)"])
+
+    # The hint has to be the value to paste back, so the row pastes it back.
+    _, first = drv.call("read_file", {"path": R_FILE, "limit": 3})
+    _, _, note = read_parts(first)
+    m = re.search(r"offset=(\d+) for more", note)
+    problems = [] if m else ["no `offset=<n> for more` hint: %r"
+                             % (note or "<none>")]
+    rows = []
+    if m:
+        _, again = drv.call("read_file", {"path": R_FILE,
+                                          "offset": int(m.group(1)),
+                                          "limit": 3})
+        rows = read_parts(again)[1]
+        if rows != rng(4, 6):
+            problems.append("pasting offset=%s back returned rows %s, want "
+                            "%s" % (m.group(1), rows, rng(4, 6)))
+    suite.record("I", "limit-cut-resume-hint-round-trips", problems,
+                 detail=["a limit that stops before EOF prints the resume",
+                         "hint, and passing that offset back with the same",
+                         "limit lands on the very next line",
+                         "note: %s | next page: %s" % (note or "-", rows)],
+                 text=first, showable=True)
+
+    record_read(
+        suite, "limit-past-eof-is-whole-tail", drv,
+        {"path": R_FILE, "offset": 8, "limit": 50}, rng(9, 10), want_note="",
+        detail=["nothing was cut, so there is nothing to resume: no hint"])
+    record_read(
+        suite, "reported-call-shape-accepted", drv,
+        {"path": R_FILE, "limit": 200}, rng(1, R_LINES), want_note="",
+        detail=["the call that used to come back as an unknown-param",
+                "rejection: `path` + `limit`, exactly as the built-in Read",
+                "is called"])
+
+    # The character ceiling still applies ON TOP of the line limit.  Eight wide
+    # rows are ~540 chars, so a ceiling of 400 engages the handler's line
+    # pager; its budget (the ceiling less the header and accounting reserve)
+    # holds a few rows, and the reply stays under the dispatcher's cap of the
+    # same number, so what comes back is the handler's cut and not a blind one.
+    is_error, text = drv.call("read_file", {"path": R_WIDE, "limit": 8,
+                                            "max_answer_chars": 400})
+    _, rows, note = read_parts(text)
+    problems = []
+    if is_error:
+        problems.append("server returned an error")
+    if not rows or len(rows) >= 8 or rows != rng(1, len(rows)):
+        problems.append("rows are %s, want a contiguous run from 1 shorter "
+                        "than the limit of 8" % (rows,))
+    elif "offset=%d for more" % len(rows) not in note:
+        problems.append("accounting line %r does not resume at offset=%d"
+                        % (note or "<none>", len(rows)))
+    suite.record("I", "max_answer_chars-cuts-inside-limit", problems,
+                 detail=["limit=8 with a ceiling too small for 8 rows: the",
+                         "ceiling wins and its hint names the row it stopped",
+                         "at, not the one the limit would have",
+                         "rows: %s | note: %s" % (rows, note or "-")],
+                 text=text, showable=True)
+
+    record_error(
+        suite, "I", "limit-with-end_line-refused", drv, "read_file",
+        {"path": R_FILE, "limit": 3, "end_line": 5},
+        must_say=["limit", "end_line", "mutually exclusive"],
+        detail=["a COUNT and a POSITION that can disagree: whichever one",
+                "silently lost would disobey half the request"])
+    record_error(
+        suite, "I", "limit-zero-refused", drv, "read_file",
+        {"path": R_FILE, "limit": 0}, must_say=["limit", "positive integer"],
+        detail=["zero lines is not a read; the built-in Read's limit has no",
+                "'unlimited' sentinel either"])
+    record_error(
+        suite, "I", "limit-negative-refused", drv, "read_file",
+        {"path": R_FILE, "limit": -1}, must_say=["limit", "positive integer"],
+        detail=["a negative count would slice from the END of the window --",
+                "a wrong answer shaped exactly like a right one"])
+    record_error(
+        suite, "I", "limit-non-integer-refused", drv, "read_file",
+        {"path": R_FILE, "limit": "many"},
+        must_say=["limit", "positive integer"],
+        detail=["_int_param would fall back silently; for a line count the",
+                "fallback has no honest value, so it is refused instead"])
+    # A float with a fractional part is refused, not truncated: `int(2.5)` is 2,
+    # and a caller who asked for two and a half lines gets two with nothing to
+    # say a line was dropped.  An INTEGER-VALUED float (3.0) and a digit string
+    # ("3") carry no such loss and stay accepted, like every other int param.
+    record_error(
+        suite, "I", "limit-fractional-float-refused", drv, "read_file",
+        {"path": R_FILE, "limit": 2.5}, must_say=["limit", "positive integer"],
+        detail=["int(2.5) == 2 would silently truncate a line count"])
+    record_error(
+        suite, "I", "limit-bool-refused", drv, "read_file",
+        {"path": R_FILE, "limit": True}, must_say=["limit", "positive integer"],
+        detail=["int(True) == 1: a boolean is not a count, however it coerces"])
+    record_read(
+        suite, "limit-integral-float-accepted", drv,
+        {"path": R_FILE, "limit": 3.0}, rng(1, 3),
+        detail=["3.0 names a whole number of lines; nothing is lost"])
+    record_read(
+        suite, "limit-digit-string-accepted", drv,
+        {"path": R_FILE, "limit": "3"}, rng(1, 3),
+        detail=["the wire carries numbers as strings; \"3\" is 3"])
+
+    # An offset past EOF is an empty window, not an error -- the same answer
+    # list_dir and find_file give through _row_page -- and it says so with
+    # _rows_note's past-the-end form instead of an INVERTED header range
+    # (`lines 21-20 of 10`) that reads like a parse error.
+    for cid, params in (
+            ("offset-past-eof-says-so", {"path": R_FILE, "offset": 20}),
+            ("offset-past-eof-with-limit-says-so",
+             {"path": R_FILE, "offset": 20, "limit": 3})):
+        record_read(
+            suite, cid, drv, params, [],
+            want_note="[no rows at offset 20 of %d]" % R_LINES,
+            detail=["no rows exist there; the note names the offset and the",
+                    "total so the caller can see why"])
+
+    # The negative-offset hint must be pasteable too: it names a REAL 0-based
+    # offset (8), and calling again with it lands on the line after the window.
+    _, first = drv.call("read_file", {"path": R_FILE, "offset": -4, "limit": 2})
+    _, first_rows, note = read_parts(first)
+    m = re.search(r"offset=(\d+) for more", note)
+    problems = [] if m else ["no `offset=<n> for more` hint: %r"
+                             % (note or "<none>")]
+    rows = []
+    if m:
+        _, again = drv.call("read_file", {"path": R_FILE,
+                                          "offset": int(m.group(1)),
+                                          "limit": 2})
+        rows = read_parts(again)[1]
+        want = [first_rows[-1] + 1, first_rows[-1] + 2] if first_rows else []
+        if not first_rows or rows != want:
+            problems.append("pasting offset=%s back returned rows %s after a "
+                            "window of %s, want %s"
+                            % (m.group(1), rows, first_rows, want))
+    suite.record("I", "negative-offset-hint-round-trips", problems,
+                 detail=["offset=-4, limit=2 is rows 7-8; its hint pasted back",
+                         "with the same limit must continue at row 9",
+                         "window: %s | note: %s | next page: %s"
+                         % (first_rows, note or "-", rows)],
+                 text=first, showable=True)
+
+
+# ---------------------------------------------------------------------------
+# Group J -- find_file and the ignore filter
+#
+# Wire-driven, on group A-D's fixture: the same .gitignore, so find_file's
+# answer can be read against list_dir's in group C row for row.
+# ---------------------------------------------------------------------------
+
+def group_j(suite, drv, root):
+    """find_file takes list_dir's filter: OFF by default, `skip_ignored_files`
+    or its ripgrep inverse `no_ignore` to turn it on, `.git` pruned either way.
+
+    The default is list_dir's (False), not search's (True), because a finder
+    that suddenly hid `build/` would change the answer every existing caller
+    gets.  So the default row is the one that pins "nothing changed", and the
+    two skip rows are the new behaviour -- each spelling separately, because an
+    inversion dropped or applied twice leaves exactly one of them red.
+    """
+    everything = [P_KEEP, P_SCRATCH, P_GEN, P_LEAK, P_SETTINGS, P_LOG]
+    skipped = [P_GEN, P_LEAK, P_SETTINGS, P_LOG, P_GITFILE]
+
+    record_polarity(
+        suite, "J", "find_file-default-no-filtering", drv, "find_file",
+        {"file_mask": "*"}, must=everything, must_not=[P_GITFILE],
+        extract=found_paths,
+        detail=["the default is list_dir's FALSE: today's answer, unchanged"])
+    record_polarity(
+        suite, "J", "find_file-no_ignore-true-no-filtering", drv, "find_file",
+        {"file_mask": "*", "no_ignore": True}, must=everything,
+        must_not=[P_GITFILE], extract=found_paths)
+    record_polarity(
+        suite, "J", "find_file-no_ignore-false-skips", drv, "find_file",
+        {"file_mask": "*", "no_ignore": False},
+        must=[P_KEEP, P_SCRATCH], must_not=skipped, extract=found_paths,
+        detail=["an ignored FILE (`*.log`), an ignored dir's subtree",
+                "(`build/`), and the inherited-ignore gateway's other",
+                "children all go; the `.claude/tmp` exemption stays"])
+    record_polarity(
+        suite, "J", "find_file-skip_ignored_files-skips", drv, "find_file",
+        {"file_mask": "*", "skip_ignored_files": True},
+        must=[P_KEEP, P_SCRATCH], must_not=skipped, extract=found_paths)
+
+    # `.git` is pruned whatever the filter says.  The control is in-process: a
+    # fixture that never wrote the file would make the must-not rows above pass
+    # for the wrong reason.
+    exists = os.path.isfile(os.path.join(root, P_GITFILE))
+    is_error, text = drv.call("find_file", {"file_mask": "HEAD",
+                                            "no_ignore": True})
+    got = found_paths(text)
+    problems = []
+    if not exists:
+        problems.append("CONTROL: the fixture never wrote %s" % P_GITFILE)
+    if is_error:
+        problems.append("server returned an error")
+    if P_GITFILE in got:
+        problems.append("LEAKED %s with the filter OFF" % P_GITFILE)
+    suite.record("J", "find_file-git-never-listed", problems,
+                 detail=["%s exists: %s; reported: %s"
+                         % (P_GITFILE, exists, ", ".join(sorted(got)) or "-")],
+                 text=text, showable=True)
+
+    record_error(
+        suite, "J", "find_file-no_ignore-contradiction", drv, "find_file",
+        {"file_mask": "*", "skip_ignored_files": True, "no_ignore": True},
+        must_say=["contradict"],
+        detail=["the shared _skip_ignored_param refuses it here as it does",
+                "in search"])
+    record_polarity(
+        suite, "J", "find_file-reported-call-shape", drv, "find_file",
+        {"file_mask": "*", "relative_path": "build", "no_ignore": True},
+        must=[P_GEN], must_not=[], extract=found_paths,
+        detail=["the call that came back as an unknown-param rejection:",
+                "find_file rooted INSIDE an ignored dir with no_ignore=true"])
+
+
+# ---------------------------------------------------------------------------
+# Group K -- a directory that is not there is an error, not an empty listing
+#
+# ADR 0017's rule, applied to the root rather than the glob: a reply that is
+# EMPTY is indistinguishable from "nothing matched", so the caller reports
+# absence.  The handlers built the right message and handed it back under a
+# key (`text`) the wire layer never reads, so what arrived was "".
+# ---------------------------------------------------------------------------
+
+def group_k(suite, drv):
+    for fn, params in (
+            ("find_file", {"file_mask": "*"}),
+            ("list_dir", {"recursive": True})):
+        record_error(
+            suite, "K", "%s-missing-dir-is-error" % fn, drv, fn,
+            dict(params, relative_path="no/such/dir"),
+            must_say=["does not exist", "no/such/dir"],
+            detail=["the message must REACH the caller, flagged isError like",
+                    "read_file's `File not found`"])
+        record_error(
+            suite, "K", "%s-file-as-dir-is-error" % fn, drv, fn,
+            dict(params, relative_path=P_KEEP),
+            must_say=["not a directory", P_KEEP],
+            detail=["a FILE where a directory is expected took the same",
+                    "silent-empty branch"])
+
+    # search_for_pattern walked a missing root with os.walk, which yields
+    # nothing for a path that is not there -- `0 match(es)`, the same reply as a
+    # needle that is genuinely absent.  Unlike the two walkers above it DOES take
+    # a file as its root, so the refusal is for a missing path only: the two
+    # controls pin that a file root and a directory root still search.
+    record_error(
+        suite, "K", "search-missing-path-is-error", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": "no/such/dir"},
+        must_say=["does not exist", "no/such/dir"],
+        detail=["a root that is not there answered `0 match(es)`"])
+    record_error(
+        suite, "K", "search-missing-path-in-list-is-error", drv,
+        "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": ["src", "no/such/dir"]},
+        must_say=["does not exist", "no/such/dir"],
+        detail=["one missing root in a LIST refuses the call, as one escaping",
+                "root already does -- not a partial answer that hides it"])
+    record_polarity(
+        suite, "K", "search-file-path-still-searched", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": P_KEEP},
+        must=[P_KEEP], must_not=[P_SCRATCH],
+        detail=["CONTROL: a FILE is a legitimate search root here"])
+    record_polarity(
+        suite, "K", "search-dir-path-unchanged", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": "src"},
+        must=[P_KEEP], must_not=[P_SCRATCH, P_GEN],
+        detail=["CONTROL: a directory root is scoped exactly as before"])
+
+
+# ---------------------------------------------------------------------------
+# Group L -- an offset past the last row says so; it never prints a range
+#
+# list_dir and find_file stamp a 1-based `(showing A-B of N)` range on their
+# header, computed from the offset and the rows kept.  With no rows kept that
+# range can only come out INVERTED (`showing 21-20 of 10`), which reads like a
+# parse error rather than "there is nothing at that offset".  The accounting
+# line under the rows already has a form for this -- _rows_note's
+# `[no rows at offset N of M]`, the one read_file answers with (group I) -- so
+# the header must stay out of its way.  search_for_pattern's header carries no
+# range at all; its rows are here as controls so the three stay one answer.
+# ---------------------------------------------------------------------------
+
+RX_RANGE = re.compile(r"(\d+)-(\d+) of")
+
+
+def record_page(suite, cid, driver, function, params, want_note,
+                want_range=None, detail=()):
+    """One paging row: accepted, no inverted range, the expected note line.
+
+    `want_note` is a regex matched against every line (the note is not always
+    the last line of a zero-row reply's neighbours, so it is searched for, not
+    positioned).  `want_range` pins the header's `(showing A-B of N)` when rows
+    WERE shown -- the control that a fix for the empty window did not also
+    delete the range from the windows that have one.
+    """
+    is_error, text = driver.call(function, params)
+    problems = []
+    if is_error:
+        problems.append("server returned an error")
+    for m in RX_RANGE.finditer(text):
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > b:
+            problems.append("INVERTED range %r" % m.group(0))
+    lines = text.splitlines()
+    if not any(re.fullmatch(want_note, ln.strip()) for ln in lines):
+        problems.append("no line matches %r" % want_note)
+    if want_range and want_range not in (lines[0] if lines else ""):
+        problems.append("header does not carry %r" % want_range)
+    return suite.record("L", cid, problems,
+                        detail=list(detail) + [
+                            "params: %s" % (params,),
+                            "reply : %s" % " | ".join(lines)[:300]],
+                        text=text, showable=True)
+
+
+def group_l(suite, drv):
+    # `src` holds exactly P_KEEP and P_LOG, and a non-recursive listing with the
+    # filter off shows both: two rows, so offset 2 is AT the end and 5 past it.
+    src_rows = len([p for p in (P_KEEP, P_LOG) if p.startswith("src/")])
+    for cid, params in (
+            ("list_dir-offset-past-end-says-so",
+             {"relative_path": "src", "offset": 5}),
+            ("list_dir-offset-at-end-says-so",
+             {"relative_path": "src", "offset": src_rows}),
+            ("list_dir-offset-past-end-with-head_limit",
+             {"relative_path": "src", "offset": 5, "head_limit": 1})):
+        record_page(
+            suite, cid, drv, "list_dir", params,
+            re.escape("[no rows at offset %d of %d]"
+                      % (params["offset"], src_rows)),
+            detail=["the header printed `(showing %d-%d of %d)`"
+                    % (params["offset"] + 1, params["offset"], src_rows)])
+
+    # The same header, reached with NO offset: head_limit alone armed it, and a
+    # grep that kept nothing made the window empty -- `(showing 1-0 of 0)`.
+    # Nothing is left to account for, so no note is owed; only the inversion is.
+    is_error, text = drv.call("list_dir", {"relative_path": "src",
+                                           "grep": "zz_no_such_name_zz",
+                                           "head_limit": 5})
+    problems = ["server returned an error"] if is_error else []
+    problems += ["INVERTED range %r" % m.group(0)
+                 for m in RX_RANGE.finditer(text)
+                 if int(m.group(1)) > int(m.group(2))]
+    suite.record("L", "list_dir-empty-window-head_limit-no-range", problems,
+                 detail=["head_limit with a grep that matched nothing printed",
+                         "`(showing 1-0 of 0)` with no offset in sight",
+                         "reply : %s" % " | ".join(text.splitlines())[:300]],
+                 text=text, showable=True)
+    record_page(
+        suite, "list_dir-in-window-range-unchanged", drv, "list_dir",
+        {"relative_path": "src", "offset": 1},
+        re.escape("[showing rows 2-%d of %d; no rows left]"
+                  % (src_rows, src_rows)),
+        want_range="(showing 2-%d of %d)" % (src_rows, src_rows),
+        detail=["CONTROL: a window that HAS rows keeps its header range"])
+
+    # find_file on the root: every `.txt` the fixture wrote, and nothing else
+    # carries that extension (`.git/HEAD` has none, and is pruned anyway).
+    txt = len([p for p in ALL_FILES + (P_LOG, P_GITFILE) if p.endswith(".txt")])
+    for cid, off in (("find_file-offset-past-end-says-so", 9),
+                     ("find_file-offset-at-end-says-so", txt)):
+        record_page(
+            suite, cid, drv, "find_file", {"file_mask": "*.txt", "offset": off},
+            re.escape("[no rows at offset %d of %d]" % (off, txt)),
+            detail=["the header printed `(showing %d-%d of %d)`"
+                    % (off + 1, off, txt)])
+    record_page(
+        suite, "find_file-in-window-range-unchanged", drv, "find_file",
+        {"file_mask": "*.txt", "offset": txt - 1},
+        re.escape("[showing rows %d-%d of %d; no rows left]" % (txt, txt, txt)),
+        want_range="(showing %d-%d of %d)" % (txt, txt, txt),
+        detail=["CONTROL: a window that HAS rows keeps its header range"])
+
+    # search: CONTROLS.  Its header states a count and no range, so it never
+    # had the inversion; these pin that the three pagers keep one answer.
+    for cid, params in (
+            ("search-files-offset-past-end-says-so",
+             {"output_mode": "files_with_matches", "offset": 20}),
+            ("search-content-offset-past-end-says-so",
+             {"output_mode": "content", "offset": 20})):
+        record_page(
+            suite, cid, drv, "search_for_pattern",
+            dict(params, substring_pattern=NEEDLE),
+            r"\[no rows at offset 20 of \d+\]",
+            detail=["CONTROL: search's pagers already answer in this form"])
+
+
+# ---------------------------------------------------------------------------
+# Group M -- a walk rooted at or inside `.git` is refused, not listed
+#
+# Every walker prunes a CHILD directory named `.git`, and the skill says `.git`
+# is never listed -- but a walk ROOTED there never meets that child, so
+# `list_dir .git` listed the object store and `search .git` grepped it.  The
+# answer is a refusal (isError) naming the rule, not an empty reply: an empty
+# listing of a directory that plainly exists is ADR 0017's silent zero.
+# read_file is not a walker and keeps reading a single file under `.git`.
+# ---------------------------------------------------------------------------
+
+# Group M's tree.  `.github` and `x.git` are the two names a prefix or suffix
+# test would wrongly refuse; `sub/.git` is the nested repo (a submodule's
+# gitdir) that a check on the FIRST component only would miss.
+GIT_FILES = (".git/HEAD", ".git/refs/heads/main", "sub/.git/config",
+             ".github/workflows/ci.yml", "x.git/data.txt", "src/a.txt")
+GM_HEAD, GM_REF, GM_SUBCFG, GM_CI, GM_XGIT, GM_SRC = GIT_FILES
+
+
+def make_git_fixture(ws, subdir):
+    """Group M's tree, REALPATH'd for the same reason group G's is."""
+    ws.subdir(subdir)
+    for rel in GIT_FILES:
+        ws.write_text(os.path.join(subdir, rel), LINE)
+    return os.path.realpath(ws.join(subdir))
+
+
+def group_m(suite, drv):
+    walkers = (
+        ("list_dir", {"recursive": True, "show_hidden": True}),
+        ("find_file", {"file_mask": "*"}),
+        ("search_for_pattern", {"substring_pattern": NEEDLE}))
+    for fn, params in walkers:
+        for rel in (".git", ".git/refs", "sub/.git"):
+            record_error(
+                suite, "M", "%s-refuses-%s" % (fn, rel.replace("/", "-")),
+                drv, fn, dict(params, relative_path=rel),
+                must_say=[".git", "never", rel],
+                detail=["a walk ROOTED in .git never meets the child-name",
+                        "prune, so it listed / searched git internals"])
+
+    # Spellings of the same directory: the check must see the path, not the
+    # string.  `src/../.git` is only `.git` once normalised.
+    for label, rel in (("dot-slash", "./.git"), ("trailing-slash", ".git/"),
+                       ("dotdot", "src/../.git")):
+        record_error(
+            suite, "M", "list_dir-refuses-spelling-%s" % label, drv, "list_dir",
+            {"relative_path": rel, "recursive": True},
+            must_say=[".git", "never"],
+            detail=["the same directory spelled another way"])
+    record_error(
+        suite, "M", "search-refuses-file-under-git", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": GM_HEAD},
+        must_say=[".git", "never"],
+        detail=["search takes a FILE root; one under .git is still inside it"])
+    record_error(
+        suite, "M", "search-refuses-git-root-in-list", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": ["src", ".git"]},
+        must_say=[".git", "never"],
+        detail=["one .git root in a LIST refuses the call"])
+
+    # Must-stay-green: the rule is a whole COMPONENT equal to `.git`.
+    record_polarity(
+        suite, "M", "list_dir-github-not-refused", drv, "list_dir",
+        {"relative_path": ".github", "recursive": True},
+        must=[GM_CI], must_not=[], extract=listing_paths,
+        detail=["CONTROL: `.github` merely STARTS with `.git`"])
+    record_polarity(
+        suite, "M", "find_file-x.git-not-refused", drv, "find_file",
+        {"file_mask": "*", "relative_path": "x.git"},
+        must=[GM_XGIT], must_not=[], extract=found_paths,
+        detail=["CONTROL: `x.git` merely ENDS with `.git`"])
+    record_polarity(
+        suite, "M", "search-github-not-refused", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": ".github"},
+        must=[GM_CI], must_not=[],
+        detail=["CONTROL: the prefix case, on the third walker"])
+    record_polarity(
+        suite, "M", "search-x.git-not-refused", drv, "search_for_pattern",
+        {"substring_pattern": NEEDLE, "relative_path": "x.git"},
+        must=[GM_XGIT], must_not=[],
+        detail=["CONTROL: the suffix case, on the third walker"])
+    record_polarity(
+        suite, "M", "list_dir-root-still-prunes-git-children", drv, "list_dir",
+        {"relative_path": ".", "recursive": True, "show_hidden": True},
+        must=[GM_CI, GM_XGIT, GM_SRC],
+        must_not=[GM_HEAD, GM_REF, GM_SUBCFG], extract=listing_paths,
+        detail=["CONTROL: a walk from the root keeps pruning every .git",
+                "child, top-level and nested alike"])
+
+    is_error, text = drv.call("read_file", {"relative_path": GM_HEAD})
+    problems = []
+    if is_error:
+        problems.append("read_file refused a single file under .git")
+    if NEEDLE not in text:
+        problems.append("the file's content is not in the reply")
+    suite.record("M", "read_file-git-head-still-reads", problems,
+                 detail=["CONTROL: read_file is not a walker; reading one",
+                         "named file under .git stays allowed",
+                         "reply : %s" % " | ".join(text.splitlines())[:200]],
+                 text=text, showable=True)
+
+
+# ---------------------------------------------------------------------------
 # Group G -- glob semantics: the spellings that can only ever match nothing
 #
 # Sits above group F because source order is CALL order in this file, and
@@ -1247,8 +1886,10 @@ def run(opts=None):
         pathshaped_root = make_fixture(ws, "pathshaped", GITIGNORE_PATHSHAPED)
         glob_root = make_glob_fixture(ws, "globs")
         multi_root = make_multi_fixture(ws, "multiroot")
+        read_root = make_read_fixture(ws, "readfile")
+        git_root = make_git_fixture(ws, "gitwalk")
         suite.note("      server        : %s" % SERVER)
-        suite.note("      fixture (A-D) : %s  .gitignore=%s"
+        suite.note("      fixture (A-D,J-L): %s  .gitignore=%s"
                    % (basename_root, list(GITIGNORE_BASENAME)))
         suite.note("      fixture (E)   : %s  .gitignore=%s"
                    % (pathshaped_root, list(GITIGNORE_PATHSHAPED)))
@@ -1258,10 +1899,16 @@ def run(opts=None):
                    % (multi_root,
                       ["%s x%d" % (rel, n) for rel, n in MULTI_FILES]
                       + list(M_CFILES)))
+        suite.note("      fixture (I)   : %s  files=[%s x%d lines]"
+                   % (read_root, R_FILE, R_LINES))
+        suite.note("      fixture (M)   : %s  no .gitignore, files=%s"
+                   % (git_root, list(GIT_FILES)))
 
         drv = Driver(basename_root)
         drv_path = Driver(pathshaped_root)
         drv_multi = Driver(multi_root)
+        drv_read = Driver(read_root)
+        drv_git = Driver(git_root)
         try:
             group_a(suite, drv)
             group_b(suite, drv)
@@ -1269,18 +1916,28 @@ def run(opts=None):
             group_d(suite, drv)
             group_e(suite, drv_path)
             group_h(suite, drv_multi, multi_root)
+            group_i(suite, drv_read)
+            group_j(suite, drv, basename_root)
+            group_k(suite, drv)
+            group_l(suite, drv)
+            group_m(suite, drv_git)
             stderr_bytes = (len(drv.stderr_text) + len(drv_path.stderr_text)
-                            + len(drv_multi.stderr_text))
+                            + len(drv_multi.stderr_text)
+                            + len(drv_read.stderr_text)
+                            + len(drv_git.stderr_text))
         finally:
             drv.close()
             drv_path.close()
             drv_multi.close()
+            drv_read.close()
+            drv_git.close()
 
         # Group G starts no child: it imports the server module and calls the
         # handlers in-process, so it runs outside the driver lifetime entirely.
         group_g(suite, glob_root)
 
-        workspaces = [basename_root, pathshaped_root, glob_root, multi_root]
+        workspaces = [basename_root, pathshaped_root, glob_root, multi_root,
+                      read_root, git_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()

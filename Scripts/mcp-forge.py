@@ -1504,6 +1504,13 @@ def handle_forge_call(arguments: dict,
                       cfg_path: str) -> dict:
 	"""Route a forge_call invocation to the appropriate handler."""
 	function = (arguments.get("function") or arguments.get("f") or "").strip()
+	# `status` is the spelling a caller reaches for when the answer it wants is
+	# the empty call's -- server status plus the loaded YAML summary. Folded to ""
+	# HERE, before anything reads `function`, so it takes every one of the empty
+	# call's paths below (missing config, parse error, validation errors, the
+	# status reply) rather than only the last one.
+	if function == "status":
+		function = ""
 	raw_params = arguments.get("params") or arguments.get("p") or {}
 	try:
 		params = _resolve_aliases(_ensure_dict(raw_params, "params"), PARAM_ALIASES)
@@ -1565,7 +1572,8 @@ def handle_forge_call(arguments: dict,
 
 	return {"error": (
 		f"unknown function: {function}. "
-		"Available: list, describe, validate, build, test, clean (or empty for status)"
+		"Available: list, describe, validate, build, test, clean, "
+		"status (or empty for status)"
 	)}
 
 
@@ -1644,7 +1652,7 @@ FORGE_CALL_TOOL = {
 		"  WRONG: forge_call(targets=[...])    <- targets is NOT a top-level key\n"
 		"  RIGHT: forge_call(function=\"build\", params={\"targets\":[\"app\"]})\n\n"
 		"Functions:\n"
-		"  (empty)   -> server status + loaded YAML summary\n"
+		"  (empty) / status -> server status + loaded YAML summary\n"
 		"  list      -> list all build/test/clean targets ({kind?})\n"
 		"  describe  -> show one target's commands, env_schema, requires ({target}); "
 		"without a target, lists all targets with their short descriptions\n"
@@ -1660,7 +1668,7 @@ FORGE_CALL_TOOL = {
 		"Aliases: target/t->targets, e->env, f->filter, j->ncpu, ab->auto_build, k/type->kind.\n\n"
 		"Example: function=\"test\", "
 		"params={\"targets\":[\"unit\"],\"env\":{\"JEST_FILTER\":\"rtmp\"}}\n"
-		"Call without 'function' for status.\n\n"
+		"Call without 'function' (or with function=\"status\") for status.\n\n"
 		"FINAL REMINDER\n"
 		"If `project-forge.yaml` exists and you are about to type a build,\n"
 		"test, or clean command into Bash: STOP. Call `forge_call` instead.\n"
@@ -1674,7 +1682,7 @@ FORGE_CALL_TOOL = {
 				"type": "string",
 				"description": (
 					"Function name: list, describe, validate, build, test, clean, "
-					"or empty for status. Alias: 'f'."
+					"status, or empty for status. Alias: 'f'."
 				),
 			},
 			"params": {

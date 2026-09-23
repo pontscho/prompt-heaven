@@ -64,7 +64,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `mcp_first_guard` | `test_mcp_first_guard.py` | A–N |
 | `sbx_gate` | `test_sbx_gate.py` | A–Q |
 | `purity_lsp` | `test_purity_lsp.py` | A–J |
-| `purity_file_ops` | `test_purity_file_ops.py` | A–G |
+| `purity_file_ops` | `test_purity_file_ops.py` | A–M |
 | `mcp_git_params` | `test_mcp_git_params.py` | A–M |
 | `name_existence` | `test_name_existence.py` | A–I |
 | `spawn_stdin` | `test_spawn_stdin.py` | A–D |
@@ -79,6 +79,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `handler_crash` | `test_handler_crash.py` | A–E |
 | `table_cells` | `test_table_cells.py` | A–G |
 | `protocol_version` | `test_protocol_version.py` | A–E |
+| `forge_dispatch` | `test_forge_dispatch.py` | A–C |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
@@ -114,6 +115,7 @@ python3 tests/test_wire_log.py
 python3 tests/test_handler_crash.py
 python3 tests/test_table_cells.py
 python3 tests/test_protocol_version.py
+python3 tests/test_forge_dispatch.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 
@@ -214,7 +216,7 @@ tests/
   test_mcp_first_guard.py    groups A-N
   test_sbx_gate.py           groups A-Q   (grant-only gate; the guard's mirror)
   test_purity_lsp.py         groups A-J   (live clangd + lua-language-server)
-  test_purity_file_ops.py    groups A-G   (stdlib file handlers, no binary, ~2s)
+  test_purity_file_ops.py    groups A-M   (stdlib file handlers, no binary, ~2s)
   test_mcp_git_params.py     groups A-M   (offline, subprocess stubbed)
   test_name_existence.py     groups A-I
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
@@ -275,6 +277,9 @@ tests/
                                            the fleet's agreement asserted
                                            BETWEEN the files so the suite never
                                            holds a copy of the number)
+  test_forge_dispatch.py     groups A-C   (in-process, mkdtemp fixtures, starts
+                                           no server -- `status` is the empty
+                                           call on all four of its paths)
   files/                     tf_-prefixed C and Lua fixtures for purity_lsp
   README.md
 ```
