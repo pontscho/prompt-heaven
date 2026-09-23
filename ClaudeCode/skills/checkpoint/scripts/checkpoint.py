@@ -5,6 +5,7 @@ write a new session block to the top of it, and maintain its line-range table
 of contents.
 Usage: checkpoint.py {next-number|latest|mission|nexts|activate [ID]|toc|list|session <ID>} [--file PATH]
        checkpoint.py prepend [--block-file PATH] [--file PATH] [--overwrite]
+       checkpoint.py migrate [--dry-run] [--file PATH]
 
 The parser keys entirely off markdown header level (`## `) plus a prefix token
 (SESSION / ACTIVATION / MISSION); it never regexes arbitrary body content. A
@@ -21,6 +22,21 @@ blocks a resuming session needs -- MISSION, the newest SESSION, its ACTIVATION -
 in one call. Files written before the change keep their `### ACTIVATION`
 subsections, and both readers fall back to them; only a NEW segment handed to
 `prepend` is held to the new shape.
+
+`migrate` converts such a file, once, on request: each legacy subsection's body
+moves into an `## ACTIVATION S<NNN>` block right below its session -- its lines
+verbatim, only the blank lines at its edges trimmed, one blank separator
+around the new block, and one blank left where the subsection was. It
+exists for the same reason `prepend` does -- the checkpoint has ONE writer, and
+a conversion done by hand (or by an editor tool) would be a second one, with
+the stale TOC that comes with it. It is also the one command that edits a
+block already written, which the append-only model otherwise forbids; that
+exception is kept explicit and user-invoked rather than folded into another
+command. Nothing runs it implicitly, the only lines it moves are the
+subsection's (so `activate` prints the same prompt before and after), a
+session it cannot convert unambiguously is skipped and reported, `--dry-run`
+shows the report without writing, and a run with nothing to migrate writes
+nothing.
 
 `toc` reports each block's 1-indexed start and end line, so a cold reader can
 Read one block by offset instead of the whole file. `toc --write` rewrites the
@@ -86,9 +102,10 @@ SESSION_RE = re.compile(r"^SESSION\s+S(\d+)\b")
 # is addressed through the session it belongs to, and `next-number` stays a
 # function of the SESSION ids alone.
 ACTIVATION_RE = re.compile(r"^ACTIVATION\s+S(\d+)\b")
-# The pre-block form, a subsection inside a SESSION. Read-only from here on:
+# The pre-block form, a subsection inside a SESSION. Never WRITTEN from here on:
 # `activate` and `nexts` still find it in an old file, `prepend` refuses it in a
-# new segment. Case-insensitive, because the refusal must not be dodged by a
+# new segment, and the one command that touches it is `migrate`, which moves it
+# OUT into its own block when the user asks. Case-insensitive, because the refusal must not be dodged by a
 # `### Activation` that a reader would still take for the prompt.
 LEGACY_ACTIVATION_RE = re.compile(r"^###\s+ACTIVATION\b", re.IGNORECASE)
 # A fence opener or closer: three or more backticks or tildes after optional
@@ -227,20 +244,41 @@ def unfenced(lines):
             yield index, line
 
 
-def legacy_activation(block):
-    """The body lines of a SESSION block's old `### ACTIVATION` subsection, or
-    None if it has none: from the line after that header up to the next `### `
-    header or the end of the block. Fence-aware, so a quoted header inside a
-    code sample is neither the start nor the end of it."""
-    body = block.lines[1:]
+def legacy_span(block):
+    """(start, end) of a SESSION block's old `### ACTIVATION` subsection, as
+    indices into `block.lines`, or None if it has none: from the `### ACTIVATION`
+    line up to (not including) the next `### ` line, or the end of the block.
+    Fence-aware, so a quoted header inside a code sample is neither the start
+    nor the end of it.
+
+    ONE locator for the reader that falls back to the subsection and for the
+    writer that moves it out: if `migrate` located it differently from
+    `activate`, the prompt it wrote into the new block would not be the prompt
+    the user had been getting.
+    """
     start = None
-    for index, line in unfenced(body):
+    for index, line in unfenced(block.lines[1:]):
+        index += 1  # back to an index into block.lines, header included
         if start is None:
             if LEGACY_ACTIVATION_RE.match(line):
-                start = index + 1
+                start = index
         elif line.startswith("### "):
-            return body[start:index]
-    return None if start is None else body[start:]
+            return start, index
+    return None if start is None else (start, len(block.lines))
+
+
+def legacy_count(block):
+    """How many unfenced `### ACTIVATION` lines a block carries. The readers
+    never ask -- they take the first -- but a writer that moves one has to."""
+    return sum(1 for _index, line in unfenced(block.lines[1:])
+               if LEGACY_ACTIVATION_RE.match(line))
+
+
+def legacy_activation(block):
+    """The body lines of a SESSION block's old `### ACTIVATION` subsection, or
+    None if it has none -- the lines `legacy_span` locates, header excluded."""
+    span = legacy_span(block)
+    return None if span is None else block.lines[span[0] + 1:span[1]]
 
 
 def dequote(lines):
@@ -647,6 +685,127 @@ def cmd_toc(path, write=False):
     return 0
 
 
+def trim_blank_edges(lines):
+    """`lines` without its leading and trailing blank lines."""
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    return trim_trailing_blanks(lines[start:])
+
+
+def migrate_session(block, number, has_next):
+    """(new lines, reason) for one SESSION block: the session without its old
+    `### ACTIVATION` subsection followed by the `## ACTIVATION S<NNN>` block
+    carrying that subsection's body, or (None, reason) when it is skipped.
+
+    The body's lines are copied VERBATIM -- quote markers, wording, line breaks
+    -- except that the blank lines at its two edges are trimmed, which changes
+    nothing `activate` prints: it trims them too. The subsection's lines are
+    the only ones that move. The gap they leave is exactly one blank line: the
+    blank already above the subsection if there is one, else one of its own
+    trailing blanks, else -- the one case where a byte is ADDED outside the
+    moved lines -- a blank typed in, so the text above does not run into the
+    `### ` that follows. The new block gets one blank separator above it (the
+    session's own trailing blank when it has one) and, when a block follows,
+    one below it.
+
+    A session with TWO unfenced `### ACTIVATION` subsections is skipped whole:
+    which one is the prompt is a judgement, and `activate` reading the first
+    is a reader's fallback, not a reason to delete the second.
+    """
+    span = legacy_span(block)
+    if span is None:
+        return None, "no `### ACTIVATION` subsection"
+    if legacy_count(block) > 1:
+        return None, "more than one ### ACTIVATION subsection -- resolve by hand"
+    start, end = span
+    prompt = trim_blank_edges(block.lines[start + 1:end])
+    if not dequote(prompt):
+        return None, ("the `### ACTIVATION` subsection is empty -- nothing to "
+                      "move, and an empty `## ACTIVATION` block is not written")
+    lines = block.lines
+    if not lines[start - 1].strip():
+        # A blank line already sits above the subsection: it stays as the
+        # gap, and the subsection's own trailing blanks go with it.
+        kept = lines[:start] + lines[end:]
+    elif not lines[end - 1].strip():
+        # No blank above: keep ONE of the subsection's trailing blanks, so the
+        # text above does not run into whatever came after.
+        kept = lines[:start] + lines[end - 1:]
+    elif end < len(lines):
+        # No blank on either side and a `### ` follows: the one blank line the
+        # gap must have is not in the file, so it is written in.
+        kept = lines[:start] + [""] + lines[end:]
+    else:
+        kept = lines[:start]  # at the block's end: the separator below covers it
+    if kept[-1].strip():
+        kept.append("")  # the separator above the new block
+    # No blank line under the header: the same spelling SKILL.md's template
+    # gives a new block, so a migrated file does not carry two.
+    activation = ["## ACTIVATION S%03d" % number] + prompt
+    if has_next:
+        activation.append("")
+    return kept + activation, None
+
+
+def cmd_migrate(path, dry_run=False):
+    """Move every legacy `### ACTIVATION` subsection into its own block.
+
+    One pass, one report, at most one write: every session is judged first,
+    the new body is regenerated through `with_toc` like every other write, and
+    `write_atomic` replaces the file once. A run that migrates nothing writes
+    NOTHING -- not even an identical file -- so a second run is provably inert
+    down to the mtime, and `--dry-run` differs from a real run only in the
+    write.
+    """
+    require_file(path)
+    body = strip_toc(read_lines(path))
+    if not body or not body[0].startswith("# "):
+        die("no H1 title on line 1 of %s -- refusing to migrate" % path)
+    blocks = parse_blocks(body)
+    has_block = {activation_num(b) for b in blocks} - {None}
+    out = body[:blocks[0].start - 1] if blocks else list(body)
+    report = []
+    migrated = skipped = 0
+    for position, block in enumerate(blocks):
+        number = session_num(block)
+        if number is None:
+            out += block.lines
+            continue
+        new_lines, reason = None, None
+        if number in has_block:
+            if legacy_span(block) is not None:
+                reason = ("both forms -- an `## ACTIVATION S%03d` block exists "
+                          "and the `### ACTIVATION` subsection is left where "
+                          "it is" % number)
+            else:
+                reason = "already has an `## ACTIVATION S%03d` block" % number
+        else:
+            new_lines, reason = migrate_session(block, number,
+                                                position + 1 < len(blocks))
+        if new_lines is None:
+            skipped += 1
+            report.append("S%03d skipped: %s" % (number, reason))
+            out += block.lines
+        else:
+            migrated += 1
+            report.append("S%03d migrated" % number)
+            out += new_lines
+
+    if migrated and not dry_run:
+        write_atomic(path, with_toc(out, path))
+    for line in report:
+        print(line)
+    if dry_run:
+        tail = " (dry run -- nothing written)"
+    elif migrated:
+        tail = ""
+    else:
+        tail = " (nothing to migrate -- file untouched)"
+    print("total: %d migrated, %d skipped%s" % (migrated, skipped, tail))
+    return 0
+
+
 def read_segment(block_path, path):
     """The validated lines to insert: one or more `## ` blocks, nothing else.
 
@@ -894,6 +1053,18 @@ def build_parser():
         help="print one block by its TOC label: a SESSION (S042) or its ACTIVATION (A042)",
     )
     sp.add_argument("id", help="block id, e.g. S042, s042, 42, 042, or A042 / a042")
+    mig = sub.add_parser(
+        "migrate",
+        parents=[parent],
+        help="one-time conversion of a file written before the ACTIVATION block: "
+        "move each session's `### ACTIVATION` subsection into its own "
+        "`## ACTIVATION S<NNN>` block, then regenerate the TOC in ONE atomic write",
+    )
+    mig.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the same per-session report and write nothing",
+    )
     return parser
 
 
@@ -908,6 +1079,8 @@ def main():
         code = cmd_mission(path)
     elif args.command == "nexts":
         code = cmd_nexts(path)
+    elif args.command == "migrate":
+        code = cmd_migrate(path, args.dry_run)
     elif args.command == "activate":
         code = cmd_activate(path, args.id)
     elif args.command in ("toc", "list"):

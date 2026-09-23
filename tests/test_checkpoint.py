@@ -109,6 +109,13 @@ quietly wrong rather than a hypothetical:
      what a caller skimming stdout takes for the whole thing.  The prepend
      half of the change (the segment's shape rules) lives in group I, with
      the other segment refusals.
+  M  `migrate`, the one command that edits blocks already written: every
+     legacy `### ACTIVATION` subsection moved verbatim into its own block.
+     Gated against HAND-WRITTEN expected files, plus the invariant that makes
+     the move safe -- `activate S<n>` prints the same text before and after,
+     for every session -- and `latest` / `session` == the old block minus the
+     subsection.  A second run and a --dry-run are gated down to the inode
+     and mtime: nothing to write means no write.  Runs before K.
 
 Fixtures are generated into a `tempfile.mkdtemp()` workspace, one subdirectory
 per case, because the leftover-temp-file checks read the TARGET's directory and
@@ -127,6 +134,7 @@ Groups:
   J  negative control
   K  hygiene (runs last)
   L  the ACTIVATION block: TOC row, activate, nexts, legacy fallback
+  M  migrate: legacy subsections moved into their own blocks
 
 Usage:
   python3 tests/test_checkpoint.py
@@ -166,6 +174,7 @@ GI = "I. prepend: one write"
 GJ = "J. negative control"
 GK = "K. hygiene"
 GL = "L. activation block"
+GM = "M. migrate command (legacy ACTIVATION -> block)"
 
 # The on-disk format contract, spelled out independently of the module: a test
 # that imported these would pass a rename that orphaned every region already
@@ -625,6 +634,383 @@ Why.
 # Bytes, not text: no text writer can produce it.
 FIXTURE_NON_UTF8 = FIXTURE_MAIN.encode("utf-8").replace(
     b"Bootstrapped", b"Boot\xffstrapped")
+
+# -- `migrate` fixtures.  Each input comes with its expected output WRITTEN OUT
+# BY HAND (TOC region excluded): an expectation derived by running the module's
+# own helpers would agree with any defect they share.
+#
+# S004: subsection at the END of the session  -> migrated
+# S003: subsection in the MIDDLE, non-ASCII   -> migrated, ### MODEL stays
+# S002: `### ACTIVATION` only inside a fence  -> skipped: no subsection
+# S001: subsection whose prompt is a bare `>` -> skipped: empty
+FIXTURE_MIG = """\
+# Session Checkpoint
+
+## SESSION S004 | 2026-09-22 10:00 | feature/migrate
+### STATE
+- Done: the migrate command.
+
+### ACTIVATION
+> Resuming the migrate work on `feature/migrate`.
+> Run `checkpoint.py nexts`.
+
+## SESSION S003 | 2026-09-21 10:00 | feature/migrate
+### LOG
+1. The subsection sits in the middle.
+
+### ACTIVATION
+> Folytasd: árvíztűrő tükörfúrógép -- a kovetkezo lepes a migrate.
+>
+> Next step: ship it.
+
+### MODEL
+- A subsection AFTER the activation stays in the session.
+
+## SESSION S002 | 2026-09-20 10:00 | master
+### MODEL
+```
+### ACTIVATION
+> a fenced quote, not a prompt
+```
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. An empty prompt.
+
+### ACTIVATION
+>
+
+## MISSION
+
+Make resuming one command.
+
+### WHY
+Árvíztűrő: the tail is never touched.
+"""
+
+EXPECTED_MIG = """\
+# Session Checkpoint
+
+## SESSION S004 | 2026-09-22 10:00 | feature/migrate
+### STATE
+- Done: the migrate command.
+
+## ACTIVATION S004
+> Resuming the migrate work on `feature/migrate`.
+> Run `checkpoint.py nexts`.
+
+## SESSION S003 | 2026-09-21 10:00 | feature/migrate
+### LOG
+1. The subsection sits in the middle.
+
+### MODEL
+- A subsection AFTER the activation stays in the session.
+
+## ACTIVATION S003
+> Folytasd: árvíztűrő tükörfúrógép -- a kovetkezo lepes a migrate.
+>
+> Next step: ship it.
+
+## SESSION S002 | 2026-09-20 10:00 | master
+### MODEL
+```
+### ACTIVATION
+> a fenced quote, not a prompt
+```
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. An empty prompt.
+
+### ACTIVATION
+>
+
+## MISSION
+
+Make resuming one command.
+
+### WHY
+Árvíztűrő: the tail is never touched.
+"""
+
+MIG_MIGRATED = ("S004", "S003")
+MIG_SESSIONS = ("S004", "S003", "S002", "S001")
+MIG_REPORT_PREFIXES = [
+    "S004 migrated",
+    "S003 migrated",
+    "S002 skipped: no `### ACTIVATION` subsection",
+    "S001 skipped: the `### ACTIVATION` subsection is empty",
+]
+
+# No blank line ABOVE the subsection: the gap it leaves must still be exactly
+# one blank line -- one of its own trailing blanks, not zero and not two.
+FIXTURE_MIG_TIGHT = """\
+# Session Checkpoint
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. No blank line above the subsection.
+### ACTIVATION
+> Resume the tight one.
+
+### MODEL
+- after it
+
+## MISSION
+
+Why.
+"""
+
+EXPECTED_MIG_TIGHT = """\
+# Session Checkpoint
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. No blank line above the subsection.
+
+### MODEL
+- after it
+
+## ACTIVATION S001
+> Resume the tight one.
+
+## MISSION
+
+Why.
+"""
+
+# Partly migrated already: S003 legacy, S002 BOTH forms, S001 block only.
+FIXTURE_MIG_MIXED = """\
+# Session Checkpoint
+
+## SESSION S003 | 2026-09-22 10:00 | master
+### LOG
+1. Still legacy.
+
+### ACTIVATION
+> Resume S003.
+
+## SESSION S002 | 2026-09-21 10:00 | master
+### LOG
+1. Both forms.
+
+### ACTIVATION
+> The old copy.
+
+## ACTIVATION S002
+> The new copy.
+
+## SESSION S001 | 2026-09-20 10:00 | master
+### LOG
+1. Already migrated.
+
+## ACTIVATION S001
+> Resume S001.
+
+## MISSION
+
+Why.
+"""
+
+EXPECTED_MIG_MIXED = """\
+# Session Checkpoint
+
+## SESSION S003 | 2026-09-22 10:00 | master
+### LOG
+1. Still legacy.
+
+## ACTIVATION S003
+> Resume S003.
+
+## SESSION S002 | 2026-09-21 10:00 | master
+### LOG
+1. Both forms.
+
+### ACTIVATION
+> The old copy.
+
+## ACTIVATION S002
+> The new copy.
+
+## SESSION S001 | 2026-09-20 10:00 | master
+### LOG
+1. Already migrated.
+
+## ACTIVATION S001
+> Resume S001.
+
+## MISSION
+
+Why.
+"""
+
+MIG_MIXED_REPORT_PREFIXES = [
+    "S003 migrated",
+    "S002 skipped: both forms",
+    "S001 skipped: already has an `## ACTIVATION S001` block",
+]
+
+# No blank line on EITHER side of the subsection: the gap must still be one
+# blank line, and here it has to be written in -- the file has none to keep.
+FIXTURE_MIG_NO_BLANKS = """\
+# Session Checkpoint
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. No blank line on either side.
+### ACTIVATION
+> Resume the squeezed one.
+### MODEL
+- after it
+
+## MISSION
+
+Why.
+"""
+
+EXPECTED_MIG_NO_BLANKS = """\
+# Session Checkpoint
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. No blank line on either side.
+
+### MODEL
+- after it
+
+## ACTIVATION S001
+> Resume the squeezed one.
+
+## MISSION
+
+Why.
+"""
+
+# S002 carries TWO unfenced subsections: which is the prompt is a judgement,
+# so the whole session is skipped.  S001 is migrated, so the file IS written
+# and S002's survival is measured on a real write, not on a no-op.
+FIXTURE_MIG_TWO = """\
+# Session Checkpoint
+
+## SESSION S002 | 2026-09-20 10:00 | master
+### LOG
+1. Two prompts.
+
+### ACTIVATION
+> The first prompt.
+
+### ACTIVATION
+> The second prompt.
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. One prompt.
+
+### ACTIVATION
+> Resume S001.
+
+## MISSION
+
+Why.
+"""
+
+EXPECTED_MIG_TWO = """\
+# Session Checkpoint
+
+## SESSION S002 | 2026-09-20 10:00 | master
+### LOG
+1. Two prompts.
+
+### ACTIVATION
+> The first prompt.
+
+### ACTIVATION
+> The second prompt.
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. One prompt.
+
+## ACTIVATION S001
+> Resume S001.
+
+## MISSION
+
+Why.
+"""
+
+# The session is the LAST block in the file -- no MISSION after it, the
+# subsection runs to EOF.
+FIXTURE_MIG_LAST = """\
+# Session Checkpoint
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. The last block in the file.
+
+### ACTIVATION
+> Resume the last one.
+"""
+
+EXPECTED_MIG_LAST = """\
+# Session Checkpoint
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. The last block in the file.
+
+## ACTIVATION S001
+> Resume the last one.
+"""
+
+# The live S001 shape: a blank line above the subsection, and exactly one blank
+# line between its last line and `## MISSION`.
+FIXTURE_MIG_BEFORE_MISSION = """\
+# Session Checkpoint
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. The first session of the work stream.
+
+### ACTIVATION
+> Resume the first one.
+> Second line of the prompt.
+
+## MISSION
+
+Make resuming one command.
+
+### WHY
+Because.
+"""
+
+EXPECTED_MIG_BEFORE_MISSION = """\
+# Session Checkpoint
+
+## SESSION S001 | 2026-09-19 09:00 | master
+### LOG
+1. The first session of the work stream.
+
+## ACTIVATION S001
+> Resume the first one.
+> Second line of the prompt.
+
+## MISSION
+
+Make resuming one command.
+
+### WHY
+Because.
+"""
+
+SEGMENT_AFTER_MIGRATE = """\
+## SESSION S005 | 2026-09-23 09:00 | feature/migrate
+### LOG
+1. The first session written after the migration.
+
+## ACTIVATION S005
+> Resume after the migration.
+"""
 
 # The same fence, and NO real subsection: the quote alone must not count.
 FIXTURE_LEGACY_FENCED_ONLY = """\
@@ -2728,6 +3114,414 @@ def group_l(suite, mod, workspace):
 
 
 # ---------------------------------------------------------------------------
+# M. migrate: legacy `### ACTIVATION` subsections -> their own blocks
+# ---------------------------------------------------------------------------
+
+def unfenced_flags(lines):
+    """True per line that is OUTSIDE a ``` / ~~~ fence (fence lines are False).
+    The suite's own reading of a fence, kept apart from the module's."""
+    flags, opener = [], None
+    for line in lines:
+        mark = line.lstrip()[:3]
+        if mark in ("```", "~~~"):
+            if opener is None:
+                opener = mark
+                flags.append(False)
+                continue
+            if mark == opener:
+                opener = None
+                flags.append(False)
+                continue
+        flags.append(opener is None)
+    return flags
+
+
+def drop_subsections(lines, ids):
+    """`lines` without the unfenced `### ACTIVATION` subsection of every
+    session whose label is in `ids` -- from that line up to the next unfenced
+    `### ` line or the next `## ` block.  A session carrying MORE than one such
+    subsection keeps all of them: migrate skips it whole, and an oracle that
+    dropped the first would be judging a rule the script does not have."""
+    flags = unfenced_flags(lines)
+    counts, current = {}, None
+    for line, free in zip(lines, flags):
+        if line.startswith("## "):
+            match = re.match(r"^## SESSION\s+S0*(\d+)\b", line)
+            current = "S%03d" % int(match.group(1)) if match else None
+        elif free and current and line.startswith("### ACTIVATION"):
+            counts[current] = counts.get(current, 0) + 1
+    ids = {sid for sid in ids if counts.get(sid, 0) == 1}
+    out, current, skipping = [], None, False
+    for line, free in zip(lines, flags):
+        if line.startswith("## "):
+            match = re.match(r"^## SESSION\s+S0*(\d+)\b", line)
+            current = "S%03d" % int(match.group(1)) if match else None
+            skipping = False
+        elif free and line.startswith("### "):
+            skipping = current in ids and line.startswith("### ACTIVATION")
+        if not skipping:
+            out.append(line)
+    return out
+
+
+def drop_activation_blocks(lines, ids):
+    """`lines` without every `## ACTIVATION S<NNN>` block whose id is in `ids`."""
+    out, skipping = [], False
+    for line in lines:
+        if line.startswith("## "):
+            match = re.match(r"^## ACTIVATION\s+S0*(\d+)\b", line)
+            skipping = bool(match) and "S%03d" % int(match.group(1)) in ids
+        if not skipping:
+            out.append(line)
+    return out
+
+
+def report_lines(out):
+    """The per-session lines of a migrate report, the total line dropped."""
+    return [line for line in lines_of(out) if not line.startswith("total:")]
+
+
+def check_report(out, prefixes):
+    """Each report line must start with the expected prefix, in order."""
+    got = report_lines(out)
+    if len(got) != len(prefixes) or any(
+            not line.startswith(want) for line, want in zip(got, prefixes)):
+        return ["report is %r, want lines starting %r" % (got, prefixes)]
+    return []
+
+
+def migrate_case(suite, mod, workspace, cid, fixture, expected, report,
+                 sessions, untouched, why, outside=True):
+    """One fixture through `migrate`, judged four ways at once: the file is
+    the hand-written expectation (TOC region aside), the report is exactly
+    `report`, `activate` prints the same thing for every session before and
+    after, and each session in `untouched` reads back byte-identical."""
+    path = stage(workspace, cid, fixture)
+    act_before = {sid: call_module(mod, "cmd_activate", path, sid)[:2]
+                  for sid in sessions}
+    sess_before = {sid: call_module(mod, "cmd_session", path, sid)[:2]
+                   for sid in untouched}
+    code, out, err = run_cli("migrate", "--file", path)
+    got = strip_region(read_text(path))
+    problems = problem_if(code != 0, "exit %d: %s" % (code, err.strip()))
+    problems += problem_if(report_lines(out) != report,
+                           "report is %r, want %r" % (report_lines(out), report))
+    if got != expected:
+        want_lines, got_lines = lines_of(expected), lines_of(got)
+        first = next((i for i in range(max(len(want_lines), len(got_lines)))
+                      if want_lines[i:i + 1] != got_lines[i:i + 1]), 0)
+        problems.append("differs from the hand-written expectation at line "
+                        "%d: %r vs %r" % (first + 1, got_lines[first:first + 1],
+                                          want_lines[first:first + 1]))
+    for sid in sessions:
+        after = call_module(mod, "cmd_activate", path, sid)[:2]
+        problems += problem_if(after != act_before[sid],
+                               "activate %s: %r -> %r"
+                               % (sid, act_before[sid], after))
+    for sid in untouched:
+        after = call_module(mod, "cmd_session", path, sid)[:2]
+        problems += problem_if(after != sess_before[sid],
+                               "session %s changed" % sid)
+    problems += check_ranges(rows_of(mod, path), file_lines(path))
+    if outside:
+        # The independent oracle: minus the moved subsections before, minus
+        # the new blocks after, the two must be the same lines.  Not asked of
+        # the no-blanks shape, whose one ADDED blank is the documented case.
+        moved = [line.split(" ")[0] for line in report
+                 if line.endswith("migrated")]
+        kept_before = drop_subsections(lines_of(fixture), moved)
+        kept_after = drop_activation_blocks(lines_of(got), moved)
+        problems += problem_if(kept_before != kept_after,
+                               "outside the moved lines the file changed: "
+                               "%d lines vs %d" % (len(kept_before),
+                                                   len(kept_after)))
+    suite.record(GM, cid, problems, detail=[why] + lines_of(out))
+
+
+def stat_of(path):
+    info = os.stat(path)
+    return info.st_ino, info.st_mtime_ns
+
+
+def group_m(suite, mod, workspace):
+    path = stage(workspace, "m", FIXTURE_MIG)
+    run_cli("toc", "--write", "--file", path)  # the live file's steady state
+    before = read_text(path)
+    before_lines = lines_of(strip_region(before))
+    act_before = {sid: call_module(mod, "cmd_activate", path, sid)[:2]
+                  for sid in MIG_SESSIONS}
+    sess_before = {sid: lines_of(call_module(mod, "cmd_session", path, sid)[1])
+                   for sid in MIG_SESSIONS}
+    mission_before = call_module(mod, "cmd_mission", path)[:2]
+
+    code, out, err = run_cli("migrate", "--file", path)
+    after = read_text(path)
+    after_lines = lines_of(after)
+    problems = problem_if(code != 0, "exit %d: %s" % (code, err.strip()))
+    problems += check_report(out, MIG_REPORT_PREFIXES)
+    problems += problem_if(lines_of(out)[-1:] != ["total: 2 migrated, 2 "
+                                                  "skipped"],
+                           "total line is %r" % lines_of(out)[-1:])
+    suite.record(GM, "m-reports-one-line-per-session-and-a-total", problems,
+                 detail=lines_of(out) + [err.strip() or "no diagnostic"])
+    if code != 0:
+        return
+
+    stripped = strip_region(after)
+    problems = []
+    if stripped != EXPECTED_MIG:
+        want, got = lines_of(EXPECTED_MIG), lines_of(stripped)
+        first = next((i for i in range(max(len(want), len(got)))
+                      if want[i:i + 1] != got[i:i + 1]), 0)
+        problems.append("the migrated file differs from the hand-written "
+                        "expectation at line %d: %r vs %r"
+                        % (first + 1, got[first:first + 1],
+                           want[first:first + 1]))
+    suite.record(GM, "m-the-file-is-the-hand-written-expectation", problems,
+                 detail=["TOC region aside, byte for byte: S004 and S003 "
+                         "migrated, S002 and S001 and MISSION as they were"])
+
+    kept_before = drop_subsections(before_lines, MIG_MIGRATED)
+    kept_after = drop_activation_blocks(lines_of(stripped), MIG_MIGRATED)
+    suite.record(GM, "m-every-byte-outside-the-moved-lines-survives",
+                 problem_if(kept_before != kept_after,
+                            "the file minus the moved subsections (%d lines) "
+                            "!= the migrated file minus the new blocks (%d)"
+                            % (len(kept_before), len(kept_after))),
+                 detail=["an independent reading: drop the two subsections "
+                         "from the original, drop the two new blocks from the "
+                         "result, and what is left must be the same lines"])
+
+    rows = rows_of(mod, path)
+    problems = problem_if([r[0] for r in rows]
+                          != ["S004", "A004", "S003", "A003", "S002", "S001",
+                              "MISSION"],
+                          "rows are %r" % ([r[0] for r in rows],))
+    problems += check_ranges(rows, after_lines)
+    problems += check_slices(rows, after_lines,
+                             printed_blocks(mod, path, [r[0] for r in rows]))
+    _c, fresh, _e = run_cli("toc", "--file", path)
+    problems += check_fixpoint(region_lines(after_lines), lines_of(fresh))
+    suite.record(GM, "m-the-toc-tabulates-the-new-blocks", problems,
+                 detail=["%r" % ([r[0] for r in rows],),
+                         "regenerated in the same write, through with_toc"])
+
+    act_after = {sid: call_module(mod, "cmd_activate", path, sid)[:2]
+                 for sid in MIG_SESSIONS}
+    changed = [sid for sid in MIG_SESSIONS if act_before[sid] != act_after[sid]]
+    suite.record(GM, "m-activate-prints-the-same-text-for-every-session",
+                 problem_if(changed, "activate changed for %r: %r -> %r"
+                            % (changed, [act_before[s] for s in changed],
+                               [act_after[s] for s in changed])),
+                 detail=["exit code AND stdout, the refusals of S002 and S001 "
+                         "included: the move must be invisible to the one "
+                         "command that reads the prompt"])
+    s003 = act_after["S003"][1]
+    suite.record(GM, "m-a-non-ascii-prompt-moves-verbatim",
+                 problem_if("árvíztűrő tükörfúrógép" not in s003
+                            or act_before["S003"] != act_after["S003"],
+                            "activate S003 printed %r" % s003),
+                 detail=["not translated, not reflowed, not re-encoded"])
+
+    problems = []
+    for sid in MIG_SESSIONS:
+        want = trim_trailing_blank_lines(
+            drop_subsections(sess_before[sid], MIG_MIGRATED))
+        got = lines_of(call_module(mod, "cmd_session", path, sid)[1])
+        problems += problem_if(got != want, "%s: %r != %r"
+                               % (sid, got[-3:], want[-3:]))
+    code, latest, _e = run_cli("latest", "--file", path)
+    problems += problem_if(
+        lines_of(latest) != trim_trailing_blank_lines(
+            drop_subsections(sess_before["S004"], MIG_MIGRATED)),
+        "latest printed %r" % lines_of(latest)[-3:])
+    suite.record(GM, "m-a-session-is-its-old-self-minus-the-subsection",
+                 problems,
+                 detail=["`latest` and `session S<n>` after == the block "
+                         "before, with only the subsection removed"])
+
+    s002 = lines_of(call_module(mod, "cmd_session", path, "S002")[1])
+    problems = problem_if(s002 != sess_before["S002"],
+                          "S002 changed: %r" % s002[-3:])
+    problems += problem_if("A002" in [r[0] for r in rows],
+                           "an A002 block was written from a fenced quote")
+    suite.record(GM, "m-a-fenced-quote-is-not-migrated", problems,
+                 detail=["the only `### ACTIVATION` in S002 is inside a code "
+                         "fence: a quote, not a prompt"])
+
+    s003_lines = lines_of(call_module(mod, "cmd_session", path, "S003")[1])
+    problems = problem_if("### MODEL" not in s003_lines,
+                          "the ### MODEL after the subsection left S003")
+    problems += problem_if(any(l.startswith("### ACTIVATION")
+                               for l in s003_lines),
+                           "the subsection is still in S003")
+    blanks = [i for i in range(1, len(s003_lines))
+              if not s003_lines[i].strip() and not s003_lines[i - 1].strip()]
+    problems += problem_if(blanks, "two blank lines in a row where the "
+                           "subsection was: %r" % s003_lines)
+    suite.record(GM, "m-a-subsection-in-the-middle-moves-alone", problems,
+                 detail=s003_lines)
+
+    s001 = lines_of(call_module(mod, "cmd_session", path, "S001")[1])
+    problems = problem_if(s001 != sess_before["S001"],
+                          "S001 changed: %r" % s001[-3:])
+    problems += problem_if("A001" in [r[0] for r in rows],
+                           "an EMPTY A001 block was written")
+    suite.record(GM, "m-an-empty-prompt-is-skipped", problems,
+                 detail=["prepend would refuse an empty activation block; "
+                         "migrate must not write one either"])
+
+    suite.record(GM, "m-mission-is-untouched",
+                 problem_if(call_module(mod, "cmd_mission", path)[:2]
+                            != mission_before, "the MISSION block changed"))
+
+    # -- idempotence: nothing to migrate means nothing written ------------
+    migrated = read_text(path)
+    stamp = stat_of(path)
+    code, out2, err2 = run_cli("migrate", "--file", path)
+    problems = problem_if(code != 0, "exit %d: %s" % (code, err2.strip()))
+    problems += check_idempotent(migrated, read_text(path))
+    problems += problem_if(stat_of(path) != stamp,
+                           "the file was REPLACED (inode or mtime moved) "
+                           "although nothing was migrated")
+    problems += problem_if(not lines_of(out2)[-1:][0].startswith(
+        "total: 0 migrated"), "total line is %r" % lines_of(out2)[-1:])
+    suite.record(GM, "m-a-second-run-migrates-nothing-and-writes-nothing",
+                 problems, detail=lines_of(out2))
+
+    run_cli("toc", "--write", "--file", path)
+    suite.record(GM, "m-toc-write-after-migrate-is-a-byte-no-op",
+                 check_idempotent(migrated, read_text(path)),
+                 detail=["migrate regenerated the region through the same "
+                         "generator `toc --write` uses"])
+
+    # -- --dry-run --------------------------------------------------------
+    dry = stage(workspace, "m-dry", FIXTURE_MIG)
+    run_cli("toc", "--write", "--file", dry)
+    dry_bytes, dry_stamp = read_text(dry), stat_of(dry)
+    code, dout, derr = run_cli("migrate", "--dry-run", "--file", dry)
+    problems = problem_if(code != 0, "exit %d: %s" % (code, derr.strip()))
+    problems += check_idempotent(dry_bytes, read_text(dry))
+    problems += problem_if(stat_of(dry) != dry_stamp,
+                           "the file was replaced by a dry run")
+    problems += problem_if(report_lines(dout) != report_lines(out),
+                           "the dry-run report %r differs from the real run's "
+                           "%r" % (report_lines(dout), report_lines(out)))
+    problems += problem_if("dry run" not in (lines_of(dout)[-1:] or [""])[0],
+                           "the total does not say it was a dry run")
+    suite.record(GM, "m-dry-run-reports-the-same-and-writes-nothing",
+                 problems, detail=lines_of(dout))
+
+    # -- a subsection with no blank line above it -------------------------
+    tight = stage(workspace, "m-tight", FIXTURE_MIG_TIGHT)
+    code, _o, err = run_cli("migrate", "--file", tight)
+    problems = problem_if(code != 0, "exit %d: %s" % (code, err.strip()))
+    problems += problem_if(strip_region(read_text(tight)) != EXPECTED_MIG_TIGHT,
+                           "got %r" % lines_of(strip_region(read_text(tight))))
+    suite.record(GM, "m-a-subsection-with-no-blank-above-leaves-one-blank",
+                 problems, detail=["exactly one blank line where it was: "
+                                   "never zero, never two"])
+
+    for cid, fixture, expected, report, sessions, untouched, why in (
+            ("m-a-subsection-with-no-blank-on-either-side-leaves-one-blank",
+             FIXTURE_MIG_NO_BLANKS, EXPECTED_MIG_NO_BLANKS,
+             ["S001 migrated"], ("S001",), (),
+             "`1. x` / `### ACTIVATION` / `> p` / `### MODEL`: there is no "
+             "blank to keep, so one is written in"),
+            ("m-a-session-with-two-subsections-is-skipped-whole",
+             FIXTURE_MIG_TWO, EXPECTED_MIG_TWO,
+             ["S002 skipped: more than one ### ACTIVATION subsection -- "
+              "resolve by hand", "S001 migrated"], ("S002", "S001"),
+             ("S002",),
+             "which of two prompts is THE prompt is a judgement; S002 must "
+             "come out byte-identical while S001 beside it is migrated"),
+            ("m-the-last-block-in-the-file-migrates",
+             FIXTURE_MIG_LAST, EXPECTED_MIG_LAST,
+             ["S001 migrated"], ("S001",), (),
+             "no MISSION after it: the subsection runs to EOF, and the new "
+             "block becomes the file's last"),
+            ("m-a-subsection-right-before-the-mission-migrates",
+             FIXTURE_MIG_BEFORE_MISSION, EXPECTED_MIG_BEFORE_MISSION,
+             ["S001 migrated"], ("S001",), (),
+             "the live S001 shape: one blank above the subsection, exactly "
+             "one blank between it and `## MISSION`")):
+        migrate_case(suite, mod, workspace, cid, fixture, expected, report,
+                     sessions, untouched, why,
+                     outside=fixture is not FIXTURE_MIG_NO_BLANKS)
+
+    # -- a mixed file ------------------------------------------------------
+    mixed = stage(workspace, "m-mixed", FIXTURE_MIG_MIXED)
+    act_mixed = {sid: call_module(mod, "cmd_activate", mixed, sid)[:2]
+                 for sid in ("S003", "S002", "S001")}
+    code, mout, err = run_cli("migrate", "--file", mixed)
+    problems = problem_if(code != 0, "exit %d: %s" % (code, err.strip()))
+    problems += check_report(mout, MIG_MIXED_REPORT_PREFIXES)
+    problems += problem_if(strip_region(read_text(mixed)) != EXPECTED_MIG_MIXED,
+                           "got %r" % lines_of(strip_region(read_text(mixed))))
+    problems += problem_if(
+        {sid: call_module(mod, "cmd_activate", mixed, sid)[:2]
+         for sid in ("S003", "S002", "S001")} != act_mixed,
+        "activate changed on the mixed file")
+    suite.record(GM, "m-a-mixed-file-migrates-only-what-is-legacy", problems,
+                 detail=lines_of(mout) + [
+                     "S002 carries both forms: reported, and left for a "
+                     "human -- which copy is right is not the script's call"])
+
+    # -- the migrated file takes a new-format segment ----------------------
+    segment = stage_segment(workspace, "m", SEGMENT_AFTER_MIGRATE)
+    code, _o, err = run_cli("prepend", "--block-file", segment,
+                            "--file", path)
+    plines = file_lines(path)
+    prows = rows_of(mod, path)
+    problems = problem_if(code != 0, "exit %d: %s" % (code, err.strip()))
+    problems += problem_if([r[0] for r in prows][:3] != ["S005", "A005",
+                                                         "S004"],
+                           "rows are %r" % ([r[0] for r in prows],))
+    problems += check_ranges(prows, plines)
+    written = read_text(path)
+    run_cli("toc", "--write", "--file", path)
+    problems += check_idempotent(written, read_text(path))
+    suite.record(GM, "m-prepend-after-migrate-succeeds", problems,
+                 detail=["and a following `toc --write` is a byte no-op"])
+
+    # -- refusals ------------------------------------------------------------
+    for cid, body, tokens in (
+            ("m-refuses-a-missing-file", None, ["file not found"]),
+            ("m-refuses-a-non-utf8-file", FIXTURE_NON_UTF8,
+             ["not valid UTF-8"]),
+            ("m-refuses-a-file-with-no-h1", NO_H1, ["no H1 title"]),
+            ("m-refuses-an-unterminated-toc", UNTERMINATED,
+             ["unterminated TOC region"])):
+        refusal(suite, workspace, cid, cid, body, ["migrate"],
+                ["checkpoint:"] + tokens,
+                "the same route as every other command: exit 2, one line on "
+                "stderr, nothing on stdout, the file as it was",
+                group=GM, absent=["Traceback"], silent=True, one_line=True)
+
+    directory = sandbox_path(workspace.subdir("m-directory"))
+    code, out, err = run_cli("migrate", "--file", directory)
+    problems = problem_if(code != 2, "exit %r, want 2" % code)
+    problems += problem_if("Traceback" in err, "it raised instead of refusing")
+    problems += ["the diagnostic omits %r" % t
+                 for t in missing_tokens(err, ["not a regular file",
+                                               directory])]
+    problems += problem_if(os.listdir(directory), "the directory changed")
+    suite.record(GM, "m-refuses-a-directory-as-the-target", problems,
+                 detail=["exit %r; stderr: %s" % (code, err.strip())])
+
+    stale = stale_temp_files(workspace.path)
+    suite.record(GM, "m-no-temp-file-left",
+                 problem_if(stale, "left behind: %r" % stale[:6]))
+
+
+def trim_trailing_blank_lines(lines):
+    lines = list(lines)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # K. hygiene -- runs LAST, after every group that writes
 # ---------------------------------------------------------------------------
 
@@ -2871,6 +3665,7 @@ def run(opts=None):
             group_i(suite, mod, workspace)
             group_j(suite, mod, workspace)
             group_l(suite, mod, workspace)
+            group_m(suite, mod, workspace)
         finally:
             # group_k LAST, always: it asserts the repo tree and the user's
             # live checkpoint are exactly as this run found them, so every

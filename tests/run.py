@@ -312,9 +312,12 @@ SUITES = [
      "SESSION + its ACTIVATION -- falling back, read-only, to the old "
      "`### ACTIVATION` subsection -- an empty prompt is refused on write and "
      "on read alike, a file that is not UTF-8 is refused rather than crashed "
-     "on, and every refusal exits 2 with one line on stderr, leaving the file "
-     "alone",
-     203),
+     "on, `migrate` moves every legacy subsection verbatim into its own block "
+     "-- matched against hand-written expected files, `activate` unchanged "
+     "for every session, and a second run or a --dry-run writing nothing down "
+     "to the mtime -- and every refusal exits 2 with one line on stderr, "
+     "leaving the file alone",
+     230),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against", 92),
