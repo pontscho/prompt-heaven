@@ -16,6 +16,7 @@ links:
   - tests
   - requirements-yaml
   - 0009-the-first-reader-is-a-cold-model
+  - 0020-the-prompt-is-its-own-block
 ---
 
 # Skills

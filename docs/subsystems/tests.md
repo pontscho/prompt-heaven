@@ -20,6 +20,7 @@ links:
   - 0011-a-truncated-payload-carries-the-first-cookie
   - 0013-the-ceiling-is-a-payload-class
   - 0016-a-cell-may-not-forge-a-boundary
+  - 0020-the-prompt-is-its-own-block
 ---
 
 # Test Fleet
