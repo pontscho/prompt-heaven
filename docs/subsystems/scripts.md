@@ -562,8 +562,9 @@ caller after a bug that is not there.
 rather than re-derived. An absent **parser** may degrade — "this host's Python
 cannot read TOML" is an honest thing for a SKIP row to say — but an absent
 **answer** may not: the caller asked whether a script parses and got nothing at
-all, and a SKIP row leaves the batch verdict at **PASSED** over a file nobody
-checked. FAIL is the only rung that cannot be mistaken for success.
+all, and a SKIP row in a mixed batch leaves the verdict at **PASSED** over a file
+nobody checked, named only in a "not verified" tail. (A SKIP/LIMITED-only call
+reads **NOT VERIFIED**.) FAIL is the only rung that cannot be mistaken for success.
 
 Both interesting properties here were **measured, not assumed**, and the first is
 measured twice over, in two places, by two different instruments. The recorded

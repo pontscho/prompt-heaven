@@ -196,16 +196,19 @@ the first error, plus one overall verdict line and a count summary.
 
 **Missing PyYAML/tomllib degrades to `LIMITED`/`SKIP`; a missing `node` or `bash`
 FAILs.** That asymmetry is deliberate: those two are optional *parsers* and their
-absence is a property of this host's Python, while a `SKIP`ped `.js`/`.sh` would leave
-the batch verdict at `**PASSED**` over a file nobody ever checked.
+absence is a property of this host's Python, while a `SKIP`ped `.js`/`.sh` in a mixed
+batch would leave the verdict at `**PASSED**` over a file nobody ever checked.
 
 | Verdict | When |
 |---|---|
-| `**PASSED**` | no `FAIL` rows |
+| `**PASSED**` | no `FAIL` rows and at least one `OK`; any `LIMITED`/`SKIP` rows are named on the line: `**PASSED** — 3 OK; 1 not verified (SKIP).` |
 | `**FAILED**` | any `FAIL` row |
+| `**NOT VERIFIED**` | no `FAIL` and no `OK`: every row was `LIMITED`/`SKIP` (a lone `.txt`, a directory, a file over `max_mb`), so nothing was checked |
 | `**NOT VERIFIED (strict)**` | no `FAIL`, but `strict:true` and some row was `LIMITED`/`SKIP` |
 
-Use `strict:true` whenever a `LIMITED`/`SKIP` must not quietly read as success.
+`LIMITED` counts as not verified, like `SKIP`: a timeout checked nothing, and the
+PyYAML-less pre-check is not a parse. Use `strict:true` whenever a single
+`LIMITED`/`SKIP` in a mixed batch must fail the verdict rather than be a tail note.
 
 ## Per-format specifics
 

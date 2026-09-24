@@ -18,7 +18,8 @@ Coverage by group:
      plus the .sh/.bash extension pair and the sh/shell format spellings
   G  every function alias routes to a real handler
   H  max_mb cap semantics (0 = no cap, cap hit, default, negative, non-int)
-  I  strict mode turns SKIP into NOT VERIFIED
+  I  the batch verdict: a SKIP/LIMITED-only call is NOT VERIFIED, a mixed one
+     PASSES naming what it left out, strict turns any SKIP into NOT VERIFIED
   J  batch mode via `paths`: mixed verdicts and row count
   K  real repo files validate clean
   L  no regression in the non-validation functions (host stat sha256 pstree ...)
@@ -651,14 +652,67 @@ def run(opts=None):
         case(suite, cli, "H", "maxmb-not-int", "validate",
              {"path": big, "max_mb": "abc"}, want_error=True, must=["max_mb"])
 
-        # ================= I: strict =================
+        # ============ I: the batch verdict, strict and not ============
+        # A call that checked NOTHING -- every row SKIP or LIMITED -- used to
+        # read `**PASSED** — 1 SKIP.`, success over a file nobody parsed.  It
+        # is NOT VERIFIED now, strict or not; the three legitimate ways to get
+        # there without an error are each driven: no format for the extension,
+        # a directory, and a file over max_mb.
         case(suite, cli, "I", "strict-off-skip", "validate",
-             {"path": f("plain.txt")}, must=["SKIP", "**PASSED**"])
+             {"path": f("plain.txt")},
+             must=["SKIP", "**NOT VERIFIED** — 1 SKIP."],
+             must_not=["**PASSED**", "(strict)"])
+        case(suite, cli, "I", "dir-alone-not-verified", "validate",
+             {"path": f("adir")},
+             must=["SKIP", "**NOT VERIFIED**"],
+             must_not=["**PASSED**", "(strict)"])
+        case(suite, cli, "I", "maxmb-cap-not-verified", "validate",
+             {"path": big, "max_mb": 1},
+             must=["SKIP", "**NOT VERIFIED**"],
+             must_not=["**PASSED**", "(strict)"])
+        # A MIXED batch still passes -- a missing optional parser must not sink
+        # the files that were checked -- but the line names what it left out.
+        case(suite, cli, "I", "mixed-ok-skip-passed", "validate",
+             {"paths": [f("valid.json"), f("plain.txt")]},
+             must=["**PASSED** — 1 OK; 1 not verified (SKIP)."],
+             must_not=["NOT VERIFIED", "FAIL"])
+        case(suite, cli, "I", "all-ok-plain-passed", "validate",
+             {"paths": [f("valid.json"), f("valid.xml")]},
+             must=["**PASSED** — 2 OK."],
+             must_not=["not verified", "NOT VERIFIED"])
+        # strict is unchanged: any SKIP/LIMITED row, alone or mixed
         case(suite, cli, "I", "strict-on-skip", "validate",
              {"path": f("plain.txt"), "strict": True},
              must=["SKIP", "**NOT VERIFIED (strict)**"])
+        case(suite, cli, "I", "strict-on-mixed", "validate",
+             {"paths": [f("valid.json"), f("plain.txt")], "strict": True},
+             must=["**NOT VERIFIED (strict)** — 1 OK, 1 SKIP."],
+             must_not=["**PASSED**"])
         case(suite, cli, "I", "strict-on-ok", "validate",
              {"path": f("valid.json"), "strict": True}, must=["**PASSED**"])
+        # LIMITED counts as NOT checked: two of its three sources (a node/bash
+        # timeout) checked nothing, the third (YAML without PyYAML) is "NOT a
+        # full parse" by its own message.  No fixture can force it on a host
+        # that has PyYAML and a fast bash, so the YAML validator is swapped
+        # in-process for one that answers LIMITED, and h_validate is called
+        # directly -- same code path, minus the transport.
+        vmod = H.load_module_from_path("mcp_inspect_verdict_i", SERVER)
+        vmod._VALIDATORS["yaml"] = (
+            lambda data, name: vmod._v_limited("forced LIMITED [test]"))
+        for cid, paths, want, not_want in [
+                ("limited-only-not-verified", [f("valid.yaml")],
+                 "**NOT VERIFIED** — 1 LIMITED.", "**PASSED**"),
+                ("mixed-ok-limited-passed", [f("valid.json"), f("valid.yaml")],
+                 "**PASSED** — 1 OK; 1 not verified (LIMITED).",
+                 "NOT VERIFIED")]:
+            try:
+                t = vmod.h_validate({"paths": paths})
+            except Exception as exc:  # a crash is a red row, not a dead suite
+                t = "raised %s: %s" % (type(exc).__name__, exc)
+            problems = [] if want in t else ["MISSING %r" % want]
+            if not_want in t:
+                problems.append("UNEXPECTED %r" % not_want)
+            suite.record("I", cid, problems, text=t, showable=True)
 
         # ================= J: batch =================
         t = case(suite, cli, "J", "batch-mixed", "validate",

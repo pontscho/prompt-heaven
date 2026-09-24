@@ -1680,11 +1680,13 @@ def _v_javascript(data: bytes, name: str) -> _VResult:
     if node is None:
         # FAIL, not the SKIP a missing PyYAML/tomllib gets. The asymmetry is
         # deliberate -- do NOT harmonise it: those two are optional PARSERS, and
-        # SKIP/LIMITED still leaves the batch verdict PASSED, which is honest for
-        # "this host's Python cannot read TOML". Here the caller asked whether a
-        # JS file parses and got NO answer at all; a SKIP row in a batch reads as
-        # "nothing to see here" and would let **PASSED** stand over an unchecked
-        # file. FAIL is the only rung that cannot be mistaken for success.
+        # SKIP/LIMITED in a MIXED batch still leaves the verdict PASSED (with a
+        # "N not verified" tail), which is honest for "this host's Python cannot
+        # read TOML". Here the caller asked whether a JS file parses and got NO
+        # answer at all; a SKIP row in a batch with any OK row would let
+        # **PASSED** stand over an unchecked file, the tail being easy to miss.
+        # (A SKIP-only call reads NOT VERIFIED.) FAIL is the only rung that
+        # cannot be mistaken for success.
         return _v_fail("no `node` in PATH (install Node.js to validate "
                        "JavaScript)")
     if name != "<content>":
@@ -1772,9 +1774,9 @@ def _v_bash(data: bytes, name: str) -> _VResult:
     if bash is None:
         # FAIL, not SKIP -- the same call `_v_javascript` makes above, for the
         # same reason: the caller asked whether a script parses and got NO
-        # answer, and a SKIP row would let **PASSED** stand over an unchecked
-        # file. An absent PARSER (PyYAML/tomllib) is the thing that may degrade;
-        # an absent ANSWER is not.
+        # answer, and a SKIP row in a mixed batch would let **PASSED** stand over
+        # an unchecked file. An absent PARSER (PyYAML/tomllib) is the thing that
+        # may degrade; an absent ANSWER is not.
         return _v_fail("no `bash` in PATH (install Bash to validate shell "
                        "scripts)")
     if name != "<content>":
@@ -1918,12 +1920,26 @@ def h_validate(p: dict, fmt: str = "") -> str:
             record(*_validate_bytes(data, used, path), used, path)
 
     summary = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
+    # LIMITED counts as NOT checked, same as SKIP: two of its three sources are
+    # a `node --check`/`bash -n` timeout that checked nothing, and the third is
+    # the PyYAML-less pre-check that says "NOT a full parse" in its own message.
+    unverified = [(s, counts[s]) for s in (_V_LIMITED, _V_SKIP) if counts[s]]
     if counts[_V_FAIL]:
         verdict = "**FAILED**"
-    elif strict and (counts[_V_LIMITED] or counts[_V_SKIP]):
+    elif strict and unverified:
         verdict = "**NOT VERIFIED (strict)**"
+    elif not counts[_V_OK]:
+        # nothing was checked at all -- a lone .txt, a directory, a file over
+        # max_mb -- so PASSED would be success over a file nobody parsed
+        verdict = "**NOT VERIFIED**"
     else:
         verdict = "**PASSED**"
+        if unverified:
+            # a mixed batch still passes, but the line names what it left out
+            kinds = (unverified[0][0] if len(unverified) == 1 else
+                     ", ".join(f"{n} {s}" for s, n in unverified))
+            summary = (f"{counts[_V_OK]} OK; "
+                       f"{sum(n for _, n in unverified)} not verified ({kinds})")
     # No title: the `format` column already carries the format PER ROW, which is
     # strictly better than one in a header -- a mixed-extension batch has no
     # single format to name, and the old header printed nothing at all for it.
