@@ -1743,10 +1743,9 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     dedupe_files = len(search_roots) > 1
     seen_files: set = set()
 
-    # Smart default: switch to "content" mode when context-line params are set
-    # or when the search target is a single file — otherwise the user-passed
-    # context params are silently ignored and a single-file search would only
-    # answer "yes/no this file matches", which is rarely the actual intent.
+    # Default is "content", unconditionally: a file-list default would silently
+    # ignore context params and answer a single-file search with only
+    # "yes/no this file matches", which is rarely the actual intent.
     explicit_mode = params.get("output_mode")
     if explicit_mode:
         output_mode = explicit_mode
