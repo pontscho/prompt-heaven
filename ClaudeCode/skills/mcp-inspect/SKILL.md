@@ -110,9 +110,12 @@ mcp__mcp-inspect__inspect_call(function="<name>", params={...})
   it is truncated with an explicit note.
 
 Errors come back as `isError: true` with a one-line explanation (bad params, unknown
-function, missing binary). Unknown/typo'd params are **silently ignored** — there is no
-accepted-params table on this server, so `{pdi: 123}` behaves like `{}`. Re-read the
-signature if a filter seems to have had no effect.
+function, missing binary). Unknown/typo'd params are **refused**, not ignored: each
+function has an accepted-params table, checked after the function alias is resolved and
+before anything runs, so `process {pdi: 123}` answers
+`Unknown params for 'process': pdi. Accepted: max_answer_chars, pid.` The pinned format
+validators (`json`, `python`, … `bash`) refuse `format`/`fmt` instead of letting the pinned
+format override it — use `validate` to choose a format.
 
 ## Function index (34)
 
@@ -156,7 +159,9 @@ params:{content: "{\"a\":1}", format: "json"}       # inline text, no file neede
 
 - `path` (alias `file`) and `paths` **together** → hard error (nothing is silently
   dropped). `content` together with either → hard error.
-- `content` **requires** `format` — there is no filename to detect from.
+- `content` **requires** `format` on `validate` — there is no filename to detect from.
+  A pinned function (`json`, `yaml`, …) already has its format and **refuses** a
+  `format`/`fmt` param, so there it is `params:{content: "..."}` alone.
 - With `validate`, `format` is optional and auto-detected from the extension:
   `.json` · `.yaml`/`.yml` · `.toml` · `.xml`/`.svg`/`.xsd`/`.rss` · `.plist` ·
   `.ini`/`.cfg` · `.csv` · `.tsv` · `.py`/`.pyi` · `.js`/`.mjs`/`.cjs` ·
@@ -366,7 +371,8 @@ verdict unset and prints `MISMATCH` — read the row, not just the verdict.
 - **Output tables are whitespace-aligned, not pipe-delimited.** Never split on `|` when
   parsing this server's output.
 - **`0` usually means "no cap"** for `limit`/`top`/`max_mb`, not "nothing".
-- **Unknown params are silently ignored** (see *How to call*).
+- **Unknown params are refused** with the function's accepted list (see *How to call*) —
+  read the list rather than retrying spellings.
 - **The server's view is the server's**: `stat` access bits, `limits`, and `env` reflect
   the MCP server process, not the Bash shell you would have used. `env` in particular
   shows the environment the server was launched with.

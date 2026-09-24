@@ -1978,15 +1978,15 @@ def h_bash(p: dict) -> str:
 
 # canonical -> (handler, one-line description)
 HANDLERS: Dict[str, Tuple[Any, str]] = {
-    "processes":   (h_processes, "List processes (params: filter, user, sort=cpu|mem|pid, limit)"),
+    "processes":   (h_processes, "List processes (params: filter, user, sort=cpu|mem|pid, limit, timeout)"),
     "process":     (h_process, "Detail for one PID (params: pid)"),
-    "ports":       (h_ports, "Listening sockets (params: proto=tcp|udp|all)"),
-    "connections": (h_connections, "Network connections (params: state=established|all)"),
-    "open_files":  (h_open_files, "Open files/FDs via lsof (params: pid, port, user, path, limit)"),
+    "ports":       (h_ports, "Listening sockets (params: proto=tcp|udp|all, timeout)"),
+    "connections": (h_connections, "Network connections (params: state=established|all, timeout)"),
+    "open_files":  (h_open_files, "Open files/FDs via lsof (params: pid, port, user, path, limit, timeout)"),
     "host":        (h_host, "Host/OS/uname/uptime/cpu/loadavg"),
     "memory":      (h_memory, "Memory usage (vm_stat / free / meminfo)"),
     "disk":        (h_disk, "Filesystem usage via df (params: path)"),
-    "disk_usage":  (h_disk_usage, "Directory sizes via du (params: path [req], depth, top)"),
+    "disk_usage":  (h_disk_usage, "Directory sizes via du (params: path [req], depth, top, timeout)"),
     "mounts":      (h_mounts, "Mounted filesystems"),
     "which":       (h_which, "Resolve a binary in PATH (params: name)"),
     "env":         (h_env, "Environment vars, secrets redacted (params: key, filter, show_secrets)"),
@@ -1997,9 +1997,9 @@ HANDLERS: Dict[str, Tuple[Any, str]] = {
     "limits":      (h_limits, "Resource limits / rlimits (params: pid — per-PID on Linux only)"),
     "services":    (h_services, "launchctl/systemctl services (params: filter, user, limit)"),
     "versions":    (h_versions, "Versions of allow-listed tools (params: tools)"),
-    "hash":        (h_hash, "File digest (params: path [req], algo (alias algorithm)=sha256|sha512|sha1|md5|blake2b, expect, max_mb, recursive, max_files=1000)"),
-    "sha256":      (h_sha256, "SHA-256 of a file or files (params: path [req], expect, recursive, max_files)"),
-    "md5":         (h_md5, "MD5 of a file or files (params: path [req], expect, recursive, max_files)"),
+    "hash":        (h_hash, "File digest (params: path | paths [req], algo (alias algorithm)=sha256|sha512|sha384|sha224|sha1|md5|blake2b|blake2s, expect, max_mb, recursive, max_files=1000)"),
+    "sha256":      (h_sha256, "SHA-256 of a file or files (params: path | paths [req], expect, max_mb, recursive, max_files)"),
+    "md5":         (h_md5, "MD5 of a file or files (params: path | paths [req], expect, max_mb, recursive, max_files)"),
     "validate":    (h_validate, "Syntax/format validation, format auto-detected from the extension (params: path | paths | content+format; format, strict, max_mb)"),
     "json":        (h_json, "Validate JSON (params: path | paths | content)"),
     "python":      (h_python, "Validate Python syntax via in-memory compile() — stronger than ast.parse, writes no .pyc (params: path | paths | content)"),
@@ -2051,6 +2051,66 @@ ALIASES = {
 }
 
 
+# The params each function reads, keyed by CANONICAL name -- the dispatcher
+# resolves a function alias before looking here.  A key outside its function's
+# row is REFUSED, not dropped: every handler has a no-filter default that is a
+# plausible answer, so a misspelling used to come back as a confident wrong one
+# (`processes {pattern}` as the top 30 of the whole host, `limits {process}` as
+# this server's own rlimits).  Each row is exactly what the handler reads,
+# helpers it hands `p` to included (`_timeout_param`, `_hash_algo`, the pinned
+# wrappers' `h_validate`), inline or-chain aliases too; group R of
+# tests/test_inspect_validate.py extracts those reads from this source and
+# demands equality, so the table cannot drift from the code.
+#
+# `_COMMON_PARAMS` is what the DISPATCHER itself reads. The one deliberate gap
+# between a row and its handler's reads is the pinned format validators: they
+# omit `format`/`fmt`, because `h_validate(p, "json")` lets the pinned format
+# override them in silence -- `json {format: yaml}` parsed as JSON. Refused
+# instead, and `validate` is the function that takes a format. `sha256`/`md5`
+# KEEP `algo`/`algorithm`: `_hash_algo` already refuses a disagreeing one.
+_COMMON_PARAMS = {"max_answer_chars"}
+_HASH_PARAMS = {"path", "file", "paths", "algo", "algorithm", "max_mb",
+                "recursive", "max_files", "expect"}
+_VALIDATE_FILE_PARAMS = {"path", "file", "paths", "content", "text", "max_mb",
+                         "strict"}
+HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
+    "processes":   _COMMON_PARAMS | {"filter", "name", "user", "sort", "limit",
+                                     "timeout"},
+    "process":     _COMMON_PARAMS | {"pid"},
+    "ports":       _COMMON_PARAMS | {"proto", "timeout"},
+    "connections": _COMMON_PARAMS | {"state", "timeout"},
+    "open_files":  _COMMON_PARAMS | {"pid", "port", "user", "path", "limit",
+                                     "timeout"},
+    "host":        set(_COMMON_PARAMS),
+    "memory":      set(_COMMON_PARAMS),
+    "disk":        _COMMON_PARAMS | {"path"},
+    "disk_usage":  _COMMON_PARAMS | {"path", "depth", "top", "timeout"},
+    "mounts":      set(_COMMON_PARAMS),
+    "which":       _COMMON_PARAMS | {"name", "cmd", "command"},
+    "env":         _COMMON_PARAMS | {"key", "filter", "show_secrets"},
+    "stat":        _COMMON_PARAMS | {"path", "file"},
+    "interfaces":  _COMMON_PARAMS | {"filter", "name"},
+    "route":       set(_COMMON_PARAMS),
+    "pstree":      _COMMON_PARAMS | {"pid", "depth", "limit"},
+    "limits":      _COMMON_PARAMS | {"pid"},
+    "services":    _COMMON_PARAMS | {"filter", "name", "user", "limit"},
+    "versions":    _COMMON_PARAMS | {"tools", "tool", "name"},
+    "hash":        _COMMON_PARAMS | _HASH_PARAMS,
+    "sha256":      _COMMON_PARAMS | _HASH_PARAMS,
+    "md5":         _COMMON_PARAMS | _HASH_PARAMS,
+    "validate":    _COMMON_PARAMS | _VALIDATE_FILE_PARAMS | {"format", "fmt"},
+}
+for _pinned in ("json", "python", "yaml", "toml", "xml", "ini", "csv", "tsv",
+                "plist", "javascript", "bash"):
+    HANDLER_ACCEPTED_PARAMS[_pinned] = _COMMON_PARAMS | _VALIDATE_FILE_PARAMS
+del _pinned
+
+
+def _unknown_params(params: dict, accepted: set) -> List[str]:
+    """Sorted caller params outside `accepted`."""
+    return sorted(set(params) - accepted)
+
+
 def _status_text(project_root: Optional[str]) -> str:
     lines = ["## mcp-inspect", "",
              f"Platform: `{platform.platform()}`  ({_SYS})",
@@ -2073,6 +2133,11 @@ def _status_text(project_root: Optional[str]) -> str:
         "FAILS the row instead of degrading it (an unchecked file must not read "
         "as PASSED). Everything else (json/python/xml/ini/csv/tsv/plist) is "
         "stdlib.\n")
+    lines.append(
+        "Every function also takes `max_answer_chars` (default "
+        f"{DEFAULT_MAX_CHARS}). A param outside a function's list is REFUSED "
+        "with the accepted list, never ignored; the pinned format validators "
+        "(json, python, ...) refuse `format`/`fmt` — use `validate` for that.\n")
     lines.append("Functions (all READ-ONLY):\n")
     for name, (_, desc) in HANDLERS.items():
         al = [a for a, c in ALIASES.items() if c == name]
@@ -2100,6 +2165,18 @@ def handle_inspect_call(arguments: dict, project_root: Optional[str]) -> dict:
             + ", ".join(sorted(HANDLERS)) + ". Call with no 'function' for details."
         )}
     handler = entry[0]
+    # After the function alias is resolved and BEFORE the handler runs, so a
+    # misspelled key is refused rather than answered as if it were absent.
+    # Returned through the `error` key like every other refusal here, which
+    # _handle_tool_call turns into isError: true (ADR 0010).
+    accepted = HANDLER_ACCEPTED_PARAMS.get(canonical)
+    if accepted is not None:
+        unknown = _unknown_params(params, accepted)
+        if unknown:
+            return {"error": (
+                f"Unknown params for '{canonical}': {', '.join(unknown)}."
+                f" Accepted: {', '.join(sorted(accepted))}."
+            )}
     try:
         md = handler(params)
     except ValueError as exc:
@@ -2143,17 +2220,21 @@ INSPECT_CALL_TOOL = {
         "`py_compile`, `json.tool`, `jq .`, `xmllint --noout`, `node --check`, "
         "`bash -n`): reports line:col and writes nothing.\n\n"
         "Single-tool dispatcher: pass `function` + `params` (or `f` + `p`). "
-        "Called without `function` → server status + full function list.\n\n"
+        "Called without `function` → server status + full function list. "
+        "Every function also takes `max_answer_chars` (default 100000); a "
+        "param not listed for its function is REFUSED with the accepted list, "
+        "never silently ignored.\n\n"
         "Functions (aliases in parens):\n"
-        "  processes (ps)        params: filter, user, sort=cpu|mem|pid, limit\n"
+        "  processes (ps)        params: filter, user, sort=cpu|mem|pid, limit, "
+        "timeout\n"
         "  process               params: pid\n"
-        "  ports (netstat/ss)    params: proto=tcp|udp|all\n"
-        "  connections           params: state=established|all\n"
-        "  open_files (lsof)     params: pid, port, user, path, limit\n"
+        "  ports (netstat/ss)    params: proto=tcp|udp|all, timeout\n"
+        "  connections           params: state=established|all, timeout\n"
+        "  open_files (lsof)     params: pid, port, user, path, limit, timeout\n"
         "  host (uname)          host/OS/uptime/cpu/loadavg\n"
         "  memory (free/vm_stat) memory usage\n"
         "  disk (df)             params: path\n"
-        "  disk_usage (du)       params: path [required], depth, top\n"
+        "  disk_usage (du)       params: path [required], depth, top, timeout\n"
         "  mounts                mounted filesystems\n"
         "  which                 params: name\n"
         "  env                   params: key, filter; secret-looking values "
@@ -2166,19 +2247,21 @@ INSPECT_CALL_TOOL = {
         "  limits (ulimit)       params: pid (per-PID on Linux only)\n"
         "  services (launchctl)  params: filter, user, limit\n"
         "  versions (toolchain)  params: tools — allow-listed binaries only\n"
-        "  sha256 (shasum)       params: path [required] (or a list), expect, "
-        "recursive, max_files\n"
-        "  md5 (md5sum)          params: path [required] (or a list), expect, "
-        "recursive, max_files\n"
-        "  hash (checksum)       params: path [required], algo (alias algorithm)="
-        "sha256|sha512|sha1|md5|blake2b, expect, max_mb, recursive (hash every "
+        "  sha256 (shasum)       params: path | paths [required], expect, "
+        "max_mb, recursive, max_files\n"
+        "  md5 (md5sum)          params: path | paths [required], expect, "
+        "max_mb, recursive, max_files\n"
+        "  hash (checksum)       params: path | paths [required], algo (alias "
+        "algorithm)=sha256|sha512|sha384|sha224|sha1|md5|blake2b|blake2s, "
+        "expect, max_mb, recursive (hash every "
         "regular file under a directory, symlinks not followed), max_files "
         "(default 1000, 0 = no cap)\n"
         "  validate (lint/check) params: path | paths (a LIST — check many files "
         "in ONE call) | content+format; format (else from the extension), "
         "strict, max_mb (0 = no cap)\n"
         "  json python yaml toml xml ini csv tsv plist javascript bash — each is "
-        "also its own function, same params, format pinned; aliases "
+        "also its own function, same params, format pinned (so format/fmt is "
+        "refused — use validate); aliases "
         "py/ast/yml/xmllint/plutil/js/sh/shell. javascript is `node --check` "
         "(syntax only, never executed; .js/.mjs/.cjs — NOT .jsx/.ts; FAIL if "
         "node is not installed). bash (= sh = shell) is `bash -n` (syntax only, "
@@ -2233,8 +2316,8 @@ class McpServer:
         # Handlers are safe to run concurrently, and that was AUDITED rather than
         # assumed. The module declares no `global` anywhere; it caches nothing --
         # no memoised which()/versions table, no host or process snapshot; and
-        # _VERSION_TOOLS / _VALIDATE_EXT / _VALIDATORS / HANDLERS / ALIASES are
-        # built at import time and thereafter only read (`.get`, indexing,
+        # _VERSION_TOOLS / _VALIDATE_EXT / _VALIDATORS / HANDLERS / ALIASES /
+        # HANDLER_ACCEPTED_PARAMS are built at import time and thereafter only read (`.get`, indexing,
         # sorted). Every list and dict a handler appends to is created inside that
         # handler, the probes are read-only with shell=False, and project_root is
         # written once in __init__. The ONE exception the audit turned up is the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Functional suite for the mcp-inspect VALIDATION family (groups A-O).
+"""Functional suite for the mcp-inspect VALIDATION family (groups A-R).
 
 Spawns ONE long-lived `python3 Scripts/mcp-inspect.py` child, speaks
 line-delimited JSON-RPC 2.0 to it, and asserts on `isError` plus substrings of
@@ -32,6 +32,14 @@ Coverage by group:
   P  hash: `algorithm` is an alias of `algo` (a conflict is refused, the algo
      that ran is named), and `recursive`/`max_files` directory expansion --
      sorted, symlinks skipped, subdirs descended, truncation never silent
+  Q  the param gate, live: an unknown key is refused on EVERY function (isError,
+     function and key named); every key a function reads -- or-chain aliases,
+     `timeout`, `max_answer_chars` -- passes the gate; a pinned format
+     validator refuses `format`/`fmt` instead of overriding it
+  R  the accepted table cannot drift: every registry function has a row and no
+     row names a missing one, and each row EQUALS the keys the handler reads,
+     extracted from the server source by ast (helpers that receive `p`
+     followed), with the pinned validators' format/fmt the one exclusion
 
 Usage:
   python3 tests/test_inspect_validate.py
@@ -235,9 +243,12 @@ def build_fixtures(work):
 
 def case(suite, cli, group, cid, fn, params, want_error=False,
          must=(), must_not=()):
+    """`want_error=None` asserts nothing about the flag -- for a call whose only
+    claim is about the text (group Q's accepts-*, where a handler refusing a
+    value is past the gate and so beside the point)."""
     err, text = cli.call_tool(fn, params)
     problems = []
-    if err != want_error:
+    if want_error is not None and err != want_error:
         problems.append("isError=%s expected %s" % (err, want_error))
     for s in must:
         if s not in text:
@@ -307,6 +318,138 @@ def _ast_ok(path):
         return "ACCEPTS (ast.parse succeeded)"
     except SyntaxError as exc:
         return "rejects (%s line %s)" % (exc.msg, exc.lineno)
+
+
+# ---------------------------------------------------------------------------
+# group R: the static half of the param gate -- what each handler READS, taken
+# from the server's own source by ast, never typed here
+# ---------------------------------------------------------------------------
+
+# The formats a pinned wrapper fixes.  These are the one place the accepted set
+# is deliberately SMALLER than what the handler reads: `h_json` calls
+# `h_validate(p, "json")`, which does read `format`/`fmt` -- and then lets the
+# pinned value override them in silence.  Refusing them is the whole point.
+PINNED_FORMATS = ("json", "python", "yaml", "toml", "xml", "ini", "csv", "tsv",
+                  "plist", "javascript", "bash")
+PINNED_EXCLUDED = {"format", "fmt"}
+
+
+def _server_tree():
+    with open(SERVER, encoding="utf-8") as fh:
+        return ast.parse(fh.read(), SERVER)
+
+
+def _module_functions(tree):
+    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+
+def _registry_handlers(tree):
+    """HANDLERS as written in the source: canonical name -> handler NAME."""
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            target = node.target
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        else:
+            continue
+        if not (isinstance(target, ast.Name) and target.id == "HANDLERS"
+                and isinstance(node.value, ast.Dict)):
+            continue
+        out = {}
+        for k, v in zip(node.value.keys, node.value.values):
+            if (isinstance(k, ast.Constant) and isinstance(v, ast.Tuple)
+                    and v.elts and isinstance(v.elts[0], ast.Name)):
+                out[k.value] = v.elts[0].id
+        return out
+    return {}
+
+
+def _str_consts(node):
+    if (isinstance(node, (ast.Tuple, ast.List, ast.Set)) and node.elts
+            and all(isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    for e in node.elts)):
+        return {e.value for e in node.elts}
+    return None
+
+
+def param_reads(funcs, fname, pname, seen=None):
+    """Every key function `fname` reads off its parameter `pname`.
+
+    Returns (keys, unresolved).  Recognised reads: `p.get("k")`, `p["k"]`,
+    `"k" in p` / `not in p`, and a loop variable standing in for "k" when it
+    iterates a literal tuple of strings (`_hash_algo`'s `for k in ("algo",
+    "algorithm")`).  `p` handed POSITIONALLY or by keyword to another
+    module-level function is followed into that function under its own
+    parameter name -- which is how `_timeout_param`, `_hash_algo` and the
+    pinned wrappers' `h_validate` are reached without being listed.
+
+    Anything else that touches `p` -- `p.items()`, `dict(p)`, a key computed at
+    run time -- is UNRESOLVED and reported, never skipped: a read this
+    extractor cannot see is exactly the read that would let the table drift.
+    """
+    seen = set() if seen is None else seen
+    if (fname, pname) in seen or fname not in funcs:
+        return set(), []
+    seen.add((fname, pname))
+    fn = funcs[fname]
+
+    loop_vars = {}
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.comprehension, ast.For)):
+            vals = _str_consts(node.iter)
+            if isinstance(node.target, ast.Name) and vals:
+                loop_vars.setdefault(node.target.id, set()).update(vals)
+
+    keys, unresolved, understood = set(), [], set()
+
+    def is_p(n):
+        return isinstance(n, ast.Name) and n.id == pname
+
+    def take(expr, where):
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            keys.add(expr.value)
+        elif isinstance(expr, ast.Name) and expr.id in loop_vars:
+            keys.update(loop_vars[expr.id])
+        else:
+            unresolved.append("%s:%s %s" % (fname, getattr(expr, "lineno", "?"),
+                                            where))
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Attribute) and is_p(f.value) and f.attr == "get" \
+                    and node.args:
+                understood.add(id(f.value))
+                take(node.args[0], "%s.get(<computed>)" % pname)
+            elif isinstance(f, ast.Name) and f.id in funcs:
+                spec = funcs[f.id].args
+                names = [a.arg for a in spec.posonlyargs + spec.args]
+                for i, a in enumerate(node.args):
+                    if is_p(a) and i < len(names):
+                        understood.add(id(a))
+                        k2, u2 = param_reads(funcs, f.id, names[i], seen)
+                        keys |= k2
+                        unresolved += u2
+                for kw in node.keywords:
+                    if is_p(kw.value) and kw.arg:
+                        understood.add(id(kw.value))
+                        k2, u2 = param_reads(funcs, f.id, kw.arg, seen)
+                        keys |= k2
+                        unresolved += u2
+        elif isinstance(node, ast.Subscript) and is_p(node.value):
+            understood.add(id(node.value))
+            take(node.slice, "%s[<computed>]" % pname)
+        elif (isinstance(node, ast.Compare) and len(node.ops) == 1
+              and isinstance(node.ops[0], (ast.In, ast.NotIn))
+              and is_p(node.comparators[0])):
+            understood.add(id(node.comparators[0]))
+            take(node.left, "<computed> in %s" % pname)
+
+    for node in ast.walk(fn):
+        if is_p(node) and id(node) not in understood:
+            unresolved.append("%s:%d %s escapes (not a keyed read)"
+                              % (fname, node.lineno, pname))
+    return keys, unresolved
 
 
 # ---------------------------------------------------------------------------
@@ -731,7 +874,169 @@ def run(opts=None):
         suite.record("O", "gate-discriminates",
                      [] if seen == ["## title"] else ["unfenced() saw %r" % seen])
 
+        # ============ Q: the param gate, over live JSON-RPC ============
+        # A misspelled key used to be dropped without a word, and every one of
+        # these handlers has a no-filter default that is a plausible answer:
+        # `processes {pattern}` came back as the top 30 of the whole host.  The
+        # function list is the server's own registry, so a new handler is in
+        # this loop the moment it exists.
+        src_tree = _server_tree()
+        registry = _registry_handlers(src_tree)
+        for fn in sorted(registry):
+            case(suite, cli, "Q", "bogus-" + fn, fn,
+                 {"bogus_param": 1},
+                 want_error=True,
+                 must=["Unknown params for '%s'" % fn, "bogus_param",
+                       "Accepted:", "max_answer_chars"])
+
+        # Every key each function accepts, in ONE call per function, plus
+        # `max_answer_chars` everywhere: the gate names every unknown key it
+        # sees, so one call proves the whole set.  Values are chosen to fail
+        # fast where they fail at all -- a handler refusing `path` together
+        # with `paths` is past the gate, which is all this group asserts.
+        small = f(os.path.join("hashtree", "a.txt"))
+        hash_all = {"path": small, "file": small, "paths": [small],
+                    "expect": "0" * 64, "max_mb": 1, "recursive": False,
+                    "max_files": 5}
+        validate_all = {"path": f("valid.json"), "file": f("valid.json"),
+                        "paths": [f("valid.json")], "content": "{}",
+                        "text": "{}", "max_mb": 1, "strict": False}
+        accepts = {
+            "processes": {"filter": "python", "name": "python", "user": "root",
+                          "sort": "mem", "limit": 3, "timeout": 5},
+            "process": {"pid": 1},
+            "ports": {"proto": "udp", "timeout": 5},
+            "connections": {"state": "established", "timeout": 3},
+            "open_files": {"pid": 1, "port": 1, "user": "root",
+                           "path": SERVER, "limit": 3, "timeout": 3},
+            "host": {}, "memory": {}, "mounts": {}, "route": {},
+            "disk": {"path": H.REPO_ROOT},
+            "disk_usage": {"path": f("hashtree"), "depth": 1, "top": 3,
+                           "timeout": 10},
+            "which": {"name": "git", "cmd": "git", "command": "git"},
+            "env": {"key": "HOME", "filter": "HOME", "show_secrets": False},
+            "stat": {"path": SERVER, "file": SERVER},
+            "interfaces": {"filter": "lo", "name": "lo"},
+            "pstree": {"pid": 1, "depth": 1, "limit": 5},
+            "limits": {"pid": 1},
+            "services": {"filter": "ssh", "name": "ssh", "user": False,
+                         "limit": 3},
+            "versions": {"tools": ["git"], "tool": "git", "name": "git"},
+            "hash": dict(hash_all, algo="md5", algorithm="md5"),
+            "sha256": dict(hash_all, algo="sha256", algorithm="sha256"),
+            "md5": dict(hash_all, algo="md5", algorithm="md5"),
+            "validate": dict(validate_all, format="json", fmt="json"),
+        }
+        for fmt in PINNED_FORMATS:
+            accepts[fmt] = dict(validate_all)
+        for fn in sorted(registry):
+            params = dict(accepts.get(fn, {"__no_accepts_row__": 1}),
+                      max_answer_chars=50000)
+            case(suite, cli, "Q", "accepts-" + fn, fn, params,
+                 want_error=None, must_not=["Unknown params"])
+
+        # A pinned format validator must REFUSE a conflicting format rather
+        # than override it: `json {format: yaml}` used to parse as JSON.
+        case(suite, cli, "Q", "json-format-yaml-refused", "json",
+             {"path": f("valid.yaml"), "format": "yaml"}, want_error=True,
+             must=["Unknown params for 'json'", "format"])
+        case(suite, cli, "Q", "json-fmt-refused", "json",
+             {"path": f("valid.yaml"), "fmt": "yaml"}, want_error=True,
+             must=["Unknown params for 'json'", "fmt"])
+        case(suite, cli, "Q", "validate-format-yaml-ok", "validate",
+             {"path": f("valid.yaml"), "format": "yaml"},
+             must=["OK", "**PASSED**", "yaml"], must_not=["Unknown params"])
+        # the two worked examples of the plausible wrong answer
+        case(suite, cli, "Q", "processes-pattern-refused", "processes",
+             {"pattern": "node"}, want_error=True,
+             must=["Unknown params for 'processes'", "pattern", "filter"])
+        case(suite, cli, "Q", "limits-process-refused", "limits",
+             {"process": 123}, want_error=True,
+             must=["Unknown params for 'limits'", "process", "pid"])
+        # the gate runs AFTER function-alias resolution, so the refusal names
+        # the canonical function, whose accepted list is the one that applies
+        case(suite, cli, "Q", "alias-names-canonical", "ps",
+             {"pattern": "node"}, want_error=True,
+             must=["Unknown params for 'processes'"])
+
         cli.close()
+
+        # ============ R: the accepted table cannot drift from the code ============
+        # In-process, AST plus one import of the server module (bytecode-free).
+        # The live group Q proves the gate REFUSES; this one proves the table it
+        # refuses against is the set of keys the handlers actually read.
+        mod = H.load_module_from_path("mcp_inspect_params_r", SERVER)
+        table = getattr(mod, "HANDLER_ACCEPTED_PARAMS", None)
+        common = getattr(mod, "_COMMON_PARAMS", None)
+        funcs = _module_functions(src_tree)
+        suite.record("R", "table-exists",
+                     [] if isinstance(table, dict) and isinstance(common, (set, frozenset))
+                     else ["HANDLER_ACCEPTED_PARAMS=%s _COMMON_PARAMS=%s"
+                           % (type(table).__name__, type(common).__name__)])
+        table = table if isinstance(table, dict) else {}
+        common = set(common) if isinstance(common, (set, frozenset)) else set()
+        missing = sorted(set(registry) - set(table))
+        orphan = sorted(set(table) - set(registry))
+        suite.record("R", "every-function-has-a-row",
+                     [] if registry and not missing else
+                     ["no row for: %s" % ", ".join(missing or ["<empty registry>"])])
+        suite.record("R", "no-row-for-a-missing-fn",
+                     [] if not orphan else ["row names no function: %s"
+                                            % ", ".join(orphan)])
+        lacking = sorted(fn for fn, acc in table.items() if not common <= set(acc))
+        suite.record("R", "common-in-every-row",
+                     [] if common and not lacking else
+                     ["_COMMON_PARAMS empty"] if not common else
+                     ["rows without the common set: %s" % ", ".join(lacking)])
+        # the common set is exactly what the DISPATCHER reads off params
+        disp, _ = param_reads(funcs, "handle_inspect_call", "params")
+        suite.record("R", "common-is-dispatcher-reads",
+                     [] if common and disp == common else
+                     ["dispatcher reads %s, _COMMON_PARAMS is %s"
+                      % (sorted(disp), sorted(common))])
+        leaked = sorted(fmt for fmt in PINNED_FORMATS
+                        if PINNED_EXCLUDED & set(table.get(fmt, ())))
+        suite.record("R", "pinned-refuse-format",
+                     [] if table and not leaked else
+                     ["no table"] if not table else
+                     ["pinned validators accepting format/fmt: %s"
+                      % ", ".join(leaked)])
+        # The extractor has to be able to FAIL: prove it follows p into a helper
+        # (`_timeout_param`), through a wrapper into its target (`h_md5` ->
+        # `h_hash` -> `_hash_algo`), and resolves a loop over a literal tuple.
+        k_proc, _ = param_reads(funcs, "h_processes", "p")
+        k_md5, _ = param_reads(funcs, "h_md5", "p")
+        k_json, _ = param_reads(funcs, "h_json", "p")
+        ctl = []
+        if "timeout" not in k_proc:
+            ctl.append("did not follow h_processes -> _timeout_param")
+        if not {"algo", "algorithm", "paths"} <= k_md5:
+            ctl.append("did not follow h_md5 -> h_hash -> _hash_algo: %s"
+                       % sorted(k_md5))
+        if not {"format", "fmt", "content"} <= k_json:
+            ctl.append("did not follow h_json -> h_validate: %s" % sorted(k_json))
+        suite.record("R", "extractor-follows-helpers", ctl)
+        # Per function, EXACT equality both ways: a key read but not accepted
+        # would be refused on a call the handler honours; a key accepted but
+        # never read is the silent drop this gate exists to end, moved one layer
+        # up.  The pinned validators' one sanctioned difference is format/fmt.
+        for fn in sorted(registry):
+            reads, unresolved = param_reads(funcs, registry[fn], "p")
+            if fn in PINNED_FORMATS:
+                reads = reads - PINNED_EXCLUDED
+            acc = set(table.get(fn, ())) - common
+            problems = ["unresolved read: %s" % u for u in unresolved]
+            if fn not in table:
+                problems.append("no row")
+            else:
+                if reads - acc:
+                    problems.append("read but not accepted: %s"
+                                    % ", ".join(sorted(reads - acc)))
+                if acc - reads:
+                    problems.append("accepted but never read: %s"
+                                    % ", ".join(sorted(acc - reads)))
+            suite.record("R", "drift-" + fn, problems,
+                         text="reads=%s" % sorted(reads))
 
         # ================= D: read-only contract =================
         pyc_after = H.pycache_snapshot()

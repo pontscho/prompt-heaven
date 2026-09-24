@@ -60,7 +60,7 @@ rationale lives in `docs/subsystems/tests.md`.
 
 | name | file | groups |
 |---|---|---|
-| `inspect_validate` | `test_inspect_validate.py` | A–O |
+| `inspect_validate` | `test_inspect_validate.py` | A–R |
 | `mcp_first_guard` | `test_mcp_first_guard.py` | A–N |
 | `sbx_gate` | `test_sbx_gate.py` | A–Q |
 | `purity_lsp` | `test_purity_lsp.py` | A–J |
@@ -212,7 +212,7 @@ or modified by a test run.
 tests/
   run.py                     single entry point / aggregator + the SUITES table
   _harness.py                shared plumbing, used by every suite
-  test_inspect_validate.py   groups A-O
+  test_inspect_validate.py   groups A-R
   test_mcp_first_guard.py    groups A-N
   test_sbx_gate.py           groups A-Q   (grant-only gate; the guard's mirror)
   test_purity_lsp.py         groups A-J   (live clangd + lua-language-server)
