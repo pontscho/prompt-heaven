@@ -342,13 +342,24 @@ bits **for the server process** (not for you).
 
 ### hash / sha256 / md5
 `path` (alias `file`) or `paths` (a list) **[required]**, `expect` (single path only →
-`MATCH`/`MISMATCH` verdict), `max_mb` (default 2048). `hash` also takes `algo`:
-`sha256` (default), `sha512`, `sha384`, `sha224`, `sha1`, `md5`, `blake2b`, `blake2s`.
+`MATCH`/`MISMATCH` verdict), `max_mb` (default 2048, per file). `hash` also takes `algo`
+(alias `algorithm`): `sha256` (default), `sha512`, `sha384`, `sha224`, `sha1`, `md5`,
+`blake2b`, `blake2s`. `algo` and `algorithm` that disagree are refused, and so is either
+one disagreeing with a fixed wrapper (`md5` + `algorithm:"sha256"`). The reply has no
+header row, so the algorithm that ran is named on an `algo: <name>` line under the table.
 Computed with `hashlib` in 1 MB chunks — identical digests on every platform, unlike
-`shasum` vs `md5sum` vs `md5 -q`. Directories and unreadable files become a note in
-their row instead of failing the batch. **Gotcha:** with `expect`, a row that was
-skipped (directory/error) leaves the verdict unset and prints `MISMATCH` — read the
-row, not just the verdict.
+`shasum` vs `md5sum` vs `md5 -q`.
+
+`recursive` (bool, default false) expands a directory — in `path` or any element of
+`paths` — into one row per **regular** file beneath it, full path, sorted, subdirectories
+descended. Symlinked files and symlinked directories are **not** followed (a count line
+says how many were passed over). `max_files` (default 1000, `0` = no cap) bounds the files
+an expansion adds, **shared across the whole call**; hitting it stops the walk and
+appends `truncated at N files` — never a silent cut. `expect` with a directory expansion
+is refused. Without `recursive`, a directory is a row saying to pass `recursive:true`.
+Unreadable files and subdirectories become a note in their row instead of failing the
+batch. **Gotcha:** with `expect`, a row that was skipped (directory/error) leaves the
+verdict unset and prints `MISMATCH` — read the row, not just the verdict.
 
 ## Gotchas worth remembering
 

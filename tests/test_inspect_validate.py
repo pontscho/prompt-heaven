@@ -29,6 +29,9 @@ Coverage by group:
      `bash -n` is parsed and not executed
   O  envelope discipline, and every canonical handler either gated or skipped
      with a written reason
+  P  hash: `algorithm` is an alias of `algo` (a conflict is refused, the algo
+     that ran is named), and `recursive`/`max_files` directory expansion --
+     sorted, symlinks skipped, subdirs descended, truncation never silent
 
 Usage:
   python3 tests/test_inspect_validate.py
@@ -211,6 +214,14 @@ def build_fixtures(work):
     with open(work.join("valid_binary.plist"), "wb") as fh:
         plistlib.dump({"k": "v", "n": [1, 2, 3]}, fh, fmt=plistlib.FMT_BINARY)
     work.subdir("adir")
+    # group P's tree, in a SUBDIR on purpose: group D digests only the files
+    # directly inside the workspace, and a symlink there would be read through.
+    # Written b-before-a so a walk that trusts the filesystem order is caught.
+    work.write_text(os.path.join("hashtree", "b.txt"), "bravo\n")
+    work.write_text(os.path.join("hashtree", "a.txt"), "alpha\n")
+    work.write_text(os.path.join("hashtree", "sub", "c.txt"), "charlie\n")
+    os.symlink("a.txt", work.join("hashtree", "link.txt"))
+    os.symlink("sub", work.join("hashtree", "linkdir"))
     # >1 MB valid JSON for the max_mb cap test
     big = work.join("big.json")
     with open(big, "w", encoding="utf-8") as fh:
@@ -261,6 +272,12 @@ def row_for(text, target):
         if target in ln and not ln.startswith("#"):
             return ln
     return ""
+
+
+def hex_tokens(text, width):
+    """How many whitespace-separated tokens are exactly `width` lowercase hex."""
+    return sum(1 for ln in text.splitlines() for w in ln.split()
+               if len(w) == width and all(c in "0123456789abcdef" for c in w))
 
 
 def _skill_verdict(path):
@@ -572,6 +589,65 @@ def run(opts=None):
         # not `sort`, so the server owes them the ordering it chose.
         case(suite, cli, "L", "processes", "processes", {"limit": 5},
              must=["sort cpu", "PID", "COMM"])
+
+        # ============ P: hash -- algorithm alias, recursive expansion ============
+        # `algorithm` used to be dropped without a word and the reply carried no
+        # header, so an md5 request came back as an unlabelled sha256.  The
+        # digest's SHAPE (32 vs 64 hex) is what proves which algorithm ran; the
+        # `algo:` line is what tells a caller who cannot count hex digits.
+        tree = f("hashtree")
+        t = case(suite, cli, "P", "algorithm-alias-md5", "hash",
+                 {"path": f(os.path.join("hashtree", "a.txt")),
+                  "algorithm": "md5"}, must=["algo: md5"])
+        n32, n64 = hex_tokens(t, 32), hex_tokens(t, 64)
+        suite.record("P", "algorithm-alias-digest-shape",
+                     [] if (n32, n64) == (1, 0) else
+                     ["expected one 32-hex token and no 64-hex, got %d/%d"
+                      % (n32, n64)], text=t)
+        case(suite, cli, "P", "algo-algorithm-conflict", "hash",
+             {"path": f(os.path.join("hashtree", "a.txt")),
+              "algo": "sha256", "algorithm": "md5"},
+             want_error=True, must=["algo", "algorithm", "sha256", "md5"])
+        case(suite, cli, "P", "algo-algorithm-agree", "hash",
+             {"path": f(os.path.join("hashtree", "a.txt")),
+              "algo": "md5", "algorithm": "MD5"}, must=["algo: md5"])
+        # the fixed-algorithm wrappers have the same silent-override shape
+        case(suite, cli, "P", "md5-wrapper-conflict", "md5",
+             {"path": f(os.path.join("hashtree", "a.txt")),
+              "algorithm": "sha256"},
+             want_error=True, must=["md5", "sha256"])
+        case(suite, cli, "P", "dir-without-recursive-hint", "hash",
+             {"path": tree}, must=["is a directory", "recursive:true"])
+        t = case(suite, cli, "P", "recursive-rows", "hash",
+                 {"path": tree, "recursive": True, "algo": "md5"},
+                 must=[os.path.join(tree, "a.txt"), os.path.join(tree, "b.txt"),
+                       os.path.join(tree, "sub", "c.txt"), "algo: md5"],
+                 must_not=["link.txt", "linkdir", "truncated"])
+        order = [t.find(os.path.join(tree, n))
+                 for n in ("a.txt", "b.txt", os.path.join("sub", "c.txt"))]
+        nrows = hex_tokens(t, 32)
+        suite.record("P", "recursive-sorted-3-rows",
+                     [] if (-1 not in order and order == sorted(order)
+                            and nrows == 3) else
+                     ["positions %r, %d digest rows (want ascending, 3)"
+                      % (order, nrows)], text=t)
+        t = case(suite, cli, "P", "max-files-truncation", "hash",
+                 {"path": tree, "recursive": True, "max_files": 2},
+                 must=["truncated at 2 files", "max_files"],
+                 must_not=[os.path.join("sub", "c.txt")])
+        # the cap is shared across `paths`: 3 files from the tree fill it, so
+        # the second element's one file is what gets truncated
+        t = case(suite, cli, "P", "max-files-shared-across-paths", "hash",
+                 {"paths": [tree, f(os.path.join("hashtree", "sub"))],
+                  "recursive": True, "max_files": 3},
+                 must=["truncated at 3 files"])
+        suite.record("P", "max-files-shared-row-count",
+                     [] if hex_tokens(t, 64) == 3 else
+                     ["expected 3 digest rows, got %d" % hex_tokens(t, 64)],
+                     text=t)
+        case(suite, cli, "P", "expect-with-dir-refused", "hash",
+             {"path": tree, "recursive": True, "expect": "0" * 64},
+             want_error=True, must=["expect", "directory"])
 
         # ===== O: envelope discipline -- form, not values, so it cannot age =====
         # Two invariants over a successful reply: mcp-inspect writes no Markdown

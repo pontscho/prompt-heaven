@@ -1167,10 +1167,39 @@ _HASH_ALGOS = ("sha256", "sha512", "sha384", "sha224", "sha1", "md5",
 _HASH_MAX_MB = 2048          # refuse bigger files unless max_mb is raised: the
                              # digest holds one handler worker start to finish
 _HASH_CHUNK = 1024 * 1024
+_HASH_MAX_FILES = 1000       # files a `recursive` expansion may add, summed
+                             # across the whole call, before it stops and says so
+
+
+def _hash_algo(p: dict, fixed: str) -> str:
+    """The one algorithm this call runs, from `algo`, its alias `algorithm`, or
+    the wrapper's fixed choice -- refusing any two of them that disagree.
+
+    `algorithm` used to be dropped without a word, and since the reply names no
+    algorithm in a header, an md5 request came back as an unlabelled sha256.
+    A disagreement is refused rather than resolved: neither spelling outranks
+    the other, and a wrapper (`md5`, `sha256`) outranking an explicit param is
+    the same silent override again.
+    """
+    given = [(k, str(p[k]).strip().lower()) for k in ("algo", "algorithm")
+             if p.get(k) not in (None, "")]
+    if fixed:
+        given.insert(0, (f"function={fixed}", fixed))
+    names = {v for _, v in given}
+    if len(names) > 1:
+        raise ValueError("conflicting algorithms: "
+                         + ", ".join(f"{k}={v!r}" for k, v in given)
+                         + " — 'algorithm' is an alias of 'algo'; pass one.")
+    algo = names.pop() if names else "sha256"
+    if algo not in _HASH_ALGOS:
+        raise ValueError(f"unsupported algo {algo!r}; use one of: "
+                         + ", ".join(_HASH_ALGOS))
+    return algo
 
 
 def h_hash(p: dict, algo: str = "") -> str:
     import hashlib
+    import stat as st_mod
 
     single = p.get("path") or p.get("file")
     multi = p.get("paths")
@@ -1180,48 +1209,104 @@ def h_hash(p: dict, algo: str = "") -> str:
     raw = single or multi
     if not raw:
         raise ValueError("hashing requires params.path (one file, or a list of files).")
-    algo = (algo or str(p.get("algo") or "sha256")).strip().lower()
-    if algo not in _HASH_ALGOS:
-        raise ValueError(f"unsupported algo {algo!r}; use one of: "
-                         + ", ".join(_HASH_ALGOS))
+    algo = _hash_algo(p, algo)
     max_mb = _int_param(p.get("max_mb", _HASH_MAX_MB), "max_mb") \
         if "max_mb" in p else _HASH_MAX_MB
-    paths = list(raw) if isinstance(raw, list) else [raw]
+    recursive = _bool_param(p.get("recursive"), False)
+    max_files = _int_param(p["max_files"], "max_files") \
+        if p.get("max_files") is not None else _HASH_MAX_FILES
+    paths = [os.path.expanduser(str(item).strip())
+             for item in (list(raw) if isinstance(raw, list) else [raw])]
     expect = str(p.get("expect") or "").strip().lower()
     if expect and len(paths) != 1:
         raise ValueError("'expect' compares a single file — pass exactly one path.")
+    if expect and recursive and os.path.isdir(paths[0]):
+        raise ValueError("'expect' compares a single file, and recursive:true "
+                         "expands this directory into many — hash one file, "
+                         "or drop 'expect' and read the rows.")
 
     rows: List[List[str]] = []
     verdict: Optional[bool] = None
-    for item in paths:
-        path = os.path.expanduser(str(item).strip())
-        if os.path.isdir(path):
-            rows.append([path, "(is a directory)", ""])
-            continue
+    expanded = 0                 # files added by directory expansion, all paths
+    truncated = False
+    not_followed = 0             # symlinks and special files a walk passed over
+
+    def hash_one(path: str) -> Optional[str]:
         try:
             size = os.path.getsize(path)
             if max_mb > 0 and size > max_mb * 1024 * 1024:
                 rows.append([path, f"(skipped: {_kb_human(size / 1024)} "
                              f"exceeds max_mb={max_mb})", ""])
-                continue
+                return None
             digest_obj = hashlib.new(algo)
             with open(path, "rb") as fh:
                 for chunk in iter(lambda: fh.read(_HASH_CHUNK), b""):
                     digest_obj.update(chunk)
         except OSError as exc:
             rows.append([path, f"(error: {exc.strerror or exc})", ""])
-            continue
+            return None
         digest = digest_obj.hexdigest()
         rows.append([path, digest,
                      f"{size} B" if size < 1024 else _kb_human(size / 1024)])
-        if expect:
-            verdict = digest == expect
+        return digest
+
+    def walk_error(exc: OSError) -> None:
+        # os.walk's default is to skip an unreadable subdirectory in silence
+        rows.append([exc.filename or "?", f"(error: {exc.strerror or exc})", ""])
+
+    for path in paths:
+        if truncated:
+            break
+        if not os.path.isdir(path):
+            digest = hash_one(path)
+            if expect and digest is not None:
+                verdict = digest == expect
+            continue
+        if not recursive:
+            rows.append([path, "(is a directory; pass recursive:true to hash "
+                               "its files)", ""])
+            continue
+        # followlinks=False keeps a symlinked subdirectory out of the descent,
+        # and lstat keeps a symlinked FILE out of the rows: both would hash a
+        # target that may live outside the tree the caller named.  Sorting in
+        # place makes the order the same on every filesystem.
+        for dirpath, dirnames, filenames in os.walk(path, onerror=walk_error,
+                                                    followlinks=False):
+            dirnames.sort()
+            not_followed += sum(1 for d in dirnames
+                                if os.path.islink(os.path.join(dirpath, d)))
+            for name in sorted(filenames):
+                full = os.path.join(dirpath, name)
+                try:
+                    regular = st_mod.S_ISREG(os.lstat(full).st_mode)
+                except OSError as exc:
+                    rows.append([full, f"(error: {exc.strerror or exc})", ""])
+                    continue
+                if not regular:
+                    not_followed += 1
+                    continue
+                if max_files > 0 and expanded >= max_files:
+                    truncated = True
+                    break
+                expanded += 1
+                hash_one(full)
+            if truncated:
+                break
 
     # `path` first, because that is what identifies the row, and no header row
-    # at all: a 64-char hex digest and a size name themselves.  Which is also
-    # why the alignment has to stay -- with no header to count columns against,
-    # it is the only thing keeping a path that contains a space unambiguous.
+    # at all: a hex digest and a size name themselves.  Which is also why the
+    # alignment has to stay -- with no header to count columns against, it is
+    # the only thing keeping a path that contains a space unambiguous.  What a
+    # hex digest does NOT name is its algorithm (md5 vs a truncated anything),
+    # so that one fact rides on its own line under the table.
     out = _md_fence(_fmt_table(["path", algo, "size"], rows, show_header=False))
+    out += f"\n\nalgo: {algo}"
+    if not_followed:
+        out += (f"\n\n_{not_followed} symlink(s) or special file(s) not "
+                "followed or hashed_")
+    if truncated:
+        out += (f"\n\n**truncated at {max_files} files** — more remain; raise "
+                "max_files (0 = no cap) to hash the rest.")
     if expect:
         out += ("\n\n**MATCH** — the digest equals the expected value."
                 if verdict else
@@ -1912,9 +1997,9 @@ HANDLERS: Dict[str, Tuple[Any, str]] = {
     "limits":      (h_limits, "Resource limits / rlimits (params: pid — per-PID on Linux only)"),
     "services":    (h_services, "launchctl/systemctl services (params: filter, user, limit)"),
     "versions":    (h_versions, "Versions of allow-listed tools (params: tools)"),
-    "hash":        (h_hash, "File digest (params: path [req], algo=sha256|sha512|sha1|md5|blake2b, expect, max_mb)"),
-    "sha256":      (h_sha256, "SHA-256 of a file or files (params: path [req], expect)"),
-    "md5":         (h_md5, "MD5 of a file or files (params: path [req], expect)"),
+    "hash":        (h_hash, "File digest (params: path [req], algo (alias algorithm)=sha256|sha512|sha1|md5|blake2b, expect, max_mb, recursive, max_files=1000)"),
+    "sha256":      (h_sha256, "SHA-256 of a file or files (params: path [req], expect, recursive, max_files)"),
+    "md5":         (h_md5, "MD5 of a file or files (params: path [req], expect, recursive, max_files)"),
     "validate":    (h_validate, "Syntax/format validation, format auto-detected from the extension (params: path | paths | content+format; format, strict, max_mb)"),
     "json":        (h_json, "Validate JSON (params: path | paths | content)"),
     "python":      (h_python, "Validate Python syntax via in-memory compile() — stronger than ast.parse, writes no .pyc (params: path | paths | content)"),
@@ -2081,10 +2166,14 @@ INSPECT_CALL_TOOL = {
         "  limits (ulimit)       params: pid (per-PID on Linux only)\n"
         "  services (launchctl)  params: filter, user, limit\n"
         "  versions (toolchain)  params: tools — allow-listed binaries only\n"
-        "  sha256 (shasum)       params: path [required] (or a list), expect\n"
-        "  md5 (md5sum)          params: path [required] (or a list), expect\n"
-        "  hash (checksum)       params: path [required], algo=sha256|sha512|sha1|"
-        "md5|blake2b, expect, max_mb\n"
+        "  sha256 (shasum)       params: path [required] (or a list), expect, "
+        "recursive, max_files\n"
+        "  md5 (md5sum)          params: path [required] (or a list), expect, "
+        "recursive, max_files\n"
+        "  hash (checksum)       params: path [required], algo (alias algorithm)="
+        "sha256|sha512|sha1|md5|blake2b, expect, max_mb, recursive (hash every "
+        "regular file under a directory, symlinks not followed), max_files "
+        "(default 1000, 0 = no cap)\n"
         "  validate (lint/check) params: path | paths (a LIST — check many files "
         "in ONE call) | content+format; format (else from the extension), "
         "strict, max_mb (0 = no cap)\n"
