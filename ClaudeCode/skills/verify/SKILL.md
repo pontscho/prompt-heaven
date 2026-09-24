@@ -88,6 +88,10 @@ a missing `node` or `bash` **fails**. Deliberate: those two are optional *parser
 whose absence is a property of this interpreter, whereas a skipped `.js` or `.sh`
 would let an unchecked file pass a gate.
 
+**As a CI or pre-commit gate, always pass `--strict`.** Without it a run whose
+every row is `SKIP` or `LIMITED` checked nothing and still exits 0; a gate reads
+only the exit code, so it would pass files nobody parsed.
+
 ## Coverage — stdlib only, plus the external `node` and `bash` binaries
 
 | Format     | module / tool        | Completeness |
