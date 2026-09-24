@@ -349,13 +349,25 @@ count. The suite records that basename asymmetry as an explicit limitation rathe
 than a guarantee, carrying one pattern of each shape in a single fixture
 `tests/test_purity_file_ops.py`.
 
-`search_for_pattern` also accepts two ripgrep-style flags it does not need.
-`regex` and `line_numbers` are no-ops when **true** — the pattern is always
-regex-compiled and `content` rows always carry `path:line:` — and a hard error
-when **false** `Scripts/mcp-purity.py:handle_search_for_pattern`. Tolerating the
-true polarity spares a round trip on a call that asked for what it was already
-getting; rejecting the false one is the whole point, because silently ignoring it
-is how a pattern meant literally quietly becomes a regex. `query` is an alias for
+`search_for_pattern` also accepts the ripgrep-style flags callers reach for, and
+none of them is ever silently ignored
+`Scripts/mcp-purity.py:handle_search_for_pattern`. `regex:false` is a real
+literal mode: the pattern is `re.escape`d and skips the `\|` → `|` rewrite the
+regex path applies for callers who over-escape alternation, so `size(` is five
+characters rather than an unterminated group, and a pattern that fails to compile
+as a regex is answered with a pointer to it. It used to be a hard error, which was
+the honest answer while no literal mode existed — silently ignoring it is how a
+pattern meant literally quietly becomes a regex — but it left every caller
+hand-escaping metacharacters. `line_numbers` is a no-op when **true**, since
+`content` rows always carry `path:line:`, and is still refused when **false** in
+`content` mode: purity cannot drop them, and ignoring the request would hand back
+exactly what the caller asked to remove. `only_matching` is ripgrep's `-o` — each
+non-empty match becomes its own `path:line: <match>` row, so `offset` and
+`head_limit` page by match, not by line, and the header names both counts so the
+number being paged cannot be read as the line count `match(es)` means everywhere
+else. It is refused beside `count` / `files_with_matches`, whose rows carry no
+text to trim, and beside nonzero context lines, which ripgrep drops silently under
+`-o` — the one precedent this server declines to copy. `query` is an alias for
 `substring_pattern` per-function only, never in the global table, because `symbol`
 owns `query` as its own canonical parameter
 `Scripts/mcp-purity.py:PARAM_ALIASES_BY_FUNC`. The same table carries the opposite
@@ -364,7 +376,14 @@ parameter, so there the global row could only ever answer a name filter with the
 accepted-name dump — the per-function row aims it at `filter` instead, the fnmatch
 name match that `pattern` already means in `find_file`. A global alias is only
 global when every handler can honour it; the two escapes are *owned elsewhere* and
-*does not exist here*. The contract is pinned by the
+*does not exist here*. `max_results` / `max` take the second escape: globally they
+name the semantic handlers' cap, but `search_for_pattern`, `find_file` and
+`list_dir` cap with `head_limit`, so there they re-point instead of dying as
+unknown params — while `count` is deliberately not re-pointed, because beside
+`output_mode: count` it would be ambiguous. `paths_include` / `paths_exclude` are
+plain global aliases of the two `*_glob` filters `Scripts/mcp-purity.py:PARAM_ALIASES`,
+and sending an alias beside its canonical name is refused like any other collision
+`Scripts/mcp-purity.py:_resolve_aliases` [[0015-ambiguity-is-the-defect]]. The contract is pinned by the
 `purity_file_ops` suite `tests/test_purity_file_ops.py` and restated
 model-facing in `ClaudeCode/skills/mcp-purity/SKILL.md`. (The case count is not
 repeated here: the figure that stood in this sentence said **39** against a
