@@ -83,7 +83,9 @@ Groups:
   C  list_dir, both branches, with and without skip_ignored_files
   D  the parameter contract: aliases (function and param, global and
      per-function -- `max_results`/`max` capping the three listings like
-     `head_limit`, refused beside it, and left alone in `symbol`), the
+     `head_limit`, refused beside it, and left alone in `symbol`;
+     `paths_include`/`paths_exclude` filtering like their `*_glob` params and
+     refused beside them or beside `exclude`), the
      inverted `no_ignore` spelling, tolerated no-ops,
      real rejections, and search's `regex:false` literal mode (a `(` and a
      `\\|` taken literally) with the regex-mode compile error naming it
@@ -917,6 +919,63 @@ def group_d(suite, drv, drv_lit):
         must_say=["ambiguous", "max_results", "head_limit"],
         must_not_say=["unknown params"],
         detail=["both set head_limit: a collision, not a precedence question"])
+
+    # `paths_include` / `paths_exclude` -> the *_glob params, GLOBAL rows beside
+    # `include`/`exclude`.  The reported call was search_for_pattern with
+    # `paths_exclude: [<file>]`, which died as an unknown param.  Each row
+    # compares the alias against the canonical call ROW FOR ROW, and pins the
+    # filter's effect against an unfiltered CONTROL: a key that were tolerated
+    # and dropped returns the unfiltered rows, which differ from the canonical
+    # ones only because the target file is in one set and not the other.
+    base = {"substring_pattern": NEEDLE}
+    _, plain_text = drv.call("search", base)
+    plain = search_row_paths(plain_text)
+    for cid, alias, canon_key, value, gone in (
+            ("paths_exclude-list-excludes-like-glob", "paths_exclude",
+             "paths_exclude_glob", [P_KEEP], P_KEEP),
+            ("paths_include-list-includes-like-glob", "paths_include",
+             "paths_include_glob", ["src/**"], P_SCRATCH)):
+        _, canon_text = drv.call("search", dict(base, **{canon_key: value}))
+        is_error, text = drv.call("search", dict(base, **{alias: value}))
+        canon, got = search_row_paths(canon_text), search_row_paths(text)
+        problems = ["server returned an error"] if is_error else []
+        if gone not in plain:
+            problems.append("VACUOUS: %s is absent even without the filter"
+                            % gone)
+        if gone in canon:
+            problems.append("CONTROL: %s=%s still returned %s"
+                            % (canon_key, value, gone))
+        if gone in got:
+            problems.append("%s=%s still returned %s" % (alias, value, gone))
+        if not got:
+            problems.append("%s=%s returned no rows at all" % (alias, value))
+        if got != canon:
+            problems.append("%s rows differ from %s rows" % (alias, canon_key))
+        suite.record(
+            "D", cid, problems,
+            detail=["`%s` -> %s (global row)" % (alias, canon_key),
+                    "unfiltered : %s" % sorted(plain),
+                    "%s: %s" % (canon_key, sorted(canon)),
+                    "%s: %s" % (alias, sorted(got)),
+                    "reply: %s" % " | ".join(text.splitlines())[:200]],
+            text=text, showable=True)
+    # Two spellings of one param is refused (ADR 0015) -- against the canonical
+    # name and against the older alias alike, never as an unknown param.
+    record_error(
+        suite, "D", "paths_exclude-and-glob-ambiguous", drv, "search",
+        {"substring_pattern": NEEDLE, "paths_exclude": [P_KEEP],
+         "paths_exclude_glob": [P_KEEP]},
+        must_say=["ambiguous", "paths_exclude", "paths_exclude_glob"],
+        must_not_say=["unknown params"],
+        detail=["both set paths_exclude_glob: a collision, not a precedence",
+                "question"])
+    record_error(
+        suite, "D", "paths_exclude-and-exclude-ambiguous", drv, "search",
+        {"substring_pattern": NEEDLE, "paths_exclude": [P_KEEP],
+         "exclude": [P_KEEP]},
+        must_say=["ambiguous", "'exclude'", "'paths_exclude'"],
+        must_not_say=["unknown params"],
+        detail=["two ALIASES of one canonical param collide just the same"])
     # CONTROL: the per-function rows must not leak into the semantic layer,
     # where `max_results` is canonical and `max` must still reach it.
     problems, replies = [], []

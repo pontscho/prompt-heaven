@@ -217,8 +217,8 @@ canonical name is what error messages reference.
 | `replacement`, `replace`, `replace_with`, `new_string`, `new` | `repl` |
 | `line_start`, `start` | `start_line` |
 | `line_end`, `end` | `end_line` |
-| `include` | `paths_include_glob` |
-| `exclude` | `paths_exclude_glob` |
+| `include`, `paths_include` | `paths_include_glob` |
+| `exclude`, `paths_exclude` | `paths_exclude_glob` |
 | `glob` | `paths_include_glob` *(except in `list_dir`, where `glob` is also accepted natively as a synonym)* |
 
 ### Function-specific aliases (override globals for the named function)
