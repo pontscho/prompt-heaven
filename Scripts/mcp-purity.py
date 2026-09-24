@@ -1773,6 +1773,28 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
             "'count' for a payload without line numbers."
         )
 
+    # ripgrep's `-o`: each MATCH becomes its own `path:line: <match>` row. Only
+    # `content` rows carry text to trim, so beside `count`/`files_with_matches`
+    # it is refused rather than ignored. So is any nonzero context: rg silently
+    # drops context under -o, and a silently dropped param is the defect class
+    # this server refuses. No mode inference is needed: the default output_mode
+    # is already `content`, so `only_matching` alone is a complete request.
+    only_matching = _bool_param(params.get("only_matching", False), False)
+    if only_matching:
+        if output_mode != "content":
+            raise ValueError(
+                f"Parameter 'only_matching' is valid only in output_mode 'content' "
+                f"(got '{output_mode}'): {output_mode} rows carry no matched text "
+                "to trim. Drop only_matching, or use output_mode 'content'."
+            )
+        if ctx_before or ctx_after:
+            raise ValueError(
+                "Parameter 'only_matching' cannot be combined with context lines "
+                "(context_lines / context_lines_before / context_lines_after): a "
+                "row is the matched text alone, so there is no line for context "
+                "to surround. Drop one of the two."
+            )
+
     max_file_size = params.get("max_file_size", 10 * 1024 * 1024)  # default 10 MB
     skip_ignored = _skip_ignored_param(params, True)
     # Serena-compat: when true, restrict the scan to source-code files
@@ -1807,7 +1829,12 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
     # Collect all matches first (for count and files_with_matches we need file-level info)
     file_matches: Dict[str, int] = {}  # file_rel -> match count
     content_entries: List[str] = []
+    # The unit `offset`, `head_limit` and the row budget count. One per matching
+    # LINE normally; one per non-empty MATCH under only_matching, because there a
+    # row IS a match -- counting lines would page a 3-match line as one row.
     total_match_count = 0
+    # Matching lines under only_matching, for the header only (see below).
+    total_line_count = 0
     total_chars = 0
     truncated = False
 
@@ -1973,6 +2000,35 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                                 f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
                                 "use a more specific path or pattern"
                             )
+                        if only_matching:
+                            # Zero-length matches (`x*`) are skipped, and so
+                            # is a match that is only the line terminator:
+                            # either would be an empty row. A line whose
+                            # matches are all empty is not a matching line.
+                            hits = [m.group(0).rstrip("\n")
+                                    for m in pattern.finditer(line)]
+                            hits = [h for h in hits if h]
+                            if not hits:
+                                continue
+                            file_hit_count += 1
+                            total_line_count += 1
+                            for hit in hits:
+                                total_match_count += 1
+                                if total_match_count <= offset:
+                                    continue   # paged past: costs no budget
+                                entry = f"{file_rel}:{i + 1}: {hit}"
+                                if (row_budget > 0 and content_entries
+                                        and total_chars + len(entry) + 1 > row_budget):
+                                    truncated = True
+                                    break
+                                content_entries.append(entry)
+                                total_chars += len(entry) + 1
+                                if head_limit > 0 and len(content_entries) >= head_limit:
+                                    truncated = True
+                                    break
+                            if truncated:
+                                break
+                            continue
                         if pattern.search(line):
                             file_hit_count += 1
                             total_match_count += 1
@@ -2046,6 +2102,13 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
         # collecting, so there is nothing left to page here — only to account for.
         entries = content_entries
         header = f"{total_match_count}{approx} match(es)"
+        if only_matching:
+            # Here a row is a MATCH, not a line, and the bare `N match(es)` would
+            # read as the line count it means everywhere else. Both are stated,
+            # each named, so the number `offset` pages against (matches, the
+            # one `_rows_note` below totals) cannot be mistaken for the other.
+            header = (f"{total_match_count}{approx} match(es) on "
+                      f"{total_line_count}{approx} line(s), one row per match")
         note = (_rows_note(offset, len(entries), total_match_count, exact)
                 if truncated or offset else "")
         return _reply(header, entries, note)
@@ -6062,6 +6125,9 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         # the default no-op; `line_numbers` is a no-op the handler rejects only
         # when false in content mode, a request purity cannot honour.
         "regex", "line_numbers",
+        # ripgrep's `-o`: one `path:line: <match>` row per match. Content mode
+        # only; refused beside count/files_with_matches or nonzero context.
+        "only_matching",
         # ripgrep's `--no-ignore`, the INVERSE of skip_ignored_files. Flipped in
         # _skip_ignored_param, not in the alias table — see the docstring there.
         "no_ignore",
@@ -6305,7 +6371,9 @@ PURITY_CALL_TOOL = {
         "indirect references. search_for_pattern remains free-text search over ANY\n"
         "filetype (comments, log strings, build text): substring_pattern is a regex\n"
         "by default; pass regex:false for a literal match (`size(` needs no escaping) - use it when\n"
-        "you want text, not a symbol. The former standalone clangd_call / cuda_call /\n"
+        "you want text, not a symbol. only_matching:true (rg -o) makes each match its own\n"
+        "`path:line: <match>` row; content mode only, refused beside context lines.\n"
+        "The former standalone clangd_call / cuda_call /\n"
         "luals_call TOOLS are retired and unregistered - they do not exist in any\n"
         "session, and purity_call is the only entry point. Their legacy\n"
         "clangd_*/cuda_*/luals_* FUNCTION names do still resolve, as aliases here.\n\n"
@@ -6591,7 +6659,7 @@ HANDLER_DESCRIPTIONS = {
     "delete_lines":        "Delete a range of lines",
     "replace_lines":       "Replace a range of lines with new content",
     "insert_at_line":      "Insert content before a given line",
-    "search_for_pattern":  "Regex search across project files (regex:false for a literal match; output_mode: files_with_matches|content|count, head_limit, offset)",
+    "search_for_pattern":  "Regex search across project files (regex:false for a literal match; output_mode: files_with_matches|content|count, head_limit, offset; only_matching: one row per match, content mode only)",
     "find_definition":     "Find a symbol's definition by name OR file position (symbol/at)",
     "find_type_definition": "Find where the TYPE at a file position is defined (textDocument/typeDefinition)",
     "find_references":      "Find references to a symbol by name OR file position",

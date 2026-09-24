@@ -115,6 +115,11 @@ Groups:
   M  a walk rooted at or inside `.git` is refused, in all three walkers and
      every spelling of the path; `.github` / `x.git` are not, and read_file
      still reads one file under `.git`
+  N  search's `only_matching` (ripgrep -o): one row per MATCH carrying only
+     the matched text, zero-length matches dropped, literal mode too,
+     `head_limit`/`offset` counting match rows, a header that names both the
+     match and the line count, and a refusal -- not a silent drop -- beside
+     `count`, `files_with_matches` or any nonzero context
 """
 
 import os
@@ -1953,6 +1958,166 @@ def group_m(suite, drv):
 
 
 # ---------------------------------------------------------------------------
+# Group N -- `only_matching` (ripgrep -o): the match, not the line
+#
+# The trigger was a real call against a .jsonl log: the caller wanted each
+# `"outcome":"..."` value, not the whole event line, and the param died as
+# unknown.  Every row here is compared EXACTLY -- a substring test would pass
+# on the full line too, which is precisely the behaviour being replaced.
+# ---------------------------------------------------------------------------
+
+# Group N's tree.  EV_FILE's third line holds THREE matches, which is what
+# makes "head_limit counts match rows" a different observable from "head_limit
+# counts lines": with one match per line the two page identically.  The fourth
+# line mentions `outcome` without the pattern's shape, so it must stay silent.
+OM_EV = "events.jsonl"
+OM_ZERO = "zero.txt"
+OM_LIT = "lit.txt"
+OM_PATTERN = '"outcome":"[a-z-]+"'
+ONLYMATCH_FILES = (
+    (OM_EV, '{"id":1,"outcome":"pass","note":"x"}\n'
+            '{"id":2,"outcome":"fail-hard"}\n'
+            '{"outcome":"skip","n":1,"outcome":"retry","outcome":"pass"}\n'
+            'no outcome field here\n'),
+    # `x*` matches the empty string at every position: line 1 has ONE non-empty
+    # match (`xx`) among empties, line 2 has nothing but empties.
+    (OM_ZERO, "axxb\nnothing\n"),
+    # `size(` is an unterminated group as a regex; twice on one line.
+    (OM_LIT, "call size(x) and size(y)\n"),
+)
+OM_ROWS = [
+    '%s:1: "outcome":"pass"' % OM_EV,
+    '%s:2: "outcome":"fail-hard"' % OM_EV,
+    '%s:3: "outcome":"skip"' % OM_EV,
+    '%s:3: "outcome":"retry"' % OM_EV,
+    '%s:3: "outcome":"pass"' % OM_EV,
+]
+
+
+def make_onlymatch_fixture(ws, subdir):
+    """Group N's tree, REALPATH'd for the same reason group G's is."""
+    ws.subdir(subdir)
+    for rel, body in ONLYMATCH_FILES:
+        ws.write_text(os.path.join(subdir, rel), body)
+    return os.path.realpath(ws.join(subdir))
+
+
+def match_rows(text):
+    """The `path:line: text` rows of a search reply, verbatim, in order."""
+    return [row for row in text.splitlines() if RX_MATCH_ROW.match(row)]
+
+
+def record_rows(suite, cid, driver, params, want_rows, want_lines=(),
+                detail=()):
+    """Call search and require EXACTLY `want_rows`, plus any `want_lines` regex
+    matching some line of the reply (header or note)."""
+    is_error, text = driver.call("search_for_pattern", params)
+    problems = []
+    if is_error:
+        problems.append("server returned an error")
+    got = match_rows(text)
+    if got != list(want_rows):
+        problems.append("rows %r, want %r" % (got, list(want_rows)))
+    lines = [ln.strip() for ln in text.splitlines()]
+    for want in want_lines:
+        if not any(re.fullmatch(want, ln) for ln in lines):
+            problems.append("no line matches %r" % want)
+    return suite.record("N", cid, problems,
+                        detail=list(detail) + [
+                            "params: %s" % (params,),
+                            "reply : %s" % " | ".join(text.splitlines())[:400]],
+                        text=text, showable=True)
+
+
+def group_n(suite, drv):
+    base = {"substring_pattern": OM_PATTERN, "relative_path": OM_EV,
+            "only_matching": True}
+
+    record_rows(
+        suite, "one-match-per-line-exact-text", drv,
+        dict(base, output_mode="content", head_limit=2), OM_ROWS[:2],
+        detail=["one match per line: the row is the matched text alone,",
+                "never the `{\"id\":...}` line around it"])
+    record_rows(
+        suite, "multi-match-line-one-row-each", drv,
+        dict(base, output_mode="content"), OM_ROWS,
+        detail=["line 3 holds three matches: three rows, all `:3:`, in",
+                "the order they occur on the line"])
+    record_rows(
+        suite, "header-counts-matches-and-lines", drv,
+        dict(base, output_mode="content"), OM_ROWS,
+        want_lines=[r"5 match\(es\) on 3 line\(s\)(\W.*)?"],
+        detail=["under only_matching `N match(es)` counts ROWS (matches),",
+                "and the line count is stated beside it, so neither number",
+                "can be read as the other"])
+    record_rows(
+        suite, "default-output_mode-is-content", drv, dict(base), OM_ROWS,
+        detail=["the default output_mode is already `content`, so",
+                "only_matching needs no explicit mode"])
+    record_rows(
+        suite, "zero-length-matches-no-empty-rows", drv,
+        {"substring_pattern": "x*", "relative_path": OM_ZERO,
+         "only_matching": True},
+        ["%s:1: xx" % OM_ZERO],
+        detail=["`x*` matches the empty string everywhere; only `xx` is a",
+                "row, and line 2 (empties only) yields none"])
+    record_rows(
+        suite, "regex-false-literal", drv,
+        {"substring_pattern": "size(", "regex": False,
+         "relative_path": OM_LIT, "only_matching": True},
+        ["%s:1: size(" % OM_LIT, "%s:1: size(" % OM_LIT],
+        detail=["literal mode: the match IS the literal, twice on one line"])
+    record_rows(
+        suite, "head_limit-counts-match-rows", drv,
+        dict(base, offset=2, head_limit=2), OM_ROWS[2:4],
+        want_lines=[r"\[showing rows 3-4 of .*; offset=4 for more\]"],
+        detail=["offset 2 lands on line 3's first match and head_limit 2",
+                "stops INSIDE that line: rows, not lines, are counted"])
+    record_rows(
+        suite, "offset-continues-inside-line", drv,
+        dict(base, offset=4), OM_ROWS[4:],
+        want_lines=[r"\[showing rows 5-5 of 5; no rows left\]"],
+        detail=["the resume hint from the row above picks up the third",
+                "match of line 3, not line 4"])
+
+    for mode in ("count", "files_with_matches"):
+        record_error(
+            suite, "N", "refused-with-%s" % mode, drv, "search_for_pattern",
+            dict(base, output_mode=mode),
+            must_say=["only_matching", "valid only", "content", mode],
+            must_not_say=["unknown params"],
+            detail=["%s rows carry no match text to trim" % mode])
+    for key in ("context_lines", "context_lines_after"):
+        record_error(
+            suite, "N", "refused-with-%s" % key, drv, "search_for_pattern",
+            dict(base, **{key: 1}),
+            must_say=["only_matching", "cannot be combined", "context"],
+            must_not_say=["unknown params"],
+            detail=["rg ignores context under -o; purity refuses instead of",
+                    "silently dropping it"])
+    record_rows(
+        suite, "context_lines-zero-accepted", drv,
+        dict(base, context_lines=0), OM_ROWS,
+        detail=["CONTROL: zero context asks for nothing to drop"])
+    record_error(
+        suite, "N", "only_matching-false-count-accepted", drv,
+        "search_for_pattern", dict(base, only_matching=False,
+                                   output_mode="count"),
+        want_error=False,
+        detail=["CONTROL: the refusal is for only_matching TRUE"])
+    record_rows(
+        suite, "without-only_matching-rows-are-lines", drv,
+        {"substring_pattern": OM_PATTERN, "relative_path": OM_EV},
+        ['%s:1: {"id":1,"outcome":"pass","note":"x"}' % OM_EV,
+         '%s:2: {"id":2,"outcome":"fail-hard"}' % OM_EV,
+         '%s:3: {"outcome":"skip","n":1,"outcome":"retry",'
+         '"outcome":"pass"}' % OM_EV],
+        want_lines=[r"3 match\(es\)"],
+        detail=["CONTROL: the default stays one row per matching LINE,",
+                "and its header keeps its old shape"])
+
+
+# ---------------------------------------------------------------------------
 # Group G -- glob semantics: the spellings that can only ever match nothing
 #
 # Sits above group F because source order is CALL order in this file, and
@@ -2269,6 +2434,7 @@ def run(opts=None):
         git_root = make_git_fixture(ws, "gitwalk")
         outside_root = make_outside_fixture(ws, "outside")
         literal_root = make_literal_fixture(ws, "literal")
+        onlymatch_root = make_onlymatch_fixture(ws, "onlymatch")
         suite.note("      server        : %s" % SERVER)
         suite.note("      fixture (A-D,J-L): %s  .gitignore=%s"
                    % (basename_root, list(GITIGNORE_BASENAME)))
@@ -2288,6 +2454,8 @@ def run(opts=None):
                    % (outside_root, [O_KEEP, O_ESCAPE, O_ESC + " -> symlink"]))
         suite.note("      fixture (D lit): %s  no .gitignore, files=%s"
                    % (literal_root, [rel for rel, _ in LITERAL_FILES]))
+        suite.note("      fixture (N)   : %s  no .gitignore, files=%s"
+                   % (onlymatch_root, [rel for rel, _ in ONLYMATCH_FILES]))
 
         drv = Driver(basename_root)
         drv_strict = Driver(basename_root, strict=True)
@@ -2296,6 +2464,7 @@ def run(opts=None):
         drv_read = Driver(read_root)
         drv_git = Driver(git_root)
         drv_lit = Driver(literal_root)
+        drv_om = Driver(onlymatch_root)
         try:
             group_a(suite, drv)
             group_b(suite, drv)
@@ -2308,13 +2477,16 @@ def run(opts=None):
             group_k(suite, drv, drv_strict, outside_root)
             group_l(suite, drv)
             group_m(suite, drv_git)
+            group_n(suite, drv_om)
             stderr_bytes = (len(drv.stderr_text) + len(drv_path.stderr_text)
                             + len(drv_multi.stderr_text)
                             + len(drv_read.stderr_text)
                             + len(drv_git.stderr_text)
                             + len(drv_lit.stderr_text)
+                            + len(drv_om.stderr_text)
                             + len(drv_strict.stderr_text))
         finally:
+            drv_om.close()
             drv_lit.close()
             drv.close()
             drv_strict.close()
@@ -2328,7 +2500,8 @@ def run(opts=None):
         group_g(suite, glob_root)
 
         workspaces = [basename_root, pathshaped_root, glob_root, multi_root,
-                      read_root, git_root, outside_root, literal_root]
+                      read_root, git_root, outside_root, literal_root,
+                      onlymatch_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()

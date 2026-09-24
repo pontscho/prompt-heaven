@@ -169,6 +169,7 @@ Existing content at `line` shifts down. Does not replace.
 |-|-|-|-|-|
 |`substring_pattern`|string|yes|—|Regex pattern to search for — or a literal string with `regex: false`|
 |`regex`|bool|no|true|`false` = literal match: the pattern is `re.escape`d, so `size(` needs no escaping (see below)|
+|`only_matching`|bool|no|false|ripgrep `-o`: each match is its own `path:line: <match>` row (a line with 3 matches gives 3 rows); empty matches are skipped. `content` mode only — refused with `count` / `files_with_matches` and with any nonzero context (see below)|
 |`context_lines_before`|int|no|0|Context lines before match|
 |`context_lines_after`|int|no|0|Context lines after match|
 |`paths_include_glob`|string or list of strings|no|""|Glob to include files — matches the project-relative **path** OR the basename, and `**/` = any depth **including zero**, so `tests/**/*.py` also matches `tests/foo.py`. A **list** keeps a file matching **any** element. Brace alternation refused, in every element|
@@ -191,6 +192,18 @@ naming `regex:false` as the way out.
 always carry `path:line:`, so passing it `true` changes nothing. Passing `false`
 in content mode is a hard error — for rows without line numbers use
 `output_mode: "files_with_matches"` or `"count"`.
+
+`only_matching: true` is ripgrep's `-o`: the row carries the matched text, not
+the line, so `{"substring_pattern":"\"outcome\":\"[a-z-]+\"","only_matching":true}`
+over a `.jsonl` log answers `log.jsonl:3: "outcome":"pass"`. It works in literal
+mode too (the match is the literal). Zero-length matches (`x*`) never become
+rows. `head_limit`, `offset` and the row budget count **match rows**, and the
+header says so: `5 match(es) on 3 line(s), one row per match`. The default
+`output_mode` is already `content`, so the flag needs no explicit mode. It is a
+hard error beside `output_mode: "count"` or `"files_with_matches"` (no matched
+text to trim) and beside any nonzero `context_lines` / `context_lines_before` /
+`context_lines_after` — ripgrep silently drops context under `-o`; purity
+refuses instead.
 
 **The gitignore filter never hides `.claude/tmp`.** The scratch area is
 gitignored on purpose but is exactly where the fleet's working files land, so a

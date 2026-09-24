@@ -216,8 +216,10 @@ SUITES = [
      "rather than an inverted range, a walk rooted in `.git` refused, and "
      "search's globs taken as a string or a list of strings, and its "
      "`regex:false` literal mode, `max_results`/`max` as head_limit, and "
-     "`paths_include`/`paths_exclude` as the *_glob filters",
-     158),
+     "`paths_include`/`paths_exclude` as the *_glob filters, and "
+     "`only_matching` (rg -o): one row per match, paged by match rows, "
+     "refused beside count/files_with_matches/context",
+     173),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 295),
     ("name_existence", run_name_existence,
