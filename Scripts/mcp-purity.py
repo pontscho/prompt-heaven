@@ -222,11 +222,23 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
         # fnmatch name filter, which is also what `pattern` means in
         # find_file: the two listing calls now answer to the same word.
         "pattern": "filter",
+        "max_results": "head_limit",
+        "max": "head_limit",
+    },
+    "find_file": {
+        "max_results": "head_limit",
+        "max": "head_limit",
     },
     # `query` cannot go in the global table: `symbol` takes `query` as its own
     # canonical param, so a global alias would rewrite it out from under it.
+    # `max_results` is the semantic handlers' cap, and the global `max` row
+    # sends callers there; the three file-layer searches cap with `head_limit`,
+    # so the same word re-points here instead of dying as an unknown param.
+    # `count` is NOT re-pointed: next to output_mode "count" it is ambiguous.
     "search_for_pattern": {
         "query": "substring_pattern",
+        "max_results": "head_limit",
+        "max": "head_limit",
     },
 }
 

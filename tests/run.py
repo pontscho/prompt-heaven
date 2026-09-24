@@ -215,8 +215,8 @@ SUITES = [
      "an offset past the last row answered with the past-the-end note "
      "rather than an inverted range, a walk rooted in `.git` refused, and "
      "search's globs taken as a string or a list of strings, and its "
-     "`regex:false` literal mode",
-     149),
+     "`regex:false` literal mode, and `max_results`/`max` as head_limit",
+     154),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 295),
     ("name_existence", run_name_existence,

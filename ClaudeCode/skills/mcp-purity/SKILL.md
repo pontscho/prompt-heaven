@@ -231,6 +231,7 @@ canonical name is what error messages reference.
 | `replace_lines`     | `new_content` | `content` |
 | `insert_at_line`    | `new_content` | `content` |
 | `search_for_pattern` | `query` | `substring_pattern` *(global table cannot carry it — `symbol` owns `query` as its own canonical param)* |
+| `search_for_pattern`, `find_file`, `list_dir` | `max_results`, `max` | `head_limit` *(the global `max` row targets the semantic handlers' `max_results`, which these three do not take; `count` is NOT aliased here — beside `output_mode: "count"` it is ambiguous. Passing both an alias and `head_limit` is refused as ambiguous)* |
 | `list_dir`          | `long_format` | `long`   |
 | `list_dir`          | `pattern` | `filter` *(the global `substring_pattern` target is not a `list_dir` param at all, so the global row would only ever produce a rejection)* |
 
@@ -319,4 +320,4 @@ The legacy function names still work through `purity_call` (registered as direct
 | `*_diagnostics` | `diagnostics` |
 | `*_init` | (no-op — backend inits lazily) |
 
-The `_at` variants fold onto their non-`_at` counterpart (position vs name is auto-detected from the params). Param aliases folded in from clangd: `symbol`→`symbol_name`, `col`/`column`/`char`→`character`, `max`/`count`→`max_results`, `depth`→`call_hierarchy_depth`. The path key is `relative_path` (purity's canonical), with `path`/`file`/`file_path` accepted as aliases.
+The `_at` variants fold onto their non-`_at` counterpart (position vs name is auto-detected from the params). Param aliases folded in from clangd: `symbol`→`symbol_name`, `col`/`column`/`char`→`character`, `max`/`count`→`max_results` (in `search_for_pattern`/`find_file`/`list_dir`, `max` and `max_results` fold onto `head_limit` instead), `depth`→`call_hierarchy_depth`. The path key is `relative_path` (purity's canonical), with `path`/`file`/`file_path` accepted as aliases.

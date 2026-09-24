@@ -82,7 +82,9 @@ Groups:
   B  the exemption is NARROW -- the inheritance rule (the shipped defect)
   C  list_dir, both branches, with and without skip_ignored_files
   D  the parameter contract: aliases (function and param, global and
-     per-function), the inverted `no_ignore` spelling, tolerated no-ops,
+     per-function -- `max_results`/`max` capping the three listings like
+     `head_limit`, refused beside it, and left alone in `symbol`), the
+     inverted `no_ignore` spelling, tolerated no-ops,
      real rejections, and search's `regex:false` literal mode (a `(` and a
      `\\|` taken literally) with the regex-mode compile error naming it
   E  path-shaped .gitignore: what the basename matcher does and does not honour
@@ -865,6 +867,70 @@ def group_d(suite, drv, drv_lit):
                 "HANDLERS row  -> dispatch on the RAW name",
                 "FUNCTION_ALIASES row -> `query`/`path` resolve under the",
                 "CANONICAL name, so its absence reads as unknown-param"])
+
+    # `max_results` / `max` -> head_limit in the three file-layer listings.  The
+    # global `max` row points at the semantic handlers' `max_results`, which
+    # none of these three accepts, so before the per-function rows both words
+    # died as an unknown param.  Each row compares the alias against the
+    # canonical head_limit call ROW FOR ROW, and carries its own anti-vacuity
+    # check: an uncapped call that already returns <= N rows would let an alias
+    # that were tolerated and DROPPED pass as a cap.
+    cap = 2
+    for cid, function, base, alias, extract in (
+            ("max_results-caps-search-like-head_limit", "search",
+             {"substring_pattern": NEEDLE, "skip_ignored_files": False},
+             "max_results", search_row_paths),
+            ("max-caps-find_file-like-head_limit", "find_file",
+             {"file_mask": "*.txt"}, "max", found_paths),
+            ("max_results-caps-list_dir-like-head_limit", "list_dir",
+             {"relative_path": ".", "recursive": True, "show_hidden": True},
+             "max_results", listing_paths)):
+        _, full_text = drv.call(function, base)
+        _, canon_text = drv.call(function, dict(base, head_limit=cap))
+        is_error, text = drv.call(function, dict(base, **{alias: cap}))
+        full, canon, got = (extract(full_text), extract(canon_text),
+                            extract(text))
+        problems = ["server returned an error"] if is_error else []
+        if len(full) <= cap:
+            problems.append("VACUOUS: the uncapped call returned %d row(s), "
+                            "not more than %d" % (len(full), cap))
+        if len(canon) != cap:
+            problems.append("CONTROL: head_limit=%d returned %d row(s)"
+                            % (cap, len(canon)))
+        if got != canon:
+            problems.append("%s=%d rows differ from head_limit=%d rows"
+                            % (alias, cap, cap))
+        suite.record(
+            "D", cid, problems,
+            detail=["`%s` -> head_limit in %s (per-function row; the global"
+                    % (alias, function),
+                    "`max` row would send it to max_results, not accepted here)",
+                    "uncapped : %d row(s)" % len(full),
+                    "head_limit=%d: %s" % (cap, sorted(canon)),
+                    "%s=%d: %s" % (alias, cap, sorted(got)),
+                    "reply: %s" % " | ".join(text.splitlines())[:200]],
+            text=text, showable=True)
+    # Two spellings of one param is refused (ADR 0015), and the alias is one.
+    record_error(
+        suite, "D", "max_results-and-head_limit-ambiguous", drv, "search",
+        {"substring_pattern": NEEDLE, "max_results": 1, "head_limit": 1},
+        must_say=["ambiguous", "max_results", "head_limit"],
+        must_not_say=["unknown params"],
+        detail=["both set head_limit: a collision, not a precedence question"])
+    # CONTROL: the per-function rows must not leak into the semantic layer,
+    # where `max_results` is canonical and `max` must still reach it.
+    problems, replies = [], []
+    for key in ("max_results", "max"):
+        is_error, text = drv.call("symbol", {"query": NEEDLE, key: 1})
+        low = text.lower()
+        replies.append("%s: %s" % (key, text.strip()[:120]))
+        if "unknown params" in low or "head_limit" in low:
+            problems.append("`%s` in symbol was not left on max_results: %s"
+                            % (key, text.strip()[:160]))
+    suite.record("D", "symbol-keeps-max_results", problems,
+                 detail=["an LSP-unavailable or empty answer is acceptable;",
+                         "an unknown-param or head_limit mention is not"]
+                 + replies, showable=True)
 
     # `no_ignore` is ripgrep's spelling and the INVERSE of skip_ignored_files,
     # so it cannot be a PARAM_ALIASES row (that layer renames keys and never
