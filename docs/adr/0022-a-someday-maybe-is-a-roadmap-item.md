@@ -429,3 +429,7 @@ IO and git:
   approval and is not part of this decision.
 - **No count is written here.** The suites' sizes are in the `SUITES` rows of
   `tests/run.py`.
+
+## Addendum (2026-09-28): the containment window is not one syscall wide
+
+The second of the two containment limits above files a symlink swapped in after the check and before the write under the same one-syscall race class as the lock window. That overclaims. The lock window is one syscall wide: the re-check and the replace sit next to each other. The containment check does not: it runs once, in `main` before the command is dispatched `ClaudeCode/skills/roadmap/scripts/roadmap.py:main`, and the write comes at the end of `commit`, so the window spans argument parsing, the git spawns, the wiki scan and rendering. The limit itself stands and stays declared, not gated: the path is the caller's own and the trust boundary already treats the local tree as trusted. Only the width was wrong. Recorded as roadmap item R-0026.
