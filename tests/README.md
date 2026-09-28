@@ -70,9 +70,11 @@ rationale lives in `docs/subsystems/tests.md`.
 | `spawn_stdin` | `test_spawn_stdin.py` | A–D |
 | `mcp_footprint` | `test_mcp_footprint.py` | A–H |
 | `wiki_recall` | `test_wiki_recall.py` | A–P |
+| `wiki_index` | `test_wiki_index.py` | A–F |
 | `jira_cli` | `test_jira_cli.py` | A–M |
 | `bitbucket_cli` | `test_bitbucket_cli.py` | A–K |
 | `checkpoint` | `test_checkpoint.py` | A–K |
+| `roadmap` | `test_roadmap.py` | A–L |
 | `generated_region` | `test_generated_region.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
 | `wire_log` | `test_wire_log.py` | A–F |
@@ -106,9 +108,11 @@ python3 tests/test_name_existence.py
 python3 tests/test_spawn_stdin.py
 python3 tests/test_mcp_footprint.py
 python3 tests/test_wiki_recall.py
+python3 tests/test_wiki_index.py
 python3 tests/test_jira_cli.py
 python3 tests/test_bitbucket_cli.py
 python3 tests/test_checkpoint.py
+python3 tests/test_roadmap.py
 python3 tests/test_generated_region.py
 python3 tests/test_read_loop.py
 python3 tests/test_wire_log.py
@@ -222,6 +226,10 @@ tests/
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
   test_mcp_footprint.py      groups A-H   (AST + one handshake per server)
   test_wiki_recall.py        groups A-P   (synthetic corpus, offline)
+  test_wiki_index.py         groups A-F   (both INDEX renderers and both copies
+                                           of the six page-type constants, loaded
+                                           side by side and compared -- archive
+                                           pages counted, never listed)
   test_jira_cli.py           groups A-M   (transport injected, nothing dialled)
   test_bitbucket_cli.py      groups A-K   (transport injected, nothing dialled
                                            -- the one case that needs the REAL
@@ -238,6 +246,11 @@ tests/
   test_checkpoint.py         groups A-K   (drives a WRITER: every path is a
                                            mkdtemp path, never either of the
                                            script's own default targets)
+  test_roadmap.py            groups A-L   (drives the roadmap WRITER: every path
+                                           is a mkdtemp path and the default
+                                           target is unreachable by construction;
+                                           group K digests the live roadmap and
+                                           archive and runs last, always)
   test_generated_region.py   groups A-F   (in-memory only, writes nothing --
                                            re-renders every generated region
                                            from the canonical source its own

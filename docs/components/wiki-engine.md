@@ -20,6 +20,7 @@ links:
   - 0003-the-trigger-travels-with-the-tool
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
   - 0018-the-totals-must-describe-the-scope
+  - 0022-a-someday-maybe-is-a-roadmap-item
 ---
 
 # Documentation Wiki Engine
@@ -153,11 +154,22 @@ the same as fresh.
 
 Which pages are *checkable at all* is decided by anchors, not by type. Any page
 carrying `sources:` must also carry `verified:` or it is gated `unverified`
-whatever its type; the `overview` / `adr` / `glossary` exemption is only reached
-by a page carrying neither `sources:` nor `targets:`
-`ClaudeCode/skills/wiki/scripts/freshness.py:UNTRACKED_TYPES`. So an `adr` that
-anchors real files is freshness-tracked like any component — the append-only
-rule freezes its body, not its verification record.
+whatever its type; the `overview` / `adr` / `glossary` / `roadmap` /
+`roadmap-item` exemption is only reached by a page carrying neither `sources:`
+nor `targets:` `ClaudeCode/skills/wiki/scripts/_wikilib.py:UNTRACKED_TYPES`. So
+an `adr` that anchors real files is freshness-tracked like any component — the
+append-only rule freezes its body, not its verification record.
+
+The two roadmap types are the one place `INDEX.md` does not list a page per
+line: every `roadmap-item` (one closed roadmap item, archived as its own
+immutable page) is counted into a single rendered line instead, and is exempt
+from the orphan rule because archive pages are unlinked by design
+`ClaudeCode/skills/wiki/scripts/_wikilib.py:INDEX_COUNTED_TYPES`
+`ClaudeCode/skills/wiki/scripts/_wikilib.py:ORPHAN_EXEMPT_TYPES`. `INDEX.md` is
+loaded into every session, so a hundred closed items would otherwise cost a
+hundred context lines each time; why the roadmap lives in the wiki at all, and
+why it has its own writer rather than a `wiki_call` function, is
+[[0022-a-someday-maybe-is-a-roadmap-item]].
 
 ## `status:` is editorial intent, never freshness
 

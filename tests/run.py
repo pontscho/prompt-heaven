@@ -114,6 +114,10 @@ def run_wiki_recall(opts):
     return run_python_suite("test_wiki_recall", opts)
 
 
+def run_wiki_index(opts):
+    return run_python_suite("test_wiki_index", opts)
+
+
 def run_jira_cli(opts):
     return run_python_suite("test_jira_cli", opts)
 
@@ -124,6 +128,10 @@ def run_bitbucket_cli(opts):
 
 def run_checkpoint(opts):
     return run_python_suite("test_checkpoint", opts)
+
+
+def run_roadmap(opts):
+    return run_python_suite("test_roadmap", opts)
 
 
 def run_generated_region(opts):
@@ -235,6 +243,11 @@ SUITES = [
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
      "the frontmatter aliases synonym field", 154),
+    ("wiki_index", run_wiki_index,
+     "INDEX.md rendering and the page-type constants: both render_index copies "
+     "byte-identical, a roadmap-item never listed and counted in one rendered "
+     "line, the orphan exemption, and the server/skill parity of six constants",
+     40),
     ("jira_cli", run_jira_cli,
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "
@@ -325,6 +338,17 @@ SUITES = [
      "to the mtime -- and every refusal exits 2 with one line on stderr, "
      "leaving the file alone",
      230),
+    ("roadmap", run_roadmap,
+     "roadmap.py, the single writer of docs/roadmap: the on-disk format "
+     "contract spelled independently of the module, the wiki type "
+     "membership, and the AST gates over its source -- stdlib only, one git "
+     "spawn site with a pinned argv prefix and a read-only subcommand set, no "
+     "shell, IO only in section 3, the clock only in today(), the standard "
+     "streams named in four functions, exact write-route caller sets, the IO "
+     "error rule PER CALL, one reader, re.ASCII and fullmatch only -- each "
+     "scanner with a planted control, and hygiene that proves the sandbox "
+     "guards bite even before the script exists",
+     326),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against", 92),
@@ -355,7 +379,7 @@ SUITES = [
      "McpServer wrap and the module-level dispatcher, each declared per server "
      "rather than inferred, with the format string required to be a literal so "
      "a payload cannot be interpolated into a log that IS written", 58),
-    # TYPED for the same reason again.  The count is 4 escapers + 4 rendered
+    # TYPED for the same reason again.  The count is 5 escapers + 5 rendered
     # rows + 1 coupling + 2 documented + 2 structure + 4 roster + 12 control +
     # 4 hygiene: a renderer that arrives or changes class moves it, which is the
     # alarm.  The control group is the large one on purpose -- six defective
@@ -366,7 +390,7 @@ SUITES = [
      "either escapes its own delimiter and documents the scheme where the "
      "model reads it, or is whitespace-delimited and has none to escape -- "
      "with reversibility a SEPARATE clause, because an encoder that does not "
-     "escape its own escape character passes a column count", 33),
+     "escape its own escape character passes a column count", 35),
     # TYPED for the same reason again.  The count is 3 clauses x 15 servers +
     # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
     # being analysed IS the defect here, so a count that moves when the fleet

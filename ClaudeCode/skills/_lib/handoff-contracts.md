@@ -160,6 +160,25 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 
 ---
 
+### `/p:roadmap`
+
+**Inputs:**
+- A command from the user: `init`, `add`, `list`, `show`, `move`, `rank`, `link`, `close`, `render`, `wip`, `export`, or the skill-level `adopt` op (interactive)
+- `docs/roadmap/roadmap.md` and `docs/roadmap/archive/*.md` (read by `roadmap.py` on every command; the default target resolves against the git top-level)
+- `adopt` only: the wiki root's ADR declared-limit sections, draft `spec` pages with `targets:`, "Open Questions" / "Next Steps" sections, and pending `requirements.yaml` leftovers — harvested read-only by `p:minion-explorer`
+
+**Outputs:**
+- `docs/roadmap/roadmap.md` — wiki page of type `roadmap`: frontmatter (with `wip_now`), a generated summary region, the four lanes `# now` / `# next` / `# later` / `# inbox`, one `## R-NNNN · <title>` block per live item. **Written EXCLUSIVELY by `roadmap.py`** (whole-file render, optimistic two-digest lock, atomic replace)
+- `docs/roadmap/archive/NNNN-<slug>.md` — wiki page of type `roadmap-item`, one per closed item (NNNN = the item id). Created exclusively by `roadmap.py close`, complete on publication, never rewritten
+- `roadmap.py export` — JSON `roadmap-export/1` on stdout or to `--out` (contract in the `p:roadmap` SKILL.md)
+
+**Side effects:**
+- Writes staged input files `.claude/tmp/roadmap-stage-<ts>-<n>.json|.txt` (via `purity_call` `create_text_file`) and, during `adopt`, the export `.claude/tmp/roadmap-adopt-<ts>.json`; untrusted text reaches `roadmap.py` only through these files, never the shell line
+- `close --commit` reads git (`cat-file -e`); `export` reads git (`rev-parse`, `ls-tree`); no command runs an index-refreshing git command
+- Never edits any other wiki page (closing an item does not touch its `spec` page); never runs `wiki_call` `reindex` itself
+
+---
+
 ## Per-pipeline intermediate files
 
 | File | Producer | Consumer | Format |
@@ -171,6 +190,10 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 | `docs/reviews/security-review-<ts>.md` | `/p:security-review` Step 4 | end-user (audit trail) | markdown, full report |
 | `docs/reviews/code-review-<name>-<date>.md` | `/p:code-review` Step 4 (Synthesize) | end-user (audit trail) | markdown, full report — only when `--output` includes markdown |
 | `docs/reviews/branch-review-<ts>.md` | `/p:branch-review` Step 4 (Synthesize) | end-user (audit trail) | markdown, full report — only when `--output` includes markdown |
+| `docs/roadmap/roadmap.md` | `/p:roadmap` via `roadmap.py` (the only writer) | `p:wiki` (`wiki_call` `search`, INDEX.md), `/p:roadmap export` | markdown wiki page, type `roadmap`; format in the `p:roadmap` SKILL.md |
+| `docs/roadmap/archive/NNNN-<slug>.md` | `roadmap.py close` (exclusive create; immutable) | `p:wiki` (`search`; INDEX.md counts these in one line, never lists them) | markdown wiki page, type `roadmap-item` |
+| `.claude/tmp/roadmap-adopt-<ts>.json` | `/p:roadmap adopt` hop 1 (`roadmap.py export --out`) | `p:minion-explorer` (dedup of harvested candidates by origin) | JSON, `roadmap-export/1` |
+| `.claude/tmp/roadmap-stage-<ts>-<n>.json` / `.txt` | `/p:roadmap` (main context, `purity_call` `create_text_file`) | `roadmap.py` (`--item-file`, `--why-file`, `--reason-file`) | JSON item object / plain text |
 
 > **Note:** `/p:code-review` and `/p:branch-review` are standalone (not part of the feature-lifecycle pipeline) and produce **no `.claude/tmp/` intermediate files** — their finder→verifier→synthesize handoff is entirely via `Agent` return values held in the skill body, so the only files they emit are the optional `docs/reviews/` reports above.
 

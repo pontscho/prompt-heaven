@@ -31,9 +31,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _wikilib as w  # noqa: E402
 
-# Page types that are not bound to code sources and are never freshness-tracked.
-UNTRACKED_TYPES = {"overview", "adr", "glossary"}
-
 # Statuses that are listed page-by-page; everything else is summarized as a count.
 # `promotable` is actionable (a forward target materialized) so it is detailed;
 # `planned` stays a summarized count.
@@ -126,7 +123,7 @@ def analyze(root: str, head: str):
 				pages.append({"name": name, "path": relpath, "type": typ,
 					"status": "planned"})
 			else:
-				status = "untracked" if typ in UNTRACKED_TYPES else "no-sources"
+				status = "untracked" if typ in w.UNTRACKED_TYPES else "no-sources"
 				pages.append({"name": name, "path": relpath, "type": typ, "status": status})
 			continue
 		if not commit:

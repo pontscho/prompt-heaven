@@ -1,0 +1,2317 @@
+#!/usr/bin/env python3
+"""
+The single writer of docs/roadmap/: roadmap.md (the live lanes) and archive/
+(one immutable page per closed item). The operator contract -- commands,
+flags, the file format, refusal handling -- lives in the skill's SKILL.md; the
+decision and its alternatives in ADR 0022. This docstring says WHY each
+mechanism is shaped the way it is, and does not restate the field table.
+
+ONE WRITER, WHOLE-FILE RENDER. roadmap.md is never patched in place. Every
+mutating command parses the whole file into a model, changes the model, and
+renders the whole file again, then re-parses what it rendered and refuses to
+write unless that parses back to the same model. A second writer (an editor, a
+hand edit, another tool) would have to reproduce every formatting decision to
+stay parseable; the strict reader refuses its output instead of guessing, so a
+hand edit is loud, never silently absorbed.
+
+AN OPTIMISTIC, TWO-DIGEST LOCK. There is no lock file. A command remembers the
+sha256 of the roadmap.md bytes it read AND of the archive listing, and
+write_atomic re-takes both immediately before os.replace; a mismatch refuses
+with nothing written. The archive digest is there because `add` derives the
+next id from the archive: a concurrent close must invalidate it. The window
+between the re-check and the replace is one syscall wide, and declared.
+
+ARCHIVE WINS. A close writes the archive page first and then removes the live
+block. A crash between the two leaves the id in both places; the loader drops
+the live copy (the archive page is complete by construction: it is published
+by linking a fully written, fsynced temp file) and says so. Read commands
+repair in memory and note it; mutating commands persist the repair.
+
+IO LIVES IN ONE SECTION. Everything that touches the filesystem, a process or
+a clock is in section 3 (and `today()`), and every IO call there sits in the
+body of a `try` that names OSError, so an IO failure is one `roadmap:` line on
+stderr and exit 2, never a traceback. Parsing, validation and rendering are
+pure functions of strings. The suite gates these rules on the source by AST.
+
+UNTRUSTED TEXT IS DATA. Titles, origins and whys harvested from a repository
+reach this script through staged files (--item-file, --why-file,
+--reason-file), never through a shell line, and every single-line value passes
+one character rule (check_line) before it is written onto its one line.
+"""
+
+import argparse
+import collections
+import datetime
+import errno
+import hashlib
+import io
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import unicodedata
+
+# ---------------------------------------------------------------------------
+# 1. constants & grammar
+# ---------------------------------------------------------------------------
+
+DEFAULT_FILE = "docs/roadmap/roadmap.md"
+ARCHIVE_DIRNAME = "archive"
+ROADMAP_TYPE = "roadmap"
+ITEM_TYPE = "roadmap-item"
+HORIZONS = ("now", "next", "later", "unset")
+# horizon -> its H1 lane heading, in file order. The ONE place that knows inbox means unset.
+LANE_HEADINGS = (("now", "# now"), ("next", "# next"), ("later", "# later"), ("unset", "# inbox"))
+LANE_LABELS = {"now": "now", "next": "next", "later": "later", "unset": "inbox"}
+OPEN_STATES = ("idea", "planned", "active")
+CLOSED_STATES = ("done", "dropped")
+# Key-line order of a live item; the archive frontmatter uses the same order for these keys.
+ITEM_KEYS = ("state", "horizon", "origin", "spec", "blocked_by", "follows", "severity", "tags")
+LIST_KEYS = ("blocked_by", "tags")            # always written inline, [] when empty
+OPTIONAL_KEYS = ("spec", "follows", "severity")  # omitted when unset
+REQUIRED_ITEM_KEYS = ("state", "horizon", "origin", "blocked_by", "tags")
+ROADMAP_KEYS = ("name", "type", "status", "title", "description", "wip_now")
+# The archive frontmatter, in canonical order; `commit` xor `reason`.
+ARCHIVE_KEYS = ("name", "type", "status", "title", "description", "id", "state", "horizon",
+                "origin", "spec", "blocked_by", "follows", "severity", "tags", "closed",
+                "commit", "reason")
+ARCHIVE_REQUIRED = ("name", "type", "status", "title", "description", "id", "state",
+                    "horizon", "origin", "blocked_by", "tags", "closed")
+EDITORIAL_STATUSES = ("draft", "active", "deprecated")
+WIP_DEFAULT = 3
+WIP_NOTE_UNARGUED = ("# wip_now is an unargued starting value (adr 0022, after adr 0013)"
+                     " -- change it only with roadmap.py wip N --reason TEXT")
+ROADMAP_TITLE = "Roadmap"
+ROADMAP_DESCRIPTION = ("Known-but-unscheduled work by horizon (now, next, later, inbox), "
+                       "written only by roadmap.py; closed items are archived one file each "
+                       "under roadmap/archive/.")
+SUMMARY_BEGIN_PREFIX = "<!-- ROADMAP:BEGIN"
+SUMMARY_END_PREFIX = "<!-- ROADMAP:END"
+SUMMARY_BEGIN = SUMMARY_BEGIN_PREFIX + " -- generated by roadmap.py; do not edit by hand -->"
+SUMMARY_END = SUMMARY_END_PREFIX + " -->"
+SUMMARY_COLUMNS = ("Lane", "Id", "State", "Title", "Ready")
+LIST_COLUMNS = ("Lane", "Id", "State", "Title", "Ready", "Blocked by")
+UNTRIAGED_COLUMNS = ("Id", "Title", "Age (days)", "Origin")
+TMP_PREFIX = ".roadmap-"
+TMP_SUFFIX = ".tmp"
+EXPORT_SCHEMA = "roadmap-export/1"
+GIT_TIMEOUT_SEC = 30
+# Every git spawn starts with these, and runs with GIT_NO_LAZY_FETCH=1 in its env.
+# Cheap hardening, DECLARED, not a gated guarantee (adr 0022): the local .git/config
+# is trusted (clone does not transfer it; write access to it already equals code
+# execution as the user). What IS relied on: roadmap.py never runs an index-refreshing
+# command (git status/diff/add); the export's dirty flag is hashed in Python
+# (worktree_dirty). hooksPath is pinned so a future write-ish call inherits the guard;
+# protocol.allow=never and GIT_NO_LAZY_FETCH keep a read from reaching the network.
+# safe.bareRepository=explicit stops discovery from cwd=docs/roadmap adopting a bare
+# repository planted there as tracked files, whose config clone DOES transfer.
+GIT_SAFE_ARGV = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                 "-c", "protocol.allow=never", "-c", "safe.bareRepository=explicit")
+# --item-file: a JSON object; the allowed and required keys depend on the command (S2-1).
+ITEM_FILE_KEYS = {
+    "add": ("title", "origin", "why", "tags", "severity", "horizon", "reason"),
+    "link": ("origin", "spec", "blocked_by"),
+}
+ITEM_FILE_REQUIRED = {"add": ("title", "origin"), "link": ()}   # link: at least one key
+STAGED_MAX_BYTES = 65536   # --item-file / --why-file / --reason-file: small by contract
+# Cap for every other read_regular: roadmap.md, each archive entry, each wiki page of the
+# name scan, each worktree file worktree_dirty hashes. An UNARGUED starting value, like
+# wip_now (adr 0022, after adr 0013): it bounds memory against a planted huge file, and
+# no measurement chose it. Change it with a reason, never silently.
+PAGE_MAX_BYTES = 4 * 1024 * 1024
+# read_regular's reasons (returned, never raised); each caller maps them to its own
+# refusal, skip or verdict. An OSError is returned as the exception itself. A caller
+# that must report READ_MISSING through io_fail passes a REAL exception,
+# FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path), so io_fail's
+# contract ("exc is an OSError") has no special case (L1).
+READ_MISSING = "missing"
+READ_NOT_REGULAR = "not a regular file"
+READ_TOO_LARGE = "too large"
+# The lane spellings a caller may type (move <lane>, add/list --horizon, the item file's
+# horizon): inbox is the spelling of unset. Validated in code, never via argparse choices.
+LANE_INPUT = {"now": "now", "next": "next", "later": "later", "inbox": "unset", "unset": "unset"}
+SLUG_MAX = 50
+# U+00B7 MIDDLE DOT, the separator of every item heading and archive title.
+DOT = "\xb7"
+# Every pattern: re.ASCII (so \d is [0-9], never an Arabic-Indic or other Unicode
+# digit that int() would still accept) and NO ^ / $ anchors -- every use is
+# .fullmatch(), because $ also matches before a trailing "\n" (M3).
+ID_RE = re.compile(r"[Rr]-?0*(\d{1,4})|0*(\d{1,4})", re.ASCII)   # R-0014, r-0014, R14, 14, 0014
+ITEM_ID_RE = re.compile(r"R-(\d{4})", re.ASCII)                 # the one spelling the files carry
+ITEM_HEADING_RE = re.compile(r"## R-(\d{4}) \xb7 (\S.*)", re.ASCII)
+ARCHIVE_NAME_RE = re.compile(r"(\d{4})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md", re.ASCII)
+SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*", re.ASCII)
+TAG_RE = SLUG_RE
+SHA_RE = re.compile(r"[0-9a-f]{7,64}", re.ASCII)                # user input: SHA-1 or SHA-256 repos
+FULL_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}", re.ASCII)   # the stored archive `commit`
+DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})", re.ASCII)       # shape only; check_date adds the calendar
+LOG_RE = re.compile(r"- (\d{4}-\d{2}-\d{2}) (new|now|next|later|unset)->"
+                    r"(now|next|later|unset|done|dropped)"
+                    r"(?: \[(idea|planned|active)->(idea|planned|active)\])?: (\S.*)", re.ASCII)
+WIP_NOTE_RE = re.compile(r"# wip_now \S.*", re.ASCII)
+# wip_now and `wip N`. Bounded: past 4300 digits int() raises ValueError (3.11+).
+POS_INT_RE = re.compile(r"[1-9][0-9]{0,8}", re.ASCII)
+# A why line that would split the item on re-read: a level 1-3 heading.
+WHY_HEADING_RE = re.compile(r"#{1,3} .*", re.ASCII)
+SLUG_SPLIT_RE = re.compile(r"[^a-z0-9]+", re.ASCII)             # slugify's separator run
+GRAMMAR = ("%s: line %d: %s -- refusing to guess (roadmap.md has one writer; was it "
+           "edited by hand?)")
+
+Item = collections.namedtuple(
+    "Item",
+    "id title state horizon origin spec blocked_by follows severity tags why log closed path")
+# id: int (R-0014 -> 14); horizon: "now"|"next"|"later"|"unset"
+# spec/follows/severity: None or str/int (follows is an int id); blocked_by: tuple of int (sorted, unique)
+# tags: tuple of str (sorted, unique); why: str (markdown, "" when absent)
+# log: tuple of LogEntry; closed: None or Closed
+# path: path of the file the item was read from, relative to the wiki root's parent
+LogEntry = collections.namedtuple("LogEntry", "date lane_from lane_to state_from state_to reason")
+# lane_from: None for "new"; state_from/state_to: both None unless the state changed
+Closed = collections.namedtuple("Closed", "date commit reason")
+Snapshot = collections.namedtuple("Snapshot", "digest archive_digest")
+# digest: sha256 hex of roadmap.md bytes (None if missing);
+# archive_digest: sha256 hex of "\n".join(sorted(non-temp names in archive/))
+State = collections.namedtuple("State", "path meta lanes archived snapshot text repairs display")
+# meta: dict name/type/status/title/description/wip_now/wip_note
+# lanes: dict horizon -> list of Item in rank order; archived: dict int id -> Item
+# text: the decoded roadmap.md text as read; repairs: list of (id, archive relpath)
+# display: roadmap.md's path relative to the wiki root's parent, the `path` a new item gets
+ABSENT = object()     # write_atomic expectation: the target must not exist (init)
+UNLOCKED = object()   # write_atomic expectation: no lock (export --out)
+
+_TODAY = None   # set once by main() from --today; in-process tests may set it directly
+
+
+# ---------------------------------------------------------------------------
+# 2. errors & output -- each names a stream and hands it to _write_stream
+# ---------------------------------------------------------------------------
+
+def die(message):
+    _write_stream(sys.stderr, "roadmap: %s\n" % message, "stderr")
+    sys.exit(2)
+
+
+def note(message):
+    _write_stream(sys.stderr, "roadmap: %s\n" % message, "stderr")
+
+
+def emit(text):
+    _write_stream(sys.stdout, text + "\n", "stdout")
+
+
+def emit_raw(text):
+    """Verbatim: `show` of an archived item must reproduce the file's bytes,
+    and `export` on stdout must equal `export --out` byte for byte."""
+    _write_stream(sys.stdout, text, "stdout")
+
+
+def today():
+    if _TODAY is not None:
+        return _TODAY
+    return datetime.date.today().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# 3. io -- the ONLY section that touches a file, a process or a descriptor.
+#    Every IO call sits in the body of a try whose handlers name OSError.
+# ---------------------------------------------------------------------------
+
+def _write_stream(stream, text, role):
+    """UTF-8 bytes through .buffer when the stream has one (a real terminal or
+    pipe); plain text otherwise (the StringIO that tests' captured() installs).
+    The U+00B7 in item headings must not depend on the locale's encoding.
+    backslashreplace: a PATH decoded from non-UTF-8 argv or filesystem bytes
+    carries lone surrogates; naming it in a refusal must never raise (NFR-4).
+    role is "stdout" or "stderr"; it picks the exit code of a failed write (M2)."""
+    buffer = getattr(stream, "buffer", None)
+    try:
+        if buffer is not None:
+            stream.flush()
+            buffer.write(text.encode("utf-8", "backslashreplace"))
+            buffer.flush()
+        else:
+            stream.write(text)
+    except OSError as exc:
+        _silence(stream)                # no "Exception ignored" at shutdown
+        if role == "stderr":
+            sys.exit(2)                 # the refusal channel itself is gone
+        if isinstance(exc, BrokenPipeError):
+            sys.exit(0)                 # the reader stopped reading: not our failure
+        die("cannot write to standard output: %s"
+            % (exc.strerror or exc.__class__.__name__))
+
+
+def _silence(stream):
+    """Point the stream's descriptor at /dev/null, best effort (M2). A stream
+    with no real descriptor (a test's StringIO or fake) has nothing to
+    silence, and is never dup2-ed over."""
+    fileno = getattr(stream, "fileno", None)
+    if fileno is None:
+        return
+    try:
+        target = fileno()
+        fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(fd, target)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, AttributeError, io.UnsupportedOperation):
+        pass
+
+
+def io_fail(op, path, exc):
+    """The backstop refusal for an IO error. op names the operation in plain
+    words ("read", "list", "create directory", "create a temporary file in",
+    "write", "link", "replace", "stat", "resolve the working directory")."""
+    reason = getattr(exc, "strerror", None) or (
+        os.strerror(exc.errno) if getattr(exc, "errno", None) else exc.__class__.__name__)
+    die("cannot %s %s: %s" % (op, path, reason))
+
+
+def _discard(tmp):
+    """Best-effort unlink of a temp file: the refusal already under way is the
+    one worth reporting, and a missing temp is already clean."""
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+
+
+def read_regular(path, cap):
+    """Read a REGULAR file of at most cap bytes. Never follows a final symlink,
+    never blocks on a FIFO, never reads past cap. Returns (data, None) or
+    (None, why): why is READ_MISSING, READ_NOT_REGULAR, READ_TOO_LARGE or the
+    OSError itself. It never raises OSError; each caller maps `why` to its own
+    refusal (die), skip (note) or verdict (dirty)."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None, READ_MISSING
+    except OSError as exc:
+        return None, exc
+    if not stat.S_ISREG(st.st_mode):
+        return None, READ_NOT_REGULAR
+    if st.st_size > cap:
+        return None, READ_TOO_LARGE
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)       # ELOOP if swapped for a symlink since the lstat
+    except FileNotFoundError:
+        return None, READ_MISSING
+    except OSError as exc:
+        return None, exc
+    try:                                # outer: guards the reads AND the close (H1)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):   # swapped for a FIFO/device since the lstat
+                return None, READ_NOT_REGULAR
+            chunks, left = [], cap + 1
+            while left > 0:
+                chunk = os.read(fd, min(left, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                left -= len(chunk)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        return None, exc
+    data = b"".join(chunks)
+    if len(data) > cap:                 # grew since the lstat
+        return None, READ_TOO_LARGE
+    return data, None
+
+
+def read_archive_entry(path):
+    """The ONE mapping of an archive entry read, shared by read_state_files and
+    cmd_show; returns the bytes or refuses."""
+    data, why = read_regular(path, PAGE_MAX_BYTES)
+    if why == READ_NOT_REGULAR:
+        die("archive entry %s is not a regular file" % path)
+    if why == READ_TOO_LARGE:
+        die("archive entry %s is larger than %d bytes -- refusing to read it"
+            % (path, PAGE_MAX_BYTES))
+    if why == READ_MISSING:             # vanished after the listing: a concurrent change
+        io_fail("read", path, FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path))
+    if why is not None:
+        io_fail("read", path, why)
+    return data
+
+
+def decode(path, data):
+    """Strict UTF-8 on the refusal route (P3). The lock digests the BYTES, so
+    the decode is done here rather than by open()."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        die("%s is not valid UTF-8 (byte 0x%02x at offset %d) -- refusing to read it"
+            % (path, exc.object[exc.start], exc.start))
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _archive_digest(names):
+    """The archive half of the lock: the sorted non-temp names. A name that is
+    not UTF-8 is digested through surrogateescape, never refused here."""
+    kept = sorted(name for name in names if not name.startswith(TMP_PREFIX))
+    return digest("\n".join(kept).encode("utf-8", "surrogateescape"))
+
+
+def take_snapshot(path):
+    """The lock's two digests, as they are NOW. A roadmap.md that cannot be
+    read as a regular file is a changed file: its digest can never match."""
+    data, why = read_regular(path, PAGE_MAX_BYTES)
+    if why == READ_MISSING:
+        roadmap = None
+    elif why is not None:
+        roadmap = "unreadable: %s" % (why,)
+    else:
+        roadmap = digest(data)
+    archive_dir = archive_dir_of(path)
+    try:
+        names = os.listdir(archive_dir)
+    except FileNotFoundError:
+        names = []
+    except OSError as exc:
+        io_fail("list", archive_dir, exc)
+    return Snapshot(roadmap, _archive_digest(names))
+
+
+def check_snapshot(path, expect, conflict):
+    if take_snapshot(path) != expect:
+        die(conflict or "%s changed since it was read (another session?) -- nothing "
+                        "written; re-run the command" % path)
+
+
+def write_atomic(path, text, expect, conflict=None):
+    """Temp file in the target's directory, fsync, chmod, then the lock
+    re-check IMMEDIATELY before os.replace (or the exclusive link for init).
+    Every exit cleans the temp file."""
+    try:
+        data = text.encode("utf-8")     # user values are check_line-clean; a PATH-derived
+    except UnicodeError as exc:         # export field is not, so this is the backstop
+        io_fail("encode the text for", path, exc)
+    directory = os.path.dirname(path)   # pure; replaced by the absolute form below
+    try:
+        directory = os.path.dirname(os.path.abspath(path))   # abspath reads the cwd (H1)
+        mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o644
+        handle, tmp = tempfile.mkstemp(dir=directory, prefix=TMP_PREFIX, suffix=TMP_SUFFIX)
+    except OSError as exc:              # unwritable or vanished directory: no traceback
+        io_fail("create a temporary file in", directory or path, exc)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, mode)
+        if expect is ABSENT:
+            _publish_link(tmp, path, data, "%s already exists -- init never overwrites" % path)
+        else:
+            if expect is not UNLOCKED:
+                check_snapshot(path, expect, conflict)   # die() here -> except below unlinks tmp
+            os.replace(tmp, path)
+    except OSError as exc:              # ENOSPC, EACCES, EXDEV...: clean up, then one line
+        _discard(tmp)
+        io_fail("write", path, exc)
+    except BaseException:               # SystemExit from die(), KeyboardInterrupt: clean up, re-raise
+        _discard(tmp)
+        raise
+
+
+def create_exclusive(path, text):
+    """Create a COMPLETE file that must not exist yet: written to an fsynced
+    temp, then published by _publish_link. A missing archive/ is created
+    first (M5): a fresh clone never has an empty one."""
+    directory = os.path.dirname(path)
+    ensure_archive_dir(directory)
+    try:
+        data = text.encode("utf-8")
+    except UnicodeError as exc:
+        io_fail("encode the text for", path, exc)
+    try:
+        handle, tmp = tempfile.mkstemp(dir=directory, prefix=TMP_PREFIX, suffix=TMP_SUFFIX)
+    except OSError as exc:
+        io_fail("create a temporary file in", directory, exc)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, 0o644)
+        _publish_link(tmp, path, data,
+                      "%s already exists -- an archive file is never overwritten" % path)
+    except OSError as exc:
+        _discard(tmp)
+        io_fail("write", path, exc)
+    except BaseException:
+        _discard(tmp)
+        raise
+
+
+def _publish_link(tmp, final, data, exists_message):
+    """Publish a complete temp file under `final`, which must not exist:
+    os.link fails with FileExistsError exactly like O_EXCL. Where hard links
+    are unavailable, an O_EXCL create of `final` written from `data` (never a
+    re-read of the temp). The temp name never survives (L2)."""
+    try:
+        os.link(tmp, final)
+        linked = True
+    except FileExistsError:
+        _discard(tmp)
+        die(exists_message)
+    except OSError:
+        linked = False
+    if not linked:
+        try:
+            fd = os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            _discard(tmp)
+            die(exists_message)
+        except OSError as exc:
+            _discard(tmp)
+            io_fail("create", final, exc)
+        try:
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            _discard(final)
+            _discard(tmp)
+            io_fail("create", final, exc)
+    try:                                # the directory entry, best effort
+        dfd = os.open(os.path.dirname(final) or ".", os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
+    _discard(tmp)
+
+
+def git(args, cwd, binary=False):
+    """Run one read-only git command; report through the rc, never raise.
+    124 on timeout, 127 if git is missing, 126 on any other spawn failure.
+    stdout is os.fsdecode-d (it cannot fail) unless binary=True."""
+    empty = b"" if binary else ""
+    try:
+        proc = subprocess.run(
+            list(GIT_SAFE_ARGV) + list(args), cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=GIT_TIMEOUT_SEC,    # never wait forever: a prompt or a stuck lock
+            env=dict(os.environ, GIT_NO_LAZY_FETCH="1"),
+        )
+    except FileNotFoundError:
+        return 127, empty, "git executable not found"
+    except subprocess.TimeoutExpired:
+        return 124, empty, "git %s timed out after %ds" % (args[0] if args else "", GIT_TIMEOUT_SEC)
+    except OSError as exc:
+        return 126, empty, "cannot run git: %s" % (exc.strerror or exc.__class__.__name__)
+    out = proc.stdout if binary else os.fsdecode(proc.stdout)
+    return proc.returncode, out, proc.stderr.decode("utf-8", "replace")
+
+
+def verify_commit(sha, cwd):
+    """The full sha of an existing commit, or a refusal. The shape comes
+    first, so a value like -x never reaches git (R19); a git that cannot run
+    (124/126/127) is reported as such, never as "not a repository"."""
+    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+        die("%r is not a commit sha (want 7-64 lowercase hex digits)" % (sha,))
+    rc, _out, err = git(["rev-parse", "--show-toplevel"], cwd)
+    if rc in (124, 126, 127):
+        die("cannot verify commit %s: git failed (%s)" % (sha, err.strip()))
+    if rc != 0:
+        die("cannot verify commit %s: %s is not inside a git repository" % (sha, cwd))
+    rc, _out, err = git(["cat-file", "-e", sha + "^{commit}"], cwd)
+    if rc in (124, 126, 127):
+        die("cannot verify commit %s: git failed (%s)" % (sha, err.strip()))
+    if rc != 0:
+        die("commit %s does not exist in %s (git cat-file -e)" % (sha, cwd))
+    rc, out, _err = git(["rev-parse", "--verify", "--quiet", sha + "^{commit}"], cwd)
+    full = out.strip()
+    if rc != 0 or not FULL_SHA_RE.fullmatch(full):
+        die("cannot verify commit %s: git failed (unexpected rev-parse output)" % sha)
+    return full
+
+
+def resolve_target(file_arg):
+    """--file as an absolute normalized path; without it, DEFAULT_FILE under
+    the git top-level of the cwd, falling back to the cwd -- so a run from a
+    subdirectory never creates a second docs/roadmap there."""
+    if file_arg is not None:
+        try:
+            return os.path.abspath(file_arg)
+        except OSError as exc:
+            io_fail("resolve the working directory for", file_arg, exc)
+    try:
+        cwd = os.getcwd()
+    except OSError as exc:
+        io_fail("resolve the working directory for", DEFAULT_FILE, exc)
+    rc, out, _err = git(["rev-parse", "--show-toplevel"], cwd)
+    top = out.rstrip("\n") if rc == 0 else ""
+    return os.path.normpath(os.path.join(top or cwd, DEFAULT_FILE))
+
+
+def check_containment(path):
+    """The roadmap directory must resolve inside its tree (S4-1): a symlinked
+    roadmap/ or a symlinked ancestor inside the work tree would carry every
+    write outside the repository while every per-file check passed."""
+    roadmap_dir = os.path.dirname(path)
+    refuse_symlink(roadmap_dir, "roadmap directory")
+    wiki = os.path.dirname(roadmap_dir)
+    probe = os.path.dirname(wiki)
+    while not os.path.isdir(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    rc, out, _err = git(["rev-parse", "--show-toplevel"], probe)
+    top = out.rstrip("\n") if rc == 0 else ""
+    try:
+        base = os.path.realpath(top or wiki)
+        real = os.path.realpath(roadmap_dir)
+    except OSError as exc:
+        io_fail("resolve", roadmap_dir, exc)
+    if real != base and not real.startswith(base.rstrip(os.sep) + os.sep):
+        die("%s resolves to %s, outside %s -- refusing to write through a symlinked directory"
+            % (roadmap_dir, real, base))
+
+
+def refuse_symlink(path, what, message=None):
+    if os.path.islink(path):
+        die(message % path if message else "%s %s is a symlink -- refusing" % (what, path))
+
+
+def refuse_existing(path):
+    if os.path.lexists(path):
+        die("%s already exists -- init never overwrites" % path)
+
+
+def ensure_archive_dir(path):
+    """Create archive/ (and roadmap/, and any missing parent) when absent."""
+    refuse_symlink(path, "archive directory")
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        io_fail("create directory", path, exc)
+
+
+def archive_names_for_id(archive_dir, n):
+    """The sorted archive names that belong to id n: the twin pre-check of a
+    close. A missing archive/ holds none."""
+    prefix = "%04d-" % n
+    try:
+        names = os.listdir(archive_dir)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        io_fail("list", archive_dir, exc)
+    return sorted(name for name in names if name.startswith(prefix) and name.endswith(".md"))
+
+
+def check_out_path(out, roadmap_path):
+    """export --out: never a symlink (S-L2), a directory, the roadmap or
+    anything inside its archive; its parent must be an existing directory, so
+    mkstemp in a missing one is a friendly line, not a traceback (round-3 H1).
+    write_atomic's io_fail stays the backstop for a parent that vanishes."""
+    refuse_symlink(out, "--out")
+    if os.path.isdir(out):
+        die("--out %s is a directory" % out)
+    try:
+        real = os.path.realpath(out)
+        own = os.path.realpath(roadmap_path)
+        archive = os.path.realpath(archive_dir_of(roadmap_path))
+        parent = os.path.dirname(os.path.abspath(out))
+    except OSError as exc:
+        io_fail("resolve", out, exc)
+    if real == own or real == archive or real.startswith(archive + os.sep):
+        die("--out %s is the roadmap or its archive -- refusing" % out)
+    if not os.path.isdir(parent):
+        die("--out %s: directory %s does not exist" % (out, parent))
+
+
+def read_state_files(path):
+    """(roadmap.md bytes, {archive name: bytes}, snapshot, display paths).
+    The snapshot is taken from exactly the bytes and the listing returned, so
+    the lock compares what was parsed. Display paths are relative to the wiki
+    root's parent, computed here so pure code never needs relpath."""
+    archive_dir = archive_dir_of(path)
+    refuse_symlink(path, "roadmap",
+                   "%s is a symlink -- roadmap.py reads and replaces only a regular file it owns")
+    refuse_symlink(archive_dir, "archive directory")
+    data, why = read_regular(path, PAGE_MAX_BYTES)
+    if why == READ_MISSING:
+        die("file not found: %s -- run roadmap.py init first" % path)
+    if why == READ_NOT_REGULAR:
+        die("not a regular file: %s" % path)
+    if why == READ_TOO_LARGE:
+        die("%s is larger than %d bytes -- refusing to read it" % (path, PAGE_MAX_BYTES))
+    if why is not None:
+        io_fail("read", path, why)
+    try:
+        names = os.listdir(archive_dir)
+    except FileNotFoundError:
+        names = []                      # a fresh clone: git keeps no empty directory (M5)
+    except OSError as exc:
+        io_fail("list", archive_dir, exc)
+    kept = sorted(name for name in names if not name.startswith(TMP_PREFIX))
+    for name in kept:
+        if not ARCHIVE_NAME_RE.fullmatch(name):
+            die("unexpected file in archive/: %s (want NNNN-slug.md)" % name)
+    archive = dict((name, read_archive_entry(os.path.join(archive_dir, name))) for name in kept)
+    snapshot = Snapshot(digest(data), _archive_digest(names))
+    try:
+        rel = os.path.relpath(path, os.path.dirname(wiki_root_of(path)))
+    except OSError as exc:
+        io_fail("resolve", path, exc)
+    display = {"path": path, "roadmap": rel,
+               "archive": os.path.join(os.path.dirname(rel), ARCHIVE_DIRNAME)}
+    return data, archive, snapshot, display
+
+
+def wiki_page_names(root):
+    """(names, pages) over every *.md under the wiki root but INDEX.md and
+    dot-directories. names: every stem AND frontmatter name -> its file (the
+    slug-collision map, deliberately wider than the wiki's own skip list).
+    pages: the frontmatter names of files that ARE pages. A file this scan
+    cannot read as a small regular file is skipped with a note, never
+    followed, opened blocking or refused: roadmap.py does not own it."""
+    names, pages = {}, {}
+
+    def skipped(exc):
+        note("note: wiki name scan skipped %r (%s)"
+             % (getattr(exc, "filename", None) or root, exc.strerror or exc.__class__.__name__))
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=skipped):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for filename in sorted(filenames):
+            if not filename.endswith(".md") or filename == "INDEX.md":
+                continue
+            full = os.path.join(dirpath, filename)
+            data, why = read_regular(full, PAGE_MAX_BYTES)
+            if why is not None:
+                note("note: wiki name scan skipped %r (%s)"
+                     % (full, getattr(why, "strerror", None) or why))
+                continue
+            names.setdefault(os.path.splitext(filename)[0], full)
+            name = _frontmatter_name(data.decode("utf-8", "replace"))
+            if name:
+                names.setdefault(name, full)
+                pages.setdefault(name, full)
+    return names, pages
+
+
+def _frontmatter_name(text):
+    """The lenient look: a --- fence that closes, with a non-empty top-level
+    name: line between. Never the strict parser: this file is not ours."""
+    lines = text.split("\n")
+    if not lines or lines[0].rstrip("\r") != "---":
+        return None
+    for line in lines[1:]:
+        line = line.rstrip("\r")
+        if line == "---":
+            return None
+        if line.startswith("name:"):
+            value = line[len("name:"):].strip()
+            if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+                value = value[1:-1]
+            if value:
+                for rest in lines[lines.index(line) + 1:]:
+                    if rest.rstrip("\r") == "---":
+                        return value
+            return None
+    return None
+
+
+def read_staged_file(flag, path, roadmap_path):
+    """The one reader of --item-file, --why-file and --reason-file (S-H1): a
+    small regular file that is neither the roadmap nor inside its archive."""
+    try:
+        real = os.path.realpath(path)
+        own = os.path.realpath(roadmap_path)
+        archive = os.path.realpath(archive_dir_of(roadmap_path))
+    except OSError as exc:
+        io_fail("resolve", path, exc)
+    if real == own or real == archive or real.startswith(archive + os.sep):
+        die("%s %s is the roadmap or its archive -- refusing" % (flag, path))
+    data, why = read_regular(path, STAGED_MAX_BYTES)
+    if why == READ_MISSING:
+        die("%s %s does not exist" % (flag, path))
+    if why == READ_NOT_REGULAR:
+        die("%s %s is not a regular file" % (flag, path))
+    if why == READ_TOO_LARGE:
+        die("%s %s is larger than %d bytes -- a staged file is small by contract"
+            % (flag, path, STAGED_MAX_BYTES))
+    if why is not None:
+        io_fail("read", path, why)
+    return decode(path, data)
+
+
+def worktree_dirty(roadmap_dir):
+    """Whether the working-tree content of the roadmap directory differs
+    from HEAD's tree for it (S2-2): True, False, or None when it cannot be
+    known (not a work tree, an unborn HEAD, an object format git cannot
+    name, a git failure, a malformed ls-tree record). Filter-free on
+    purpose: every blob is hashed here, from ls-tree plus the working files,
+    so no command this runs refreshes the index and no clean filter or
+    fsmonitor configured in the repository ever executes. The direction of
+    error is declared: it can over-report (autocrlf, a clean filter, an
+    ignored file), never under-report. It never raises and never dies: a
+    per-entry OSError means "possibly different", so True (L3)."""
+    rc, out, _err = git(["rev-parse", "--show-toplevel"], roadmap_dir)
+    top = out.rstrip("\n")
+    if rc != 0 or not top:
+        return None
+    rc, out, _err = git(["rev-parse", "--show-object-format"], roadmap_dir)
+    fmt = out.strip()
+    if rc != 0 or fmt not in ("sha1", "sha256"):
+        return None
+    oid_len = 40 if fmt == "sha1" else 64
+
+    def _reraise(exc):
+        raise exc                       # an unlistable directory is dirty, never skipped
+
+    try:
+        real_top = os.path.realpath(top)
+        real_dir = os.path.realpath(roadmap_dir)
+        spec = os.path.relpath(real_dir, real_top).replace(os.sep, "/")
+        rc, raw, _err = git(["ls-tree", "-r", "-z", "HEAD", "--", spec], real_top, binary=True)
+        if rc != 0:
+            return None
+        records = raw.split(b"\0")
+        if records and records[-1] == b"":
+            records.pop()               # every record is TERMINATED by NUL (I2)
+        tracked = {}
+        for record in records:
+            meta, tab, name = record.partition(b"\t")
+            fields = meta.split(b" ")
+            if not tab or not name or len(fields) != 3:
+                return None
+            mode, _kind, oid = fields
+            oid = oid.decode("ascii", "replace")
+            if len(oid) != oid_len or not FULL_SHA_RE.fullmatch(oid):
+                return None
+            tracked[os.fsdecode(name)] = (mode, oid)
+        for rel, (mode, oid) in sorted(tracked.items()):
+            full = os.path.join(real_top, *rel.split("/"))
+            st = os.lstat(full)         # never followed (S3-1)
+            if mode == b"120000":
+                if not stat.S_ISLNK(st.st_mode):
+                    return True
+                data = os.readlink(os.fsencode(full))
+            elif mode in (b"100644", b"100755"):
+                if not stat.S_ISREG(st.st_mode) or st.st_size > PAGE_MAX_BYTES:
+                    return True
+                if bool(st.st_mode & stat.S_IXUSR) != (mode == b"100755"):
+                    return True
+                data, why = read_regular(full, PAGE_MAX_BYTES)
+                if why is not None:
+                    return True
+            else:
+                return True             # a submodule, an unknown mode
+            if hashlib.new(fmt, b"blob %d\x00" % len(data) + data).hexdigest() != oid:
+                return True
+        prefix = "" if spec == "." else spec + "/"
+        for dirpath, dirnames, filenames in os.walk(real_dir, onerror=_reraise):
+            sub = os.path.relpath(dirpath, real_dir).replace(os.sep, "/")
+            base = prefix if sub == "." else prefix + sub + "/"
+            linked = [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]
+            for name in filenames + linked:
+                if base + name not in tracked:
+                    return True         # untracked: an ignored file and a temp name included
+        return False
+    except OSError:
+        return True
+
+
+# ---------------------------------------------------------------------------
+# 4. frontmatter subset + the value rules (pure)
+# ---------------------------------------------------------------------------
+
+def parse_kv_lines(lines, first_lineno, where):
+    """[(key, raw, lineno)] for contiguous `key: value` lines. A full-line
+    comment comes back as ("#", line, lineno) for the caller to judge; a line
+    that is not `key: value` is handed to where(lineno, line), which refuses."""
+    out = []
+    for offset, line in enumerate(lines):
+        lineno = first_lineno + offset
+        if line.startswith("#"):
+            out.append(("#", line, lineno))
+            continue
+        key, sep, raw = line.partition(": ")
+        if not sep or not key or key != key.strip() or " " in key:
+            where(lineno, line)
+        out.append((key, raw, lineno))
+    return out
+
+
+def fm_value(key, raw, where):
+    """One value as the wiki parser reads it, strictly: a list key must be an
+    inline [...] split on ',' (like _wikilib._parse_scalar); a quoted scalar is
+    refused, because the writer never produces one."""
+    if key in LIST_KEYS:
+        if not (raw.startswith("[") and raw.endswith("]")):
+            where("%s must be an inline list [...], got %r" % (key, raw))
+        inner = raw[1:-1].strip()
+        return [piece.strip() for piece in inner.split(",") if piece.strip()]
+    if len(raw) >= 2 and raw[0] in "\"'" and raw[-1] == raw[0]:
+        where("quoted value %r (roadmap.py never writes one)" % raw)
+    return raw
+
+
+def render_kv(key, value):
+    if isinstance(value, (list, tuple)):
+        return "%s: [%s]" % (key, ", ".join(value))
+    return "%s: %s" % (key, value)
+
+
+def _line_break(ch):
+    """True for every character str.splitlines splits at, computed from the
+    running Python rather than typed."""
+    return len(("a" + ch + "a").splitlines()) != 1
+
+
+def check_line(field, value):
+    """The ONE character rule for a single-line value (S-M1): no line
+    separator, no lone surrogate, no C0 control, no backtick."""
+    for ch in value:
+        code = ord(ch)
+        if _line_break(ch):
+            die("%s value %r carries a line separator (U+%04X) -- it would split the line "
+                "it is written on" % (field, value, code))
+        if 0xD800 <= code <= 0xDFFF:
+            die("%s value %r carries a lone surrogate (U+%04X) -- it cannot be written as "
+                "UTF-8" % (field, value, code))
+        if code < 0x20:
+            die("%s value %r carries a control character (U+%04X)" % (field, value, code))
+        if ch == "`":
+            die("%s value %r carries a backtick -- generated roadmap text is backtick-free "
+                "(verify would read it as an anchor)" % (field, value))
+    return value
+
+
+def check_scalar(field, value):
+    """check_line, then what the wiki frontmatter parser would read otherwise.
+    RETURNS the stripped value; every caller writes that, never its argument."""
+    check_line(field, value)
+    text = value.strip()
+    why = None
+    if not text:
+        why = "empty"
+    elif text.startswith("[") and text.endswith("]"):
+        why = "wrapped in brackets"
+    elif len(text) >= 2 and text[0] in "\"'" and text[-1] == text[0]:
+        why = "wrapped in matching quotes"
+    if why is not None:
+        die("%s value %r would not survive the wiki frontmatter parser (%s)"
+            % (field, value, why))
+    return text
+
+
+def check_reason(value):
+    """The one entry for every reason on every route (M1 round 5)."""
+    check_line("reason", value)
+    text = value.strip()
+    if not text:
+        die("reason is empty (after stripping whitespace)")
+    return text
+
+
+def check_list_item(field, value):
+    """One element of an inline list: a tag (TAG_RE) or an id (ID_RE)."""
+    check_line(field, value)
+    if field == "tag":
+        if not TAG_RE.fullmatch(value):
+            die("tag %r is not kebab-case" % value)
+        return value
+    return parse_id(value)
+
+
+def check_why(text):
+    """Why prose: newlines are fine, nothing that would split the item or the
+    file is. Returns the text without leading and trailing blank lines (L3)."""
+    lines = text.split("\n")
+    for lineno, line in enumerate(lines, 1):
+        for ch in line:
+            code = ord(ch)
+            if _line_break(ch):
+                die("the why text carries a line separator other than a newline (U+%04X) on "
+                    "line %d -- use plain newlines" % (code, lineno))
+            if 0xD800 <= code <= 0xDFFF:
+                die("the why text carries a lone surrogate (U+%04X) on line %d -- it cannot "
+                    "be written as UTF-8" % (code, lineno))
+            if code < 0x20 and ch != "\t":
+                die("the why text carries a control character (U+%04X) on line %d"
+                    % (code, lineno))
+        if WHY_HEADING_RE.fullmatch(line):
+            die("the why text carries a heading on line %d (%r) -- a level 1-3 heading "
+                "would split the item" % (lineno, line))
+        if line.startswith(SUMMARY_BEGIN_PREFIX) or line.startswith(SUMMARY_END_PREFIX):
+            die("the why text carries a summary marker on line %d" % lineno)
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
+def check_date(where, value):
+    """Every date is a calendar date (M3): the ASCII shape, then the calendar."""
+    match = DATE_RE.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        die("%s %r is not a YYYY-MM-DD date" % (where, value))
+    try:
+        datetime.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        die("%s: %r is not a calendar date" % (where, value))
+    return value
+
+
+def _json_kind(value):
+    for kind, name in ((list, "array"), (str, "string"), (bool, "boolean"),
+                       (int, "number"), (float, "number")):
+        if isinstance(value, kind):
+            return name
+    return "null"
+
+
+def parse_item_file(text, where, command):
+    """A staged JSON object (S-H1): one well-defined escaping for every
+    character, so the stager never needs to know the refusal rules. Checks the
+    structure; every value then goes through the same check_* as its flag."""
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                die("--item-file %s: duplicate key %r" % (where, key))
+            obj[key] = value
+        return obj
+
+    try:
+        obj = json.loads(text, object_pairs_hook=unique)
+    except RecursionError:
+        die("--item-file %s is not a JSON object (nested too deeply)" % where)
+    except ValueError as exc:
+        die("--item-file %s is not a JSON object (%s)" % (where, exc))
+    if not isinstance(obj, dict):
+        die("--item-file %s is not a JSON object (the top level is a JSON %s)"
+            % (where, _json_kind(obj)))
+    allowed = ITEM_FILE_KEYS[command]
+    for key in obj:
+        if key not in allowed:
+            die("--item-file %s: unknown key %r for %s (want %s)"
+                % (where, key, command, ", ".join(allowed)))
+    if command == "link" and not obj:
+        die("--item-file %s: link needs at least one of origin, spec, blocked_by" % where)
+    for key in ITEM_FILE_REQUIRED[command]:
+        if key not in obj:
+            die("--item-file %s: %s is missing" % (where, key))
+    for key in allowed:
+        if key not in obj:
+            continue
+        value = obj[key]
+        if key in ("tags", "blocked_by"):
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                die("--item-file %s: %s must be a list of strings" % (where, key))
+        elif not isinstance(value, str):
+            die("--item-file %s: %s must be a string" % (where, key))
+    if "horizon" in obj:
+        lane_input(obj["horizon"], "--horizon")
+    return obj
+
+
+def reason_from_file(text, where):
+    """A --reason-file: exactly one trailing newline is the file's, the rest is
+    the reason's -- so a second line is check_line's refusal (L2)."""
+    if text.endswith("\n"):
+        text = text[:-1]
+    return check_reason(text)
+
+
+def lane_input(value, flag):
+    """A typed lane or horizon (L6): inbox is the spelling of unset."""
+    lane = LANE_INPUT.get(value) if isinstance(value, str) else None
+    if lane is None:
+        if flag is None:
+            die("lane %r is not one of now, next, later, inbox" % (value,))
+        die("%s %r is not one of now, next, later, inbox" % (flag, value))
+    return lane
+
+
+def check_state(value):
+    if value not in OPEN_STATES:
+        die("--state %r is not one of idea, planned, active -- done and dropped are reached "
+            "only through close (invariant 3)" % (value,))
+    return value
+
+
+# ---------------------------------------------------------------------------
+# 5. parse (pure): the strict reader
+# ---------------------------------------------------------------------------
+
+def parse_roadmap(text, path):
+    """(meta, lanes) from roadmap.md's text, or a refusal naming the line.
+    Strict on purpose: roadmap.md has one writer, so anything it would not
+    have written is a hand edit, refused rather than guessed at."""
+    def refuse(lineno, detail):
+        die(GRAMMAR % (path, lineno, detail))
+
+    if "\r" in text:
+        refuse(text[:text.index("\r")].count("\n") + 1, "carriage return in the file")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    for lineno, line in enumerate(lines, 1):
+        if line and line.splitlines() != [line]:   # a separator str.splitlines honours
+            bad = [ch for ch in line if len(("a" + ch + "a").splitlines()) != 1]
+            refuse(lineno, "line separator U+%04X in the file" % ord(bad[0]))
+    if not lines or lines[0] != "---":
+        refuse(1, "no frontmatter")
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        refuse(1, "no frontmatter")
+
+    entries = parse_kv_lines(lines[1:end], 2, lambda n, line: refuse(
+        n, "unknown frontmatter key %r" % line))
+    values, where, note_line = {}, {}, None
+    for index, (key, raw, lineno) in enumerate(entries):
+        if key == "#":
+            following = entries[index + 1][0] if index + 1 < len(entries) else None
+            if not WIP_NOTE_RE.fullmatch(raw) or following != "wip_now" or note_line:
+                refuse(lineno, "unexpected comment line %r (the only comment roadmap.py "
+                               "writes is the wip_now note)" % raw)
+            note_line = raw
+            continue
+        if key not in ROADMAP_KEYS:
+            refuse(lineno, "unknown frontmatter key %r" % key)
+        if key in values:
+            refuse(lineno, "duplicate key %r" % key)
+        values[key] = fm_value(key, raw, lambda detail, n=lineno: refuse(n, detail))
+        where[key] = lineno
+    for key in ROADMAP_KEYS:
+        if key not in values:
+            refuse(end + 1, "frontmatter key %r is missing" % key)
+    if values["type"] != ROADMAP_TYPE:
+        refuse(where["type"], "frontmatter type is %r, want roadmap" % values["type"])
+    if values["status"] not in EDITORIAL_STATUSES:
+        refuse(where["status"], "status %r is not one of draft, active, deprecated"
+               % values["status"])
+    if not POS_INT_RE.fullmatch(values["wip_now"]):
+        refuse(where["wip_now"], "wip_now must be a positive integer, got %r "
+               "(at most 9 digits)" % values["wip_now"])
+    meta = {"name": values["name"], "type": values["type"], "status": values["status"],
+            "title": values["title"], "description": values["description"],
+            "wip_now": int(values["wip_now"]), "wip_note": note_line}
+
+    # The preamble: regenerated on every write, never parsed for data.
+    index, region = end + 1, None
+    while index < len(lines):
+        line = lines[index]
+        if region is None and line.startswith("# "):
+            break
+        if region is not None:
+            if line.startswith(SUMMARY_END_PREFIX):
+                region = None
+        elif line.startswith(SUMMARY_BEGIN_PREFIX):
+            region = index + 1
+        elif line.strip():
+            refuse(index + 1, "unexpected text before the first lane heading: %r" % line)
+        index += 1
+    if region is not None:
+        refuse(region, "unterminated summary region")
+
+    headings = [heading for _lane, heading in LANE_HEADINGS]
+    lane_of = dict((heading, lane) for lane, heading in LANE_HEADINGS)
+    lanes = dict((lane, []) for lane in HORIZONS)
+    seen, position, current = set(), 0, None
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("# "):
+            if line not in lane_of:
+                refuse(index + 1, "unknown lane heading %r" % line)
+            want = headings[position] if position < len(headings) else None
+            if line != want:
+                if want is None or line in headings[:position] or want in lines[index + 1:]:
+                    refuse(index + 1, "lane heading %r out of order (want # now, # next, "
+                                      "# later, # inbox)" % line)
+                refuse(index + 1, "lane heading %r is missing" % want)
+            current = lane_of[line]
+            position += 1
+            index += 1
+            continue
+        if line.startswith("## "):
+            stop = index + 1
+            while stop < len(lines) and not (lines[stop].startswith("## ")
+                                             or lines[stop].startswith("# ")):
+                stop += 1
+            item = parse_item(lines[index:stop], index + 1, path, current)
+            if item.id in seen:
+                refuse(index + 1, "R-%04d appears twice" % item.id)
+            seen.add(item.id)
+            lanes[current].append(item)
+            index = stop
+            continue
+        if line.strip():
+            refuse(index + 1, "malformed item heading %r" % line)
+        index += 1
+    if position < len(headings):
+        refuse(len(lines), "lane heading %r is missing" % headings[position])
+    return meta, lanes
+
+
+def _id_list(values, key, fail):
+    ids = []
+    for value in values:
+        match = ITEM_ID_RE.fullmatch(value)
+        if match is None or int(match.group(1)) == 0:
+            fail("%s holds %r, not an R-NNNN id" % (key, value))
+        ids.append(int(match.group(1)))
+    return tuple(sorted(set(ids)))
+
+
+def parse_item(lines, first_lineno, path, lane):
+    """One item block of roadmap.md: its `## R-NNNN <U+00B7> title` heading, the
+    key lines, the optional why prose and the log."""
+    def refuse(lineno, detail):
+        die(GRAMMAR % (path, lineno, detail))
+
+    match = ITEM_HEADING_RE.fullmatch(lines[0])
+    if match is None or int(match.group(1)) == 0:
+        refuse(first_lineno, "malformed item heading %r" % lines[0])
+    n, title = int(match.group(1)), match.group(2)
+    body = list(lines)
+    while len(body) > 1 and not body[-1].strip():
+        body.pop()
+    index = 1
+    while index < len(body) and not body[index].strip():
+        index += 1
+    start = index
+    while index < len(body) and body[index].strip():
+        index += 1
+    entries = parse_kv_lines(body[start:index], first_lineno + start,
+                             lambda lineno, line: refuse(lineno, "unknown key %r" % line))
+    values, where, last = {}, {}, -1
+    for key, raw, lineno in entries:
+        if key not in ITEM_KEYS:
+            refuse(lineno, "unknown key %r" % (raw if key == "#" else key))
+        if key in values:
+            refuse(lineno, "duplicate key %r" % key)
+        order = ITEM_KEYS.index(key)
+        if order < last:
+            refuse(lineno, "key %r out of order (want state, horizon, origin, spec, "
+                           "blocked_by, follows, severity, tags)" % key)
+        last = order
+        values[key] = fm_value(key, raw, lambda detail, ln=lineno: refuse(ln, detail))
+        where[key] = lineno
+    for key in REQUIRED_ITEM_KEYS:
+        if key not in values:
+            refuse(first_lineno, "R-%04d has no %s line" % (n, key))
+    if values["state"] not in OPEN_STATES:
+        refuse(where["state"], "state %r is not one of idea, planned, active" % values["state"])
+    if values["horizon"] != lane:
+        refuse(where["horizon"], "R-%04d sits in lane %s but says horizon: %s"
+               % (n, LANE_LABELS[lane], values["horizon"]))
+    blocked_by = _id_list(values["blocked_by"], "blocked_by",
+                          lambda detail: refuse(where["blocked_by"], detail))
+    follows = None
+    if "follows" in values:
+        follows = _id_list([values["follows"]], "follows",
+                           lambda detail: refuse(where["follows"], detail))[0]
+    try:
+        log_at = body.index("### Log", index)
+    except ValueError:
+        refuse(first_lineno, "missing ### Log")
+    why = body[index:log_at]
+    while why and not why[0].strip():
+        why.pop(0)
+    while why and not why[-1].strip():
+        why.pop()
+    log = []
+    for offset in range(log_at + 1, len(body)):
+        line = body[offset]
+        if not line.strip():
+            continue
+        lineno = first_lineno + offset
+        entry = parse_log_line(line, "%s: line %d" % (path, lineno))
+        if entry is None:
+            refuse(lineno, "malformed log line %r" % line)
+        if entry.lane_to in CLOSED_STATES:
+            refuse(lineno, "a closing log line (%s) in roadmap.md" % entry.lane_to)
+        log.append(entry)
+    if not log:
+        refuse(first_lineno + log_at, "R-%04d has no %s line" % (n, "log"))
+    return Item(n, title, values["state"], values["horizon"], values["origin"],
+                values.get("spec"), blocked_by, follows, values.get("severity"),
+                tuple(sorted(set(values["tags"]))), "\n".join(why), tuple(log), None, path)
+
+
+def parse_log_line(line, where):
+    """A LogEntry, or None when the line is not a log line (the caller refuses
+    in its own file's shape). The date must be on the calendar (M3)."""
+    match = LOG_RE.fullmatch(line)
+    if match is None:
+        return None
+    date, lane_from, lane_to, state_from, state_to, reason = match.groups()
+    check_date(where, date)
+    return LogEntry(date, None if lane_from == "new" else lane_from, lane_to,
+                    state_from, state_to, reason)
+
+
+def _archive_description(n, state, date):
+    return "Closed roadmap item R-%04d (%s %s)." % (n, state, date)
+
+
+def parse_archive(text, name, path=None):
+    """One archive page, strictly: anything short of the complete shape
+    render_archive writes is a close interrupted mid-write, refused rather
+    than trusted by "archive wins". `name` is the file name or its stem."""
+    stem = name[:-3] if name.endswith(".md") else name
+    filename = stem + ".md"
+
+    def incomplete(detail):
+        die("archive/%s is incomplete (%s) -- a close interrupted mid-write? inspect it by "
+            "hand" % (filename, detail))
+
+    if "\r" in text:
+        incomplete("carriage return in the file")
+    if not text.endswith("\n"):
+        incomplete("no final newline")
+    lines = text[:-1].split("\n")
+    if lines[0] != "---":
+        incomplete("no frontmatter")
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        incomplete("unterminated frontmatter")
+    entries = parse_kv_lines(lines[1:end], 2,
+                             lambda lineno, line: incomplete("line %d: %r" % (lineno, line)))
+    values, order = {}, []
+    for key, raw, _lineno in entries:
+        if key not in ARCHIVE_KEYS:
+            incomplete("unknown key %r" % (raw if key == "#" else key))
+        if key in values:
+            incomplete("duplicate key %r" % key)
+        values[key] = fm_value(key, raw, incomplete)
+        order.append(key)
+    for key in ARCHIVE_REQUIRED:
+        if key not in values:
+            incomplete("%s is missing" % key)
+    if order != [key for key in ARCHIVE_KEYS if key in values]:
+        incomplete("keys out of order")
+    if values["name"] != stem:
+        die("archive/%s: frontmatter name %r does not match its filename"
+            % (filename, values["name"]))
+    named = ARCHIVE_NAME_RE.fullmatch(filename)
+    ident = ITEM_ID_RE.fullmatch(values["id"])
+    if named is None or ident is None or ident.group(1) != named.group(1):
+        die("archive/%s: frontmatter id %s does not match its filename"
+            % (filename, values["id"]))
+    n = int(named.group(1))
+    if values["type"] != ITEM_TYPE:
+        incomplete("type %r" % values["type"])
+    if values["status"] not in EDITORIAL_STATUSES:
+        incomplete("status %r" % values["status"])
+    check_date("archive/%s closed" % filename, values["closed"])
+    state = values["state"]
+    if state not in CLOSED_STATES:
+        incomplete("state %r" % state)
+    if (state == "done") != ("commit" in values) or (state == "dropped") != ("reason" in values):
+        incomplete("a done item carries commit, a dropped one reason")
+    if "commit" in values and not FULL_SHA_RE.fullmatch(values["commit"]):
+        incomplete("commit %r is not a full sha" % values["commit"])
+    prefix = "R-%04d %s " % (n, DOT)
+    if not values["title"].startswith(prefix) or not values["title"][len(prefix):]:
+        incomplete("title %r lacks the R-NNNN %s prefix" % (values["title"], DOT))
+    title = values["title"][len(prefix):]
+    if values["description"] != _archive_description(n, state, values["closed"]):
+        incomplete("description %r is not the generated one" % values["description"])
+    if values["horizon"] not in HORIZONS:
+        incomplete("horizon %r" % values["horizon"])
+    blocked_by = _id_list(values["blocked_by"], "blocked_by", incomplete)
+    follows = None
+    if "follows" in values:
+        follows = _id_list([values["follows"]], "follows", incomplete)[0]
+
+    body = lines[end + 1:]
+    if body[:5] != ["", "# " + values["title"], "", "## Why", ""]:
+        incomplete("the body does not open with the title heading and ## Why")
+    try:
+        log_at = body.index("## Log", 5)
+    except ValueError:
+        incomplete("no ## Log")
+    why = body[5:log_at]
+    while why and not why[-1].strip():
+        why.pop()
+    if not why:
+        incomplete("an empty ## Why")
+    why_text = "\n".join(why)
+    if why_text == "_(none)_":
+        why_text = ""
+    log = []
+    for offset in range(log_at + 1, len(body)):
+        line = body[offset]
+        if not line.strip():
+            continue
+        entry = parse_log_line(line, "archive/%s: line %d" % (filename, end + 2 + offset))
+        if entry is None:
+            incomplete("malformed log line %r" % line)
+        log.append(entry)
+    if not log:
+        incomplete("no log line")
+    if any(entry.lane_to in CLOSED_STATES for entry in log[:-1]) or log[-1].lane_to != state:
+        incomplete("the last log line, and only it, closes the item as %s" % state)
+    return Item(n, title, state, values["horizon"], values["origin"], values.get("spec"),
+                blocked_by, follows, values.get("severity"),
+                tuple(sorted(set(values["tags"]))), why_text, tuple(log),
+                Closed(values["closed"], values.get("commit"), values.get("reason")), path)
+
+
+# ---------------------------------------------------------------------------
+# 6. model & invariants (pure, but for the load_state composition)
+# ---------------------------------------------------------------------------
+
+def parse_id(raw):
+    match = ID_RE.fullmatch(raw) if isinstance(raw, str) else None
+    n = int(match.group(1) or match.group(2)) if match else 0
+    if n == 0:
+        die("%r is not an id (want R-NNNN)" % (raw,))
+    return n
+
+
+def fmt_id(n):
+    return "R-%04d" % n
+
+
+def _live(state):
+    return [item for lane in HORIZONS for item in state.lanes[lane]]
+
+
+def next_id(state):
+    """max(live ids + archive ids) + 1: a gap is never reused."""
+    ids = set(state.archived) | set(item.id for item in _live(state))
+    n = max(ids) + 1 if ids else 1
+    if n > 9999:
+        die("id space exhausted (R-9999)")
+    return n
+
+
+def resolve(state, n):
+    """(item, lane, index) for a live item, (item, None, None) for an archived
+    one, or the unknown-id refusal."""
+    for lane in HORIZONS:
+        for index, item in enumerate(state.lanes[lane]):
+            if item.id == n:
+                return item, lane, index
+    if n in state.archived:
+        return state.archived[n], None, None
+    die("unknown id %s" % fmt_id(n))
+
+
+def refuse_closed(item):
+    die("%s is closed (%s) -- closed items are immutable; a regression is a new item with "
+        "--follows %s" % (fmt_id(item.id), item.state, fmt_id(item.id)))
+
+
+def cycle_members(graph):
+    """P8's Kahn check, ported: the ids whose in-degree stays positive, which
+    is the cycle members AND everything downstream of them -- the items the
+    cycle strands (L3). graph: id -> the ids it is blocked by."""
+    known = sorted(graph)
+    in_degree = dict((tid, 0) for tid in known)
+    adj = dict((tid, []) for tid in known)
+    for tid in known:
+        for dep in graph[tid]:
+            if dep in in_degree and dep != tid:
+                adj[dep].append(tid)    # dep must finish before tid
+                in_degree[tid] += 1
+    queue = [tid for tid in known if in_degree[tid] == 0]
+    visited = 0
+    while queue:
+        tid = queue.pop(0)
+        visited += 1
+        for nxt in adj[tid]:
+            in_degree[nxt] -= 1
+            if in_degree[nxt] == 0:
+                queue.append(nxt)
+    if visited != len(known):
+        return sorted(tid for tid in known if in_degree[tid] > 0)
+    return []
+
+
+def ready(item, state):
+    """True iff every blocker is CLOSED, done or dropped: a dropped blocker is
+    a void dependency, never a permanent block (R23)."""
+    return all(blocker in state.archived for blocker in item.blocked_by)
+
+
+def validate(state):
+    """The invariants every write must hold. Not WIP: the cap is checked on
+    transitions into now only, so a lowered cap never blocks a move out."""
+    live = _live(state)
+    known = set(state.archived) | set(item.id for item in live)
+    for item in live:
+        if item.horizon == "unset" and item.state != "idea":
+            die("an untriaged item must be an idea (invariant 1) -- %s would be %s in the "
+                "inbox; give it a lane or --state idea" % (fmt_id(item.id), item.state))
+        if item.state == "active" and item.horizon != "now":
+            die("an active item must be in now (invariant 2) -- %s would be active in %s"
+                % (fmt_id(item.id), LANE_LABELS[item.horizon]))
+    for item in live:
+        for blocker in item.blocked_by:
+            if blocker == item.id:
+                die("an item cannot block itself")
+            if blocker not in known:
+                die("unknown id in --blocked-by: %s" % fmt_id(blocker))
+        if item.follows is not None:
+            if item.follows not in known:
+                die("unknown id in --follows: %s" % fmt_id(item.follows))
+            if item.follows not in state.archived:
+                die("--follows must name a closed item; %s is live" % fmt_id(item.follows))
+    graph = dict((n, list(item.blocked_by)) for n, item in state.archived.items())
+    graph.update((item.id, list(item.blocked_by)) for item in live)
+    members = cycle_members(graph)
+    if members:
+        die("blocked_by would create a cycle: %s" % ", ".join(fmt_id(n) for n in members))
+    owners = {}
+    for n in sorted(state.archived):
+        owners.setdefault(state.archived[n].origin, state.archived[n])
+    for item in sorted(live, key=lambda i: i.id):
+        other = owners.setdefault(item.origin, item)
+        if other.id != item.id:
+            where = other.path + (", dropped" if other.state == "dropped" else "")
+            die("origin %r is already recorded by %s (%s)"
+                % (item.origin, fmt_id(other.id), where))
+
+
+def slugify(title):
+    """The archive name's slug: NFKD, ASCII only, lowercase kebab, cut on a
+    hyphen boundary at SLUG_MAX. "" when nothing survives (--slug then)."""
+    text = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+    slug = SLUG_SPLIT_RE.sub("-", text.lower()).strip("-")
+    if len(slug) > SLUG_MAX:
+        cut = slug[:SLUG_MAX]
+        if slug[SLUG_MAX] != "-" and "-" in cut:
+            cut = cut.rsplit("-", 1)[0]
+        slug = cut.strip("-")
+    return slug
+
+
+def build_state(raw):
+    """Parse roadmap.md and every archive page; the archive wins an id both
+    hold (a close interrupted between its two writes), and the drop is
+    recorded in `repairs` for the caller to persist or to note."""
+    data, archive_files, snapshot, display = raw
+    path = display["path"]
+    text = decode(path, data)
+    meta, lanes = parse_roadmap(text, display["roadmap"])
+    archived, source = {}, {}
+    for name in sorted(archive_files):
+        entry_text = decode(os.path.join(archive_dir_of(path), name), archive_files[name])
+        item = parse_archive(entry_text, name, os.path.join(display["archive"], name))
+        if item.id in archived:
+            die("R-%04d is archived twice (%s, %s) -- keep one by hand"
+                % (item.id, source[item.id], name))
+        archived[item.id] = item
+        source[item.id] = name
+    repairs = []
+    for lane in HORIZONS:
+        kept = []
+        for item in lanes[lane]:
+            if item.id in archived:
+                repairs.append((item.id, archived[item.id].path))
+            else:
+                kept.append(item)
+        lanes[lane] = kept
+    return State(path, meta, lanes, archived, snapshot, text, repairs, display["roadmap"])
+
+
+def load_state(path):
+    return build_state(read_state_files(path))
+
+
+def check_target_shape(path):
+    """--file must be <wiki root>/roadmap/roadmap.md, and the wiki root must
+    not be the filesystem root: only then is the wiki root well defined (L5)."""
+    roadmap_dir = os.path.dirname(path)
+    if os.path.basename(path) != "roadmap.md" or os.path.basename(roadmap_dir) != "roadmap":
+        die("--file %s is not <wiki root>/roadmap/roadmap.md -- the wiki root is the parent "
+            "of the roadmap/ directory" % path)
+    wiki = os.path.dirname(roadmap_dir)
+    if os.path.dirname(wiki) == wiki:
+        die("--file %s would make the filesystem root the wiki root" % path)
+
+
+def wiki_root_of(path):
+    return os.path.dirname(os.path.dirname(path))
+
+
+def archive_dir_of(path):
+    return os.path.join(os.path.dirname(path), ARCHIVE_DIRNAME)
+
+
+# ---------------------------------------------------------------------------
+# 7. render (pure)
+# ---------------------------------------------------------------------------
+
+def _md_cell(value):
+    r"""Escape one cell so a value cannot open a column. Reversible: \\ \| \n \r \t.
+    The escape character is escaped FIRST (ADR 0016's one vocabulary)."""
+    text = str(value).replace("\\", "\\\\").replace("|", "\\|")
+    return text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
+def render_table(headers, rows):
+    """A padded markdown table; cells are escaped BEFORE the widths are
+    measured, and every column is left-justified."""
+    table = [[_md_cell(cell) for cell in headers]] + [[_md_cell(cell) for cell in row]
+                                                      for row in rows]
+    widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+
+    def row_line(row):
+        return "| " + " | ".join(cell.ljust(width) for cell, width in zip(row, widths)) + " |"
+
+    rule = "|" + "|".join("-" * (width + 2) for width in widths) + "|"
+    return "\n".join([row_line(table[0]), rule] + [row_line(row) for row in table[1:]])
+
+
+def render_log_line(entry):
+    bracket = ""
+    if entry.state_from is not None:
+        bracket = " [%s->%s]" % (entry.state_from, entry.state_to)
+    return "- %s %s->%s%s: %s" % (entry.date, entry.lane_from or "new", entry.lane_to,
+                                  bracket, entry.reason)
+
+
+def _key_lines(item):
+    lines = [render_kv("state", item.state), render_kv("horizon", item.horizon),
+             render_kv("origin", item.origin)]
+    if item.spec is not None:
+        lines.append(render_kv("spec", item.spec))
+    lines.append(render_kv("blocked_by", [fmt_id(n) for n in item.blocked_by]))
+    if item.follows is not None:
+        lines.append(render_kv("follows", fmt_id(item.follows)))
+    if item.severity is not None:
+        lines.append(render_kv("severity", item.severity))
+    lines.append(render_kv("tags", list(item.tags)))
+    return lines
+
+
+def render_item(item):
+    lines = ["## %s %s %s" % (fmt_id(item.id), DOT, item.title), ""] + _key_lines(item) + [""]
+    if item.why:
+        lines += item.why.split("\n") + [""]
+    return lines + ["### Log", ""] + [render_log_line(entry) for entry in item.log]
+
+
+def render_summary(state):
+    archived = list(state.archived.values())
+    done = sum(1 for item in archived if item.state == "done")
+    head = ("WIP now: %d of %d. Archive: %d closed item%s (%d done, %d dropped)."
+            % (len(state.lanes["now"]), state.meta["wip_now"], len(archived),
+               "" if len(archived) == 1 else "s", done, len(archived) - done))
+    rows = [(LANE_LABELS[lane], fmt_id(item.id), item.state, item.title,
+             "yes" if ready(item, state) else "no")
+            for lane in HORIZONS for item in state.lanes[lane]]
+    return [SUMMARY_BEGIN, head, ""] + render_table(SUMMARY_COLUMNS, rows).split("\n") \
+        + [SUMMARY_END]
+
+
+def render_roadmap(state):
+    meta = state.meta
+    lines = ["---"] + [render_kv(key, meta[key])
+                       for key in ("name", "type", "status", "title", "description")]
+    if meta.get("wip_note"):
+        lines.append(meta["wip_note"])
+    lines += [render_kv("wip_now", meta["wip_now"]), "---", ""]
+    lines += render_summary(state) + [""]
+    for lane, heading in LANE_HEADINGS:
+        lines += [heading, ""]
+        for item in state.lanes[lane]:
+            lines += render_item(item) + [""]
+    while lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def render_archive(item, name):
+    """An immutable archive page. Frontmatter scalars are flat, lists inline,
+    optional keys omitted, and no sources/targets/verified/links: the page is
+    untracked by design. No backtick anywhere in generated text."""
+    stem = name[:-3] if name.endswith(".md") else name
+    title = "%s %s %s" % (fmt_id(item.id), DOT, item.title)
+    closed = item.closed
+    lines = ["---", render_kv("name", stem), render_kv("type", ITEM_TYPE),
+             render_kv("status", "active"), render_kv("title", title),
+             render_kv("description", _archive_description(item.id, item.state, closed.date)),
+             render_kv("id", fmt_id(item.id))]
+    lines += _key_lines(item)
+    lines.append(render_kv("closed", closed.date))
+    if item.state == "done":
+        lines.append(render_kv("commit", closed.commit))
+    else:
+        lines.append(render_kv("reason", closed.reason))
+    lines += ["---", "", "# " + title, "", "## Why", "", item.why or "_(none)_", "",
+              "## Log", ""]
+    lines += [render_log_line(entry) for entry in item.log]
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# 8. write
+# ---------------------------------------------------------------------------
+
+def _model_diff(meta, lanes, state):
+    if meta != state.meta:
+        return "frontmatter"
+    for lane in HORIZONS:
+        mine, theirs = state.lanes[lane], lanes[lane]
+        for a, b in zip(mine, theirs):
+            if a != b:
+                return fmt_id(a.id)
+        if len(mine) != len(theirs):
+            return "lane %s" % LANE_LABELS[lane]
+    return "the model"
+
+
+def commit(state, conflict=None):
+    """validate -> render -> re-parse self-check -> no-op check -> the locked
+    write. True when a write happened."""
+    validate(state)
+    text = render_roadmap(state)
+    meta, lanes = parse_roadmap(text, state.display)
+    if meta != state.meta or lanes != state.lanes:
+        die("internal: the rendered file does not parse back to the model (%s) -- nothing "
+            "was written" % _model_diff(meta, lanes, state))
+    if text == state.text:
+        return False
+    write_atomic(state.path, text, state.snapshot, conflict)
+    for n, where in state.repairs:
+        note("repaired: %s was in both roadmap.md and %s (a close interrupted between its "
+             "two writes); removed the live copy" % (fmt_id(n), where))
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 9. commands -- each returns an exit code; mutating ones end in commit + emit
+# ---------------------------------------------------------------------------
+
+def _note_repairs(state):
+    """Read-only commands repair in memory, and say so."""
+    for n, where in state.repairs:
+        note("note: %s is in both roadmap.md and %s; the archive wins -- run roadmap.py "
+             "render to persist the repair" % (fmt_id(n), where))
+
+
+def _split_values(values):
+    """A repeatable, comma-separated flag (--tags, --blocked-by, --unblock)."""
+    out = []
+    for value in values or ():
+        out += [piece for piece in value.split(",") if piece != ""]
+    return out
+
+
+def _check_spec(spec, path):
+    check_line("spec", spec)
+    if not SLUG_RE.fullmatch(spec):
+        die("--spec %r is not a wiki page name (want kebab-case [a-z0-9-])" % spec)
+    root = wiki_root_of(path)
+    _names, pages = wiki_page_names(root)
+    if spec not in pages:
+        die("--spec %r is not a wiki page under %s" % (spec, root))
+    return spec
+
+
+def _check_wip(state):
+    occupants = state.lanes["now"]
+    cap = state.meta["wip_now"]
+    if len(occupants) >= cap:
+        die("now is full (%d of %d: %s) -- move one out, close one, or change the cap with "
+            "roadmap.py wip" % (len(occupants), cap,
+                                ", ".join(fmt_id(item.id) for item in occupants)))
+
+
+def _copy_lanes(state):
+    return dict((lane, list(items)) for lane, items in state.lanes.items())
+
+
+def _staged_reason(reason, reason_file, path, missing):
+    if reason is not None and reason_file is not None:
+        die("--reason and --reason-file are exclusive")
+    if reason is None and reason_file is None:
+        die(missing)
+    if reason is not None:
+        return check_reason(reason)
+    return reason_from_file(read_staged_file("--reason-file", reason_file, path), reason_file)
+
+
+def cmd_init(path):
+    """Every refusal init can decide is decided before anything is created
+    (H1); then archive/ (and roadmap/), then roadmap.md, through the link
+    route, which refuses a concurrent init that got there first."""
+    archive_dir = archive_dir_of(path)
+    refuse_symlink(archive_dir, "archive directory")
+    refuse_existing(path)
+    ensure_archive_dir(archive_dir)
+    meta = {"name": ROADMAP_TYPE, "type": ROADMAP_TYPE, "status": "active",
+            "title": ROADMAP_TITLE, "description": ROADMAP_DESCRIPTION,
+            "wip_now": WIP_DEFAULT, "wip_note": WIP_NOTE_UNARGUED}
+    empty = State(path, meta, dict((lane, []) for lane in HORIZONS), {}, None, None, [], None)
+    write_atomic(path, render_roadmap(empty), ABSENT)
+    emit("initialized: %s" % path)
+    return 0
+
+
+def cmd_add(path, item_file, title, origin, horizon, state, spec, blocked_by, follows,
+            severity, tags, why, why_file, reason):
+    if item_file is not None and (tags or any(value is not None for value in (
+            title, origin, why, why_file, severity, horizon, reason))):
+        die("--item-file excludes --title, --origin, --why, --why-file, --tags, --severity, "
+            "--horizon and --reason")
+    if why is not None and why_file is not None:
+        die("--why and --why-file are exclusive")
+    if item_file is not None:
+        values = parse_item_file(read_staged_file("--item-file", item_file, path),
+                                 item_file, "add")
+        title, origin = values["title"], values["origin"]
+        why, severity = values.get("why"), values.get("severity")
+        horizon, reason = values.get("horizon"), values.get("reason")
+        tag_values = values.get("tags", [])
+    else:
+        if title is None or origin is None:
+            die("add needs --title and --origin")
+        if why_file is not None:
+            why = read_staged_file("--why-file", why_file, path)
+        tag_values = _split_values(tags)
+    title = check_scalar("title", title)
+    origin = check_scalar("origin", origin)
+    if severity is not None:
+        severity = check_scalar("severity", severity)
+    tag_values = tuple(sorted(set(check_list_item("tag", tag) for tag in tag_values)))
+    why = check_why(why or "")
+    reason = check_reason(reason) if reason is not None else "added"
+    lane = lane_input(horizon, "--horizon") if horizon is not None else "unset"
+    new_state = check_state(state) if state is not None else "idea"
+    blockers = tuple(sorted(set(check_list_item("blocked_by", value)
+                                for value in _split_values(blocked_by))))
+    follows_id = check_list_item("follows", follows) if follows is not None else None
+    if spec is not None:
+        spec = _check_spec(spec, path)
+    current = load_state(path)
+    n = next_id(current)
+    if lane == "now":
+        _check_wip(current)
+    changed = new_state != "idea"
+    entry = LogEntry(today(), None, lane, "idea" if changed else None,
+                     new_state if changed else None, reason)
+    item = Item(n, title, new_state, lane, origin, spec, blockers, follows_id, severity,
+                tag_values, why, (entry,), None, current.display)
+    lanes = _copy_lanes(current)
+    lanes[lane].append(item)
+    commit(current._replace(lanes=lanes))
+    emit(fmt_id(n))
+    return 0
+
+
+def _age(item):
+    start = datetime.date.fromisoformat(item.log[0].date)
+    return (datetime.date.fromisoformat(today()) - start).days
+
+
+def cmd_list(path, state, horizon, untriaged, ready_only):
+    if state is not None:
+        check_state(state)
+    lane_filter = lane_input(horizon, "--horizon") if horizon is not None else None
+    current = load_state(path)
+    _note_repairs(current)
+    rows = []
+    for lane in HORIZONS:
+        if (untriaged and lane != "unset") or (lane_filter is not None and lane != lane_filter):
+            continue
+        for item in current.lanes[lane]:
+            is_ready = ready(item, current)
+            if (state is not None and item.state != state) or (ready_only and not is_ready):
+                continue
+            if untriaged:
+                rows.append((fmt_id(item.id), item.title, str(_age(item)), item.origin))
+            else:
+                rows.append((LANE_LABELS[lane], fmt_id(item.id), item.state, item.title,
+                             "yes" if is_ready else "no",
+                             ", ".join(fmt_id(n) for n in item.blocked_by)))
+    if not rows:
+        emit("no live item matches")
+        return 0
+    emit(render_table(UNTRIAGED_COLUMNS if untriaged else LIST_COLUMNS, rows))
+    return 0
+
+
+def cmd_show(path, raw_id):
+    """A live item's block, or a closed item's archive page byte for byte
+    (read through the section-3 helper, so this command makes no IO call)."""
+    n = parse_id(raw_id)
+    current = load_state(path)
+    _note_repairs(current)
+    item, lane, _index = resolve(current, n)
+    if lane is not None:
+        emit("\n".join(render_item(item)))
+        return 0
+    entry = os.path.join(archive_dir_of(path), os.path.basename(item.path))
+    emit_raw(decode(entry, read_archive_entry(entry)))
+    return 0
+
+
+def cmd_move(path, raw_id, lane, reason, reason_file, state):
+    target = lane_input(lane, None)
+    if state is not None:
+        check_state(state)
+    text = _staged_reason(reason, reason_file, path,
+                          "a lane or state change needs --reason or --reason-file")
+    n = parse_id(raw_id)
+    current = load_state(path)
+    item, lane_now, index = resolve(current, n)
+    if lane_now is None:
+        refuse_closed(item)
+    new_state = state or item.state
+    if target == lane_now and new_state == item.state:
+        die("%s is already in %s as %s -- nothing to move"
+            % (fmt_id(n), LANE_LABELS[lane_now], item.state))
+    if target == "now" and lane_now != "now":
+        _check_wip(current)
+    changed = new_state != item.state
+    entry = LogEntry(today(), lane_now, target, item.state if changed else None,
+                     new_state if changed else None, text)
+    moved = item._replace(state=new_state, horizon=target, log=item.log + (entry,))
+    lanes = _copy_lanes(current)
+    if target == lane_now:
+        lanes[target][index] = moved            # a state change keeps its rank
+    else:
+        del lanes[lane_now][index]
+        lanes[target].append(moved)             # a lane change joins at the end
+    commit(current._replace(lanes=lanes))
+    emit("%s: %s->%s%s" % (fmt_id(n), lane_now, target,
+                           " [%s->%s]" % (item.state, new_state) if changed else ""))
+    return 0
+
+
+def cmd_rank(path, raw_id, before, top):
+    if (before is not None) == bool(top):
+        die("rank needs exactly one of --before ID or --top")
+    n = parse_id(raw_id)
+    other = parse_id(before) if before is not None else None
+    if other == n:
+        die("an item cannot be ranked before itself")
+    current = load_state(path)
+    item, lane, index = resolve(current, n)
+    if lane is None:
+        refuse_closed(item)
+    lanes = _copy_lanes(current)
+    order = lanes[lane]
+    del order[index]
+    if top:
+        order.insert(0, item)
+    else:
+        target, target_lane, _index = resolve(current, other)
+        if target_lane is None:
+            refuse_closed(target)
+        if target_lane != lane:
+            die("%s (%s) and %s (%s) are in different lanes -- rank orders within a lane"
+                % (fmt_id(n), LANE_LABELS[lane], fmt_id(other), LANE_LABELS[target_lane]))
+        order.insert([i.id for i in order].index(other), item)
+    commit(current._replace(lanes=lanes))
+    emit("%s: position %d of %d in %s" % (fmt_id(n), [i.id for i in order].index(n) + 1,
+                                          len(order), LANE_LABELS[lane]))
+    return 0
+
+
+def cmd_link(path, raw_id, item_file, spec, no_spec, origin, blocked_by, unblock, follows,
+             no_follows):
+    if item_file is not None and (origin is not None or spec is not None or no_spec
+                                  or blocked_by):
+        die("--item-file excludes --origin, --spec, --no-spec and --blocked-by")
+    if spec is not None and no_spec:
+        die("--spec and --no-spec are exclusive")
+    if follows is not None and no_follows:
+        die("--follows and --no-follows are exclusive")
+    adds = _split_values(blocked_by)
+    removes = _split_values(unblock)
+    if item_file is not None:
+        values = parse_item_file(read_staged_file("--item-file", item_file, path),
+                                 item_file, "link")
+        origin, spec, adds = values.get("origin"), values.get("spec"), values.get(
+            "blocked_by", [])
+    elif not (spec is not None or no_spec or origin is not None or adds or removes
+              or follows is not None or no_follows):
+        die("link needs at least one of --item-file, --spec, --no-spec, --origin, "
+            "--blocked-by, --unblock, --follows, --no-follows")
+    n = parse_id(raw_id)
+    if origin is not None:
+        origin = check_scalar("origin", origin)
+    if spec is not None:
+        spec = _check_spec(spec, path)
+    adds = [check_list_item("blocked_by", value) for value in adds]
+    removes = [check_list_item("blocked_by", value) for value in removes]
+    follows_id = check_list_item("follows", follows) if follows is not None else None
+    current = load_state(path)
+    item, lane, index = resolve(current, n)
+    if lane is None:
+        refuse_closed(item)
+    changed = []
+    if origin is not None:
+        item = item._replace(origin=origin)
+        changed.append("origin")
+    if spec is not None or no_spec:
+        item = item._replace(spec=None if no_spec else spec)
+        changed.append("spec")
+    if adds or removes:
+        blockers = set(item.blocked_by)
+        for blocker in removes:
+            if blocker not in blockers:
+                die("%s is not blocked by %s" % (fmt_id(n), fmt_id(blocker)))
+            blockers.discard(blocker)
+        blockers.update(adds)
+        item = item._replace(blocked_by=tuple(sorted(blockers)))
+        changed.append("blocked_by")
+    if follows_id is not None or no_follows:
+        item = item._replace(follows=None if no_follows else follows_id)
+        changed.append("follows")
+    lanes = _copy_lanes(current)
+    lanes[lane][index] = item
+    commit(current._replace(lanes=lanes))
+    emit("%s: linked (%s)" % (fmt_id(n), ", ".join(changed)))
+    return 0
+
+
+def cmd_render(path):
+    """Re-render and persist any repair; nothing is written (the mtime stays)
+    when the bytes would not change."""
+    current = load_state(path)
+    if commit(current):
+        emit("rendered: %s" % path)
+    else:
+        emit("unchanged: %s" % path)
+    return 0
+
+
+def cmd_wip(path, n, reason, reason_file):
+    """The single-writer route for the WIP cap: the note line above wip_now
+    records who changed it, when, from what, and why."""
+    if not isinstance(n, str) or not POS_INT_RE.fullmatch(n):
+        die("wip needs a positive integer, got %r (at most 9 digits)" % (n,))
+    value = int(n)
+    text = _staged_reason(reason, reason_file, path,
+                          "a WIP change needs --reason or --reason-file")
+    current = load_state(path)
+    cap = current.meta["wip_now"]
+    if value == cap:
+        die("wip_now is already %d -- nothing to change" % cap)
+    occupants = current.lanes["now"]
+    if value < len(occupants):
+        die("now holds %d items (%s); a cap of %d would already be exceeded -- move items "
+            "out first" % (len(occupants), ", ".join(fmt_id(i.id) for i in occupants), value))
+    meta = dict(current.meta, wip_now=value,
+                wip_note="# wip_now set to %d on %s (was %d): %s" % (value, today(), cap, text))
+    commit(current._replace(meta=meta))
+    emit("wip_now: %d -> %d" % (cap, value))
+    return 0
+
+
+def cmd_close(path, raw_id, commit_sha, reason, reason_file, slug):
+    """Archive first, then remove the live block: a crash between the two
+    leaves the id in both places, and "archive wins" repairs it. The archive
+    page is rendered, re-parsed and compared BEFORE it is created, because
+    once created it is immutable (H1 round 5); the lock is re-checked before
+    the create and again inside the roadmap write."""
+    n = parse_id(raw_id)
+    current = load_state(path)
+    item, lane, _index = resolve(current, n)
+    if lane is None:
+        refuse_closed(item)
+    if [commit_sha, reason, reason_file].count(None) != 2:
+        die("close needs exactly one of --commit SHA (done), --reason TEXT or --reason-file "
+            "PATH (dropped)")
+    full = None
+    text = None
+    if commit_sha is not None:
+        full = verify_commit(commit_sha, os.path.dirname(path))
+    else:
+        text = check_scalar("reason", _staged_reason(reason, reason_file, path, None))
+    if slug is not None:
+        check_line("slug", slug)
+        if not SLUG_RE.fullmatch(slug):
+            die("--slug %r is not kebab-case" % slug)
+    else:
+        slug = slugify(item.title)
+        if not slug:
+            die("the title of %s yields no slug -- pass --slug" % fmt_id(n))
+    name = "%04d-%s" % (n, slug)
+    shown_dir = os.path.join(os.path.dirname(item.path), ARCHIVE_DIRNAME)
+    archive_dir = archive_dir_of(path)
+    existing = archive_names_for_id(archive_dir, n)
+    if existing:
+        die("%s is already archived at %s" % (fmt_id(n), os.path.join(shown_dir, existing[0])))
+    names, _pages = wiki_page_names(wiki_root_of(path))
+    if name in names:
+        die("archive name %s collides with %s -- pass --slug" % (name, names[name]))
+
+    day = today()
+    if full is not None:
+        closed, state_to, why = Closed(day, full, None), "done", "commit %s" % full
+    else:
+        closed, state_to, why = Closed(day, None, text), "dropped", text
+    shown = os.path.join(shown_dir, name + ".md")
+    archived = item._replace(state=state_to, closed=closed, path=shown,
+                             log=item.log + (LogEntry(day, lane, state_to, None, None, why),))
+    page = render_archive(archived, name)
+    if parse_archive(page, name, shown) != archived:
+        die("internal: the rendered file does not parse back to the model (%s) -- nothing "
+            "was written" % ("archive/%s.md" % name))
+    check_snapshot(path, current.snapshot, None)
+    create_exclusive(os.path.join(archive_dir, name + ".md"), page)
+
+    lanes = _copy_lanes(current)
+    lanes[lane] = [other for other in lanes[lane] if other.id != n]
+    all_archived = dict(current.archived)
+    all_archived[n] = archived
+    # S with the archive digest recomputed for exactly one added name (5.4).
+    listing = [os.path.basename(other.path) for other in current.archived.values()]
+    snapshot = Snapshot(current.snapshot.digest, _archive_digest(listing + [name + ".md"]))
+    commit(current._replace(lanes=lanes, archived=all_archived, snapshot=snapshot),
+           conflict="%s was archived to %s but roadmap.md or the archive listing changed "
+                    "underneath -- the next run removes the live copy (archive wins)"
+                    % (fmt_id(n), shown))
+    emit(shown)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 10. export -- deterministic JSON (roadmap-export/1): no clock, sorted keys,
+#     a fixed item order, so the same inputs give the same bytes
+# ---------------------------------------------------------------------------
+
+def _export_log(entry):
+    state = None
+    if entry.state_from is not None:
+        state = {"from": entry.state_from, "to": entry.state_to}
+    return {"date": entry.date, "from": entry.lane_from, "to": entry.lane_to,
+            "reason": entry.reason, "state": state}
+
+
+def _export_item(item, rank, is_ready):
+    closed = None
+    if item.closed is not None:
+        closed = {"date": item.closed.date, "commit": item.closed.commit,
+                  "reason": item.closed.reason}
+    return {"id": fmt_id(item.id), "title": item.title, "state": item.state,
+            "horizon": item.horizon, "origin": item.origin, "spec": item.spec,
+            "blocked_by": [fmt_id(blocker) for blocker in item.blocked_by],
+            "follows": fmt_id(item.follows) if item.follows is not None else None,
+            "severity": item.severity, "tags": list(item.tags), "why": item.why,
+            "log": [_export_log(entry) for entry in item.log], "closed": closed,
+            "path": item.path, "rank": rank, "ready": is_ready}
+
+
+def build_export(state, head, dirty, closed_since, open_only):
+    """The export document: live items in file order, then the closed items
+    in scope by ascending id; counts describe exactly the items emitted
+    (ADR 0018). A path that is not UTF-8 refuses here, before either route
+    writes, so stdout and --out behave identically (L4)."""
+    counts = dict((key, 0) for key in ("untriaged", "later", "next", "now", "done", "dropped"))
+    items = []
+    for lane in HORIZONS:
+        for rank, item in enumerate(state.lanes[lane]):
+            items.append(_export_item(item, rank, ready(item, state)))
+            counts["untriaged" if lane == "unset" else lane] += 1
+    if not open_only:
+        for n in sorted(state.archived):
+            item = state.archived[n]
+            if closed_since is not None and item.closed.date < closed_since:
+                continue
+            items.append(_export_item(item, None, None))
+            counts[item.state] += 1
+    for entry in items:
+        for ch in entry["path"]:
+            if 0xD800 <= ord(ch) <= 0xDFFF:
+                die("export path %r carries a lone surrogate (U+%04X; a directory name that "
+                    "is not UTF-8) -- rename it; the export is UTF-8 JSON"
+                    % (entry["path"], ord(ch)))
+    return {"schema": EXPORT_SCHEMA, "source": {"head": head, "dirty": dirty},
+            "scope": {"open": True, "closed": not open_only, "closed_since": closed_since},
+            "counts": counts, "wip_limit": {"now": state.meta["wip_now"]}, "items": items}
+
+
+def export_text(doc):
+    return json.dumps(doc, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+
+
+def cmd_export(path, out, closed_since, open_only):
+    """Read-only and lock-free: a repair is made in memory and noted. Both
+    routes carry the same bytes: emit_raw, never emit (L5)."""
+    if closed_since is not None and open_only:
+        die("--closed-since and --open-only are exclusive")
+    if closed_since is not None:
+        check_date("--closed-since", closed_since)
+    if out is not None:
+        check_out_path(out, path)
+    current = load_state(path)
+    _note_repairs(current)
+    roadmap_dir = os.path.dirname(path)
+    rc, head, _err = git(["rev-parse", "--short", "HEAD"], roadmap_dir)
+    head = head.strip() if rc == 0 and head.strip() else None
+    dirty = worktree_dirty(roadmap_dir)
+    text = export_text(build_export(current, head, dirty, closed_since, open_only))
+    if out is None:
+        emit_raw(text)
+    else:
+        write_atomic(out, text, UNLOCKED)
+        emit("exported: %s" % out)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 11. cli
+# ---------------------------------------------------------------------------
+
+COMMANDS = {
+    "init": cmd_init,
+    "add": cmd_add,
+    "list": cmd_list,
+    "show": cmd_show,
+    "move": cmd_move,
+    "rank": cmd_rank,
+    "link": cmd_link,
+    "render": cmd_render,
+    "wip": cmd_wip,
+    "close": cmd_close,
+    "export": cmd_export,
+}
+# The parsed arguments each command takes after the path, in order.
+COMMAND_ARGS = {
+    "init": (),
+    "add": ("item_file", "title", "origin", "horizon", "state", "spec", "blocked_by",
+            "follows", "severity", "tags", "why", "why_file", "reason"),
+    "list": ("state", "horizon", "untriaged", "ready"),
+    "show": ("id",),
+    "move": ("id", "lane", "reason", "reason_file", "state"),
+    "rank": ("id", "before", "top"),
+    "link": ("id", "item_file", "spec", "no_spec", "origin", "blocked_by", "unblock",
+             "follows", "no_follows"),
+    "render": (),
+    "wip": ("n", "reason", "reason_file"),
+    "close": ("id", "commit", "reason", "reason_file", "slug"),
+    "export": ("out", "closed_since", "open_only"),
+}
+
+
+def build_parser():
+    """Every value is a plain string validated IN CODE (no choices=): an
+    argparse usage error is a multi-line block, a refusal is one line."""
+    # --file / --today are accepted before the command and after it. The copy on
+    # the subcommands defaults to SUPPRESS, so an absent one never overwrites a
+    # value given before the command.
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument("--file", default=argparse.SUPPRESS,
+                        help="roadmap.md (default: %s under the git top-level)" % DEFAULT_FILE)
+    parent.add_argument("--today", default=argparse.SUPPRESS,
+                        help="YYYY-MM-DD used for every generated date")
+
+    parser = argparse.ArgumentParser(
+        description="The single writer of docs/roadmap/: live lanes in roadmap.md, closed "
+                    "items archived one page each.")
+    parser.add_argument("--file", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--today", default=None, help=argparse.SUPPRESS)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("init", parents=[parent], help="create an empty roadmap")
+
+    add = sub.add_parser("add", parents=[parent], help="add an item")
+    add.add_argument("--item-file", metavar="PATH", help="the whole item as a JSON object")
+    add.add_argument("--title")
+    add.add_argument("--origin")
+    add.add_argument("--horizon", help="now, next, later or inbox (default: inbox)")
+    add.add_argument("--state", help="idea, planned or active (default: idea)")
+    add.add_argument("--spec", help="a wiki page name")
+    add.add_argument("--blocked-by", action="append", metavar="IDS")
+    add.add_argument("--follows", metavar="ID")
+    add.add_argument("--severity")
+    add.add_argument("--tags", action="append", metavar="TAGS")
+    add.add_argument("--why")
+    add.add_argument("--why-file", metavar="PATH")
+    add.add_argument("--reason")
+
+    lst = sub.add_parser("list", parents=[parent], help="list live items")
+    lst.add_argument("--state")
+    lst.add_argument("--horizon")
+    lst.add_argument("--untriaged", action="store_true")
+    lst.add_argument("--ready", action="store_true")
+
+    show = sub.add_parser("show", parents=[parent], help="print one item")
+    show.add_argument("id")
+
+    move = sub.add_parser("move", parents=[parent], help="change an item's lane and/or state")
+    move.add_argument("id")
+    move.add_argument("lane", help="now, next, later or inbox")
+    move.add_argument("--state")
+    move.add_argument("--reason")
+    move.add_argument("--reason-file", metavar="PATH")
+
+    rank = sub.add_parser("rank", parents=[parent], help="order an item within its lane")
+    rank.add_argument("id")
+    rank.add_argument("--before", metavar="ID")
+    rank.add_argument("--top", action="store_true")
+
+    link = sub.add_parser("link", parents=[parent], help="edit an item's links")
+    link.add_argument("id")
+    link.add_argument("--item-file", metavar="PATH", help="origin/spec/blocked_by as JSON")
+    link.add_argument("--spec")
+    link.add_argument("--no-spec", action="store_true")
+    link.add_argument("--origin")
+    link.add_argument("--blocked-by", action="append", metavar="IDS")
+    link.add_argument("--unblock", action="append", metavar="IDS")
+    link.add_argument("--follows", metavar="ID")
+    link.add_argument("--no-follows", action="store_true")
+
+    sub.add_parser("render", parents=[parent], help="re-render the file, persisting repairs")
+
+    wip = sub.add_parser("wip", parents=[parent], help="change the WIP cap of now")
+    wip.add_argument("n")
+    wip.add_argument("--reason")
+    wip.add_argument("--reason-file", metavar="PATH")
+
+    close = sub.add_parser("close", parents=[parent],
+                           help="archive an item as done (--commit) or dropped (--reason)")
+    close.add_argument("id")
+    close.add_argument("--commit", metavar="SHA", help="done: an existing commit")
+    close.add_argument("--reason", help="dropped: why")
+    close.add_argument("--reason-file", metavar="PATH")
+    close.add_argument("--slug", help="the archive name's slug (default: from the title)")
+
+    export = sub.add_parser("export", parents=[parent], help="deterministic JSON, read-only")
+    export.add_argument("--out", metavar="PATH", help="write here instead of stdout")
+    export.add_argument("--closed-since", metavar="YYYY-MM-DD")
+    export.add_argument("--open-only", action="store_true")
+    return parser
+
+
+def main():
+    global _TODAY
+    args = build_parser().parse_args()
+    path = resolve_target(args.file)
+    check_target_shape(path)
+    check_containment(path)
+    if args.today is not None:
+        _TODAY = check_date("--today", args.today)
+    command = COMMANDS[args.command]
+    sys.exit(command(path, *[getattr(args, name) for name in COMMAND_ARGS[args.command]]))
+
+
+if __name__ == "__main__":
+    main()

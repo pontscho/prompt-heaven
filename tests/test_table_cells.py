@@ -9,8 +9,8 @@ row silently grows a column: still valid output, still parses, just not the
 table that was meant.  The model then reads one field's value under another
 field's name and has no way to know.
 
-MEASURED over `Scripts/` AND `ClaudeCode/skills/*/scripts/`, six renderers exist
-and they split two ways:
+MEASURED over `Scripts/` AND `ClaudeCode/skills/*/scripts/`, seven renderers
+exist and they split two ways:
 
   * `Scripts/mcp-postgres.py`  escapes, reversibly, and SAYS SO on the wire.
   * `ClaudeCode/skills/jira/scripts/jira.py`  escapes the pipe, deliberately
@@ -20,6 +20,9 @@ and they split two ways:
   * `ClaudeCode/skills/checkpoint/scripts/checkpoint.py`  renders the TOC that
     tells a COLD MODEL which line range to read, and was safe only because its
     own parser ate the delimiter first.
+  * `ClaudeCode/skills/roadmap/scripts/roadmap.py`  renders the roadmap
+    summary region and `list` as a padded GFM table whose Title cell is free
+    user text, and escapes with checkpoint's vocabulary.
   * `Scripts/mcp-jenkins.py` and `Scripts/mcp-inspect.py` do not escape either
     and do not need to: their delimiter is whitespace, not `|`.
 
@@ -189,7 +192,7 @@ STRUCTURE = "STRUCTURE"
 
 # Declared totals, so a silent re-classification of one renderer trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_ESCAPED = 4
+DECLARED_ESCAPED = 5
 DECLARED_STRUCTURE = 2
 
 
@@ -276,6 +279,16 @@ RENDERERS = {
             "construction, like the Jira CLI: a skill script has no tools/list "
             "to carry a scheme -- but unlike jira its reader is the model this "
             "repo ships, so the scheme is documented in the skill body instead"),
+
+    "roadmap": Row(
+        path="ClaudeCode/skills/roadmap/scripts/roadmap.py", cls=ESCAPED,
+        renderer="render_table", escaper="_md_cell", delim="|",
+        reversible=True,
+        desc_const=None, desc_tokens=(),
+        why="the roadmap summary region and `list`: a padded GFM table whose "
+            "Title cell is free user text. Same vocabulary as checkpoint's "
+            "_toc_cell; out of group C like checkpoint, because a skill script "
+            "has no tools/list -- the scheme is documented in the skill body"),
 
     "mcp-jenkins": Row(
         path="Scripts/mcp-jenkins.py", cls=STRUCTURE,
@@ -799,9 +812,11 @@ def group_structure(suite, loaded):
                               "misdeclared" if problems else "no pipe columns"))
 
 
-# The census that found these six: `.ljust(`/`.rjust(` across BOTH roots the
+# The census that found these seven: `.ljust(`/`.rjust(` across BOTH roots the
 # roster spans, plus postgres's unpadded DELIM.join and jira's `---` GFM table,
-# neither of which pads.  Re-run every time, so a seventh cannot arrive unnoticed.
+# neither of which pads.  Re-run every time, so an eighth cannot arrive
+# unnoticed -- the seventh, roadmap.py, is the sweep doing exactly that: it
+# arrived undeclared and this sweep failed until its row was written.
 #
 # The roots are two because the ROSTER is two.  It reached outside `Scripts/` by
 # hand for the Jira CLI while this sweep read `Scripts/` only, and that gap is
@@ -815,6 +830,7 @@ SWEEP_EXPECTED = {
     "Scripts/mcp-jenkins.py",
     "Scripts/mcp-tshark.py",
     "ClaudeCode/skills/checkpoint/scripts/checkpoint.py",
+    "ClaudeCode/skills/roadmap/scripts/roadmap.py",
 }
 
 
@@ -1143,7 +1159,7 @@ def group_hygiene(suite, loaded, pyc_before, tree_before):
                  else ["new=%r touched=%r" % (new, touched)],
                  detail=["pyc before=%d after=%d"
                          % (len(pyc_before), len(pyc_after)),
-                         "note        : this suite IMPORTS six modules, so "
+                         "note        : this suite IMPORTS seven modules, so "
                          "this case is load-bearing here rather than "
                          "ceremonial"])
 

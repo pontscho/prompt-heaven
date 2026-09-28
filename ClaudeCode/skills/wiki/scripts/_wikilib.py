@@ -20,6 +20,25 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 SKIP_FILES = {"INDEX.md"}
 SKIP_DIRS = {"sources", "plans", ".git", ".claude", ".cache"}
 
+# Page-type vocabulary for the p:wiki scripts. Scripts/mcp-wiki.py keeps its own
+# copy on purpose -- a fleet server never imports a sibling, and amalgamate
+# cannot reach a skill script -- and tests/test_wiki_index.py gates the two
+# copies equal. Change both, or the gate fails.
+TYPE_ORDER = ["overview", "subsystem", "component", "reference", "analysis",
+	"concept", "spec", "runbook", "adr", "glossary", "roadmap", "roadmap-item"]
+# Frontmatter `status:` is editorial intent, never freshness (p:wiki schema §3).
+# `active` is the unmarked normal state, so INDEX.md labels only a deliberate
+# `draft` or `deprecated`. `current`/`stale` are rejected: they are two of the
+# eight git-measured states, and a hand-written field borrowing HEAD's
+# vocabulary is what made the index print `[current]` for all ten pages while
+# git measured nine of them stale.
+INDEX_LABELLED = ("draft", "deprecated")
+STATUS_FORBIDDEN = ("current", "stale")
+# Page types that are not bound to code sources and are never freshness-tracked.
+UNTRACKED_TYPES = {"overview", "adr", "glossary", "roadmap", "roadmap-item"}
+ORPHAN_EXEMPT_TYPES = ("overview", "roadmap-item")   # archive pages are unlinked by design
+INDEX_COUNTED_TYPES = ("roadmap-item",)              # INDEX.md counts these, never lists them
+
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
