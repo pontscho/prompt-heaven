@@ -169,7 +169,9 @@ python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py export [--out '<sta
 - The **why** may span lines and may contain backticks, but not a level 1-3 heading
   (`#`, `##`, `###` at a line start), a summary-region marker, a control character
   other than newline and tab, or a line separator other than a plain newline.
-  Leading and trailing blank lines are dropped.
+  Leading and trailing blank lines are dropped. A why that is then exactly
+  `_(none)_` is refused: it is the archive's placeholder for an empty why, and would
+  read back as none.
 - `--spec` and `--slug` must be kebab-case (`[a-z0-9-]`); `--spec` must also name an
   existing wiki page (a file with a frontmatter `name:`).
 - **Anchors go in `origin:`, not in the why.** A backticked `path` or `path:symbol` in

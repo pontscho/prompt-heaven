@@ -5191,6 +5191,7 @@ def group_i(suite, mod, work, wiki):
     suite.record(GI, "i-reason-file-one-line-accepted", problems,
                  detail=[_d("why", "exactly one trailing newline is "
                                    "stripped")])
+    _group_i_why_sentinel(suite, work)
 
     _group_i_git_timeout(suite, mod, work)
     _group_i_staged_input(suite, mod, work)
@@ -5198,6 +5199,55 @@ def group_i(suite, mod, work, wiki):
     _group_i_lanes_and_spec(suite, mod, work)
     _group_i_init_and_symlinks(suite, mod, work)
     _group_i_containment(suite, mod, work)
+
+
+def _group_i_why_sentinel(suite, work):
+    """R-0023: `_(none)_` is the archive's placeholder for an empty why, so a
+    why that IS that text (after the why's own blank-line trimming) reads back
+    as no why, and close's round-trip self-check refused it as `internal:`.
+    The add must refuse it instead; a why merely CONTAINING it is prose."""
+    cid = "i-why-sentinel-refused-at-add"
+    path = stage_roadmap(work, cid, EXPECTED_B)
+    item = staged(work, cid, "item.json", json.dumps(
+        {"title": "t", "origin": "user:i-sentinel", "why": "\n_(none)_\n\n"}))
+    archive_before = H.file_digests(_archive_dir(path))
+    before = read_bytes(path)
+    code, _out, err = cli(path, "add", "--item-file", item)
+    problems = shape_problems(code, err)
+    problems += ["the diagnostic omits %r" % t for t in missing_tokens(
+        err, ["the why text is the archive placeholder '_(none)_'"])]
+    problems += problem_if(read_bytes(path) != before,
+                           "the roadmap was modified anyway")
+    problems += problem_if(H.file_digests(_archive_dir(path)) != archive_before,
+                           "the archive changed")
+    close_err = ""
+    if code == 0:
+        _c, _o, close_err = cli(path, "close", "R-0005", "--reason", "x")
+        problems.append("the add was accepted; close then said: %s"
+                        % (close_err.strip() or "<nothing>"))
+    suite.record(GI, cid, problems,
+                 detail=[_d("why", "an item that can never be closed must "
+                                   "not be addable"),
+                         _d("stderr", err.strip() or "<empty>")])
+
+    cid = "i-why-containing-sentinel-closes"
+    path = stage_roadmap(work, cid, EXPECTED_B)
+    item = staged(work, cid, "item.json", json.dumps(
+        {"title": "t", "origin": "user:i-sentinel-prose",
+         "why": "_(none)_ is the placeholder"}))
+    code, _out, err = cli(path, "add", "--item-file", item)
+    problems = shape_problems(code, err, 0)
+    code, out, err = cli(path, "close", "R-0005", "--reason", "x")
+    problems += shape_problems(code, err, 0)
+    archive = os.path.join(_archive_dir(path), "0005-t.md")
+    problems += problem_if(not os.path.isfile(archive)
+                           or "\n_(none)_ is the placeholder\n"
+                           not in read_utf8(archive),
+                           "the archive does not carry the why verbatim")
+    suite.record(GI, cid, problems,
+                 detail=[_d("control", "the rule is equality, not "
+                                       "containment"),
+                         _d("stderr", err.strip() or "<empty>")])
 
 
 def _group_i_git_timeout(suite, mod, work):

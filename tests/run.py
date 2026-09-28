@@ -349,7 +349,7 @@ SUITES = [
      "error rule PER CALL, one reader, re.ASCII and fullmatch only -- each "
      "scanner with a planted control, and hygiene that proves the sandbox "
      "guards bite even before the script exists",
-     338),
+     340),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against", 92),
