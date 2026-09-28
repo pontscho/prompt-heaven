@@ -17,6 +17,7 @@ verified:
   date: 2026-09-28
 links:
   - roadmap
+  - spec-roadmap
   - 0002-index-claims-no-freshness
   - 0013-the-ceiling-is-a-payload-class
   - 0016-a-cell-may-not-forge-a-boundary

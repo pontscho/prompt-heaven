@@ -1,10 +1,10 @@
 ---
-name: feature-implementation-plan
+name: spec-roadmap
 type: spec
-status: draft
+status: deprecated
 title: p:roadmap — a single-writer roadmap skill wired into the wiki
-description: DRAFT plan for p:roadmap — a stdlib-only single-writer roadmap.py owning docs/roadmap/roadmap.md plus one immutable archive page per closed item, two new wiki page types that INDEX.md counts instead of listing, the page-type constants homed in _wikilib with a server parity gate, and two new test suites written red first.
-targets:
+description: SHIPPED in f581b1b (2026-09-28) and kept as a record rather than a live plan — a stdlib-only single-writer roadmap.py owning docs/roadmap/roadmap.md plus one immutable archive page per closed item, two new wiki page types that INDEX.md counts instead of listing, the page-type constants homed in _wikilib with a server parity gate, and two new test suites written red first. Its path:line anchors are not maintained; the decision lives in ADR 0022.
+sources:
   - ClaudeCode/skills/roadmap/SKILL.md
   - ClaudeCode/skills/roadmap/scripts/roadmap.py
   - ClaudeCode/skills/wiki/scripts/_wikilib.py
@@ -19,11 +19,11 @@ targets:
   - tests/run.py
   - tests/README.md
   - project-forge.yaml
-  - docs/adr/0022-a-someday-maybe-is-a-roadmap-item.md
-  - docs/components/wiki-engine.md
-  - docs/subsystems/skills.md
-  - docs/subsystems/tests.md
+verified:
+  commit: f581b1b
+  date: 2026-09-28
 links:
+  - 0022-a-someday-maybe-is-a-roadmap-item
   - wiki-engine
   - tests
   - skills
@@ -34,7 +34,15 @@ links:
 
 # Feature Implementation Plan: p:roadmap — a single-writer roadmap skill wired into the wiki
 
-> **Status: draft, not built.** The design decisions are locked. The source is the design
+> **SHIPPED, AND NOT MAINTAINED. Read this as a record, not as instructions.**
+> The plan was executed in `f581b1b` (2026-09-28); the decision is recorded in
+> [[0022-a-someday-maybe-is-a-roadmap-item]], and the living WHAT/HOW is the roadmap
+> SKILL.md and the roadmap.py docstring. Where the implementation deviated from this text
+> (the dirty-flag FIFO case, the nested-JSON fixture size, the R3/R20 test groups, the
+> display path of a new item), the code and ADR 0022 are right and this page is not.
+> Its path:line anchors are left as they were written.
+>
+> **Status at writing: draft, not built.** The design decisions are locked. The source is the design
 > session of 2026-09-28 plus "Decisions taken after exploration" 1-9, and nothing here reopens
 > them. Where this plan picks an implementation detail the design left open, it is marked
 > **[IMPL-CHOICE]**.
