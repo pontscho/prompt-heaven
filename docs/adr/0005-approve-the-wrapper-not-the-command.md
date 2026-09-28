@@ -12,7 +12,7 @@ verified:
   commit: 1446acb
   date: 2026-08-08
 links:
-  - feature-implementation-plan
+  - spec-sandbox-run
   - hooks
   - skills
   - 0007-a-path-spelled-deny-protects-the-spelling
@@ -22,7 +22,7 @@ links:
 
 **Status:** accepted (implemented). Append-only — the WHY is frozen here; the
 living WHAT/HOW is the [[skills]] `p:sandbox-run` skill, the [[hooks]] roster,
-and the [[feature-implementation-plan]] spec.
+and the [[spec-sandbox-run]] spec.
 
 ## Context
 

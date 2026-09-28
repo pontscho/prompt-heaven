@@ -12,7 +12,6 @@ verified:
 links:
   - overview
   - agents
-  - feature-implementation-plan
   - tests
   - requirements-yaml
   - 0009-the-first-reader-is-a-cold-model
@@ -55,7 +54,7 @@ description is what Claude matches against to auto-activate the skill.
 | `p:wiki` | This documentation-wiki engine ([[wiki-engine]]) |
 | `p:recap` | Session recap into the AI Soul memory system |
 | `p:feature-plan` / `p:task-plan` / `p:implement` | Migrated `/p:` workflow chain: plan -> `requirements.yaml` -> execute |
-| `p:code-review` / `p:branch-review` | Multi-lens code review (finder/verifier minion fan-out) — see [[feature-implementation-plan]] |
+| `p:code-review` / `p:branch-review` | Multi-lens code review (finder/verifier minion fan-out). Its plan lived in the fixed plan slot and was overwritten by the next feature; the last version survives only in git, as the plan file at 1446acb~1 |
 | `p:sandbox-run` | Sandboxed CLI runner: the bundled `sbx` helper contains a command under macOS Seatbelt / Linux bwrap — default-deny writes, no network, secret read+write denial, fail-closed on any other platform — paired with the grant-only `sbx-gate.py` PreToolUse(Bash) gate that auto-allows a clean, in-project, network-free invocation |
 | `p:checkpoint` | Session handoff into `.claude/tmp/checkpoint.md`: an append-only stack of session blocks under a frozen mission tail, written whole in English whatever language the conversation is in, with a script-generated line-range table of contents that makes one block readable by offset — [[0009-the-first-reader-is-a-cold-model]]. Each session's activation prompt is its own `## ACTIVATION S<NNN>` block directly below that session, with its own `A<NNN>` TOC row `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:toc_rows`, so a resume is one command: `nexts` prints MISSION + the newest SESSION + its ACTIVATION block `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:cmd_nexts`, and `activate` prints the prompt paste-ready with the `>` markers stripped, which is where the skill's chat reply takes it from instead of retyping it `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:cmd_activate`. `prepend` refuses a segment that does not pair every session with its own prompt block `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:check_segment_shape`; older files that carry the prompt as a `### ACTIVATION` subsection stay readable through a read-only fallback `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:legacy_activation` |
 | `p:jira` | Jira from the CLI via the bundled `jira.py`: Cloud and Server/DC behind one client with the deployment probed rather than guessed, four distinct pagers, `JIRA_READ_ONLY` and `--dry-run` as refusals, and a `.claude/jira.json` profile found by a walk that stops at `$HOME` with both sides resolved through `realpath` — driven fully offline with the transport injected ([[tests]]) |
