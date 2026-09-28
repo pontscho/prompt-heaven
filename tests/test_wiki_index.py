@@ -29,7 +29,9 @@ GROUPS
   B  render_index: byte-identical between the copies on every corpus variant,
      archive pages counted and never listed, the reindex.py CLI
   C  reindex collect: equal between the copies, the orphan exemption
-  D  freshness classification of the two roadmap types
+  D  freshness classification of the two roadmap types, and the freshness.py
+     exit code on a sourced page with no verified.commit: listed always,
+     gating unless its `status:` is `draft`
   E  negative controls -- each proves an oracle above can FIRE
   F  hygiene: the live docs/INDEX.md, the repo tree, bytecode, the sandbox
   G  the git helper, both copies: the server's timeout and the roadmap's
@@ -55,6 +57,8 @@ The case count lives only in the SUITES table of tests/run.py.
 
 import ast
 import collections
+import contextlib
+import io
 import os
 import posixpath
 import subprocess
@@ -78,7 +82,7 @@ ROADMAP_PY = H.repo_path("ClaudeCode", "skills", "roadmap", "scripts",
 GA = "A. constant parity: one vocabulary, two copies"
 GB = "B. render_index, both copies"
 GC = "C. reindex collect, both copies"
-GD = "D. freshness: the roadmap types are untracked"
+GD = "D. freshness: roadmap types untracked, an unverified draft not gating"
 GE = "E. negative control"
 GF = "F. hygiene"
 GG = "G. the git helper, both copies: timeout and hardening"
@@ -134,6 +138,22 @@ SOURCED_ITEM = _page("roadmap/archive/0009-sourced-item.md",
                      "r-0009-sourced-item", ITEM_TYPE, "Sourced Item",
                      extra="sources:\n  - Scripts/never-written.py\n")
 
+# A concept page carrying `sources:` and NO `verified:`, once per editorial
+# `status:`.  SKILL.md names `status: draft` as the right way to hold such a page
+# while its code is uncommitted, so the freshness.py exit code must list it and
+# not gate on it; every other status is the control that still gates.  Each
+# lives in a corpus of its own, because the exit code is corpus-wide.
+UNVERIFIED_STATUSES = ("draft", "active", "deprecated", None)
+
+
+def _unverified_page(status):
+    label = status or "nostatus"
+    extra = ("status: %s\n" % status if status else "") + \
+        "sources:\n  - Scripts/never-written.py\n"
+    return _page("concepts/unverified-%s.md" % label, "unverified-%s" % label,
+                 "concept", "Unverified %s" % label.title(), extra=extra)
+
+
 Variant = collections.namedtuple("Variant",
                                  "label items with_roadmap link_roadmap only")
 
@@ -145,8 +165,13 @@ V_UNLINKED = Variant("unlinked-roadmap", len(ARCHIVE), True, False, None)
 V_CLI = Variant("cli", len(ARCHIVE), True, True, None)
 V_SOURCED = Variant("sourced-item", 0, False, False, (SOURCED_ITEM,))
 
+V_UNVERIFIED = {s: Variant("unverified-%s" % (s or "nostatus"), 0, False, False,
+                           (_unverified_page(s),))
+                for s in UNVERIFIED_STATUSES}
+
 RENDER_VARIANTS = (V_FULL, V_SINGLE, V_NONE, V_ARCHIVE_ONLY, V_UNLINKED)
-ALL_VARIANTS = RENDER_VARIANTS + (V_CLI, V_SOURCED)
+ALL_VARIANTS = RENDER_VARIANTS + (V_CLI, V_SOURCED) + tuple(
+    V_UNVERIFIED[s] for s in UNVERIFIED_STATUSES)
 
 
 def variant_pages(variant):
@@ -728,6 +753,67 @@ def group_d(suite, srv, fresh_mod, roots):
                          _d("why", "the untracked short-circuit is reached only "
                                    "without sources:, which is why the roadmap "
                                    "writer never writes that key")])
+
+    group_d_unverified(suite, srv, fresh_mod, roots)
+
+
+def run_freshness_cli(fresh_mod, root):
+    """freshness.py's main() on one corpus: (exit code, stdout)."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = fresh_mod.main(["--root", root])
+    return rc, out.getvalue()
+
+
+def group_d_unverified(suite, srv, fresh_mod, roots):
+    """A page with sources and no verified.commit, per editorial status.
+
+    `draft` is what SKILL.md tells an author to write for exactly this page, so
+    the CLI gate lists it and exits 0; every other status still gates.  The
+    server classifies all four `unverified` either way -- its `gating` line is
+    verify's, and git lag there is advisory for every status (adr 0019).
+    """
+    for status in UNVERIFIED_STATUSES:
+        variant = V_UNVERIFIED[status]
+        page = variant.only[0]
+        root = roots[variant.label]
+        rc, text = run_freshness_cli(fresh_mod, root)
+        want_rc = 0 if status == "draft" else 1
+        problems = []
+        if rc != want_rc:
+            problems.append("exit %r, want %r" % (rc, want_rc))
+        listed = [ln for ln in text.splitlines()
+                  if ln.startswith("- ") and ("`%s`" % page.path) in ln]
+        if not listed:
+            problems.append("%s is not listed in the report" % page.path)
+        if "unverified (1):" not in text:
+            problems.append("no `unverified (1):` bucket in the report")
+        if status == "draft" and listed and "not gating" not in listed[0]:
+            problems.append("the draft row does not say it is not gating: %r"
+                            % listed[0])
+        if status != "draft" and listed and "not gating" in listed[0]:
+            problems.append("a %r row claims not gating: %r"
+                            % (status, listed[0]))
+        suite.record(GD, "cli-unverified-%s-%s"
+                     % (status or "nostatus",
+                        "listed-not-gating" if status == "draft" else "gates"),
+                     problems,
+                     detail=[_d("status", status or "(absent)"),
+                             _d("exit", rc),
+                             _d("row", listed[0] if listed else "(none)")])
+
+    draft = V_UNVERIFIED["draft"]
+    got = {}
+    for relpath, fm, _body in srv.iter_pages(roots[draft.label]):
+        got[relpath.replace(os.sep, "/")] = srv._classify_page(
+            relpath, fm, roots[draft.label], lambda _commit: None)["status"]
+    path = draft.only[0].path
+    suite.record(GD, "server-draft-unverified-stays-visible",
+                 [] if got.get(path) == "unverified"
+                 else ["server classified %s %r, want 'unverified'"
+                       % (path, got.get(path))],
+                 detail=[_d("why", "the draft exemption is the CLI gate's; the "
+                                   "state itself stays listed in both copies")])
 
 
 def group_e(suite, srv, reindex_mod, lib, roots):

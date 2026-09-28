@@ -251,8 +251,9 @@ SUITES = [
      "INDEX.md rendering and the page-type constants: both render_index copies "
      "byte-identical, a roadmap-item never listed and counted in one rendered "
      "line, the orphan exemption, the server/skill parity of six constants, "
-     "and both git() copies timed out and hardened like roadmap.py's",
-     48),
+     "both git() copies timed out and hardened like roadmap.py's, and the "
+     "freshness.py exit code listing but not gating an unverified draft",
+     53),
     ("wiki_addendum", run_wiki_addendum,
      "addendum.py, the one legal write to an accepted ADR: one dated "
      "addendum appended with every old byte kept, only an active `type: adr` "

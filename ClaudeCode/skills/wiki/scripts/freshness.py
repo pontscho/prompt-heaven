@@ -13,7 +13,8 @@ Usage:
 Prints a compact prose report on stdout: actionable pages (stale /
 orphaned-source / unverified / promotable) are listed in detail; everything else
 is summarized as counts. Exits non-zero if any page is stale, orphaned-source,
-or unverified (usable as a pre-PR CI gate).
+or unverified (usable as a pre-PR CI gate) -- except an unverified page with no
+verified.commit whose `status:` is `draft`, which is listed but does not gate.
 
 Forward `spec` pages carry `targets:` (intended-but-unbuilt code anchors, the
 forward pair of `sources:`). Two non-gating statuses describe them:
@@ -35,6 +36,13 @@ import _wikilib as w  # noqa: E402
 # `promotable` is actionable (a forward target materialized) so it is detailed;
 # `planned` stays a summarized count.
 DETAIL_STATUSES = ["stale", "orphaned-source", "unverified", "promotable"]
+# Statuses that fail the exit code -- except an `unverified` page with no
+# verified.commit whose editorial `status:` is DRAFT_STATUS. SKILL.md prescribes
+# `status: draft` for exactly that page (its code is uncommitted, so no commit
+# can be claimed), so gating on it would fail the gate for following the schema.
+# It is still listed; only the exit code ignores it.
+GATING_STATUSES = ("stale", "orphaned-source", "unverified")
+DRAFT_STATUS = "draft"
 
 _INVALID = "<invalid-commit>"
 
@@ -127,8 +135,15 @@ def analyze(root: str, head: str):
 				pages.append({"name": name, "path": relpath, "type": typ, "status": status})
 			continue
 		if not commit:
-			pages.append({"name": name, "path": relpath, "type": typ,
-				"status": "unverified", "reason": "no verified.commit"})
+			page = {"name": name, "path": relpath, "type": typ,
+				"status": "unverified", "reason": "no verified.commit"}
+			if fm.get("status") == DRAFT_STATUS:
+				# The schema's own answer for sources whose code is not
+				# committed yet: any verified.commit would be a false claim.
+				# Listed as unverified, excluded from the exit code.
+				page["gating"] = False
+				page["reason"] += " (status: draft, not gating)"
+			pages.append(page)
 			continue
 		changed = _changed_files(commit, head, repo, cache)
 		if changed is None:
@@ -214,8 +229,8 @@ def main(argv=None) -> int:
 	if not args.quiet:
 		sys.stdout.write(render(report))
 
-	summary = report["summary"]
-	gating = summary.get("stale", 0) + summary.get("orphaned-source", 0) + summary.get("unverified", 0)
+	gating = sum(1 for page in report["pages"]
+		if page["status"] in GATING_STATUSES and page.get("gating", True))
 	return 1 if gating else 0
 
 

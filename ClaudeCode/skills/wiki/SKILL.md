@@ -505,7 +505,7 @@ are investigative captures (network traces, performance measurements) typically
 not tied to specific source files.
 
 **The sources⇒verified invariant is type-agnostic.** Any page of ANY type that
-carries `sources:` MUST also carry `verified:`. `freshness` gates such a page as
+carries `sources:` MUST also carry `verified:`. `freshness` classifies such a page as
 `unverified` the moment `verified.commit` is absent, regardless of type — the
 `overview` / `adr` / `glossary` / `roadmap` / `roadmap-item` exemption in
 `UNTRACKED_TYPES` is only reached by a page carrying NEITHER `sources:` nor
@@ -514,7 +514,9 @@ carries `sources:` MUST also carry `verified:`. `freshness` gates such a page as
 did carry*. Where a page's sources genuinely cannot be verified yet — the code
 exists only in an uncommitted working tree, so any `verified.commit` would be a
 false claim — the correct expression is `status: draft` (§3, "awaiting
-promotion"), not an omitted `verified:` under `status: active`.
+promotion"), not an omitted `verified:` under `status: active`. `freshness.py`
+still lists that draft page as `unverified` but leaves it out of its exit code;
+the same page under any other `status:` fails it.
 
 A `spec` page is the same genre as a `subsystem`/`component` design, but it may
 exist *before* its code does. Its anchor requirements depend on `status`
@@ -524,7 +526,8 @@ exist *before* its code does. Its anchor requirements depend on `status`
 - `status: active` → `sources:` + `verified:` required (like a subsystem/component);
   `targets:` only for the parts not yet built.
 - **Invariant**: any `spec` that carries `sources:` MUST also carry `verified:`
-  (otherwise `freshness.py` gates it as `unverified`).
+  (otherwise `freshness.py` gates it as `unverified`, unless it is still
+  `status: draft`, above).
 - An anchor MUST NOT appear in both `targets:` and `sources:` at once
   (documentation-only, not machine-checked — future lint work).
 
