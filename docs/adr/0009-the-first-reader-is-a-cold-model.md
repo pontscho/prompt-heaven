@@ -326,3 +326,14 @@ Both paths are gated now
 `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:cmd_prepend`. Two of these four
 defects are the same shape: a guard that was *nearly* right, and only a written
 case could tell the difference.
+
+## Addendum (2026-09-28): the syntax gap is closed
+
+The gap the consequences left open, a syntax error in this script passing a fully
+green fleet, was closed as roadmap item R-0007. The `syntax` target now globs the
+whole `ClaudeCode/skills` tree, not only its `scripts/` folders, because four
+runnable skill scripts sit next to their `SKILL.md`; it also names the
+extensionless `sandbox-run/scripts/sbx` by path, so a rename fails the target
+instead of silently dropping the file `project-forge.yaml`. A deliberately broken
+probe under `ClaudeCode/skills/checkpoint/scripts/` failed the target before it was
+removed. `ClaudeCode/scripts/` is still outside the glob.

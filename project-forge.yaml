@@ -11,6 +11,12 @@ version: 1
 # Never reintroduce `py_compile`: it writes __pycache__/*.pyc into the tree as a
 # side effect, every suite that snapshots bytecode asserts the tree stays
 # empty, and the Bash guard denies it outright.
+#
+# ClaudeCode/skills is globbed whole, not just */scripts/: cmake, drawio and
+# static-linking keep their runnable .py beside SKILL.md. The sandbox-run `sbx`
+# wrapper is Python with no extension -- the one such file under skills -- so it
+# is named explicitly; a rename then fails the target loudly instead of silently
+# dropping the trust-boundary script out of the check.
 
 configuration:
   settings:
@@ -21,9 +27,9 @@ configuration:
 
 build:
   syntax:
-    description: "Compile-check every Python file in Scripts, tests and hooks (in memory, no .pyc)"
+    description: "Compile-check every Python file in Scripts, tests, hooks and skills, plus the extensionless sbx (in memory, no .pyc)"
     commands:
-      - python3 -B -c "import pathlib; ps=[p for d in ('Scripts','tests','ClaudeCode/hooks') for p in pathlib.Path(d).rglob('*.py')]; [compile(p.read_bytes(), str(p), 'exec') for p in ps]; print('syntax OK', len(ps), 'files')"
+      - python3 -B -c "import pathlib; ps=[p for d in ('Scripts','tests','ClaudeCode/hooks','ClaudeCode/skills') for p in pathlib.Path(d).rglob('*.py')]+[pathlib.Path('ClaudeCode/skills/sandbox-run/scripts/sbx')]; [compile(p.read_bytes(), str(p), 'exec') for p in ps]; print('syntax OK', len(ps), 'files')"
     filter:
       grep: 'syntax OK|Error|error|Traceback'
 
