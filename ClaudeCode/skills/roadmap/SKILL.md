@@ -166,14 +166,18 @@ python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py export [--out '<sta
 
 - A **single-line value** (title, origin, spec, severity, each tag, every reason, the
   slug) may not contain a line break of any kind (including `\r`, U+2028, U+0085), a
-  control character (the tab included), a lone surrogate, or a **backtick**. It is
+  control character (C0 with the tab included, DEL, C1), a format character (bidi
+  overrides and isolates U+202A-202E and U+2066-2069, zero-width U+200B-200F, the
+  BOM U+FEFF), a lone surrogate, or a **backtick**. It is
   written onto exactly one line, and a separator would forge a second one. Title,
   origin, severity and a close reason are also refused when empty or wrapped in
   `[...]` or in matching quotes, because the wiki frontmatter parser would read them
   back as something else. Every reason is stripped, and an empty one is refused.
 - The **why** may span lines and may contain backticks, but not a level 1-3 heading
-  (`#`, `##`, `###` at a line start), a summary-region marker, a control character
-  other than newline and tab, or a line separator other than a plain newline.
+  (`#`, `##`, `###` at a line start), a summary-region marker, a control or format
+  character (as above) other than newline and tab, or a line separator other than a
+  plain newline. The reader applies the same rule: roadmap.md or an archive page
+  carrying such a character is refused before `list`, `show` or `export` prints it.
   Leading and trailing blank lines are dropped. A why that is then exactly
   `_(none)_` is refused: it is the archive's placeholder for an empty why, and would
   read back as none.

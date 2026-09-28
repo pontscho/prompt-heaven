@@ -193,12 +193,12 @@ _TODAY = None   # set once by main() from --today; in-process tests may set it d
 # ---------------------------------------------------------------------------
 
 def die(message):
-    _write_stream(sys.stderr, "roadmap: %s\n" % message, "stderr")
+    _write_stream(sys.stderr, "roadmap: %s\n" % escape_unsafe(message), "stderr")
     sys.exit(2)
 
 
 def note(message):
-    _write_stream(sys.stderr, "roadmap: %s\n" % message, "stderr")
+    _write_stream(sys.stderr, "roadmap: %s\n" % escape_unsafe(message), "stderr")
 
 
 def emit(text):
@@ -883,9 +883,35 @@ def _line_break(ch):
     return len(("a" + ch + "a").splitlines()) != 1
 
 
+def unsafe_char(ch):
+    """The ONE character predicate, shared by the writer, the reader and die()
+    (R-0019): a line break str.splitlines honours, a lone surrogate, or a
+    control (Cc: C0, DEL, C1) or format character (Cf: bidi overrides and
+    isolates, zero-width characters, the BOM) -- what a terminal acts on or
+    hides. Each caller allows newline and tab where it has them."""
+    return _line_break(ch) or unicodedata.category(ch) in ("Cc", "Cf", "Cs")
+
+
+def first_unsafe(text):
+    """(line number, character) of the first unsafe_char in a file's text,
+    newline and tab excepted, or None: the strict reader's half of the rule."""
+    bad = [ch for ch in set(text) if ch not in "\n\t" and unsafe_char(ch)]
+    if not bad:
+        return None
+    at = min(text.index(ch) for ch in bad)
+    return text.count("\n", 0, at) + 1, text[at]
+
+
+def escape_unsafe(text):
+    """text with every unsafe_char backslash-escaped (\\x1b, \\u202e): a refusal
+    names filesystem names verbatim, and none may reach the terminal raw."""
+    return "".join(ch.encode("unicode_escape").decode("ascii") if unsafe_char(ch) else ch
+                   for ch in text)
+
+
 def check_line(field, value):
-    """The ONE character rule for a single-line value (S-M1): no line
-    separator, no lone surrogate, no C0 control, no backtick."""
+    """The ONE character rule for a single-line value (S-M1): no unsafe_char
+    (line separator, lone surrogate, control or format character), no backtick."""
     for ch in value:
         code = ord(ch)
         if _line_break(ch):
@@ -894,7 +920,7 @@ def check_line(field, value):
         if 0xD800 <= code <= 0xDFFF:
             die("%s value %r carries a lone surrogate (U+%04X) -- it cannot be written as "
                 "UTF-8" % (field, value, code))
-        if code < 0x20:
+        if unsafe_char(ch):
             die("%s value %r carries a control character (U+%04X)" % (field, value, code))
         if ch == "`":
             die("%s value %r carries a backtick -- generated roadmap text is backtick-free "
@@ -952,7 +978,7 @@ def check_why(text):
             if 0xD800 <= code <= 0xDFFF:
                 die("the why text carries a lone surrogate (U+%04X) on line %d -- it cannot "
                     "be written as UTF-8" % (code, lineno))
-            if code < 0x20 and ch != "\t":
+            if ch != "\t" and unsafe_char(ch):
                 die("the why text carries a control character (U+%04X) on line %d"
                     % (code, lineno))
         if WHY_HEADING_RE.fullmatch(line):
@@ -1080,6 +1106,9 @@ def parse_roadmap(text, path):
         if line and line.splitlines() != [line]:   # a separator str.splitlines honours
             bad = [ch for ch in line if len(("a" + ch + "a").splitlines()) != 1]
             refuse(lineno, "line separator U+%04X in the file" % ord(bad[0]))
+    found = first_unsafe(text)
+    if found:
+        refuse(found[0], "control character U+%04X in the file" % ord(found[1]))
     if not lines or lines[0] != "---":
         refuse(1, "no frontmatter")
     try:
@@ -1290,6 +1319,9 @@ def parse_archive(text, name, path=None):
 
     if "\r" in text:
         incomplete("carriage return in the file")
+    found = first_unsafe(text)
+    if found:
+        incomplete("control character U+%04X in the file" % ord(found[1]))
     if not text.endswith("\n"):
         incomplete("no final newline")
     lines = text[:-1].split("\n")

@@ -5192,6 +5192,7 @@ def group_i(suite, mod, work, wiki):
                  detail=[_d("why", "exactly one trailing newline is "
                                    "stripped")])
     _group_i_why_sentinel(suite, work)
+    _group_i_terminal_chars(suite, work)
 
     _group_i_git_timeout(suite, mod, work)
     _group_i_staged_input(suite, mod, work)
@@ -5248,6 +5249,80 @@ def _group_i_why_sentinel(suite, work):
                  detail=[_d("control", "the rule is equality, not "
                                        "containment"),
                          _d("stderr", err.strip() or "<empty>")])
+
+
+# R-0019: characters a terminal acts on or hides that are not C0 controls --
+# DEL, a C1 control (CSI), a bidi override and isolate, zero-width space, BOM.
+TERMINAL_CHARS = tuple(chr(c) for c in (0x7F, 0x9B, 0x202E, 0x2066, 0x200B,
+                                        0xFEFF))
+RLO = chr(0x202E)   # RIGHT-TO-LEFT OVERRIDE; spelled as a code point, never raw
+
+
+def _group_i_terminal_chars(suite, work):
+    """The writer refuses every TERMINAL_CHARS member in a single-line value
+    and in the why; the strict reader refuses a hand-planted one in roadmap.md
+    or an archive page before list/show/export print it; a refusal naming a
+    filesystem name escapes it rather than writing it raw to the terminal."""
+    path = stage_roadmap(work, "i-terminal-write", EXPECTED_B)
+    for ch in TERMINAL_CHARS:
+        tag = "%04x" % ord(ch)
+        record_refusal(suite, GI, "i-terminal-title-" + tag, path,
+                       ["add", "--title", "a%sb" % ch, "--origin",
+                        "user:i-t-" + tag],
+                       ["title value", "control character (U+%04X)" % ord(ch)],
+                       "a single-line value carries no terminal-active or "
+                       "invisible character")
+        record_refusal(suite, GI, "i-terminal-why-" + tag, path,
+                       ["add", "--title", "t", "--origin", "user:i-w-" + tag,
+                        "--why", "ok\na%sb" % ch],
+                       ["the why text carries a control character (U+%04X) "
+                        "on line 2" % ord(ch)],
+                       "the why keeps newline and tab, nothing else")
+    record_refusal(suite, GI, "i-terminal-reason", path,
+                   ["move", "R-0003", "next", "--reason", "a%sb" % RLO],
+                   ["reason value", "control character (U+202E)"],
+                   "a reason is a single-line value")
+    code, _out, err = cli(path, "add", "--title", "t", "--origin",
+                          "user:i-w-tab", "--why",
+                          "a\tb %s %s" % (DOT, chr(0xE9)))
+    suite.record(GI, "i-terminal-why-tab-accepted",
+                 shape_problems(code, err, 0),
+                 detail=[_d("control", "tab and printable non-ASCII stay "
+                                       "allowed in the why")])
+
+    planted = EXPECTED_B.replace(WHY_1, WHY_1 + " " + RLO)
+    for verb in (["list"], ["show", "R-0004"], ["export"]):
+        cid = "i-terminal-reader-roadmap-" + verb[0]
+        record_refusal(suite, GI, cid, stage_roadmap(work, cid, planted), verb,
+                       ["control character U+202E in the file"],
+                       "the strict reader re-applies the writer's character "
+                       "rule before anything is printed")
+    cid = "i-terminal-reader-archive-show"
+    archive = ARCHIVE_9.replace("inside a lane.", "inside a lane.\x1b[2J")
+    record_refusal(suite, GI, cid,
+                   stage_roadmap(work, cid, EXPECTED_B,
+                                 {ARCHIVE_9_NAME: archive}),
+                   ["show", "R-0009"],
+                   ["archive/0009-planted.md is incomplete (control character "
+                    "U+001B in the file)"],
+                   "show never prints a planted escape sequence")
+    cid = "i-terminal-reader-tab-accepted"
+    path = stage_roadmap(work, cid, EXPECTED_B.replace(WHY_1, WHY_1 + "\tx"))
+    code, _out, err = cli(path, "list")
+    suite.record(GI, cid, shape_problems(code, err, 0),
+                 detail=[_d("control", "a tab in the why reads back")])
+
+    cid = "i-terminal-name-escaped"
+    name = "x\x1b[31m%s.md" % RLO
+    path = stage_roadmap(work, cid, EXPECTED_B, {name: "x"})
+    problems, err = check_refusal(path, ["list"],
+                                  ["unexpected file in archive/: x\\x1b[31m"
+                                   "\\u202e.md"])
+    problems += problem_if("\x1b" in err or RLO in err,
+                           "stderr carries the raw characters")
+    suite.record(GI, cid, problems,
+                 detail=[_d("why", "die() escapes what it cannot print "
+                                   "safely"), _d("stderr", repr(err.strip()))])
 
 
 def _group_i_git_timeout(suite, mod, work):
