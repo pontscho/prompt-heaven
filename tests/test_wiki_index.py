@@ -30,8 +30,8 @@ GROUPS
      archive pages counted and never listed, the reindex.py CLI
   C  reindex collect: equal between the copies, the orphan exemption
   D  freshness classification of the two roadmap types, and the freshness.py
-     exit code on a sourced page with no verified.commit: listed always,
-     gating unless its `status:` is `draft`
+     verdict (adr 0019): orphaned-source gates the exit code; stale and
+     unverified -- for every editorial `status:` -- are listed and advisory
   E  negative controls -- each proves an oracle above can FIRE
   F  hygiene: the live docs/INDEX.md, the repo tree, bytecode, the sandbox
   G  the git helper, both copies: the server's timeout and the roadmap's
@@ -82,7 +82,7 @@ ROADMAP_PY = H.repo_path("ClaudeCode", "skills", "roadmap", "scripts",
 GA = "A. constant parity: one vocabulary, two copies"
 GB = "B. render_index, both copies"
 GC = "C. reindex collect, both copies"
-GD = "D. freshness: roadmap types untracked, an unverified draft not gating"
+GD = "D. freshness: roadmap types untracked, the CLI gates only orphaned-source"
 GE = "E. negative control"
 GF = "F. hygiene"
 GG = "G. the git helper, both copies: timeout and hardening"
@@ -138,12 +138,25 @@ SOURCED_ITEM = _page("roadmap/archive/0009-sourced-item.md",
                      "r-0009-sourced-item", ITEM_TYPE, "Sourced Item",
                      extra="sources:\n  - Scripts/never-written.py\n")
 
-# A concept page carrying `sources:` and NO `verified:`, once per editorial
-# `status:`.  SKILL.md names `status: draft` as the right way to hold such a page
-# while its code is uncommitted, so the freshness.py exit code must list it and
-# not gate on it; every other status is the control that still gates.  Each
-# lives in a corpus of its own, because the exit code is corpus-wide.
+# The freshness.py exit code gates only on what the CLI can PROVE (adr 0019):
+# `orphaned-source`, a `sources:` path gone from the tree.  Git lag -- `stale`
+# and `unverified` -- is listed and advisory, for every editorial `status:`.
+# A concept page carrying `sources:` and NO `verified:`, once per status: all
+# four are listed and none gates, so no status needs an exemption.  Each lives
+# in a corpus of its own, because the exit code is corpus-wide.
 UNVERIFIED_STATUSES = ("draft", "active", "deprecated", None)
+# A resolvable-looking commit.  The fixture sits outside any repository, so the
+# CLI's `_changed_files` is swapped for a stub for the two cases that need a
+# verified page to reach `stale` / `orphaned-source`.
+FAKE_COMMIT = "abc1234"
+_VERIFIED = "verified:\n  commit: %s\n  date: 2026-09-28\n" % FAKE_COMMIT
+# Its one source is itself, so it exists; the stub reports it changed.
+STALE_PAGE = _page("concepts/stale-page.md", "stale-page", "concept",
+                   "Stale Page",
+                   extra="sources:\n  - concepts/stale-page.md\n" + _VERIFIED)
+ORPHAN_PAGE = _page("concepts/orphan-page.md", "orphan-page", "concept",
+                    "Orphan Page",
+                    extra="sources:\n  - Scripts/never-written.py\n" + _VERIFIED)
 
 
 def _unverified_page(status):
@@ -168,9 +181,11 @@ V_SOURCED = Variant("sourced-item", 0, False, False, (SOURCED_ITEM,))
 V_UNVERIFIED = {s: Variant("unverified-%s" % (s or "nostatus"), 0, False, False,
                            (_unverified_page(s),))
                 for s in UNVERIFIED_STATUSES}
+V_STALE = Variant("stale-page", 0, False, False, (STALE_PAGE,))
+V_ORPHAN = Variant("orphan-page", 0, False, False, (ORPHAN_PAGE,))
 
 RENDER_VARIANTS = (V_FULL, V_SINGLE, V_NONE, V_ARCHIVE_ONLY, V_UNLINKED)
-ALL_VARIANTS = RENDER_VARIANTS + (V_CLI, V_SOURCED) + tuple(
+ALL_VARIANTS = RENDER_VARIANTS + (V_CLI, V_SOURCED, V_STALE, V_ORPHAN) + tuple(
     V_UNVERIFIED[s] for s in UNVERIFIED_STATUSES)
 
 
@@ -765,42 +780,83 @@ def run_freshness_cli(fresh_mod, root):
     return rc, out.getvalue()
 
 
-def group_d_unverified(suite, srv, fresh_mod, roots):
-    """A page with sources and no verified.commit, per editorial status.
+def cli_verdict_problems(rc, text, page, bucket, want_gating):
+    """The CLI's contract on a one-page corpus: listed in its bucket, a
+    `gating:` line that counts only the provable class and says which checks
+    are server-only, an `advisory:` line for git lag, and an exit code that
+    agrees with the gating count."""
+    problems = []
+    want_rc = 1 if want_gating else 0
+    if rc != want_rc:
+        problems.append("exit %r, want %r" % (rc, want_rc))
+    lines = text.splitlines()
+    listed = [ln for ln in lines
+              if ln.startswith("- ") and ("`%s`" % page.path) in ln]
+    if not listed:
+        problems.append("%s is not listed in the report" % page.path)
+    if "%s (1):" % bucket not in lines:
+        problems.append("no `%s (1):` bucket in the report" % bucket)
+    gating = [ln for ln in lines if ln.startswith("gating: ")]
+    if len(gating) != 1:
+        problems.append("%d `gating:` line(s), want 1" % len(gating))
+    else:
+        if not gating[0].startswith("gating: %d " % want_gating):
+            problems.append("gating line %r, want a count of %d"
+                            % (gating[0], want_gating))
+        if "wiki_call verify" not in gating[0]:
+            problems.append("the gating line does not say what only "
+                            "`wiki_call verify` checks: %r" % gating[0])
+    advisory = [ln for ln in lines if ln.startswith("advisory: ")]
+    if want_gating and advisory:
+        problems.append("an orphaned-source page produced an advisory line: %r"
+                        % advisory)
+    if not want_gating and len(advisory) != 1:
+        problems.append("%d `advisory:` line(s) for git lag, want 1"
+                        % len(advisory))
+    return problems, (listed[0] if listed else "(none)"), \
+        (gating[0] if gating else "(none)")
 
-    `draft` is what SKILL.md tells an author to write for exactly this page, so
-    the CLI gate lists it and exits 0; every other status still gates.  The
-    server classifies all four `unverified` either way -- its `gating` line is
-    verify's, and git lag there is advisory for every status (adr 0019).
+
+def group_d_unverified(suite, srv, fresh_mod, roots):
+    """The CLI exit code gates only on what it can prove (adr 0019).
+
+    A page with sources and no verified.commit is `unverified` -- git lag, not
+    a defect -- for EVERY editorial status: listed, advisory, exit 0.  `stale`
+    is advisory too.  `orphaned-source` (a sources: path gone from the tree) is
+    the one class the CLI can demonstrate, and the one the server's verify
+    gates as a broken anchor, so it alone sets the exit code.
     """
     for status in UNVERIFIED_STATUSES:
         variant = V_UNVERIFIED[status]
-        page = variant.only[0]
-        root = roots[variant.label]
-        rc, text = run_freshness_cli(fresh_mod, root)
-        want_rc = 0 if status == "draft" else 1
-        problems = []
-        if rc != want_rc:
-            problems.append("exit %r, want %r" % (rc, want_rc))
-        listed = [ln for ln in text.splitlines()
-                  if ln.startswith("- ") and ("`%s`" % page.path) in ln]
-        if not listed:
-            problems.append("%s is not listed in the report" % page.path)
-        if "unverified (1):" not in text:
-            problems.append("no `unverified (1):` bucket in the report")
-        if status == "draft" and listed and "not gating" not in listed[0]:
-            problems.append("the draft row does not say it is not gating: %r"
-                            % listed[0])
-        if status != "draft" and listed and "not gating" in listed[0]:
-            problems.append("a %r row claims not gating: %r"
-                            % (status, listed[0]))
-        suite.record(GD, "cli-unverified-%s-%s"
-                     % (status or "nostatus",
-                        "listed-not-gating" if status == "draft" else "gates"),
-                     problems,
+        rc, text = run_freshness_cli(fresh_mod, roots[variant.label])
+        problems, row, gline = cli_verdict_problems(
+            rc, text, variant.only[0], "unverified", 0)
+        suite.record(GD, "cli-unverified-%s-listed-advisory"
+                     % (status or "nostatus"), problems,
                      detail=[_d("status", status or "(absent)"),
-                             _d("exit", rc),
-                             _d("row", listed[0] if listed else "(none)")])
+                             _d("exit", rc), _d("row", row),
+                             _d("gating", gline)])
+
+    saved = fresh_mod._changed_files
+    try:
+        for variant, bucket, changed, want in (
+                (V_STALE, "stale", {STALE_PAGE.path}, 0),
+                (V_ORPHAN, "orphaned-source", set(), 1)):
+            fresh_mod._changed_files = (
+                lambda commit, head, repo, cache, _c=changed:
+                set(_c) if commit == FAKE_COMMIT else None)
+            rc, text = run_freshness_cli(fresh_mod, roots[variant.label])
+            problems, row, gline = cli_verdict_problems(
+                rc, text, variant.only[0], bucket, want)
+            suite.record(GD, "cli-%s-%s" % (bucket,
+                                            "gates" if want else "advisory"),
+                         problems,
+                         detail=[_d("exit", rc), _d("row", row),
+                                 _d("gating", gline),
+                                 _d("stub", "_changed_files(%s) -> %r"
+                                    % (FAKE_COMMIT, sorted(changed)))])
+    finally:
+        fresh_mod._changed_files = saved
 
     draft = V_UNVERIFIED["draft"]
     got = {}
@@ -812,8 +868,8 @@ def group_d_unverified(suite, srv, fresh_mod, roots):
                  [] if got.get(path) == "unverified"
                  else ["server classified %s %r, want 'unverified'"
                        % (path, got.get(path))],
-                 detail=[_d("why", "the draft exemption is the CLI gate's; the "
-                                   "state itself stays listed in both copies")])
+                 detail=[_d("why", "both copies classify it `unverified`; "
+                                   "neither gates on it")])
 
 
 def group_e(suite, srv, reindex_mod, lib, roots):

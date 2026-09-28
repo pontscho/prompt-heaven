@@ -189,7 +189,9 @@ The stdlib scripts `ClaudeCode/skills/wiki/scripts/freshness.py` and
 `ClaudeCode/skills/wiki/scripts/reindex.py` carry the same freshness/index
 logic — including the same forbidden-status lint
 `ClaudeCode/skills/wiki/scripts/reindex.py:collect` — and remain as a pre-PR CI
-gate (non-zero exit on stale pages, duplicate slugs, or malformed frontmatter);
+gate (`freshness.py` exits non-zero only on an orphaned source, with stale and
+unverified pages reported as advisory per [[0019-only-gate-on-what-you-can-prove]];
+`reindex.py` on duplicate slugs or malformed frontmatter);
 `wiki_call` is the interactive path. That pair is hand-maintained: the server
 vendors the script logic instead of importing it, and the fleet's generator
 renders only into `Scripts/mcp-*.py` `Scripts/amalgamate.py:TARGET_GLOB`, so it

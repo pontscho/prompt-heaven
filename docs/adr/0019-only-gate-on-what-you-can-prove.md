@@ -177,3 +177,11 @@ Three carve-outs, each measured on a real page rather than reasoned:
   down beside the skill, because the two steps that cost the most on the first
   page were not about the mechanism at all — prose points at a number, and moving
   the number without moving the pointers leaves a page that parses and lies.
+
+## Addendum (2026-09-28): the CLI takes up half one
+
+Half one was implemented in the server only. `ClaudeCode/skills/wiki/scripts/freshness.py` kept the pre-decision exit code, stale plus orphaned-source plus unverified, while the wiki skill said the CI gate ran the same logic. Found while fixing roadmap item R-0025, closed as R-0032.
+
+The CLI now exits non-zero only on an `orphaned-source` page: a `sources:` path gone from the tree on a page whose `verified.commit` resolves. That is a filesystem fact and the same broken anchor the server's `gating:` line counts, so it stays on the verdict side. `stale` and `unverified` are listed and counted on an `advisory:` line in the server's own wording, whatever the page's `status:`. R-0025's draft exemption was folded into that rule and removed.
+
+A clean CLI exit is a declared subset of the server's verdict. Symbol anchors, body anchors and measured regions are checked only by `wiki_call verify`: carrying them into the CLI would copy the verifier and the measured-region stack, the duplication roadmap item R-0002 tracks. A missing source path on a page with no resolvable `verified.commit` classifies as `unverified`, so it is advisory in the CLI; `verify` still catches it. On the live corpus the day this landed the CLI reported gating 0 and 28 advisory pages, where the old code would have exited 1.

@@ -12,9 +12,16 @@ Usage:
 
 Prints a compact prose report on stdout: actionable pages (stale /
 orphaned-source / unverified / promotable) are listed in detail; everything else
-is summarized as counts. Exits non-zero if any page is stale, orphaned-source,
-or unverified (usable as a pre-PR CI gate) -- except an unverified page with no
-verified.commit whose `status:` is `draft`, which is listed but does not gate.
+is summarized as counts, followed by a `gating:` and an `advisory:` line.
+
+The exit code gates only on what this script can PROVE (docs/adr/0019): it is
+non-zero iff a page is `orphaned-source` -- a `sources:` path gone from the tree,
+which is a filesystem fact and the same broken anchor the server's `verify`
+gates. `stale` and `unverified` are git lag, a measurement rather than a verdict:
+listed, counted on the `advisory:` line, never an exit code -- for every
+editorial `status:`. Symbol anchors, body anchors and measured regions are
+verified ONLY by `wiki_call verify` (Scripts/mcp-wiki.py); this script does not
+repeat that verifier, so a clean exit here is a subset of the server's verdict.
 
 Forward `spec` pages carry `targets:` (intended-but-unbuilt code anchors, the
 forward pair of `sources:`). Two non-gating statuses describe them:
@@ -36,13 +43,12 @@ import _wikilib as w  # noqa: E402
 # `promotable` is actionable (a forward target materialized) so it is detailed;
 # `planned` stays a summarized count.
 DETAIL_STATUSES = ["stale", "orphaned-source", "unverified", "promotable"]
-# Statuses that fail the exit code -- except an `unverified` page with no
-# verified.commit whose editorial `status:` is DRAFT_STATUS. SKILL.md prescribes
-# `status: draft` for exactly that page (its code is uncommitted, so no commit
-# can be claimed), so gating on it would fail the gate for following the schema.
-# It is still listed; only the exit code ignores it.
-GATING_STATUSES = ("stale", "orphaned-source", "unverified")
-DRAFT_STATUS = "draft"
+# The verdict (adr 0019, half one). `orphaned-source` is the one provable class
+# this script can reach; the server's `gating:` line counts it too, as a broken
+# anchor found by `verify`. Git lag is ADVISORY_STATUSES, in the order the
+# advisory line names them -- the same pair, in the same order, as the server's.
+GATING_STATUSES = ("orphaned-source",)
+ADVISORY_STATUSES = ("stale", "unverified")
 
 _INVALID = "<invalid-commit>"
 
@@ -135,15 +141,8 @@ def analyze(root: str, head: str):
 				pages.append({"name": name, "path": relpath, "type": typ, "status": status})
 			continue
 		if not commit:
-			page = {"name": name, "path": relpath, "type": typ,
-				"status": "unverified", "reason": "no verified.commit"}
-			if fm.get("status") == DRAFT_STATUS:
-				# The schema's own answer for sources whose code is not
-				# committed yet: any verified.commit would be a false claim.
-				# Listed as unverified, excluded from the exit code.
-				page["gating"] = False
-				page["reason"] += " (status: draft, not gating)"
-			pages.append(page)
+			pages.append({"name": name, "path": relpath, "type": typ,
+				"status": "unverified", "reason": "no verified.commit"})
 			continue
 		changed = _changed_files(commit, head, repo, cache)
 		if changed is None:
@@ -209,13 +208,31 @@ def render(report) -> str:
 	clean = {k: v for k, v in report["summary"].items() if k not in DETAIL_STATUSES}
 	if clean:
 		lines.append("ok: " + ", ".join("%d %s" % (v, k) for k, v in sorted(clean.items())))
+	lines.append("gating: %d (%s; symbol anchors, body anchors and measured regions "
+		"are checked only by wiki_call verify)"
+		% (gating_count(report), " + ".join(GATING_STATUSES)))
+	moved, unchecked = (report["summary"].get(s, 0) for s in ADVISORY_STATUSES)
+	if moved or unchecked:
+		# The server's advisory sentence, so the two reports read the same.
+		lines.append(
+			"advisory: %d page(s) list a source git says moved since they were "
+			"verified, %d cannot be compared at all — git lag is a MEASUREMENT, "
+			"not a verdict: it cannot tell a moved comma from a reversed "
+			"decision. A human read may be owed; nothing here is claimed wrong."
+			% (moved, unchecked))
 	if not report["pages"]:
 		lines.append("no pages found")
 	return "\n".join(lines).rstrip() + "\n"
 
 
+def gating_count(report) -> int:
+	"""What the exit code gates on: the provable classes only (adr 0019)."""
+	return sum(report["summary"].get(s, 0) for s in GATING_STATUSES)
+
+
 def main(argv=None) -> int:
-	parser = argparse.ArgumentParser(description="Detect stale wiki pages (git-only).")
+	parser = argparse.ArgumentParser(description="Report wiki git lag (advisory) and "
+		"exit non-zero only on an orphaned source path (git-only).")
 	parser.add_argument("--root", default="docs", help="wiki root directory (default: docs)")
 	parser.add_argument("--head", default="HEAD", help="ref representing current state (default: HEAD)")
 	parser.add_argument("--quiet", action="store_true", help="print nothing; rely on the exit code only")
@@ -229,9 +246,7 @@ def main(argv=None) -> int:
 	if not args.quiet:
 		sys.stdout.write(render(report))
 
-	gating = sum(1 for page in report["pages"]
-		if page["status"] in GATING_STATUSES and page.get("gating", True))
-	return 1 if gating else 0
+	return 1 if gating_count(report) else 0
 
 
 if __name__ == "__main__":

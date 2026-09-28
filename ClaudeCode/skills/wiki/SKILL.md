@@ -222,7 +222,11 @@ gate** (exit codes drive PR checks); `wiki_call` is the interactive/agentic path
 ~/.claude/skills/p/skills/wiki/scripts/reindex.py   --root docs [--check]
 ```
 
-- `freshness.py` exits non-zero if any page is stale — usable as a pre-PR CI gate.
+- `freshness.py` exits non-zero only on an `orphaned-source` page (a `sources:`
+  path gone from the tree) — usable as a pre-PR CI gate. `stale` and
+  `unverified` are git lag: listed and reported on its `advisory:` line, never
+  an exit code (adr 0019). Symbol anchors, body anchors and measured regions are
+  checked only by `wiki_call` `verify`.
 - `reindex.py` regenerates `INDEX.md` by default; `--check` audits without
   writing. It exits non-zero on duplicate slugs or malformed frontmatter.
 
@@ -514,9 +518,7 @@ carries `sources:` MUST also carry `verified:`. `freshness` classifies such a pa
 did carry*. Where a page's sources genuinely cannot be verified yet — the code
 exists only in an uncommitted working tree, so any `verified.commit` would be a
 false claim — the correct expression is `status: draft` (§3, "awaiting
-promotion"), not an omitted `verified:` under `status: active`. `freshness.py`
-still lists that draft page as `unverified` but leaves it out of its exit code;
-the same page under any other `status:` fails it.
+promotion"), not an omitted `verified:` under `status: active`.
 
 A `spec` page is the same genre as a `subsystem`/`component` design, but it may
 exist *before* its code does. Its anchor requirements depend on `status`
@@ -526,8 +528,7 @@ exist *before* its code does. Its anchor requirements depend on `status`
 - `status: active` → `sources:` + `verified:` required (like a subsystem/component);
   `targets:` only for the parts not yet built.
 - **Invariant**: any `spec` that carries `sources:` MUST also carry `verified:`
-  (otherwise `freshness.py` gates it as `unverified`, unless it is still
-  `status: draft`, above).
+  (otherwise `freshness` reports it as `unverified`).
 - An anchor MUST NOT appear in both `targets:` and `sources:` at once
   (documentation-only, not machine-checked — future lint work).
 
@@ -559,8 +560,8 @@ A page's freshness is defined against its anchors:
   since last verification — flag for human review, do not silently rewrite.
 
 Division of labor: file-level freshness (`stale`, `orphaned-source`) is
-detected cheaply by `wiki_call` `freshness` (git only; the `freshness.py` CI gate
-runs the same logic). Symbol-level checks
+detected cheaply by `wiki_call` `freshness` (git only; `freshness.py` runs the
+same classification, and its exit code gates only `orphaned-source`). Symbol-level checks
 (`broken`, `drifted`) require the language MCP servers and happen during the
 LLM lint pass — never with grep/find.
 
@@ -584,10 +585,10 @@ curation step: move the anchor `targets:` → `sources:`, set
 - **`promotable`** — at least one `targets:` path now exists; the page is ready
   to promote. Listed page-by-page (actionable); `planned` is summarized as a count.
 
-**Status precedence**: a gating status (`stale` / `orphaned-source` /
+**Status precedence**: a git-measured status (`stale` / `orphaned-source` /
 `unverified`) > `promotable` > `current`. `promotable` only surfaces when the
 `sources:` side is otherwise `current` — so a materialized target can never mask
-a real gating condition on a page's sources. Neither `planned` nor `promotable`
+a real condition on a page's sources. Neither `planned` nor `promotable`
 gates CI.
 
 ### 4b. Measured regions (a number is never typed)

@@ -252,8 +252,9 @@ SUITES = [
      "byte-identical, a roadmap-item never listed and counted in one rendered "
      "line, the orphan exemption, the server/skill parity of six constants, "
      "both git() copies timed out and hardened like roadmap.py's, and the "
-     "freshness.py exit code listing but not gating an unverified draft",
-     53),
+     "freshness.py exit code gating only on orphaned-source, with stale and "
+     "unverified listed as advisory for every editorial status",
+     55),
     ("wiki_addendum", run_wiki_addendum,
      "addendum.py, the one legal write to an accepted ADR: one dated "
      "addendum appended with every old byte kept, only an active `type: adr` "
