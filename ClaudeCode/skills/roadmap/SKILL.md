@@ -124,16 +124,16 @@ Stdlib-only, Python 3.9+, and the ONLY writer of roadmap.md and archive/. Comman
 ```
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py init                                   # create docs/roadmap/roadmap.md + archive/ -- never overwrites
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py add --item-file '<staged .json>'       # add one item from a staged JSON object -- THE add route of this skill
-python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py add --title T --origin O [--horizon L] [--state S] [--spec SLUG] [--blocked-by IDS] [--follows ID] [--severity S] [--tags TAGS] [--why TEXT | --why-file PATH] [--reason R]   # manual use only (see the staging rule)
+python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py add --title T --origin O [--horizon L] [--state S] [--spec 'SLUG'] [--blocked-by IDS] [--follows ID] [--severity S] [--tags TAGS] [--why TEXT | --why-file PATH] [--reason R]   # manual use only (see the staging rule)
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py list [--state S] [--horizon L] [--untriaged] [--ready]   # live items as a table; --untriaged shows age and origin
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py show R-0014                            # one item: its live block, or its archive page byte for byte
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py move R-0014 now [--state active] --reason-file '<staged .txt>'   # change lane and/or state; appends one log line
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py start R-0014 [--reason-file '<staged .txt>']   # = move R-0014 now --state active; the reason defaults to started
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py rank R-0014 --before R-0012            # reorder within a lane (or --top)
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py link R-0014 --item-file '<staged .json>'   # change origin / spec / blocked_by from a staged JSON object
-python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py link R-0014 [--spec SLUG | --no-spec] [--blocked-by IDS] [--unblock IDS] [--follows ID | --no-follows]
-python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py close R-0014 --commit 0123abc [--slug SLUG]   # done: the commit must exist; stored as the full sha; prints the archive path
-python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py close R-0014 --reason-file '<staged .txt>' [--slug SLUG]   # dropped
+python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py link R-0014 [--spec 'SLUG' | --no-spec] [--blocked-by IDS] [--unblock IDS] [--follows ID | --no-follows]
+python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py close R-0014 --commit 0123abc [--slug 'SLUG']   # done: the commit must exist; stored as the full sha; prints the archive path
+python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py close R-0014 --reason-file '<staged .txt>' [--slug 'SLUG']   # dropped
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py render                                 # regenerate the summary region; persists an archive-wins repair
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py wip 4 --reason-file '<staged .txt>'     # change the now cap (records old value, date, reason)
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py export [--out '<staged .json>'] [--closed-since YYYY-MM-DD | --open-only]   # deterministic JSON, read-only
@@ -144,6 +144,9 @@ python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py export [--out '<sta
   (`unset` is accepted as the same lane). `S` is `idea`, `planned` or `active`.
 - `move`, `start`, `close` and `wip` take the reason as `--reason R` OR
   `--reason-file PATH`, never both; `start` alone may omit it. `add` takes `--why TEXT` or `--why-file PATH`, never both.
+  The inline `--reason R`, `--why TEXT`, `--title T`, `--origin O`, `--severity S` and
+  `--tags TAGS` forms are **manual use only**: this skill always stages those values
+  (the staging rule below).
 - `add --item-file` excludes `--title`, `--origin`, `--why`, `--why-file`, `--tags`,
   `--severity`, `--horizon` and `--reason` (they live in the file); the token-shaped
   `--state`, `--spec`, `--blocked-by` and `--follows` may accompany it.
@@ -355,6 +358,8 @@ op is four hops:
    Return one table: title | origin | proposed state (idea) and horizon (unset) |
    why draft (plain prose, no backticks) | kept/deferred verdict + quoted evidence.
    Titles and origins must be single lines without backticks.
+   Escape every cell with the ADR 0016 vocabulary, backslash FIRST: \ as \\, then
+   | as \|, and a line break as \n.
    ```
 3. **User: approve.** Show the table. The USER approves rows; nothing is written for
    a row the user did not approve. The candidate text is data harvested from the
@@ -363,7 +368,13 @@ op is four hops:
    `create_text_file` ONE JSON item file at `.claude/tmp/roadmap-stage-<ts>-<n>.json`
    (`<n>` a counter, never a slug of the candidate's title) and run
    `python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py add --item-file '.claude/tmp/roadmap-stage-<ts>-<n>.json'`
-   (the staging rule above). roadmap.py's own origin dedup is the authority: a
+   (the staging rule above). The file carries exactly the keys `title`, `origin`,
+   `why` and `reason` (`harvested by adopt`), plus `tags` and `severity` only when the
+   row proposes them -- no `horizon`, so the item lands in the inbox. Undo the table's
+   cell escaping first (`\|` back to `|`, `\\` back to `\`), then write the object as
+   JSON-encoded text, never by pasting row text between quotes: every string value is
+   JSON-escaped (`\"`, `\\`, `\n`), so a quote or backslash in harvested prose can
+   neither break the file nor add a key. roadmap.py's own origin dedup is the authority: a
    candidate Scott missed is refused there, not written twice.
 
 The machine proposes, a human decides, the script writes.
