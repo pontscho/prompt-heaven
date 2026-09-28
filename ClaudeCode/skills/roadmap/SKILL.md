@@ -311,6 +311,10 @@ anchor where the regression was observed, or `user:<YYYY-MM-DD>:<kebab-key>`.
 Reusing the predecessor's origin is refused, because the origin dedup covers the
 archive too.
 
+When a `close`d item's origin is a section of an accepted ADR, record the closure
+on that ADR with the wiki's `addendum.py` (`ClaudeCode/skills/wiki/SKILL.md`, staged
+item file), never with a hand edit.
+
 ## `/p:roadmap adopt` -- harvest candidates, the user approves, the script writes
 
 `p:minion-explorer` (Scott) is read-only and has no Bash

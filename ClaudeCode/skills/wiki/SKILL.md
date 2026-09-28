@@ -230,6 +230,25 @@ Use the CLI scripts ONLY for a CI gate or a quick main-context sanity check.
 All interactive work (freshness, reindex, search, page reads, anchor
 verification) goes through the janitor and `wiki_call`.
 
+**The one write to an accepted ADR — `addendum.py`.** An accepted ADR is
+append-only (Schema §2), so its only legal write is a dated addendum at the end,
+and this stdlib-only script makes that the only write it can do. It never
+touches the frontmatter or an existing byte:
+
+```bash
+python3 ~/.claude/skills/p/skills/wiki/scripts/addendum.py --page 'docs/adr/NNNN-<slug>.md' --item-file '<staged .json>' [--today YYYY-MM-DD]
+```
+
+The item file is staged with `purity_call` `create_text_file` under
+`.claude/tmp/` — free text never travels on the shell line (the `p:roadmap`
+staging rule) — and holds exactly `{"title": ..., "body": ...}`: a one-line
+title without a backtick, a markdown body with no level 1-2 heading (`###` and
+deeper are fine). It appends `## Addendum (<date>): <title>` and the body, and
+prints the page path. Only an existing `type: adr`, `status: active` page under
+`docs/` is accepted; a `draft` ADR is refused (edit the draft directly), and so
+is a heading the page already carries. Every refusal is exit 2 with one stderr
+line and the page untouched. Never hand-edit an accepted ADR instead.
+
 **The bootstrap, and it is a third thing — neither the server nor a CI gate.**
 
 ```bash

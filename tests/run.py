@@ -118,6 +118,10 @@ def run_wiki_index(opts):
     return run_python_suite("test_wiki_index", opts)
 
 
+def run_wiki_addendum(opts):
+    return run_python_suite("test_wiki_addendum", opts)
+
+
 def run_jira_cli(opts):
     return run_python_suite("test_jira_cli", opts)
 
@@ -249,6 +253,12 @@ SUITES = [
      "line, the orphan exemption, the server/skill parity of six constants, "
      "and both git() copies timed out and hardened like roadmap.py's",
      48),
+    ("wiki_addendum", run_wiki_addendum,
+     "addendum.py, the one legal write to an accepted ADR: one dated "
+     "addendum appended with every old byte kept, only an active `type: adr` "
+     "page inside the wiki root, a staged title/body item whose body cannot "
+     "forge a sibling section, and the same heading never appended twice",
+     57),
     ("jira_cli", run_jira_cli,
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "

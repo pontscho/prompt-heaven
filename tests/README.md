@@ -71,6 +71,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `mcp_footprint` | `test_mcp_footprint.py` | A–H |
 | `wiki_recall` | `test_wiki_recall.py` | A–P |
 | `wiki_index` | `test_wiki_index.py` | A–F |
+| `wiki_addendum` | `test_wiki_addendum.py` | A–E |
 | `jira_cli` | `test_jira_cli.py` | A–M |
 | `bitbucket_cli` | `test_bitbucket_cli.py` | A–K |
 | `checkpoint` | `test_checkpoint.py` | A–K |
@@ -109,6 +110,7 @@ python3 tests/test_spawn_stdin.py
 python3 tests/test_mcp_footprint.py
 python3 tests/test_wiki_recall.py
 python3 tests/test_wiki_index.py
+python3 tests/test_wiki_addendum.py
 python3 tests/test_jira_cli.py
 python3 tests/test_bitbucket_cli.py
 python3 tests/test_checkpoint.py
@@ -230,6 +232,9 @@ tests/
                                            of the six page-type constants, loaded
                                            side by side and compared -- archive
                                            pages counted, never listed)
+  test_wiki_addendum.py      groups A-E   (drives addendum.py as a child against
+                                           a mkdtemp wiki root; the live docs/
+                                           is digested before and after)
   test_jira_cli.py           groups A-M   (transport injected, nothing dialled)
   test_bitbucket_cli.py      groups A-K   (transport injected, nothing dialled
                                            -- the one case that needs the REAL

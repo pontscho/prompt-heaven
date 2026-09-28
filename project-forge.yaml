@@ -136,6 +136,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared'
 
+  wiki_addendum:
+    description: "addendum.py (ClaudeCode/skills/wiki/scripts/), the one legal write to an accepted ADR, driven as a child process against a fake wiki root in a mkdtemp sandbox with GIT_CEILING_DIRECTORIES at its parent -- never the live docs/, which is digested before and after. The exact appended bytes with every old byte kept, the file mode and a fresh inode; only an active type: adr page inside <git top-level>/docs (draft, other types, missing pages, paths and symlinks out of the root refused); the staged title/body item (unknown or duplicate keys, a multi-line or backticked title, a body with a level 1-2 ATX or setext heading refused, ### accepted); the same heading never appended twice. Every refusal: exit 2, one stderr line, the page byte-identical."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py wiki_addendum
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|PROBLEM'
+
   jira_cli:
     description: "The Jira CLI, fully offline (transport injected): auth mode, context-path URL join, lazy deployment probe, four pagers (the Cloud token model and the DC offset model behind one iterator, the agile isLast/startAt envelope behind boards, sprints and create metadata, and the hand-rolled projects walk a census by call graph missed), each walked past page one and bounded against a server that ignores startAt -- JIRA_READ_ONLY, --dry-run, error mapping, and the byte-pinned multipart attachment body."
     requires: [syntax]
