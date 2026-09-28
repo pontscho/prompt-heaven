@@ -113,6 +113,17 @@ One defect was introduced and is recorded rather than hidden: the carve-out is a
 a symlink-farm host (the realpaths diverge), reachable on a copy-deployed install
 with the cwd inside it.
 
+*Later addendum (R-0005) — fixed.* Confirmed live under `sandbox-exec` first,
+before the fix: with a copy-deployed layout and the cwd in a git checkout under
+`~/.claude/skills`, the checkout's `.git/config` read back in full while the
+repo's own `.git/config` and `~/.claude/settings.json` were denied. bwrap had
+the same ordering, because a carve-out's `--ro-bind` takes its source from the
+pristine host and so carries no mask with it. Both builders now split the deny
+set on its `is_dir` bit. Directory secrets come before the carve-outs, and the
+per-file `.git/config` masks come after them, still ahead of the shadow
+write-denies. A file mask can only narrow access, so moving it later cannot
+re-open anything.
+
 ## What the measurements changed
 
 Two explanations that were written down before being measured turned out to be

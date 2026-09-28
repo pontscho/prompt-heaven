@@ -568,12 +568,26 @@ def _run_offline(suite, helper, ws):
     os.makedirs(os.path.join(nocfg, ".git"), exist_ok=True)
     nocfg_config = os.path.join(os.path.realpath(nocfg), ".git", "config")
 
+    # --- COPY-DEPLOYED fixture (ADR 0007 Consequences, roadmap R-0005) ----------
+    # On a copy-deployed install the tooling under a carve-out is a REAL directory,
+    # not a symlink into a repo -- so a git checkout living there has a .git/config
+    # whose realpath sits INSIDE the carve-out subtree. The carve-out is a subtree
+    # read-ALLOW, and if it is emitted after the per-file .git/config mask,
+    # last-match-wins (Seatbelt) / later-mount-wins (bwrap) hands the credentials
+    # file back. Measured live under sandbox-exec before the fix: the carve-out
+    # .git/config read 68 bytes while the repo's own .git/config was denied.
+    deployed = os.path.join(carve_skills, "deployed")
+    os.makedirs(os.path.join(deployed, ".git"), exist_ok=True)
+    open(os.path.join(deployed, ".git", "config"), "w").close()
+    cfg_deployed = os.path.join(os.path.realpath(deployed), ".git", "config")
+
     prev_home = os.environ.get("HOME")
     os.environ["HOME"] = home
     try:
         secrets = helper.secret_paths(plain)
         secrets_n = helper.secret_paths(nsub)
         secrets_nocfg = helper.secret_paths(nocfg)
+        secrets_cd = helper.secret_paths(deployed)
         carveouts = helper.carveout_paths()
         shadow = helper.shadow_write_denies()
         os.environ["HOME"] = home_nc
@@ -809,6 +823,54 @@ def _run_offline(suite, helper, ws):
                 problems.append("carve-out %s bound READ-WRITE (--bind)" % c)
     _rec(suite, GRP_Q,
          "(a2) bwrap: carve-out --ro-bind AFTER the ~/.claude --tmpfs (index)",
+         problems)
+
+    # (a2) COPY-DEPLOYED: a .git/config whose realpath sits UNDER a carve-out must
+    # keep its deny. The carve-out is a SUBTREE read-allow; the .git/config mask is a
+    # per-FILE deny. Whichever is emitted later wins on both backends, so the file
+    # mask must come after every carve-out -- otherwise the carve-out silently
+    # re-opens the git remote credentials (ADR 0007 Consequences, R-0005). Asserted
+    # by INDEX against EVERY carve-out, since which carve-out holds the checkout is a
+    # property of the host, not of the builder.
+    scope_cd = helper.Scope(writes=[], net=False, ro=True, argv=["true"],
+                            secret_paths=secrets_cd, carveouts=carveouts,
+                            shadow_write_denies=shadow)
+    prof_cd = helper._seatbelt_argv(scope_cd)[2].split("\n")
+    problems = []
+    if cfg_deployed not in [p for p, _d in secrets_cd]:
+        problems.append("fixture: %s not in the secret set" % cfg_deployed)
+    cd_deny = '(deny file-read* (subpath "%s"))' % cfg_deployed
+    if cd_deny not in prof_cd:
+        problems.append("missing %s" % cd_deny)
+    else:
+        for c in carveouts:
+            allow = '(allow file-read* (subpath "%s"))' % c
+            if allow in prof_cd and prof_cd.index(allow) > prof_cd.index(cd_deny):
+                problems.append("carve-out %s read-allow at %d AFTER the .git/config "
+                                "read-deny at %d -- last-match-wins re-opens it"
+                                % (c, prof_cd.index(allow), prof_cd.index(cd_deny)))
+    _rec(suite, GRP_Q,
+         "(a2) Seatbelt: .git/config under a carve-out denied AFTER it (copy-deploy)",
+         problems)
+
+    bw_cd = helper._bwrap_argv(scope_cd)
+    problems = []
+    mask_cd = [i for i in range(len(bw_cd) - 2)
+               if bw_cd[i] == "--ro-bind" and bw_cd[i + 1] == "/dev/null"
+               and bw_cd[i + 2] == cfg_deployed]
+    if not mask_cd:
+        problems.append("no --ro-bind /dev/null mask for %s" % cfg_deployed)
+    else:
+        for c in carveouts:
+            found = [i for i in range(len(bw_cd) - 2)
+                     if bw_cd[i] == "--ro-bind" and bw_cd[i + 1] == c
+                     and bw_cd[i + 2] == c]
+            if found and found[-1] > mask_cd[0]:
+                problems.append("carve-out %s bound at %d AFTER the .git/config mask "
+                                "at %d -- the later mount (sourced from the pristine "
+                                "host) buries the mask" % (c, found[-1], mask_cd[0]))
+    _rec(suite, GRP_Q,
+         "(a2) bwrap: .git/config under a carve-out masked AFTER it (copy-deploy)",
          problems)
 
     # (a2) NEGATIVE -- the carve-out is fail-closed BY ENUMERATION: only the two

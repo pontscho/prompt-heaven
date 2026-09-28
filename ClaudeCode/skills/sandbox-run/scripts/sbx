@@ -58,7 +58,8 @@ class Scope:
                    `(path, is_dir)` PAIRS. The is_dir bit is resolved THERE, in
                    the one function that already performs the existence I/O, so
                    _bwrap_argv can pick the correct mask primitive (tmpfs for a
-                   directory, ro-bind /dev/null for a file) while staying PURE.
+                   directory, ro-bind /dev/null for a file) while staying PURE, and both
+                   builders use it to emit the FILE masks after the carve-outs.
       carveouts    the read-ONLY carve-out set produced by carveout_paths(): the
                    named subtrees of a denied secret that must stay READABLE
                    (~/.claude/skills, ~/.claude/scripts -- this repo's own
@@ -120,12 +121,14 @@ def _seatbelt_argv(scope):
       (version 1) / (deny default) / allow the minimal ops a CLI needs (exec, fork,
       self-signal, sysctl-read) / (allow file-read* (subpath "/")) permissive reads /
       per writable scope (allow file-write* (subpath "<canonical>")) UNLESS scope.ro
-      (R21: then none) / so they win, per secret_paths entry BOTH
+      (R21: then none) / so they win, per DIRECTORY secret_paths entry BOTH
       (deny file-read* ...) and (deny file-write* ...) (R16/R17/R22/R22b) / per
       scope.carveouts entry (allow file-read* (subpath "<p>")) -- read ONLY, so
       last-match-wins hands the READ back for that subtree while the secret's WRITE
-      deny above it still stands / LAST of the file rules, per
-      scope.shadow_write_denies entry (deny file-write* (subpath "<realpath>")) --
+      deny above it still stands / per FILE secret_paths entry (the .git/config
+      masks) the same read+write deny pair, AFTER the carve-outs so a .git/config
+      inside a carve-out subtree keeps its deny (ADR 0007) / LAST of the file
+      rules, per scope.shadow_write_denies entry (deny file-write* (subpath "<realpath>")) --
       write ONLY, closing the name divergence / (allow network*) if scope.net, else
       (deny network*) (R18).
 
@@ -153,7 +156,8 @@ def _seatbelt_argv(scope):
     Pure: no I/O. Because canonicalize (task-003) already rejected quotes, parens,
     backslash and newline, every embedded path is a safe SBPL string literal -- do
     NOT re-quote or re-escape. The pre-resolved deny set (as (path, is_dir) pairs;
-    this builder ignores the bit, only bwrap needs it) and carve-out set are read
+    this builder uses the bit only to ORDER a file mask after the carve-outs) and
+    carve-out set are read
     off scope.secret_paths / scope.carveouts, both resolved ONCE in main(), keeping
     this builder side-effect-free.
     """
@@ -174,12 +178,14 @@ def _seatbelt_argv(scope):
         for path in scope.writes:
             lines.append('(allow file-write* (subpath "%s"))' % path)
     # LAST, so last-match-wins makes them win over the permissive read-allow: deny
-    # BOTH read and write for every secret, even inside an allowed write scope
-    # (R16, R17, R22, R22b).
-    for secret, _is_dir in scope.secret_paths or ():
-        lines.append('(deny file-read* (subpath "%s"))' % secret)
-        lines.append('(deny file-write* (subpath "%s"))' % secret)
-    # LAST of the file rules, so last-match-wins hands READ back for these named
+    # BOTH read and write for every DIRECTORY secret, even inside an allowed write
+    # scope (R16, R17, R22, R22b). The per-FILE secrets (the .git/config masks) are
+    # emitted separately, AFTER the carve-outs -- see below.
+    for secret, is_dir in scope.secret_paths or ():
+        if is_dir:
+            lines.append('(deny file-read* (subpath "%s"))' % secret)
+            lines.append('(deny file-write* (subpath "%s"))' % secret)
+    # AFTER the directory secrets, so last-match-wins hands READ back for these named
     # subtrees of an otherwise-denied secret (this repo's own tooling under
     # ~/.claude). READ ONLY -- no file-write* allow is emitted, so the ~/.claude
     # write-deny above is untouched and everything NOT named here (projects,
@@ -188,6 +194,18 @@ def _seatbelt_argv(scope):
     # enumeration.
     for path in scope.carveouts or ():
         lines.append('(allow file-read* (subpath "%s"))' % path)
+    # AFTER the carve-outs: the per-FILE secrets (every ancestor .git/config). A
+    # carve-out is a SUBTREE read-allow, so on a copy-deployed install -- where
+    # ~/.claude/skills holds real directories, not symlinks into a repo -- a git
+    # checkout under it has a .git/config INSIDE the carve-out, and a mask emitted
+    # before the carve-out loses to it (last match wins): the git remote
+    # credentials were readable (measured live, ADR 0007 Consequences). A file mask
+    # only ever narrows, so moving it later cannot re-open anything a carve-out was
+    # meant to keep shut.
+    for secret, is_dir in scope.secret_paths or ():
+        if not is_dir:
+            lines.append('(deny file-read* (subpath "%s"))' % secret)
+            lines.append('(deny file-write* (subpath "%s"))' % secret)
     # THE LAST file rules, and every one of them is a DENY: the write-only shadow
     # set. ~/.claude is denied under the spelling `~/.claude`, but on a host where
     # ~/.claude/hooks is a SYMLINK into a repo, the SAME directory is also spelled
@@ -222,9 +240,12 @@ def _bwrap_argv(scope):
       `is_dir` BIT: a DIRECTORY secret gets --tmpfs <p>, a regular-FILE secret (the
       .git/config entries) gets --ro-bind /dev/null <p> because --tmpfs needs a
       directory mountpoint (a file -> bwrap ensure_dir() ENOTDIR -> die() BEFORE
-      exec) / per scope.carveouts entry --ro-bind <p> <p> layered AFTER the masks so
+      exec) -- the DIRECTORY masks here, the FILE masks after the carve-outs / per
+      scope.carveouts entry --ro-bind <p> <p> layered AFTER the directory masks so
       the LATER mount wins and the subtree is readable again (read-only, so it gains
-      no write) / per scope.shadow_write_denies entry --ro-bind <realpath> <realpath>
+      no write) / per FILE secret the --ro-bind /dev/null mask, AFTER the carve-outs
+      so a .git/config inside a carve-out subtree stays masked (ADR 0007) / per
+      scope.shadow_write_denies entry --ro-bind <realpath> <realpath>
       layered LAST of the mounts, re-mounting the divergent spelling read-only /
       --unshare-pid + --proc /proc / --unshare-net UNLESS scope.net (R18) /
       --die-with-parent / the `--` end-of-options terminator / then *scope.argv.
@@ -233,7 +254,8 @@ def _bwrap_argv(scope):
     operations strictly in argv order and a LATER operation on the same path wins, so
     a mask must come after the binds to hide a secret inside a writable scope, a
     carve-out must come after the masks or the --tmpfs over ~/.claude would bury it
-    again, and a shadow write-deny must come after the writable --bind whose spelling
+    again, a file mask must come after the carve-out that contains it or the carve-out
+    would bury the mask, and a shadow write-deny must come after the writable --bind whose spelling
     it is revoking. (Only the SOURCE of a bind is resolved in the pre-pivot
     filesystem; the DEST is resolved in the new root, which is why re-binding a path
     onto ITSELF read-only is the correct way to drop write access to it.)
@@ -279,13 +301,12 @@ def _bwrap_argv(scope):
     #     by the read-only mount (R17/R22 preserved).
     # The bit replaces the old `endswith(".git/config")` name heuristic outright:
     # STRUCTURE is now read from the filesystem once, not guessed from a suffix.
+    # The FILE masks are layered separately, AFTER the carve-outs -- see below.
     for secret, is_dir in scope.secret_paths or ():
         if is_dir:
             argv += ["--tmpfs", secret]
-        else:
-            argv += ["--ro-bind", "/dev/null", secret]
-    # per carve-out: a READ-ONLY bind layered AFTER the masks, because the LATER
-    # mount wins -- this is what makes the named subtrees of ~/.claude (this repo's
+    # per carve-out: a READ-ONLY bind layered AFTER the directory masks, because the
+    # LATER mount wins -- this is what makes the named subtrees of ~/.claude (this repo's
     # own tooling) readable again after the --tmpfs above buried them. --ro-bind is
     # exactly the wanted semantics: readable, NOT writable, so ~/.claude keeps its
     # write-deny and every unnamed path under it stays masked (fail-closed by
@@ -293,6 +314,14 @@ def _bwrap_argv(scope):
     # has to mkdir a mountpoint under the read-only root.
     for path in scope.carveouts or ():
         argv += ["--ro-bind", path, path]
+    # per FILE secret (every ancestor .git/config): the /dev/null mask, AFTER the
+    # carve-outs. A carve-out bind's SOURCE is resolved in the pristine host root,
+    # so it carries no mask with it: on a copy-deployed install a .git/config under
+    # ~/.claude/skills was buried by the later carve-out mount and readable again
+    # (ADR 0007 Consequences). Layered here, the mask is the later mount and wins.
+    for secret, is_dir in scope.secret_paths or ():
+        if not is_dir:
+            argv += ["--ro-bind", "/dev/null", secret]
     # per shadow target: re-bind the path ONTO ITSELF read-only, LAST of the mounts
     # so the later mount wins over the writable --bind above. ~/.claude is masked
     # under the ~/.claude spelling, but on a host where ~/.claude/hooks is a symlink
