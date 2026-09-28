@@ -58,7 +58,7 @@ whose horizon is `now`, whatever its state (`planned` and `idea` included). The
 starting value 3 is **unargued**: nobody measured it, and the file says so in the
 comment above it. Change it only with `wip N --reason-file PATH`, which records the
 old value, the date and the reason. The cap is checked on transitions INTO `now`
-(`add` with horizon `now`, `move ... now`) and by `wip` itself, never on load, so a
+(`add` with horizon `now`, `move ... now`, `start`) and by `wip` itself, never on load, so a
 lowered cap can never block moving an item out of `now`. A refusal names the items
 occupying `now`.
 
@@ -123,6 +123,7 @@ python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py add --title T --ori
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py list [--state S] [--horizon L] [--untriaged] [--ready]   # live items as a table; --untriaged shows age and origin
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py show R-0014                            # one item: its live block, or its archive page byte for byte
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py move R-0014 now [--state active] --reason-file '<staged .txt>'   # change lane and/or state; appends one log line
+python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py start R-0014 [--reason-file '<staged .txt>']   # = move R-0014 now --state active; the reason defaults to started
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py rank R-0014 --before R-0012            # reorder within a lane (or --top)
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py link R-0014 --item-file '<staged .json>'   # change origin / spec / blocked_by from a staged JSON object
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py link R-0014 [--spec SLUG | --no-spec] [--blocked-by IDS] [--unblock IDS] [--follows ID | --no-follows]
@@ -136,8 +137,8 @@ python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py export [--out '<sta
 - `IDS` and `TAGS` are comma-separated and the flag may repeat (`--tags wiki,scripts`).
   `ID` accepts `R-0014`; write it that way. `L` is `now`, `next`, `later` or `inbox`
   (`unset` is accepted as the same lane). `S` is `idea`, `planned` or `active`.
-- `move`, `close` and `wip` take the reason as `--reason R` OR `--reason-file PATH`,
-  never both; `add` takes `--why TEXT` or `--why-file PATH`, never both.
+- `move`, `start`, `close` and `wip` take the reason as `--reason R` OR
+  `--reason-file PATH`, never both; `start` alone may omit it. `add` takes `--why TEXT` or `--why-file PATH`, never both.
 - `add --item-file` excludes `--title`, `--origin`, `--why`, `--why-file`, `--tags`,
   `--severity`, `--horizon` and `--reason` (they live in the file); the token-shaped
   `--state`, `--spec`, `--blocked-by` and `--follows` may accompany it.
@@ -223,8 +224,9 @@ the git top-level.
   never as `--title "..."`;
 - every title, origin, tag, severity, why and reason, whatever its source and even
   when it is one word: a why via the item file or `--why-file`, a reason via
-  `--reason-file` (on `move`, `close`, `wip`) or via the item file's `reason` key (on
-  `add`), and an origin, spec or blocker change on an existing item via
+  `--reason-file` (on `move`, `start`, `close`, `wip`) or via the item file's `reason`
+  key (on `add`) -- `start` WITHOUT a reason needs no staged file, because its default
+  reason `started` is written by roadmap.py and never crosses the shell -- and an origin, spec or blocker change on an existing item via
   `link --item-file <path>` (keys `origin`, `spec`, `blocked_by`). `link --origin "..."`
   is never typed;
 - staging file names start with `roadmap-stage-` (the adopt export: `roadmap-adopt-`),

@@ -2646,6 +2646,99 @@ def group_d(suite, mod, work, wiki):
                  detail=[_d("planted", "wip_now: 1 with two items in now"),
                          _d("why", "WIP is checked on transitions INTO now "
                                    "only (R24)")])
+    _group_d_start(suite, work)
+
+
+def _group_d_start(suite, work):
+    """`start ID` is `move ID now --state active` with the default reason
+    `started`: the same stdout, log line, WIP cap and refusals as move."""
+    for cid, reason_argv, want_reason in (
+            ("d-start-default-reason", [], "started"),
+            ("d-start-reason-flag", ["--reason", "on it"], "on it"),
+            ("d-start-reason-file", None, "picked up by a session")):
+        path = stage_roadmap(work, cid, EXPECTED_B)
+        if reason_argv is None:
+            reason_argv = ["--reason-file",
+                           staged(work, cid, "r.txt", want_reason + "\n")]
+        code, out, err = cli(path, "start", "R-0004", *reason_argv)
+        problems = shape_problems(code, err, 0)
+        problems += problem_if(out != "R-0004: next->now [idea->active]\n",
+                               "stdout %r" % out)
+        text = read_utf8(path) if os.path.isfile(path) else ""
+        problems += problem_if("- 2026-09-28 new->next: added\n- 2026-09-28 "
+                               "next->now [idea->active]: %s\n" % want_reason
+                               not in text,
+                               "the log line with reason %r was not appended"
+                               % want_reason)
+        problems += problem_if(_heading_order(text) != ["R-0001", "R-0004",
+                                                        "R-0002", "R-0003"],
+                               "R-0004 did not join now at the end: %r"
+                               % _heading_order(text))
+        problems += problem_if("state: active\nhorizon: now\norigin: "
+                               "user:2026-09-28:export-golden\n" not in text,
+                               "R-0004 is not active in now")
+        suite.record(GD, cid, problems,
+                     detail=[_d("argv", "start R-0004 %s"
+                                % " ".join(reason_argv[:1])),
+                             _d("stdout", out.strip() or "<empty>")])
+
+    path = stage_roadmap(work, "d-start-in-now", EXPECTED_B)
+    code, out, err = cli(path, "move", "R-0004", "now", "--state", "planned",
+                         "--reason", "queued")
+    problems = shape_problems(code, err, 0)
+    code, out, err = cli(path, "start", "R-0004")
+    problems += shape_problems(code, err, 0)
+    problems += problem_if(out != "R-0004: now->now [planned->active]\n",
+                           "stdout %r" % out)
+    problems += problem_if("- 2026-09-28 now->now [planned->active]: started\n"
+                           not in read_utf8(path),
+                           "the same-lane state change was not logged")
+    suite.record(GD, "d-start-planned-in-now", problems,
+                 detail=[_d("why", "an item already in now changes state "
+                                   "only; no WIP check (move's same-lane "
+                                   "route)")])
+
+    path = stage_roadmap(work, "d-start-refusals", EXPECTED_B)
+    for cid, argv, tokens, why in (
+            ("d-start-noop", ["start", "R-0001"],
+             ["R-0001 is already in now as active -- nothing to move"],
+             "already now+active: move's no-op refusal"),
+            ("d-start-unknown-id", ["start", "R-0099"],
+             ["unknown id R-0099"], "an unknown id"),
+            ("d-start-bad-id", ["start", "R-00x1"],
+             ["'R-00x1' is not an id (want R-NNNN)"], "a malformed id"),
+            ("d-start-reason-flags", ["start", "R-0004", "--reason", "x",
+                                      "--reason-file", "nope.txt"],
+             ["--reason and --reason-file are exclusive"],
+             "the two reason routes exclude each other"),
+            ("d-start-backtick-reason", ["start", "R-0004", "--reason",
+                                         "see `x`"],
+             ["reason value", "carries a backtick"],
+             "the single-line reason rule applies"),
+            ("d-start-empty-reason", ["start", "R-0004", "--reason", "   "],
+             ["reason is empty (after stripping whitespace)"],
+             "an explicit empty reason is refused, not defaulted")):
+        record_refusal(suite, GD, cid, path, argv, tokens, why)
+
+    path, problems, _outs = build(work, "d-start-wip-cap", [
+        ("add", "--title", "a", "--origin", "user:d-sa", "--horizon", "now"),
+        ("add", "--title", "b", "--origin", "user:d-sb", "--horizon", "now"),
+        ("add", "--title", "c", "--origin", "user:d-sc", "--horizon", "now"),
+        ("add", "--title", "d", "--origin", "user:d-sd", "--horizon", "next")])
+    if problems:
+        suite.record(GD, "d-start-wip-cap-names-occupants", problems)
+    else:
+        record_refusal(suite, GD, "d-start-wip-cap-names-occupants", path,
+                       ["start", "R-0004"],
+                       ["now is full (3 of 3: R-0001, R-0002, R-0003)",
+                        "change the cap with roadmap.py wip"],
+                       "start enters now, so the WIP cap applies")
+
+    path = stage_roadmap(work, "d-start-closed-id", EMPTY_TEXT, BOTH_ARCHIVES)
+    record_refusal(suite, GD, "d-start-closed-id", path, ["start", "R-0001"],
+                   ["R-0001 is closed (done) -- closed items are immutable; a "
+                    "regression is a new item with --follows R-0001"],
+                   "an archived item cannot be started")
 
 
 # ---------------------------------------------------------------------------

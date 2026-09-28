@@ -1744,10 +1744,12 @@ def _copy_lanes(state):
     return dict((lane, list(items)) for lane, items in state.lanes.items())
 
 
-def _staged_reason(reason, reason_file, path, missing):
+def _staged_reason(reason, reason_file, path, missing, default=None):
     if reason is not None and reason_file is not None:
         die("--reason and --reason-file are exclusive")
     if reason is None and reason_file is None:
+        if default is not None:
+            return check_reason(default)
         die(missing)
     if reason is not None:
         return check_reason(reason)
@@ -1869,12 +1871,15 @@ def cmd_show(path, raw_id):
     return 0
 
 
-def cmd_move(path, raw_id, lane, reason, reason_file, state):
+def cmd_move(path, raw_id, lane, reason, reason_file, state, default_reason=None):
+    """Also `start`: the parser fixes lane now, state active and the default
+    reason `started`, so starting an item is this code path, not a copy."""
     target = lane_input(lane, None)
     if state is not None:
         check_state(state)
     text = _staged_reason(reason, reason_file, path,
-                          "a lane or state change needs --reason or --reason-file")
+                          "a lane or state change needs --reason or --reason-file",
+                          default_reason)
     n = parse_id(raw_id)
     current = load_state(path)
     item, lane_now, index = resolve(current, n)
@@ -2186,6 +2191,7 @@ COMMANDS = {
     "list": cmd_list,
     "show": cmd_show,
     "move": cmd_move,
+    "start": cmd_move,      # move ID now --state active, default reason `started`
     "rank": cmd_rank,
     "link": cmd_link,
     "render": cmd_render,
@@ -2201,6 +2207,7 @@ COMMAND_ARGS = {
     "list": ("state", "horizon", "untriaged", "ready"),
     "show": ("id",),
     "move": ("id", "lane", "reason", "reason_file", "state"),
+    "start": ("id", "lane", "reason", "reason_file", "state", "default_reason"),
     "rank": ("id", "before", "top"),
     "link": ("id", "item_file", "spec", "no_spec", "origin", "blocked_by", "unblock",
              "follows", "no_follows"),
@@ -2262,6 +2269,13 @@ def build_parser():
     move.add_argument("--state")
     move.add_argument("--reason")
     move.add_argument("--reason-file", metavar="PATH")
+
+    start = sub.add_parser("start", parents=[parent],
+                           help="move an item to now as active (default reason: started)")
+    start.add_argument("id")
+    start.add_argument("--reason")
+    start.add_argument("--reason-file", metavar="PATH")
+    start.set_defaults(lane="now", state="active", default_reason="started")
 
     rank = sub.add_parser("rank", parents=[parent], help="order an item within its lane")
     rank.add_argument("id")
