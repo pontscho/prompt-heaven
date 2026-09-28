@@ -4596,6 +4596,25 @@ def run(opts=None):
                                 % silent_types),
                              _d("fixture", "%r" % sorted(fixture_types))],
                      text="")
+
+        # The converse, gated separately.  An absent key is silent rather than
+        # wrong -- the lookup is a .get() with a () default -- and that is
+        # exactly why it has to be gated: `roadmap` and `roadmap-item` sat in
+        # TYPE_ORDER with no tokens from the commit that added them until the
+        # follow-up the roadmap spec listed, and nothing said so.  A new page
+        # type now chooses its tokens in the same change that declares it.
+        problems = []
+        if silent_types:
+            problems.append("TYPE_ORDER types %r carry no TYPE_SIGNAL_TOKENS "
+                            "entry: a query for that type's vocabulary never "
+                            "promotes its pages, and the omission is invisible"
+                            % silent_types)
+        suite.record("O", "every-declared-type-carries-tokens", problems,
+                     detail=[_d("types", "%d in TYPE_ORDER, %d with tokens"
+                                % (len(smod.TYPE_ORDER),
+                                   len(set(smod.TYPE_ORDER) & set(table)))),
+                             _d("silent", "%r" % silent_types)],
+                     text="")
     finally:
         work.cleanup()
 

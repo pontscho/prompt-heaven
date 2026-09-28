@@ -32,6 +32,22 @@ GROUPS
   D  freshness classification of the two roadmap types
   E  negative controls -- each proves an oracle above can FIRE
   F  hygiene: the live docs/INDEX.md, the repo tree, bytecode, the sandbox
+  G  the git helper, both copies: the server's timeout and the roadmap's
+     hardening (GIT_SAFE_ARGV prefix, GIT_NO_LAZY_FETCH=1)
+
+THE GIT HELPER IS A THIRD SHARED THING
+--------------------------------------
+`git()` is vendored the same way the constants are, and drifted the same way:
+the server copy got a timeout the skill copy never did, and neither got the
+`-c` prefix and child env that roadmap.py's `git()` carries (adr 0022, entry
+12).  Group G drives each copy with its module's `subprocess` swapped for a
+recorder -- one module attribute on one loaded copy, never the real
+`subprocess` module -- and asserts the argv and the keyword arguments of the
+one spawn.  The wanted prefix is read from roadmap.py's source with
+`ast.literal_eval`, never typed here and never executed, so the three copies
+cannot agree on a value this suite made up.  One live case then runs both
+copies against the real git in this repo, because a `-c` pair a real git
+rejects would pass every recorded assertion.
 
 Every expected count is derived from the fixture list below, never typed.
 The case count lives only in the SUITES table of tests/run.py.
@@ -41,6 +57,7 @@ import ast
 import collections
 import os
 import posixpath
+import subprocess
 import sys
 import types
 
@@ -55,6 +72,8 @@ SCRIPTS_DIR = H.repo_path("ClaudeCode", "skills", "wiki", "scripts")
 REINDEX = os.path.join(SCRIPTS_DIR, "reindex.py")
 FRESHNESS = os.path.join(SCRIPTS_DIR, "freshness.py")
 LIVE_INDEX = H.repo_path("docs", "INDEX.md")
+ROADMAP_PY = H.repo_path("ClaudeCode", "skills", "roadmap", "scripts",
+                         "roadmap.py")
 
 GA = "A. constant parity: one vocabulary, two copies"
 GB = "B. render_index, both copies"
@@ -62,6 +81,12 @@ GC = "C. reindex collect, both copies"
 GD = "D. freshness: the roadmap types are untracked"
 GE = "E. negative control"
 GF = "F. hygiene"
+GG = "G. the git helper, both copies: timeout and hardening"
+
+# The argv every group-G call passes through `git()`: the shape of
+# `repo_root()`, the one call both copies make on every run.
+GIT_PROBE_ARGS = ["rev-parse", "--show-toplevel"]
+LAZY_FETCH_ENV = "GIT_NO_LAZY_FETCH"
 
 # The six names the two copies must agree on.  Their VALUES are never typed
 # here: parity compares the copies, and the roadmap cases below name only the
@@ -371,6 +396,96 @@ def _tree_digests(root):
 def _inside(path, root):
     real, base = os.path.realpath(path), os.path.realpath(root)
     return real == base or real.startswith(base + os.sep)
+
+
+def roadmap_safe_argv():
+    """roadmap.py's GIT_SAFE_ARGV, read from its source -- never executed."""
+    tree = ast.parse(_read(ROADMAP_PY))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "GIT_SAFE_ARGV"
+                for t in node.targets):
+            return tuple(ast.literal_eval(node.value))
+    return None
+
+
+class _SpawnRecorder:
+    """Stands in for the `subprocess` module inside ONE loaded git() copy.
+
+    Only the names git() reads are provided; each is the real object, so an
+    `except subprocess.TimeoutExpired` in the copy catches what run() raises.
+    """
+    DEVNULL = subprocess.DEVNULL
+    PIPE = subprocess.PIPE
+    TimeoutExpired = subprocess.TimeoutExpired
+    CompletedProcess = subprocess.CompletedProcess
+
+    def __init__(self, raise_timeout=False):
+        self.calls = []
+        self.raise_timeout = raise_timeout
+
+    def run(self, argv, **kwargs):
+        self.calls.append((list(argv), dict(kwargs)))
+        if self.raise_timeout:
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def record_git(mod, raise_timeout=False):
+    """(result_or_exception, calls) of one `mod.git(GIT_PROBE_ARGS)` call with
+    the copy's own `subprocess` attribute swapped for a recorder."""
+    fake = _SpawnRecorder(raise_timeout)
+    saved = mod.subprocess
+    mod.subprocess = fake
+    try:
+        result = mod.git(list(GIT_PROBE_ARGS), cwd=H.REPO_ROOT)
+    except Exception as exc:                  # a copy that lets it escape
+        result = exc
+    finally:
+        mod.subprocess = saved
+    return result, fake.calls
+
+
+def git_call_problems(label, calls, want_argv, want_timeout):
+    """Everything group G demands of ONE recorded git() spawn."""
+    if len(calls) != 1:
+        return ["%s: git() spawned %d time(s), want 1" % (label, len(calls))]
+    argv, kwargs = calls[0]
+    problems = []
+    if want_argv is None:
+        problems.append("%s: roadmap.py has no GIT_SAFE_ARGV to compare "
+                        "against" % label)
+    elif tuple(argv[:len(want_argv)]) != tuple(want_argv):
+        problems.append("%s: argv %r does not start with roadmap.py's "
+                        "GIT_SAFE_ARGV %r" % (label, argv, want_argv))
+    elif argv[len(want_argv):] != GIT_PROBE_ARGS:
+        problems.append("%s: args after the prefix are %r, want %r"
+                        % (label, argv[len(want_argv):], GIT_PROBE_ARGS))
+    if "timeout" not in kwargs:
+        problems.append("%s: no timeout= -- subprocess.run waits forever"
+                        % label)
+    elif kwargs["timeout"] != want_timeout:
+        problems.append("%s: timeout=%r, want the server's GIT_TIMEOUT_SEC %r"
+                        % (label, kwargs["timeout"], want_timeout))
+    env = kwargs.get("env")
+    if env is None:
+        problems.append("%s: no env= -- %s=1 is never set"
+                        % (label, LAZY_FETCH_ENV))
+    else:
+        if env.get(LAZY_FETCH_ENV) != "1":
+            problems.append("%s: env %s=%r, want '1'"
+                            % (label, LAZY_FETCH_ENV, env.get(LAZY_FETCH_ENV)))
+        rest = {k: v for k, v in env.items() if k != LAZY_FETCH_ENV}
+        base = {k: v for k, v in os.environ.items() if k != LAZY_FETCH_ENV}
+        if rest != base:
+            problems.append("%s: env is not os.environ plus %s (differs in %r)"
+                            % (label, LAZY_FETCH_ENV,
+                               sorted(set(rest) ^ set(base))[:5]
+                               or sorted(k for k in rest
+                                         if rest[k] != base[k])[:5]))
+    if kwargs.get("stdin") is not subprocess.DEVNULL:
+        problems.append("%s: stdin=%r, want DEVNULL" % (label, kwargs.get("stdin")))
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +802,89 @@ def group_e(suite, srv, reindex_mod, lib, roots):
                          _d("why", "a scanner that matches nothing is "
                                    "indistinguishable from a clean tree")])
 
+    # 5. The G oracle must fire on the helper's old shape: a bare `git` argv,
+    #    no timeout, no env -- one problem per missing piece.
+    bare = [(["git"] + GIT_PROBE_ARGS, {"stdin": subprocess.DEVNULL})]
+    fired = git_call_problems("planted", bare, roadmap_safe_argv(),
+                              getattr(srv, "GIT_TIMEOUT_SEC", 30))
+    problems = ["the G oracle missed the absent %s" % piece
+                for piece, word in (("prefix", "GIT_SAFE_ARGV"),
+                                     ("timeout", "timeout"),
+                                     ("env", LAZY_FETCH_ENV))
+                if not any(word in f for f in fired)]
+    suite.record(GE, "control-bare-git-call-fires-the-git-oracle", problems,
+                 detail=[_d("planted", "argv %r, stdin=DEVNULL only"
+                            % bare[0][0]),
+                         _d("fired", repr(fired))])
+
+
+def group_g(suite, srv, lib):
+    want_argv = roadmap_safe_argv()
+    want_timeout = getattr(srv, "GIT_TIMEOUT_SEC", None)
+    copies = (("server", srv), ("skill", lib))
+
+    problems = []
+    if want_timeout is None:
+        problems.append("the server has no GIT_TIMEOUT_SEC")
+    elif getattr(lib, "GIT_TIMEOUT_SEC", None) != want_timeout:
+        problems.append("_wikilib GIT_TIMEOUT_SEC is %r, the server's is %r"
+                        % (getattr(lib, "GIT_TIMEOUT_SEC", None), want_timeout))
+    suite.record(GG, "timeout-constant-parity", problems,
+                 detail=[_d("server", repr(want_timeout)),
+                         _d("_wikilib", repr(getattr(lib, "GIT_TIMEOUT_SEC",
+                                                     None)))])
+
+    problems = []
+    for label, mod in copies:
+        value = getattr(mod, "GIT_SAFE_ARGV", None)
+        if value is None or tuple(value) != want_argv:
+            problems.append("%s GIT_SAFE_ARGV is %r, roadmap.py's is %r"
+                            % (label, value, want_argv))
+    suite.record(GG, "safe-argv-parity-with-roadmap", problems,
+                 detail=[_d("roadmap.py", repr(want_argv)),
+                         _d("read", "ast.literal_eval of its source, never "
+                                    "executed")])
+
+    for label, mod in copies:
+        result, calls = record_git(mod)
+        problems = git_call_problems(label, calls, want_argv, want_timeout)
+        if isinstance(result, Exception):
+            problems.append("%s: git() raised %r" % (label, result))
+        suite.record(GG, "spawn-shape-" + label, problems,
+                     detail=[_d("argv", repr(calls[0][0]) if calls else "-"),
+                             _d("kwargs", ", ".join(sorted(calls[0][1]))
+                                if calls else "-")])
+
+    for label, mod in copies:
+        result, _calls = record_git(mod, raise_timeout=True)
+        problems = []
+        if isinstance(result, Exception):
+            problems.append("%s: a timeout escaped git() as %r"
+                            % (label, result))
+        elif not (isinstance(result, tuple) and result[0] == 124):
+            problems.append("%s: a timeout returned %r, want rc 124"
+                            % (label, result))
+        suite.record(GG, "timeout-returns-124-" + label, problems,
+                     detail=[_d("result", repr(result)),
+                             _d("why", "124 is what every caller already "
+                                       "reads as `git could not answer`")])
+
+    problems = []
+    want_root = os.path.realpath(H.REPO_ROOT)
+    for label, mod in copies:
+        rc, out, err = mod.git(list(GIT_PROBE_ARGS), cwd=H.REPO_ROOT)
+        if rc != 0:
+            problems.append("%s: real git exited %d: %s"
+                            % (label, rc, err.strip()[:200]))
+        elif os.path.realpath(out.strip()) != want_root:
+            problems.append("%s: toplevel %r, want %r"
+                            % (label, out.strip(), want_root))
+    suite.record(GG, "real-git-accepts-the-hardened-argv", problems,
+                 detail=[_d("argv", "git() %s in the repo root"
+                            % " ".join(GIT_PROBE_ARGS)),
+                         _d("why", "a -c pair a real git rejects passes every "
+                                   "recorded assertion above")])
+
 
 def group_f(suite, pyc_before, tree_before, live_before, work_path):
     live_after = (H.sha256_file(LIVE_INDEX) if os.path.isfile(LIVE_INDEX)
@@ -743,6 +941,7 @@ def run(opts=None):
         group_c(suite, srv, reindex_mod, roots)
         group_d(suite, srv, fresh_mod, roots)
         group_e(suite, srv, reindex_mod, lib, roots)
+        group_g(suite, srv, lib)
     finally:
         # Loading reindex.py / freshness.py put their directory on sys.path and
         # _wikilib into sys.modules; no later suite in this process inherits

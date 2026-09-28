@@ -242,12 +242,13 @@ SUITES = [
      "floored percentages, query-side stopwords, get_page section index, "
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
-     "the frontmatter aliases synonym field", 154),
+     "the frontmatter aliases synonym field", 155),
     ("wiki_index", run_wiki_index,
      "INDEX.md rendering and the page-type constants: both render_index copies "
      "byte-identical, a roadmap-item never listed and counted in one rendered "
-     "line, the orphan exemption, and the server/skill parity of six constants",
-     40),
+     "line, the orphan exemption, the server/skill parity of six constants, "
+     "and both git() copies timed out and hardened like roadmap.py's",
+     48),
     ("jira_cli", run_jira_cli,
      "Jira CLI offline: auth mode, context-path URL join, lazy deployment "
      "probe, the Cloud token pager and the DC offset pager behind one "

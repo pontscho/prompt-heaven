@@ -117,10 +117,11 @@ exception, and a new one requires an explicit decision rather than a per-minion
 hack.
 
 One consequence is worth writing down here, because it reads like a wiki-layout
-defect and is not. **`docs/feature-implementation-plan.md` sits at the `docs/`
-root rather than under `specs/` deliberately.** Its path is pinned by the
+defect and is not. **`docs/feature-implementation-plan.md` is a slot at the
+`docs/` root rather than under `specs/`, deliberately** — the path `/p:feature-plan`
+writes the current plan to, empty between plans. Its path is pinned by the
 handoff contract itself `ClaudeCode/skills/_lib/handoff-contracts.md`, by the
 default in `ClaudeCode/scripts/task-implementation-plan.py`, and by the four
 skills and three agents of the plan→task→implement chain. A live interface
-outranks the wiki's own layout rule, so the file stays put — the audit has been
+outranks the wiki's own layout rule, so the slot stays put — the audit has been
 run, and the move should not be proposed again.

@@ -13,7 +13,6 @@ verified:
 links:
   - scripts
   - skills
-  - feature-implementation-plan
   - tests
   - 0002-index-claims-no-freshness
   - spec-purity-unification
@@ -34,8 +33,9 @@ skill. See [[skills]] and [[scripts]] for those.
 
 ## Why a second artifact at all
 
-The plan and the YAML have different readers. `docs/feature-implementation-plan.md`
-is prose — judged by a validation loop and read by a human ([[feature-implementation-plan]]).
+The plan and the YAML have different readers. The plan — written to the
+`docs/feature-implementation-plan.md` slot by `/p:feature-plan` — is prose, judged
+by a validation loop and read by a human.
 The YAML is read and *rewritten* by programs: `Scripts/task-update.py` flips a
 task's status in place while preserving the file's formatting, `Scripts/task-plan.py`
 derives execution levels and detects file conflicts between tasks, and the validator

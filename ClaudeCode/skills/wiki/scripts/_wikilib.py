@@ -41,6 +41,22 @@ INDEX_COUNTED_TYPES = ("roadmap-item",)              # INDEX.md counts these, ne
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
+# Wall-clock ceiling on ONE git invocation -- the value Scripts/mcp-wiki.py uses,
+# where the measurement behind it is written down: every call here is a local
+# read-only query (rev-parse, diff --name-only between two commits), so 30 s is
+# only ever reached by a git that will never answer. tests/test_wiki_index.py
+# gates the two copies equal.
+GIT_TIMEOUT_SEC = 30
+# Every git spawn starts with these, and runs with GIT_NO_LAZY_FETCH=1 in its env:
+# the same prefix as ClaudeCode/skills/roadmap/scripts/roadmap.py (adr 0022, entry
+# 12), where the reasoning lives. Cheap hardening, not a gated guarantee -- the
+# local .git/config is trusted. safe.bareRepository=explicit is the entry that
+# matters: it stops discovery from adopting a bare repository planted in the
+# working tree as tracked files, whose config clone DOES transfer.
+# tests/test_wiki_index.py gates this equal to roadmap.py's and the server's.
+GIT_SAFE_ARGV = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+	"-c", "protocol.allow=never", "-c", "safe.bareRepository=explicit")
+
 
 def git(args: List[str], cwd: str) -> Tuple[int, str, str]:
 	"""Run a git command; return (returncode, stdout, stderr).
@@ -49,19 +65,25 @@ def git(args: List[str], cwd: str) -> Tuple[int, str, str]:
 	would be inherited. No caller here needs it (rev-parse, diff --name-only),
 	and under an automated harness an inherited stdin turns a credential or
 	editor prompt into a silent hang instead of an immediate error.
+	A timeout returns 124 (the shell convention), which every caller already
+	reads as "git could not answer".
 	`Scripts/mcp-wiki.py` vendors this helper (tabs -> 4 spaces) and carries the
-	same line, where it additionally guards the JSON-RPC stream -- keep the two
-	copies in step.
+	same lines, where stdin=DEVNULL additionally guards the JSON-RPC stream --
+	keep the two copies in step.
 	"""
 	try:
 		proc = subprocess.run(
-			["git"] + args, cwd=cwd,
+			list(GIT_SAFE_ARGV) + args, cwd=cwd,
 			stdin=subprocess.DEVNULL,
 			stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+			timeout=GIT_TIMEOUT_SEC,   # never wait forever; see the constant
+			env=dict(os.environ, GIT_NO_LAZY_FETCH="1"),
 		)
 		return proc.returncode, proc.stdout, proc.stderr
 	except FileNotFoundError:
 		return 127, "", "git executable not found"
+	except subprocess.TimeoutExpired:
+		return 124, "", "git %s timed out after %ds" % (args[0] if args else "", GIT_TIMEOUT_SEC)
 
 
 def repo_root(start: Optional[str] = None) -> str:

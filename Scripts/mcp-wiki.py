@@ -128,6 +128,16 @@ DEFAULT_MAX_CHARS = 100_000
 # the page classifies as `unverified`, never as `current`. Degrading toward "not
 # checkable" is the correct direction for a documentation freshness gate.
 GIT_TIMEOUT_SEC = 30
+# Every git spawn starts with these, and runs with GIT_NO_LAZY_FETCH=1 in its env:
+# the same prefix as ClaudeCode/skills/roadmap/scripts/roadmap.py (adr 0022, entry
+# 12), where the reasoning lives. Cheap hardening, not a gated guarantee -- the
+# local .git/config is trusted. safe.bareRepository=explicit is the entry that
+# matters: it stops discovery from adopting a bare repository planted in the
+# working tree as tracked files, whose config clone DOES transfer. Only `git()`
+# below uses it; a registry-named measurement command is not a git helper.
+# tests/test_wiki_index.py gates this equal to roadmap.py's and _wikilib.py's.
+GIT_SAFE_ARGV = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                 "-c", "protocol.allow=never", "-c", "safe.bareRepository=explicit")
 
 # Page-type ordering for INDEX / list rendering (mirrors ClaudeCode/skills/wiki/scripts/_wikilib.py; tests/test_wiki_index.py gates parity).
 TYPE_ORDER = ["overview", "subsystem", "component", "reference", "analysis",
@@ -247,6 +257,11 @@ TYPE_SIGNAL_TOKENS = {
     "adr":       ("adr", "decision", "rationale", "alternatives",
                   "consequences", "tradeoff"),
     "glossary":  ("glossary", "terminology", "definition"),
+    "roadmap":   ("roadmap", "unscheduled", "horizon"),
+    # `roadmap-item` may not carry `roadmap`: the prefix rule above would make
+    # every roadmap query promote every closed item. The hyphenated type name
+    # itself fails the tokenizer rule, so its tokens are its schema words only.
+    "roadmap-item": ("item", "closed", "dropped", "archive"),
 }
 # Weight of a type-signal hit, on the same scale as FIELD_WEIGHTS. CALIBRATED,
 # not chosen — `.claude/tmp/wiki-density/probe_w9.py` sweeps 0/2/3/4/6/8 over
@@ -359,10 +374,11 @@ def git(args: List[str], cwd: str) -> Tuple[int, str, str]:
     """
     try:
         proc = subprocess.run(
-            ["git"] + args, cwd=cwd,
+            list(GIT_SAFE_ARGV) + args, cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
             timeout=GIT_TIMEOUT_SEC,   # never wait forever; see the constant
+            env=dict(os.environ, GIT_NO_LAZY_FETCH="1"),
         )
         return proc.returncode, proc.stdout, proc.stderr
     except FileNotFoundError:

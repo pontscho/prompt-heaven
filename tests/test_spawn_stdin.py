@@ -69,7 +69,9 @@ SURVEYED (reported as INFO, never a failure):
   * `ClaudeCode/skills/**` -- standalone CLI tools run by a human in a terminal,
     where inheriting the terminal's stdin is often the POINT.  Surveying them
     still paid: `skills/wiki/scripts/_wikilib.py` is the same git helper as
-    `Scripts/mcp-wiki.py`, and only the MCP copy got the `stdin=DEVNULL` fix.
+    `Scripts/mcp-wiki.py`, and the survey showed only the MCP copy had the
+    `stdin=DEVNULL` fix.  Both copies now carry it, with the same timeout and
+    git hardening -- `tests/test_wiki_index.py` group G gates them in step.
   * `tests/**` -- `_harness.run_process()` uses `input=` (explicit, different
     spelling) and `JsonRpcClient` uses `stdin=PIPE`, but the shell oracle in
     `test_mcp_git_params.py` inherits.  Its child is `printf`, which never
