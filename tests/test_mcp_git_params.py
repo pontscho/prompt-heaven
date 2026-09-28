@@ -975,6 +975,13 @@ def run(opts=None):
               {"args": ["user.name", "x"]}, error="mutates")
         check(suite, drv, "H", "apply-without-check-refused", "apply",
               {"path": "x.patch"}, error="only allowed with --check")
+        check(suite, drv, "H", "worktree-list-allowed", "worktree",
+              {"args": ["list", "--porcelain"]},
+              argv=["git", "worktree", "list", "--porcelain"])
+        check(suite, drv, "H", "worktree-add-refused", "worktree",
+              {"args": ["add", "../x"]}, error="only allowed as `worktree list`")
+        check(suite, drv, "H", "worktree-bare-refused", "worktree", {},
+              error="only allowed as `worktree list`")
         check(suite, drv, "H", "params-as-json-string", "log",
               '{"range":"A..B","stat":true}',
               argv=["git", "log", "--stat", "A..B"])

@@ -237,6 +237,18 @@ def validate_hash_object(args: List[str]) -> None:
         )
 
 
+def validate_worktree(args: List[str]) -> None:
+    # `list` is the only read-only subcommand; add/remove/move/prune/lock/
+    # unlock/repair all write .git/worktrees or the filesystem.
+    positional = [a for a in args if not a.startswith("-")]
+    if not positional or positional[0] != "list":
+        raise ValueError(
+            "git worktree is only allowed as `worktree list` "
+            "(e.g. params={\"args\":[\"list\",\"--porcelain\"]}). "
+            "add/remove/move/prune/lock/unlock/repair mutate: use Bash for those."
+        )
+
+
 def validate_fetch(args: List[str]) -> None:
     if "--dry-run" not in args:
         raise ValueError("git fetch is only allowed with --dry-run.")
@@ -256,6 +268,7 @@ FILTERED_SUBCOMMANDS: Dict[str, Callable[[List[str]], None]] = {
     "fetch":  validate_fetch,
     "apply":  validate_apply,
     "hash-object": validate_hash_object,
+    "worktree": validate_worktree,
 }
 
 SUBCOMMAND_DESCRIPTIONS = {
@@ -293,6 +306,7 @@ SUBCOMMAND_DESCRIPTIONS = {
     "fetch":          "Network read with --dry-run only",
     "apply":          "Patch validity check with --check only",
     "hash-object":    "Compute the git object ID of a file (-w and --stdin blocked)",
+    "worktree":       "List worktrees (`list` subcommand only)",
 }
 
 
@@ -1116,7 +1130,8 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     else:
         return {"error": (
             f"git subcommand '{function}' is not on the read-only whitelist. "
-            "Use the Bash tool for mutating operations."
+            "git_call does not expose it (this does not mean it mutates); "
+            "run it through the Bash tool."
         )}
 
     try:
@@ -1293,7 +1308,8 @@ GIT_CALL_TOOL = {
         "  Bash(\"git config --list/--get ...\")              -> function=\"config\"\n"
         "  Bash(\"git fetch --dry-run\")                      -> function=\"fetch\"\n"
         "  Bash(\"git apply --check ...\")                    -> function=\"apply\"\n"
-        "  Bash(\"git hash-object <file>\")                   -> function=\"hash-object\"\n\n"
+        "  Bash(\"git hash-object <file>\")                   -> function=\"hash-object\"\n"
+        "  Bash(\"git worktree list ...\")                    -> function=\"worktree\"\n\n"
         "Use Bash ONLY for the mutating ops this tool does NOT expose (commit, "
         "add, push, reset, checkout, merge, rebase, branch -d/-m, tag -a/-d, "
         "remote add/set-url, config <name> <value>, fetch without --dry-run, "

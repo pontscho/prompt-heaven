@@ -221,7 +221,7 @@ SUITES = [
      "refused beside count/files_with_matches/context",
      173),
     ("mcp_git_params", run_mcp_git_params,
-     "mcp-git named params -> git argv, offline", 295),
+     "mcp-git named params -> git argv, offline", 298),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,
