@@ -109,6 +109,11 @@ Two copies of one helper drift; ADR 0012 declined a shared transport tier, not t
   reason. An item's age (`list --untriaged`) is counted from its first log line.
 - **Origin conventions:** `<repo-relative path>#<heading-slug>` for an item harvested
   from a document; `user:<YYYY-MM-DD>:<kebab-key>` for an idea a person raised.
+- **One harvested item per source section, by design.** A section with several
+  deferred threads yields ONE bundled item whose why lists them. No disambiguating
+  suffix (`#slug~2`): a re-run of `adopt` could not tell which thread a suffix meant,
+  and the dedup would stop being idempotent. A thread that needs its own lane is split
+  off as a new item with a `user:` origin, naming the section in its why.
 - A closed item's archive page, `archive/NNNN-<slug>.md` (NNNN = the item id), adds
   `closed:` and either `commit:` (done; the full sha) or `reason:` (dropped).
 
