@@ -1,7 +1,7 @@
 ---
 name: 0022-a-someday-maybe-is-a-roadmap-item
 type: adr
-status: draft
+status: active
 title: A someday-maybe is a roadmap item
 description: Decision to record known-but-unscheduled work as two new wiki page types written by one stdlib script in its own skill -- a live roadmap in horizon lanes and one immutable archive page per closed item, counted rather than listed in INDEX.md -- with the kept-versus-deferred rule, the priority model and its unargued WIP cap, the archive and optimistic-lock model, the staging rule that keeps harvested prose off the shell line, the git trust boundary, the export contract, every alternative rejected, and the limits declared rather than gated.
 sources:
@@ -12,6 +12,9 @@ sources:
   - ClaudeCode/skills/wiki/scripts/_wikilib.py
   - tests/test_wiki_index.py
   - tests/test_roadmap.py
+verified:
+  commit: f581b1b
+  date: 2026-09-28
 links:
   - roadmap
   - 0002-index-claims-no-freshness
@@ -26,10 +29,7 @@ links:
 
 # ADR 0022: A someday-maybe is a roadmap item
 
-**Status:** proposed (draft). The code it records exists only in the uncommitted
-working tree, so this page carries no `verified:` block: a commit there would be a
-false claim. Once the implementation commit exists it is promoted in its own edit
-to `status: active` with a `verified:` block, and this line becomes accepted. The
+**Status:** accepted (implemented, `f581b1b`). Append-only from here. The
 living WHAT/HOW is `ClaudeCode/skills/roadmap/SKILL.md` and the docstring of
 `ClaudeCode/skills/roadmap/scripts/roadmap.py`, described in [[skills]].
 
