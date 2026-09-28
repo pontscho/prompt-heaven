@@ -581,6 +581,21 @@ def _run_offline(suite, helper, ws):
     open(os.path.join(deployed, ".git", "config"), "w").close()
     cfg_deployed = os.path.join(os.path.realpath(deployed), ".git", "config")
 
+    # --- SHADOW-over-mask fixture (roadmap R-0031) ------------------------------
+    # A symlink directly under ~/.claude whose realpath is a git checkout: the
+    # checkout becomes a shadow target (re-bound onto itself read-only on bwrap),
+    # and its .git/config is a file secret when the cwd is inside it. A bwrap bind
+    # takes its SOURCE from the pristine host, so a shadow --ro-bind emitted after
+    # the /dev/null mask carries no mask with it and buries it -- the same class
+    # R-0005 closed for the carve-outs. Seatbelt is immune: its shadow rule is a
+    # write-only deny and grants no read.
+    linkedrepo = ws.subdir("linkedrepo")
+    os.makedirs(os.path.join(linkedrepo, ".git"), exist_ok=True)
+    open(os.path.join(linkedrepo, ".git", "config"), "w").close()
+    os.symlink(linkedrepo, os.path.join(claude, "linkedrepo"))   # direct child
+    linkedrepo_real = os.path.realpath(linkedrepo)
+    cfg_linked = os.path.join(linkedrepo_real, ".git", "config")
+
     prev_home = os.environ.get("HOME")
     os.environ["HOME"] = home
     try:
@@ -588,6 +603,7 @@ def _run_offline(suite, helper, ws):
         secrets_n = helper.secret_paths(nsub)
         secrets_nocfg = helper.secret_paths(nocfg)
         secrets_cd = helper.secret_paths(deployed)
+        secrets_lr = helper.secret_paths(linkedrepo)
         carveouts = helper.carveout_paths()
         shadow = helper.shadow_write_denies()
         os.environ["HOME"] = home_nc
@@ -871,6 +887,42 @@ def _run_offline(suite, helper, ws):
                                 "host) buries the mask" % (c, found[-1], mask_cd[0]))
     _rec(suite, GRP_Q,
          "(a2) bwrap: .git/config under a carve-out masked AFTER it (copy-deploy)",
+         problems)
+
+    # (a3) bwrap: a .git/config under a SHADOW target stays masked (R-0031). The
+    # shadow --ro-bind <t> <t> re-mounts the whole checkout from the pristine host,
+    # so it must come BEFORE the /dev/null mask or it buries the mask and the git
+    # remote credentials read back. Asserted by INDEX against the containing shadow
+    # target. Masks-after-shadows keeps the shadow's write protection: the mask is a
+    # read-only bind too, so no later mount grants a write.
+    scope_lr = helper.Scope(writes=[linkedrepo_real], net=False, ro=False,
+                            argv=["true"], secret_paths=secrets_lr,
+                            carveouts=carveouts, shadow_write_denies=shadow)
+    bw_lr = helper._bwrap_argv(scope_lr)
+    problems = []
+    if linkedrepo_real not in shadow:
+        problems.append("fixture: %s is not a shadow target" % linkedrepo_real)
+    if cfg_linked not in [p for p, _d in secrets_lr]:
+        problems.append("fixture: %s not in the secret set" % cfg_linked)
+    mask_lr = [i for i in range(len(bw_lr) - 2)
+               if bw_lr[i] == "--ro-bind" and bw_lr[i + 1] == "/dev/null"
+               and bw_lr[i + 2] == cfg_linked]
+    shadow_lr = [i for i in range(len(bw_lr) - 2)
+                 if bw_lr[i] == "--ro-bind" and bw_lr[i + 1] == linkedrepo_real
+                 and bw_lr[i + 2] == linkedrepo_real]
+    if not mask_lr:
+        problems.append("no --ro-bind /dev/null mask for %s" % cfg_linked)
+    elif not shadow_lr:
+        problems.append("no shadow --ro-bind for %s" % linkedrepo_real)
+    elif shadow_lr[-1] > mask_lr[-1]:
+        problems.append("shadow %s bound at %d AFTER the .git/config mask at %d -- "
+                        "the later mount (sourced from the pristine host) buries "
+                        "the mask" % (linkedrepo_real, shadow_lr[-1], mask_lr[-1]))
+    if any(bw_lr[i] == "--bind" and bw_lr[i + 1] == cfg_linked
+           for i in range(len(bw_lr) - 1)):
+        problems.append("%s got a writable --bind" % cfg_linked)
+    _rec(suite, GRP_Q,
+         "(a3) bwrap: .git/config under a shadow target masked AFTER it (R-0031)",
          problems)
 
     # (a2) NEGATIVE -- the carve-out is fail-closed BY ENUMERATION: only the two

@@ -122,7 +122,12 @@ pristine host and so carries no mask with it. Both builders now split the deny
 set on its `is_dir` bit. Directory secrets come before the carve-outs, and the
 per-file `.git/config` masks come after them, still ahead of the shadow
 write-denies. A file mask can only narrow access, so moving it later cannot
-re-open anything.
+re-open anything. On bwrap a shadow write-deny is also a subtree `--ro-bind`
+from the host and would bury a mask the same way (R-0031), so the file masks
+there are emitted after the shadows as well. The shadows' write protection
+still holds, because the mask is itself a read-only bind: the last mount on
+every covered path stays read-only, and Seatbelt, whose shadows are write-only
+denies, is unchanged.
 
 ## What the measurements changed
 
