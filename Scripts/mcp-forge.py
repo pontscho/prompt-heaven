@@ -107,6 +107,22 @@ _DANGEROUS_RE = re.compile('|'.join(DANGEROUS_PATTERNS), re.IGNORECASE)
 
 MAX_OUTPUT_BYTES = 50 * 1024 * 1024  # 50 MB cap per command
 
+# The REPLY ceiling -- not MAX_OUTPUT_BYTES above, which bounds one command's
+# captured bytes and never the answer. Deliberately NOT the fleet's 24000, and
+# it does not take that shared block -- the block renders the reader together
+# with its own 24000, so adopting it would adopt the value. What a build or test
+# call returns is a VERBATIM subprocess transcript this server did not compose:
+# the filter narrows it, but every line that survives is the tool's own. The
+# recovery the 24000 class relies on -- ask again, narrower -- is not available
+# from the answer, because asking again means RUNNING the build again: minutes
+# of work, and a second test run is a new measurement (a flaky case, a changed
+# tree), not the remainder of the first one. The three payload classes are
+# ratified in ADR 0013; the cut is `_cap_text`, applied in `_handle_tool_call`.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_CHARS
+DEFAULT_MAX_CHARS = 100_000
+# END GENERATED: 4a4d02ccb7a4
+
 TOP_LEVEL_KEYS = {"version", "configuration", "build", "test", "clean"}
 TARGET_KINDS = ("build", "test", "clean")
 
@@ -1499,6 +1515,98 @@ def _ensure_filter(value: Any) -> Any:
 	)
 
 
+# ===========================================================================
+# Reply ceiling (DEFAULT_MAX_CHARS, cap convention v1)
+# ===========================================================================
+
+# The cut below wraps output this server fenced itself (`_markdown_run_section`
+# puts every log in a ``` block), so a cut landing inside one would hand the
+# reader a block left open. This constant is what finds the fences.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _FENCE_LINE_RE
+_FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
+# END GENERATED: f6d18108dd1c
+
+
+def _answer_ceiling(arguments: dict) -> Tuple[int, str]:
+	"""(ceiling, bias) for one forge_call. A ceiling <= 0 disables the cut.
+
+	Read from the RAW arguments rather than inside `handle_forge_call`, because
+	the cut belongs where the whole reply exists -- `_handle_tool_call`, after
+	every one of the dispatcher's many return paths has produced its text. A
+	`params` that fails to parse here falls back to the default; the dispatcher
+	refuses it on its own terms a moment later.
+
+	`test` keeps the TAIL, per the fleet's v1 convention: a test run's verdict --
+	the aggregate, the failing-suite list -- is printed last, so a head cut
+	would keep the noise and drop the answer. Everything else keeps the head.
+	"""
+	raw = arguments.get("params") or arguments.get("p") or {}
+	try:
+		params = _ensure_dict(raw, "params")
+	except ValueError:
+		params = {}
+	function = arguments.get("function") or arguments.get("f") or ""
+	bias = "tail" if str(function).strip() == "test" else "head"
+	try:
+		return int(params.get("max_answer_chars", DEFAULT_MAX_CHARS)), bias
+	except (TypeError, ValueError, OverflowError):
+		return DEFAULT_MAX_CHARS, bias
+
+
+def _balance_fences(body: str, keep_tail: bool) -> str:
+	"""Close (or re-open) a fenced block the cut landed inside.
+
+	An odd number of fence lines means exactly one is missing: at the bottom
+	when the head was kept, at the top when the tail was. Hand copy of
+	mcp-jenkins' -- a merge still queued in `Scripts/_mcp_paging.py`.
+	"""
+	fences = _FENCE_LINE_RE.findall(body)
+	if len(fences) % 2 == 0:
+		return body
+	if keep_tail:
+		return "%s\n%s" % (fences[0], body)
+	return "%s\n%s" % (body.rstrip("\n"), fences[-1])
+
+
+def _cap_text(text: str, max_chars: int, bias: str = "head") -> str:
+	"""Cut `text` to `max_chars` on a LINE BOUNDARY, with ONE closing line.
+
+	Hand copy of mcp-jenkins' `_cap_text`, re-indented for this tab host. The
+	closing line names the end it kept and is charged against the ceiling, as is
+	the one repair fence `_balance_fences` may add, so the reply never exceeds
+	the number the caller asked for.
+	"""
+	if max_chars <= 0 or len(text) <= max_chars:
+		return text
+	total = len(text)
+	keep_tail = bias == "tail"
+
+	def marker(kept: int) -> str:
+		if keep_tail:
+			return (f"\n[truncated: kept {kept} of {total} chars from the tail; "
+			        f"raise max_answer_chars or narrow the query]")
+		return (f"\n[truncated: kept {kept} of {total} chars from the head; "
+		        f"raise max_answer_chars or narrow the query]")
+
+	fences = _FENCE_LINE_RE.findall(text)
+	keep = max_chars - len(marker(total))
+	if fences:
+		keep -= max(len(f) for f in fences) + 1
+	if keep <= 0:
+		# The ceiling is smaller than the accounting line itself. The line still
+		# wins: a payload with no accounting is worse than no payload.
+		return marker(0).lstrip("\n")
+	if keep_tail:
+		cut = text.find("\n", total - keep)
+		body = text[cut + 1:] if 0 <= cut < total - 1 else text[total - keep:]
+	else:
+		cut = text.rfind("\n", 0, keep + 1)
+		body = text[:cut] if cut > 0 else text[:keep]
+	kept = len(body)
+	return _balance_fences(body, keep_tail) + marker(kept)
+
+
 def handle_forge_call(arguments: dict,
                       project_root: str,
                       cfg_path: str) -> dict:
@@ -1693,6 +1801,8 @@ FORGE_CALL_TOOL = {
 					"filter is {grep, grep_context, invert_grep, head, tail}, or a bare string "
 					"meaning grep. "
 					"list: {kind?}. describe: {target?} (omit target to list all). validate: {path?}. "
+					"Every function also takes max_answer_chars (default "
+					f"{DEFAULT_MAX_CHARS}; <= 0 = no cut; test keeps the tail). "
 					"Alias: 'p'."
 				),
 			},
@@ -1919,6 +2029,10 @@ class McpServer:
 			result = {"error": f"Internal server error: {type(exc).__name__}: {exc}"}
 		is_error = "error" in result
 		text = result.get("__raw_text__") or result.get("error", "")
+		# The WHOLE reply, error text included: it is the one string the caller
+		# receives, so it is the one string the ceiling can honestly bound.
+		max_chars, bias = _answer_ceiling(arguments)
+		text = _cap_text(text, max_chars, bias)
 		return self._result(msg_id, {
 			"content": [{"type": "text", "text": text}],
 			"isError": is_error,

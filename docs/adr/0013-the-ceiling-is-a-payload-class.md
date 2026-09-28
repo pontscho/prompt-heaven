@@ -228,3 +228,11 @@ Three decisions inside it are worth keeping:
 - **Line-boundary truncation** is a runtime property. `mcp-git`'s cut lands on
   the pre-fence text, which makes an unbalanced fence impossible whatever the
   payload holds, but it is not a line-boundary cut and nothing here claims one.
+
+## Addendum (2026-09-28): forge and gdc join the verbatim class
+
+Two registered servers had no reply ceiling at all, so this page's class model did not reach them, and the body of `bc974e9` ("No server in the fleet is uncapped.") was false. mcp-forge carried only `MAX_OUTPUT_BYTES`, which bounds one command's captured bytes, and mcp-gdc only function-local limits (`_MAX_HTML`, the snapshot line limit, the response-body limit). The footprint instrument read both as const-only, and the deviation rule could judge only a constant that existed, so it skipped them. Closed as roadmap item R-0009.
+
+Both now declare the verbatim class, 100_000, on the non-idempotent reason. Asking a build again means re-running it: minutes, and a new measurement rather than the rest of the first. A live page moves between calls, so a second DevTools snapshot is a new measurement too. forge keeps the tail for `test` and the head otherwise, with fence repair; gdc keeps the head without fence repair, because gdc fences nothing itself and a repair fence would invent page content. No new class and no new number.
+
+The gate now fails a registered, non-inert server that declares no ceiling or declares a value outside the three classes, with a negative control that must flag the old forge and gdc shapes.

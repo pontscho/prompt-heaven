@@ -106,11 +106,11 @@ scanner, which is the rule that lets a page document the marker it also carries
 
 <!-- BEGIN MEASURED: generated-region-census -->
 - MCP servers matching `Scripts/mcp-*.py`: 15, of which 15 carry at least one generated region
-- live generated regions in them: 111
-- block instances those regions emit: 149
+- live generated regions in them: 114
+- block instances those regions emit: 152
 - distinct canonical blocks named on a marker: 22, out of the 22 defined by the 5 canonical sources
 
-Regions by how many blocks one marker names: 73 name 1 block; 38 name 2 blocks.
+Regions by how many blocks one marker names: 76 name 1 block; 38 name 2 blocks.
 
 The 38 region(s) that name more than one block, by the list written on the marker:
 
@@ -125,7 +125,7 @@ The 38 region(s) that name more than one block, by the list written on the marke
 
 Generated into every one of the 15 servers: `_configure_logging`, `_json_error_window`.
 Generated into every server but `Scripts/mcp-webfetch.py`: `_error`, `_result`.
-<!-- END MEASURED: b9b14f6e3338 -->
+<!-- END MEASURED: 1616a7e8823c -->
 
 A single region may name several blocks, and that is the whole of the gap between
 the region count and the block-instance count.
@@ -309,7 +309,7 @@ rather than luck: `ast.walk` descends the whole tree and every binder is matched
 by node type, so a module-level statement is analysed on the same terms as a
 `def` body `Scripts/amalgamate.py:free_names`. `_FENCE_LINE_RE` is the first
 *constant* to spend the budget — it reads `re`, and carries that import
-requirement to each of its three hosts. It is not the first block to carry one at
+requirement to each of its four hosts. It is not the first block to carry one at
 all: `_result`'s `msg_id: Any` has demanded `typing.Any` of fourteen hosts since
 long before, which is the annotation hole named above. What is new is the route,
 not the requirement — a plain read in an executable statement rather than an

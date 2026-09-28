@@ -107,6 +107,7 @@ forge_call(function="<name>", params={...all args here...})
 
 - Top-level keys allowed: `function` (alias `f`), `params` (alias `p`).
 - Nothing else at the top level.
+- Every function also takes `max_answer_chars` in `params` (default `100000`): a longer reply is cut on a line boundary with one `[truncated: kept N of M chars from the head|tail; …]` line — `test` keeps the tail (the verdict prints last), everything else the head; `<= 0` disables the cut.
 - WRONG: `forge_call(targets=["app"])`
 - RIGHT: `forge_call(function="build", params={"targets":["app"]})`
 

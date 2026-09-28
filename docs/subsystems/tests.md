@@ -98,6 +98,11 @@ repo, no environment, no binary, no clock — but the part worth copying is that
 the promotion was a **reading** of a condition the suite had itself recorded,
 not a fresh argument. Conformance as a whole stays INFO, because that ADR
 licenses a deviation on the default alone and leaves the other two criteria open.
+The same decision later carried a second finding over:
+`every-registered-server-declares-a-ceiling` fails a registered server with no
+reply-ceiling constant, or one outside the three classes — the blind spot where
+`mcp-forge` and `mcp-gdc` had sat, invisible to the deviation gate because it
+could only judge a constant that existed.
 
 INFO rows are printed, not swallowed, and that is the point: a knowingly-open
 gap stays **visible**, so promoting a tree to gated later is a scope decision on
@@ -213,7 +218,7 @@ is the registry, and the run is the only thing that knows the totals.
 | `mcp_git_params` | named params → `git` argv, fully offline with `subprocess` stubbed |
 | `name_existence` | prompt corpus + server text ↔ live MCP inventory, plus agent grants vs their own prescriptions |
 | `spawn_stdin` | every spawn site under `Scripts/` passes an explicit `stdin=` — AST-based, one case per site |
-| `mcp_footprint` | fleet token cost: description tax, result ceilings, boilerplate. A tape measure, not a gate — with one exception, the ceiling-deviation rule of [[0013-the-ceiling-is-a-payload-class]], plus its own negative control |
+| `mcp_footprint` | fleet token cost: description tax, result ceilings, boilerplate. A tape measure, not a gate — with two exceptions, the ceiling-deviation and ceiling-declaration rules of [[0013-the-ceiling-is-a-payload-class]], each with its own negative control |
 | `wiki_recall` | the wiki search relevance gate on a synthetic corpus — silence, calibration, type signal, aliases |
 | `wiki_index` | the wiki's INDEX renderer, orphan rule and page-type vocabulary in **both** copies — the skill scripts and `Scripts/mcp-wiki.py` — loaded side by side: the six page-type constants equal between the copies and homed once on the skill side, `render_index` byte-identical across corpus variants, a `roadmap-item` page counted in one line and never listed, the orphan exemption for archive pages but not for an unlinked `roadmap` page, and both roadmap types freshness-untracked only while they carry no `sources:`, each oracle with a negative control that proves it can fire — [[0022-a-someday-maybe-is-a-roadmap-item]] |
 | `wiki_addendum` | `addendum.py`, the one legal write to an accepted ADR, driven as a child against a `mkdtemp` wiki root: the appended bytes exact and every old byte kept, the file mode kept and the inode fresh (temp file + `os.replace`); only an `active` `type: adr` page under the git top-level's `docs/` is written — a draft, another type, a missing page, and a path or symlink out of the root are refused; the staged item is exactly `title` + `body`, and a body line that is a level 1-2 heading (ATX or setext) is refused while `###` passes; the same heading is never appended twice; every refusal is exit 2, one stderr line, the page byte-identical `ClaudeCode/skills/wiki/scripts/addendum.py` |

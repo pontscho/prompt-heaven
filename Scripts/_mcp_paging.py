@@ -193,10 +193,11 @@ def _max_answer_chars(args: dict) -> int:
 # the comment above; what belongs here is only the number.
 #
 # It is a block of its OWN rather than a second name on the pair above, and the
-# three hosts each say why in their own words: `_max_answer_chars` renders
+# five hosts each say why in their own words: `_max_answer_chars` renders
 # together with `DEFAULT_MAX_ANSWER_CHARS`, so a server taking that marker would
-# take the 24000 along with the reader. These three want the number and no
-# reader, which is exactly what a constant block is for.
+# take the 24000 along with the reader. These five want the number and no
+# reader, which is exactly what a constant block is for. (Three at the lift;
+# mcp-forge and mcp-gdc declared the class later -- they had no ceiling at all.)
 #
 # All three wrote the line identically AND each said in prose that it matched the
 # other two -- agreement asserted on disk, in triplicate, which is the shape this

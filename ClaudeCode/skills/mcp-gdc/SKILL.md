@@ -26,6 +26,7 @@ Tool: `gdc_call`
 Parameters: `function` (string), `params` (object, optional)
 Short aliases: `f` for `function`, `p` for `params`
 Called without `function` → returns server status (same as `gdc_status`).
+Every function also takes `max_answer_chars` in `params` (default `100000`): a longer reply is cut on a line boundary keeping the head, ending in one `[truncated: kept N of M chars from the head; …]` line; `<= 0` disables the cut.
 
 ## How to call any function
 

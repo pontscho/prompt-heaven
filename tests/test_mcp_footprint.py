@@ -15,7 +15,7 @@ Three taxes, all paid out of the context window, all invisible until measured:
   3. BOILERPLATE -- what a handler emits regardless of content: headings,
      fences, command echoes, filter statistics, empty-result notes.
 
-EVERY FINDING ABOUT A SERVER IS `INFO` IN THIS ROUND -- BUT ONE
+EVERY FINDING ABOUT A SERVER IS `INFO` IN THIS ROUND -- BUT TWO
 ---------------------------------------------------------------
 A missing cap, a non-conforming cap, a fat description: all INFO, never FAIL.
 Turning them into a gate is a LATER work item, and doing it now would paint
@@ -34,6 +34,12 @@ the reason is a good one. Conformance itself -- param name, default, closing
 line, bundled into one verdict -- stays INFO, because ADR 0013 ratified a
 deviation on the default alone and left the other two criteria open.
 
+The second exception rests on the same decision: a server DECLARES its class,
+so `every-registered-server-declares-a-ceiling` fails a registered server that
+carries no reply-ceiling constant at all, or one whose value is none of the
+three classes. The deviation gate used to skip such a server in silence, and
+two registered servers (mcp-forge, mcp-gdc) sat in exactly that blind spot.
+
 What is otherwise gated here is the suite's own integrity, because a measuring
 tape that silently reads zero is worse than no tape at all:
 
@@ -47,9 +53,9 @@ tape that silently reads zero is worse than no tape at all:
   * group H  -- purity's truncation behaviour at RUNTIME.  Not a conformance
                 verdict pending a decision: a regression guard on a defect that
                 shipped and has been fixed (a reply of one header and zero rows).
-  * group C  -- the deviation rule above, plus its own negative control.  Once
-                the two offenders are fixed the live tree has none, so the
-                control is the only thing between that gate and a silent pass.
+  * group C  -- the two rules above, each with its own negative control.  Once
+                the offenders are fixed the live tree has none, so the control
+                is the only thing between each gate and a silent pass.
 
 THE REGISTERED-vs-EXISTING DISTINCTION IS LOAD-BEARING
 ------------------------------------------------------
@@ -534,6 +540,45 @@ def unjustified_deviations(report, source):
                 "%d it deviates from" % (report.file, lineno, name, value,
                                          V1_DEFAULT))
     return problems
+
+
+# ADR 0013's three ratified payload classes, keyed by the number each one
+# carries. The decision is the CLASS; the number follows from it, so a reply
+# ceiling carrying any other value is a fourth class nobody argued for.
+RATIFIED_CLASSES = {
+    V1_DEFAULT: "COMPOSED (the server built the reply)",
+    100_000: "VERBATIM (an artefact the server did not compose)",
+    500_000: "SEQUENCE (meaning is in the row count)",
+}
+
+
+def undeclared_ceiling(report):
+    """A REGISTERED server must declare a reply ceiling, in one of the classes.
+
+    The deviation gate above can only judge a constant that exists. A server
+    carrying NONE is invisible to it -- and that was the live state of two
+    registered servers when ADR 0013 was written: mcp-forge bounded only a
+    subprocess's captured BYTES (`MAX_OUTPUT_BYTES`, one command's capture, not
+    the reply), and mcp-gdc's bounds were function-local literals (`_MAX_HTML`
+    in one handler, a line count in another). Neither is a reply ceiling, both
+    match `CAP_CONST_RX`, and so the fleet table read them as CONST-ONLY caps
+    while the class model said nothing about them at all.
+
+    An INERT server is exempt: its footprint is zero because it is never
+    launched, which is the distinction this whole file is built on.
+    """
+    if not report.registered or report.parse_error:
+        return []
+    declared = [(ln, name, value) for ln, name, value in report.constants
+                if REPLY_CAP_CONST_RX.match(name)]
+    if not declared:
+        return ["%s is registered and declares NO reply ceiling -- no "
+                "DEFAULT_MAX_*CHARS constant, so neither ADR 0013's class "
+                "model nor the deviation gate can see it" % report.file]
+    return ["%s:%d %s = %s is not one of ADR 0013's three classes (%s)"
+            % (report.file, ln, name, value,
+               ", ".join(str(v) for v in sorted(RATIFIED_CLASSES)))
+            for ln, name, value in declared if value not in RATIFIED_CLASSES]
 
 
 def _render(node, limit=40):
@@ -1475,8 +1520,9 @@ def group_ceilings(suite, reports, sources):
                     "gated         : NO. This round MEASURES conformance. "
                     "Turning it into a gate is a separate work item and would "
                     "paint the whole run red until the server fixes land",
-                    "one exception : the DEVIATION rule is gated below, and "
-                    "only that one. Conformance bundles three criteria -- param "
+                    "two exceptions: the DEVIATION rule and the DECLARATION "
+                    "rule are gated below, and only those. Conformance bundles "
+                    "three criteria -- param "
                     "name, default, closing line -- and ADR 0013 ratified a "
                     "deviation on the DEFAULT alone. The other two are still "
                     "measured here and gated nowhere",
@@ -1501,8 +1547,9 @@ def group_ceilings(suite, reports, sources):
                          "how a detector goes blind while staying green",
                          "gated       : YES -- suite integrity"])
 
-    # THE ONE GATED FINDING ABOUT A SERVER IN THIS FILE; the header names it as
-    # the exception and says why it stopped being a "later work item".
+    # THE FIRST OF TWO GATED FINDINGS ABOUT A SERVER IN THIS FILE; the header
+    # names both as exceptions and says why they stopped being a "later work
+    # item".
     # `Scripts/_mcp_paging.py`'s convention comment always demanded that a server
     # needing a different ceiling keeps its own copy AND SAYS WHY. The second
     # clause was gated nowhere, and it showed: 2 of the 4 deviating servers never
@@ -1542,8 +1589,8 @@ def group_ceilings(suite, reports, sources):
                     "not tested  : whether the reason is a GOOD one. That is "
                     "what ADR 0013 is for; this asserts only that a reason was "
                     "written down where the next reader will find it",
-                    "gated       : YES -- the one finding about a server this "
-                    "file gates. See ADR 0013"])
+                    "gated       : YES -- one of the two findings about a "
+                    "server this file gates. See ADR 0013"])
 
     # Group D's contract, applied to this gate. Once the two offenders carry
     # their sentence the live tree has ZERO of them, and a checker that silently
@@ -1589,6 +1636,190 @@ def group_ceilings(suite, reports, sources):
                          "between the gate and a silent pass",
                          "gated       : YES -- suite integrity, same contract "
                          "as group D"])
+
+    # THE SECOND GATED FINDING ABOUT A SERVER. The deviation gate above judges a
+    # constant that EXISTS; a registered server with no reply ceiling at all
+    # used to be skipped by it in silence, and two were -- mcp-forge and mcp-gdc,
+    # recorded in ADR 0013's "What this page does not settle". A skip that
+    # hides exactly the servers a rule is about is the bug, so a missing
+    # declaration is a FAILURE here, not a gap in coverage. Same no-flap
+    # argument: source text already in the repo, nothing else.
+    problems, declared = [], []
+    for report in reports:
+        problems += undeclared_ceiling(report)
+        if report.registered and not report.parse_error:
+            names = ["%s = %s" % (name, value)
+                     for _ln, name, value in report.constants
+                     if REPLY_CAP_CONST_RX.match(name)]
+            declared.append("%s: %s" % (report.file,
+                                        ", ".join(names) or "NONE"))
+    suite.record(GC, "every-registered-server-declares-a-ceiling", problems,
+                 detail=declared
+                 + ["",
+                    "rule        : ADR 0013 -- a server does not pick a "
+                    "ceiling, it declares which payload class its handlers "
+                    "return, and the number follows",
+                    "classes     : %s" % "; ".join(
+                        "%d %s" % (v, RATIFIED_CLASSES[v])
+                        for v in sorted(RATIFIED_CLASSES)),
+                    "not counted : MAX_OUTPUT_BYTES, _MAX_HTML, _MAX_LOG and "
+                    "every other CAP_CONST_RX match outside the reply family "
+                    "-- they bound one capture, one handler, one ring",
+                    "exempt      : INERT (unregistered) servers, whose footprint "
+                    "is zero",
+                    "gated       : YES -- the second finding about a server "
+                    "this file gates. See ADR 0013"])
+
+    # Its own negative control, for the reason the one above has one: once the
+    # two servers declare a class the live tree has no offender left.
+    must_flag = {
+        # mcp-forge's shape before it declared: one command's captured bytes.
+        "subprocess-bytes-only": "MAX_OUTPUT_BYTES = 50 * 1024 * 1024\n",
+        # mcp-gdc's shape before it declared: a literal local to one handler.
+        "function-local-literal": ("def handle_get_html(args):\n"
+                                   "    _MAX_HTML = 50000\n"
+                                   "    return args\n"),
+        "no-ceiling-at-all": "LIMIT = 5\n",
+        "a-fourth-class": ("# Not the fleet's %d: a class of our own.\n"
+                           "DEFAULT_MAX_CHARS = 60_000\n" % V1_DEFAULT),
+    }
+    must_stay_silent = {
+        "composed": "DEFAULT_MAX_ANSWER_CHARS = 24000\n",
+        "verbatim": "DEFAULT_MAX_CHARS = 100_000\n",
+        "sequence": "DEFAULT_MAX_OUTPUT_CHARS = 500_000\n",
+    }
+    problems = []
+    for label in sorted(must_flag):
+        if not undeclared_ceiling(analyse_caps(must_flag[label], label)):
+            problems.append("planted %r was NOT flagged" % label)
+    for label in sorted(must_stay_silent):
+        found = undeclared_ceiling(analyse_caps(must_stay_silent[label], label))
+        if found:
+            problems.append("bait %r was flagged: %s" % (label, found))
+    inert = undeclared_ceiling(analyse_caps("LIMIT = 5\n", "inert-uncapped",
+                                            registered=False))
+    if inert:
+        problems.append("an INERT server was flagged: %s" % inert)
+    suite.record(GC, "ceiling-declaration-detector-discriminates", problems,
+                 detail=["must flag   : %s" % ", ".join(sorted(must_flag)),
+                         "must ignore : %s, plus an INERT file with no ceiling"
+                         % ", ".join(sorted(must_stay_silent)),
+                         "gated       : YES -- suite integrity, same contract "
+                         "as group D"])
+
+    group_declared_cut_runtime(suite)
+
+
+# The two servers that declared a class LAST, driven in-process: a declared
+# constant nobody's cut honours would pass every structural case above.
+DECLARED_CUT_FILES = ("mcp-forge.py", "mcp-gdc.py")
+
+
+def _cut_problems(label, reply, ceiling, end_words):
+    """What is wrong with one capped reply, judged on the v1 closing line."""
+    problems = []
+    if len(reply) > ceiling:
+        problems.append("%s: reply is %d chars, over the %d ceiling"
+                        % (label, len(reply), ceiling))
+    last = reply.rsplit("\n", 1)[-1]
+    if not (last.startswith(V1_TRUNC_OPEN) and last.endswith(V1_TRUNC_CLOSE)
+            and end_words in last):
+        problems.append("%s: last line is not the v1 closing line naming %r: "
+                        "%r" % (label, end_words, last))
+    return problems
+
+
+def group_declared_cut_runtime(suite):
+    """Runtime half of the declaration gate, for mcp-forge and mcp-gdc. GATED."""
+    ceiling = CAP_CEILING
+    rows = ["row %03d %s" % (i, "x" * 40) for i in range(200)]
+    plain = "\n".join(rows)
+    fenced = "# forge test t\n\n```\n%s\n```\n**tail verdict**" % plain
+    problems, detail = [], []
+    for fname in DECLARED_CUT_FILES:
+        try:
+            mod = H.load_module_from_path(
+                "ph_cut_%s" % fname.replace("-", "_").replace(".py", ""),
+                os.path.join(SCRIPTS_DIR, fname))
+        except Exception as exc:                                  # noqa: BLE001
+            problems.append("%s does not load: %s: %s"
+                            % (fname, type(exc).__name__, exc))
+            continue
+        # Recorded, never raised: a server that lost a helper must fail THIS
+        # case, not take the rest of the suite down with an AttributeError.
+        missing = [n for n in ("DEFAULT_MAX_CHARS", "_cap_text",
+                               "_answer_ceiling") if not hasattr(mod, n)]
+        if missing:
+            problems.append("%s defines no %s" % (fname, ", ".join(missing)))
+            continue
+        default = mod.DEFAULT_MAX_CHARS
+        if fname == "mcp-forge.py":
+            head = mod._cap_text(fenced, ceiling, "head")
+            tail = mod._cap_text(fenced, ceiling, "tail")
+            problems += _cut_problems("forge head", head, ceiling,
+                                      "from the head")
+            problems += _cut_problems("forge tail", tail, ceiling,
+                                      "from the tail")
+            if not head.startswith("# forge test t"):
+                problems.append("forge head: the head was not kept")
+            if "**tail verdict**" not in tail:
+                problems.append("forge tail: the verdict line was not kept")
+            for label, reply in (("head", head), ("tail", tail)):
+                if len(mod._FENCE_LINE_RE.findall(reply)) % 2:
+                    problems.append("forge %s: cut left a ``` block open"
+                                    % label)
+            readers = [
+                ({"function": "test"}, (default, "tail")),
+                ({"f": "build", "p": {"max_answer_chars": 5}}, (5, "head")),
+                ({"function": "build",
+                  "params": '{"max_answer_chars": 7}'}, (7, "head")),
+                ({"params": {"max_answer_chars": "junk"}}, (default, "head")),
+                ({"params": {"max_answer_chars": float("inf")}},
+                 (default, "head")),
+                ({"params": "not json"}, (default, "head")),
+            ]
+            for args, want in readers:
+                got = mod._answer_ceiling(args)
+                if got != want:
+                    problems.append("forge _answer_ceiling(%r) = %r, want %r"
+                                    % (args, got, want))
+        else:
+            head = mod._cap_text(plain, ceiling)
+            problems += _cut_problems("gdc", head, ceiling, "from the head")
+            if not head.startswith("row 000 "):
+                problems.append("gdc: the head was not kept")
+            readers = [
+                ("gdc_call", {"function": "get_html"}, default),
+                ("gdc_call", {"f": "get_html",
+                              "p": {"max_answer_chars": 5}}, 5),
+                ("gdc_call", {"params": '{"max_answer_chars": 7}'}, 7),
+                ("get_html", {"max_answer_chars": 9}, 9),
+                ("get_html", {"max_answer_chars": "junk"}, default),
+                ("get_html", {"max_answer_chars": float("inf")}, default),
+                ("gdc_call", {"params": "not json"}, default),
+            ]
+            for name, args, want in readers:
+                got = mod._answer_ceiling(name, args)
+                if got != want:
+                    problems.append("gdc _answer_ceiling(%r, %r) = %r, want %r"
+                                    % (name, args, got, want))
+        if mod._cap_text(plain, 0) != plain:
+            problems.append("%s: max_answer_chars <= 0 did not disable the cut"
+                            % fname)
+        if mod._cap_text("short", ceiling) != "short":
+            problems.append("%s: a reply under the ceiling was altered" % fname)
+        detail.append("%s: DEFAULT_MAX_CHARS = %d, cut driven at %d"
+                      % (fname, default, ceiling))
+    suite.record(GC, "declared-ceiling-cut-stays-inside-the-number", problems,
+                 detail=detail
+                 + ["asserts     : the reply fits the ceiling, its last line is "
+                    "the v1 closing line naming the end kept, forge's tail "
+                    "bias keeps the verdict and leaves no fence open, <= 0 "
+                    "disables the cut, and the per-call reader falls back on "
+                    "junk, infinity and unparseable params",
+                    "why         : a declared constant nobody's cut honours "
+                    "would pass every structural case above",
+                    "gated       : YES -- in-process, no network, no browser"])
 
 
 def group_control(suite, fixture_root):

@@ -1587,6 +1587,76 @@ async def handle_find_element(mgr: GdcManager, args: dict) -> Any:
     )
 
 
+# --- Reply ceiling (cap convention v1) ---
+
+# The REPLY ceiling -- not the per-handler bounds above (`_MAX_HTML` in
+# get_html, the line count in take_snapshot, the 2000-char response body), each
+# of which bounds one handler and none of which bounds the answer. Deliberately
+# NOT the fleet's 24000, and it does not take that shared block -- the block
+# renders the reader together with its own 24000, so adopting it would adopt the
+# value. The replies that get large here are VERBATIM artefacts of a live page
+# this server did not compose: outerHTML of an element the caller named, the
+# value a script the caller wrote returned, a request's own log entries, the
+# page's accessibility tree. The recovery the 24000 class relies on -- ask again,
+# narrower -- is not available: a page is not a file, it moves between calls
+# (timers, network, the caller's own clicks), so a second snapshot is a new
+# measurement rather than the remainder of the first. The three payload classes
+# are ratified in ADR 0013; the cut is `_cap_text`, applied in `_dispatch_tool`.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_CHARS
+DEFAULT_MAX_CHARS = 100_000
+# END GENERATED: 4a4d02ccb7a4
+
+
+def _answer_ceiling(name: str, args: dict) -> int:
+    """The per-call reply ceiling. <= 0 disables it -- "give me all of it".
+
+    Read in `_dispatch_tool`, where every path meets, so the direct-tool path
+    and the `gdc_call` path are bounded alike. On the `gdc_call` path the knob
+    sits inside `params`; a `params` that fails to parse falls back to the
+    default here, and `handle_gdc_call` refuses it on its own terms.
+    """
+    source = args
+    if name == "gdc_call":
+        try:
+            source = _ensure_dict(args.get("params") or args.get("p") or {})
+        except ValueError:
+            source = {}
+    try:
+        return int(source.get("max_answer_chars", DEFAULT_MAX_CHARS))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MAX_CHARS
+
+
+def _cap_text(text: str, max_chars: int) -> str:
+    """Cut `text` to `max_chars` on a LINE BOUNDARY, with ONE closing line.
+
+    mcp-jenkins' `_cap_text` in its head-biased form, and WITHOUT the fence
+    repair: this server wraps nothing in a ``` block, so a cut cannot open a
+    fence it made, and appending a fence line to a page's own HTML would be
+    inventing content in a verbatim artefact. The closing line is charged
+    against the ceiling, so the reply never exceeds the number asked for. A
+    payload with no newline to cut at (minified HTML is one long line) takes
+    the hard cut -- the boundary does not exist there.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    total = len(text)
+
+    def marker(kept: int) -> str:
+        return (f"\n[truncated: kept {kept} of {total} chars from the head; "
+                f"raise max_answer_chars or narrow the query]")
+
+    keep = max_chars - len(marker(total))
+    if keep <= 0:
+        # The ceiling is smaller than the accounting line itself. The line
+        # still wins: a payload with no accounting is worse than no payload.
+        return marker(0).lstrip("\n")
+    cut = text.rfind("\n", 0, keep + 1)
+    body = text[:cut] if cut > 0 else text[:keep]
+    return body + marker(len(body))
+
+
 # --- Dispatcher ---
 
 async def handle_gdc_call(mgr: GdcManager, args: dict) -> Any:
@@ -1646,7 +1716,11 @@ LISTED_TOOLS = [
                 },
                 "params": {
                     "type": "object",
-                    "description": "Parameters for the function (see gdc-mcp skill for schema). Alias: 'p'",
+                    "description": (
+                        "Parameters for the function (see gdc-mcp skill for schema). "
+                        f"Every function also takes max_answer_chars (default {DEFAULT_MAX_CHARS}; "
+                        "<= 0 = no cut). Alias: 'p'"
+                    ),
                 },
                 "p": {
                     "type": "object",
@@ -1857,6 +1931,15 @@ class McpServer:
             # diagnosis, and 60s off. It now falls to the branch below and
             # reports what actually timed out.
             result = await handler(self.manager, args)
+            # The reply ceiling bounds the WHOLE reply, failure text included,
+            # and is applied here because this is the one place every path --
+            # gdc_call and the unlisted direct tools -- passes through.
+            max_chars = _answer_ceiling(name, args)
+            if isinstance(result, str):
+                result = _cap_text(result, max_chars)
+            elif (isinstance(result, dict)
+                  and isinstance(result.get("error"), str)):
+                result = {"error": _cap_text(result["error"], max_chars)}
             # A handler that FAILED says so by shape, not by prose. Every
             # failure return in this file is `{"error": <text>}`; a plain
             # string is a success. Before this branch existed the two were
