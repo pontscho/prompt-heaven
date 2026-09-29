@@ -52,15 +52,36 @@ it is per server, one column, so phase 2 changes a word and not a design:
 
   task        the asyncio work itself stops -- the handlers are coroutines on
               the loop and the CancelledError lands inside them (gdc, lldb).
+  kill        the request's CHILD PROCESS is killed (forge, tshark): every
+              request-scoped Popen is adopted by a per-request reclaim record,
+              and the dispatch target's CancelledError arm signals the child's
+              process group from the loop thread while the worker thread is
+              still blocked in communicate(); the thread then returns and its
+              result is discarded.
+  lsp-cancel  a semantic call is reclaimed IN the language server: the
+              generated `_request` answers a CancelledError by dropping its
+              `_pending` waiter and sending `$/cancelRequest` for the LSP id
+              (clangd, cuda, lua-lsp, purity).  File operations and anything
+              else parked in a worker thread remain reply-only.
   reply-only  the reply is suppressed but the work runs on: a worker thread,
-              a subprocess, or a language server's own request keeps going
-              until it finishes (the other thirteen).
+              a subprocess, or a remote peer keeps going until it finishes.
 
-Phase 2 moves forge and tshark to a `kill` class (the subprocess is killed) and
-the LSP hosts to `$/cancelRequest`; each new value needs its own measurement
-here before a row may claim it.  What IS measured today (group B): a `task` row
-must be a `coroutine` server in `test_read_loop`'s own analysis, because a
-handler parked in a worker thread is out of reach of any CancelledError.
+Each class other than reply-only is MEASURED here (group B) before a row may
+claim it:
+  * a `task` row must be a `coroutine` server in `test_read_loop`'s own
+    analysis, because a handler parked in a worker thread is out of reach of
+    any CancelledError;
+  * a `kill` row must adopt every Popen outside a declared exemption (KILL_
+    EXEMPT, with its reason), start each adopted child in its own session so a
+    process-group signal reaches its descendants, spawn nothing through a
+    blocking subprocess.run/call/check_* whose handle cannot be recorded, and
+    carry a re-raising CancelledError arm in the dispatch target that reaches
+    os.killpg;
+  * an `lsp-cancel` row must carry a `_request` whose CancelledError arm pops
+    the `_pending` entry, names `$/cancelRequest`, and re-raises.
+The behaviour behind the last two is gated elsewhere: forge's kill live in the
+smoke harness (`inflight_kill_probe`), `_request`'s cancel arm in
+`test_generated_region` group E against the canonical source.
 
 NEGATIVE CONTROL (group D) -- mandatory, and this suite was written RED: the
 fleet had no hook when it was first run, so the controls are what prove each
@@ -89,7 +110,7 @@ Groups:
   A  GATE     -- the hook, the registry and the cancel-safe dispatch target
   B  DECLARED -- the reclaim class vs what can be measured, one per server
   C  ROSTER   -- the table covers the tree, class totals, a blindness floor
-  D  control  -- planted defects the analyser MUST flag, and a correct one
+  D  control  -- planted defects the analysers MUST flag, and correct ones
   E  GATE     -- MCP_SKELETON.md section 5's sample, lifted by script
   F  hygiene  -- every write under .claude/tmp, no bytecode, no new repo paths
 """
@@ -132,22 +153,32 @@ CANCEL_METHOD = "notifications/cancelled"
 # THE DECLARED TABLE -- one reclaim class per server, with the reason.
 # ---------------------------------------------------------------------------
 TASK = "task"
+KILL = "kill"
+LSP_CANCEL = "lsp-cancel"
 REPLY_ONLY = "reply-only"
 CLASSES = {
     TASK: "the asyncio work stops: handlers are coroutines on the loop",
-    REPLY_ONLY: "the reply is suppressed; a thread, subprocess or language "
-                "server keeps working until it finishes",
+    KILL: "the request's child process group is signalled: every "
+          "request-scoped Popen is adopted, and the dispatch target's "
+          "CancelledError arm kills it",
+    LSP_CANCEL: "a semantic call is reclaimed in the language server via "
+                "$/cancelRequest and its pending waiter dropped; file "
+                "operations stay reply-only",
+    REPLY_ONLY: "the reply is suppressed; a thread, subprocess or remote peer "
+                "keeps working until it finishes",
 }
 
 FLEET = {
-    "mcp-clangd.py":   (REPLY_ONLY, "the clangd request keeps running in clangd "
-                                    "(phase 2: $/cancelRequest)"),
+    "mcp-clangd.py":   (LSP_CANCEL, "the generated _request sends "
+                                    "$/cancelRequest to clangd and drops its "
+                                    "waiter"),
     "mcp-context7.py": (REPLY_ONLY, "the urlopen parked on _HTTP_EXECUTOR runs "
                                     "to its timeout"),
-    "mcp-cuda.py":     (REPLY_ONLY, "the clangd request keeps running in clangd "
-                                    "(phase 2: $/cancelRequest)"),
-    "mcp-forge.py":    (REPLY_ONLY, "the build/test subprocess keeps running "
-                                    "(phase 2: kill)"),
+    "mcp-cuda.py":     (LSP_CANCEL, "the generated _request sends "
+                                    "$/cancelRequest to clangd and drops its "
+                                    "waiter"),
+    "mcp-forge.py":    (KILL,       "run_command's build/test child is adopted "
+                                    "and its process group killed on cancel"),
     "mcp-gdc.py":      (TASK,       "coroutine handlers: the CDP await is "
                                     "cancelled and the lane lock released"),
     "mcp-git.py":      (REPLY_ONLY, "the git subprocess runs to completion in "
@@ -158,15 +189,17 @@ FLEET = {
                                     "worker thread"),
     "mcp-lldb.py":     (TASK,       "coroutine handlers: the whole-handler lock "
                                     "is released on cancel"),
-    "mcp-lua-lsp.py":  (REPLY_ONLY, "the request keeps running in "
-                                    "lua-language-server (phase 2: "
-                                    "$/cancelRequest)"),
+    "mcp-lua-lsp.py":  (LSP_CANCEL, "the generated _request sends "
+                                    "$/cancelRequest to lua-language-server "
+                                    "and drops its waiter"),
     "mcp-postgres.py": (REPLY_ONLY, "the query runs to completion in its worker "
                                     "thread"),
-    "mcp-purity.py":   (REPLY_ONLY, "LSP requests keep running in the language "
-                                    "server and file ops on the default pool"),
-    "mcp-tshark.py":   (REPLY_ONLY, "the tshark subprocess keeps running "
-                                    "(phase 2: kill)"),
+    "mcp-purity.py":   (LSP_CANCEL, "semantic calls: $/cancelRequest to "
+                                    "clangd/luals; file ops on the default "
+                                    "pool stay reply-only"),
+    "mcp-tshark.py":   (KILL,       "each request's tshark run is adopted and "
+                                    "its process group killed on cancel; the "
+                                    "capture child is a session (KILL_EXEMPT)"),
     "mcp-webfetch.py": (REPLY_ONLY, "the fetch runs to completion in its worker "
                                     "thread (the drain-on-shutdown reason)"),
     "mcp-wiki.py":     (REPLY_ONLY, "the search runs to completion in its worker "
@@ -174,7 +207,17 @@ FLEET = {
 }
 
 DECLARED_TASK = 2
-DECLARED_REPLY_ONLY = 13
+DECLARED_KILL = 2
+DECLARED_LSP_CANCEL = 4
+DECLARED_REPLY_ONLY = 7
+
+# A `kill` server's Popen sites that are NOT request-scoped, by (file, enclosing
+# function), each with the reason it may outlive the request that spawned it.
+KILL_EXEMPT = {
+    ("mcp-tshark.py", "handle_start_capture"):
+        "the capture child IS the session: it outlives start_capture by design "
+        "and is owned through SESSIONS by stop_capture and shutdown",
+}
 
 TASK_FACTORIES = {"create_task", "ensure_future"}
 DISPATCH_TARGETS = {"_serve", "_dispatch"}
@@ -197,6 +240,25 @@ NOT_KEYED = "REGISTRY-NOT-KEYED-BY-ID"
 NO_FORGET = "FINISHED-ID-NEVER-FORGOTTEN"
 INIT_CANCELLABLE = "INITIALIZE-CANCELLABLE"
 SWALLOWS = "DISPATCH-SWALLOWS-CANCEL"
+
+# -- the `kill` class --
+RECORD_CALLS = {"adopt"}
+BLOCKING_SPAWNS = {"run", "call", "check_call", "check_output"}
+SIGNAL_CALLS = {"killpg"}
+KILL_NO_SPAWN = "KILL-NO-ADOPTED-POPEN"
+KILL_UNADOPTED = "KILL-POPEN-NOT-ADOPTED"
+KILL_NO_SESSION = "KILL-CHILD-NOT-OWN-GROUP"
+KILL_BLOCKING = "KILL-BLOCKING-SPAWN"
+KILL_NO_ARM = "KILL-NO-CANCEL-ARM"
+KILL_NO_SIGNAL = "KILL-ARM-NEVER-SIGNALS"
+
+# -- the `lsp-cancel` class --
+LSP_CANCEL_METHOD = "$/cancelRequest"
+LSP_NO_REQUEST = "LSP-NO-REQUEST-HOP"
+LSP_NO_ARM = "LSP-NO-CANCEL-ARM"
+LSP_NO_NOTICE = "LSP-ARM-SENDS-NO-CANCELREQUEST"
+LSP_LEAKS = "LSP-ARM-LEAVES-PENDING"
+LSP_ARM_SWALLOWS = "LSP-ARM-SWALLOWS-CANCEL"
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +542,248 @@ def analyse(path, source=None, line_offset=0):
 
 
 # ---------------------------------------------------------------------------
+# the reclaim-class analysers (group B measures a row's class with these)
+# ---------------------------------------------------------------------------
+
+class Reclaim:
+    """What one reclaim-class analyser found in one file."""
+
+    def __init__(self, path):
+        self.path = path
+        self.problems = []
+        self.detail = []
+
+    def fail(self, code, line):
+        if code not in self.problems:
+            self.problems.append(code)
+        self.detail.append("%s: %s" % (code, line))
+
+
+def _parse(path, source, result):
+    if source is None:
+        with open(path, encoding="utf-8") as fh:
+            source = fh.read()
+    try:
+        return ast.parse(source, filename=path)
+    except SyntaxError as exc:
+        result.fail(NO_SERVER_CLASS, "unparseable: %s" % exc)
+        return None
+
+
+def _call_name(call):
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _func_index(tree):
+    """Every def in the module by name, methods included."""
+    index = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            index.setdefault(node.name, []).append(node)
+    return index
+
+
+def _reach(nodes, index):
+    """`nodes` plus every def they call BY NAME -- a bare name or the last
+    attribute of a dotted call, so `reclaim.cancel(loop)` follows every def
+    named `cancel` -- transitively.  Deliberately loose: this is a presence
+    gate, and over-following can only find a signal that is there."""
+    seen = set()
+    out = list(nodes)
+    queue = list(nodes)
+    while queue:
+        node = queue.pop()
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            name = _call_name(sub)
+            if name in index and name not in seen:
+                seen.add(name)
+                for d in index[name]:
+                    out.append(d)
+                    queue.append(d)
+    return out
+
+
+def _own_nodes(func):
+    """Every node inside `func` that no nested def owns."""
+    stack = list(func.body)
+    while stack:
+        node = stack.pop()
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)):
+                continue
+            stack.append(child)
+
+
+def _is_subprocess(call, names):
+    func = call.func
+    return (isinstance(func, ast.Attribute) and func.attr in names
+            and isinstance(func.value, ast.Name) and func.value.id == "subprocess")
+
+
+def _own_session(call):
+    for kw in call.keywords:
+        if kw.arg == "start_new_session" and isinstance(kw.value, ast.Constant) \
+                and kw.value.value is True:
+            return True
+        if kw.arg == "preexec_fn" and isinstance(kw.value, ast.Attribute) \
+                and kw.value.attr == "setsid":
+            return True
+    return False
+
+
+def _reraises(handler):
+    return any(isinstance(n, ast.Raise) and n.exc is None
+               for n in ast.walk(handler))
+
+
+def _names_cancelled(handler):
+    """True if the except clause NAMES CancelledError (bare/BaseException do
+    not count as a deliberate cancel arm)."""
+    if handler.type is None:
+        return False
+    types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    for t in types:
+        name = t.id if isinstance(t, ast.Name) else (
+            t.attr if isinstance(t, ast.Attribute) else None)
+        if name == "CancelledError":
+            return True
+    return False
+
+
+def analyse_kill(path, source=None, exempt=()):
+    """The `kill` class: adopted Popen handles and a cancel arm that signals."""
+    result = Reclaim(path)
+    tree = _parse(path, source, result)
+    if tree is None:
+        return result
+    index = _func_index(tree)
+
+    adopted = 0
+    for funcs in index.values():
+        for func in funcs:
+            own = list(_own_nodes(func))
+            for node in own:
+                if isinstance(node, ast.Call) and _is_subprocess(node, BLOCKING_SPAWNS):
+                    result.fail(KILL_BLOCKING,
+                                "line %d: %s() calls subprocess.%s -- a blocking "
+                                "spawn hands back no handle a cancel could "
+                                "signal" % (node.lineno, func.name, node.func.attr))
+            popens = []
+            for node in own:
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) \
+                        and _is_subprocess(node.value, {"Popen"}):
+                    target = node.targets[0]
+                    popens.append((node.value, target.id
+                                   if isinstance(target, ast.Name) else None))
+                elif isinstance(node, (ast.With, ast.AsyncWith)):
+                    for item in node.items:
+                        expr = item.context_expr
+                        if isinstance(expr, ast.Call) and _is_subprocess(expr, {"Popen"}):
+                            var = item.optional_vars
+                            popens.append((expr, var.id
+                                           if isinstance(var, ast.Name) else None))
+            if not popens:
+                continue
+            if func.name in exempt:
+                result.detail.append("exempt: %s() -- %s"
+                                     % (func.name, exempt[func.name]))
+                continue
+            for call, var in popens:
+                recorded = var is not None and any(
+                    isinstance(n, ast.Call) and _call_name(n) in RECORD_CALLS
+                    and any(isinstance(a, ast.Name) and a.id == var for a in n.args)
+                    for n in own)
+                if not recorded:
+                    result.fail(KILL_UNADOPTED,
+                                "line %d: %s() spawns a Popen it never passes "
+                                "to %s -- a cancel cannot find it"
+                                % (call.lineno, func.name, sorted(RECORD_CALLS)))
+                    continue
+                adopted += 1
+                if not _own_session(call):
+                    result.fail(KILL_NO_SESSION,
+                                "line %d: the adopted child is not started with "
+                                "start_new_session=True / preexec_fn=os.setsid, "
+                                "so a process-group signal cannot reach its "
+                                "descendants" % call.lineno)
+    if adopted == 0 and KILL_UNADOPTED not in result.problems:
+        result.fail(KILL_NO_SPAWN, "no adopted subprocess.Popen anywhere -- "
+                                   "nothing for a cancel to kill")
+    result.detail.insert(0, "adopted     : %d Popen site(s)" % adopted)
+
+    cls = _find_class(tree)
+    serve = None
+    if cls is not None:
+        methods = _methods(cls)
+        serve = next((methods[t] for t in sorted(DISPATCH_TARGETS)
+                      if t in methods), None)
+    arms = [] if serve is None else [
+        n for n in ast.walk(serve)
+        if isinstance(n, ast.ExceptHandler) and _names_cancelled(n) and _reraises(n)]
+    if not arms:
+        result.fail(KILL_NO_ARM, "the dispatch target has no re-raising "
+                                 "`except asyncio.CancelledError` arm to kill "
+                                 "from while the worker thread is blocked")
+    else:
+        reached = _reach([a for arm in arms for a in arm.body], index)
+        if not any(isinstance(n, ast.Call) and _call_name(n) in SIGNAL_CALLS
+                   for n in _walk_all(reached)):
+            result.fail(KILL_NO_SIGNAL, "line %d: the cancel arm reaches no "
+                                        "os.killpg" % arms[0].lineno)
+    return result
+
+
+def analyse_lsp(path, source=None):
+    """The `lsp-cancel` class: `_request`'s CancelledError arm."""
+    result = Reclaim(path)
+    tree = _parse(path, source, result)
+    if tree is None:
+        return result
+    hops = _func_index(tree).get("_request", [])
+    if not hops:
+        result.fail(LSP_NO_REQUEST, "no `_request` -- nothing speaks to a "
+                                    "language server here")
+        return result
+    for hop in hops:
+        arms = [n for n in ast.walk(hop)
+                if isinstance(n, ast.ExceptHandler) and _names_cancelled(n)]
+        if not arms:
+            result.fail(LSP_NO_ARM, "line %d: _request has no `except "
+                                    "asyncio.CancelledError` arm -- the "
+                                    "pending waiter leaks and the server keeps "
+                                    "computing" % hop.lineno)
+            continue
+        for arm in arms:
+            if not _has_const([arm], LSP_CANCEL_METHOD):
+                result.fail(LSP_NO_NOTICE, "line %d: the cancel arm never "
+                                           "names %s" % (arm.lineno,
+                                                         LSP_CANCEL_METHOD))
+            pops = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                       and n.func.attr == "pop"
+                       and isinstance(n.func.value, ast.Attribute)
+                       and n.func.value.attr == "_pending"
+                       for n in ast.walk(arm))
+            if not pops:
+                result.fail(LSP_LEAKS, "line %d: the cancel arm leaves the "
+                                       "waiter in _pending" % arm.lineno)
+            if not _reraises(arm):
+                result.fail(LSP_ARM_SWALLOWS, "line %d: the cancel arm does not "
+                                              "re-raise -- the cancelled call "
+                                              "would carry on" % arm.lineno)
+    result.detail.insert(0, "_request    : %d hop(s)" % len(hops))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # groups
 # ---------------------------------------------------------------------------
 
@@ -523,17 +827,28 @@ def group_declared(suite, files):
         if klass not in CLASSES:
             problems.append("reclaim class %r is not one of %s"
                             % (klass, sorted(CLASSES)))
-        dispatch = RL.analyse(H.repo_path(SCAN_ROOT, name)).dispatch
+        path = H.repo_path(SCAN_ROOT, name)
+        dispatch = RL.analyse(path).dispatch
+        measured = []
         if klass == TASK and dispatch != "coroutine":
             problems.append("declared %r but test_read_loop measures dispatch "
                             "%r -- a handler in a worker thread is out of reach "
                             "of any CancelledError" % (klass, dispatch))
+        if klass == KILL:
+            exempt = {fn: why for (f, fn), why in KILL_EXEMPT.items() if f == name}
+            got = analyse_kill(path, exempt=exempt)
+            problems.extend("declared %r: %s" % (klass, p) for p in got.problems)
+            measured = ["  " + d for d in got.detail]
+        if klass == LSP_CANCEL:
+            got = analyse_lsp(path)
+            problems.extend("declared %r: %s" % (klass, p) for p in got.problems)
+            measured = ["  " + d for d in got.detail]
         suite.record(GB, name, problems,
                      detail=["declared    : %s -- %s"
                              % (klass, CLASSES.get(klass, "?")),
                              "dispatch    : %s (measured by test_read_loop)"
                              % dispatch,
-                             "why         : %s" % note],
+                             "why         : %s" % note] + measured,
                      brief="%s | %s | %s" % (H.FAIL if problems else H.PASS,
                                              name, klass))
 
@@ -552,19 +867,21 @@ def group_roster(suite, shapes, files):
                  detail=["in tree     : %d" % len(present),
                          "declared    : %d" % len(declared)])
 
-    task = sorted(n for n, r in FLEET.items() if r[0] == TASK)
-    reply = sorted(n for n, r in FLEET.items() if r[0] == REPLY_ONLY)
+    declared_totals = ((TASK, DECLARED_TASK), (KILL, DECLARED_KILL),
+                       (LSP_CANCEL, DECLARED_LSP_CANCEL),
+                       (REPLY_ONLY, DECLARED_REPLY_ONLY))
     problems = []
-    if len(task) != DECLARED_TASK:
-        problems.append("task group is %d, declared %d" % (len(task), DECLARED_TASK))
-    if len(reply) != DECLARED_REPLY_ONLY:
-        problems.append("reply-only group is %d, declared %d"
-                        % (len(reply), DECLARED_REPLY_ONLY))
+    detail = []
+    for klass, want in declared_totals:
+        rows = sorted(n for n, r in FLEET.items() if r[0] == klass)
+        if len(rows) != want:
+            problems.append("%s group is %d, declared %d" % (klass, len(rows), want))
+        detail.append("%-11s (%d): %s" % (klass, len(rows), ", ".join(rows)))
+    if set(CLASSES) != {k for k, _w in declared_totals}:
+        problems.append("CLASSES and the declared totals name different classes")
     suite.record(GC, "the reclaim classes match their declared totals", problems,
-                 detail=["task (%d)       : %s" % (len(task), ", ".join(task)),
-                         "reply-only (%d): %s" % (len(reply), ", ".join(reply)),
-                         "note        : phase 2 moves rows to new classes; a "
-                         "silent re-classification must trip something"])
+                 detail=detail + ["note        : a silent re-classification "
+                                  "must trip something"])
 
     hooked = [n for n, s in shapes.items() if s.hook_line]
     suite.record(GC, "the analyser resolved a hook in every server",
@@ -720,8 +1037,115 @@ FIXTURES = {
 }
 
 
+GOOD_KILL = '''
+import asyncio
+import os
+import signal
+import subprocess
+
+
+class _Reclaim:
+    def __init__(self):
+        self.procs = []
+
+    def adopt(self, proc):
+        self.procs.append(proc)
+
+    def cancel(self):
+        for proc in self.procs:
+            os.killpg(proc.pid, signal.SIGTERM)
+
+
+def run_command(reclaim, argv):
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, start_new_session=True)
+    reclaim.adopt(proc)
+    return proc.communicate()
+
+
+class McpServer:
+    async def _serve(self, loop, workers, msg):
+        reclaim = _Reclaim()
+        try:
+            response = await loop.run_in_executor(workers, run_command, reclaim, msg)
+        except asyncio.CancelledError:
+            reclaim.cancel()
+            raise
+        except Exception:
+            response = None
+        return response
+'''
+
+_KILL_ARM = ("        except asyncio.CancelledError:\n"
+             "            reclaim.cancel()\n"
+             "            raise\n")
+
+GOOD_LSP = '''
+import asyncio
+
+
+class Client:
+    async def _request(self, method, params, timeout=10.0):
+        req_id = self._next_id
+        self._next_id += 1
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[req_id] = fut
+        try:
+            await self._send({"jsonrpc": "2.0", "id": req_id, "method": method,
+                              "params": params})
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": {"message": "timeout"}}
+        except asyncio.CancelledError:
+            self._pending.pop(req_id, None)
+            try:
+                await self._send({"jsonrpc": "2.0", "method": "$/cancelRequest",
+                                  "params": {"id": req_id}})
+            except Exception:
+                pass
+            raise
+'''
+
+_LSP_ARM_HEAD = ("        except asyncio.CancelledError:\n"
+                 "            self._pending.pop(req_id, None)\n")
+
+RECLAIM_FIXTURES = {
+    # name -> (class, source, expected problem codes)
+    "rcl_kill_good.py": (KILL, GOOD_KILL, []),
+    "rcl_kill_not_adopted.py": (
+        KILL, GOOD_KILL.replace("    reclaim.adopt(proc)\n", ""), [KILL_UNADOPTED]),
+    "rcl_kill_no_session.py": (
+        KILL, GOOD_KILL.replace(", start_new_session=True)", ")"), [KILL_NO_SESSION]),
+    "rcl_kill_blocking_spawn.py": (
+        KILL, GOOD_KILL.replace("    return proc.communicate()\n",
+                                "    subprocess.run(argv, stdin=subprocess.DEVNULL)\n"
+                                "    return proc.communicate()\n"),
+        [KILL_BLOCKING]),
+    "rcl_kill_no_arm.py": (KILL, GOOD_KILL.replace(_KILL_ARM, ""), [KILL_NO_ARM]),
+    "rcl_kill_arm_never_signals.py": (
+        KILL, GOOD_KILL.replace("            reclaim.cancel()\n",
+                                "            reclaim.procs.clear()\n"),
+        [KILL_NO_SIGNAL]),
+    "rcl_lsp_good.py": (LSP_CANCEL, GOOD_LSP, []),
+    "rcl_lsp_no_arm.py": (
+        LSP_CANCEL, GOOD_LSP[:GOOD_LSP.index(_LSP_ARM_HEAD)], [LSP_NO_ARM]),
+    "rcl_lsp_no_notice.py": (
+        LSP_CANCEL, GOOD_LSP.replace("$/cancelRequest", "$/progress"), [LSP_NO_NOTICE]),
+    "rcl_lsp_leaks.py": (
+        LSP_CANCEL, GOOD_LSP.replace(_LSP_ARM_HEAD,
+                                     "        except asyncio.CancelledError:\n"),
+        [LSP_LEAKS]),
+    "rcl_lsp_swallows.py": (
+        LSP_CANCEL, GOOD_LSP.replace("            raise\n", "            return None\n"),
+        [LSP_ARM_SWALLOWS]),
+}
+
+
 def write_fixtures(root):
-    for name, (source, _expected) in sorted(FIXTURES.items()):
+    sources = [(n, s) for n, (s, _e) in FIXTURES.items()]
+    sources += [(n, s) for n, (_k, s, _e) in RECLAIM_FIXTURES.items()]
+    for name, source in sorted(sources):
         path = os.path.join(root, name)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(source)
@@ -756,6 +1180,38 @@ def group_control(suite, fixture_root):
                        % (flagged, must_flag)],
                  detail=["fixtures    : %d (%d defective, %d correct)"
                          % (len(FIXTURES), must_flag, len(FIXTURES) - must_flag)])
+
+    # The reclaim-class analysers, planted the same way: group B's `kill` and
+    # `lsp-cancel` verdicts are only worth what these prove each code can do.
+    good = {KILL: GOOD_KILL, LSP_CANCEL: GOOD_LSP}
+    flagged = 0
+    for name, (klass, source, expected) in sorted(RECLAIM_FIXTURES.items()):
+        problems = []
+        if expected and source == good[klass]:
+            problems.append("the mutation did not apply -- the fixture is GOOD "
+                            "under another name and proves nothing")
+        path = os.path.join(fixture_root, name)
+        got_shape = analyse_kill(path) if klass == KILL else analyse_lsp(path)
+        got = sorted(got_shape.problems)
+        if got != sorted(expected):
+            problems.append("codes %r != expected %r" % (got, sorted(expected)))
+        elif expected:
+            flagged += 1
+        suite.record(GD, "control-" + name, problems,
+                     detail=["class       : %s" % klass,
+                             "expected    : %r" % sorted(expected),
+                             "got         : %r" % got]
+                            + ["  " + d for d in got_shape.detail],
+                     brief="%s | control-%s | %r"
+                           % (H.FAIL if problems else H.PASS, name, got))
+    must_flag = sum(1 for _n, (_k, _s, e) in RECLAIM_FIXTURES.items() if e)
+    suite.record(GD, "reclaim control fires at all",
+                 [] if flagged == must_flag
+                 else ["only %d of %d defective fixtures flagged exactly"
+                       % (flagged, must_flag)],
+                 detail=["fixtures    : %d (%d defective, %d correct)"
+                         % (len(RECLAIM_FIXTURES), must_flag,
+                            len(RECLAIM_FIXTURES) - must_flag)])
 
 
 # -- group E: the skeleton ---------------------------------------------------

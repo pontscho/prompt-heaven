@@ -24,6 +24,7 @@ Usage:
 
 import argparse
 import asyncio
+import contextvars
 import difflib
 import json
 import logging
@@ -32,6 +33,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -950,6 +952,86 @@ def _check_command_safety(command: str) -> None:
 # Execution primitives
 # ===========================================================================
 
+# R-0006 phase 2: what a cancel reclaims here is the CHILD. The seconds a
+# SIGTERM'd process group gets before the SIGKILL, the same grace the timeout
+# ladder in run_command gives it.
+CANCEL_KILL_GRACE = 5.0
+
+
+class _Reclaim:
+	"""One request's spawned children, so cancelling the request kills them.
+
+	McpServer._serve makes one per request and publishes it through
+	_REQUEST_RECLAIM into the context the worker thread runs in. run_command
+	ADOPTS every Popen it starts; _serve's CancelledError arm calls cancel() on
+	the LOOP thread while the worker is still blocked in communicate() -- the
+	signal is what unblocks it, and the thread's result is then discarded.
+
+	The lock orders adopt() against cancel(): a child adopted after the cancel
+	(the worker was between the pre-spawn check and the Popen) is killed on the
+	spot, so there is no window in which a cancelled request's child escapes.
+	"""
+
+	def __init__(self) -> None:
+		self._lock = threading.Lock()
+		self._procs: List[subprocess.Popen] = []
+		self.cancelled = False
+
+	def adopt(self, proc: subprocess.Popen) -> None:
+		with self._lock:
+			if not self.cancelled:
+				self._procs.append(proc)
+				return
+		# Already cancelled: nobody wants this child's output.
+		_signal_group(proc, signal.SIGKILL)
+
+	def cancel(self, loop: asyncio.AbstractEventLoop) -> None:
+		"""SIGTERM every adopted group now, SIGKILL survivors after the grace.
+
+		Never blocks: it runs on the event-loop thread. The escalation is a
+		call_later rather than a wait for the same reason.
+		"""
+		with self._lock:
+			self.cancelled = True
+			procs = list(self._procs)
+		for proc in procs:
+			_signal_group(proc, signal.SIGTERM)
+		if procs:
+			loop.call_later(CANCEL_KILL_GRACE, self._escalate, procs)
+
+	@staticmethod
+	def _escalate(procs: List[subprocess.Popen]) -> None:
+		for proc in procs:
+			_signal_group(proc, signal.SIGKILL)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+	"""Signal *proc*'s process group, if the child has not been reaped yet.
+
+	The group id is the child's pid (start_new_session makes it the leader), so
+	no os.getpgid() round trip is needed -- and none is wanted: once the child
+	is reaped (returncode set) that pid may name somebody else's process. While
+	returncode is None, the worker thread's communicate() has not reaped it, so
+	the pid, and with it the group, is still ours.
+	"""
+	if proc.returncode is not None:
+		return
+	try:
+		os.killpg(proc.pid, sig)
+	except OSError:
+		pass
+
+
+# The current request's _Reclaim, or None outside a request (a direct caller).
+_REQUEST_RECLAIM: "contextvars.ContextVar[Optional[_Reclaim]]" = contextvars.ContextVar(
+	"forge_request_reclaim", default=None
+)
+
+
+class RequestCancelled(Exception):
+	"""The request was cancelled before this command could start."""
+
+
 def run_command(command: str, cwd: str, env: Dict[str, str],
                 timeout: int, merge_stderr: bool = True
                 ) -> Tuple[int, bytes, float, bool]:
@@ -958,6 +1040,11 @@ def run_command(command: str, cwd: str, env: Dict[str, str],
 	start = time.monotonic()
 	timed_out = False
 	exit_code = -1
+	reclaim = _REQUEST_RECLAIM.get()
+	if reclaim is not None and reclaim.cancelled:
+		# A multi-target or auto-build call: do not start the NEXT command of
+		# a request that has been cancelled. Nobody reads what this raises.
+		raise RequestCancelled(command)
 	# stdin=DEVNULL is not optional. Popen inherits the parent's stdin, and this
 	# server's stdin IS the JSON-RPC stream, so any build command that reads
 	# stdin (an interactive prompt, a stray `cat`, a test runner in watch mode)
@@ -982,6 +1069,8 @@ def run_command(command: str, cwd: str, env: Dict[str, str],
 		stderr=stderr_target,
 		start_new_session=True,
 	)
+	if reclaim is not None:
+		reclaim.adopt(proc)
 	try:
 		stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
 	except subprocess.TimeoutExpired:
@@ -1868,7 +1957,9 @@ class McpServer:
 		#     per parse, so each handler owns its own cfg dict and its own parser;
 		#   * this instance holds two strings, both written in __init__ before the
 		#     loop starts and never reassigned;
-		#   * run_command holds its Popen in a local — no shared handle — and the
+		#   * run_command holds its Popen in a local — no shared handle; the one
+		#     other reference is its OWN request's _Reclaim (R-0006), made per
+		#     request in _serve and lock-guarded — and the
 		#     working directory travels as a Popen argument, because nothing in
 		#     this file calls os.chdir. os.environ is only ever .copy()'d, never
 		#     written, so no handler can perturb another's environment either.
@@ -1993,8 +2084,9 @@ class McpServer:
 
 		An unknown, finished or malformed requestId is ignored silently: the
 		request may simply have finished before the notice arrived. The reply
-		is what this suppresses; the build or test subprocess the worker thread
-		is waiting on keeps running to completion (R-0006 phase 2 kills it).
+		is what this suppresses, and the cancel lands in _serve, whose
+		CancelledError arm kills the build or test child the worker thread is
+		waiting on (R-0006 phase 2, the `kill` reclaim class).
 		"""
 		if not isinstance(params, dict):
 			return
@@ -2008,8 +2100,24 @@ class McpServer:
 
 	async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
 		"""One request, from dispatch to written reply. Runs as its own task."""
+		# R-0006 phase 2: this request's children, published into the context
+		# the worker thread runs in. The task already owns a private copy of the
+		# context, so the set() is invisible to every other request, and
+		# copy_context().run carries it across -- a thread starts with a fresh
+		# context, so without it run_command would see None.
+		reclaim = _Reclaim()
+		_REQUEST_RECLAIM.set(reclaim)
+		ctx = contextvars.copy_context()
 		try:
-			response = await loop.run_in_executor(workers, self._handle_message, msg)
+			response = await loop.run_in_executor(
+				workers, ctx.run, self._handle_message, msg)
+		except asyncio.CancelledError:
+			# notifications/cancelled (or shutdown). The worker thread is still
+			# blocked in communicate(); killing the child's group is what lets it
+			# return, and whatever it returns is discarded. Re-raised, so no
+			# reply is written.
+			reclaim.cancel(loop)
+			raise
 		except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
 			# Deliberately Exception, not BaseException: cancellation on shutdown
 			# must propagate rather than be reported back as an internal error.

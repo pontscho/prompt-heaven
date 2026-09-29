@@ -1352,6 +1352,76 @@ def group_blocks(suite, blocks, lsp, paging, logmod):
     suite.record(GE, "lsp-request-timeout-answers-and-unregisters", problems,
                  detail=[repr(answer)])
 
+    # The CANCEL arm (R-0006 phase 2). A cancelled MCP request cancels the task
+    # awaiting `_request`, and the block owes three things: the waiter comes
+    # back OUT of `_pending` (before this arm only the timeout took it out, so
+    # every cancel left a future behind), the language server is told with
+    # `$/cancelRequest` naming the LSP id that went out -- a notification, so
+    # no id of its own -- and the CancelledError is RE-RAISED, never turned into
+    # an answer. Parked on a future nothing resolves, so the cancel always lands
+    # inside the wait, on every machine.
+    async def _cancel_inflight(receiver):
+        task = asyncio.ensure_future(lsp._request(
+            receiver, "textDocument/references", {"x": 1}, timeout=30.0))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            return "cancelled", None
+        except Exception as exc:                   # noqa: BLE001 -- the point
+            return "raised", exc
+        return "answered", task.result()
+
+    recv = _Receiver()
+    recv._next_id = 7
+    outcome, value = asyncio.run(_cancel_inflight(recv))
+    problems = problem_if(
+        outcome != "cancelled",
+        "_request %s instead of re-raising CancelledError: %r" % (outcome, value),
+    )
+    problems += problem_if(
+        recv._pending,
+        "the cancelled waiter was left in _pending: %r" % sorted(recv._pending),
+    )
+    problems += problem_if(
+        len(recv.sent) != 2,
+        "_request sent %d message(s) on a cancel, expected the request and "
+        "one $/cancelRequest" % len(recv.sent),
+    )
+    if len(recv.sent) >= 2:
+        problems += problem_if(
+            recv.sent[1] != {"jsonrpc": "2.0", "method": "$/cancelRequest",
+                             "params": {"id": 7}},
+            "the cancel notice drifted or named the wrong id: %r" % (recv.sent[1],),
+        )
+    suite.record(GE, "lsp-request-cancel-unregisters-and-notifies", problems,
+                 detail=[str(recv.sent)])
+
+    # Best-effort means best-effort: a transport that fails on the notice (the
+    # backend died, the pipe is closed) must not turn the cancel into that
+    # failure, and must not stop the waiter from being unregistered.
+    class _BrokenNotice(_Receiver):
+        async def _send(self, body):
+            self.sent.append(body)
+            if "id" not in body:
+                raise BrokenPipeError("the backend went away")
+
+    recv = _BrokenNotice()
+    outcome, value = asyncio.run(_cancel_inflight(recv))
+    problems = problem_if(
+        outcome != "cancelled",
+        "a failing $/cancelRequest surfaced as %s instead of the "
+        "CancelledError: %r" % (outcome, value),
+    )
+    problems += problem_if(
+        recv._pending,
+        "the cancelled waiter was left in _pending: %r" % sorted(recv._pending),
+    )
+    suite.record(GE, "lsp-request-cancel-notice-is-best-effort", problems,
+                 detail=[str(recv.sent)])
+
     # A notification is a notification BECAUSE it carries no `id`. Give it one
     # and the backend replies to a request nothing is waiting for: the answer
     # reaches the reader loop, finds no `_pending` entry and is dropped in

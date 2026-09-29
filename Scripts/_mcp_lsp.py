@@ -180,6 +180,23 @@ def path_to_uri(path: str) -> str:
 # it POPS the pending future and answers with an error dict -- so a slow backend
 # costs one call rather than leaking a future into a table that is never swept.
 #
+# The CANCEL arm (R-0006 phase 2) owes the same pop, and one thing more. A
+# cancelled MCP request cancels the task awaiting here; before this arm only the
+# timeout took the waiter out, so every cancel left one behind until the answer
+# happened to arrive. And the language server is still computing an answer
+# nobody will read, so it is told: `$/cancelRequest` naming the LSP id that went
+# out, a notification (no `id` of its own). Best-effort and bounded -- a dead
+# backend or a wedged pipe must neither turn the cancel into its own failure nor
+# hold the cancel up for longer than a second -- and then the CancelledError is
+# re-raised, never converted into an answer. It is sent with `self._send`, not
+# `self._notify`, so the block still promises nothing about `self` beyond
+# `_send`, `_pending` and `_next_id`. The request's own `_send` sits inside the
+# try, so a cancel landing mid-send unregisters too; a `$/cancelRequest` for an
+# id the server never saw is ignored by the protocol. No statement in the block
+# spans two lines: an implicit line join is alignment, which makes a block
+# tab-unsafe (tests/test_generated_region.py group F), and this one must stay
+# generatable into any host.
+#
 # `_next_id += 1` followed by `_pending[req_id] = fut` is also the pair
 # `tests/test_read_loop.py` names as safe ONLY on the event-loop thread (ADR
 # 0008). That invariant now has one writer instead of four; the block is the
@@ -193,12 +210,20 @@ async def _request(self, method: str, params: Any, timeout: float = 10.0) -> dic
     loop = asyncio.get_running_loop()
     fut: asyncio.Future = loop.create_future()
     self._pending[req_id] = fut
-    await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
     try:
+        await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         return await asyncio.wait_for(fut, timeout=timeout)
     except asyncio.TimeoutError:
         self._pending.pop(req_id, None)
         return {"error": {"message": f"timeout waiting for {method}"}}
+    except asyncio.CancelledError:
+        self._pending.pop(req_id, None)
+        notice = {"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": req_id}}
+        try:
+            await asyncio.wait_for(self._send(notice), timeout=1.0)
+        except Exception:
+            pass
+        raise
 
 
 async def _notify(self, method: str, params: Any) -> None:

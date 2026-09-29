@@ -3277,10 +3277,16 @@ class BaseLspClient(LspBackend):
     async def stop(self) -> None:
         if self._reader_task:
             self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
+            # asyncio.wait, not `await` under `except CancelledError: pass`,
+            # for handle_restart_lsp's reason (R-0006): that handler also
+            # swallowed a cancel of the task CALLING stop(), so a restart
+            # cancelled here still answered. wait() leaves the reader's own
+            # outcome in the task and raises only OUR cancellation.
+            await asyncio.wait({self._reader_task})
+            reader_exc = (None if self._reader_task.cancelled()
+                          else self._reader_task.exception())
+            if reader_exc is not None:
+                raise reader_exc   # as the bare `await` always did
             self._reader_task = None
 
         if self.process:
@@ -3582,16 +3588,24 @@ class BaseLspClient(LspBackend):
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending[req_id] = fut
-        await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         try:
+            await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             return {"error": {"message": f"timeout waiting for {method}"}}
+        except asyncio.CancelledError:
+            self._pending.pop(req_id, None)
+            notice = {"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": req_id}}
+            try:
+                await asyncio.wait_for(self._send(notice), timeout=1.0)
+            except Exception:
+                pass
+            raise
 
     async def _notify(self, method: str, params: Any) -> None:
         await self._send({"jsonrpc": "2.0", "method": method, "params": params})
-    # END GENERATED: 9e3a42dc773d
+    # END GENERATED: 60b99f4a6a3e
 
     async def open_document(self, path: str) -> None:
         """Open a document (first sight) or refresh it if it changed on disk,
@@ -6021,18 +6035,36 @@ async def handle_restart_lsp(params: dict, project_root: str, strict: bool = Fal
 
     # Cancel any in-flight init, unregister, and fully stop the running client.
     # Capture the task ref BEFORE _drop_backend pops it from the registry.
+    #
+    # The init task is waited for with asyncio.wait, NOT `await task` under
+    # `except asyncio.CancelledError: pass` (R-0006). That handler could not
+    # tell the two cancellations apart -- the INIT task's, which we asked for,
+    # and THIS request's, from a notifications/cancelled -- so it swallowed
+    # ours and the cancelled restart went on to re-init and answer. Task.
+    # cancelling() would tell them apart, but it is 3.11+ and this file's floor
+    # is 3.9. asyncio.wait separates them by construction on every version: it
+    # never raises the awaited task's outcome (an init that ended cancelled or
+    # failed simply lands in `done`), and a cancellation of the CURRENT task
+    # raises CancelledError out of the wait itself, without cancelling the
+    # task it was waiting on. So any CancelledError below is ours.
     task = _backend_init_tasks.get(backend_type)
     client = _drop_backend(backend_type)
-    if task is not None and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-    if client is not None:
-        await _safe_stop(client)
+    try:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.wait({task})
+            if not task.cancelled():
+                task.exception()   # retrieved: a failed init is expected here
+        if client is not None:
+            await _safe_stop(client)
+    except asyncio.CancelledError:
+        # Our cancel. The client is already out of the registry, so nothing
+        # else would ever stop it: hand it to the background reaper (idempotent
+        # if a _safe_stop was cut short) and let the cancellation propagate --
+        # the dispatcher's finally still releases the backend lock.
+        if client is not None:
+            _reap_backend_process(client)
+        raise
 
     wiped = False
     if reindex and backend_type == "clangd":

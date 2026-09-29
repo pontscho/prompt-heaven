@@ -241,7 +241,7 @@ SUITES = [
      "wiring, the fail-closed refusal off Linux x86_64, and the live prctl "
      "probe on Linux", 29),
     ("purity_lsp", run_purity_lsp,
-     "purity_call semantic navigation: clangd + luals absorption", 152),
+     "purity_call semantic navigation: clangd + luals absorption", 155),
     ("purity_file_ops", run_purity_file_ops,
      "purity_call file handlers: the .claude/tmp ignore exemption, the "
      "inheritance rule that keeps it narrow, the param contract, and the "
@@ -402,7 +402,7 @@ SUITES = [
      "a region's BEGIN line is the one its names resolve against; the "
      "generator's census read path -- fleet, sources, per-block hosts and the "
      "hand-copy walk with its declared reasons -- derived, sorted, writes "
-     "nothing", 94),
+     "nothing", 96),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
@@ -424,7 +424,8 @@ SUITES = [
      "request-id registry forgotten on completion, a hook before dispatch "
      "that refuses a bool or float requestId and never replies, initialize "
      "never cancellable, a dispatch target that lets the CancelledError "
-     "through, and what a cancel reclaims declared per server", 55),
+     "through, and what a cancel reclaims declared per server and MEASURED "
+     "for the kill and lsp-cancel classes", 67),
     # TYPED for read_loop's reason above, not mcp_footprint's: a server that
     # appears without a declared row is the defect, so a moved count is the
     # alarm working.  The two per-server groups make it 2N + a fixed tail.

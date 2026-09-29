@@ -1709,6 +1709,90 @@ def group_j(suite):
           detail=["priming raised at ~0.05s; a 30s barrier task must be "
                   "cancelled, not orphaned (settled in %.3fs)" % secs])
 
+    # -- J9-J11: R-0006 phase 2. handle_restart_lsp cancels an in-flight init
+    # and waits for it. It used to wait with `await task` under `except
+    # asyncio.CancelledError: pass`, which cannot tell the INIT task's
+    # cancellation from the REQUEST's own: a notifications/cancelled landing in
+    # that wait was swallowed, and the cancelled restart went on to re-init and
+    # answer. The backend registry and _ensure_backend are stubbed -- this pins
+    # the handler's cancellation contract, not clangd.
+    async def restart_scenario(cancel_after):
+        state = {"stopped": 0, "ensured": 0}
+
+        class _StubClient:
+            process = None
+
+            async def stop(self):
+                state["stopped"] += 1
+
+        async def slow_init():
+            try:
+                await asyncio.sleep(30.0)
+            except asyncio.CancelledError:
+                # An init that needs a moment to unwind keeps the restart
+                # parked in its wait, which is where the cancel must land.
+                await asyncio.sleep(0.3)
+                raise
+
+        async def stub_ensure(filetype, root):             # noqa: ARG001
+            state["ensured"] += 1
+            return _StubClient()
+
+        saved = mod._ensure_backend
+        mod._ensure_backend = stub_ensure
+        mod._backend_locks.pop("clangd", None)
+        session = set()
+        token = mod._BACKEND_SESSION.set(session)
+        init = asyncio.ensure_future(slow_init())
+        try:
+            await asyncio.sleep(0)
+            mod._backend_init_tasks["clangd"] = init
+            mod._backends["clangd"] = _StubClient()
+            restart = asyncio.ensure_future(
+                mod.handle_restart_lsp({"backend": "clangd"}, H.REPO_ROOT))
+            if cancel_after is not None:
+                await asyncio.sleep(cancel_after)
+                restart.cancel()
+            try:
+                outcome, value = "answered", await restart
+            except asyncio.CancelledError:
+                outcome, value = "cancelled", None
+            await asyncio.sleep(0.5)       # the init unwinds, the reaper runs
+            return outcome, value, dict(state)
+        finally:
+            if not init.done():
+                init.cancel()
+            mod._ensure_backend = saved
+            mod._release_backends(session)
+            mod._BACKEND_SESSION.reset(token)
+            mod._backend_init_tasks.pop("clangd", None)
+            mod._backends.pop("clangd", None)
+            mod._backend_locks.pop("clangd", None)
+
+    outcome, value, state = _run(restart_scenario(None))
+    text = (value or {}).get("__raw_text__", "")
+    check(suite, "J", "restart-uncancelled-still-restarts",
+          [] if outcome == "answered" and "restarted" in text
+          and state == {"stopped": 1, "ensured": 1} else
+          ["outcome=%s text=%r state=%r" % (outcome, text[:80], state)],
+          detail=["control: the stubbed registry reaches the real restart path, "
+                  "so the two cases below are measuring the handler"])
+
+    outcome, value, state = _run(restart_scenario(0.1))
+    check(suite, "J", "restart-cancel-propagates-no-reply",
+          [] if outcome == "cancelled" and state["ensured"] == 0 else
+          ["outcome=%s ensured=%d value=%r -- the request's own cancel was "
+           "swallowed and the cancelled restart re-initialised and answered"
+           % (outcome, state["ensured"], value)],
+          detail=["cancelled 0.1s in, while the restart waits on an init that "
+                  "takes 0.3s to unwind"])
+    check(suite, "J", "restart-cancel-still-stops-dropped-client",
+          [] if state["stopped"] == 1 else
+          ["the client _drop_backend unregistered was stopped %d time(s); a "
+           "cancel must not strand its process" % state["stopped"]],
+          detail=["the restart had already dropped the client from the "
+                  "registry, so nothing else would ever stop it"])
+
 
 # ---------------------------------------------------------------------------
 # Group I -- hygiene and timings

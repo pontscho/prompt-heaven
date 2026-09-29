@@ -35,6 +35,10 @@ that the convergence patch guarantees:
                            loopback peer is never answered, a sibling targeted
                            only by ill-typed requestIds still is (R-0006; see
                            inflight_cancel_probe)
+  * in-flight kill       -> mcp-forge only: a cancelled test call's child
+                           process is killed, not left to finish, and the
+                           cancelled id is never answered (R-0006 phase 2; see
+                           inflight_kill_probe)
 
 Usage:
   python3 _mcp_smoke_test.py                 # all servers
@@ -956,6 +960,106 @@ def inflight_cancel_probe(checks):
         peer.close()
 
 
+_KILL_PROBE_YAML = """version: 1
+test:
+  hold:
+    description: "R-0006 smoke: record the shell pid, then become a 30s sleep"
+    commands:
+      - echo $$ > child.pid; exec sleep 30
+"""
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def inflight_kill_probe(checks):
+    """R-0006 phase 2, end to end: a cancelled forge call KILLS its child.
+
+    mcp-forge is a `kill`-class server (tests/test_cancel.py): the build/test
+    child a request spawns is adopted by that request, and the cancel signals
+    its process group while the worker thread is still blocked in
+    communicate().  A second instance is pointed at a throwaway project under
+    .claude/tmp whose one target writes its shell pid and then `exec`s a 30s
+    sleep, so the pid on disk IS the child.  After the cancel the child must be
+    gone well inside its 30s, the ping behind the cancel must be answered
+    first, and the cancelled id must never be answered.
+    """
+    import tempfile
+    tmp_root = os.path.join(os.path.dirname(SCRIPT_DIR), ".claude", "tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    project = tempfile.mkdtemp(prefix="forge_kill_smoke_", dir=tmp_root)
+    pid_file = os.path.join(project, "child.pid")
+    with open(os.path.join(project, "project-forge.yaml"), "w",
+              encoding="utf-8") as fh:
+        fh.write(_KILL_PROBE_YAML)
+    srv = Server({"file": "mcp-forge.py", "tool": "forge_call",
+                  "args": ["--project-root", project]})
+    srv.start()
+    pid = None
+    try:
+        srv.send({"jsonrpc": "2.0", "id": "init", "method": "initialize",
+                  "params": {}})
+        if (srv.read() or {}).get("id") != "init":
+            checks.append(check("kill probe: second instance initializes",
+                                False, "alive=%r" % srv.alive()))
+            return
+        srv.send({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                  "params": {"name": "forge_call",
+                             "arguments": {"function": "test",
+                                           "params": {"targets": ["hold"]}}}})
+        deadline = time.time() + 10.0
+        while pid is None and time.time() < deadline:
+            try:
+                with open(pid_file, encoding="utf-8") as fh:
+                    pid = int(fh.read().strip() or "0") or None
+            except (OSError, ValueError):
+                pid = None
+            if pid is None:
+                time.sleep(0.05)
+        running = pid is not None and _pid_alive(pid)
+        checks.append(check("kill probe: the child is running in flight",
+                            running, "pid=%r" % pid))
+        if not running:
+            return
+
+        srv.send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                  "params": {"requestId": 1, "reason": "smoke kill probe"}})
+        srv.send({"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}})
+        first = srv.read() or {}
+        checks.append(check("kill probe: no reply to the cancel, ping answered",
+                            first.get("id") == 2,
+                            "first reply=%s" % json.dumps(first)[:160]))
+
+        deadline = time.time() + 8.0
+        while _pid_alive(pid) and time.time() < deadline:
+            time.sleep(0.05)
+        checks.append(check("kill probe: the cancelled call's child is killed",
+                            not _pid_alive(pid),
+                            "pid %d still alive %.0fs after the cancel "
+                            "(its sleep is 30s)" % (pid, 8.0)))
+
+        srv.send({"jsonrpc": "2.0", "id": 3, "method": "ping", "params": {}})
+        seen = _read_ids(srv, (3,), 10.0)
+        seen += _read_ids(srv, ("never",), 1.0)
+        checks.append(check("kill probe: the cancelled call is never answered",
+                            1 not in seen and 3 in seen, "ids seen=%r" % seen))
+    finally:
+        srv.stop()
+        if pid is not None and _pid_alive(pid):
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        shutil.rmtree(project, ignore_errors=True)
+
+
 def run_server(cfg):
     """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}."""
     srv = Server(cfg)
@@ -1049,6 +1153,11 @@ def run_server(cfg):
         #     a second instance pointed at a loopback peer.
         if cfg["tool"] == "jenkins_call":
             inflight_cancel_probe(checks)
+
+        # 13. forge-only: a cancel that lands on a build/test call really in
+        #     flight kills the child it spawned (R-0006 phase 2, `kill` class).
+        if cfg["tool"] == "forge_call":
+            inflight_kill_probe(checks)
 
         status = "PASS" if all(ok for _, ok, _ in checks) else "FAIL"
         return (status, checks)

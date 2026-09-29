@@ -897,16 +897,24 @@ class ClangdClient:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending[req_id] = fut
-        await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         try:
+            await self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             return {"error": {"message": f"timeout waiting for {method}"}}
+        except asyncio.CancelledError:
+            self._pending.pop(req_id, None)
+            notice = {"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": req_id}}
+            try:
+                await asyncio.wait_for(self._send(notice), timeout=1.0)
+            except Exception:
+                pass
+            raise
 
     async def _notify(self, method: str, params: Any) -> None:
         await self._send({"jsonrpc": "2.0", "method": method, "params": params})
-    # END GENERATED: 9e3a42dc773d
+    # END GENERATED: 60b99f4a6a3e
 
     async def open_document(self, path: str) -> None:
         abs_path = pathlib.Path(path)

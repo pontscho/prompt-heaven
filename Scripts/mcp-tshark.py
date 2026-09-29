@@ -24,6 +24,7 @@ Functions:
 
 import argparse
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -152,6 +153,131 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Request-scoped tshark runs (R-0006 phase 2: a cancel kills the child)
+# ---------------------------------------------------------------------------
+# The seconds a SIGTERM'd tshark gets before the SIGKILL -- the grace
+# _kill_process_group gives a capture.
+CANCEL_KILL_GRACE = 5.0
+
+
+class _Reclaim:
+    """One request's tshark children, so cancelling the request kills them.
+
+    McpServer._serve makes one per request and publishes it through
+    _REQUEST_RECLAIM into the context the worker thread runs in. _run_tshark
+    ADOPTS every child it starts; _serve's CancelledError arm calls cancel() on
+    the LOOP thread while the worker is still blocked in communicate() -- the
+    signal is what unblocks it, and the thread's result is then discarded.
+
+    NOT used for start_capture's child: that one is the session itself, meant
+    to outlive the request, and its ownership travels through SESSIONS.
+
+    The lock orders adopt() against cancel(): a child adopted after the cancel
+    is killed on the spot, so a cancelled request's child cannot escape.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._procs: List[subprocess.Popen] = []
+        self.cancelled = False
+
+    def adopt(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            if not self.cancelled:
+                self._procs.append(proc)
+                return
+        # Already cancelled: nobody wants this child's output.
+        _signal_group(proc, signal.SIGKILL)
+
+    def cancel(self, loop: asyncio.AbstractEventLoop) -> None:
+        """SIGTERM every adopted group now, SIGKILL survivors after the grace.
+
+        Never blocks: it runs on the event-loop thread, which is why the
+        escalation is a call_later and not a wait.
+        """
+        with self._lock:
+            self.cancelled = True
+            procs = list(self._procs)
+        for proc in procs:
+            _signal_group(proc, signal.SIGTERM)
+        if procs:
+            loop.call_later(CANCEL_KILL_GRACE, self._escalate, procs)
+
+    @staticmethod
+    def _escalate(procs: List[subprocess.Popen]) -> None:
+        for proc in procs:
+            _signal_group(proc, signal.SIGKILL)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal *proc*'s process group, if the child has not been reaped yet.
+
+    The group id is the child's pid (start_new_session makes it the leader).
+    No os.getpgid() round trip, on purpose: once the child is reaped
+    (returncode set) that pid may name somebody else's process, and while
+    returncode is None the worker's communicate() has not reaped it.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, sig)
+    except OSError:
+        pass
+
+
+# The current request's _Reclaim, or None outside a request (a direct caller).
+_REQUEST_RECLAIM: "contextvars.ContextVar[Optional[_Reclaim]]" = contextvars.ContextVar(
+    "tshark_request_reclaim", default=None
+)
+
+
+class RequestCancelled(Exception):
+    """The request was cancelled before this tshark run could start."""
+
+
+def _run_tshark(args: List[str], timeout: float) -> subprocess.CompletedProcess:
+    """`subprocess.run(args, capture_output=True, text=True, timeout=timeout)`
+    for a request-scoped tshark run, with the child adopted by the request.
+
+    subprocess.run hands back no handle, so a cancel could never reach its
+    child; this is run()'s own body with the Popen kept. Two differences, and
+    only two: the child leads its own session (start_new_session, os.setsid in
+    C between fork and exec) so a cancel can signal its whole group, and it is
+    adopted by the current request's _Reclaim. The timeout path is run()'s,
+    verbatim: kill the child, reap it, re-raise TimeoutExpired.
+
+    stdin=DEVNULL: stdin is NOT covered by capture_output, so it would be
+    inherited -- and this server's stdin is the JSON-RPC stream. tshark reads
+    stdin whenever the capture source resolves to it (`-r -`, or `-i -`).
+    """
+    reclaim = _REQUEST_RECLAIM.get()
+    if reclaim is not None and reclaim.cancelled:
+        raise RequestCancelled(args[0])
+    with subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as proc:
+        if reclaim is not None:
+            reclaim.adopt(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            # POSIX communicate already put the output so far on the exception.
+            proc.wait()
+            raise
+        except BaseException:
+            proc.kill()
+            raise
+        retcode = proc.poll()
+    return subprocess.CompletedProcess(proc.args, retcode, stdout, stderr)
 
 
 def _cleanup_sessions() -> None:
@@ -667,10 +793,9 @@ def _packet_count(pcap_path: str) -> int:
     """Quick packet count via tshark — no full dissection."""
     try:
         tshark = _get_tshark()
-        r = subprocess.run(
+        r = _run_tshark(
             [tshark, "-r", pcap_path, "-T", "fields", "-e", "frame.number"],
-            capture_output=True, text=True, timeout=30,
-            stdin=subprocess.DEVNULL,   # never let tshark reach the MCP stream
+            timeout=30,
         )
         if r.returncode == 0 and r.stdout.strip():
             return len(r.stdout.strip().split("\n"))
@@ -852,8 +977,7 @@ def _run_analyze(params: dict, project_root: str) -> str:
 
     log.info("Analyzing: %s", " ".join(args))
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout_sec,
-                                stdin=subprocess.DEVNULL)   # never reach the MCP stream
+        result = _run_tshark(args, timeout=timeout_sec)
     except subprocess.TimeoutExpired:
         return f"**Error:** Analysis timed out after {timeout_sec}s"
 
@@ -972,10 +1096,7 @@ def handle_list_sessions(params: dict, project_root: str) -> dict:
 def handle_list_interfaces(params: dict, project_root: str) -> dict:
     tshark = _get_tshark()
     try:
-        result = subprocess.run(
-            [tshark, "-D"], capture_output=True, text=True, timeout=10,
-            stdin=subprocess.DEVNULL,   # never let tshark reach the MCP stream
-        )
+        result = _run_tshark([tshark, "-D"], timeout=10)
     except subprocess.TimeoutExpired:
         return {"error": "tshark -D timed out"}
     except OSError as exc:
@@ -1052,8 +1173,7 @@ def handle_statistics(params: dict, project_root: str) -> dict:
 
     log.info("Statistics: %s", " ".join(args))
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=120,
-                                stdin=subprocess.DEVNULL)   # never reach the MCP stream
+        result = _run_tshark(args, timeout=120)
     except subprocess.TimeoutExpired:
         return {"error": "Statistics timed out after 120s"}
 
@@ -1097,8 +1217,7 @@ def handle_follow_stream(params: dict, project_root: str) -> dict:
 
     log.info("Follow stream: %s", " ".join(args))
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=120,
-                                stdin=subprocess.DEVNULL)   # never reach the MCP stream
+        result = _run_tshark(args, timeout=120)
     except subprocess.TimeoutExpired:
         return {"error": "Follow stream timed out after 120s"}
 
@@ -1476,7 +1595,9 @@ class McpServer:
         """notifications/cancelled, on the loop thread. Never replies.
 
         An unknown, finished or malformed requestId is ignored silently: the
-        request may simply have finished before the notice arrived.
+        request may simply have finished before the notice arrived. The cancel
+        lands in _serve, whose CancelledError arm kills the request's tshark
+        child (R-0006 phase 2, the `kill` reclaim class).
         """
         if not isinstance(params, dict):
             return
@@ -1490,8 +1611,24 @@ class McpServer:
 
     async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
         """One request, from dispatch to written reply. Runs as its own task."""
+        # R-0006 phase 2: this request's tshark children, published into the
+        # context the worker thread runs in. The task owns a private copy of the
+        # context, so the set() is invisible to every other request, and
+        # copy_context().run carries it across -- a thread starts with a fresh
+        # context, so without it _run_tshark would see None.
+        reclaim = _Reclaim()
+        _REQUEST_RECLAIM.set(reclaim)
+        ctx = contextvars.copy_context()
         try:
-            response = await loop.run_in_executor(workers, self._handle_message, msg)
+            response = await loop.run_in_executor(
+                workers, ctx.run, self._handle_message, msg)
+        except asyncio.CancelledError:
+            # notifications/cancelled (or shutdown). The worker thread is still
+            # blocked in communicate(); killing the child's group is what lets
+            # it return, and whatever it returns is discarded. Re-raised, so no
+            # reply is written.
+            reclaim.cancel(loop)
+            raise
         except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
             # Catching Exception and not BaseException is load-bearing: the
             # `finally` above cancels these tasks, and swallowing CancelledError
