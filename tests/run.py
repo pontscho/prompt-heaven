@@ -240,8 +240,9 @@ SUITES = [
      "`only_matching` (rg -o): one row per match, paged by match rows, "
      "refused beside count/files_with_matches/context, "
      "find_file's path-style character classes, and a catastrophic "
-     "search regex bounded by the call's time budget",
-     197),
+     "search regex bounded by the call's time budget, and replace_content's "
+     "regex mode bounded the same way, the file left untouched on overrun",
+     209),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 298),
     ("name_existence", run_name_existence,

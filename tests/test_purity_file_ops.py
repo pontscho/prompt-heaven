@@ -131,6 +131,11 @@ Groups:
      (`$`, CRLF, no final newline, form feed, non-ASCII, context, count,
      files_with_matches, zero-length only_matching), literal mode and the
      pattern-length ceiling as controls
+  Q  replace_content's `mode:"regex"` is bounded the same way: a catastrophic
+     needle answers an error naming the budget and `mode:"literal"` within the
+     group P bound, leaves the file's bytes untouched, and the server still
+     replaces afterwards; backrefs, zero-length matches, the zero / one / many
+     answers, a bad group reference and literal mode as controls
 """
 
 import os
@@ -2717,6 +2722,199 @@ def group_p(suite, drv, root):
 
 
 # ---------------------------------------------------------------------------
+# Group Q -- replace_content's regex mode is bounded too
+#
+# Group P bounded search_for_pattern; replace_content's `mode:"regex"` still
+# ran re.finditer and re.sub in-process on up to 10 MB, so the same `(a+)+$`
+# froze the whole server there.  Every catastrophic row runs on its OWN fresh
+# server under the same harness timeout as group P, asserts the error names
+# the budget and `mode:"literal"`, asserts the file's BYTES are unchanged (a
+# replace that gave up must not have written anything), and then asks the SAME
+# server for a normal replace.  The controls pin replace_content's semantics
+# as they were: backrefs (numbered and named), zero-length matches counted the
+# way re.sub counts them, the zero / one / many-without-allow_multiple
+# answers, a bad group reference, and literal mode -- which stays in-process
+# and answers the evil needle at once.
+# ---------------------------------------------------------------------------
+
+RQ_EVIL = "evil.txt"
+RQ_EVIL_BYTES = ("a" * 40 + "!\n").encode("utf-8")
+
+
+def make_replace_fixture(ws, subdir):
+    """Group Q's tree: only the catastrophic file; the controls write their
+    own file first, because every accepted replace mutates it."""
+    ws.subdir(subdir)
+    ws.write_bytes(os.path.join(subdir, RQ_EVIL), RQ_EVIL_BYTES)
+    return os.path.realpath(ws.join(subdir))
+
+
+def _q_write(root, rel, data):
+    with open(os.path.join(root, rel), "wb") as fh:
+        fh.write(data.encode("utf-8"))
+
+
+def _q_read(root, rel):
+    with open(os.path.join(root, rel), "rb") as fh:
+        return fh.read()
+
+
+def record_rc_bounded(suite, cid, root, params, detail=()):
+    """A catastrophic replace on a FRESH server: an error within P_BOUND_SECS,
+    the file untouched, and the same server still replacing afterwards."""
+    drv = Driver(root, timeout=P_RPC_TIMEOUT)
+    problems = []
+    elapsed = 0.0
+    after = "(not asked: the first call never returned)"
+    try:
+        t0 = time.monotonic()
+        is_error, text = drv.call("replace_content", params)
+        elapsed = time.monotonic() - t0
+        low = text.lower()
+        if text.startswith("DRIVER-ERROR"):
+            problems.append("no reply within the %.0fs harness timeout (%s)"
+                            % (P_RPC_TIMEOUT, text[:160]))
+        elif not is_error:
+            problems.append("expected an error, call was accepted")
+        else:
+            for token in ("time budget", "backtrack", 'mode:"literal"'):
+                if token not in low:
+                    problems.append("error text does not mention %r" % token)
+        if elapsed > P_BOUND_SECS:
+            problems.append("took %.1fs, bound is %.0fs"
+                            % (elapsed, P_BOUND_SECS))
+        if _q_read(root, RQ_EVIL) != RQ_EVIL_BYTES:
+            problems.append("the file was modified by a replace that failed")
+        if not text.startswith("DRIVER-ERROR"):
+            rel = "after-%s.txt" % cid
+            _q_write(root, rel, "one two\n")
+            a_err, after = drv.call("replace_content", {
+                "relative_path": rel, "needle": r"(\w+) (\w+)",
+                "repl": r"\2 \1", "mode": "regex"})
+            if a_err or _q_read(root, rel) != b"two one\n":
+                problems.append("server did not answer a normal replace "
+                                "afterwards: %s" % after.strip()[:200])
+    finally:
+        drv.close()
+    return suite.record("Q", cid, problems,
+                        detail=list(detail) + [
+                            "params : %s" % (params,),
+                            "elapsed: %.2fs (bound %.0fs)"
+                            % (elapsed, P_BOUND_SECS),
+                            "reply  : %s" % text.strip()[:300],
+                            "after  : %s" % after.strip()[:200]],
+                        text=text, showable=True)
+
+
+def record_rc(suite, cid, drv, before, params, want_error=False,
+              want_after=None, must_say=(), detail=()):
+    """Write *before* to params' file, replace, then assert the reply AND the
+    bytes on disk: an error must leave *before* untouched."""
+    root, rel = drv.root, params["relative_path"]
+    _q_write(root, rel, before)
+    t0 = time.monotonic()
+    is_error, text = drv.call("replace_content", params)
+    elapsed = time.monotonic() - t0
+    got = _q_read(root, rel).decode("utf-8")
+    problems = []
+    if want_error and not is_error:
+        problems.append("expected an error, call was accepted")
+    if not want_error and is_error:
+        problems.append("expected acceptance, got an error")
+    for token in must_say:
+        if token.lower() not in text.lower():
+            problems.append("reply does not mention %r" % token)
+    want = before if want_error else want_after
+    if want is not None and got != want:
+        problems.append("file is %r, want %r" % (got, want))
+    return suite.record("Q", cid, problems,
+                        detail=list(detail) + [
+                            "params : %s" % (params,),
+                            "elapsed: %.2fs" % elapsed,
+                            "reply  : %s" % text.strip()[:300],
+                            "file   : %r" % got[:200]],
+                        text=text, showable=True)
+
+
+def group_q(suite, drv, root):
+    evil = {"relative_path": RQ_EVIL, "needle": "(a+)+$", "repl": "x",
+            "mode": "regex"}
+    record_rc_bounded(
+        suite, "catastrophic-replace-bounded", root, dict(evil),
+        detail=["the default: count the matches, refuse or substitute"])
+    record_rc_bounded(
+        suite, "catastrophic-replace-multi-bounded", root,
+        dict(evil, allow_multiple_occurrences=True),
+        detail=["allow_multiple_occurrences: the substitution path"])
+
+    rx = {"relative_path": "ctl.txt", "mode": "regex"}
+    record_rc(
+        suite, "backref-numbered-multi", drv, "foo=1\nbar=2\nété=3\n",
+        dict(rx, needle=r"(\w+)=(\d)", repl=r"\2=\1",
+             allow_multiple_occurrences=True),
+        want_after="1=foo\n2=bar\n3=été\n", must_say=["Replaced 3"],
+        detail=["CONTROL: numbered backrefs, a Unicode \\w, three matches"])
+    record_rc(
+        suite, "backref-named-one", drv, "key: value\nother\n",
+        dict(rx, needle=r"(?m)^(?P<k>\w+): (?P<v>\w+)$",
+             repl=r"\g<v>: \g<k>"),
+        want_after="value: key\nother\n", must_say=["Replaced 1"],
+        detail=["CONTROL: named backrefs and an inline (?m) flag"])
+    record_rc(
+        suite, "many-without-allow_multiple-refused", drv, "ab ab ab\n",
+        dict(rx, needle="ab", repl="X"), want_error=True,
+        must_say=["Multiple matches (3)", "allow_multiple_occurrences"],
+        detail=["CONTROL: the count check still refuses, file untouched"])
+    record_rc(
+        suite, "zero-matches-refused", drv, "nothing here\n",
+        dict(rx, needle=r"\d+", repl="N"), want_error=True,
+        must_say=["Pattern not found"],
+        detail=["CONTROL: no match is an error, file untouched"])
+    record_rc(
+        suite, "zero-length-matches-counted", drv, "ab",
+        dict(rx, needle="x*", repl="-", allow_multiple_occurrences=True),
+        want_after="-a-b-", must_say=["Replaced 3"],
+        detail=["CONTROL: re.sub's empty-match rule, and a count that agrees"])
+    record_rc(
+        suite, "bad-group-reference-refused", drv, "abc\n",
+        dict(rx, needle="(b)", repl=r"\2"), want_error=True,
+        must_say=["group"],
+        detail=["CONTROL: an invalid backref is an error, file untouched"])
+    record_rc(
+        suite, "bad-pattern-refused", drv, "abc\n",
+        dict(rx, needle="(b", repl="x"), want_error=True,
+        detail=["CONTROL: a pattern that does not compile"])
+    record_rc(
+        suite, "pipe-escape-still-alternation", drv, "cat dog\n",
+        dict(rx, needle=r"cat\|dog", repl="pet",
+             allow_multiple_occurrences=True),
+        want_after="pet pet\n", must_say=["Replaced 2"],
+        detail=["CONTROL: the `\\|` -> `|` rewrite regex mode always did"])
+    record_rc(
+        suite, "literal-mode-parens", drv, "f(a+)+$ g\n",
+        {"relative_path": "ctl.txt", "needle": "(a+)+$", "repl": "Z"},
+        want_after="fZ g\n", must_say=["Replaced 1"],
+        detail=["CONTROL: literal mode (the default) takes the text as-is"])
+    t0 = time.monotonic()
+    is_error, text = drv.call("replace_content", {
+        "relative_path": RQ_EVIL, "needle": "(a+)+$", "repl": "x",
+        "mode": "literal"})
+    elapsed = time.monotonic() - t0
+    problems = []
+    if not is_error or "needle not found" not in text.lower():
+        problems.append("expected 'Needle not found', got: %s" % text[:200])
+    if elapsed > 2.0:
+        problems.append("literal mode took %.1fs" % elapsed)
+    if _q_read(root, RQ_EVIL) != RQ_EVIL_BYTES:
+        problems.append("the file was modified")
+    suite.record("Q", "literal-mode-evil-needle-fast", problems,
+                 detail=["CONTROL: literal mode stays in-process and linear",
+                         "elapsed: %.2fs" % elapsed,
+                         "reply  : %s" % text.strip()[:300]],
+                 text=text, showable=True)
+
+
+# ---------------------------------------------------------------------------
 # Group F -- hygiene
 # ---------------------------------------------------------------------------
 
@@ -2872,9 +3070,21 @@ def run(opts=None):
         finally:
             drv_rd.close()
 
+        # Group Q likewise: a fresh server per catastrophic row, the controls
+        # share drv_rq.
+        replace_root = make_replace_fixture(ws, "replace")
+        suite.note("      fixture (Q)   : %s  no .gitignore, files=%s"
+                   % (replace_root, [RQ_EVIL]))
+        drv_rq = Driver(replace_root)
+        try:
+            group_q(suite, drv_rq, replace_root)
+            stderr_bytes += len(drv_rq.stderr_text)
+        finally:
+            drv_rq.close()
+
         workspaces = [basename_root, pathshaped_root, glob_root, multi_root,
                       read_root, git_root, outside_root, literal_root,
-                      onlymatch_root, class_root, redos_root]
+                      onlymatch_root, class_root, redos_root, replace_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()

@@ -64,7 +64,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `mcp_first_guard` | `test_mcp_first_guard.py` | A–O |
 | `sbx_gate` | `test_sbx_gate.py` | A–Q |
 | `purity_lsp` | `test_purity_lsp.py` | A–J |
-| `purity_file_ops` | `test_purity_file_ops.py` | A–P |
+| `purity_file_ops` | `test_purity_file_ops.py` | A–Q |
 | `mcp_git_params` | `test_mcp_git_params.py` | A–N |
 | `name_existence` | `test_name_existence.py` | A–I |
 | `spawn_stdin` | `test_spawn_stdin.py` | A–D |
@@ -226,7 +226,7 @@ tests/
   test_mcp_first_guard.py    groups A-O
   test_sbx_gate.py           groups A-Q   (grant-only gate; the guard's mirror)
   test_purity_lsp.py         groups A-J   (live clangd + lua-language-server)
-  test_purity_file_ops.py    groups A-P   (stdlib file handlers, no binary, ~2s)
+  test_purity_file_ops.py    groups A-Q   (stdlib file handlers, no binary, ~2s)
   test_mcp_git_params.py     groups A-N   (offline, subprocess stubbed)
   test_name_existence.py     groups A-I
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)

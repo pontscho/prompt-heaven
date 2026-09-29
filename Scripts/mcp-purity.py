@@ -46,7 +46,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -98,11 +98,18 @@ def _configure_logging(debug, log_file):
 # the budget, the file and regex:false. Literal mode (regex:false) stays
 # in-process: an re.escape()d pattern has nothing to backtrack over.
 #
-# NOT covered here: list_dir's `grep` and replace_content's regex mode still
-# match in-process; their own comments carry that residual.
+# replace_content's mode:"regex" uses the same worker (op `r`/`R`): the match
+# count and the substitution both run in the child against
+# _REPLACE_DEADLINE_SECS, and an overrun is an error naming the budget and
+# mode:"literal" raised BEFORE the write, so the file is left untouched.
+# Literal mode stays in-process (str.count / str.replace).
+#
+# NOT covered here: list_dir's `grep` still matches in-process -- the one
+# remaining residual; its own comment carries it.
 
 _MAX_REGEX_LEN = 1000          # caller-supplied pattern length ceiling
 _SEARCH_DEADLINE_SECS = 5.0    # wall-clock budget for multi-file scan loops
+_REPLACE_DEADLINE_SECS = 5.0   # wall-clock budget for replace_content's regex
 
 
 def _check_regex_len(pattern: str, param_name: str = "pattern") -> None:
@@ -118,8 +125,12 @@ def _check_regex_len(pattern: str, param_name: str = "pattern") -> None:
 # imports nothing from this file or the environment. Frames are an 8-byte
 # big-endian length plus payload: the first is the pattern, then one request
 # per file -- op byte (`s` search / `f` finditer) + the file's text -- each
-# answered by one JSON frame. Lines are rebuilt by splitting on "\n" ONLY,
-# which is exactly how the parent's text-mode readlines() cut them (newlines
+# answered by one JSON frame. replace_content's op is `r` (one match allowed)
+# or `R` (allow_multiple_occurrences) + an 8-byte repl length + repl + the
+# whole text, answered [count, new_text] -- new_text null when the count
+# refuses (0, or >1 under `r`), so the substitution runs only when the old
+# in-process code would have run it -- or {"error": msg} for a bad template.
+# For `s`/`f`, lines are rebuilt by splitting on "\n" ONLY, which is exactly how the parent's text-mode readlines() cut them (newlines
 # already translated); str.splitlines() would also cut at \f, \x1c, U+2028...
 # `f` keeps a line's non-empty matches with the line terminator stripped --
 # the only_matching row rule, applied here so a zero-length `x*` does not ship
@@ -143,8 +154,26 @@ def frame():
         sys.exit(0)
     return body
 pat = re.compile(frame().decode("utf-8", "surrogatepass"))
+def reply(res):
+    data = json.dumps(res).encode("ascii")
+    out.write(struct.pack("!Q", len(data)))
+    out.write(data)
+    out.flush()
 while True:
     req = frame()
+    if req[:1] in (b"r", b"R"):
+        (k,) = struct.unpack("!Q", req[1:9])
+        repl = req[9:9 + k].decode("utf-8", "surrogatepass")
+        text = req[9 + k:].decode("utf-8", "surrogatepass")
+        n = sum(1 for _ in pat.finditer(text))
+        if n == 0 or (n > 1 and req[:1] == b"r"):
+            reply([n, None])
+            continue
+        try:
+            reply([n, pat.sub(repl, text)])
+        except Exception as exc:
+            reply({"error": str(exc)})
+        continue
     op, text = req[:1], req[1:].decode("utf-8", "surrogatepass")
     parts = text.split("\n")
     lines = [p + "\n" for p in parts[:-1]]
@@ -159,10 +188,7 @@ while True:
                     if h]
             if hits:
                 res.append([i, hits])
-    data = json.dumps(res).encode("ascii")
-    out.write(struct.pack("!Q", len(data)))
-    out.write(data)
-    out.flush()
+    reply(res)
 '''
 
 
@@ -195,11 +221,21 @@ class _RegexWorker:
     the ReDoS guard above). Started lazily on the first file, so a call that
     reaches no file spawns nothing; every reply is awaited against the call's
     absolute *deadline*, and a miss kills the child and raises ValueError.
-    close() is idempotent and is what the handler's ExitStack runs."""
+    close() is idempotent and is what the handler's ExitStack runs.
+    replace_content drives it too (substitute()): *budget*, *task* and
+    *way_out* only change what the overrun error says and the child's CPU
+    backstop; the defaults are search_for_pattern's."""
 
-    def __init__(self, pattern_str: str, deadline: float) -> None:
+    def __init__(self, pattern_str: str, deadline: float,
+                 budget: float = _SEARCH_DEADLINE_SECS,
+                 task: str = "search",
+                 way_out: str = ", narrow relative_path, or pass regex:false "
+                                "for a literal search") -> None:
         self._pattern = pattern_str
         self._deadline = deadline
+        self._budget = budget
+        self._task = task
+        self._way_out = way_out
         self._proc: Optional[subprocess.Popen] = None
         self._sel: Optional[selectors.BaseSelector] = None
         self._closed = False
@@ -210,9 +246,8 @@ class _RegexWorker:
         if not sys.executable:
             raise RuntimeError(
                 "cannot evaluate the regex in a bounded worker: this "
-                "interpreter reports no executable path; pass regex:false "
-                "for a literal search")
-        cpu = int(_SEARCH_DEADLINE_SECS) + 2
+                "interpreter reports no executable path" + self._way_out)
+        cpu = int(self._budget) + 2
         self._proc = subprocess.Popen(
             [sys.executable, "-I", "-S", "-c", _REGEX_WORKER_SRC, str(cpu)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -238,12 +273,11 @@ class _RegexWorker:
             if remaining <= 0 or not self._sel.select(remaining):
                 self.close()
                 raise ValueError(
-                    f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s) "
+                    f"{self._task} exceeded time budget ({self._budget:.0f}s) "
                     f"while matching the regex against {where}: the pattern may "
                     "backtrack catastrophically (nested quantifiers such as "
                     "(a+)+ or (a|a)*). The match was stopped. Simplify the "
-                    "pattern, narrow relative_path, or pass regex:false for a "
-                    "literal search")
+                    "pattern" + self._way_out)
             chunk = os.read(fd, n - len(buf))
             if not chunk:
                 self.close()
@@ -252,12 +286,26 @@ class _RegexWorker:
             buf += chunk
         return bytes(buf)
 
-    def _ask(self, op: bytes, lines: List[str], where: str) -> list:
+    def _ask(self, op: bytes, lines: List[str], where: str,
+             prefix: bytes = b"") -> Any:
         if self._proc is None:
             self._start()
-        self._send(op + "".join(lines).encode("utf-8", "surrogatepass"))
+        self._send(op + prefix
+                   + "".join(lines).encode("utf-8", "surrogatepass"))
         (n,) = struct.unpack("!Q", self._recv(8, where))
         return json.loads(self._recv(n, where).decode("ascii"))
+
+    def substitute(self, repl: str, text: str, allow_multiple: bool,
+                   where: str) -> Tuple[int, Optional[str]]:
+        """replace_content's regex mode: (match count, new text). The new
+        text is None when the count refuses (0, or >1 without
+        *allow_multiple*); a bad replacement template raises re.error."""
+        rb = repl.encode("utf-8", "surrogatepass")
+        res = self._ask(b"R" if allow_multiple else b"r", [text], where,
+                        prefix=struct.pack("!Q", len(rb)) + rb)
+        if isinstance(res, dict):
+            raise re.error(res.get("error", "invalid replacement"))
+        return res[0], res[1]
 
     def search_lines(self, lines: List[str], where: str) -> set:
         return set(self._ask(b"s", lines, where))
@@ -1706,34 +1754,41 @@ def handle_replace_content(params: dict, project_root: str, strict: bool = False
     else:
         _check_regex_len(needle, "needle")
         needle = needle.replace("\\|", "|")
-        # F3/CWE-1333: bound content size before running the regex to limit
-        # backtracking exposure.  The 10 MB cap matches search_for_pattern's
-        # max_file_size default.
-        # Residual: a single catastrophic re.finditer/re.sub call on a large
-        # input cannot be preempted in pure-stdlib re — the length cap on the
-        # pattern + this content-size ceiling are the proportionate mitigation
-        # for a local single-user tool running in a thread-pool executor.
+        # F3/CWE-1333: the 10 MB content cap matches search_for_pattern's
+        # max_file_size default. The bound on backtracking is the regex
+        # worker (see the ReDoS guard): the count and the substitution run in
+        # a killable child against _REPLACE_DEADLINE_SECS, and an overrun
+        # raises before the write below, so the file is never touched.
         _RC_MAX_CONTENT = 10 * 1024 * 1024  # 10 MB
         if len(content) > _RC_MAX_CONTENT:
             raise ValueError(
                 f"File content ({len(content)} bytes) exceeds the {_RC_MAX_CONTENT // (1024*1024)} MB "
                 "limit for regex replace; use literal mode or a smaller file"
             )
-        matches = list(re.finditer(needle, content))
-        if not matches:
+        re.compile(needle)  # a pattern syntax error surfaces here, as before
+        worker = _RegexWorker(
+            needle, time.monotonic() + _REPLACE_DEADLINE_SECS,
+            budget=_REPLACE_DEADLINE_SECS, task="replace_content",
+            way_out=' or pass mode:"literal" for a literal replace. The file '
+                    "was not modified")
+        try:
+            count, replaced = worker.substitute(repl, content, allow_multiple,
+                                                _rel)
+        finally:
+            worker.close()
+        if count == 0:
             raise ValueError(f"Pattern not found in {_rel}")
-        if len(matches) > 1 and not allow_multiple:
+        if count > 1 and not allow_multiple:
             raise ValueError(
-                f"Multiple matches ({len(matches)}) found in {_rel}. "
+                f"Multiple matches ({count}) found in {_rel}. "
                 "Set allow_multiple_occurrences=true to replace all."
             )
-        new_content = re.sub(needle, repl, content)
+        new_content = replaced
 
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(new_content)
 
-    n = count if mode == "literal" else len(matches)
-    return {"__raw_text__": f"Replaced {n} occurrence(s) in {rel}"}
+    return {"__raw_text__": f"Replaced {count} occurrence(s) in {rel}"}
 
 
 def handle_delete_lines(params: dict, project_root: str, strict: bool = False) -> dict:
