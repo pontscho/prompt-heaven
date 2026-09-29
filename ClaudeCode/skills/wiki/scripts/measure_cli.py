@@ -20,10 +20,11 @@ from a process whose vintage the caller cannot see.
 
 IT IS A BOOTSTRAP, NOT A SECOND IMPLEMENTATION
 ----------------------------------------------
-`freshness.py` and `reindex.py`, in this same directory, are hand-mirrored
-copies of server logic, and `docs/components/wiki-engine.md` records the price
-in as many words: a change to either copy must still be mirrored in the other by
-hand. This file is deliberately NOT a third instance of that bargain. It carries
+`freshness.py` and `reindex.py`, in this same directory, used to be
+hand-mirrored copies of server logic, each change landing twice. Since roadmap
+R-0033 they are wrappers of this same shape: they import this module for
+`open_wiki` -- the resolver and loader below, reached through one function --
+and call the server. This file never was an instance of that bargain. It carries
 no marker grammar, no digest rule, no fence rule, no state table and no
 rendering step. Every one of those is CALLED on the module it loads:
 
@@ -219,16 +220,43 @@ def load_server(path):
 	return module
 
 
-def default_project_root():
-	"""The enclosing git work tree, or the working directory if there is none."""
-	here = os.path.abspath(os.getcwd())
+def default_project_root(start=None):
+	"""The git work tree enclosing `start` (default: the working directory), or
+	`start` itself if there is none."""
+	origin = os.path.abspath(start or os.getcwd())
+	here = origin
 	while True:
 		if os.path.exists(os.path.join(here, ".git")):
 			return here
 		parent = os.path.dirname(here)
 		if parent == here:
-			return os.path.abspath(os.getcwd())
+			return origin
 		here = parent
+
+
+def open_wiki(root, server):
+	"""(module, target) for the two sibling gates, `freshness.py` and `reindex.py`.
+
+	They take their wiki root the way they always have: `--root`, relative to
+	the working directory. This maps it onto what `call` reads -- the project
+	root is the git work tree enclosing the wiki root (so the search order above
+	looks for the server in THAT tree), or the wiki root itself outside any
+	repository -- and then resolves and loads the server exactly as `main` does.
+	Both roots are realpath'd: the server's containment check compares a realpath
+	against the project root it is handed, and a symlinked prefix (/var on macOS)
+	would otherwise read as an escape. Refuses, like everything here, before the
+	server is asked.
+	"""
+	abs_root = os.path.realpath(root)
+	if not os.path.isdir(abs_root):
+		raise Refusal("root not found: %s" % root)
+	project_root = os.path.realpath(default_project_root(abs_root))
+	target = argparse.Namespace(
+		project_root=project_root,
+		wiki_root=os.path.relpath(abs_root, project_root),
+		strict=False, max_chars=DEFAULT_MAX_CHARS)
+	path, _label = resolve_server(server, project_root)
+	return load_server(path), target
 
 
 def wiki_abs(args):

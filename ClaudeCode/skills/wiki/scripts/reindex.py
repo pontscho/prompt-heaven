@@ -1,155 +1,112 @@
 #!/usr/bin/env python3
-"""reindex.py -- regenerate docs/INDEX.md and audit the wiki structure.
+"""reindex.py -- regenerate docs/INDEX.md and audit the wiki: the SERVER's reindex.
 
-Deterministic, stdlib-only, no LLM. Walks the wiki root, reads every page's
-frontmatter, and:
-  - regenerates INDEX.md (one line per page, grouped by type), and
-  - audits for orphans (no inbound link), duplicate slugs, and malformed
-    frontmatter (missing name/type).
+A thin wrapper, the way `measure_cli.py` is one (roadmap R-0033). It loads the
+committed `Scripts/mcp-wiki.py` off disk and calls the same
+`handle_wiki_call("reindex")` the MCP process answers `wiki_call reindex` with:
+the server walks the wiki root, writes INDEX.md (unless `--check`), and returns
+the audit -- orphans, duplicate slugs, malformed frontmatter -- which is printed
+verbatim. Before R-0033 this script carried a hand-mirrored copy of the collect,
+render and report steps; now they exist once, in the server.
 
-Only INDEX.md is ever written. With --check, nothing is written. The audit is
-printed as compact markdown prose on stdout.
+Only INDEX.md is ever written, and only by the server. With --check, nothing is
+written. The report's header names the INDEX.md the server wrote by its
+absolute path (the pre-R-0033 CLI printed the `--root` spelling).
+
+THE EXIT CODE
+-------------
+Non-zero iff the server's answer carries a duplicate-slug or a malformed block.
+That is read by the server's exported `REINDEX_BLOCKING_PREFIXES` -- the
+prefixes it renders those two block heads with -- never by matching the prose
+around them. Orphans are reported and never fail.
+
+FINDING THE SERVER
+------------------
+Exactly `measure_cli.py`'s order, through its own resolver and loader (imported,
+not copied): `--server`, then `$MCP_WIKI_SERVER`, then `Scripts/` and
+`scripts/` under the project root -- the git work tree enclosing `--root` --
+then the same two under each ancestor of this script's real path. There is no
+fallback: without the server file on disk this script cannot run. A copy-deployed
+plugin with no repo beside it needs `--server` or `$MCP_WIKI_SERVER`.
 
 Usage:
-    python scripts/reindex.py --root docs            # regenerate INDEX.md + audit
-    python scripts/reindex.py --root docs --check     # audit only, write nothing
+    python3 scripts/reindex.py --root docs            # regenerate INDEX.md + audit
+    python3 scripts/reindex.py --root docs --check    # audit only, write nothing
+    (either form also takes --server PATH)
 
-Exits non-zero if duplicate slugs or malformed frontmatter are found.
+Exit codes:
+    0  audited (and, without --check, written); no duplicate slug, nothing malformed
+    1  the server's audit names a duplicate slug or malformed frontmatter
+    2  the server was never asked or could not answer: no server module found,
+       the root is missing, or the server returned a tool error
 """
-from __future__ import annotations
-
-import argparse
 import os
 import sys
 
+# Before the sibling import: loading the server off disk must not litter the
+# tree it is indexing with bytecode.
+sys.dont_write_bytecode = True
+
+import argparse  # noqa: E402
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _wikilib as w  # noqa: E402
+import measure_cli as m  # noqa: E402
+
+# The server module main() loaded; `render_index` resolves one itself when it
+# is called without main() having run.
+_SERVER = None
 
 
-def collect(root: str):
-	entries = []
-	by_name = {}
-	referenced = set()
-	malformed = []
-	for relpath, fm, body in w.iter_pages(root):
-		name = fm.get("name")
-		typ = fm.get("type")
-		entry = {
-			"path": relpath,
-			"name": name,
-			"type": typ or "unknown",
-			"title": fm.get("title") or name or relpath,
-			"description": fm.get("description") or "",
-			"status": fm.get("status") or "",
-		}
-		entries.append(entry)
-		for link in w.as_list(fm.get("links")) + w.extract_wikilinks(body):
-			referenced.add(link)
-		issues = []
-		if not name:
-			issues.append("missing name")
-		if not typ:
-			issues.append("missing type")
-		if entry["status"] in w.STATUS_FORBIDDEN:
-			issues.append("status `%s` is a git-measured state, not editorial"
-				" intent (use draft/active/deprecated)" % entry["status"])
-		if issues:
-			malformed.append({"path": relpath, "issues": issues})
-		if name:
-			by_name.setdefault(name, []).append(relpath)
-	dups = {n: paths for n, paths in by_name.items() if len(paths) > 1}
-	orphans = [e for e in entries
-		if e["name"] and e["name"] not in referenced and e["type"] not in w.ORPHAN_EXEMPT_TYPES]
-	return entries, dups, orphans, malformed
+def _loaded_server():
+	global _SERVER
+	if _SERVER is None:
+		path, _label = m.resolve_server(None, m.default_project_root())
+		_SERVER = m.load_server(path)
+	return _SERVER
 
 
-def render_index(entries) -> str:
-	groups: dict = {}
-	counted = []
-	for entry in entries:
-		if entry["type"] in w.INDEX_COUNTED_TYPES:
-			counted.append(entry)
-			continue
-		groups.setdefault(entry["type"], []).append(entry)
-	order = w.TYPE_ORDER + sorted(t for t in groups if t not in w.TYPE_ORDER)
-
-	lines = ["# Wiki Index", "",
-		"_Generated by the p:wiki reindex tool — refresh with `/p:wiki`. Do not edit by hand._", ""]
-	for typ in order:
-		bucket = groups.get(typ) or []
-		# The count line and its section are roadmap's (adr 0022); the
-		# constant only names WHICH types are counted instead of listed.
-		tail = _counted_lines(counted) if typ == "roadmap" else []
-		if not bucket and not tail:
-			continue
-		lines.append("## %s" % typ)
-		for entry in sorted(bucket, key=lambda e: e["title"].lower()):
-			desc = (" — " + entry["description"]) if entry["description"] else ""
-			status = (" `[%s]`" % entry["status"]) if entry["status"] in w.INDEX_LABELLED else ""
-			lines.append("- [%s](%s)%s%s" % (entry["title"], entry["path"], desc, status))
-		lines.extend(tail)
-		lines.append("")
-	return "\n".join(lines).rstrip() + "\n"
+def render_index(entries):
+	# Kept by NAME only: docs/adr/0022 -- a frozen, append-only page -- anchors
+	# `reindex.py:render_index` in its frontmatter `sources:`, and that anchor
+	# must keep resolving. The renderer itself lives once, in the server.
+	return _loaded_server().render_index(entries)
 
 
-def _counted_lines(counted):
-	"""ONE line for every closed roadmap item, never one line per item:
-	INDEX.md is @-included by CLAUDE.md and loaded every session. N is
-	rendered, never typed (adr 0019)."""
-	if not counted:
-		return []
-	dirs = sorted({os.path.dirname(e["path"]).replace(os.sep, "/") + "/"
-		for e in counted})
-	return ["- Roadmap archive: %d closed item%s -> %s"
-		% (len(counted), "" if len(counted) == 1 else "s", ", ".join(dirs))]
-
-
-def render_report(entries, dups, orphans, malformed, wrote_path) -> str:
-	"""Render the audit as compact markdown prose."""
-	if wrote_path:
-		lines = ["# reindex: %d pages -> %s" % (len(entries), wrote_path), ""]
-	else:
-		lines = ["# reindex: %d pages (check only)" % len(entries), ""]
-	if dups:
-		lines.append("duplicate slugs (%d):" % len(dups))
-		for name, paths in sorted(dups.items()):
-			lines.append("- %s — %s" % (name, ", ".join(paths)))
-		lines.append("")
-	if malformed:
-		lines.append("malformed (%d):" % len(malformed))
-		for item in malformed:
-			lines.append("- %s — %s" % (item["path"], ", ".join(item["issues"])))
-		lines.append("")
-	if orphans:
-		lines.append("orphans (%d):" % len(orphans))
-		for entry in orphans:
-			lines.append("- %s `%s`" % (entry["name"], entry["path"]))
-		lines.append("")
-	lines.append("summary: %d pages, %d dup-slug, %d malformed, %d orphan"
-		% (len(entries), len(dups), len(malformed), len(orphans)))
-	return "\n".join(lines).rstrip() + "\n"
-
-
-def main(argv=None) -> int:
-	parser = argparse.ArgumentParser(description="Regenerate INDEX.md and audit the wiki.")
-	parser.add_argument("--root", default="docs", help="wiki root directory (default: docs)")
-	parser.add_argument("--check", action="store_true", help="audit only; do not write INDEX.md")
+def main(argv=None):
+	global _SERVER
+	parser = argparse.ArgumentParser(
+		prog="reindex.py",
+		description=("Regenerate INDEX.md and audit the wiki through the "
+			"committed mcp-wiki server's `reindex`."),
+		epilog=("exit codes: 0 clean | 1 duplicate slug or malformed frontmatter "
+			"| 2 the server was not found, the root is missing, or the server "
+			"returned a tool error. Orphans never fail."))
+	parser.add_argument("--root", default="docs",
+		help="wiki root directory, relative to the working directory (default: docs)")
+	parser.add_argument("--check", action="store_true",
+		help="audit only; do not write INDEX.md")
+	parser.add_argument("--server", metavar="PATH",
+		help="path to mcp-wiki.py (default: discovered, as measure_cli.py does)")
 	args = parser.parse_args(argv)
 
-	if not os.path.isdir(args.root):
-		sys.stderr.write("reindex: root not found: %s\n" % args.root)
+	try:
+		module, target = m.open_wiki(args.root, args.server)
+		missing = [name for name in ("render_index", "REINDEX_BLOCKING_PREFIXES")
+			if not hasattr(module, name)]
+		if missing:
+			raise m.Refusal("%s exports no %s; this wrapper needs the server "
+				"that has them" % (module.__file__, ", ".join(missing)))
+		_SERVER = module
+		text, ok = m.call(module, target, "reindex", check=args.check or None)
+	except (m.Refusal, OSError) as exc:
+		sys.stderr.write("%s: %s\n" % (parser.prog, exc))
 		return 2
-
-	entries, dups, orphans, malformed = collect(args.root)
-
-	wrote_path = None
-	if not args.check:
-		wrote_path = os.path.join(args.root, "INDEX.md")
-		with open(wrote_path, "w", encoding="utf-8") as fh:
-			fh.write(render_index(entries))
-
-	sys.stdout.write(render_report(entries, dups, orphans, malformed, wrote_path))
-	return 1 if (dups or malformed) else 0
+	if not ok:
+		sys.stderr.write("%s: %s\n" % (parser.prog, text))
+		return 2
+	sys.stdout.write(text.rstrip("\n") + "\n")
+	blocking = tuple(module.REINDEX_BLOCKING_PREFIXES)
+	return 1 if any(line.startswith(blocking) for line in text.splitlines()) else 0
 
 
 if __name__ == "__main__":

@@ -232,10 +232,13 @@ tests/
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
   test_mcp_footprint.py      groups A-H   (AST + one handshake per server)
   test_wiki_recall.py        groups A-S   (synthetic corpus, offline)
-  test_wiki_index.py         groups A-H   (both INDEX renderers and both copies
-                                           of the six page-type constants, loaded
-                                           side by side and compared -- archive
-                                           pages counted, never listed)
+  test_wiki_index.py         groups A-H   (the server's INDEX renderer -- archive
+                                           pages counted, never listed -- both
+                                           copies of the six page-type constants
+                                           and the _wikilib helpers compared side
+                                           by side, and the freshness.py /
+                                           reindex.py wrappers driven against
+                                           mkdtemp corpora and fixture git repos)
   test_wiki_addendum.py      groups A-E   (drives addendum.py as a child against
                                            a mkdtemp wiki root; the live docs/
                                            is digested before and after)

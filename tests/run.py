@@ -257,14 +257,18 @@ SUITES = [
      "the frontmatter aliases synonym field, "
      "the frozen-record advisory carve-out", 160),
     ("wiki_index", run_wiki_index,
-     "INDEX.md rendering and the page-type constants: both render_index copies "
-     "byte-identical, a roadmap-item never listed and counted in one rendered "
-     "line, the orphan exemption, the server/skill parity of six constants, "
-     "both git() copies timed out and hardened like roadmap.py's, and the "
-     "freshness.py exit code gating only on orphaned-source, with stale and "
-     "unverified listed as advisory for every editorial status, and every "
-     "other vendored function compared as code and constant by value",
-     87),
+     "INDEX.md rendering and the page-type constants: the server's "
+     "render_index never listing a roadmap-item and counting them in one "
+     "rendered line, the orphan exemption, the server/_wikilib parity of six "
+     "constants, both git() copies timed out and hardened like roadmap.py's, "
+     "every other _wikilib function the server vendors compared as code and "
+     "constant by value, and the freshness.py / reindex.py wrappers over the "
+     "server: the freshness exit code is the server's gating number (a dead "
+     "body anchor gates, git lag is advisory for every editorial status), its "
+     "output is the server's answer, reindex fails on a duplicate slug through "
+     "the server's exported prefix, render_index is a delegate, and no server "
+     "means exit 2",
+     72),
     ("wiki_addendum", run_wiki_addendum,
      "addendum.py, the one legal write to an accepted ADR: one dated "
      "addendum appended with every old byte kept, only an active `type: adr` "

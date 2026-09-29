@@ -186,27 +186,41 @@ and the two rejected alternatives are frozen in
 [[0002-index-claims-no-freshness]].
 
 The stdlib scripts `ClaudeCode/skills/wiki/scripts/freshness.py` and
-`ClaudeCode/skills/wiki/scripts/reindex.py` carry the same freshness/index
-logic — including the same forbidden-status lint
-`ClaudeCode/skills/wiki/scripts/reindex.py:collect` — and remain as a pre-PR CI
-gate (`freshness.py` exits non-zero only on an orphaned source, with stale and
-unverified pages reported as advisory per [[0019-only-gate-on-what-you-can-prove]];
-`reindex.py` on duplicate slugs or malformed frontmatter);
-`wiki_call` is the interactive path. That pair is hand-maintained: the server
-vendors the script logic instead of importing it, and the fleet's generator
-renders only into `Scripts/mcp-*.py` `Scripts/amalgamate.py:TARGET_GLOB`, so it
-never reaches the skill's copies — a change to either copy must still be
-mirrored in the other by hand. What changed is that the mirroring can no longer
-be forgotten: `tests/test_wiki_index.py:group_h` compares every vendored
-function as code (its AST, with only the docstring, the annotations, its own
-name and the scripts' `w.` qualifier taken out), every shared constant by value,
-and the two freshness halves the server restructured by their output, and a
-census names any name both sides define that no case compares. Rendering the
-server's copies from `_wikilib.py` as generated regions was refused by the
-generator's own gated contract rather than by preference: every canonical source
-is pinned to `Scripts/<name>` `tests/test_generated_region.py:group_contract`,
-and the skill module is tab-indented, which the per-block tab rule cannot carry
-into a space-indented host `Scripts/amalgamate.py:block_is_tab_safe`.
+`ClaudeCode/skills/wiki/scripts/reindex.py` remain as a pre-PR human/CI gate,
+and since roadmap R-0033 they carry no freshness or index logic at all: each is a
+thin wrapper that loads the committed server module off disk — through the
+resolver and loader of the measured-region bootstrap beside them,
+`ClaudeCode/skills/wiki/scripts/measure_cli.py:open_wiki` — and calls the same
+`handle_wiki_call` the MCP process answers `wiki_call` with, printing the answer
+verbatim. So the forbidden-status lint above exists once, in
+`Scripts/mcp-wiki.py:reindex_collect`, and so does everything else. Their exit
+codes are the server's too: `freshness.py` exits 1 exactly when the server's
+`gating:` line counts anything — a dead body anchor included — reading the count
+by the exported `Scripts/mcp-wiki.py:GATING_LINE_PREFIX`, and `reindex.py` exits
+1 when the audit carries a block named by
+`Scripts/mcp-wiki.py:REINDEX_BLOCKING_PREFIXES` (a duplicate slug or malformed
+frontmatter). The price is that neither runs without the server file on disk: no
+server found is exit 2, and a copy-deployed plugin needs `--server` or
+`$MCP_WIKI_SERVER`. Why the CLI's verdict stopped being a declared subset of the
+server's — the subset is what let five gating pages hide behind a CLI exit of 0 —
+is the latest addendum of [[0019-only-gate-on-what-you-can-prove]].
+
+What is still hand-maintained is the other direction: the server vendors
+`ClaudeCode/skills/wiki/scripts/_wikilib.py`'s frontmatter parser, page walk, git
+helper and page-type constants instead of importing them, because a fleet server
+never imports a sibling and the fleet's generator renders only into
+`Scripts/mcp-*.py` `Scripts/amalgamate.py:TARGET_GLOB`, so it never reaches the
+skill module. That mirroring can no longer be forgotten:
+`tests/test_wiki_index.py:group_h` compares every vendored function as code (its
+AST, with only the docstring, the annotations, its own name and the scripts'
+`w.` qualifier taken out) and every shared constant by value, and a census names
+any name a skill script and the server both define that no case compares — which
+also stops the two wrappers from growing a copy back. Rendering the server's
+copies from `_wikilib.py` as generated regions was refused by the generator's own
+gated contract rather than by preference: every canonical source is pinned to
+`Scripts/<name>` `tests/test_generated_region.py:group_contract`, and the skill
+module is tab-indented, which the per-block tab rule cannot carry into a
+space-indented host `Scripts/amalgamate.py:block_is_tab_safe`.
 
 Hand-maintained is no longer the whole story for this file, though. Several
 spans of `Scripts/mcp-wiki.py` are rendered into it from the fleet's canonical

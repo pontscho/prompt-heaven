@@ -323,7 +323,7 @@ Skill(p:wiki, args="ingest <base-ref>")
 The wiki skill returns the librarian's structured report; handle it exactly as `p:wiki` mandates:
 - **Applied Changes** (frontmatter bumps, prose updates, INDEX regen) — already done; relay the list, no action.
 - **Proposed Changes** — the librarian NEVER auto-creates or deletes pages. Significant changed files that map to NO page come back as `[PROPOSE-NEW-PAGE]`; destructive items as `[PROPOSE-DELETE]` / `[PROPOSE-SPLIT]` / `[PROPOSE-STATUS-DOWNGRADE]`. **Surface every proposal to the user and get explicit approval** before you (the main agent) execute a page creation or deletion via `purity_call`. This is the *documentation-creation* half of the request: new subsystems shipped by this implementation get new pages — but only with the user's sign-off, never silently.
-- **Findings / Self-check** — verify the librarian's self-check is honestly complete (per the `p:wiki` contract: anchors MCP-resolved, `reindex.py --check` and `freshness.py` clean, no silent body rewrites). Re-invoke with a follow-up if any item is unjustifiably unticked.
+- **Findings / Self-check** — verify the librarian's self-check is honestly complete (per the `p:wiki` contract: anchors MCP-resolved, `wiki_call` `reindex` with `check: true` and `wiki_call` `freshness` clean — the librarian has no Bash and runs those, never the `reindex.py` / `freshness.py` CLIs, which are a human/CI gate over the same server functions — and no silent body rewrites). Re-invoke with a follow-up if any item is unjustifiably unticked.
 
 ### d. Record the outcome
 

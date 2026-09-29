@@ -30,7 +30,7 @@ Functions:
   freshness        corpus report: what verify can PROVE broken (gating) plus git
                    lag, which is now an advisory line that says it is a
                    measurement and not a verdict
-  reindex          regenerate INDEX.md + structural audit (ports reindex.py logic)
+  reindex          regenerate INDEX.md + structural audit (reindex.py calls it)
   stats            page counts by type/status + dup/orphan/malformed audit
   verify           resolve every `path` / `path:symbol` anchor in the corpus and
                    report the ones that do not — the job a human currently does
@@ -41,9 +41,11 @@ Functions:
                    a hand edit is refused, never silently overwritten
 
 The stdlib-only frontmatter parser is vendored from the p:wiki `_wikilib.py`
-(kept in sync by hand — the p:wiki schema's §5 parseable subset is the contract),
-and so are the reindex/freshness helpers; tests/test_wiki_index.py compares
-every vendored function as code and every shared constant by value.
+(kept in sync by hand — the p:wiki schema's §5 parseable subset is the contract);
+tests/test_wiki_index.py compares every vendored function as code and every
+shared constant by value. The reindex/freshness logic is NOT vendored the other
+way any more: the p:wiki `freshness.py` and `reindex.py` CLIs load this module
+off disk and call `handle_wiki_call` (roadmap R-0033), so it exists once, here.
 Symbol-level anchor verification is the WEAK half here on purpose: `verify` runs
 a stdlib text matcher and declares its own limits, while the authoritative
 resolution stays with the LLM (p:minion-librarian) via the language MCP servers.
@@ -1973,7 +1975,7 @@ def measure_render(rows, malformed, registry, rel_root: str, wrote: bool,
 
 
 # ---------------------------------------------------------------------------
-# Freshness (ports p:wiki/scripts/freshness.py)
+# Freshness (the p:wiki freshness.py CLI calls this; it carries no copy)
 # ---------------------------------------------------------------------------
 
 def _changed_files(commit: str, head: str, repo: str, cache: dict):
@@ -2351,7 +2353,7 @@ def freshness_render(report) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Reindex (ports p:wiki/scripts/reindex.py)
+# Reindex (the p:wiki reindex.py CLI calls this; it carries no copy)
 # ---------------------------------------------------------------------------
 
 def reindex_collect(root: str):
@@ -2431,18 +2433,31 @@ def _counted_lines(counted):
             % (len(counted), "" if len(counted) == 1 else "s", ", ".join(dirs))]
 
 
+# The two audit blocks that FAIL a reindex, as the prefixes their head lines are
+# rendered with. Exported for `ClaudeCode/skills/wiki/scripts/reindex.py`, which
+# since roadmap R-0033 is a wrapper over this module: it derives its exit code
+# from this answer the way `freshness.py` derives its own from
+# GATING_LINE_PREFIX -- by the constant the line was rendered with, never by
+# matching the prose around it. Orphans are reported and never fail. Every
+# other line of the report starts with `#`, `- ` or `summary:`, so neither
+# prefix can be matched by a page name.
+REINDEX_DUPS_PREFIX = "duplicate slugs ("
+REINDEX_MALFORMED_PREFIX = "malformed ("
+REINDEX_BLOCKING_PREFIXES = (REINDEX_DUPS_PREFIX, REINDEX_MALFORMED_PREFIX)
+
+
 def render_reindex_report(entries, dups, orphans, malformed, wrote_path) -> str:
     if wrote_path:
         lines = ["# reindex: %d pages -> %s" % (len(entries), wrote_path), ""]
     else:
         lines = ["# reindex: %d pages (check only)" % len(entries), ""]
     if dups:
-        lines.append("duplicate slugs (%d):" % len(dups))
+        lines.append("%s%d):" % (REINDEX_DUPS_PREFIX, len(dups)))
         for name, paths in sorted(dups.items()):
             lines.append("- %s — %s" % (name, ", ".join(paths)))
         lines.append("")
     if malformed:
-        lines.append("malformed (%d):" % len(malformed))
+        lines.append("%s%d):" % (REINDEX_MALFORMED_PREFIX, len(malformed)))
         for item in malformed:
             lines.append("- %s — %s" % (item["path"], ", ".join(item["issues"])))
         lines.append("")

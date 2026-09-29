@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""INDEX.md rendering and the wiki page-type constants, in BOTH copies (A-F).
+"""INDEX.md rendering, the wiki page-type constants, and the two wiki CLIs (A-H).
 
-THE TWO COPIES
---------------
-The wiki's INDEX renderer, its orphan rule and its page-type vocabulary live
-twice: once in the p:wiki skill scripts (`ClaudeCode/skills/wiki/scripts/`,
-homed in `_wikilib.py`) and once in `Scripts/mcp-wiki.py`.  The duplication is
-deliberate -- a fleet server never imports a sibling, and the amalgamate
-generator cannot reach a skill script -- so the only thing that keeps the two
-honest is a gate that loads both and compares them.  This suite is that gate.
+WHAT IS STILL TWO COPIES, AND WHAT IS NOT
+-----------------------------------------
+The page-type vocabulary and the frontmatter/git helpers live twice: once in
+`ClaudeCode/skills/wiki/scripts/_wikilib.py` (which addendum.py imports) and
+once in `Scripts/mcp-wiki.py`.  That duplication is deliberate -- a fleet
+server never imports a sibling, and the amalgamate generator cannot reach a
+skill script -- so the only thing that keeps the two honest is a gate that
+loads both and compares them.  This suite is that gate.
+
+The INDEX renderer, the orphan rule and the freshness classifier are NOT two
+copies any more (roadmap R-0033).  `freshness.py` and `reindex.py` are thin
+wrappers that load the committed server module off disk -- through
+`measure_cli.py`'s resolver and loader -- and call its `handle_wiki_call`, so
+the render/collect/classify cases below judge the server alone, and the two
+CLIs are judged by CONTRACT: `freshness.py`'s exit code is the server's own
+`gating:` number, `reindex.py` fails exactly when the server's answer carries a
+block its exported REINDEX_BLOCKING_PREFIXES name, both print the server's
+answer, and both exit 2 when no server module can be found.
 
 WHAT A ROADMAP ITEM DOES TO THE INDEX
 -------------------------------------
@@ -26,20 +36,23 @@ GROUPS
 ------
   A  the six constants are equal between the copies, homed once on the skill
      side, and carry the roadmap types
-  B  render_index: byte-identical between the copies on every corpus variant,
-     archive pages counted and never listed, the reindex.py CLI
-  C  reindex collect: equal between the copies, the orphan exemption
-  D  freshness classification of the two roadmap types, and the freshness.py
-     verdict (adr 0019): orphaned-source gates the exit code; stale and
-     unverified -- for every editorial `status:` -- are listed and advisory
+  B  the server's render_index: archive pages counted and never listed; the
+     reindex.py wrapper: writes the server's INDEX, fails on a duplicate slug
+     through the server's answer, keeps `render_index` as a delegate, and
+     exits 2 with no server to load
+  C  the server's reindex collect: the orphan exemption
+  D  the server's freshness classification of the two roadmap types, and the
+     freshness.py wrapper: its exit code and `gating:` line are the server's
+     (a dead body anchor gates), its output is the server's answer, git lag is
+     advisory for every editorial `status:`, and no server means exit 2
   E  negative controls -- each proves an oracle above can FIRE
   F  hygiene: the live docs/INDEX.md, the repo tree, bytecode, the sandbox
   G  the git helper, both copies: the server's timeout and the roadmap's
      hardening (GIT_SAFE_ARGV prefix, GIT_NO_LAZY_FETCH=1)
-  H  everything else the server vendors: each function compared as CODE (AST,
-     docstring / annotations / name / `w.` qualifier taken out), each constant
-     by value, the two restructured freshness halves by output, and a census
-     that names any shared name no case compares
+  H  everything else the server vendors from _wikilib: each function compared
+     as CODE (AST, docstring / annotations / name / `w.` qualifier taken out),
+     each constant by value, and a census that names any shared name no case
+     compares -- which also stops a CLI wrapper from growing a copy back
 
 WHY PARITY GATES AND NOT GENERATION (roadmap R-0002)
 ----------------------------------------------------
@@ -50,7 +63,9 @@ measured and refused by the generator's own gated contract, not by taste:
 block of the tab-indented skill module would join it, and the generator only
 converts spaces to tabs, never back.  An import is out for the fleet-wide
 reason (a server never imports a sibling; no server does today).  So the
-copies stay, and every one of them is compared here.
+copies stay, and every one of them is compared here.  The direction R-0033
+took is the other one -- a skill CLI importing the SERVER -- which neither rule
+forbids, and it is why the CLI copies could go while _wikilib's stay.
 
 THE GIT HELPER IS A THIRD SHARED THING
 --------------------------------------
@@ -78,6 +93,7 @@ import io
 import os
 import posixpath
 import re
+import shutil
 import subprocess
 import sys
 import types
@@ -92,18 +108,26 @@ SERVER = H.repo_path("Scripts", "mcp-wiki.py")
 SCRIPTS_DIR = H.repo_path("ClaudeCode", "skills", "wiki", "scripts")
 REINDEX = os.path.join(SCRIPTS_DIR, "reindex.py")
 FRESHNESS = os.path.join(SCRIPTS_DIR, "freshness.py")
+WIKILIB = os.path.join(SCRIPTS_DIR, "_wikilib.py")
 LIVE_INDEX = H.repo_path("docs", "INDEX.md")
 ROADMAP_PY = H.repo_path("ClaudeCode", "skills", "roadmap", "scripts",
                          "roadmap.py")
 
 GA = "A. constant parity: one vocabulary, two copies"
-GB = "B. render_index, both copies"
-GC = "C. reindex collect, both copies"
-GD = "D. freshness: roadmap types untracked, the CLI gates only orphaned-source"
+GB = "B. render_index (server) and the reindex.py wrapper"
+GC = "C. reindex collect (server)"
+GD = "D. freshness: roadmap types untracked, the CLI exit code is the server's"
 GE = "E. negative control"
 GF = "F. hygiene"
 GG = "G. the git helper, both copies: timeout and hardening"
 GH = "H. vendored code: every other shared function and constant, both copies"
+
+# The wrappers find the server the way measure_cli.py does; this is the one
+# override the no-server cases have to take out of a child's environment, and
+# the files a relocated copy of the wrappers needs beside it to import at all.
+SERVER_ENV_VAR = "MCP_WIKI_SERVER"
+NOT_FOUND_TOKEN = "cannot find the mcp-wiki server module"
+CLI_COPY_FILES = ("freshness.py", "reindex.py", "measure_cli.py", "_wikilib.py")
 
 # The argv every group-G call passes through `git()`: the shape of
 # `repo_root()`, the one call both copies make on every run.
@@ -119,14 +143,15 @@ CONSTANTS = ("TYPE_ORDER", "INDEX_LABELLED", "STATUS_FORBIDDEN",
 ROADMAP_TYPE = "roadmap"
 ITEM_TYPE = "roadmap-item"
 
-# Group H: every OTHER thing the server vendors from the skill scripts.  The
-# six CONSTANTS above and the git pair (group G) are gated where they were
-# first gated; this is the rest, so that no duplicated line is left ungated.
+# Group H: every OTHER thing the server vendors from _wikilib.  The six
+# CONSTANTS above and the git pair (group G) are gated where they were first
+# gated; this is the rest, so that no duplicated line is left ungated.
 #
 # (skill script, name there, name in the server) -- a function compared as
 # CODE, not as output: its AST, with only the differences declared in
-# `normalized_function` taken out.  The server renamed four on the way in.
-SKILL_ALIAS = "w"            # `import _wikilib as w` in freshness.py/reindex.py
+# `normalized_function` taken out.  The eight freshness.py / reindex.py rows
+# left with R-0033: those scripts no longer carry the code, they call it.
+SKILL_ALIAS = "w"            # `import _wikilib as w` in a skill script
 VENDORED_FUNCTIONS = (
     ("_wikilib.py", "git", "git"),
     ("_wikilib.py", "repo_root", "repo_root"),
@@ -139,31 +164,20 @@ VENDORED_FUNCTIONS = (
     ("_wikilib.py", "iter_pages", "iter_pages"),
     ("_wikilib.py", "extract_wikilinks", "extract_wikilinks"),
     ("_wikilib.py", "as_list", "as_list"),
-    ("freshness.py", "_changed_files", "_changed_files"),
-    ("freshness.py", "_source_path", "_source_path"),
-    ("freshness.py", "_evaluate", "_evaluate"),
-    ("freshness.py", "_detail", "_fresh_detail"),
-    ("reindex.py", "collect", "reindex_collect"),
-    ("reindex.py", "render_index", "render_index"),
-    ("reindex.py", "_counted_lines", "_counted_lines"),
-    ("reindex.py", "render_report", "render_reindex_report"),
 )
 # (skill script, constant) -- compared by VALUE, same name on both sides.
 VENDORED_CONSTANTS = (
     ("_wikilib.py", "SKIP_FILES"),
     ("_wikilib.py", "SKIP_DIRS"),
     ("_wikilib.py", "_WIKILINK_RE"),
-    ("freshness.py", "DETAIL_STATUSES"),
-    ("freshness.py", "ADVISORY_STATUSES"),
-    ("freshness.py", "_INVALID"),
 )
 # Same name in both, different on purpose -- the only names the census case
 # lets through undeclared.  `main` is two different programs' argv parsing.
-# `GATING_STATUSES` (freshness.py) and `GATING_CLASSES` (server) are not listed
-# because they share no name: the CLI can prove one class, the server three
-# (adr 0019), and `freshness-render-shared-lines` gates everything else the two
-# renderers print.
-DECLARED_DIFFERENT = ("main",)
+# `render_index` in reindex.py is NOT a copy: it is a one-line delegate to the
+# loaded server's own, kept by name only because docs/adr/0022 (a frozen page)
+# anchors `reindex.py:render_index` in its frontmatter; group B's
+# `render-index-delegates` gates that it delegates rather than renders.
+DECLARED_DIFFERENT = ("main", "render_index")
 # Already gated elsewhere in this suite, so the census counts them as declared.
 GATED_ELSEWHERE = ("GIT_TIMEOUT_SEC", "GIT_SAFE_ARGV")
 
@@ -176,11 +190,11 @@ def _d(label, value):
 # The fixture: one list of pages; every variant is a filter of it
 # ---------------------------------------------------------------------------
 
-Page = collections.namedtuple("Page", "path name type title links extra")
+Page = collections.namedtuple("Page", "path name type title links extra body")
 
 
-def _page(path, name, typ, title, links=(), extra=""):
-    return Page(path, name, typ, title, tuple(links), extra)
+def _page(path, name, typ, title, links=(), extra="", body=""):
+    return Page(path, name, typ, title, tuple(links), extra, body)
 
 
 OVERVIEW = _page("overview.md", "overview", "overview", "Fixture Overview")
@@ -204,33 +218,49 @@ SOURCED_ITEM = _page("roadmap/archive/0009-sourced-item.md",
                      "r-0009-sourced-item", ITEM_TYPE, "Sourced Item",
                      extra="sources:\n  - Scripts/never-written.py\n")
 
-# The freshness.py exit code gates only on what the CLI can PROVE (adr 0019):
-# `orphaned-source`, a `sources:` path gone from the tree.  Git lag -- `stale`
-# and `unverified` -- is listed and advisory, for every editorial `status:`.
-# A concept page carrying `sources:` and NO `verified:`, once per status: all
-# four are listed and none gates, so no status needs an exemption.  Each lives
-# in a corpus of its own, because the exit code is corpus-wide.
+# The freshness.py exit code is the SERVER's verdict (R-0033): whatever its
+# `gating:` line counts -- a dead `sources:` path, a dead body anchor, a
+# measured-region defect.  Git lag -- `stale` and `unverified` -- is listed and
+# advisory, for every editorial `status:`.  A concept page carrying `sources:`
+# and NO `verified:`, once per status: all four are listed and none gates, so
+# no status needs an exemption.  Its one source is the page itself, so the
+# anchor resolves and only the git lag is left to report.  Each lives in a
+# corpus of its own, because the exit code is corpus-wide.
 UNVERIFIED_STATUSES = ("draft", "active", "deprecated", None)
-# A resolvable-looking commit.  The fixture sits outside any repository, so the
-# CLI's `_changed_files` is swapped for a stub for the two cases that need a
-# verified page to reach `stale` / `orphaned-source`.
-FAKE_COMMIT = "abc1234"
-_VERIFIED = "verified:\n  commit: %s\n  date: 2026-09-28\n" % FAKE_COMMIT
-# Its one source is itself, so it exists; the stub reports it changed.
-STALE_PAGE = _page("concepts/stale-page.md", "stale-page", "concept",
-                   "Stale Page",
-                   extra="sources:\n  - concepts/stale-page.md\n" + _VERIFIED)
-ORPHAN_PAGE = _page("concepts/orphan-page.md", "orphan-page", "concept",
-                    "Orphan Page",
-                    extra="sources:\n  - Scripts/never-written.py\n" + _VERIFIED)
+# `stale` and `orphaned-source` need a `verified.commit` git can diff against,
+# so those two pages live in real fixture repositories (see `git_fixture`),
+# never in this repository and never through a stubbed classifier.
+STALE_SOURCE = "src/moved.py"
+GONE_SOURCE = "src/never-written.py"
+
+
+def _verified_page(slug, source, commit):
+    return _page("concepts/%s.md" % slug, slug, "concept",
+                 slug.replace("-", " ").title(),
+                 extra="sources:\n  - %s\nverified:\n  commit: %s\n"
+                       "  date: 2026-09-28\n" % (source, commit))
 
 
 def _unverified_page(status):
     label = status or "nostatus"
+    path = "concepts/unverified-%s.md" % label
     extra = ("status: %s\n" % status if status else "") + \
-        "sources:\n  - Scripts/never-written.py\n"
-    return _page("concepts/unverified-%s.md" % label, "unverified-%s" % label,
+        "sources:\n  - %s\n" % path
+    return _page(path, "unverified-%s" % label,
                  "concept", "Unverified %s" % label.title(), extra=extra)
+
+
+# An ACTIVE, non-ADR page whose one body anchor names a file that does not
+# exist -- the defect the server's `gating:` line counts and the pre-R-0033
+# CLI never read, which is how five gating pages hid behind a CLI exit of 0
+# (R-0036).  It carries no `sources:`, so git lag cannot be what gates it.
+DEAD_BODY_ANCHOR = "concepts/never-written.py"
+DEAD_BODY = _page("concepts/dead-body.md", "dead-body", "concept", "Dead Body",
+                  extra="status: active\n",
+                  body="The code lives in `%s`." % DEAD_BODY_ANCHOR)
+# Two pages, one slug: the reindex audit's duplicate-slug failure.
+DUP_A = _page("concepts/dup-a.md", "dup-slug", "concept", "Dup A")
+DUP_B = _page("concepts/dup-b.md", "dup-slug", "concept", "Dup B")
 
 
 Variant = collections.namedtuple("Variant",
@@ -247,12 +277,12 @@ V_SOURCED = Variant("sourced-item", 0, False, False, (SOURCED_ITEM,))
 V_UNVERIFIED = {s: Variant("unverified-%s" % (s or "nostatus"), 0, False, False,
                            (_unverified_page(s),))
                 for s in UNVERIFIED_STATUSES}
-V_STALE = Variant("stale-page", 0, False, False, (STALE_PAGE,))
-V_ORPHAN = Variant("orphan-page", 0, False, False, (ORPHAN_PAGE,))
+V_DEAD_BODY = Variant("dead-body", 0, False, False, (DEAD_BODY,))
+V_DUP = Variant("dup-slug", 0, False, False, (DUP_A, DUP_B))
 
 RENDER_VARIANTS = (V_FULL, V_SINGLE, V_NONE, V_ARCHIVE_ONLY, V_UNLINKED)
-ALL_VARIANTS = RENDER_VARIANTS + (V_CLI, V_SOURCED, V_STALE, V_ORPHAN) + tuple(
-    V_UNVERIFIED[s] for s in UNVERIFIED_STATUSES)
+ALL_VARIANTS = RENDER_VARIANTS + (V_CLI, V_SOURCED, V_DEAD_BODY, V_DUP) + \
+    tuple(V_UNVERIFIED[s] for s in UNVERIFIED_STATUSES)
 
 
 def variant_pages(variant):
@@ -273,9 +303,10 @@ def variant_pages(variant):
 def page_text(page):
     body_links = " ".join("[[%s]]" % link for link in page.links)
     return ("---\nname: %s\ntype: %s\ntitle: %s\ndescription: %s in the "
-            "wiki_index fixture.\n%s---\n\n# %s\n\nFixture body. %s\n"
+            "wiki_index fixture.\n%s---\n\n# %s\n\nFixture body. %s\n%s"
             % (page.name, page.type, page.title, page.title, page.extra,
-               page.title, body_links))
+               page.title, body_links,
+               (page.body + "\n") if page.body else ""))
 
 
 def build_variant(work, variant):
@@ -445,14 +476,6 @@ def check_collect(result, pages, label):
     if dups:
         problems.append("%s: duplicate slugs %r" % (label, dups))
     return problems
-
-
-def _lib_copy(lib, **changes):
-    ns = types.SimpleNamespace(**{k: getattr(lib, k) for k in dir(lib)
-                                  if not k.startswith("__")})
-    for key, value in changes.items():
-        setattr(ns, key, value)
-    return ns
 
 
 def _module_level_assignments(tree):
@@ -714,40 +737,127 @@ def undeclared_shared_names(skill_sources, server_src):
     return out
 
 
-def freshness_render_fixture():
-    """A report with one page in every status the classifier can return."""
-    def page(status, **extra):
-        return dict({"name": "p-" + status, "path": "x/%s.md" % status,
-                     "type": "concept", "status": status}, **extra)
-    pages = [
-        page("stale", changed_sources=["a.py", "b.py"], verified_at="abc1234"),
-        page("orphaned-source", missing=["gone.py"], changed_sources=[],
-             verified_at="abc1234"),
-        page("unverified", reason="no verified.commit"),
-        page("promotable", materialized=["new.py"]),
-        page("planned"), page("current", verified_at="abc1234"),
-        page("untracked"), page("no-sources"),
-    ]
-    summary = {}
-    for p in pages:
-        summary[p["status"]] = summary.get(p["status"], 0) + 1
-    return {"root": "docs", "head": "abc1234", "pages": pages,
-            "summary": summary}
+# ---------------------------------------------------------------------------
+# The CLI wrappers: how they are driven, and what the server says to compare
+# ---------------------------------------------------------------------------
+
+def server_freshness(srv, root):
+    """The server's own `freshness` answer for one corpus, uncut.  The root is
+    realpath'd because the server's containment check compares a realpath
+    against the project root it is handed (the sandbox sits under a symlinked
+    temp directory on macOS)."""
+    result = srv.handle_wiki_call(
+        {"function": "freshness", "params": {"max_answer_chars": 0}},
+        os.path.realpath(root), ".", False)
+    if result.get("error"):
+        return "error: %s" % result["error"]
+    return result.get("__raw_text__") or ""
 
 
-def render_shared_line_problems(skill_text, server_text):
-    """The two freshness renderers must print the same report but for the one
-    line that is theirs by design: `gating:` (adr 0019 -- what each can prove)."""
-    def shared(text):
-        return [ln for ln in text.splitlines() if not ln.startswith("gating: ")]
-    a, b = shared(skill_text), shared(server_text)
-    if a == b:
-        return []
-    diff = [ln for ln in difflib.unified_diff(a, b, "freshness.py", "server",
-                                              n=0, lineterm="")
-            if not ln.startswith("@@")]
-    return ["the renderers differ outside the gating line: %s"
-            % " | ".join(diff[2:8])]
+def gating_number(srv, text):
+    """The count on the one line rendered with the server's exported
+    GATING_LINE_PREFIX, or None.  The prefix is READ from the server, never
+    typed here, so this oracle and the wrapper agree on one string."""
+    prefix = getattr(srv, "GATING_LINE_PREFIX", None)
+    if not prefix:
+        return None
+    lines = [ln for ln in text.splitlines() if ln.startswith(prefix)]
+    if len(lines) != 1:
+        return None
+    head = lines[0][len(prefix):].split(" ", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def gating_line(srv, text):
+    prefix = getattr(srv, "GATING_LINE_PREFIX", None) or "gating: "
+    lines = [ln for ln in text.splitlines() if ln.startswith(prefix)]
+    return lines[0] if lines else "(none)"
+
+
+def run_freshness_cli(fresh_mod, root, *extra):
+    """freshness.py's main() in-process on one corpus: (exit, stdout, stderr).
+    An argparse refusal is an exit code here, not a crashed suite."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            rc = fresh_mod.main(["--root", root] + list(extra))
+        except SystemExit as exc:
+            rc = exc.code
+    return rc, out.getvalue(), err.getvalue()
+
+
+def run_cli(script, args, cwd, without_env=()):
+    """One CLI as a child: (exit, stdout, stderr), with `without_env` taken
+    out of the child's environment."""
+    env = H.child_env()
+    for key in without_env:
+        env.pop(key, None)
+    try:
+        proc = subprocess.run([sys.executable, "-B", script] + list(args),
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=120, cwd=cwd, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 127, "", str(exc)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def relocated_cli(work):
+    """The wrappers copied into the sandbox, where no ancestor of their real
+    path holds a Scripts/mcp-wiki.py: the one place the discovery can miss."""
+    target = work.subdir("cli-copy")
+    for name in CLI_COPY_FILES:
+        source = os.path.join(SCRIPTS_DIR, name)
+        if os.path.isfile(source):
+            shutil.copyfile(source, os.path.join(target, name))
+    return target
+
+
+# Identity, signing and branch pinned on every fixture commit, and the user's
+# global/system git configuration kept out, so no developer setting decides a
+# case.  The fixture repositories live in the sandbox, never in this repo.
+FIXTURE_GIT = ("-c", "user.name=t", "-c", "user.email=t@t",
+               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main")
+
+
+def fixture_git(repo, *args):
+    env = H.child_env({"GIT_CONFIG_GLOBAL": os.devnull,
+                       "GIT_CONFIG_NOSYSTEM": "1",
+                       "GIT_CEILING_DIRECTORIES": os.path.dirname(repo)})
+    try:
+        proc = subprocess.run(["git"] + list(FIXTURE_GIT) + list(args),
+                              cwd=repo, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=30,
+                              env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 127, "", str(exc)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def git_fixture(work, label, slug, source):
+    """A real repository: commit 1 holds STALE_SOURCE; the one page is written
+    verified AT commit 1 and naming `source`; commit 2 moves STALE_SOURCE.
+    Returns (docs root or None, the page, problems)."""
+    repo = work.subdir(label)
+    work.write_text(os.path.join(label, STALE_SOURCE), "VALUE = 1\n")
+    problems = []
+
+    def run(*args):
+        rc, out, err = fixture_git(repo, *args)
+        if rc != 0:
+            problems.append("fixture git %s exited %d: %s"
+                            % (" ".join(args), rc, err.strip()[:200]))
+        return out
+
+    run("init", "-q", ".")
+    run("add", "-A")
+    run("commit", "-q", "-m", "c1")
+    commit = run("rev-parse", "HEAD").strip()
+    page = _verified_page(slug, source, commit or "0000000")
+    work.write_text(os.path.join(label, "docs", page.path), page_text(page))
+    work.write_text(os.path.join(label, STALE_SOURCE), "VALUE = 2\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "c2")
+    return (None if problems else os.path.join(repo, "docs")), page, problems
 
 
 # ---------------------------------------------------------------------------
@@ -789,68 +899,54 @@ def group_a(suite, srv, lib):
                             % ITEM_TYPE)])
 
 
-def _renders(srv, reindex_mod, root):
-    return (srv.render_index(srv.reindex_collect(root)[0]),
-            reindex_mod.render_index(reindex_mod.collect(root)[0]))
+def _render(srv, root):
+    return srv.render_index(srv.reindex_collect(root)[0])
 
 
 def group_b(suite, srv, reindex_mod, roots, work):
-    rendered = {}
-    for variant in RENDER_VARIANTS:
-        server_text, skill_text = _renders(srv, reindex_mod, roots[variant.label])
-        rendered[variant.label] = (server_text, skill_text)
-        problems = [] if server_text == skill_text else [
-            "the two render_index copies differ on the %s corpus" % variant.label]
-        suite.record(GB, "render-parity-" + variant.label, problems,
-                     detail=[_d("corpus", "%d page(s), %d archive"
-                                % (len(variant_pages(variant)),
-                                   len(archive_pages(variant_pages(variant))))),
-                             _d("bytes", "server %d, skill %d"
-                                % (len(server_text), len(skill_text)))],
-                     text=server_text if problems else "")
+    rendered = {variant.label: _render(srv, roots[variant.label])
+                for variant in RENDER_VARIANTS}
 
-    def both(variant, oracle):
-        pages = variant_pages(variant)
-        server_text, skill_text = rendered[variant.label]
-        return (oracle(server_text, pages, "server")
-                + oracle(skill_text, pages, "skill"))
+    def server_only(variant, oracle):
+        return oracle(rendered[variant.label], variant_pages(variant), "server")
 
     full_pages = variant_pages(V_FULL)
     suite.record(GB, "archive-pages-never-listed",
-                 both(V_FULL, listed_archive_problems),
+                 server_only(V_FULL, listed_archive_problems),
                  detail=[_d("archive", ", ".join(p.path for p in
                                                  archive_pages(full_pages)))],
-                 text=rendered[V_FULL.label][0])
+                 text=rendered[V_FULL.label])
     suite.record(GB, "one-count-line-for-the-archive",
-                 both(V_FULL, count_line_problems),
+                 server_only(V_FULL, count_line_problems),
                  detail=[_d("want", repr(expected_count_line(full_pages)))],
-                 text=rendered[V_FULL.label][0])
+                 text=rendered[V_FULL.label])
     suite.record(GB, "roadmap-under-its-heading-no-item-heading",
-                 both(V_FULL, roadmap_section_problems),
+                 server_only(V_FULL, roadmap_section_problems),
                  detail=[_d("want", "`## %s` once, the roadmap page under it, "
                                     "no `## %s`" % (ROADMAP_TYPE, ITEM_TYPE))],
-                 text=rendered[V_FULL.label][0])
+                 text=rendered[V_FULL.label])
     suite.record(GB, "singular-for-one-item",
-                 both(V_SINGLE, count_line_problems),
+                 server_only(V_SINGLE, count_line_problems),
                  detail=[_d("want", repr(expected_count_line(
                      variant_pages(V_SINGLE))))],
-                 text=rendered[V_SINGLE.label][0])
+                 text=rendered[V_SINGLE.label])
     suite.record(GB, "no-archive-line-at-zero-items",
-                 both(V_NONE, count_line_problems),
+                 server_only(V_NONE, count_line_problems),
                  detail=[_d("want", "no `- Roadmap archive:` line at all")],
-                 text=rendered[V_NONE.label][0])
+                 text=rendered[V_NONE.label])
 
     only_pages = variant_pages(V_ARCHIVE_ONLY)
-    problems = both(V_ARCHIVE_ONLY, check_render)
-    for label, text in zip(("server", "skill"), rendered[V_ARCHIVE_ONLY.label]):
-        found, _headings = sections(text)
-        want = [expected_count_line(only_pages)]
-        if found.get(ROADMAP_TYPE) != want:
-            problems.append("%s: `## %s` holds %r, want only %r"
-                            % (label, ROADMAP_TYPE, found.get(ROADMAP_TYPE), want))
+    problems = server_only(V_ARCHIVE_ONLY, check_render)
+    found, _headings = sections(rendered[V_ARCHIVE_ONLY.label])
+    want = [expected_count_line(only_pages)]
+    if found.get(ROADMAP_TYPE) != want:
+        problems.append("server: `## %s` holds %r, want only %r"
+                        % (ROADMAP_TYPE, found.get(ROADMAP_TYPE), want))
     suite.record(GB, "archive-only-keeps-the-roadmap-heading", problems,
                  detail=[_d("corpus", "archive pages, no roadmap page")],
-                 text=rendered[V_ARCHIVE_ONLY.label][0])
+                 text=rendered[V_ARCHIVE_ONLY.label])
+
+    group_b_delegate(suite, srv, reindex_mod)
 
     # The CLI, on a corpus of its own inside the sandbox.
     root = roots[V_CLI.label]
@@ -858,8 +954,10 @@ def group_b(suite, srv, reindex_mod, roots, work):
     problems = []
     if not _inside(root, work.path):
         problems.append("refusing: %s is outside the sandbox %s" % (root, work.path))
-        suite.record(GB, "cli-check-writes-nothing", problems)
-        suite.record(GB, "cli-writes-render-index", problems)
+        for cid in ("cli-check-writes-nothing", "cli-writes-render-index",
+                    "cli-check-fails-on-a-duplicate-slug",
+                    "cli-reindex-no-server-exits-2"):
+            suite.record(GB, cid, problems)
         return
     before = _tree_digests(root)
     rc, out, err = H.run_process([sys.executable, "-B", REINDEX, "--root", root,
@@ -883,11 +981,12 @@ def group_b(suite, srv, reindex_mod, roots, work):
     if rc != 0:
         problems.append("reindex.py exited %d: %s" % (rc, err.strip()[:200]))
     written = _read(index) if os.path.isfile(index) else None
-    want = reindex_mod.render_index(reindex_mod.collect(root)[0])
+    want = _render(srv, root)
     if written is None:
         problems.append("INDEX.md was not written at %s" % index)
     elif written != want:
-        problems.append("the written INDEX.md differs from render_index")
+        problems.append("the written INDEX.md differs from the server's "
+                        "render_index")
     suite.record(GB, "cli-writes-render-index", problems,
                  detail=[_d("argv", "reindex.py --root <sandbox>/docs"),
                          _d("bytes", "written %s, rendered %d"
@@ -895,27 +994,110 @@ def group_b(suite, srv, reindex_mod, roots, work):
                                len(want)))],
                  text=written or out)
 
-
-def _collects(srv, reindex_mod, root):
-    return srv.reindex_collect(root), reindex_mod.collect(root)
+    group_b_wrapper(suite, srv, roots, work)
 
 
-def group_c(suite, srv, reindex_mod, roots):
+def group_b_delegate(suite, srv, reindex_mod):
+    """reindex.py keeps a module-level `render_index` ONLY as a delegate: the
+    frozen docs/adr/0022 anchors it by name.  A stub stands in for the loaded
+    server; the delegate must hand it the entries and return its answer
+    untouched -- a copy that renders by itself returns something else."""
+    sentinel = object()
+    seen = []
+    stub = types.SimpleNamespace(
+        render_index=lambda entries: (seen.append(entries), sentinel)[1])
+    probe = []
+    problems = []
+    fn = getattr(reindex_mod, "render_index", None)
+    if not callable(fn):
+        problems.append("reindex.py has no module-level render_index (the "
+                        "frozen docs/adr/0022 anchors it)")
+    else:
+        missing = object()
+        saved = getattr(reindex_mod, "_SERVER", missing)
+        reindex_mod._SERVER = stub
+        try:
+            got = fn(probe)
+        except Exception as exc:              # a delegate that crashes on it
+            got = exc
+        finally:
+            if saved is missing:
+                del reindex_mod._SERVER
+            else:
+                reindex_mod._SERVER = saved
+        if got is not sentinel:
+            problems.append("render_index did not return the loaded server's "
+                            "answer: got %s" % (repr(got)[:120]))
+        if len(seen) != 1 or seen[0] is not probe:
+            problems.append("the loaded server's render_index was called %d "
+                            "time(s) with the caller's entries" % len(seen))
+    suite.record(GB, "render-index-delegates", problems,
+                 detail=[_d("stub", "reindex._SERVER = a namespace whose "
+                                    "render_index returns a sentinel"),
+                         _d("why", "the name must keep resolving for a frozen "
+                                   "ADR, and must not be a second renderer")])
+
+
+def group_b_wrapper(suite, srv, roots, work):
+    """reindex.py's contract as a wrapper: its failure is the server's, read by
+    the exported prefix, and without a server it cannot run at all."""
+    root = roots[V_DUP.label]
+    before = _tree_digests(root)
+    rc, out, err = run_cli(REINDEX, ["--root", root, "--check",
+                                     "--server", SERVER], work.path)
+    after = _tree_digests(root)
+    problems = []
+    if rc != 1:
+        problems.append("exit %r, want 1 on a duplicate slug: %s"
+                        % (rc, err.strip()[:200]))
+    prefix = getattr(srv, "REINDEX_DUPS_PREFIX", None)
+    if prefix is None:
+        problems.append("the server exports no REINDEX_DUPS_PREFIX to read "
+                        "the failure by")
+    elif not any(line.startswith(prefix) for line in out.splitlines()):
+        problems.append("no line starts with the server's %r" % prefix)
+    if before != after:
+        problems.append("--check changed the corpus")
+    suite.record(GB, "cli-check-fails-on-a-duplicate-slug", problems,
+                 detail=[_d("argv", "reindex.py --root <sandbox>/dup --check "
+                                    "--server Scripts/mcp-wiki.py"),
+                         _d("exit", rc),
+                         _d("pages", ", ".join(p.path for p in
+                                               variant_pages(V_DUP)))],
+                 text=out + err)
+
+    copy_dir = relocated_cli(work)
+    rc, out, err = run_cli(os.path.join(copy_dir, "reindex.py"),
+                           ["--root", roots[V_FULL.label], "--check"],
+                           work.path, without_env=(SERVER_ENV_VAR,))
+    suite.record(GB, "cli-reindex-no-server-exits-2",
+                 no_server_problems(rc, out, err),
+                 detail=[_d("argv", "<sandbox>/cli-copy/reindex.py --check, "
+                                    "$%s unset" % SERVER_ENV_VAR),
+                         _d("exit", rc)],
+                 text=out + err)
+
+
+def no_server_problems(rc, out, err):
+    problems = []
+    if rc != 2:
+        problems.append("exit %r, want 2 when no server module is found" % rc)
+    if NOT_FOUND_TOKEN not in err:
+        problems.append("stderr does not say %r: %r"
+                        % (NOT_FOUND_TOKEN, err.strip()[:200]))
+    if out.strip():
+        problems.append("printed a report without a server: %r"
+                        % out.strip()[:120])
+    return problems
+
+
+def group_c(suite, srv, roots):
     root = roots[V_FULL.label]
     pages = variant_pages(V_FULL)
-    server_res, skill_res = _collects(srv, reindex_mod, root)
-    labels = ("entries", "dups", "orphans", "malformed")
-    problems = ["%s differ between the copies" % label
-                for label, a, b in zip(labels, server_res, skill_res) if a != b]
-    suite.record(GC, "collect-parity", problems,
-                 detail=[_d("orphans", "server %r, skill %r"
-                            % (orphan_names(server_res), orphan_names(skill_res)))])
+    server_res = srv.reindex_collect(root)
 
     def per_copy(test):
-        out = []
-        for label, res in (("server", server_res), ("skill", skill_res)):
-            out += test(label, res)
-        return out
+        return test("server", server_res)
 
     suite.record(GC, "no-roadmap-item-orphan", per_copy(
         lambda label, res: ["%s: %s is an orphan" % (label, e["path"])
@@ -930,13 +1112,11 @@ def group_c(suite, srv, reindex_mod, roots):
         else ["%s: %s is not an orphan" % (label, LONELY.path)]),
         detail=[_d("why", "without this the exemption could be `every type`")])
 
-    u_root = roots[V_UNLINKED.label]
-    u_server, u_skill = _collects(srv, reindex_mod, u_root)
+    u_server = srv.reindex_collect(roots[V_UNLINKED.label])
     problems = []
-    for label, res in (("server", u_server), ("skill", u_skill)):
-        if ROADMAP.name not in orphan_names(res):
-            problems.append("%s: the unlinked %s is not an orphan"
-                            % (label, ROADMAP.path))
+    if ROADMAP.name not in orphan_names(u_server):
+        problems.append("server: the unlinked %s is not an orphan"
+                        % ROADMAP.path)
     suite.record(GC, "unlinked-roadmap-page-is-orphan", problems,
                  detail=[_d("why", "only the item type is exempt; the live "
                                    "roadmap page must be linked from somewhere")])
@@ -945,7 +1125,7 @@ def group_c(suite, srv, reindex_mod, roots):
         lambda label, res: ["%s: malformed %r" % (label, res[3])] if res[3] else []))
 
 
-def group_d(suite, srv, fresh_mod, roots):
+def group_d(suite, srv, fresh_mod, roots, work):
     root = roots[V_FULL.label]
 
     def server_states(r):
@@ -955,57 +1135,41 @@ def group_d(suite, srv, fresh_mod, roots):
                 relpath, fm, r, lambda _commit: None)["status"]
         return out
 
-    def skill_states(r):
-        return {p["path"].replace(os.sep, "/"): p["status"]
-                for p in fresh_mod.analyze(r, "HEAD")["pages"]}
-
-    states = {"server": server_states(root), "skill": skill_states(root)}
+    states = server_states(root)
     pages = variant_pages(V_FULL)
     roadmap_pages = [p for p in pages if p.type in (ROADMAP_TYPE, ITEM_TYPE)]
-    for label in ("skill", "server"):
-        problems = ["%s: %s classified %r, want 'untracked'"
-                    % (label, p.path, states[label].get(p.path))
-                    for p in roadmap_pages
-                    if states[label].get(p.path) != "untracked"]
-        suite.record(GD, "roadmap-types-untracked-" + label, problems,
-                     detail=[_d("pages", "%d roadmap/roadmap-item page(s)"
-                                % len(roadmap_pages))])
+    problems = ["server: %s classified %r, want 'untracked'"
+                % (p.path, states.get(p.path))
+                for p in roadmap_pages if states.get(p.path) != "untracked"]
+    suite.record(GD, "roadmap-types-untracked-server", problems,
+                 detail=[_d("pages", "%d roadmap/roadmap-item page(s)"
+                            % len(roadmap_pages))])
 
-    problems = ["%s: %s classified %r, want 'no-sources'"
-                % (label, LONELY.path, states[label].get(LONELY.path))
-                for label in ("skill", "server")
-                if states[label].get(LONELY.path) != "no-sources"]
+    problems = [] if states.get(LONELY.path) == "no-sources" else [
+        "server: %s classified %r, want 'no-sources'"
+        % (LONELY.path, states.get(LONELY.path))]
     suite.record(GD, "sourceless-concept-stays-no-sources", problems,
                  detail=[_d("why", "the exemption is per type, not for every "
                                    "sourceless page")])
 
-    s_root = roots[V_SOURCED.label]
-    sourced = {"server": server_states(s_root), "skill": skill_states(s_root)}
-    problems = ["%s: a %s carrying sources: classified 'untracked'"
-                % (label, ITEM_TYPE) for label in ("skill", "server")
-                if sourced[label].get(SOURCED_ITEM.path) == "untracked"]
+    sourced = server_states(roots[V_SOURCED.label])
+    problems = ["server: a %s carrying sources: classified 'untracked'"
+                % ITEM_TYPE] if sourced.get(SOURCED_ITEM.path) == "untracked" \
+        else []
     suite.record(GD, "sourced-item-is-not-untracked", problems,
-                 detail=[_d("server", sourced["server"].get(SOURCED_ITEM.path)),
-                         _d("skill", sourced["skill"].get(SOURCED_ITEM.path)),
+                 detail=[_d("server", sourced.get(SOURCED_ITEM.path)),
                          _d("why", "the untracked short-circuit is reached only "
                                    "without sources:, which is why the roadmap "
                                    "writer never writes that key")])
 
-    group_d_unverified(suite, srv, fresh_mod, roots)
+    group_d_unverified(suite, srv, fresh_mod, roots, work)
+    group_d_wrapper(suite, srv, fresh_mod, roots, work)
 
 
-def run_freshness_cli(fresh_mod, root):
-    """freshness.py's main() on one corpus: (exit code, stdout)."""
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        rc = fresh_mod.main(["--root", root])
-    return rc, out.getvalue()
-
-
-def cli_verdict_problems(rc, text, page, bucket, want_gating):
-    """The CLI's contract on a one-page corpus: listed in its bucket, a
-    `gating:` line that counts only the provable class and says which checks
-    are server-only, an `advisory:` line for git lag, and an exit code that
+def cli_verdict_problems(srv, rc, text, page, bucket, want_gating):
+    """The CLI's contract on a one-page corpus: listed in its bucket, ONE line
+    carrying the server's GATING_LINE_PREFIX whose count is the wanted one, an
+    `advisory:` line for git lag and none otherwise, and an exit code that
     agrees with the gating count."""
     problems = []
     want_rc = 1 if want_gating else 0
@@ -1018,67 +1182,61 @@ def cli_verdict_problems(rc, text, page, bucket, want_gating):
         problems.append("%s is not listed in the report" % page.path)
     if "%s (1):" % bucket not in lines:
         problems.append("no `%s (1):` bucket in the report" % bucket)
-    gating = [ln for ln in lines if ln.startswith("gating: ")]
-    if len(gating) != 1:
-        problems.append("%d `gating:` line(s), want 1" % len(gating))
-    else:
-        if not gating[0].startswith("gating: %d " % want_gating):
-            problems.append("gating line %r, want a count of %d"
-                            % (gating[0], want_gating))
-        if "wiki_call verify" not in gating[0]:
-            problems.append("the gating line does not say what only "
-                            "`wiki_call verify` checks: %r" % gating[0])
-    advisory = [ln for ln in lines if ln.startswith("advisory: ")]
+    count = gating_number(srv, text)
+    if count != want_gating:
+        problems.append("gating line %r reads as %r, want a count of %d"
+                        % (gating_line(srv, text), count, want_gating))
+    prefix = getattr(srv, "ADVISORY_LINE_PREFIX", "advisory: ")
+    advisory = [ln for ln in lines if ln.startswith(prefix)]
     if want_gating and advisory:
         problems.append("an orphaned-source page produced an advisory line: %r"
                         % advisory)
     if not want_gating and len(advisory) != 1:
         problems.append("%d `advisory:` line(s) for git lag, want 1"
                         % len(advisory))
-    return problems, (listed[0] if listed else "(none)"), \
-        (gating[0] if gating else "(none)")
+    return problems, (listed[0] if listed else "(none)"), gating_line(srv, text)
 
 
-def group_d_unverified(suite, srv, fresh_mod, roots):
-    """The CLI exit code gates only on what it can prove (adr 0019).
+def group_d_unverified(suite, srv, fresh_mod, roots, work):
+    """Git lag never sets the exit code -- for every editorial status.
 
-    A page with sources and no verified.commit is `unverified` -- git lag, not
-    a defect -- for EVERY editorial status: listed, advisory, exit 0.  `stale`
-    is advisory too.  `orphaned-source` (a sources: path gone from the tree) is
-    the one class the CLI can demonstrate, and the one the server's verify
-    gates as a broken anchor, so it alone sets the exit code.
+    A page with sources and no verified.commit is `unverified`: listed,
+    advisory, exit 0.  `stale` is advisory too.  `orphaned-source` (a sources:
+    path gone from the tree) gates, because the server's verify counts that
+    dead path as a broken anchor -- the CLI no longer decides any of this, it
+    reads the server's `gating:` line.  The two verified pages live in real
+    fixture repositories, so git itself decides stale versus orphaned.
     """
     for status in UNVERIFIED_STATUSES:
         variant = V_UNVERIFIED[status]
-        rc, text = run_freshness_cli(fresh_mod, roots[variant.label])
+        rc, text, err = run_freshness_cli(fresh_mod, roots[variant.label])
         problems, row, gline = cli_verdict_problems(
-            rc, text, variant.only[0], "unverified", 0)
+            srv, rc, text, variant.only[0], "unverified", 0)
         suite.record(GD, "cli-unverified-%s-listed-advisory"
                      % (status or "nostatus"), problems,
                      detail=[_d("status", status or "(absent)"),
                              _d("exit", rc), _d("row", row),
-                             _d("gating", gline)])
+                             _d("gating", gline)],
+                     text=text + err)
 
-    saved = fresh_mod._changed_files
-    try:
-        for variant, bucket, changed, want in (
-                (V_STALE, "stale", {STALE_PAGE.path}, 0),
-                (V_ORPHAN, "orphaned-source", set(), 1)):
-            fresh_mod._changed_files = (
-                lambda commit, head, repo, cache, _c=changed:
-                set(_c) if commit == FAKE_COMMIT else None)
-            rc, text = run_freshness_cli(fresh_mod, roots[variant.label])
+    for label, slug, source, bucket, want in (
+            ("git-stale", "stale-page", STALE_SOURCE, "stale", 0),
+            ("git-orphan", "orphan-page", GONE_SOURCE, "orphaned-source", 1)):
+        root, page, problems = git_fixture(work, label, slug, source)
+        rc, text, err, row, gline = None, "", "", "(none)", "(none)"
+        if root is not None:
+            rc, text, err = run_freshness_cli(fresh_mod, root)
             problems, row, gline = cli_verdict_problems(
-                rc, text, variant.only[0], bucket, want)
-            suite.record(GD, "cli-%s-%s" % (bucket,
-                                            "gates" if want else "advisory"),
-                         problems,
-                         detail=[_d("exit", rc), _d("row", row),
-                                 _d("gating", gline),
-                                 _d("stub", "_changed_files(%s) -> %r"
-                                    % (FAKE_COMMIT, sorted(changed)))])
-    finally:
-        fresh_mod._changed_files = saved
+                srv, rc, text, page, bucket, want)
+        suite.record(GD, "cli-%s-%s" % (bucket,
+                                        "gates" if want else "advisory"),
+                     problems,
+                     detail=[_d("exit", rc), _d("row", row),
+                             _d("gating", gline),
+                             _d("fixture", "a git repo: page verified at c1, "
+                                           "%s moved in c2, source %s"
+                                % (STALE_SOURCE, source))],
+                     text=text + err)
 
     draft = V_UNVERIFIED["draft"]
     got = {}
@@ -1090,31 +1248,83 @@ def group_d_unverified(suite, srv, fresh_mod, roots):
                  [] if got.get(path) == "unverified"
                  else ["server classified %s %r, want 'unverified'"
                        % (path, got.get(path))],
-                 detail=[_d("why", "both copies classify it `unverified`; "
-                                   "neither gates on it")])
+                 detail=[_d("why", "the server classifies it `unverified`; "
+                                   "git lag never gates")])
 
 
-def group_e(suite, srv, reindex_mod, lib, roots):
-    # 1. INDEX_COUNTED_TYPES emptied in BOTH copies -> the B oracle must name
-    #    every archive page as listed.
+def group_d_wrapper(suite, srv, fresh_mod, roots, work):
+    """freshness.py as a wrapper: its verdict and its words are the server's.
+
+    The dead-body-anchor case is the one R-0036 was hidden by: an ACTIVE
+    concept page whose body names a file that is gone.  No `sources:`, so the
+    pre-R-0033 CLI classified it `no-sources` and exited 0 while the server's
+    `gating:` line counted it."""
+    root = roots[V_DEAD_BODY.label]
+    rc, text, err = run_freshness_cli(fresh_mod, root)
+    answer = server_freshness(srv, root)
+    ours, theirs = gating_number(srv, text), gating_number(srv, answer)
+    problems = []
+    if not theirs:
+        problems.append("the server's own answer does not gate the planted "
+                        "dead body anchor (gating %r) -- the fixture proves "
+                        "nothing" % theirs)
+    if ours != theirs:
+        problems.append("the CLI's gating number %r is not the server's %r"
+                        % (ours, theirs))
+    if rc != 1:
+        problems.append("exit %r, want 1 while the server gates" % rc)
+    suite.record(GD, "cli-dead-body-anchor-gates-like-the-server", problems,
+                 detail=[_d("page", "%s, active concept, body anchor `%s`"
+                            % (DEAD_BODY.path, DEAD_BODY_ANCHOR)),
+                         _d("exit", rc),
+                         _d("cli", gating_line(srv, text)),
+                         _d("server", gating_line(srv, answer))],
+                 text=text + err)
+
+    root = roots[V_FULL.label]
+    rc, text, err = run_freshness_cli(fresh_mod, root)
+    answer = server_freshness(srv, root)
+    problems = []
+    if text != answer.rstrip("\n") + "\n":
+        diff = [ln for ln in difflib.unified_diff(
+            answer.splitlines(), text.splitlines(), "server", "freshness.py",
+            n=0, lineterm="") if not ln.startswith("@@")]
+        problems.append("the CLI's report is not the server's answer: %s"
+                        % " | ".join(diff[2:8]))
+    if rc != 0:
+        problems.append("exit %r on a corpus the server does not gate: %s"
+                        % (rc, err.strip()[:200]))
+    suite.record(GD, "cli-output-is-the-server-answer", problems,
+                 detail=[_d("corpus", "%d page(s)" % len(variant_pages(V_FULL))),
+                         _d("bytes", "cli %d, server %d"
+                            % (len(text), len(answer)))],
+                 text=text + err)
+
+    copy_dir = relocated_cli(work)
+    rc, out, err = run_cli(os.path.join(copy_dir, "freshness.py"),
+                           ["--root", roots[V_FULL.label]],
+                           work.path, without_env=(SERVER_ENV_VAR,))
+    suite.record(GD, "cli-freshness-no-server-exits-2",
+                 no_server_problems(rc, out, err),
+                 detail=[_d("argv", "<sandbox>/cli-copy/freshness.py, "
+                                    "$%s unset" % SERVER_ENV_VAR),
+                         _d("exit", rc)],
+                 text=out + err)
+
+
+def group_e(suite, srv, lib, roots):
+    # 1. INDEX_COUNTED_TYPES emptied in a second server load -> the B oracle
+    #    must name every archive page as listed.
     ctl = H.load_module_from_path("mcp_wiki_index_control_counted", SERVER)
     ctl.INDEX_COUNTED_TYPES = ()
-    saved = reindex_mod.w
-    reindex_mod.w = _lib_copy(lib, INDEX_COUNTED_TYPES=())
-    try:
-        pages = variant_pages(V_FULL)
-        server_text, skill_text = _renders(ctl, reindex_mod, roots[V_FULL.label])
-        fired = (check_render(server_text, pages, "server")
-                 + check_render(skill_text, pages, "skill"))
-    finally:
-        reindex_mod.w = saved
-    missed = ["%s: %s" % (label, p.path) for label in ("server", "skill")
-              for p in archive_pages(pages)
-              if not any(f.startswith(label) and p.path in f for f in fired)]
+    pages = variant_pages(V_FULL)
+    fired = check_render(_render(ctl, roots[V_FULL.label]), pages, "server")
+    missed = ["server: %s" % p.path for p in archive_pages(pages)
+              if not any(p.path in f for f in fired)]
     suite.record(GE, "control-uncounted-items-are-reported-listed",
                  ["the B oracle did not report %s as listed" % m for m in missed],
                  detail=[_d("planted", "INDEX_COUNTED_TYPES = () in a second "
-                                       "server load and in a _wikilib copy"),
+                                       "server load"),
                          _d("fired", "%d problem(s)" % len(fired))])
 
     # 2. UNTRACKED_TYPES minus `roadmap` in a copy of the server namespace ->
@@ -1131,25 +1341,19 @@ def group_e(suite, srv, reindex_mod, lib, roots):
                             % ROADMAP_TYPE),
                          _d("fired", "%d problem(s)" % len(fired))])
 
-    # 3. ORPHAN_EXEMPT_TYPES back to overview-only in BOTH copies -> the C
-    #    oracle must name every archive page as an orphan.
+    # 3. ORPHAN_EXEMPT_TYPES back to overview-only in a second server load ->
+    #    the C oracle must name every archive page as an orphan.
     ctl = H.load_module_from_path("mcp_wiki_index_control_orphans", SERVER)
     ctl.ORPHAN_EXEMPT_TYPES = ("overview",)
-    reindex_mod.w = _lib_copy(lib, ORPHAN_EXEMPT_TYPES=("overview",))
-    try:
-        pages = variant_pages(V_FULL)
-        server_res, skill_res = _collects(ctl, reindex_mod, roots[V_FULL.label])
-        fired = (check_collect(server_res, pages, "server")
-                 + check_collect(skill_res, pages, "skill"))
-    finally:
-        reindex_mod.w = saved
-    missed = ["%s: %s" % (label, p.path) for label in ("server", "skill")
-              for p in archive_pages(pages)
-              if not any(f.startswith(label) and p.path in f for f in fired)]
+    pages = variant_pages(V_FULL)
+    fired = check_collect(ctl.reindex_collect(roots[V_FULL.label]), pages,
+                          "server")
+    missed = ["server: %s" % p.path for p in archive_pages(pages)
+              if not any(p.path in f for f in fired)]
     suite.record(GE, "control-unexempt-items-are-reported-orphans",
                  ["the C oracle did not report %s as an orphan" % m for m in missed],
                  detail=[_d("planted", "ORPHAN_EXEMPT_TYPES = ('overview',) in a "
-                                       "second server load and a _wikilib copy"),
+                                       "second server load"),
                          _d("fired", "%d problem(s)" % len(fired))])
 
     # 4. The single-home AST scanner must see a planted module-level copy.
@@ -1255,16 +1459,17 @@ def _skill_sources():
             for name in ("_wikilib.py", "freshness.py", "reindex.py")}
 
 
-def group_h(suite, srv, fresh_mod, lib, roots):
-    """Everything the server vendors that groups A and G do not already gate.
+def group_h(suite, srv, lib):
+    """Everything the server vendors from _wikilib that groups A and G do not
+    already gate.
 
     Functions are compared as CODE (see `normalized_function`), because the
     fixture corpora cannot reach every branch -- a quoted scalar, a nested
     dict, a `path:symbol` anchor -- and a copy that drifted in an unreached
-    branch would pass any output comparison.  The two renamed-and-restructured
-    halves, freshness `analyze`/`render`, are compared by OUTPUT instead: the
-    server split classification out into `_classify_page` and grew a scope and
-    a verify-backed gating line, so their code legitimately differs."""
+    branch would pass any output comparison.  The census still reads
+    freshness.py and reindex.py: they carry no vendored code now (R-0033), and
+    a name they grow that the server also defines is the first sign of a copy
+    coming back."""
     sources = _skill_sources()
     server_src = _read(SERVER)
     for label, skill_name, server_name in VENDORED_FUNCTIONS:
@@ -1277,7 +1482,7 @@ def group_h(suite, srv, fresh_mod, lib, roots):
                                            "function's own name, `%s.`"
                                 % SKILL_ALIAS)])
 
-    mods = {"_wikilib.py": lib, "freshness.py": fresh_mod}
+    mods = {"_wikilib.py": lib}
     for label, name in VENDORED_CONSTANTS:
         problems = constant_parity_problems(mods[label], srv, name, label)
         suite.record(GH, "value-parity-" + name, problems,
@@ -1296,32 +1501,8 @@ def group_h(suite, srv, fresh_mod, lib, roots):
                                             len(GATED_ELSEWHERE),
                                             len(DECLARED_DIFFERENT)))])
 
-    report = freshness_render_fixture()
-    skill_text = fresh_mod.render(report)
-    server_text = srv.freshness_render(report)
-    suite.record(GH, "freshness-render-shared-lines",
-                 render_shared_line_problems(skill_text, server_text),
-                 detail=[_d("statuses", ", ".join(sorted(report["summary"]))),
-                         _d("excluded", "the `gating:` line (adr 0019)")],
-                 text=server_text)
 
-    problems = []
-    for variant in ALL_VARIANTS:
-        root = roots[variant.label]
-        ours, theirs = fresh_mod.analyze(root, "HEAD"), \
-            srv.freshness_analyze(root, "HEAD")
-        if ours != theirs:
-            problems.append("%s: freshness.py analyze %r, server %r"
-                            % (variant.label, ours.get("summary"),
-                               theirs.get("summary")))
-    suite.record(GH, "analyze-parity-every-corpus", problems,
-                 detail=[_d("corpora", "%d, every fixture variant"
-                            % len(ALL_VARIANTS)),
-                         _d("compared", "the whole report: root, head, every "
-                                        "page dict, summary")])
-
-
-def group_e_vendored(suite, srv, fresh_mod):
+def group_e_vendored(suite, srv, lib):
     """Controls for group H's oracles: each must FIRE on a planted defect and
     stay SILENT on every difference it declares acceptable."""
     base = ('def f(value):\n    """doc"""\n    if value is None:\n'
@@ -1348,18 +1529,17 @@ def group_e_vendored(suite, srv, fresh_mod):
                          _d("silent on", "docstring, annotations, function "
                                          "name, `w.` qualifier")])
 
-    ctl = types.SimpleNamespace(DETAIL_STATUSES=list(fresh_mod.DETAIL_STATUSES)
-                                + ["planned"],
+    ctl = types.SimpleNamespace(SKIP_DIRS=set(lib.SKIP_DIRS) | {"planted"},
                                 _WIKILINK_RE=re.compile(r"\[\[([^\]]+)\]\]",
                                                         re.I))
-    fired = (constant_parity_problems(ctl, srv, "DETAIL_STATUSES", "planted")
+    fired = (constant_parity_problems(ctl, srv, "SKIP_DIRS", "planted")
              + constant_parity_problems(ctl, srv, "_WIKILINK_RE", "planted"))
     problems = ["the value oracle missed %s" % name
-                for name in ("DETAIL_STATUSES", "_WIKILINK_RE")
+                for name in ("SKIP_DIRS", "_WIKILINK_RE")
                 if not any(name in f for f in fired)]
     suite.record(GE, "control-value-parity-fires", problems,
-                 detail=[_d("planted", "an extra detail status; the wikilink "
-                                       "regex with re.I"),
+                 detail=[_d("planted", "an extra skipped directory; the "
+                                       "wikilink regex with re.I"),
                          _d("fired", repr(fired))])
 
     planted = {"planted.py": "def as_list(v):\n    return v\nMAIN_ONLY = 1\n"
@@ -1373,18 +1553,6 @@ def group_e_vendored(suite, srv, fresh_mod):
         problems.append("the census reported %r, want exactly the two "
                         "undeclared shared names" % fired)
     suite.record(GE, "control-census-names-an-undeclared-copy", problems,
-                 detail=[_d("fired", repr(fired))])
-
-    report = freshness_render_fixture()
-    skill_text = fresh_mod.render(report)
-    tampered = skill_text.replace("advisory: ", "advisory:  ", 1)
-    fired = render_shared_line_problems(skill_text, tampered)
-    gating_only = "\n".join(ln + "X" if ln.startswith("gating: ") else ln
-                            for ln in skill_text.splitlines())
-    problems = [] if fired else ["missed a one-space advisory change"]
-    if render_shared_line_problems(skill_text, gating_only):
-        problems.append("fired on a gating-line-only difference")
-    suite.record(GE, "control-render-oracle-skips-only-gating", problems,
                  detail=[_d("fired", repr(fired))])
 
 
@@ -1435,23 +1603,26 @@ def run(opts=None):
         srv = H.load_module_from_path("mcp_wiki_index_under_test", SERVER)
         reindex_mod = H.load_module_from_path("wiki_index_reindex", REINDEX)
         fresh_mod = H.load_module_from_path("wiki_index_freshness", FRESHNESS)
-        lib = reindex_mod.w
+        # _wikilib loaded off disk by path: the CLIs no longer import it, so
+        # neither of them is the route to the copy this suite judges.
+        lib = H.load_module_from_path("wiki_index_wikilib", WIKILIB)
         roots = {v.label: build_variant(work, v) for v in ALL_VARIANTS}
 
         group_a(suite, srv, lib)
         group_b(suite, srv, reindex_mod, roots, work)
-        group_c(suite, srv, reindex_mod, roots)
-        group_d(suite, srv, fresh_mod, roots)
-        group_e(suite, srv, reindex_mod, lib, roots)
+        group_c(suite, srv, roots)
+        group_d(suite, srv, fresh_mod, roots, work)
+        group_e(suite, srv, lib, roots)
         group_g(suite, srv, lib)
-        group_h(suite, srv, fresh_mod, lib, roots)
-        group_e_vendored(suite, srv, fresh_mod)
+        group_h(suite, srv, lib)
+        group_e_vendored(suite, srv, lib)
     finally:
         # Loading reindex.py / freshness.py put their directory on sys.path and
-        # _wikilib into sys.modules; no later suite in this process inherits
-        # either.
+        # their sibling imports into sys.modules; no later suite in this
+        # process inherits either.
         sys.path[:] = saved_path
         sys.modules.pop("_wikilib", None)
+        sys.modules.pop("measure_cli", None)
         work.cleanup()
         group_f(suite, pyc_before, tree_before, live_before, work.path)
 

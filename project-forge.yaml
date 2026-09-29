@@ -129,7 +129,7 @@ test:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|window|gate'
 
   wiki_index:
-    description: "INDEX.md rendering and the wiki page-type constants in both copies (Scripts/mcp-wiki.py and the p:wiki skill scripts): byte-identical render_index, roadmap-item pages counted in one line and never listed, the orphan exemption, freshness classification, and server/skill constant parity. Writes only a mkdtemp corpus -- never the live docs/INDEX.md."
+    description: "INDEX.md rendering, the wiki page-type constants in both copies (Scripts/mcp-wiki.py and the p:wiki _wikilib.py), and the freshness.py / reindex.py wrappers over the server: roadmap-item pages counted in one line and never listed, the orphan exemption, freshness classification, server/_wikilib code and constant parity, the freshness.py exit code equal to the server's gating number, reindex.py failing on a duplicate slug through the server's exported prefix, and exit 2 with no server. Writes only mkdtemp corpora and fixture git repos -- never the live docs/INDEX.md."
     requires: [syntax]
     commands:
       - python3 tests/run.py wiki_index

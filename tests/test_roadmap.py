@@ -119,8 +119,6 @@ LIVE_ARCHIVE = H.repo_path("docs", "roadmap", "archive")
 WIKI_SCRIPTS = H.repo_path("ClaudeCode", "skills", "wiki", "scripts")
 WIKILIB = os.path.join(WIKI_SCRIPTS, "_wikilib.py")
 SERVER = H.repo_path("Scripts", "mcp-wiki.py")
-REINDEX = os.path.join(WIKI_SCRIPTS, "reindex.py")
-FRESHNESS = os.path.join(WIKI_SCRIPTS, "freshness.py")
 
 GA = "A. format contract + AST gates"
 GB = "B. round trip, idempotence, byte preservation"
@@ -797,7 +795,7 @@ def case_type_membership(suite, mod, lib):
                  detail=[_d("roadmap", repr(getattr(mod, "ROADMAP_TYPE",
                                                     None))),
                          _d("item", repr(getattr(mod, "ITEM_TYPE", None))),
-                         _d("against", "_wikilib as reindex.py loads it")])
+                         _d("against", "_wikilib, loaded off disk by path")])
 
 
 def case_stdlib(suite, tree):
@@ -899,7 +897,11 @@ def run_group(suite, group, body, *args):
                      detail=lines[-8:])
 
 
-Wiki = collections.namedtuple("Wiki", "lib reindex freshness server")
+# The wiki's two readers of a page: _wikilib (the skill scripts' parser) and
+# the server.  reindex.py and freshness.py are no longer readers of their own
+# -- they call the server (R-0033) -- so the server's collect and freshness
+# analysis are what the roadmap's pages are judged by.
+Wiki = collections.namedtuple("Wiki", "lib server")
 
 
 @contextlib.contextmanager
@@ -1546,17 +1548,15 @@ def group_c(suite, mod, work, wiki):
                                             "(M2): close is Step 6")])
 
         problems = []
-        for label, collect in (("reindex.collect", wiki.reindex.collect),
-                               ("server reindex_collect",
-                                wiki.server.reindex_collect)):
-            _entries, dups, orphans, malformed = collect(root)
-            problems += problem_if(malformed, "%s: malformed %r"
-                                   % (label, malformed))
-            problems += problem_if(dups, "%s: dups %r" % (label, dups))
-            stray = [o["path"] for o in orphans if o["type"] == "roadmap-item"]
-            problems += problem_if(stray, "%s: roadmap-item orphans %r"
-                                   % (label, stray))
-        report = wiki.freshness.analyze(root, "HEAD")
+        label = "server reindex_collect"
+        _entries, dups, orphans, malformed = wiki.server.reindex_collect(root)
+        problems += problem_if(malformed, "%s: malformed %r"
+                               % (label, malformed))
+        problems += problem_if(dups, "%s: dups %r" % (label, dups))
+        stray = [o["path"] for o in orphans if o["type"] == "roadmap-item"]
+        problems += problem_if(stray, "%s: roadmap-item orphans %r"
+                               % (label, stray))
+        report = wiki.server.freshness_analyze(root, "HEAD")
         tracked = [(p["path"], p["status"]) for p in report["pages"]
                    if p["status"] != "untracked"]
         problems += problem_if(tracked, "freshness reports %r, want untracked "
@@ -1565,9 +1565,9 @@ def group_c(suite, mod, work, wiki):
         problems += problem_if(gating, "verify_analyze gating %r" % gating)
         suite.record(GC, "c-collect-freshness-verify", problems,
                      detail=[_d("oracle", "zero malformed, zero dups, no "
-                                          "roadmap-item orphan in both "
-                                          "collects; freshness untracked; "
-                                          "verify gating == []")])
+                                          "roadmap-item orphan in the "
+                                          "server's collect; its freshness "
+                                          "untracked; verify gating == []")])
 
     base = stage_roadmap(work, "c-controls", EXPECTED_B)
     for cid, title, tokens in (
@@ -5077,24 +5077,23 @@ def run(opts=None):
             suite.record(GA, "target-exists", [],
                          detail=[_d("target", TARGET)])
             mod = H.load_module_from_path("roadmap_under_test", TARGET)
-            # reindex.py imports _wikilib the way the wiki tooling does
-            # (P10); its `w` is the object whose constants are judged.
-            reindex_mod = H.load_module_from_path("roadmap_wiki_reindex",
-                                                  REINDEX)
-            run_group(suite, GA, group_a, suite, mod, reindex_mod.w,
-                      _read(TARGET))
-            wiki = Wiki(reindex_mod.w, reindex_mod,
-                        H.load_module_from_path("roadmap_wiki_freshness",
-                                                FRESHNESS),
-                        H.load_module_from_path("roadmap_wiki_server", SERVER))
+            # _wikilib is loaded off disk by path (P10): it is the object
+            # whose constants are judged.  reindex.py used to be the route to
+            # it; since R-0033 that script calls the server and imports no
+            # _wikilib at all.
+            lib = H.load_module_from_path("roadmap_wiki_lib", WIKILIB)
+            run_group(suite, GA, group_a, suite, mod, lib, _read(TARGET))
+            wiki = Wiki(lib, H.load_module_from_path("roadmap_wiki_server",
+                                                     SERVER))
             for group, body in ((GB, group_b), (GC, group_c), (GD, group_d),
                                 (GE, group_e), (GF, group_f), (GG, group_g),
                                 (GH, group_h), (GI, group_i), (GJ, group_j),
                                 (GL, group_l)):
                 run_group(suite, group, body, suite, mod, work, wiki)
     finally:
-        # Loading reindex.py put its directory on sys.path and _wikilib into
-        # sys.modules; no later suite in this process inherits either (L8).
+        # Nothing here puts the wiki scripts' directory on sys.path or
+        # _wikilib into sys.modules any more, but a group body might; no later
+        # suite in this process inherits either (L8).
         sys.path[:] = saved_path
         sys.modules.pop("_wikilib", None)
         try:
