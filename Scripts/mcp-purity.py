@@ -2447,6 +2447,9 @@ def encode_lsp_message(body: dict) -> bytes:
     return header.encode("ascii") + encoded
 # END GENERATED: c99fbaf62f6b
 
+# Largest LSP Content-Length accepted before the body is read (64 MB).
+_LSP_MAX_MESSAGE = 64 * 1024 * 1024
+
 
 async def read_lsp_message(reader: "asyncio.StreamReader") -> Optional[dict]:
     """Read one LSP message from reader. Returns None on EOF."""
@@ -2471,10 +2474,9 @@ async def read_lsp_message(reader: "asyncio.StreamReader") -> Optional[dict]:
             else:
                 # F9 / CWE-789: reject absurdly large Content-Length before
                 # readexactly to prevent OOM from a buggy/malicious LSP child.
-                _LSP_MAX_MESSAGE = 64 * 1024 * 1024  # 64 MB
                 if content_length > _LSP_MAX_MESSAGE:
-                    log.warning("LSP Content-Length %d exceeds 64 MB ceiling; aborting read",
-                                content_length)
+                    log.warning("LSP Content-Length %d exceeds %d-byte ceiling; aborting read",
+                                content_length, _LSP_MAX_MESSAGE)
                     return None
 
     if content_length == 0:
@@ -4700,6 +4702,7 @@ _backends: Dict[str, LspBackend] = {}
 _backend_init_tasks: Dict[str, "asyncio.Task"] = {}
 _backend_init_failed: Dict[str, float] = {}     # backend_type -> loop.time() of last failure
 _INIT_FAILURE_BACKOFF = 30.0                    # seconds
+_BACKEND_INIT_TIMEOUT_SECS = 90.0               # caller's wait for a backend start + init
 _CLANGD_FILETYPES = {"c", "cpp", "cuda"}
 _LUALS_FILETYPES = {"lua"}
 # CWE-426 mitigation: resolved absolute paths for LSP binaries.  Set by main()
@@ -5144,9 +5147,11 @@ async def _ensure_backend(filetype: str, project_root: str) -> LspBackend:
         _backend_init_tasks[backend_type] = task
 
     try:
-        client = await asyncio.wait_for(asyncio.shield(task), timeout=90.0)
+        client = await asyncio.wait_for(asyncio.shield(task),
+                                        timeout=_BACKEND_INIT_TIMEOUT_SECS)
     except asyncio.TimeoutError:
-        raise RuntimeError(f"LSP backend '{backend_type}' init timed out (90s)")
+        raise RuntimeError(f"LSP backend '{backend_type}' init timed out "
+                           f"({_BACKEND_INIT_TIMEOUT_SECS:.0f}s)")
     except Exception as exc:
         _backend_init_failed[backend_type] = loop.time()
         _backend_init_tasks.pop(backend_type, None)

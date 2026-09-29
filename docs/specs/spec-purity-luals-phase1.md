@@ -14,6 +14,8 @@ sources:
   - Scripts/mcp-purity.py:_resolve_lsp_binary
   - Scripts/mcp-purity.py:_sanitize_log
   - Scripts/mcp-purity.py:CLANGD_EXEC_DENYLIST_EXACT
+  - Scripts/mcp-purity.py:_BACKEND_INIT_TIMEOUT_SECS
+  - Scripts/mcp-purity.py:_LSP_MAX_MESSAGE
   - Scripts/mcp-purity.py:HANDLERS
   - Scripts/_mcp_smoke_test.py:purity_semantic_checks
   - Scripts/mcp-lua-lsp.py
@@ -65,8 +67,8 @@ as `initializationOptions` and again as a post-init
 redundancy is deliberate: some luals versions ignore `initializationOptions` when
 the client negotiates the `workspace/configuration` capability, and dropping
 either push fails silently rather than loudly — it stalls startup until the
-90-second timeout `Scripts/mcp-purity.py:_ensure_backend`. A silent 90s hang is the expensive failure mode, so both
-pushes stay.
+90-second timeout `Scripts/mcp-purity.py:_BACKEND_INIT_TIMEOUT_SECS`. A silent
+90s hang is the expensive failure mode, so both pushes stay.
 
 **A reply to `workspace/configuration`.** luals requests per-folder settings
 during and after init and *blocks* until answered; the reply is one null per
@@ -113,7 +115,7 @@ second subprocess-spawning backend doubles the untrusted-input surface:
 - **Log-injection and resource ceilings**: CR/LF stripped from logged values
   `Scripts/mcp-purity.py:_sanitize_log`, a caller-regex length cap with scan
   deadlines, and a 64 MB LSP `Content-Length` ceiling checked *before* the read
-  `Scripts/mcp-purity.py:read_lsp_message`,
+  `Scripts/mcp-purity.py:_LSP_MAX_MESSAGE`,
   so a buggy or hostile child cannot drive the server out of memory.
 
 Validation is over the wire rather than in-process: the smoke test asserts luals
