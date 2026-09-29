@@ -11,6 +11,7 @@ verified:
   date: 2026-08-04
 links:
   - scripts
+  - 0023-the-websocket-client-is-a-sixth-domain
 ---
 
 # DuckDuckGo Bot Detection — Technical Analysis & Bypass Research
@@ -683,7 +684,7 @@ The same two-branch shape, for the same reason, is used by
 ### 7.3 CDP Backend Implementation
 
 Key details:
-- Connects via `websocket-client` with `suppress_origin=True` (required for Chrome's CORS)
+- Connects via the stdlib WebSocket client generated from `Scripts/_mcp_websocket.py`, which sends no `Origin` header — what `websocket-client`'s `suppress_origin=True` used to buy, and still required for Chrome's CORS ([[0023-the-websocket-client-is-a-sixth-domain]])
 - Must filter out `devtools://` and `chrome://` page targets
 - Must NOT use `Page.navigate` — it resets session state and triggers CAPTCHA
 - Uses `Runtime.evaluate` with `fetch()` from existing page context

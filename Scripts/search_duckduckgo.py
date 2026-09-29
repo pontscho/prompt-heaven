@@ -31,6 +31,8 @@ import random
 import time
 import os
 import base64
+import hashlib  # the generated WebSocket client (cdp backend)
+import socket  # the generated WebSocket client (cdp backend)
 from urllib.parse import parse_qs, urlparse
 
 from lxml.html import document_fromstring
@@ -336,18 +338,427 @@ def _discover_chrome():
 	return None
 
 
+# The WebSocket client, generated from Scripts/_mcp_websocket.py -- the same
+# RFC 6455 core mcp-gdc.py carries, with the blocking-socket wrapper instead of
+# the asyncio one. It replaced the third-party `websocket-client` package, so
+# the cdp backend needs nothing outside the stdlib. This file is not an MCP
+# server; it takes generated blocks because amalgamate.py names it in
+# DECLARED_HOSTS. No Origin header is sent, which is what `suppress_origin=True`
+# used to buy: Chrome refuses a DevTools socket whose Origin is not allow-listed.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region.
+# BEGIN GENERATED: _mcp_websocket.py :: WebSocketError, WS_MAX_HANDSHAKE_BYTES, WS_MAX_FRAME_BYTES, WS_MAX_MESSAGE_BYTES, _ws_parse_url, _ws_handshake_request, _ws_handshake_split, _ws_handshake_verify, _ws_mask, _ws_encode_frame, _ws_parse_frame, _ws_assemble, _ws_control_reply, _WsConnection, _ws_step, _ws_sync_connect, _ws_sync_recv, _ws_sync_send, _ws_sync_close
+class WebSocketError(ConnectionError):
+	"""A WebSocket protocol violation or a failed handshake.
+
+	A `ConnectionError` on purpose: to every caller that already treats a dead
+	link as an `OSError`, a peer that broke the protocol is the same event.
+	"""
+
+
+WS_MAX_HANDSHAKE_BYTES = 64 * 1024
+
+
+WS_MAX_FRAME_BYTES = 256 * 1024 * 1024
+
+
+WS_MAX_MESSAGE_BYTES = 256 * 1024 * 1024
+
+
+def _ws_parse_url(url: str) -> tuple:
+	"""Split a ``ws://host[:port]/path`` URL into ``(host, port, path)``.
+
+	``wss://`` is refused by name rather than dialled in clear text on port 80,
+	which is what the hand parser this replaced did with it. A bracketed IPv6
+	literal loses its brackets here and regains them in the ``Host`` header. The
+	query string stays on the path, where the request line needs it; a fragment
+	is dropped, since it never goes on the wire.
+	"""
+	if not url.startswith("ws://"):
+		scheme = url.split("://", 1)[0] if "://" in url else url[:16]
+		raise WebSocketError("only ws:// URLs are supported, not %r" % scheme)
+	rest = url[5:].split("#", 1)[0]
+	cut = len(rest)
+	for mark in "/?":
+		at = rest.find(mark)
+		if 0 <= at < cut:
+			cut = at
+	authority, path = rest[:cut], rest[cut:]
+	if not path.startswith("/"):
+		path = "/" + path
+	if "@" in authority:
+		raise WebSocketError("a ws:// URL with user information is refused")
+	port = ""
+	if authority.startswith("["):
+		close = authority.find("]")
+		if close < 0:
+			raise WebSocketError("unterminated IPv6 literal in %r" % authority)
+		host, tail = authority[1:close], authority[close + 1:]
+		if tail:
+			if not tail.startswith(":"):
+				raise WebSocketError("junk after the IPv6 literal in %r" % authority)
+			port = tail[1:]
+	elif ":" in authority:
+		host, port = authority.rsplit(":", 1)
+	else:
+		host = authority
+	if not host:
+		raise WebSocketError("a ws:// URL needs a host")
+	if not port:
+		return host, 80, path
+	if not port.isdigit() or not 0 < int(port) < 65536:
+		raise WebSocketError("invalid port %r" % port)
+	return host, int(port), path
+
+
+def _ws_handshake_request(host: str, port: int, path: str) -> tuple:
+	"""The HTTP upgrade request and the random key it carries: ``(bytes, str)``.
+
+	No ``Origin`` header is sent. Chrome refuses a DevTools WebSocket whose
+	Origin is not on its ``--remote-allow-origins`` list, and a client that
+	sends none is not a browser page -- which is what ``websocket-client``'s
+	``suppress_origin=True`` bought the search script, and why this never
+	grew an option to send one.
+
+	A host, or a path, carrying whitespace or a control character is refused:
+	either would let a URL write its own header lines into the request.
+	"""
+	for part in (host, path):
+		if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in part):
+			raise WebSocketError("refusing a host or path with whitespace or control characters")
+	key = base64.b64encode(os.urandom(16)).decode("ascii")
+	authority = "[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)
+	lines = ["GET %s HTTP/1.1" % path]
+	lines.append("Host: %s" % authority)
+	lines.append("Upgrade: websocket")
+	lines.append("Connection: Upgrade")
+	lines.append("Sec-WebSocket-Key: %s" % key)
+	lines.append("Sec-WebSocket-Version: 13")
+	return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii"), key
+
+
+def _ws_handshake_split(buf) -> int:
+	"""Where the upgrade response's header block ends in *buf*, or -1 for "read more".
+
+	The returned offset is one past the blank line, so ``buf[:end]`` is the
+	header block and ``buf[end:]`` is the first frame bytes if the server sent
+	any in the same segment -- which the client this replaced read into its
+	header buffer and threw away.
+	"""
+	end = bytes(buf[:WS_MAX_HANDSHAKE_BYTES + 4]).find(b"\r\n\r\n")
+	if 0 <= end and end + 4 <= WS_MAX_HANDSHAKE_BYTES:
+		return end + 4
+	if end < 0 and len(buf) <= WS_MAX_HANDSHAKE_BYTES:
+		return -1
+	raise WebSocketError("WebSocket handshake failed: the header block exceeds %d bytes" % WS_MAX_HANDSHAKE_BYTES)
+
+
+def _ws_handshake_verify(head: bytes, key: str) -> dict:
+	"""Check the upgrade response against RFC 6455 4.1; return its headers.
+
+	Header names are folded to lower case and a repeated header is joined with
+	``", "``, so every check below reads ONE value and compares it EXACTLY --
+	the client this replaced looked for ``101`` anywhere in the status line and
+	for the accept key anywhere in the response.
+	"""
+	lines = head.decode("latin-1").split("\r\n")
+	status = lines[0].split(" ", 2)
+	if len(status) < 2 or status[0] != "HTTP/1.1" or status[1] != "101":
+		raise WebSocketError("WebSocket handshake rejected: %r" % lines[0][:200])
+	headers = {}
+	for line in lines[1:]:
+		if not line:
+			continue
+		name, sep, value = line.partition(":")
+		if not sep or not name or name != name.strip() or line[0] in " \t":
+			raise WebSocketError("WebSocket handshake failed: malformed header line %r" % line[:200])
+		name = name.lower()
+		value = value.strip(" \t")
+		headers[name] = headers[name] + ", " + value if name in headers else value
+	if headers.get("upgrade", "").lower() != "websocket":
+		raise WebSocketError("WebSocket handshake failed: Upgrade is not websocket")
+	if "upgrade" not in [token.strip().lower() for token in headers.get("connection", "").split(",")]:
+		raise WebSocketError("WebSocket handshake failed: Connection carries no upgrade token")
+	digest = hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+	if headers.get("sec-websocket-accept") != base64.b64encode(digest).decode("ascii"):
+		raise WebSocketError("WebSocket handshake failed: invalid accept key")
+	if "sec-websocket-extensions" in headers or "sec-websocket-protocol" in headers:
+		raise WebSocketError("WebSocket handshake failed: the server negotiated an extension or subprotocol nobody offered")
+	return headers
+
+
+def _ws_mask(key: bytes, data: bytes) -> bytes:
+	"""XOR *data* with the 4-byte *key* repeated -- masking and unmasking alike.
+
+	One big-integer XOR over the whole payload instead of a Python-level loop
+	over its bytes: the loop this replaced cost a generator step per byte, which
+	on a multi-megabyte frame is the whole of the send time.
+	"""
+	size = len(data)
+	if not size:
+		return b""
+	pad = (bytes(key) * (size // 4 + 1))[:size]
+	return (int.from_bytes(data, "big") ^ int.from_bytes(pad, "big")).to_bytes(size, "big")
+
+
+def _ws_encode_frame(opcode: int, payload: bytes, fin: bool = True) -> bytes:
+	"""One client frame: FIN/opcode, the shortest length form, a fresh mask key.
+
+	Always masked -- RFC 6455 5.1 requires it of every client frame, and a
+	server is obliged to drop the connection on an unmasked one.
+	"""
+	if opcode not in (0x0, 0x1, 0x2, 0x8, 0x9, 0xA):
+		raise WebSocketError("unknown opcode 0x%X" % opcode)
+	size = len(payload)
+	if opcode >= 0x8 and (size > 125 or not fin):
+		raise WebSocketError("a control frame must be FIN and at most 125 bytes")
+	head = bytearray([(0x80 if fin else 0x00) | opcode])
+	if size < 126:
+		head.append(0x80 | size)
+	elif size < 65536:
+		head.append(0x80 | 126)
+		head += size.to_bytes(2, "big")
+	else:
+		head.append(0x80 | 127)
+		head += size.to_bytes(8, "big")
+	key = os.urandom(4)
+	return bytes(head) + key + _ws_mask(key, payload)
+
+
+def _ws_parse_frame(buf):
+	"""The first complete server frame in *buf*: ``(fin, opcode, payload, used)``.
+
+	Returns None while *buf* does not yet hold the whole frame; *used* is how
+	many bytes of *buf* the frame took. Every refusal that can be made from
+	the header is made from the header, before the payload arrives, so an
+	announced 2**63-byte frame costs ten bytes of reading and not an attempt.
+	"""
+	if len(buf) < 2:
+		return None
+	first, second = buf[0], buf[1]
+	if first & 0x70:
+		raise WebSocketError("reserved bits set on a frame, and no extension was negotiated")
+	opcode = first & 0x0F
+	if opcode not in (0x0, 0x1, 0x2, 0x8, 0x9, 0xA):
+		raise WebSocketError("unknown opcode 0x%X" % opcode)
+	fin = bool(first & 0x80)
+	if second & 0x80:
+		raise WebSocketError("the server sent a masked frame")
+	size = second & 0x7F
+	offset = 2
+	if size == 126:
+		if len(buf) < 4:
+			return None
+		size, offset = int.from_bytes(bytes(buf[2:4]), "big"), 4
+	elif size == 127:
+		if len(buf) < 10:
+			return None
+		size, offset = int.from_bytes(bytes(buf[2:10]), "big"), 10
+		if size >> 63:
+			raise WebSocketError("the most significant bit of a 64-bit frame length is set")
+	if opcode >= 0x8 and (size > 125 or not fin):
+		raise WebSocketError("a control frame must be FIN and at most 125 bytes")
+	if size > WS_MAX_FRAME_BYTES:
+		raise WebSocketError("a %d-byte frame exceeds the %d-byte cap" % (size, WS_MAX_FRAME_BYTES))
+	end = offset + size
+	if len(buf) < end:
+		return None
+	return fin, opcode, bytes(buf[offset:end]), end
+
+
+def _ws_assemble(pending: list, fin: bool, opcode: int, payload: bytes):
+	"""Fold one frame into *pending*; return ``(opcode, value)`` or None.
+
+	*pending* is the caller's per-connection list: empty between messages, and
+	``[opcode, bytearray]`` while a fragmented one is open. A control frame is
+	returned at once as ``(opcode, payload)`` -- RFC 6455 lets it arrive
+	between two fragments, and it does not disturb the message. A data message
+	is returned once its FIN fragment lands: text as ``str`` (strict UTF-8),
+	binary as ``bytes``. None means "a fragment was absorbed, keep reading" --
+	the client this replaced returned None for a continuation frame, which its
+	caller read as the connection closing.
+	"""
+	if opcode >= 0x8:
+		return opcode, payload
+	if opcode == 0x0:
+		if not pending:
+			raise WebSocketError("a continuation frame arrived with no message open")
+	elif pending:
+		raise WebSocketError("a new data frame arrived inside a fragmented message")
+	else:
+		pending[:] = [opcode, bytearray()]
+	if len(pending[1]) + len(payload) > WS_MAX_MESSAGE_BYTES:
+		raise WebSocketError("a message exceeds the %d-byte cap" % WS_MAX_MESSAGE_BYTES)
+	pending[1] += payload
+	if not fin:
+		return None
+	kind, data = pending[0], bytes(pending[1])
+	del pending[:]
+	if kind == 0x2:
+		return kind, data
+	try:
+		return kind, data.decode("utf-8")
+	except UnicodeDecodeError:
+		raise WebSocketError("a text message is not valid UTF-8") from None
+
+
+def _ws_control_reply(opcode: int, payload: bytes):
+	"""The frame a control frame obliges the client to send back, or None.
+
+	A ping is answered with a pong carrying the SAME payload (RFC 6455 5.5.2);
+	the client this replaced read the ping and answered nothing. A close is
+	answered with a close echoing its status code, after the payload is
+	checked: one byte is not a status code, the codes an endpoint must never
+	send are refused, and so is a reason that is not UTF-8. A pong needs no
+	answer.
+	"""
+	if opcode == 0x9:
+		return _ws_encode_frame(0xA, payload)
+	if opcode != 0x8:
+		return None
+	if len(payload) == 1:
+		raise WebSocketError("a close frame carried a one-byte payload")
+	if not payload:
+		return _ws_encode_frame(0x8, b"")
+	code = int.from_bytes(payload[:2], "big")
+	if code < 1000 or code in (1004, 1005, 1006, 1015):
+		raise WebSocketError("a close frame carried the reserved status code %d" % code)
+	try:
+		payload[2:].decode("utf-8")
+	except UnicodeDecodeError:
+		raise WebSocketError("a close frame's reason is not valid UTF-8") from None
+	return _ws_encode_frame(0x8, payload[:2])
+
+
+class _WsConnection:
+	"""One open client connection: its transport and the parser state between reads.
+
+	The asyncio wrapper sets *reader* and *writer*, the socket wrapper sets
+	*sock*; the core never touches any of the three. *buf* holds bytes read
+	but not yet parsed -- including any the server sent in the same segment as
+	its handshake -- and *pending* is `_ws_assemble`'s open message.
+	"""
+
+	def __init__(self, reader, writer, sock, timeout: float):
+		self.reader = reader
+		self.writer = writer
+		self.sock = sock
+		self.timeout = timeout
+		self.buf = bytearray()
+		self.pending = []
+
+
+def _ws_step(conn):
+	"""Advance *conn* over what is buffered: ``(reply, message, closed)`` or None.
+
+	None means the buffer holds no complete frame and the wrapper must read.
+	Otherwise *reply* is a frame the wrapper must send first (or None),
+	*message* is the next data message as ``str`` (or None), and *closed*
+	says the peer sent a close. A binary message is decoded with replacement
+	rather than refused, which is what the client this replaced returned for
+	one -- CDP never sends binary, so this is compatibility, not a feature.
+
+	A loop, not a recursion: the client this replaced called itself once per
+	ping or pong, so a peer streaming control frames grew its stack.
+	"""
+	while True:
+		frame = _ws_parse_frame(conn.buf)
+		if frame is None:
+			return None
+		fin, opcode, payload, used = frame
+		del conn.buf[:used]
+		event = _ws_assemble(conn.pending, fin, opcode, payload)
+		if event is None:
+			continue
+		kind, value = event
+		if kind == 0x1:
+			return None, value, False
+		if kind == 0x2:
+			return None, value.decode("utf-8", "replace"), False
+		reply = _ws_control_reply(kind, value)
+		if reply is not None or kind == 0x8:
+			return reply, None, kind == 0x8
+
+
+def _ws_sync_connect(url: str, timeout: float = 30.0):
+	"""Open a WebSocket to a ``ws://`` URL over a blocking socket.
+
+	*timeout* is the socket's own, so it bounds the connect and every later
+	read and write separately -- the semantics of ``websocket-client``'s
+	``create_connection(timeout=...)``, which this replaced.
+	"""
+	host, port, path = _ws_parse_url(url)
+	sock = socket.create_connection((host, port), timeout=timeout)
+	try:
+		request, key = _ws_handshake_request(host, port, path)
+		conn = _WsConnection(None, None, sock, timeout)
+		sock.sendall(request)
+		end = -1
+		while end < 0:
+			chunk = sock.recv(65536)
+			if not chunk:
+				raise WebSocketError("WebSocket handshake failed: connection closed")
+			conn.buf += chunk
+			end = _ws_handshake_split(conn.buf)
+		_ws_handshake_verify(bytes(conn.buf[:end]), key)
+		del conn.buf[:end]
+	except BaseException:
+		sock.close()
+		raise
+	return conn
+
+
+def _ws_sync_recv(conn):
+	"""The next data message as text; None once the peer has closed."""
+	while True:
+		step = _ws_step(conn)
+		if step is None:
+			chunk = conn.sock.recv(65536)
+			if not chunk:
+				raise WebSocketError("the connection ended without a close frame")
+			conn.buf += chunk
+			continue
+		reply, message, closed = step
+		if reply is not None:
+			conn.sock.sendall(reply)
+		if closed:
+			return None
+		if message is not None:
+			return message
+
+
+def _ws_sync_send(conn, text: str) -> None:
+	"""Send *text* as one masked text frame."""
+	conn.sock.sendall(_ws_encode_frame(0x1, text.encode("utf-8")))
+
+
+def _ws_sync_close(conn) -> None:
+	"""Send a normal-closure frame, best effort, and close the socket.
+
+	The peer's answering close is not waited for: the caller is done with the
+	connection, and a peer that never answers must not keep it open.
+	"""
+	try:
+		conn.sock.sendall(_ws_encode_frame(0x8, (1000).to_bytes(2, "big")))
+	except OSError:
+		pass
+	conn.sock.close()
+# END GENERATED: 6d2dd7da88c7
+
+
 class CDPSearcher:
 	def __init__(self, ws_url):
-		import websocket
-		self.ws = websocket.create_connection(ws_url, suppress_origin=True, timeout=30)
+		self.ws = _ws_sync_connect(ws_url, timeout=30)
 		self._id = 1
 		self._warm = False
 
 	def _send(self, method, params=None):
 		msg = {"id": self._id, "method": method, "params": params or {}}
-		self.ws.send(json.dumps(msg))
+		_ws_sync_send(self.ws, json.dumps(msg))
 		while True:
-			result = json.loads(self.ws.recv())
+			text = _ws_sync_recv(self.ws)
+			if text is None:
+				raise WebSocketError("Chrome closed the CDP connection")
+			result = json.loads(text)
 			if result.get("id") == self._id:
 				self._id += 1
 				return result
@@ -383,7 +794,7 @@ class CDPSearcher:
 
 	def close(self):
 		try:
-			self.ws.close()
+			_ws_sync_close(self.ws)
 		except Exception:
 			pass
 

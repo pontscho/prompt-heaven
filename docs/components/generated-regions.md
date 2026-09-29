@@ -3,7 +3,7 @@ name: generated-regions
 type: component
 status: active
 title: Generated regions — how the MCP fleet shares plumbing without importing it
-description: The amalgamate generator, its five canonical sources, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
+description: The amalgamate generator, its six canonical sources, the one hand-declared host that is not a server, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
 sources:
   - Scripts/amalgamate.py
   - Scripts/_mcp_concurrency.py
@@ -11,6 +11,7 @@ sources:
   - Scripts/_mcp_logging.py
   - Scripts/_mcp_lsp.py
   - Scripts/_mcp_paging.py
+  - Scripts/_mcp_websocket.py
   - tests/test_generated_region.py
 verified:
   commit: baa3a68
@@ -23,6 +24,7 @@ links:
   - 0019-only-gate-on-what-you-can-prove
   - 0014-a-canonical-source-is-a-domain
   - 0015-ambiguity-is-the-defect
+  - 0023-the-websocket-client-is-a-sixth-domain
 ---
 
 # Generated regions
@@ -32,6 +34,11 @@ import**: a canonical function is pasted into each server between two comment
 markers, and a generator re-renders it on demand. There is no runtime dependency
 between servers, no shared package, and no import that could carry a helper from
 one file to another.
+
+One host is not a server. `Scripts/search_duckduckgo.py` takes the WebSocket
+client its `cdp` backend shares with `Scripts/mcp-gdc.py`, and it is a target
+because the generator **names it by hand** — see "A host outside the glob"
+below — not because anything about it matches the server glob.
 
 **Scope note.** This page is about the *MCP fleet's* generated regions. The repo
 contains two other marker-delimited generation mechanisms and neither is this
@@ -136,7 +143,7 @@ left them in: the first two had read `70` and `84` since before the logging
 source existed, and the third read `11` against a table that summed to thirteen
 further down this same page.
 
-## Five canonical sources, and why five
+## Six canonical sources, and why six
 
 The registry is a hand-written tuple, not a glob `Scripts/amalgamate.py:CANONICAL_NAMES`,
 because a glob would let an unrelated file become a generation source by merely
@@ -176,6 +183,20 @@ decides when a sixth source is warranted are
 | `Scripts/_mcp_logging.py` | how a server CONFIGURES logging — level, sink, file mode |
 | `Scripts/_mcp_lsp.py` | how the LSP wire is spoken — `Content-Length` framing for a message, the `file://` DocumentUri for a path, the client-side hops that put a message on that wire, and the two spellings of a resolved path |
 | `Scripts/_mcp_paging.py` | how much of a result a caller gets, and how it is told where the rest is |
+| `Scripts/_mcp_websocket.py` | how a client speaks the WebSocket wire — the upgrade, the frames, message assembly, the control frames it must answer, and the ceilings on what a peer can make it allocate |
+
+`Scripts/_mcp_websocket.py` is the sixth, and the first source whose domain is a
+**protocol client** rather than a piece of server plumbing. It passed ADR 0014's
+test on the only question that test asks: none of the five could hold it without
+becoming a shelf — the LSP source speaks `Content-Length` framing over stdio,
+the JSON source speaks envelopes, and a WebSocket frame is neither. It is also
+the first source whose blocks mostly call **one another**, so no block of it
+can stand in a region alone: every host spells one marker, the sans-IO core
+dependency first and then the wrapper it uses — the asyncio one in `mcp-gdc`,
+the blocking-socket one in the search script. The decision, the hardening that
+came with the lift, and what stays out of scope are
+[[0023-the-websocket-client-is-a-sixth-domain]]; the behaviour is gated by its
+own suite, `tests/test_mcp_websocket.py`, rather than by group E here.
 
 That column is the half no command can print: a domain is a decision about what a
 source is *for*. What each source actually **defines** is measured
@@ -330,8 +351,12 @@ Neither the unsafe set nor the tab hosts are tallied here, because the suite
 measures both on every run: `tab-safety-real-blocks` asserts the unsafe set is
 exactly `_rows_note` over the real canonical text, and `host-indent-from-tokens`
 that the tab-indented servers are exactly `mcp-forge.py` and `mcp-webfetch.py`
-`tests/test_generated_region.py:group_tabs`. A block added to a source moves that
-set or fails there. The refusal therefore bites in one place: `mcp-webfetch` is
+`tests/test_generated_region.py:group_tabs`, and — in the same case — that the one
+declared host is tab-indented too. A block added to a source moves that set or
+fails there. The websocket source is the rule's newest customer: its tab host is
+the search script, so every one of its blocks was written to one call per
+physical line from the start, the request built by appending rather than as one
+bracketed list. The refusal therefore bites in one place: `mcp-webfetch` is
 the only tab host that carries `_rows_note` at all, and it keeps its own —
 excluded twice over, tab-unsafe *and* body-diverged, so clearing the tab hazard
 alone would not make it adoptable. Lifting the constants did not widen that
@@ -354,6 +379,31 @@ reshape as a botched lift is the misreading the declaration exists to prevent
 resolution is refused, and the suite gates both halves — the refusal *and* a
 positive case proving the right body was selected, because "refused" alone could
 be satisfied by a merged namespace that got lucky.
+
+## A host outside the glob
+
+The generator's targets were `Scripts/mcp-*.py` and nothing else until the
+websocket source arrived with a consumer that is not a server.
+`Scripts/amalgamate.py:DECLARED_HOSTS` is the widening, and it is a hand-written
+tuple of one filename for the reason `CANONICAL_NAMES` is: a wider glob would
+make every script in `Scripts/` a target by merely existing. A declared host
+takes the default run and `--check` exactly as a server does, and
+`tests/test_generated_region.py` mirrors the tuple, asserts the two spellings
+agree in `target-glob`, and walks the declared hosts in `fleet-ok` beside the
+servers.
+
+It is **not** in the `--census fleet` count, deliberately: that census is about
+the server fleet and says so in its first line, so its measured block above
+counts the servers only. A websocket block generated only into the search
+script therefore shows up there as defined-but-not-named-on-a-server-marker,
+which is true.
+
+Why a declared host rather than an import is the servers' argument, with one
+reason sharper: agents run the search script by path, without `-B`, so an
+imported sibling would write `Scripts/__pycache__` on every search — into the
+tree the bytecode-snapshotting suites assert stays empty — and a copy of the one
+file taken on its own would stop at an `ImportError` —
+[[0023-the-websocket-client-is-a-sixth-domain]].
 
 ## Two registers of deliberate exclusion
 

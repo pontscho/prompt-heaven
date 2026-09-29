@@ -142,6 +142,10 @@ def run_generated_region(opts):
     return run_python_suite("test_generated_region", opts)
 
 
+def run_mcp_websocket(opts):
+    return run_python_suite("test_mcp_websocket", opts)
+
+
 def run_read_loop(opts):
     return run_python_suite("test_read_loop", opts)
 
@@ -364,6 +368,11 @@ SUITES = [
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against", 92),
+    ("mcp_websocket", run_mcp_websocket,
+     "the stdlib WebSocket client: exact-match handshake, every frame length "
+     "form, the refusals a frame header earns, fragments, ping/pong, close, "
+     "the size caps and strict UTF-8 -- then both hosts' generated copies "
+     "driven against a loopback CDP peer", 42),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That

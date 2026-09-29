@@ -73,8 +73,20 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 # into Scripts/ to a generation source, and a region naming it would read as
 # legitimate as any other. Adding a source is a deliberate edit here.
 CANONICAL_NAMES = ("_mcp_concurrency.py", "_mcp_json.py", "_mcp_logging.py",
-                   "_mcp_lsp.py", "_mcp_paging.py")
+                   "_mcp_lsp.py", "_mcp_paging.py", "_mcp_websocket.py")
 CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
+
+# Hosts OUTSIDE `TARGET_GLOB` that take generated blocks, each named by hand for
+# the reason the source registry is: widening the glob would make every script
+# in Scripts/ a target by merely existing. A host listed here is a single-file
+# script with the same import-free constraint as a server -- agents run the
+# search script by path and without -B, so an imported sibling would write
+# Scripts/__pycache__ on every search, and a copy of the one file taken alone
+# would stop at an ImportError. It takes the default run and `--check` exactly
+# as a server does; the
+# `--census fleet` count stays the MCP glob's, because that census is ABOUT the
+# server fleet and says so in its first line.
+DECLARED_HOSTS = ("search_duckduckgo.py",)
 
 # The repo root, derived the same way `SCRIPTS_DIR` is and for the same reason:
 # `Scripts/` is a directory of this repository, so its parent is the root that
@@ -769,7 +781,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"({', '.join(CANONICAL_NAMES)}) into the MCP servers."
     )
     ap.add_argument("targets", nargs="*", type=Path,
-                    help=f"files to process (default: Scripts/{TARGET_GLOB})")
+                    help=f"files to process (default: Scripts/{TARGET_GLOB} "
+                         f"plus {', '.join(DECLARED_HOSTS)})")
     ap.add_argument("--check", action="store_true",
                     help="write nothing; exit 1 if any region is stale")
     ap.add_argument("--force", action="store_true",
@@ -782,13 +795,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     sources = load_all_blocks()
-    targets = args.targets or sorted(SCRIPTS_DIR.glob(TARGET_GLOB))
+    fleet = sorted(SCRIPTS_DIR.glob(TARGET_GLOB))
+    targets = args.targets or fleet + [SCRIPTS_DIR / name for name in DECLARED_HOSTS]
 
     # THE READ PATH, and it is first on purpose: nothing below this line runs
     # for a census, so there is no ordering, no flag combination and no later
-    # edit to this function that can make the reporting mode write.
+    # edit to this function that can make the reporting mode write. Its default
+    # is the server fleet alone -- see `DECLARED_HOSTS` for why.
     if args.census:
-        print(census_text(args.census, sources, targets), end="")
+        print(census_text(args.census, sources, args.targets or fleet), end="")
         return 0
 
     stale = refused = 0

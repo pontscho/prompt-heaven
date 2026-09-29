@@ -177,15 +177,23 @@ test:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared'
 
   generated_region:
-    description: "The generated-region drift gate: every # BEGIN GENERATED region in Scripts/mcp-*.py re-rendered in memory from the canonical source its own marker names (Scripts/_mcp_json.py, Scripts/_mcp_lsp.py or Scripts/_mcp_paging.py) and demanded byte-identical, the marker format contract and the source registry asserted against the generator, every canonical module imported and its blocks unit-tested, and a synthetic control group proving each mutation is detected, a cross-source name is refused, and a quoted marker stays inert. Plus the tab group: re-indentation is decided per BLOCK by tokenize rather than per file, an unsafe block is refused by name for a tab host, and a space host is served exactly what it was before. In-memory only -- writes nothing."
+    description: "The generated-region drift gate: every # BEGIN GENERATED region in Scripts/mcp-*.py and in the generator's hand-declared non-server hosts (DECLARED_HOSTS: Scripts/search_duckduckgo.py) re-rendered in memory from the canonical source its own marker names (one of the six in the generator's CANONICAL_NAMES) and demanded byte-identical, the marker format contract, the source registry and the declared-host list asserted against the generator, every canonical module imported and its blocks unit-tested, and a synthetic control group proving each mutation is detected, a cross-source name is refused, and a quoted marker stays inert. Plus the tab group: re-indentation is decided per BLOCK by tokenize rather than per file, an unsafe block is refused by name for a tab host, and a space host is served exactly what it was before. In-memory only -- writes nothing."
     requires: [syntax]
     commands:
       - python3 tests/run.py generated_region
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
+  mcp_websocket:
+    description: "The stdlib WebSocket client (Scripts/_mcp_websocket.py, ADR 0023): the upgrade request with no Origin, the response checked by EXACT status line, Upgrade, Connection token and Sec-WebSocket-Accept (RFC 6455's worked example pinned), the header-block cap, the ws:// URL parser; client frames at every length form decoded by an oracle written from the RFC, the mask against a per-byte oracle, and every refusal a frame header earns -- RSV bits, a masked server frame, an unknown opcode, an oversized or unfinished control frame, a frame over the cap refused from its header alone; fragments assembled around a ping, ping answered with its own payload, close echoed and returned as None, the message cap across fragments, strict UTF-8, and a 3000-ping stream handled without recursion. Then both wrappers over in-memory and loopback transports, and both hosts' generated copies -- mcp-gdc's CdpSession and search_duckduckgo's CDPSearcher -- driven against a loopback CDP peer. Loopback only; writes nothing."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py mcp_websocket
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|PROBLEM'
+
   amalgamate_check:
-    description: "The generator's OWN staleness gate: `Scripts/amalgamate.py --check` over every Scripts/mcp-*.py, writing nothing and exiting 1 if a region is stale or hand-edited. It neither subsumes the generated_region suite nor is subsumed by it -- that suite re-renders every region in memory from the canonical source its own marker names and demands byte identity, this one gates the CLI's exit code, the thing a human or a hook actually runs. A clean tree prints NOTHING; the exit code is the verdict. Only --check is wrapped: --force and the bare rewriting form stay unreachable from forge, because a target that repairs the tree it is measuring has no verdict left to report."
+    description: "The generator's OWN staleness gate: `Scripts/amalgamate.py --check` over every Scripts/mcp-*.py plus the hand-declared non-MCP hosts in its DECLARED_HOSTS (today Scripts/search_duckduckgo.py), writing nothing and exiting 1 if a region is stale or hand-edited. It neither subsumes the generated_region suite nor is subsumed by it -- that suite re-renders every region in memory from the canonical source its own marker names and demands byte identity, this one gates the CLI's exit code, the thing a human or a hook actually runs. A clean tree prints NOTHING; the exit code is the verdict. Only --check is wrapped: --force and the bare rewriting form stay unreachable from forge, because a target that repairs the tree it is measuring has no verdict left to report."
     requires: [syntax]
     commands:
       - python3 -B Scripts/amalgamate.py --check

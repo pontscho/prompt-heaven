@@ -11,7 +11,8 @@
 > **Some of the plumbing below is no longer described here but *generated*.** The
 > named blocks in the canonical sources — `Scripts/_mcp_concurrency.py`,
 > `Scripts/_mcp_json.py`,
-> `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` and `Scripts/_mcp_paging.py`
+> `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`, `Scripts/_mcp_paging.py`
+> and `Scripts/_mcp_websocket.py`
 > — are pasted into each
 > server by `Scripts/amalgamate.py`; for those, the canonical file is the source
 > of truth and this one only explains the shape. §8 is the mechanism, and it is
@@ -715,8 +716,11 @@ for how the LSP wire is spoken by the four language-server hosts — the
 the client-side request and notification hops that ride on both;
 `Scripts/_mcp_paging.py` for output capping and the two halves of the pager
 protocol, the `offset=<n> for more` line a payload ends with and the read that
-takes the number back; and `Scripts/_mcp_concurrency.py` for how many tool calls
-run at once, which is one constant and deliberately not the executors around it
+takes the number back; `Scripts/_mcp_concurrency.py` for how many tool calls
+run at once, which is one constant and deliberately not the executors around it;
+and `Scripts/_mcp_websocket.py` for how a client speaks the WebSocket wire —
+mcp-gdc's CDP link, and the one source with a host that is not a server at all,
+the search script `Scripts/amalgamate.py:DECLARED_HOSTS` names by hand
 — and is **pasted into** each server by
 `python3 Scripts/amalgamate.py`. In a server the result looks like this, and it
 is the whole of the mechanism:
@@ -761,7 +765,8 @@ to edit.
 
 **Change a shared helper** — edit its canonical source
 (`Scripts/_mcp_concurrency.py`, `Scripts/_mcp_json.py`,
-`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` or `Scripts/_mcp_paging.py`),
+`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`, `Scripts/_mcp_paging.py` or
+`Scripts/_mcp_websocket.py`),
 then:
 
 ```

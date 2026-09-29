@@ -77,6 +77,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `checkpoint` | `test_checkpoint.py` | A–K |
 | `roadmap` | `test_roadmap.py` | A–L |
 | `generated_region` | `test_generated_region.py` | A–F |
+| `mcp_websocket` | `test_mcp_websocket.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
 | `wire_log` | `test_wire_log.py` | A–F |
 | `handler_crash` | `test_handler_crash.py` | A–E |
@@ -116,6 +117,7 @@ python3 tests/test_bitbucket_cli.py
 python3 tests/test_checkpoint.py
 python3 tests/test_roadmap.py
 python3 tests/test_generated_region.py
+python3 tests/test_mcp_websocket.py
 python3 tests/test_read_loop.py
 python3 tests/test_wire_log.py
 python3 tests/test_handler_crash.py
@@ -264,6 +266,11 @@ tests/
                                            module and unit-tests its blocks,
                                            and decides tab re-indentation per
                                            BLOCK rather than per file)
+  test_mcp_websocket.py      groups A-F   (loopback only, writes nothing -- the
+                                           stdlib WebSocket client against an
+                                           oracle written from RFC 6455, then
+                                           both hosts' generated copies driven
+                                           against a loopback CDP peer)
   test_read_loop.py          groups A-F   (offline, AST only, nothing spawned --
                                            ADR 0008's read-loop shape in every
                                            Scripts/mcp-*.py, with the per-server

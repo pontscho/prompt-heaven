@@ -2,11 +2,14 @@
 """Generated-region drift gate -- groups A-G.
 
 `Scripts/_mcp_concurrency.py`, `Scripts/_mcp_json.py`,
-`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py` and
-`Scripts/_mcp_paging.py` are the canonical sources for the helpers the MCP
-servers share, and
+`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`,
+`Scripts/_mcp_paging.py` and `Scripts/_mcp_websocket.py` are the canonical
+sources for the helpers the MCP servers share, and
 `Scripts/amalgamate.py` inlines their named blocks into each server between
-`# BEGIN GENERATED` / `# END GENERATED` markers. The servers stay
+`# BEGIN GENERATED` / `# END GENERATED` markers -- and into the one non-server
+host its `DECLARED_HOSTS` names, which group A gates alongside the fleet and
+which the websocket blocks' own behaviour suite (`tests/test_mcp_websocket.py`)
+drives end to end, so group E does not repeat it. The servers stay
 single-file on purpose (an imported sibling would write `Scripts/__pycache__`
 into a tree every suite that snapshots bytecode asserts stays empty, and would
 move the helpers out of the module attributes `test_mcp_footprint` reaches
@@ -69,7 +72,8 @@ the host count runs from four to fifteen, so one number could never have been
 right for the group as a whole.)
 
 Groups:
-  A. GATE:    the live regions in Scripts/mcp-*.py match their canonical source
+  A. GATE:    the live regions in Scripts/mcp-*.py and the declared hosts match
+              their canonical source
   B. CONTRACT: marker spelling, hashing, anchoring, layout, source disjointness
   C. CONTROL: mutations are detected; quoted markers are not regions; a name
               does not resolve against a source that does not define it
@@ -129,6 +133,7 @@ CONCURRENCY_SOURCE = H.repo_path("Scripts", "_mcp_concurrency.py")
 LOGGING_SOURCE = H.repo_path("Scripts", "_mcp_logging.py")
 LSP_SOURCE = H.repo_path("Scripts", "_mcp_lsp.py")
 PAGING_SOURCE = H.repo_path("Scripts", "_mcp_paging.py")
+WEBSOCKET_SOURCE = H.repo_path("Scripts", "_mcp_websocket.py")
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
 TARGET = H.repo_path("Scripts", "mcp-purity.py")
 SCRIPTS = H.repo_path("Scripts")
@@ -143,6 +148,7 @@ CONCURRENCY_CANONICAL_NAME = "_mcp_concurrency.py"
 LOGGING_CANONICAL_NAME = "_mcp_logging.py"
 LSP_CANONICAL_NAME = "_mcp_lsp.py"
 PAGING_CANONICAL_NAME = "_mcp_paging.py"
+WEBSOCKET_CANONICAL_NAME = "_mcp_websocket.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
@@ -152,7 +158,28 @@ PAGING_CANONICAL_NAME = "_mcp_paging.py"
 # `sources-registered` by name instead of being adopted silently.
 CANONICAL_NAMES = (CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
                    LOGGING_CANONICAL_NAME,
-                   LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME)
+                   LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME,
+                   WEBSOCKET_CANONICAL_NAME)
+
+# The hosts OUTSIDE `TARGET_GLOB`, mirrored for the reason the source registry
+# is: the generator names them by hand so a script cannot become a target by
+# existing, and a test that read them back off the generator would agree with
+# any edit to it. `target-glob` asserts the two spellings agree, and
+# `fleet-ok` gates these alongside the servers -- a declared host the gate did
+# not walk would be a target whose drift nothing reports.
+DECLARED_HOSTS = ("search_duckduckgo.py",)
+
+# The websocket blocks call one another, and `host_provides` offers a region
+# only the host's imports -- so no websocket block can stand in a region of its
+# own, and every real host spells ONE marker: the core below, dependency first,
+# then the wrapper it uses. The tab fixture renders each block inside exactly
+# that shape, because rendering one alone would assert a region no host may use.
+WEBSOCKET_CORE = ("WebSocketError", "WS_MAX_HANDSHAKE_BYTES",
+                  "WS_MAX_FRAME_BYTES", "WS_MAX_MESSAGE_BYTES",
+                  "_ws_parse_url", "_ws_handshake_request",
+                  "_ws_handshake_split", "_ws_handshake_verify", "_ws_mask",
+                  "_ws_encode_frame", "_ws_parse_frame", "_ws_assemble",
+                  "_ws_control_reply", "_WsConnection", "_ws_step")
 
 GA = "A. GATE: live regions match their canonical source"
 GB = "B. CONTRACT: marker spelling, hashing, anchoring, layout, disjointness"
@@ -317,15 +344,22 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
     so the fixture was the ONLY thing the lift refused. A gate that only ever
     fires when a server is also broken is a gate nobody has separated from the
     servers.
+
+    The websocket source paid it a fourth time, for `base64`, `hashlib` and
+    `socket` -- and its one tab host is the search script, the first host that
+    is not a server at all.
     """
     return (
         '"""A tab-indented target."""\n'
         "import asyncio\n"
+        "import base64\n"
+        "import hashlib\n"
         "import json\n"
         "import logging\n"
         "import os\n"
         "import pathlib\n"
         "import re\n"
+        "import socket\n"
         "import sys\n"
         "from typing import Any\n"
         "from urllib.parse import urlparse\n"
@@ -404,7 +438,8 @@ def group_gate(suite, mod):
 
     stale = []
     listed = set()
-    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
+    declared = [Path(SCRIPTS) / name for name in DECLARED_HOSTS]
+    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)) + declared:
         for region in mod.audit(path, sources):
             listed.update((region.source, name) for name in region.names)
             if region.state != "ok":
@@ -597,10 +632,24 @@ def group_contract(suite, mod):
         "generator END_PREFIX is %r, on-disk contract is %r"
         % (mod.END_PREFIX, END_PREFIX),
     ))
-    suite.record(GB, "target-glob", problem_if(
+    # The glob and the hand-declared hosts are ONE question -- what the default
+    # run rewrites and `--check` gates -- so they are asserted in one case.
+    problems = problem_if(
         mod.TARGET_GLOB != TARGET_GLOB,
         "generator TARGET_GLOB is %r, expected %r" % (mod.TARGET_GLOB, TARGET_GLOB),
-    ))
+    )
+    problems += problem_if(
+        tuple(mod.DECLARED_HOSTS) != DECLARED_HOSTS,
+        "generator DECLARED_HOSTS is %r, the on-disk contract is %r"
+        % (mod.DECLARED_HOSTS, DECLARED_HOSTS),
+    )
+    problems += ["%s: declared but not a file" % name for name in DECLARED_HOSTS
+                 if not os.path.isfile(H.repo_path("Scripts", name))]
+    problems += ["%s: declared although the glob already covers it" % name
+                 for name in DECLARED_HOSTS if Path(name).match(TARGET_GLOB)]
+    suite.record(GB, "target-glob", problems,
+                 detail=["glob: Scripts/%s" % TARGET_GLOB,
+                         "declared: %s" % ", ".join(DECLARED_HOSTS)])
 
     sample = b"generated-region-hash-sample"
     expected = hashlib.sha256(sample).hexdigest()[:12]
@@ -1691,6 +1740,11 @@ def group_tabs(suite, mod):
         "_max_answer_chars": "DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars",
         WINDOW_RELAY: "%s, %s" % (WINDOW_NAME, WINDOW_RELAY),
     }
+    # Every websocket block, inside the one marker shape its hosts spell: the
+    # core, plus the block itself when it is a wrapper.
+    for name in sources.get(WEBSOCKET_CANONICAL_NAME, {}):
+        extra = () if name in WEBSOCKET_CORE else (name,)
+        paired[name] = ", ".join(WEBSOCKET_CORE + extra)
     problems = []
     for name in safe:
         source = next(s for s, blocks in sources.items() if name in blocks)
@@ -1727,8 +1781,17 @@ def group_tabs(suite, mod):
         mod.host_indent(tab_host("_offset")) != "tab",
         "a column-0 marker in a tab file was not detected as a tab host",
     )
+    # The declared hosts are outside the glob above, and the one there is tabs
+    # throughout -- the fleet's first tab host that is not a server.
+    declared_styles = {name: mod.host_indent(Path(SCRIPTS, name).read_text(encoding="utf-8"))
+                       for name in DECLARED_HOSTS}
+    problems += problem_if(
+        declared_styles != {"search_duckduckgo.py": "tab"},
+        "expected the search script to be a tab host, got %s" % declared_styles,
+    )
     suite.record(GF, "host-indent-from-tokens", problems,
-                 detail=["tab: %s" % ", ".join(tabbed)])
+                 detail=["tab: %s" % ", ".join(tabbed),
+                         "declared: %s" % ", ".join("%s=%s" % kv for kv in sorted(declared_styles.items()))])
 
     # The invariant a careless indent refactor breaks first: a SPACE host must
     # be untouched by any of the above. Not one leading tab may appear in what
@@ -2067,7 +2130,7 @@ def run(opts=None):
     pyc_before = H.pycache_snapshot()
     digests_before = {p: H.sha256_file(p) for p in
                       (SOURCE, CONCURRENCY_SOURCE, LOGGING_SOURCE, LSP_SOURCE,
-                       PAGING_SOURCE, GENERATOR, TARGET)}
+                       PAGING_SOURCE, WEBSOCKET_SOURCE, GENERATOR, TARGET)}
 
     mod = H.load_module_from_path("amalgamate_under_test", GENERATOR)
     blocks = H.load_module_from_path("mcp_json_under_test", SOURCE)
