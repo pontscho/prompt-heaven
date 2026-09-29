@@ -12,7 +12,7 @@ sources:
   - tests/test_mcp_websocket.py
   - tests/test_generated_region.py
 verified:
-  commit: b9024a0
+  commit: 01a0309
   date: 2026-09-29
 links:
   - generated-regions

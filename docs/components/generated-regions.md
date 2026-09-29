@@ -14,8 +14,8 @@ sources:
   - Scripts/_mcp_websocket.py
   - tests/test_generated_region.py
 verified:
-  commit: baa3a68
-  date: 2026-09-16
+  commit: 01a0309
+  date: 2026-09-29
 links:
   - scripts
   - tests
@@ -113,13 +113,13 @@ scanner, which is the rule that lets a page document the marker it also carries
 
 <!-- BEGIN MEASURED: generated-region-census -->
 - MCP servers matching `Scripts/mcp-*.py`: 15, of which 15 carry at least one generated region
-- live generated regions in them: 114
-- block instances those regions emit: 152
-- distinct canonical blocks named on a marker: 22, out of the 22 defined by the 5 canonical sources
+- live generated regions in them: 115
+- block instances those regions emit: 170
+- distinct canonical blocks named on a marker: 40, out of the 44 defined by the 6 canonical sources
 
-Regions by how many blocks one marker names: 76 name 1 block; 38 name 2 blocks.
+Regions by how many blocks one marker names: 76 name 1 block; 38 name 2 blocks; 1 name 18 blocks.
 
-The 38 region(s) that name more than one block, by the list written on the marker:
+The 39 region(s) that name more than one block, by the list written on the marker:
 
 | Blocks named on one marker | Regions |
 |---|---|
@@ -129,10 +129,11 @@ The 38 region(s) that name more than one block, by the list written on the marke
 | `_abs_uri`, `_abs_path` | 4 |
 | `_request`, `_notify` | 4 |
 | `uri_to_path`, `path_to_uri` | 4 |
+| `WebSocketError`, `WS_MAX_HANDSHAKE_BYTES`, `WS_MAX_FRAME_BYTES`, `WS_MAX_MESSAGE_BYTES`, `_ws_parse_url`, `_ws_handshake_request`, `_ws_handshake_split`, `_ws_handshake_verify`, `_ws_mask`, `_ws_encode_frame`, `_ws_parse_frame`, `_ws_assemble`, `_ws_control_reply`, `_WsConnection`, `_ws_step`, `_ws_connect`, `_ws_recv`, `_ws_send` | 1 |
 
 Generated into every one of the 15 servers: `_configure_logging`, `_json_error_window`.
 Generated into every server but `Scripts/mcp-webfetch.py`: `_error`, `_result`.
-<!-- END MEASURED: 1616a7e8823c -->
+<!-- END MEASURED: 3b047949464f -->
 
 A single region may name several blocks, and that is the whole of the gap between
 the region count and the block-instance count.
@@ -214,9 +215,10 @@ answer, and the one thing this page must not let a generator answer for them.
 | `Scripts/_mcp_logging.py` | 1 | `_configure_logging` |
 | `Scripts/_mcp_lsp.py` | 7 | `_abs_path`, `_abs_uri`, `_notify`, `_request`, `encode_lsp_message`, `path_to_uri`, `uri_to_path` |
 | `Scripts/_mcp_paging.py` | 7 | `DEFAULT_MAX_ANSWER_CHARS`, `DEFAULT_MAX_CHARS`, `PAGE_LINE_RESERVE`, `_FENCE_LINE_RE`, `_max_answer_chars`, `_offset`, `_rows_note` |
+| `Scripts/_mcp_websocket.py` | 22 | `WS_MAX_FRAME_BYTES`, `WS_MAX_HANDSHAKE_BYTES`, `WS_MAX_MESSAGE_BYTES`, `WebSocketError`, `_WsConnection`, `_ws_assemble`, `_ws_connect`, `_ws_control_reply`, `_ws_encode_frame`, `_ws_handshake_request`, `_ws_handshake_split`, `_ws_handshake_verify`, `_ws_mask`, `_ws_parse_frame`, `_ws_parse_url`, `_ws_recv`, `_ws_send`, `_ws_step`, `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send` |
 
-5 canonical sources define 22 blocks between them, and no name is defined by two of them.
-<!-- END MEASURED: 4fbc5733fdeb -->
+6 canonical sources define 44 blocks between them, and no name is defined by two of them.
+<!-- END MEASURED: a76ffffec29d -->
 
 Its closing line is the disjointness the suite gates as a check rather than a
 count. The paging row read `5` until the edit that added the logging row: the
