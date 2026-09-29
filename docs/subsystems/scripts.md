@@ -93,6 +93,17 @@ on it. The reasoning, the rejected alternatives, the per-server table and the si
 pre-existing bugs the conversion exposed are in
 [[0008-a-serialized-read-loop-looks-like-a-dead-server]].
 
+**Every server also honours `notifications/cancelled`.** The read loop keeps an
+id-to-task registry and cancels the named task before dispatching anything else,
+and the cancelled request is never answered. What the cancel *reclaims* depends
+on the server's class. For gdc and lldb (`task`), the coroutine stops. For forge
+and tshark (`kill`), the request's child process group is signalled
+`Scripts/mcp-forge.py:_Reclaim`. For the LSP servers (`lsp-cancel`), the
+generated `Scripts/_mcp_lsp.py:_request` sends `$/cancelRequest`. For the rest
+(`reply-only`), the reply is suppressed and the worker thread runs to its own
+timeout. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
+records the decision, and `tests/test_cancel.py` gates it ([[tests]]).
+
 The unregistered servers below were converted too, even though they never
 launch: they are the template others get copied from, which is how one broken read
 loop became thirteen in the first place.

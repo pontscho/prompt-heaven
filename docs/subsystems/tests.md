@@ -232,6 +232,7 @@ is the registry, and the run is the only thing that knows the totals.
 | `generated_region` | every live generated region still matches its canonical source, and the source named on a region's `BEGIN` line is the one its names resolve against — plus a behavioural group so a shared helper is unit-tested once rather than only drift-checked — [[generated-regions]] |
 | `mcp_websocket` | the stdlib WebSocket client in `Scripts/_mcp_websocket.py` against an oracle written from RFC 6455 rather than from the module — the upgrade request with no `Origin`, the response checked by **exact** status line, `Upgrade`, `Connection` token and accept key (the RFC's own worked example pinned), every frame length form, the mask against a per-byte oracle, every refusal a frame header earns, fragments assembled around a ping, ping answered with its own payload, close echoed, the size caps and strict UTF-8 — then both hosts' generated copies, `mcp-gdc`'s `CdpSession` and the search script's `CDPSearcher`, driven against a loopback CDP peer; that host group was run red against the hand-written client first — [[0023-the-websocket-client-is-a-sixth-domain]] |
 | `read_loop` | every server's read loop carries the shape [[0008-a-serialized-read-loop-looks-like-a-dead-server]] decided: a single-thread reader executor no handler can take, and one task per message — with the pool/coroutine split declared per server rather than inferred |
+| `cancel` | every server honours `notifications/cancelled` on its read loop, by AST `tests/test_cancel.py`: an id-to-task registry filled after dispatch and emptied by a done-callback, the hook on the loop thread before the task factory, a `requestId` that is a str or a non-bool int, `initialize` never registered, nothing written in reply, and a dispatch target that lets the `CancelledError` through. What a cancel **reclaims** is declared per server as one of four classes: `task` (the coroutine stops at its next await), `kill` (the request's child process group is signalled, with a declared exemption list `tests/test_cancel.py:KILL_EXEMPT`), `lsp-cancel` (the generated `_request` drops its pending entry and sends `$/cancelRequest`), and `reply-only` (the reply is suppressed and the work runs on). Every class but `reply-only` is measured before a row may claim it. Planted defects prove each problem code can fire, the suite was written red, and `Scripts/MCP_SKELETON.md`'s sample is lifted by script and analysed like a server. `_request`'s cancel arm is exercised behaviourally in `generated_region` `tests/test_generated_region.py:group_blocks` — [[0008-a-serialized-read-loop-looks-like-a-dead-server]] |
 | `wire_log` | wire logging is structure only at both sites — protocol metadata and argument *keys*, never a payload body or value (F12/CWE-532) — with the shape each site may log declared per server, and `Scripts/MCP_SKELETON.md`'s own sample lifted by script and run through the same analyser — [[0011-a-truncated-payload-carries-the-first-cookie]] |
 | `handler_crash` | every tool-handler catch-all leaves a traceback at a level the default WARNING configuration emits, at **both** site layers — the `McpServer` wrap, which every server has, and the module-level dispatcher, in the servers that carry one — each declared per server, plus one security clause: the format string must be a literal, so a payload cannot be interpolated into the one log that IS written |
 | `table_cells` | every table renderer either escapes its own delimiter and documents the scheme where the model reads it, or is whitespace-delimited and has none to escape — one declared row per renderer carrying the class and the reason, the real escapers imported and round-tripped rather than restated, and reversibility as a **separate** clause because an encoder that does not escape its own escape character still passes a column count — [[0016-a-cell-may-not-forge-a-boundary]] |
@@ -259,6 +260,20 @@ are **not** equal, and conflating them has already produced one wrong fleet-wide
 conclusion here — which is why `mcp_footprint` sums only over registered servers
 while the smoke check deliberately ignores the flag: its job is that every server
 file still speaks the protocol, registered or not.
+
+The same harness carries the **live** half of the cancel gate, which `cancel`
+cannot reach because it only reads the AST. Every server gets malformed or unknown
+`notifications/cancelled` messages, each followed by a ping, and must answer the
+ping and never the cancel `Scripts/_mcp_smoke_test.py:cancel_notification_checks`.
+Two probes then cancel a call that is really in flight. On jenkins, two calls are
+held open by a loopback HTTP peer: the one cancelled for real is never answered,
+and a sibling targeted only by ill-typed ids (`true`, `1.0`, `"1"`) still is
+`Scripts/_mcp_smoke_test.py:inflight_cancel_probe`. This proves reply suppression
+only, because jenkins is `reply-only`. On forge, a cancelled test call's child pid
+must be gone well before its sleep ends, and the cancelled id must never be
+answered `Scripts/_mcp_smoke_test.py:inflight_kill_probe`. Nothing proves live that
+the `task` servers stop their work or that tshark's child dies: those classes are
+declared and AST-checked only.
 
 The smoke check is also the fleet's one deliberate exception to the child-env
 rule, and the exception is argued rather than inherited: its `Popen` passes no
