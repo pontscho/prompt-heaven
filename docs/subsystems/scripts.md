@@ -96,12 +96,18 @@ pre-existing bugs the conversion exposed are in
 **Every server also honours `notifications/cancelled`.** The read loop keeps an
 id-to-task registry and cancels the named task before dispatching anything else,
 and the cancelled request is never answered. What the cancel *reclaims* depends
-on the server's class. For gdc and lldb (`task`), the coroutine stops. For forge
-and tshark (`kill`), the request's child process group is signalled
-`Scripts/mcp-forge.py:_Reclaim`. For the LSP servers (`lsp-cancel`), the
-generated `Scripts/_mcp_lsp.py:_request` sends `$/cancelRequest`. For the rest
-(`reply-only`), the reply is suppressed and the worker thread runs to its own
-timeout. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
+on the server's class. For gdc and lldb (`task`), the coroutine stops. For forge,
+tshark, git, inspect and wiki (`kill`), the request's child process group is
+signalled `Scripts/mcp-forge.py:_Reclaim`, except for declared exemptions such as
+wiki's vendored `Scripts/mcp-wiki.py:git` and mcp-git's mutating stash
+`Scripts/mcp-git.py:_run_git_mutating`, which is never killed mid-way and only
+has its reply suppressed. For the LSP servers (`lsp-cancel`), the generated
+`Scripts/_mcp_lsp.py:_request` sends `$/cancelRequest`. For postgres
+(`pg-cancel`), a `CancelRequest` carrying the captured `BackendKeyData` goes out
+on a second socket and the worker drains the error through `ReadyForQuery`
+before releasing the connection `Scripts/mcp-postgres.py:send_cancel_request`.
+For context7, jenkins and webfetch (`reply-only`), the reply is suppressed and
+the worker thread runs to its own timeout. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
 records the decision, and `tests/test_cancel.py` gates it ([[tests]]).
 
 The unregistered servers below were converted too, even though they never
