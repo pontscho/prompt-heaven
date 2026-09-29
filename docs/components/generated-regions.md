@@ -3,7 +3,7 @@ name: generated-regions
 type: component
 status: active
 title: Generated regions — how the MCP fleet shares plumbing without importing it
-description: The amalgamate generator, its six canonical sources, the one hand-declared host that is not a server, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
+description: The amalgamate generator, its canonical sources, the hand-declared hosts that are not servers, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
 sources:
   - Scripts/amalgamate.py
   - Scripts/_mcp_concurrency.py
@@ -35,7 +35,7 @@ markers, and a generator re-renders it on demand. There is no runtime dependency
 between servers, no shared package, and no import that could carry a helper from
 one file to another.
 
-One host is not a server. `Scripts/search_duckduckgo.py` takes the WebSocket
+Not every host is a server. `Scripts/search_duckduckgo.py` takes the WebSocket
 client its `cdp` backend shares with `Scripts/mcp-gdc.py`, and it is a target
 because the generator **names it by hand** — see "A host outside the glob"
 below — not because anything about it matches the server glob.
@@ -154,8 +154,10 @@ file that is deliberately not a source.
 
 `Scripts/_mcp_concurrency.py` is the other side of that coin — the case where the
 deliberate edit was actually made, and the only source so far added for a constant
-rather than for code. It holds one line, `MAX_INFLIGHT_REQUESTS = 8`, which nine
-live servers had each written out: the fleet's widest-shared constant. It got a
+rather than for code. It holds one line, `MAX_INFLIGHT_REQUESTS = 8`, which every
+live server that carried it had written out by hand until `8d56b6d` lifted it:
+the fleet's widest-shared constant, whose hosts today are the block's row in the
+`canonical-block-hosts` table below. It got a
 domain of its own because none of the four existing ones could hold it without
 becoming the shelf each of them is written not to be — JSON-RPC envelopes,
 logging configuration, LSP framing and output paging are four questions, and "how
@@ -228,17 +230,76 @@ are genuine arrivals rather than corrections — `_ensure_dict` in the JSON row,
 `DEFAULT_MAX_CHARS` in the paging one, and the DocumentUri pair then the client
 half in the LSP one.
 
-`DEFAULT_MAX_CHARS` is worth naming here because of the state its three hosts
-were found in. `mcp-git.py`, `mcp-inspect.py` and `mcp-wiki.py` each wrote
-`100_000` — ADR 0013's verbatim-artefact class — and each additionally asserted
+Which files each of those blocks actually reaches is the other half of the
+picture, and the generator counts that too `Scripts/amalgamate.py:census_hosts`:
+one row per canonical block, whether or not any host takes it. It counts the
+hand-declared non-server hosts as well, so it is the table to read for a single
+block's reach, while the fleet census above stays about the servers.
+
+<!-- BEGIN MEASURED: canonical-block-hosts -->
+| Canonical block | Source | Hosts | Generated into |
+|---|---|---|---|
+| `MAX_INFLIGHT_REQUESTS` | `Scripts/_mcp_concurrency.py` | 9 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_bool_param` | `Scripts/_mcp_json.py` | 11 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-wiki.py` |
+| `_ensure_dict` | `Scripts/_mcp_json.py` | 7 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-webfetch.py` |
+| `_error` | `Scripts/_mcp_json.py` | 14 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-wiki.py` |
+| `_int_param` | `Scripts/_mcp_json.py` | 4 | `Scripts/mcp-jenkins.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py` |
+| `_json_error_window` | `Scripts/_mcp_json.py` | 15 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_result` | `Scripts/_mcp_json.py` | 14 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-wiki.py` |
+| `_configure_logging` | `Scripts/_mcp_logging.py` | 15 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_abs_path` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
+| `_abs_uri` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
+| `_notify` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
+| `_request` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
+| `encode_lsp_message` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
+| `path_to_uri` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
+| `uri_to_path` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
+| `DEFAULT_MAX_ANSWER_CHARS` | `Scripts/_mcp_paging.py` | 6 | `Scripts/mcp-context7.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-webfetch.py` |
+| `DEFAULT_MAX_CHARS` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-wiki.py` |
+| `PAGE_LINE_RESERVE` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-webfetch.py` |
+| `_FENCE_LINE_RE` | `Scripts/_mcp_paging.py` | 4 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-purity.py` |
+| `_max_answer_chars` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py` |
+| `_offset` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py` |
+| `_rows_note` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py` |
+| `WS_MAX_FRAME_BYTES` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `WS_MAX_HANDSHAKE_BYTES` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `WS_MAX_MESSAGE_BYTES` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `WebSocketError` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_WsConnection` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_assemble` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_connect` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/mcp-gdc.py` |
+| `_ws_control_reply` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_encode_frame` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_handshake_request` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_handshake_split` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_handshake_verify` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_mask` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_parse_frame` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_parse_url` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_recv` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/mcp-gdc.py` |
+| `_ws_send` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/mcp-gdc.py` |
+| `_ws_step` | `Scripts/_mcp_websocket.py` | 2 | `Scripts/mcp-gdc.py`, `Scripts/search_duckduckgo.py` |
+| `_ws_sync_close` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/search_duckduckgo.py` |
+| `_ws_sync_connect` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/search_duckduckgo.py` |
+| `_ws_sync_recv` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/search_duckduckgo.py` |
+| `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/search_duckduckgo.py` |
+
+16 hosts scanned; 44 canonical blocks, of which 44 are generated into at least one host; every block reaches a host.
+<!-- END MEASURED: e5e4587351a3 -->
+
+`DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
+were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
+`mcp-wiki.py` each wrote `100_000` — ADR 0013's verbatim-artefact class — and each additionally asserted
 *in prose* that its number and spelling matched the other two. That is agreement
 claimed on disk in triplicate, and it is the costly form: correcting one of the
 three leaves two comments lying about it. The constant is generated now and the
 cross-references are gone; what stayed above each marker is the only
-host-specific half, why that server is in the class at all. None of the three
-takes the `DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars` pair, and that is not an
-oversight — the pair renders the reader together with its own `24000`, so taking
-the marker would take the value.
+host-specific half, why that server is in the class at all. None of the hosts
+the `canonical-block-hosts` table lists for `DEFAULT_MAX_CHARS` takes the
+`DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars` pair, and that is not an
+oversight — the pair renders the reader together with its own `24000`
+`Scripts/_mcp_paging.py:DEFAULT_MAX_ANSWER_CHARS`, so taking the marker would
+take the value.
 
 The logging source is the newest and the only one whose domain is defined by
 what it EXCLUDES. Configuring logging is not the same question as what gets
@@ -332,10 +393,9 @@ rather than luck: `ast.walk` descends the whole tree and every binder is matched
 by node type, so a module-level statement is analysed on the same terms as a
 `def` body `Scripts/amalgamate.py:free_names`. `_FENCE_LINE_RE` is the first
 *constant* to spend the budget — it reads `re`, and carries that import
-requirement to each of its four hosts. It is not the first block to carry one at
-all: `_result`'s `msg_id: Any` has demanded `typing.Any` of every host the census
-above names for it since
-long before, which is the annotation hole named above. What is new is the route,
+requirement to every host its row in the `canonical-block-hosts` table names. It
+is not the first block to carry one at all: `_result`'s `msg_id: Any` has
+demanded `typing.Any` of every host that table names for it since long before, which is the annotation hole named above. What is new is the route,
 not the requirement — a plain read in an executable statement rather than an
 annotation. The refusal used to fire only incidentally, because every live region
 passes it; `free-name-refusal` now drives it directly, on a constant, against one
@@ -354,8 +414,8 @@ Neither the unsafe set nor the tab hosts are tallied here, because the suite
 measures both on every run: `tab-safety-real-blocks` asserts the unsafe set is
 exactly `_rows_note` over the real canonical text, and `host-indent-from-tokens`
 that the tab-indented servers are exactly `mcp-forge.py` and `mcp-webfetch.py`
-`tests/test_generated_region.py:group_tabs`, and — in the same case — that the one
-declared host is tab-indented too. A block added to a source moves that set or
+`tests/test_generated_region.py:group_tabs`, and — in the same case — that the
+declared hosts `Scripts/amalgamate.py:DECLARED_HOSTS` are tab-indented too. A block added to a source moves that set or
 fails there. The websocket source is the rule's newest customer: its tab host is
 the search script, so every one of its blocks was written to one call per
 physical line from the start, the request built by appending rather than as one
@@ -413,14 +473,29 @@ file taken on its own would stop at an `ImportError` —
 The rule is not "duplication is bad". Two distinct kinds of copy are left in
 place on stated grounds, and they are counted differently.
 
-**Hand copies of things that ARE blocks** are censused by the suite: it
-intersects every server's top-level names with the canonical block names,
-subtracts what regions cover, and reports the remainder as INFO rather than FAIL
-— "this server keeps its own" is a legitimate answer, but an *undeclared* copy
-cannot appear without landing on that line. Four survive, each declared with its
-reason: a parameter-name-and-raise variant, an older signature, an allow-list
-where the canonical is a deny-list, and one that is both tab-unsafe and a body
-divergence.
+**Hand copies of things that ARE blocks** are censused by the generator
+`Scripts/amalgamate.py:hand_copies`: it intersects the names every host binds at
+module level or as a direct class member with the canonical block names,
+subtracts what regions cover, and the suite reports the remainder as INFO rather
+than FAIL — "this host keeps its own" is a legitimate answer, but an
+*undeclared* copy cannot appear without landing on that line. Each surviving copy
+carries the measured reason declared for it in
+`Scripts/amalgamate.py:HAND_COPY_REASONS`, and the census below renders them
+together, marking any copy with no reason UNDECLARED and naming any reason whose
+copy has gone:
+
+<!-- BEGIN MEASURED: hand-copy-census -->
+- `Scripts/mcp-git.py`: `_max_answer_chars` -- declared: excluded twice over: it defaults to its own DEFAULT_MAX_CHARS rather than to the value the canonical block renders its reader with, and its body carries a camelCase fallback loop the canonical has no trace of
+- `Scripts/mcp-inspect.py`: `_int_param` -- declared: takes a parameter NAME and raises, where the canonical takes a default and falls back to it
+- `Scripts/mcp-tshark.py`: `_bool_param` -- declared: keeps the older (params, key, default) signature
+- `Scripts/mcp-webfetch.py`: `_bool_param` -- declared: an ALLOW-list, so an unrecognised string reads False here and True canonically
+- `Scripts/mcp-webfetch.py`: `_error` -- declared: nothing measurable: byte-identical to the canonical once re-indented for a tab host, kept by hand only because every other server takes it co-listed with _result on one marker and this host cannot take _result
+- `Scripts/mcp-webfetch.py`: `_result` -- declared: annotates result as dict where the canonical says Any -- a body difference no re-indenting removes
+- `Scripts/mcp-webfetch.py`: `_rows_note` -- declared: excluded twice over: it is not tab-safe (its else aligns under an open paren) and its body diverged -- (start, shown, total) against the canonical (start, shown, total, exact), with no lower-bound branch
+
+7 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 4 of the 16 hosts scanned; 7 carry a declared reason and 0 do not.
+Declared reasons with no hand copy left to explain: none.
+<!-- END MEASURED: affe04647c8d -->
 
 **Things that are not blocks at all** are documented in `Scripts/MCP_SKELETON.md`
 rather than censused, because the census cannot see them. `_tool_error` *cannot*
@@ -440,14 +515,15 @@ every host that defines it, which makes it the fleet's widest hand-copied
 non-generated function. It fails on the same rule `_tool_error` does — its free
 names are each host's own alias tables, `PARAM_ALIASES` plus
 `PARAM_ALIASES_BY_FUNC` in `mcp-postgres.py`, `mcp-purity.py` and
-`mcp-wiki.py`, and those are module-level *assignments*, while `host_provides` offers only the host's module-level imports
+`mcp-wiki.py`, and those are module-level *assignments*, while `host_provides`
+offers only the host's module-level imports
 `Scripts/amalgamate.py:host_provides`. `Scripts/mcp-forge.py` sidesteps the
 tables entirely by taking one as an argument
 `Scripts/mcp-forge.py:_resolve_aliases`, and that is the tell: these are not
 copies that drifted from one original but **shapes that never agreed**.
-Measured at the last edit to this page: **eight distinct bodies over the ten
-files**, only `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py` and
-`Scripts/mcp-tshark.py` byte-identical, and two of the ten tab-indented — the
+Measured on 2026-09-29 at `771e142`, by reading every definition: **eight
+distinct bodies over the ten files**, only `Scripts/mcp-clangd.py`,
+`Scripts/mcp-cuda.py` and `Scripts/mcp-tshark.py` byte-identical, and two of the ten tab-indented — the
 same `mcp-forge.py` / `mcp-webfetch.py` pair `host-indent-from-tokens` pins
 above. The rule every host now implements — a collision is an error, not a
 precedence question — is frozen in [[0015-ambiguity-is-the-defect]], and it is
@@ -455,8 +531,8 @@ gated behaviourally rather than structurally, by
 `Scripts/_mcp_smoke_test.py:alias_collision_checks` driving every host over
 live JSON-RPC.
 
-Which files count as hosts, though, is decided **textually**: that gate pairs its per-server probe
-row against a search of the server's source for the resolver's *definition line*,
+Which files count as hosts, though, is decided **textually**: that gate pairs its
+per-server probe row against a search of the server's source for the resolver's *definition line*,
 and asserts the two agree. A text search cannot tell a definition from a
 quotation of one, so a server that defines no resolver can be made to look like a
 host merely by writing that line into a docstring — measured, on the one server
@@ -473,8 +549,9 @@ That count is why the entry earns its space. ADR 0015 and section 7c of
 identical, and both were right when they were written: `Scripts/mcp-tshark.py`
 held the fleet's last first-wins resolver, and the very commit that made
 collisions an error is what converged it onto the clangd/cuda body. The ADR is
-frozen at its decision and keeps its number; this page re-measures, on the same
-grounds as the region counts above.
+frozen at its decision and keeps its number; this page re-measured it at the
+commit named above, which is a dated measurement rather than a rendered one — no
+command counts resolver bodies yet.
 
 ## The gate
 
@@ -507,9 +584,10 @@ rename that orphaned every region already written into a server.
   flag and the pattern still compiles and still reads right, while `findall`
   quietly returns at most one hit — the fence count comes out even and a reply
   cut mid-fence reaches the reader with the block still open
-  `Scripts/_mcp_paging.py`. Group A pins the constant's *text* in all three
-  hosts; nothing yet pins what it does. The other two constants are deliberately
-  not in this position: `DEFAULT_MAX_ANSWER_CHARS` and `PAGE_LINE_RESERVE` have
+  `Scripts/_mcp_paging.py`. Group A pins the constant's *text* in every host its
+  row in the `canonical-block-hosts` table names; nothing yet pins what it does.
+  The paging source's other constants are deliberately not in this position:
+  `DEFAULT_MAX_ANSWER_CHARS`, `DEFAULT_MAX_CHARS` and `PAGE_LINE_RESERVE` have
   no behaviour to exercise, and a case asserting `== 24000` against a literal
   typed into the suite would be the same number written twice.
 - **A name that is present but unextractable is reported as absent.** The loader

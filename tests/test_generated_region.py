@@ -55,9 +55,12 @@ is indistinguishable from a clean tree. Group D is hygiene.
 
 Every case here is a gated FAIL but one: comparing two in-memory strings cannot
 flap on ordinary work, so a failure can only be a regression. The exception is
-group A's `hand-copies-are-named`, an INFO census -- the roster comment beside
-it gives the reason, that "this server keeps its own" is a legitimate answer
-and so not a thing to fail on.
+group A's `hand-copies-are-named`, an INFO census -- the comment beside it
+gives the reason, that "this server keeps its own" is a legitimate answer and
+so not a thing to fail on. Its walk and its roster of declared reasons live in
+the generator (`hand_copies`, `HAND_COPY_REASONS`), because `--census
+hand-copies` renders both into a page; this suite consumes them, and group G
+gates that it carries no second copy of the walk.
 
 IN-MEMORY ONLY. No subprocess, no external binary, no network, and this suite
 writes NOTHING -- not into the repo, not into a sandbox. The generator exposes
@@ -109,7 +112,6 @@ The case count lives in the SUITES table in tests/run.py, never here.
 Exit code 0 iff every non-informational case passes.
 """
 
-import ast
 import asyncio
 import contextlib
 import hashlib
@@ -189,11 +191,12 @@ GE = "E. BLOCKS: what each shared block actually does"
 GF = "F. TABS: per-block safety, host detection, space hosts untouched"
 GG = "G. CENSUS: the read path a page renders -- derived, sorted, writes nothing"
 
-# The census subjects, mirrored here for the reason CANONICAL_NAMES is: a third
+# The census subjects, mirrored here for the reason CANONICAL_NAMES is: a fifth
 # subject added to the generator and not to this tuple leaves the new one with
 # no case at all, which is the failure a census silently rendering an empty
-# block would produce on a page.
-CENSUS_KINDS = ("fleet", "sources")
+# block would produce on a page. `census-sources-is-the-registry` asserts the
+# two spellings agree.
+CENSUS_KINDS = ("fleet", "sources", "hosts", "hand-copies")
 
 # --- synthetic material for group C -------------------------------------------
 
@@ -268,49 +271,6 @@ def outside_regions(mod, label, text, sources):
                          key=lambda r: r.begin, reverse=True):
         del lines[region.begin:region.end + 1]
     return "".join(lines)
-
-
-def bound_names(mod, label, text):
-    """Every name *text* binds at module top level OR as a direct class member.
-
-    The generator's own `load_blocks_text` walks `tree.body` and nothing else,
-    and that is RIGHT for a canonical SOURCE: a block is a thing a marker can
-    name and paste at the marker's column, and a method buried in a class is
-    not one. The hand-copy census points the same map at a SERVER, where the
-    question is a different one -- "does this file bind a canonical name
-    anywhere the generator is not writing it" -- and the answer has to include
-    the class body, because that is where the shared shape actually lives.
-    `_result` and `_error` are METHODS in all fifteen servers; a census that
-    saw only module level would report no hand copy of either, in any server,
-    ever -- green by construction rather than by measurement.
-
-    So the walk lives HERE and not in the generator. Widening
-    `load_blocks_text` to reach into classes would widen what may become a
-    BLOCK, which is the one thing that must not happen. Two questions, two
-    walks, and only the census's one is allowed to be this broad.
-
-    `mod.assign_name` is reused rather than reimplemented for either scope:
-    which assignment shapes bind exactly one nameable thing is the generator's
-    rule, spelled out at length on that function, and a second copy of it here
-    would be a second thing to keep in step with it.
-    """
-    try:
-        tree = ast.parse(text, filename=label)
-    except SyntaxError as exc:
-        raise SystemExit("%s: cannot be parsed (%s)" % (label, exc))
-    scopes = [tree.body] + [node.body for node in tree.body
-                            if isinstance(node, ast.ClassDef)]
-    names = set()
-    for body in scopes:
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
-                names.add(node.name)
-            else:
-                bound = mod.assign_name(node)
-                if bound is not None:
-                    names.add(bound)
-    return names
 
 
 def tab_host(names, source=PAGING_CANONICAL_NAME):
@@ -456,66 +416,28 @@ def group_gate(suite, mod):
     ), detail=["%s :: %s" % pair for pair in sorted(listed)])
 
     # ONE WRITER, with the exceptions NAMED rather than hidden. A canonical block
-    # name defined at top level in a server but not inside a generated region is
-    # a hand copy, and every one left today is a DECLARED exclusion with a
-    # measured reason: mcp-inspect's `_int_param` takes a parameter NAME and
-    # RAISES where the canonical takes a default and falls back; mcp-git's
-    # `_max_answer_chars` is excluded TWICE OVER, like webfetch's `_rows_note`
-    # below -- it defaults to its own `DEFAULT_MAX_CHARS` rather than to the
-    # 24000 the canonical block renders its reader WITH, so taking that marker
-    # would take the value, AND its body carries a camelCase fallback loop the
-    # canonical has no trace of, so settling the value question alone would not
-    # make it adoptable. The reason was written at the definition all along;
-    # what was missing until the constant beside it was lifted is this roster
-    # entry, which is the half a reader surveying the fleet actually reaches for.
-    # mcp-tshark's
-    # `_bool_param` keeps the older `(params, key, default)` signature;
-    # mcp-webfetch's `_bool_param` is an ALLOW-list, so an unrecognised string
-    # reads False there and True canonically; and mcp-webfetch's `_rows_note`
-    # is excluded TWICE OVER -- it fails `block_is_tab_safe` (its `else` aligns
-    # under an open paren, so a tab host is refused that one BY NAME) AND its
-    # body has diverged: `(start, shown, total)` against the canonical
-    # `(start, shown, total, exact)`, with no lower-bound branch, so clearing
-    # the tab hazard alone would not make it adoptable. Exclusion is per BLOCK,
-    # not per server: both tab-indented servers host regions, webfetch two of
-    # them.
+    # name a host binds at top level or as a direct class member, outside every
+    # generated region, is a hand copy. The walk and the roster of MEASURED
+    # reasons both live in the generator -- `hand_copies` and
+    # `HAND_COPY_REASONS` -- because `--census hand-copies` renders them into a
+    # page, and a page cannot render a comment in this file. This case consumes
+    # that one implementation; group G gates it (`census-hand-copies-is-the-
+    # generator-walk`), including that no second copy of the walk lives here.
     #
-    # THE LAST TWO ENTRIES ARRIVED WHEN THIS CENSUS LEARNED TO LOOK INSIDE A
-    # CLASS, and they are the reason it had to. mcp-webfetch keeps `_result` and
-    # `_error` as methods of its own `McpServer`, where a walk of `tree.body`
-    # sees neither -- and since every copy of that pair in the fleet is a
-    # METHOD, the old walk could never have reported one. `bound_names` above is
-    # what closed it. Of the two, `_result` is an exclusion of the same kind as
-    # the ones already listed: it annotates `result: dict` where the canonical
-    # says `result: Any`, a body difference `render`'s own docstring records.
-    # `_error` is NOT, and that is why it is worth a line of its own -- it is
-    # byte-identical to the canonical block once re-indented for a tab host, it
-    # clears `block_is_tab_safe`, and its single free name (`Any`) is imported
-    # in that file, so NOTHING MEASURABLE keeps it out. It stays by hand only
-    # because the other fourteen servers take `_result` and `_error` co-listed
-    # on ONE marker and webfetch cannot take its neighbour. That is COLLATERAL
-    # from where the region's boundary was drawn, not a decision anybody
-    # recorded, and the two sitting side by side here is what makes the
-    # difference legible: split that marker and one of them stops being an
-    # exclusion, while the other stays one for a reason no granularity can
-    # touch.
+    # Scoped like the census: the fleet AND the declared hosts, every file the
+    # generator writes.
     #
     # INFO, not FAIL: "this server keeps its own" is a legitimate answer, so
     # this censuses rather than judges -- but an UNDECLARED hand copy, or a new
     # one, cannot appear without landing on this line, and the census is what
     # makes the next fan-out decision a reading rather than a survey.
-    known = {name for blocks in sources.values() for name in blocks}
-    hand = []
-    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)):
-        text = path.read_text(encoding="utf-8")
-        covered = set()
-        for region in mod.audit_text(path.name, text, sources):
-            covered.update(region.names)
-        defined = bound_names(mod, path.name, text) & known
-        hand += ["%s: %s" % (path.name, name)
-                 for name in sorted(defined - covered)]
+    hand = ["%s: %s%s" % (host, name,
+                          "" if (Path(host).name, name) in mod.HAND_COPY_REASONS
+                          else "  [UNDECLARED]")
+            for host, name in mod.hand_copies(
+                sources, sorted(Path(SCRIPTS).glob(TARGET_GLOB)) + declared)]
     suite.record(GA, "hand-copies-are-named", status=H.INFO,
-                 detail=hand or ["no server keeps a hand copy of a canonical "
+                 detail=hand or ["no host keeps a hand copy of a canonical "
                                  "block name"])
 
     # `_json_error_window` went fleet-wide, and that creates two invariants
@@ -915,7 +837,8 @@ def group_control(suite, mod):
         % [(r.state, r.indent) for r in regions],
     ))
 
-    # THE CLASS-MEMBER WALK the hand-copy census runs on, both directions. The
+    # THE CLASS-MEMBER WALK the hand-copy census runs on (the generator's
+    # `bound_names`, through `hand_copies_text`), both directions. The
     # generator's `load_blocks_text` visits `tree.body` only, so a census built
     # on it is blind in exactly the place the fleet's shared METHODS live: it
     # would report no hand copy of `_result` or `_error` in any server, ever,
@@ -928,11 +851,7 @@ def group_control(suite, mod):
     # answer differently on each, or it is reporting "there is a class here"
     # rather than "this name is held by hand".
     def census(text):
-        covered = set()
-        for region in audit(text):
-            covered.update(region.names)
-        return (bound_names(mod, "synthetic.py", text)
-                & set(SYNTH_BLOCKS)) - covered
+        return set(mod.hand_copies_text("synthetic.py", text, SYNTH_SOURCES))
 
     hand_held = 'class Server:\n    """doc"""\n%s' % nested_body
     seen, silent = census(hand_held), census(nested_host)
@@ -2088,8 +2007,14 @@ def group_census(suite, mod):
     if total != len(defined):
         problems.append("the rows sum to %d and the sources define %d distinct "
                         "names, so two sources share one" % (total, len(defined)))
+    if tuple(mod.CENSUS_KINDS) != CENSUS_KINDS:
+        problems.append("generator CENSUS_KINDS is %r, the mirror is %r"
+                        % (tuple(mod.CENSUS_KINDS), CENSUS_KINDS))
     for kind in CENSUS_KINDS:
-        if not mod.census_text(kind, sources, targets).strip():
+        refusal = expect_exit(lambda: mod.census_text(kind, sources, targets))
+        if refusal is not None:
+            problems.append("the %r census is refused: %s" % (kind, refusal))
+        elif not mod.census_text(kind, sources, targets).strip():
             problems.append("the %r census renders an EMPTY body, which on a "
                             "page is a block that says nothing where a number "
                             "is owed" % kind)
@@ -2102,6 +2027,201 @@ def group_census(suite, mod):
                  detail=["rows: %d, blocks: %d" % (len(source_rows), total),
                          "refusal: %s" % unknown],
                  text=source_text)
+
+    # ---- the two host-side subjects, through `main` -------------------------
+    # Their default target set is NOT the fleet census's: a block's host count
+    # and a hand copy are questions about every file the generator WRITES, so
+    # the declared non-server hosts are in scope, where `--census fleet` is
+    # about the server fleet and says so. The default argv is driven here, with
+    # the same recorder standing in for `apply_regions`, so the case can see
+    # both a wrong default and a census that fell through into the writers.
+    hosts_targets = targets + [Path(SCRIPTS) / name for name in DECLARED_HOSTS]
+    recorded, by_main = [], {}
+    mod.apply_regions = lambda path, regions: recorded.append(str(path))
+    try:
+        for kind in ("hosts", "hand-copies"):
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    code = mod.main(["--census", kind])
+            except SystemExit as exc:
+                code = exc.code
+            by_main[kind] = (code, buf.getvalue())
+    finally:
+        mod.apply_regions = real_apply
+
+    def main_problems(kind, want):
+        code, got = by_main[kind]
+        out = problem_if(recorded, "--census %s reached apply_regions: %r"
+                         % (kind, recorded))
+        out += problem_if(code != 0, "--census %s exited %r, not 0"
+                          % (kind, code))
+        out += problem_if(code == 0 and got != want,
+                          "--census %s printed %d bytes by default; over the "
+                          "fleet plus the declared hosts census_text produces "
+                          "%d" % (kind, len(got), len(want)))
+        return out
+
+    # ---- `--census hosts`: every canonical block, and who carries it ---------
+    # The oracle is the region walk again, keyed by (source, block) because a
+    # region resolves its names against its OWN source -- a count keyed by the
+    # bare name would agree with a census that credited the wrong domain.
+    def hosts_oracle(paths):
+        found = {(src, block): set()
+                 for src, blocks in sources.items() for block in blocks}
+        for path in paths:
+            for region in mod.audit(path, sources):
+                for block in region.names:
+                    found.setdefault((region.source, block), set()).add(
+                        "Scripts/%s" % path.name)
+        return found
+
+    def hosts_rows(text):
+        rows = []
+        for line in text.splitlines():
+            cells = census_cells(line)
+            if cells and len(cells) == 4 and cells[2].isdigit():
+                block, src = census_spans(cells[0]), census_spans(cells[1])
+                rows.append(((src[0] if src else "", block[0] if block else ""),
+                             int(cells[2]), census_spans(cells[3])))
+        return rows
+
+    def hosts_check(paths, text, where):
+        want = hosts_oracle(paths)
+        rows = hosts_rows(text)
+        keys = sorted(("Scripts/%s" % src, block) for src, block in want)
+        # Membership AND order in one comparison: exactly one row per block
+        # every source defines, hosted or not, in (source, block) order.
+        out = problem_if(
+            [key for key, _count, _names in rows] != keys,
+            "%s: the rows are %r, every canonical block in (source, block) "
+            "order is %r" % (where, [key for key, _c, _n in rows], keys))
+        got = {key: (count, names) for key, count, names in rows}
+        for (src, block), held in sorted(want.items()):
+            row = got.get(("Scripts/%s" % src, block))
+            if row is not None and row != (len(held), sorted(held)):
+                out.append("%s: %s says %d %r, the walk finds %d %r"
+                           % (where, block, row[0], row[1], len(held),
+                              sorted(held)))
+        return out, want
+
+    hosts_text = ""
+    refusal = expect_exit(lambda: mod.census_text("hosts", sources,
+                                                  hosts_targets))
+    problems = problem_if(refusal is not None,
+                          "`--census hosts` is refused: %s" % refusal)
+    detail = []
+    if refusal is None:
+        hosts_text = mod.census_text("hosts", sources, hosts_targets)
+        found, want = hosts_check(hosts_targets, hosts_text, "full host set")
+        problems += found
+        # A number that does not move with its input was typed: a proper
+        # subset of the hosts must re-derive, row by row.
+        few = hosts_targets[:3]
+        found, _few_want = hosts_check(
+            few, mod.census_text("hosts", sources, few),
+            "over %s alone" % ", ".join(p.name for p in few))
+        problems += found
+        if hosts_text != mod.census_text(
+                "hosts", dict(reversed(list(sources.items()))),
+                list(reversed(hosts_targets))):
+            problems.append("the host census depends on the ORDER of its "
+                            "targets or of the block maps, so it is stable "
+                            "rather than sorted")
+        closing = census_numbers(hosts_text.rstrip("\n").splitlines()[-1])
+        hosted = sum(1 for held in want.values() if held)
+        problems += ["the closing line never states the %d %s" % (value, what)
+                     for value, what in ((len(hosts_targets), "hosts scanned"),
+                                         (len(want), "canonical blocks"),
+                                         (hosted, "blocks with a host"))
+                     if value not in closing]
+        problems += main_problems("hosts", hosts_text)
+        detail = ["%s: %d" % (block, len(held))
+                  for (_src, block), held in sorted(want.items(),
+                                                    key=lambda kv: kv[0][1])]
+    suite.record(GG, "census-hosts-is-the-region-walk", problems,
+                 detail=detail, text=hosts_text)
+
+    # ---- `--census hand-copies`: ONE implementation, and it is the generator's
+    # The walk used to live in this file, beside a roster of reasons written as
+    # a comment. A page cannot render a comment, so both moved into the
+    # generator, and this case gates the move itself: a `bound_names` still
+    # defined HERE is a second implementation of the census, which is the
+    # drift this suite exists to prevent, turned on itself.
+    api = ("bound_names", "hand_copies_text", "hand_copies", "HAND_COPY_REASONS")
+    missing = [name for name in api if not hasattr(mod, name)]
+    problems = problem_if(
+        missing, "the generator does not define %s, so the hand-copy walk "
+        "still lives only in this suite" % missing)
+    problems += problem_if(
+        "bound_names" in globals(),
+        "this suite still defines its own bound_names -- two implementations "
+        "of one census")
+    hand_text, detail = "", []
+    refusal = expect_exit(lambda: mod.census_text("hand-copies", sources,
+                                                  hosts_targets))
+    problems += problem_if(refusal is not None,
+                           "`--census hand-copies` is refused: %s" % refusal)
+    if not missing and refusal is None:
+        defined_names = {n for blocks in sources.values() for n in blocks}
+        entries = mod.hand_copies(sources, hosts_targets)
+        hand_text = mod.census_text("hand-copies", sources, hosts_targets)
+        roster = dict(mod.HAND_COPY_REASONS)
+        problems += problem_if(entries != sorted(entries),
+                               "hand_copies() is not sorted: %r" % entries)
+        bullets = [line for line in hand_text.splitlines()
+                   if line.startswith("- ")]
+        parsed = [tuple(census_spans(line)[:2]) for line in bullets]
+        problems += problem_if(
+            parsed != [tuple(entry) for entry in entries],
+            "the census rows %r are not hand_copies()'s entries %r, one row "
+            "each and in its order" % (parsed, entries))
+        for line, (host, name) in zip(bullets, entries):
+            reason = roster.get((Path(host).name, name))
+            if reason is None and "UNDECLARED" not in line:
+                problems.append("%s: %s has no declared reason and its row "
+                                "does not say so: %r" % (host, name, line))
+            if reason is not None and reason not in line:
+                problems.append("%s: %s -- the row does not carry its "
+                                "declared reason: %r" % (host, name, line))
+        problems += ["the roster declares %s for %s, which no canonical "
+                     "source defines" % (name, host)
+                     for host, name in sorted(roster)
+                     if name not in defined_names]
+        # The control: an empty roster must turn every row UNDECLARED, and a
+        # declared reason naming a copy that is not there must be NAMED, not
+        # dropped -- a reason with nothing left to explain is a false sentence
+        # on the page. Restored in `finally`, so a failure cannot leak.
+        ghost_host = hosts_targets[0].name
+        ghost = sorted(defined_names - {n for h, n in entries
+                                        if Path(h).name == ghost_host})[0]
+        real_roster = mod.HAND_COPY_REASONS
+        try:
+            mod.HAND_COPY_REASONS = {}
+            bare = mod.census_text("hand-copies", sources, hosts_targets)
+            mod.HAND_COPY_REASONS = {(ghost_host, ghost): "planted"}
+            planted = mod.census_text("hand-copies", sources, hosts_targets)
+        finally:
+            mod.HAND_COPY_REASONS = real_roster
+        bare_rows = [line for line in bare.splitlines() if line.startswith("- ")]
+        problems += problem_if(
+            len(bare_rows) != len(entries)
+            or not all("UNDECLARED" in line for line in bare_rows),
+            "with an empty roster every row must read UNDECLARED: %r"
+            % bare_rows)
+        problems += problem_if(
+            not any(ghost in census_spans(line) and not line.startswith("- ")
+                    for line in planted.splitlines()),
+            "a declared reason for %s: %s, which is not a hand copy, was not "
+            "named as having nothing left to explain" % (ghost_host, ghost))
+        problems += main_problems("hand-copies", hand_text)
+        detail = ["%s: %s%s" % (host, name,
+                                "" if (Path(host).name, name) in roster
+                                else "  [UNDECLARED]")
+                  for host, name in entries]
+    suite.record(GG, "census-hand-copies-is-the-generator-walk", problems,
+                 detail=detail, text=hand_text)
 
 
 def group_hygiene(suite, pyc_before, digests_before):

@@ -12,6 +12,14 @@
     "canonical-source-blocks": {
       "description": "What each canonical generation source DEFINES -- one row per source with its block count and the names, and a closing line saying whether any name is defined by two sources. That last clause is the disjointness a marker's source field depends on: a name resolves only against the source its own region names, so two sources sharing one would make that field decorative. This is the Blocks column of the source table in docs/components/generated-regions.md, whose paging row read 5 for as long as it was typed by hand.",
       "command": ["python3", "-B", "Scripts/amalgamate.py", "--census", "sources"]
+    },
+    "canonical-block-hosts": {
+      "description": "Every canonical block, one row each whether or not anything asks for it, with how many files carry it in a generated region and which ones -- the Scripts/mcp-*.py servers plus the generator's hand-declared non-server hosts, every file it writes -- and a closing line naming any block generated into no host at all. These are the per-block host counts docs/components/generated-regions.md used to type in prose, counted by the generator that writes the regions.",
+      "command": ["python3", "-B", "Scripts/amalgamate.py", "--census", "hosts"]
+    },
+    "hand-copy-census": {
+      "description": "Every canonical block name a host keeps BY HAND -- bound at module level or as a direct class member outside every generated region -- one row per host and name, each with the measured reason the generator's roster declares for it or marked UNDECLARED, then a count line and the declared reasons with no hand copy left to explain. This is the one-writer exception list the suite used to carry as a comment: the walk and the roster now live in Scripts/amalgamate.py, and tests/test_generated_region.py consumes them rather than keeping a copy.",
+      "command": ["python3", "-B", "Scripts/amalgamate.py", "--census", "hand-copies"]
     }
   }
 }

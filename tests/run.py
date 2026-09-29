@@ -376,7 +376,10 @@ SUITES = [
      307),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
-     "a region's BEGIN line is the one its names resolve against", 92),
+     "a region's BEGIN line is the one its names resolve against; the "
+     "generator's census read path -- fleet, sources, per-block hosts and the "
+     "hand-copy walk with its declared reasons -- derived, sorted, writes "
+     "nothing", 94),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "

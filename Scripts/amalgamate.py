@@ -46,6 +46,8 @@ Usage:
     python3 Scripts/amalgamate.py --force         # discard a hand edit
     python3 Scripts/amalgamate.py --census fleet  # count the live regions
     python3 Scripts/amalgamate.py --census sources  # count what the sources define
+    python3 Scripts/amalgamate.py --census hosts  # which files carry each block
+    python3 Scripts/amalgamate.py --census hand-copies  # names kept by hand, and why
     python3 Scripts/amalgamate.py Scripts/mcp-purity.py
 """
 
@@ -94,10 +96,61 @@ DECLARED_HOSTS = ("search_duckduckgo.py",)
 # path the way a documentation page spells one.
 REPO_ROOT = SCRIPTS_DIR.parent
 
-# The census subjects. Two, because the fleet and the sources answer different
-# questions and change on different events: a region is added when a SERVER is
-# converted, a block when a canonical SOURCE grows. See `census_text`.
-CENSUS_KINDS = ("fleet", "sources")
+# The census subjects. The fleet and the sources answer different questions and
+# change on different events: a region is added when a SERVER is converted, a
+# block when a canonical SOURCE grows. The last two turn the region walk round
+# to face the blocks -- which files carry each one, and which files keep a
+# canonical name by hand instead. See `census_text`.
+CENSUS_KINDS = ("fleet", "sources", "hosts", "hand-copies")
+
+# ONE WRITER, with the exceptions NAMED rather than hidden: every hand-written
+# copy of a canonical block name a host keeps outside a generated region, keyed
+# by (host filename, block name), with the MEASURED reason it is not generated.
+#
+# It lives HERE and not in the suite because the census renders it: a reason is
+# half of what `--census hand-copies` prints, and a page cannot render a test
+# comment. The suite consumes this map and the walk below rather than carrying a
+# copy of either -- one implementation of the census, gated from the outside.
+#
+# An absent entry is not an error, it is a row the census marks UNDECLARED: "this
+# host keeps its own" is a legitimate answer, so the census reports rather than
+# judges -- but an undeclared copy cannot appear without landing on the page. An
+# entry whose copy has gone is reported too, as a reason with nothing left to
+# explain.
+#
+# The two `_max_answer_chars` / `_rows_note` entries are excluded TWICE OVER, so
+# settling either half alone would not make the block adoptable. The `_error`
+# entry is the odd one out: NOTHING measurable keeps it out -- it is
+# byte-identical to the canonical once re-indented, tab-safe, and its one free
+# name is imported there. It stays by hand only because every other server takes
+# `_result` and `_error` co-listed on one marker and mcp-webfetch cannot take the
+# first; split that marker and it stops being an exclusion, while `_result` stays
+# one for a reason no granularity can touch.
+HAND_COPY_REASONS: Dict[Tuple[str, str], str] = {
+    ("mcp-git.py", "_max_answer_chars"):
+        "excluded twice over: it defaults to its own DEFAULT_MAX_CHARS rather "
+        "than to the value the canonical block renders its reader with, and its "
+        "body carries a camelCase fallback loop the canonical has no trace of",
+    ("mcp-inspect.py", "_int_param"):
+        "takes a parameter NAME and raises, where the canonical takes a default "
+        "and falls back to it",
+    ("mcp-tshark.py", "_bool_param"):
+        "keeps the older (params, key, default) signature",
+    ("mcp-webfetch.py", "_bool_param"):
+        "an ALLOW-list, so an unrecognised string reads False here and True "
+        "canonically",
+    ("mcp-webfetch.py", "_error"):
+        "nothing measurable: byte-identical to the canonical once re-indented "
+        "for a tab host, kept by hand only because every other server takes it "
+        "co-listed with _result on one marker and this host cannot take _result",
+    ("mcp-webfetch.py", "_result"):
+        "annotates result as dict where the canonical says Any -- a body "
+        "difference no re-indenting removes",
+    ("mcp-webfetch.py", "_rows_note"):
+        "excluded twice over: it is not tab-safe (its else aligns under an open "
+        "paren) and its body diverged -- (start, shown, total) against the "
+        "canonical (start, shown, total, exact), with no lower-bound branch",
+}
 
 
 class Region(NamedTuple):
@@ -175,11 +228,12 @@ def assign_name(node: ast.stmt) -> Optional[str]:
       host's first read.
 
     Nothing is raised here. This maps what it can and leaves the rest alone,
-    because the map is also pointed at the SERVERS (the suite's hand-copy
-    census does exactly that) and ordinary module-level statements must not
-    turn a drift gate into a traceback about an unrelated line. The skip is not
-    silent where it matters: a name only enters the system by being written on
-    a marker, and `render` refuses an unknown one BY NAME.
+    because the rule is also pointed at the HOSTS (`bound_names`, the walk the
+    hand-copy census runs, does exactly that) and ordinary module-level
+    statements must not turn a drift gate into a traceback about an unrelated
+    line. The skip is not silent where it matters: a name only enters the
+    system by being written on a marker, and `render` refuses an unknown one BY
+    NAME.
     """
     if not isinstance(node, ast.Assign) or len(node.targets) != 1:
         return None
@@ -755,6 +809,148 @@ def census_sources(sources: Dict[str, Dict[str, str]]) -> List[str]:
     return out
 
 
+def census_hosts(sources: Dict[str, Dict[str, str]],
+                 targets: List[Path]) -> List[str]:
+    """Every canonical block and the files that carry it -- one page body.
+
+    One row per block EVERY source defines, hosted or not: a block no file asks
+    for is a row reading 0, never a missing row, because a table that drops the
+    zeros cannot be told apart from one that forgot a source. Keyed by (source,
+    block) since a region resolves its names against its OWN source; a host is
+    counted once however many of its regions name the block.
+    """
+    hosts: Dict[Tuple[str, str], Set[str]] = {
+        (source, block): set()
+        for source, blocks in sources.items() for block in blocks}
+    for path in targets:
+        for region in audit(path, sources):
+            for block in region.names:
+                hosts.setdefault((region.source, block), set()).add(
+                    repo_relative(path))
+
+    def spelled(source: str) -> str:
+        path = CANONICAL_SOURCES.get(source)
+        return repo_relative(path) if path else source
+
+    out = ["| Canonical block | Source | Hosts | Generated into |",
+           "|---|---|---|---|"]
+    for (source, block), held in sorted(hosts.items(),
+                                        key=lambda kv: (spelled(kv[0][0]),
+                                                        kv[0][1])):
+        out.append("| `%s` | `%s` | %d | %s |"
+                   % (block, spelled(source), len(held),
+                      census_names(sorted(held)) if held else "no host"))
+    idle = sorted(block for (_source, block), held in hosts.items() if not held)
+    out += ["",
+            "%d hosts scanned; %d canonical blocks, of which %d are generated "
+            "into at least one host; %s."
+            % (len(targets), len(hosts), len(hosts) - len(idle),
+               "every block reaches a host" if not idle
+               else "generated into no host: %s" % census_names(idle))]
+    return out
+
+
+def bound_names(label: str, text: str) -> Set[str]:
+    """Every name *text* binds at module top level OR as a direct class member.
+
+    `load_blocks_text` walks `tree.body` and nothing else, and that is RIGHT for
+    a canonical SOURCE: a block is a thing a marker can name and paste at the
+    marker's column, and a method buried in a class is not one. The hand-copy
+    census points the question at a HOST, where it is a different one -- "does
+    this file bind a canonical name anywhere the generator is not writing it"
+    -- and the answer has to include the class body, because that is where the
+    shared shape actually lives. `_result` and `_error` are METHODS in every
+    server; a census that saw only module level would report no hand copy of
+    either, anywhere, ever -- green by construction rather than by measurement.
+
+    So this is a SECOND walk, not a widened `load_blocks_text`: widening that
+    one would widen what may become a BLOCK, which is the one thing that must
+    not happen. `assign_name` is reused for both scopes, because which
+    assignment shapes bind exactly one nameable thing is one rule.
+    """
+    try:
+        tree = ast.parse(text, filename=label)
+    except SyntaxError as exc:
+        raise SystemExit(f"{label}: cannot be parsed ({exc})")
+    scopes = [tree.body] + [node.body for node in tree.body
+                            if isinstance(node, ast.ClassDef)]
+    names: Set[str] = set()
+    for body in scopes:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                names.add(node.name)
+            else:
+                bound = assign_name(node)
+                if bound is not None:
+                    names.add(bound)
+    return names
+
+
+def hand_copies_text(label: str, text: str,
+                     sources: Dict[str, Dict[str, str]]) -> List[str]:
+    """The canonical block names *text* binds by hand, outside every region.
+
+    Split from `hand_copies` for the reason `audit_text` is split from `audit`:
+    the suite proves the walk on a synthetic host without writing a file.
+    """
+    known = {name for blocks in sources.values() for name in blocks}
+    covered: Set[str] = set()
+    for region in audit_text(label, text, sources):
+        covered.update(region.names)
+    return sorted((bound_names(label, text) & known) - covered)
+
+
+def hand_copies(sources: Dict[str, Dict[str, str]],
+                targets: List[Path]) -> List[Tuple[str, str]]:
+    """(repo-relative host, name) for every hand copy in *targets*, sorted."""
+    found: List[Tuple[str, str]] = []
+    for path in targets:
+        if not path.is_file():
+            raise SystemExit(f"{path}: not a file")
+        text = path.read_text(encoding="utf-8")
+        found += [(repo_relative(path), name)
+                  for name in hand_copies_text(path.name, text, sources)]
+    return sorted(found)
+
+
+def census_hand_copies(sources: Dict[str, Dict[str, str]],
+                       targets: List[Path]) -> List[str]:
+    """Every hand-kept copy of a canonical block name, with its reason."""
+    entries = hand_copies(sources, targets)
+    out = []
+    declared = 0
+    for host, name in entries:
+        reason = HAND_COPY_REASONS.get((Path(host).name, name))
+        declared += reason is not None
+        out.append("- `%s`: `%s` -- %s"
+                   % (host, name, "declared: %s" % reason if reason is not None
+                      else "UNDECLARED: no reason is on record for this copy"))
+    carrying = len({host for host, _name in entries})
+    if entries:
+        out += ["",
+                "%d hand-written copies of a canonical block name, bound at "
+                "module level or as a direct class member outside every "
+                "generated region, in %d of the %d hosts scanned; %d carry a "
+                "declared reason and %d do not."
+                % (len(entries), carrying, len(targets), declared,
+                   len(entries) - declared)]
+    else:
+        out.append("None of the %d hosts scanned keeps a hand copy of a "
+                   "canonical block name." % len(targets))
+    # A reason whose copy is gone is a false sentence on the page, so it is
+    # NAMED -- scoped to the hosts actually scanned, since a reason about a file
+    # nobody asked for is not stale, only out of view.
+    scanned = {path.name: repo_relative(path) for path in targets}
+    live = {(Path(host).name, name) for host, name in entries}
+    orphans = sorted((scanned[host], name) for host, name in HAND_COPY_REASONS
+                     if host in scanned and (host, name) not in live)
+    out.append("Declared reasons with no hand copy left to explain: %s."
+               % ("; ".join("`%s`: `%s`" % pair for pair in orphans)
+                  if orphans else "none"))
+    return out
+
+
 def census_text(kind: str, sources: Dict[str, Dict[str, str]],
                 targets: List[Path]) -> str:
     """One census body, ending in exactly one newline.
@@ -769,6 +965,10 @@ def census_text(kind: str, sources: Dict[str, Dict[str, str]],
         lines = census_fleet(sources, targets)
     elif kind == "sources":
         lines = census_sources(sources)
+    elif kind == "hosts":
+        lines = census_hosts(sources, targets)
+    elif kind == "hand-copies":
+        lines = census_hand_copies(sources, targets)
     else:
         raise SystemExit("unknown census %r; the subjects are %s"
                          % (kind, ", ".join(CENSUS_KINDS)))
@@ -790,7 +990,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--census", choices=CENSUS_KINDS,
                     help="write NOTHING and print a census: 'fleet' counts the "
                          "live regions in the targets, 'sources' counts what "
-                         "the canonical sources define. Returns before any "
+                         "the canonical sources define, 'hosts' lists which "
+                         "files carry each canonical block, 'hand-copies' "
+                         "lists the canonical names a file keeps by hand, "
+                         "with the declared reason. Returns before any "
                          "staleness check, so --check and --force do not apply")
     args = ap.parse_args(argv)
 
@@ -800,10 +1003,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # THE READ PATH, and it is first on purpose: nothing below this line runs
     # for a census, so there is no ordering, no flag combination and no later
-    # edit to this function that can make the reporting mode write. Its default
-    # is the server fleet alone -- see `DECLARED_HOSTS` for why.
+    # edit to this function that can make the reporting mode write. The fleet
+    # census defaults to the server fleet alone -- see `DECLARED_HOSTS` for why
+    # -- while `hosts` and `hand-copies` ask about every file the generator
+    # WRITES, so they default to the same set the rewrite and `--check` walk.
     if args.census:
-        print(census_text(args.census, sources, args.targets or fleet), end="")
+        default = fleet if args.census == "fleet" else targets
+        print(census_text(args.census, sources, args.targets or default),
+              end="")
         return 0
 
     stale = refused = 0
