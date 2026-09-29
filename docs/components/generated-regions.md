@@ -14,7 +14,7 @@ sources:
   - Scripts/_mcp_websocket.py
   - tests/test_generated_region.py
 verified:
-  commit: 01a0309
+  commit: c9d2175
   date: 2026-09-29
 links:
   - scripts
@@ -29,7 +29,7 @@ links:
 
 # Generated regions
 
-The fifteen MCP servers in [[scripts]] share their plumbing by **generation, not
+The MCP servers in [[scripts]] share their plumbing by **generation, not
 import**: a canonical function is pasted into each server between two comment
 markers, and a generator re-renders it on demand. There is no runtime dependency
 between servers, no shared package, and no import that could carry a helper from
@@ -250,7 +250,7 @@ module-level imports, `log` is a module-level *assignment*, so any block reading
 it is refused by name. `_configure_logging` clears that bar by never reading
 `log`: it is a module-level `def` whose free names are `logging`, `os` and `sys`.
 The logger object itself stays hand-written because its NAME is the one thing
-that differs across the fifteen copies, and the `--debug` / `--log-file`
+that differs from copy to copy, and the `--debug` / `--log-file`
 declarations stay hand-written because `mcp-webfetch`'s `-v` / `--verbose`
 aliases are a feature, not drift.
 

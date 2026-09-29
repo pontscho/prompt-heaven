@@ -194,9 +194,31 @@ INDEX_COUNTED_TYPES = ("roadmap-item",)              # INDEX.md counts these, ne
 # the state means a `sources:` path is gone from the tree, which is precisely a
 # broken anchor, reached by the git path instead of by `verify`'s walk. The two
 # agree by construction.
+#
+# ONE CARVE-OUT from `broken-anchor`: a dead BODY span on a FROZEN RECORD — an
+# accepted ADR (`type: adr`, `status: active`) or any `status: deprecated` page
+# — is reported as an advisory and not counted. The p:wiki schema §2 makes an
+# adr append-only, frozen at decision time, and §4's argument that an ADR keeps
+# its dated numbers applies to its anchors unchanged: they are a QUOTATION of
+# the tree when the decision was taken, not a claim about HEAD. The only legal
+# write to an accepted ADR, addendum.py, appends and can never remove a body
+# span, so gating on one is a permanent red no sanctioned action can clear — a
+# gate that proves nothing anyone may act on. `deprecated` is the same shape: a
+# page describing a design that is gone quotes that design. What still gates on
+# every page, frozen or not: a dead frontmatter `sources:` entry (a DECLARED
+# claim, not a quotation) and every measured-region defect. Draft ADRs and every
+# other page keep gating on their body spans exactly as before.
 GATING_CLASSES = ("orphaned-source", "broken-anchor", "measured-region")
 GATING_LINE_PREFIX = "gating: "
 ADVISORY_LINE_PREFIX = "advisory: "
+# The name of the frozen-record advisory, in `verify`'s block head and on the
+# `freshness` advisory line alike, so one string finds both.
+FROZEN_ADVISORY_LABEL = "frozen records"
+# The one status that freezes a page of ANY type, and the (type, status) pair
+# that freezes an adr. `active` on an adr means accepted: addendum.py refuses
+# every adr whose status is not exactly this value.
+FROZEN_STATUS = "deprecated"
+FROZEN_ADR = ("adr", "active")
 # The git-lag statuses the advisory line accounts for, in the order it names
 # them: a source that moved, and a page nothing can be compared against at all.
 ADVISORY_STATUSES = ("stale", "unverified")
@@ -1652,6 +1674,20 @@ def _resolve_anchor(anchor: str, repo: str, cache: dict) -> Tuple[str, str]:
     return ("weak" if rule == "mention" else "ok"), rule
 
 
+def frozen_record(fm) -> str:
+    """Why this page is a frozen record — `accepted adr` / `deprecated` — or ''.
+
+    See the note above GATING_CLASSES: a frozen record's dead BODY span is an
+    advisory, never gating, and nothing else about the page changes.
+    """
+    status = str(fm.get("status") or "")
+    if status == FROZEN_STATUS:
+        return FROZEN_STATUS
+    if (str(fm.get("type") or ""), status) == FROZEN_ADR:
+        return "accepted adr"
+    return ""
+
+
 def verify_analyze(root: str, registry=None, registry_error: str = "",
                    rendered=None, errors=None, path_prefix=None) -> dict:
     """Resolve every anchor and classify every measured region, page by page.
@@ -1682,8 +1718,11 @@ def verify_analyze(root: str, registry=None, registry_error: str = "",
     cache: dict = {}
     seen: List[str] = []
     pages: List[dict] = []
+    frozen_pages: List[dict] = []
+    # `unresolved` still counts a frozen record's dead span -- the MEASUREMENT
+    # does not move; `frozen` says how many of those are advisory, not gating.
     summary = {"pages": 0, "anchors": 0, "resolved": 0, "unresolved": 0,
-               "weak": 0, "line_refs": 0, "regions": 0}
+               "frozen": 0, "weak": 0, "line_refs": 0, "regions": 0}
     for state in MEASURED_STATES:
         summary[state] = 0
     for relpath, fm, body in iter_pages(root):
@@ -1691,8 +1730,10 @@ def verify_analyze(root: str, registry=None, registry_error: str = "",
         if not _path_prefix_matches(relpath, prefix):
             continue
         summary["pages"] += 1
+        record = frozen_record(fm)
         row = {"path": relpath, "name": fm.get("name") or relpath,
-               "broken": [], "regions": [], "malformed": ""}
+               "broken": [], "frozen": [], "record": record,
+               "regions": [], "malformed": ""}
         anchors = [("sources", str(a)) for a in as_list(fm.get("sources"))
                    if _anchor_shaped(str(a), need_slash=False)]
         anchors += [("body", a) for a in _anchor_candidates(body, top_level)]
@@ -1709,8 +1750,15 @@ def verify_analyze(root: str, registry=None, registry_error: str = "",
                 summary["line_refs"] += 1
             else:
                 summary["unresolved"] += 1
-                row["broken"].append({"anchor": anchor, "where": where,
-                                      "kind": kind, "reason": reason})
+                finding = {"anchor": anchor, "where": where, "kind": kind,
+                           "reason": reason}
+                # The carve-out: a BODY span on a frozen record is a quotation
+                # of the tree at decision time. `sources:` is never carved out.
+                if record and where == "body":
+                    summary["frozen"] += 1
+                    row["frozen"].append(finding)
+                else:
+                    row["broken"].append(finding)
         try:
             regions = measured_regions(relpath, _page_text(root, relpath))
         except MeasuredRegionError as exc:
@@ -1732,7 +1780,12 @@ def verify_analyze(root: str, registry=None, registry_error: str = "",
                 or any(r["state"] in MEASURED_GATING_STATES
                        for r in row["regions"])):
             pages.append(row)
-    report = {"root": root, "repo": repo, "gating": pages, "summary": summary,
+        # A page may sit in BOTH lists -- an accepted ADR with a dead source
+        # and a dead body span -- and each list shows only its own findings.
+        if row["frozen"]:
+            frozen_pages.append(row)
+    report = {"root": root, "repo": repo, "gating": pages,
+              "frozen": frozen_pages, "summary": summary,
               "registry_error": registry_error, "rendered": rendered is not None}
     if prefix:
         report["path_prefix"] = prefix
@@ -1799,6 +1852,17 @@ def verify_render(report, rel_root: str) -> str:
             for reason in _verify_page_reasons(page):
                 lines.append("    %s" % reason)
         lines.append("")
+    if report.get("frozen"):
+        lines.append("%s (%d page(s)) — advisory, not gating:"
+                     % (FROZEN_ADVISORY_LABEL, len(report["frozen"])))
+        for page in report["frozen"]:
+            lines.append("- %s `%s`" % (page["name"], page["path"]))
+            lines.append("    %s: a body anchor here quotes the tree at "
+                         "decision time" % page["record"])
+            for finding in page["frozen"]:
+                lines.append("    body: %s — %s" % (
+                    finding["anchor"], finding["reason"] or finding["kind"]))
+        lines.append("")
     extra = []
     if summary["weak"]:
         extra.append("%d by mention only" % summary["weak"])
@@ -1808,6 +1872,9 @@ def verify_render(report, rel_root: str) -> str:
                  % (summary["anchors"], summary["resolved"],
                     (" (%s)" % ", ".join(extra)) if extra else "",
                     summary["unresolved"]))
+    if summary.get("frozen"):
+        lines.append("  %d of the unresolved sit in %s: advisory, not gating."
+                     % (summary["frozen"], FROZEN_ADVISORY_LABEL))
     region_bits = ["%d %s" % (summary[state], state) for state in MEASURED_STATES
                    if summary.get(state)]
     lines.append("measured regions: %d%s"
@@ -1833,7 +1900,15 @@ def verify_render(report, rel_root: str) -> str:
               "repo-root-relative — so wiki-relative directory names and worked "
               "examples in prose are not reported. The residue that rule cannot "
               "remove: an illustrative path under a REAL top-level directory is "
-              "indistinguishable from a dead anchor by shape, and is reported."]
+              "indistinguishable from a dead anchor by shape, and is reported.",
+              "A frozen record — an accepted ADR (type adr, status active) or "
+              "any deprecated page — does not gate on a dead BODY span: its "
+              "anchors quote the tree at decision time, and the one legal "
+              "write to an accepted ADR, an addendum, cannot remove a body "
+              "span, so gating on one would be a red no sanctioned action "
+              "clears. Such spans are listed under %s as an advisory instead. "
+              "A dead sources: entry and every measured-region defect gate on "
+              "every page, frozen or not." % FROZEN_ADVISORY_LABEL]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -2259,6 +2334,17 @@ def freshness_render(report) -> str:
             "not a verdict: it cannot tell a moved comma from a reversed "
             "decision. A human read may be owed; nothing here is claimed wrong."
             % (ADVISORY_LINE_PREFIX, moved, unchecked))
+    # The frozen-record carve-out (see the GATING_CLASSES note): counted HERE so
+    # the dead spans stay visible in this answer, and never in `gating:` above.
+    frozen_pages = (verify or {}).get("frozen") or []
+    if frozen_pages:
+        lines.append(
+            "%s%d dead body anchor(s) on %d page(s) in %s (accepted ADRs, "
+            "deprecated pages) — they quote the tree at decision time, so they "
+            "are reported, not gated; verify lists them."
+            % (ADVISORY_LINE_PREFIX,
+               sum(len(p["frozen"]) for p in frozen_pages), len(frozen_pages),
+               FROZEN_ADVISORY_LABEL))
     if not report["pages"]:
         lines.append("no pages found")
     return "\n".join(lines).rstrip() + "\n"
@@ -3521,7 +3607,11 @@ WIKI_CALL_TOOL = {
         "                   summary lines as what they are: gating counts what\n"
         "                   verify can PROVE is broken — an anchor that does not\n"
         "                   resolve, a measured region that is stale or hand-\n"
-        "                   edited. advisory counts GIT LAG: pages whose listed\n"
+        "                   edited — except a dead body anchor on a frozen record\n"
+        "                   (an accepted adr or a deprecated page), which quotes\n"
+        "                   the tree at decision time and is an advisory line\n"
+        "                   instead; its sources: entries still gate. The other\n"
+        "                   advisory counts GIT LAG: pages whose listed\n"
         "                   sources moved since they were verified. Lag is a\n"
         "                   measurement, not a verdict — it cannot tell a moved\n"
         "                   comma from a reversed decision — so it says a human\n"
@@ -3532,8 +3622,10 @@ WIKI_CALL_TOOL = {
         "                   (default false). Every frontmatter sources: entry and\n"
         "                   every inline path or path:symbol span is resolved\n"
         "                   against the repo, and every measured region is\n"
-        "                   classified. The symbol matcher is stdlib text — a .py\n"
-        "                   symbol resolves on a def/class/assignment, a .md one\n"
+        "                   classified; a frozen record's dead body span is\n"
+        "                   listed as an advisory, not gating. The symbol matcher\n"
+        "                   is stdlib text — a .py symbol resolves on a\n"
+        "                   def/class/assignment, a .md one\n"
         "                   on a heading, and any other extension falls back to a\n"
         "                   whole-word MENTION, counted separately and never\n"
         "                   silently promoted. purity_call is the real resolver.\n"

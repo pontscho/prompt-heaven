@@ -411,6 +411,10 @@ the functions, use `wiki_call`.
 | `roadmap`   | Live known-but-unscheduled work, by horizon; one writer (`p:roadmap`) | none                | generated   |
 | `roadmap-item` | One closed roadmap item (done or dropped)     | none                            | immutable   |
 
+An accepted `adr` is append-only: its one legal write is a dated addendum
+(`addendum.py`, above). Because nothing may rewrite its body, a dead body anchor
+in it — or in any `deprecated` page — is advisory, never gating (§4).
+
 ### 3. Page anatomy
 
 Every page begins with frontmatter. To stay parseable by the stdlib-only
@@ -558,6 +562,15 @@ A page's freshness is defined against its anchors:
   (clangd / luals / purity workspace-symbol lookup returns nothing).
 - An anchor is **drifted** if the symbol exists but its signature/type changed
   since last verification — flag for human review, do not silently rewrite.
+- **A frozen record does not gate on a dead body anchor.** A frozen record is an
+  accepted `adr` (`status: active`) or any page with `status: deprecated`. Its
+  inline body anchors quote the tree at decision time (§2: an adr is append-only),
+  and the one legal write to an accepted ADR — `addendum.py` — cannot
+  remove a body span, so a gate on one could never be cleared. `wiki_call verify`
+  and `freshness` therefore report such a span as an **advisory** under
+  `frozen records`, not in `gating`. A dead frontmatter `sources:` entry and every
+  measured-region defect still gate on every page; a `draft` adr and every other
+  page gate on their body anchors as before (`docs/adr/0019-only-gate-on-what-you-can-prove.md`).
 
 Division of labor: file-level freshness (`stale`, `orphaned-source`) is
 detected cheaply by `wiki_call` `freshness` (git only; `freshness.py` runs the

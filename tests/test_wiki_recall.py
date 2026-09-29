@@ -3,7 +3,8 @@
 index, the `source_to_pages` per-hit description, the MEASURED state in every
 recall reply's `[type/state]` label, the page TYPE as a ranking signal, the
 frontmatter `aliases:` synonym field, the shared `path_prefix` boundary rule and
-the MEASURED REGION / `verify` mechanism, in Scripts/mcp-wiki.py (groups A-R).
+the MEASURED REGION / `verify` mechanism and the frozen-record carve-out from
+`gating`, in Scripts/mcp-wiki.py (groups A-S).
 
 The case COUNT is deliberately absent from this docstring: it is written down
 once, in the SUITES table in tests/run.py, which checks it against the run.  A
@@ -303,6 +304,17 @@ Coverage by group:
      where that number differs from the old `stale + orphaned-source +
      unverified` sum, and git lag becomes an `advisory:` line that says in those
      words that it is a measurement and not a verdict
+  S  a FROZEN RECORD -- an accepted ADR, or any `deprecated` page -- does not
+     gate on a dead BODY anchor: its spans quote the tree at decision time, and
+     the one legal write to an accepted ADR (addendum.py) cannot remove one, so
+     a gate on it is a red no sanctioned action clears.  The span stays VISIBLE
+     as an advisory naming the record.  One page per clause, each carrying a
+     live span too: the accepted ADR and the deprecated spec leave `gating`, the
+     draft ADR and the active component stay in it on the SAME dead span, and an
+     accepted ADR's dead `sources:` entry still gates -- a declared claim is not
+     a quotation.  Every case reads the verdict three ways (the report, the
+     rendered `verify`, the rendered `freshness`) and the gating NUMBER three
+     ways, because the two answers derive from one report and must agree
 
 Group J runs on its OWN six-page fixture in a SECOND workspace (group N adds a
 SEVENTH page to that same workspace -- `get_page` resolves by slug, so a page
@@ -335,6 +347,10 @@ which in a shared fixture would become a finding about somebody else's pages.
 The thirteenth holds the malformed-marker corpus alone, because a page whose
 markers cannot be read is reported per page and would otherwise land in the
 counts of every case that reads a region total.
+
+Group S takes a FOURTEENTH, for the same reason in the other direction: its
+pages carry dead anchors ON PURPOSE, and in group R's corpus they would move the
+`anchors:` and `gating` numbers every group-R case derives from its own tables.
 
 Group Q takes an ELEVENTH, and its reason is the corpus SHAPE rather than the
 scoring: every fixture above is FLAT, and on a flat corpus the substring bug and
@@ -3070,6 +3086,187 @@ def build_broken_marker_fixture(work):
     work.write_text(os.path.join(WIKI_REL, "measurements.json"),
                     r_registry_text())
     return os.path.realpath(work.path)
+
+
+# ---------------------------------------------------------------------------
+# Group S -- a FROZEN RECORD does not gate on a dead BODY anchor.
+#
+# A frozen record is an accepted ADR (`type: adr`, `status: active`) or any page
+# whose `status` is `deprecated`.  Its body anchors are a QUOTATION of the tree
+# at decision time (p:wiki schema §2: an adr is append-only, frozen at decision
+# time), and the one legal write to an accepted ADR -- addendum.py -- cannot
+# remove a body span, so gating on one is a red no sanctioned action can clear.
+# The dead span stays VISIBLE, as an advisory that names the record it sits in.
+#
+# What the carve-out must NOT reach is pinned beside what it must: a DRAFT adr
+# and an active non-adr page still gate on the same dead span, and an accepted
+# ADR still gates on a dead frontmatter `sources:` entry -- a declared claim,
+# not a quotation.  Five pages, one per clause, and every page carries one LIVE
+# span as well, so "no finding" can never be the reason a page is not gating.
+# ---------------------------------------------------------------------------
+
+(S_FILE, S_SLUG, S_TYPE, S_STATUS, S_SRCS, S_BODY, S_GATES) = range(7)
+
+S_ALIVE = "src/alive.py"
+S_DEAD_PATH = "src/retired.py"                 # a real top-level dir, file gone
+S_DEAD_SYMBOL = "%s:retired_function" % S_ALIVE  # the file lives, the symbol not
+S_DEAD_SOURCE = "src/retired_source.py"
+S_COMMIT = "cafe051"
+S_DIFFS = {S_COMMIT: set()}
+
+S_ACCEPTED = "accepted-adr.md"
+S_DEPRECATED = "deprecated-spec.md"
+S_DRAFT = "draft-adr.md"
+S_ACTIVE = "active-component.md"
+S_SOURCED = "sourced-adr.md"
+
+S_PAGES = [
+    (S_ACCEPTED, "s-accepted-adr", "adr", "active", [],
+     [S_ALIVE, S_DEAD_PATH, S_DEAD_SYMBOL], False),
+    (S_DEPRECATED, "s-deprecated-spec", "spec", "deprecated", [],
+     [S_ALIVE, S_DEAD_PATH], False),
+    (S_DRAFT, "s-draft-adr", "adr", "draft", [],
+     [S_ALIVE, S_DEAD_PATH], True),
+    (S_ACTIVE, "s-active-component", "component", "active", [],
+     [S_ALIVE, S_DEAD_PATH], True),
+    (S_SOURCED, "s-sourced-adr", "adr", "active", [S_DEAD_SOURCE],
+     [S_ALIVE, S_DEAD_PATH], True),
+]
+S_BY_FILE = {p[S_FILE]: p for p in S_PAGES}
+S_DEAD_BODY = {S_DEAD_PATH, S_DEAD_SYMBOL}
+# The pages that are frozen records BY THE RULE, typed from the fixture's own
+# type/status columns rather than from the module, so the case checks the
+# module's classifier instead of asking it about itself.
+S_FROZEN_FILES = {p[S_FILE] for p in S_PAGES
+                  if p[S_STATUS] == "deprecated"
+                  or (p[S_TYPE] == "adr" and p[S_STATUS] == "active")}
+
+
+def s_page_text(page):
+    """One group-S page: frontmatter from the table, one span per body anchor."""
+    out = ["---",
+           "name: %s" % page[S_SLUG],
+           "title: Group S page %s" % page[S_SLUG],
+           "type: %s" % page[S_TYPE],
+           "status: %s" % page[S_STATUS],
+           "description: A group S fixture page carrying sfrozenpage."]
+    if page[S_SRCS]:
+        out.append("sources:")
+        out += ["  - %s" % s for s in page[S_SRCS]]
+        out += ["verified:", "  commit: %s" % S_COMMIT, "  date: 2026-01-01"]
+    out += ["---", "", "# Group S page %s" % page[S_SLUG], ""]
+    out += ["A claim anchored at `%s`." % span for span in page[S_BODY]]
+    return "\n".join(out) + "\n"
+
+
+def build_frozen_fixture(work):
+    """Write group S's five pages and the one source file they can resolve."""
+    for page in S_PAGES:
+        work.write_text(os.path.join(WIKI_REL, page[S_FILE]), s_page_text(page))
+    work.write_text(S_ALIVE, "def alive_function():\n    return 1\n")
+    return os.path.realpath(work.path)
+
+
+def s_frozen_block(text, label):
+    """{path: [indented lines]} under the `verify` frozen-record block.
+
+    The block head is read off the module (`label`); a missing label means the
+    mechanism does not exist, and the caller reports that rather than parsing.
+    The block ends at the first blank line, exactly as the gating block does.
+    """
+    out, inside, current = {}, False, None
+    if not label:
+        return out
+    for line in text.split("\n"):
+        if not inside:
+            inside = line.startswith(label + " (")
+            continue
+        if not line.strip():
+            break
+        m = _VERIFY_GATING_ROW_RE.match(line)
+        if m:
+            current = m.group("path")
+            out[current] = []
+        elif current and line.startswith("    "):
+            out[current].append(line.strip())
+    return out
+
+
+def s_case(state, page_file):
+    """The problems for one group-S page, from the five views of one corpus."""
+    page = S_BY_FILE[page_file]
+    problems = []
+    frozen_list = state["report"].get("frozen")
+    if frozen_list is None:
+        problems.append("verify_analyze returns no `frozen` list, so a frozen "
+                        "record's dead body anchor has nowhere to go but "
+                        "`gating`")
+    frozen = {p["path"]: p for p in frozen_list or []}
+    gated = {p["path"]: p for p in state["report"]["gating"]}
+    dead_body = sorted(set(page[S_BODY]) & S_DEAD_BODY)
+    if page[S_GATES]:
+        for where, paths in (("verify_analyze", sorted(gated)),
+                             ("the rendered verify", state["verify_gating"]),
+                             ("the rendered freshness", state["fresh_gating"])):
+            if page_file not in paths:
+                problems.append("%s does not gate %s, and nothing about this "
+                                "page is frozen: %r" % (where, page_file, paths))
+    else:
+        for where, paths in (("verify_analyze", sorted(gated)),
+                             ("the rendered verify", state["verify_gating"]),
+                             ("the rendered freshness", state["fresh_gating"])):
+            if page_file in paths:
+                problems.append("%s gates %s on a body span of a frozen record"
+                                % (where, page_file))
+    in_frozen = page_file in S_FROZEN_FILES
+    if in_frozen:
+        got = sorted(b["anchor"] for b in frozen.get(page_file, {})
+                     .get("frozen", []))
+        if frozen_list is not None and got != dead_body:
+            problems.append("the advisory lists %r for %s, the fixture's dead "
+                            "body spans are %r" % (got, page_file, dead_body))
+        rendered = state["frozen_rendered"].get(page_file)
+        if rendered is None:
+            problems.append("the rendered verify has no frozen-record row for "
+                            "%s, so the dead span is no longer visible at all"
+                            % page_file)
+        else:
+            for span in dead_body:
+                if not any(span in line for line in rendered):
+                    problems.append("the frozen-record row for %s never names "
+                                    "%r" % (page_file, span))
+    else:
+        if page_file in frozen:
+            problems.append("%s is not a frozen record (type %s, status %s) "
+                            "and was reported as one"
+                            % (page_file, page[S_TYPE], page[S_STATUS]))
+        broken_body = sorted(b["anchor"] for b in gated.get(page_file, {})
+                             .get("broken", []) if b["where"] == "body")
+        if broken_body != dead_body:
+            problems.append("%s gates on body spans %r, the fixture's dead "
+                            "ones are %r" % (page_file, broken_body, dead_body))
+    if page[S_SRCS]:
+        broken_src = sorted(b["anchor"] for b in gated.get(page_file, {})
+                            .get("broken", []) if b["where"] == "sources")
+        if broken_src != sorted(page[S_SRCS]):
+            problems.append("%s gates on sources %r, want %r -- a declared "
+                            "claim gates on every page, frozen or not"
+                            % (page_file, broken_src, sorted(page[S_SRCS])))
+        broken_body = [b["anchor"] for b in gated.get(page_file, {})
+                       .get("broken", []) if b["where"] == "body"]
+        if in_frozen and broken_body:
+            problems.append("%s gates on its body span(s) %r as well as on its "
+                            "source -- the body half is a quotation"
+                            % (page_file, broken_body))
+    want_gating = len([p for p in S_PAGES if p[S_GATES]])
+    counts = {"verify_gating_count": state["count"],
+              "rendered verify": state["verify_number"],
+              "rendered freshness": state["fresh_number"]}
+    for where, n in sorted(counts.items()):
+        if n != want_gating:
+            problems.append("%s says gating %r, the fixture gates %d"
+                            % (where, n, want_gating))
+    return problems
 
 
 def r_region_report(mod, abs_wiki, render=False):
@@ -9642,6 +9839,89 @@ def run(opts=None):
                      text=bad_measure)
     finally:
         region_work.cleanup()
+
+    # ============ S: a frozen record does not gate on a dead body anchor ======
+    frozen_work = H.TempWorkspace("ph-wiki-frozen-", keep=opts.keep)
+    try:
+        sroot = build_frozen_fixture(frozen_work)
+        sdrv = Driver(sroot, name="mcp_wiki_frozen")
+        smod = sdrv.mod
+        patch_git_table(smod, sroot, S_DIFFS)
+        s_label = getattr(smod, "FROZEN_ADVISORY_LABEL", None)
+        s_report = smod.verify_analyze(sdrv.abs_wiki)
+        s_verify_txt, s_verify_err = sdrv.call("verify")
+        s_fresh_txt = sdrv.freshness()
+        _s_rows, s_verdict = split_verdict_lines(s_fresh_txt, smod)
+        s_state = {
+            "report": s_report,
+            "count": smod.verify_gating_count(s_report),
+            "verify_gating": verify_gating_paths(s_verify_txt),
+            "verify_number": r_verify_numbers(s_verify_txt)["gating"],
+            "fresh_gating": freshness_gating_paths(s_verdict),
+            "fresh_number": parse_freshness(s_fresh_txt)["gating"],
+            "frozen_rendered": s_frozen_block(s_verify_txt, s_label),
+        }
+        s_premise = []
+        if s_verify_err:
+            s_premise.append("verify failed: %s" % s_verify_txt[:200])
+        if not s_label:
+            s_premise.append("the module publishes no FROZEN_ADVISORY_LABEL, so "
+                             "the advisory block has no name a caller can find")
+        s_why = _d("why", "an accepted ADR's anchors quote the tree at decision "
+                          "time (schema §2, append-only), and addendum.py -- the "
+                          "one legal write -- cannot remove a body span")
+
+        problems = s_premise + s_case(s_state, S_ACCEPTED)
+        if s_label and not any(
+                line.startswith(smod.ADVISORY_LINE_PREFIX) and s_label in line
+                for line in s_verdict):
+            problems.append("freshness carries no advisory line for frozen "
+                            "records, so the dead spans vanish from its answer")
+        suite.record("S", "an-accepted-adr-body-anchor-is-advisory", problems,
+                     detail=[_d("page", "%s (type adr, status active)"
+                                % S_ACCEPTED),
+                             _d("dead", "%r" % sorted(S_DEAD_BODY)),
+                             _d("gating", "%r" % s_state["verify_gating"]),
+                             s_why],
+                     text=s_verify_txt + "\n" + s_fresh_txt)
+
+        problems = s_premise + s_case(s_state, S_DEPRECATED)
+        suite.record("S", "a-deprecated-page-body-anchor-is-advisory", problems,
+                     detail=[_d("page", "%s (type spec, status deprecated)"
+                                % S_DEPRECATED),
+                             _d("why", "deprecated describes a design that is "
+                                       "gone; its spans quote that design")],
+                     text=s_verify_txt)
+
+        problems = s_premise + s_case(s_state, S_DRAFT)
+        suite.record("S", "a-draft-adr-still-gates-on-its-body", problems,
+                     detail=[_d("page", "%s (type adr, status draft)" % S_DRAFT),
+                             _d("why", "a draft is still being written -- "
+                                       "editing it directly is legal, so the "
+                                       "red is clearable")],
+                     text=s_verify_txt)
+
+        problems = s_premise + s_case(s_state, S_ACTIVE)
+        suite.record("S", "an-active-living-page-still-gates-on-its-body",
+                     problems,
+                     detail=[_d("page", "%s (type component, status active)"
+                                % S_ACTIVE),
+                             _d("why", "a living page is edited in place; its "
+                                       "anchors are claims about HEAD")],
+                     text=s_verify_txt)
+
+        problems = s_premise + s_case(s_state, S_SOURCED)
+        suite.record("S", "an-accepted-adr-still-gates-on-its-sources",
+                     problems,
+                     detail=[_d("page", "%s (type adr, status active)"
+                                % S_SOURCED),
+                             _d("sources", "%r" % S_BY_FILE[S_SOURCED][S_SRCS]),
+                             _d("why", "a sources: entry is a DECLARED claim, "
+                                       "not a quotation, and the carve-out "
+                                       "covers body spans alone")],
+                     text=s_verify_txt)
+    finally:
+        frozen_work.cleanup()
 
     # ============ H: hygiene ============
     pyc_after = H.pycache_snapshot()

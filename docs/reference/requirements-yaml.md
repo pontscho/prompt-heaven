@@ -8,8 +8,8 @@ sources:
   - requirements.yaml
   - Scripts/task-validator.py
 verified:
-  commit: 2663d02
-  date: 2026-09-16
+  commit: c9d2175
+  date: 2026-09-29
 links:
   - scripts
   - skills
@@ -35,7 +35,7 @@ skill. See [[skills]] and [[scripts]] for those.
 ## Why a second artifact at all
 
 The plan and the YAML have different readers. The plan — written to the
-`docs/feature-implementation-plan.md` slot by `/p:feature-plan` — is prose, judged
+`feature-implementation-plan.md` slot at the `docs/` root by `/p:feature-plan` — is prose, judged
 by a validation loop and read by a human.
 The YAML is read and *rewritten* by programs: `Scripts/task-update.py` flips a
 task's status in place while preserving the file's formatting, `Scripts/task-plan.py`

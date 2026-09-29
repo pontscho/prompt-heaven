@@ -7,8 +7,8 @@ description: Why skills, agents and fragments are three non-overlapping layers, 
 sources:
   - ClaudeCode/ARCHITECTURE.md
 verified:
-  commit: 535bf1d
-  date: 2026-08-10
+  commit: c9d2175
+  date: 2026-09-29
 links:
   - agents
   - skills
@@ -117,7 +117,7 @@ exception, and a new one requires an explicit decision rather than a per-minion
 hack.
 
 One consequence is worth writing down here, because it reads like a wiki-layout
-defect and is not. **`docs/feature-implementation-plan.md` is a slot at the
+defect and is not. **`feature-implementation-plan.md` is a slot at the
 `docs/` root rather than under `specs/`, deliberately** — the path `/p:feature-plan`
 writes the current plan to, empty between plans. Its path is pinned by the
 handoff contract itself `ClaudeCode/skills/_lib/handoff-contracts.md`, by the

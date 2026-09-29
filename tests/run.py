@@ -254,7 +254,8 @@ SUITES = [
      "floored percentages, query-side stopwords, get_page section index, "
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
-     "the frontmatter aliases synonym field", 155),
+     "the frontmatter aliases synonym field, "
+     "the frozen-record advisory carve-out", 160),
     ("wiki_index", run_wiki_index,
      "INDEX.md rendering and the page-type constants: both render_index copies "
      "byte-identical, a roadmap-item never listed and counted in one rendered "

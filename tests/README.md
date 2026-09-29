@@ -61,22 +61,22 @@ rationale lives in `docs/subsystems/tests.md`.
 | name | file | groups |
 |---|---|---|
 | `inspect_validate` | `test_inspect_validate.py` | A–R |
-| `mcp_first_guard` | `test_mcp_first_guard.py` | A–N |
+| `mcp_first_guard` | `test_mcp_first_guard.py` | A–O |
 | `sbx_gate` | `test_sbx_gate.py` | A–Q |
 | `purity_lsp` | `test_purity_lsp.py` | A–J |
-| `purity_file_ops` | `test_purity_file_ops.py` | A–M |
-| `mcp_git_params` | `test_mcp_git_params.py` | A–M |
+| `purity_file_ops` | `test_purity_file_ops.py` | A–N |
+| `mcp_git_params` | `test_mcp_git_params.py` | A–N |
 | `name_existence` | `test_name_existence.py` | A–I |
 | `spawn_stdin` | `test_spawn_stdin.py` | A–D |
 | `mcp_footprint` | `test_mcp_footprint.py` | A–H |
-| `wiki_recall` | `test_wiki_recall.py` | A–P |
-| `wiki_index` | `test_wiki_index.py` | A–F |
+| `wiki_recall` | `test_wiki_recall.py` | A–S |
+| `wiki_index` | `test_wiki_index.py` | A–H |
 | `wiki_addendum` | `test_wiki_addendum.py` | A–E |
 | `jira_cli` | `test_jira_cli.py` | A–M |
 | `bitbucket_cli` | `test_bitbucket_cli.py` | A–K |
-| `checkpoint` | `test_checkpoint.py` | A–K |
+| `checkpoint` | `test_checkpoint.py` | A–M |
 | `roadmap` | `test_roadmap.py` | A–L |
-| `generated_region` | `test_generated_region.py` | A–F |
+| `generated_region` | `test_generated_region.py` | A–G |
 | `mcp_websocket` | `test_mcp_websocket.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
 | `wire_log` | `test_wire_log.py` | A–F |
@@ -223,16 +223,16 @@ tests/
   run.py                     single entry point / aggregator + the SUITES table
   _harness.py                shared plumbing, used by every suite
   test_inspect_validate.py   groups A-R
-  test_mcp_first_guard.py    groups A-N
+  test_mcp_first_guard.py    groups A-O
   test_sbx_gate.py           groups A-Q   (grant-only gate; the guard's mirror)
   test_purity_lsp.py         groups A-J   (live clangd + lua-language-server)
-  test_purity_file_ops.py    groups A-M   (stdlib file handlers, no binary, ~2s)
-  test_mcp_git_params.py     groups A-M   (offline, subprocess stubbed)
+  test_purity_file_ops.py    groups A-N   (stdlib file handlers, no binary, ~2s)
+  test_mcp_git_params.py     groups A-N   (offline, subprocess stubbed)
   test_name_existence.py     groups A-I
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
   test_mcp_footprint.py      groups A-H   (AST + one handshake per server)
-  test_wiki_recall.py        groups A-P   (synthetic corpus, offline)
-  test_wiki_index.py         groups A-F   (both INDEX renderers and both copies
+  test_wiki_recall.py        groups A-S   (synthetic corpus, offline)
+  test_wiki_index.py         groups A-H   (both INDEX renderers and both copies
                                            of the six page-type constants, loaded
                                            side by side and compared -- archive
                                            pages counted, never listed)
@@ -252,7 +252,7 @@ tests/
                                            gates are measured as zero requests
                                            rather than asserted as statement
                                            order)
-  test_checkpoint.py         groups A-K   (drives a WRITER: every path is a
+  test_checkpoint.py         groups A-M   (drives a WRITER: every path is a
                                            mkdtemp path, never either of the
                                            script's own default targets)
   test_roadmap.py            groups A-L   (drives the roadmap WRITER: every path
@@ -260,7 +260,7 @@ tests/
                                            target is unreachable by construction;
                                            group K digests the live roadmap and
                                            archive and runs last, always)
-  test_generated_region.py   groups A-F   (in-memory only, writes nothing --
+  test_generated_region.py   groups A-G   (in-memory only, writes nothing --
                                            re-renders every generated region
                                            from the canonical source its own
                                            marker names and demands byte
