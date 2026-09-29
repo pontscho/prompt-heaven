@@ -46,8 +46,8 @@ points.
 
 The load-bearing choice is *where* that divergence is consulted: the hooks and
 attributes are read by module-level semantic helpers, **not** by the handlers
-`Scripts/mcp-purity.py:BaseLspClient`. That is what keeps all 10 canonical
-handlers backend-agnostic, so a third backend would not touch them. The surface
+`Scripts/mcp-purity.py:BaseLspClient`. That is what keeps every canonical
+handler backend-agnostic, so a third backend would not touch them. The surface
 two real servers needed turned out to be small: call-hierarchy support, the
 fallback/prime extension sets, the languageId, hover-to-type conversion, and a
 supplemental-references hook.
@@ -65,7 +65,7 @@ as `initializationOptions` and again as a post-init
 redundancy is deliberate: some luals versions ignore `initializationOptions` when
 the client negotiates the `workspace/configuration` capability, and dropping
 either push fails silently rather than loudly — it stalls startup until the
-90-second timeout. A silent 90s hang is the expensive failure mode, so both
+90-second timeout `Scripts/mcp-purity.py:_ensure_backend`. A silent 90s hang is the expensive failure mode, so both
 pushes stay.
 
 **A reply to `workspace/configuration`.** luals requests per-folder settings
@@ -112,13 +112,14 @@ second subprocess-spawning backend doubles the untrusted-input surface:
   otherwise bypassable by indirection.
 - **Log-injection and resource ceilings**: CR/LF stripped from logged values
   `Scripts/mcp-purity.py:_sanitize_log`, a caller-regex length cap with scan
-  deadlines, and a 64 MB LSP `Content-Length` ceiling checked *before* the read,
+  deadlines, and a 64 MB LSP `Content-Length` ceiling checked *before* the read
+  `Scripts/mcp-purity.py:read_lsp_message`,
   so a buggy or hostile child cannot drive the server out of memory.
 
 Validation is over the wire rather than in-process: the smoke test asserts luals
 dispatch alongside the Phase 0 assertions
 `Scripts/_mcp_smoke_test.py:purity_semantic_checks`. A fleet-level gate has since
-joined it: check 7 drives all fifteen servers with an unknown function name and
+joined it: check 7 drives every server with an unknown function name and
 requires `isError: True`, read as the flag and never as the reply text, plus a
 control that omits `function` entirely to prove a deliberate status reply is not
 flagged `Scripts/_mcp_smoke_test.py:error_envelope_checks`.
@@ -127,24 +128,24 @@ flagged `Scripts/_mcp_smoke_test.py:error_envelope_checks`.
 
 Phase 2 — retiring the standalone `clangd_call` / `cuda_call` tools and migrating
 the `p:mcp-clangd` / `p:mcp-cuda` skills and minion tool-lists — remains
-unstarted. All three standalone servers are still in the tree: this phase's own
+unstarted. The standalone servers are all still in the tree: this phase's own
 counterpart `Scripts/mcp-lua-lsp.py` beside `Scripts/mcp-clangd.py` and
 `Scripts/mcp-cuda.py`, with both skills.
 
 Unretired is not unmaintained, and the fleet has now paid that distinction twice.
-None of the three is registered, so Claude Code never launches them — but they
+None of them is registered, so Claude Code never launches them — but they
 are the template the whole fleet grew from, which is why the read-loop conversion
 covered them rather than skipping them
 [[0008-a-serialized-read-loop-looks-like-a-dead-server]], and why the
 error-envelope contract covers them too. Each carries an `_ErrorText` `str`
 subclass so a handler failure still reaches the caller's `isError` flag after the
 dispatcher has already flattened its reply to text
-`Scripts/mcp-lua-lsp.py:_ErrorText` — the three servers whose `_serialize` is a
-closure every exit has run, so the wrap only ever sees a `str`.
+`Scripts/mcp-lua-lsp.py:_ErrorText` — these are the servers whose `_serialize`
+is a closure every exit has run, so the wrap only ever sees a `str`.
 
-That helper is three byte-identical hand copies, and it stays copies on purpose.
+That helper exists as byte-identical hand copies, and stays copies on purpose.
 It is *declared* as a divergence in `Scripts/MCP_SKELETON.md` rather than homed as
 a generated canonical block: generating it would bless a second error-reporting
 mechanism as infrastructure and buy drift protection **for** the divergence in
-three servers that never launch, instead of removing it. See [[scripts]] for the
+servers that never launch, instead of removing it. See [[scripts]] for the
 fleet-wide shape and the canonical-block machinery it declines to use.

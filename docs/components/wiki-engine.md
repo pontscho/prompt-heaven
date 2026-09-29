@@ -34,7 +34,7 @@ factual claim about code carries an anchor a later lint pass can re-check.
 ## Parts
 
 - **`p:wiki` skill** `ClaudeCode/skills/wiki/SKILL.md` — the engine and
-  mandate. Dispatches five operations (`ingest`, `lint`, `query`, `init`,
+  mandate. Dispatches its operations (`ingest`, `lint`, `query`, `init`,
   `adopt`) and delegates each to the librarian. The wiki contract (page types,
   frontmatter subset, anchors, freshness model, anti-scope) is the `## Schema`
   section of that same `ClaudeCode/skills/wiki/SKILL.md`, inlined so it ships and
@@ -49,8 +49,11 @@ factual claim about code carries an anchor a later lint pass can re-check.
 
 ## `wiki_call` functions
 
-`search`, `source_to_pages`, `get_page`, `list`, `freshness`, `reindex`, and
-`stats`. `source_to_pages` is the reverse lookup from a changed source file to
+`search`, `source_to_pages`, `get_page`, `list`, `freshness`, `reindex`,
+`stats`, `verify` and `measure` `Scripts/mcp-wiki.py:HANDLERS`. `verify` checks
+every page's anchors and measured regions and reports what gates; `measure`
+renders the measured regions from `docs/measurements.json`, and writes only when
+asked to (ADR [[0019-only-gate-on-what-you-can-prove]]). `source_to_pages` is the reverse lookup from a changed source file to
 the pages that document it (used by `ingest`). Search ranking is BM25F:
 per-field weighted pseudo-TF with per-field length normalization, a single
 global saturation, and global IDF, with prefix token matching and tunable
@@ -58,12 +61,12 @@ global saturation, and global IDF, with prefix token matching and tunable
 
 ## One scope, one rule: `path_prefix`
 
-`search`, `list` and `freshness` all narrow to a subtree with `path_prefix` —
-and accept `prefix`, `dir` or `path` as spellings of it, identically on all
-three `Scripts/mcp-wiki.py:PARAM_ALIASES_BY_FUNC`. The value is matched against
+`search`, `list`, `freshness`, `verify` and `measure` all narrow to a subtree
+with `path_prefix` — and accept `prefix`, `dir` or `path` as spellings of it,
+identically on each `Scripts/mcp-wiki.py:PARAM_ALIASES_BY_FUNC`. The value is matched against
 the docs-relative path the answers themselves print, through one shared
 predicate `Scripts/mcp-wiki.py:_path_prefix_matches`, so a scope learned from
-one function selects the same pages on the other two. Four clauses: a whole page
+one function selects the same pages on the others. Four clauses: a whole page
 path matches exactly, which makes a path copied off a search hit a legal scope
 for the one page it names; a prefix ending at a `/` boundary matches everything
 beneath it at any depth, so `adr` and `adr/` behave alike; a prefix ending
@@ -72,7 +75,7 @@ selecting the 0010–0019 records; and a prefix ending inside any **earlier**
 component matches nothing, so `sub` is not a way to spell `subsystems/`.
 
 A prefix that admits no page is refused, never answered with an empty result.
-The three refusals share one body that states the boundary rule and then names
+The refusals share one body that states the boundary rule and then names
 the scopes that do exist, derived from the corpus the walk just yielded rather
 than typed `Scripts/mcp-wiki.py:_corpus_scopes`, and each denies the particular
 false reading its own silence would carry `Scripts/mcp-wiki.py:_no_scope_lines`

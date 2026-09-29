@@ -51,7 +51,7 @@ each command was migrated into a skill under `ClaudeCode/skills/` — see [[skil
 
 ## Entry points for a newcomer
 
-- `README.md` — three-sentence project purpose.
+- `README.md` — the one-line project purpose.
 - `ClaudeCode/CLAUDE.md` — the minion delegation table and coding mandates that
   govern every Claude Code session using this repo.
 - `ClaudeCode/README.md` — the full plan -> task -> implement workflow.

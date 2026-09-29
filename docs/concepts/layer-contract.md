@@ -121,7 +121,7 @@ defect and is not. **`feature-implementation-plan.md` is a slot at the
 `docs/` root rather than under `specs/`, deliberately** — the path `/p:feature-plan`
 writes the current plan to, empty between plans. Its path is pinned by the
 handoff contract itself `ClaudeCode/skills/_lib/handoff-contracts.md`, by the
-default in `ClaudeCode/scripts/task-implementation-plan.py`, and by the four
-skills and three agents of the plan→task→implement chain. A live interface
+default in `ClaudeCode/scripts/task-implementation-plan.py`, and by the skills
+and agents of the plan→task→implement chain. A live interface
 outranks the wiki's own layout rule, so the slot stays put — the audit has been
 run, and the move should not be proposed again.

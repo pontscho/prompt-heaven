@@ -23,7 +23,7 @@ reports, keeping the main context free of build/search/iteration noise — the
 core principle stated in `ClaudeCode/CLAUDE.md`.
 
 That routing is granted in each file's `tools:` list, and `tools:` is the only
-place it can be granted: the four web-facing minions — `minion-web-explorer`,
+place it can be granted: the web-facing minions — `minion-web-explorer`,
 `minion-deep-researcher`, `minion-watson` and
 `minion-inspector-security-officer` — each list
 `mcp__mcp-webfetch__webfetch_call` there and keep the built-in `WebFetch` as an
@@ -49,7 +49,7 @@ refuses an unknown one.
 | `minion-inspector-implementation.md` | Audit a completed implementation against the plan |
 | `minion-inspector-security-officer.md` | OWASP/CWE security review (plan- and code-mode) |
 | `minion-web-explorer.md` | Single-shot external/web lookups |
-| `minion-deep-researcher.md` | Comprehensive web research (10-15 parallel queries) |
+| `minion-deep-researcher.md` | Comprehensive web research (10-15 parallel queries, `ClaudeCode/agents/minion-deep-researcher.md`) |
 | `minion-mason.md` | Per-task build executor (LSP + forge) — the engine behind `p:implement` |
 | `minion-feature-planner.md` | Authoritative feature implementation-plan writer — LSP-verified plan against the live codebase (Vitruvius) |
 | `minion-task-planner.md` | Task-plan writer — emits `requirements.yaml` with function-level tasks + dependency graph (Gantt) |

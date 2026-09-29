@@ -65,9 +65,9 @@ That middle clause is quoted rather than paraphrased, because its wording is
 itself the decision. It names the **property** instead of tallying the suites,
 and it is byte-identical at every site, so the family stays greppable and a
 newly added suite cannot stale it. The tally it replaced said "four", which was
-right only under an unstated reading of which check counts; the suites that
-assert emptiness *absolutely* are five, and the ones that assert only a delta
-are more — both sets open, both in [[tests]].
+right only under an unstated reading of which check counts — a suite asserting
+emptiness *absolutely*, or one asserting only a delta. Both sets are open and
+move whenever a suite is added, which is why [[tests]] declines to count either.
 
 The cost is accepted openly — duplication is the *mechanism*, and the generator
 plus its gate are what keep the copies from diverging.
@@ -333,7 +333,8 @@ by node type, so a module-level statement is analysed on the same terms as a
 `def` body `Scripts/amalgamate.py:free_names`. `_FENCE_LINE_RE` is the first
 *constant* to spend the budget — it reads `re`, and carries that import
 requirement to each of its four hosts. It is not the first block to carry one at
-all: `_result`'s `msg_id: Any` has demanded `typing.Any` of fourteen hosts since
+all: `_result`'s `msg_id: Any` has demanded `typing.Any` of every host the census
+above names for it since
 long before, which is the annotation hole named above. What is new is the route,
 not the requirement — a plain read in an executable statement rather than an
 annotation. The refusal used to fire only incidentally, because every live region
@@ -387,7 +388,7 @@ be satisfied by a merged namespace that got lucky.
 The generator's targets were `Scripts/mcp-*.py` and nothing else until the
 websocket source arrived with a consumer that is not a server.
 `Scripts/amalgamate.py:DECLARED_HOSTS` is the widening, and it is a hand-written
-tuple of one filename for the reason `CANONICAL_NAMES` is: a wider glob would
+tuple of filenames for the reason `CANONICAL_NAMES` is: a wider glob would
 make every script in `Scripts/` a target by merely existing. A declared host
 takes the default run and `--check` exactly as a server does, and
 `tests/test_generated_region.py` mirrors the tuple, asserts the two spellings
@@ -428,33 +429,33 @@ provision is imports-only. `_ErrorText` *could* be one — byte-identical copies
 empty free names — and deliberately is not, because blessing a second mechanism
 as generated infrastructure would buy drift protection for a divergence; see
 [[0010-a-handler-failure-must-reach-iserror]]. `_send` is the third entry and
-fails on a third rule: it is byte-identical in all four LSP servers and squarely
+fails on a third rule: it is byte-identical in every LSP server and squarely
 inside the LSP source's domain — it is `encode_lsp_message`'s only caller — but
 that is exactly what refuses it, since the name it needs is a module-level `def`
 in every host rather than an import, and the co-listing remedy above cannot reach
 an indented region `Scripts/MCP_SKELETON.md`.
 
-`_resolve_aliases` is the fourth entry and the widest of them: a hand copy in all
-ten hosts that define it, which makes it the fleet's widest hand-copied
+`_resolve_aliases` is the fourth entry and the widest of them: a hand copy in
+every host that defines it, which makes it the fleet's widest hand-copied
 non-generated function. It fails on the same rule `_tool_error` does — its free
 names are each host's own alias tables, `PARAM_ALIASES` plus
-`PARAM_ALIASES_BY_FUNC` in three of them, and those are module-level
-*assignments*, while `host_provides` offers only the host's module-level imports
+`PARAM_ALIASES_BY_FUNC` in `mcp-postgres.py`, `mcp-purity.py` and
+`mcp-wiki.py`, and those are module-level *assignments*, while `host_provides` offers only the host's module-level imports
 `Scripts/amalgamate.py:host_provides`. `Scripts/mcp-forge.py` sidesteps the
 tables entirely by taking one as an argument
 `Scripts/mcp-forge.py:_resolve_aliases`, and that is the tell: these are not
-copies that drifted from one original but **ten shapes that never agreed**.
+copies that drifted from one original but **shapes that never agreed**.
 Measured at the last edit to this page: **eight distinct bodies over the ten
 files**, only `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py` and
 `Scripts/mcp-tshark.py` byte-identical, and two of the ten tab-indented — the
 same `mcp-forge.py` / `mcp-webfetch.py` pair `host-indent-from-tokens` pins
-above. The rule all ten now implement — a collision is an error, not a
+above. The rule every host now implements — a collision is an error, not a
 precedence question — is frozen in [[0015-ambiguity-is-the-defect]], and it is
 gated behaviourally rather than structurally, by
-`Scripts/_mcp_smoke_test.py:alias_collision_checks` driving all ten over live
-JSON-RPC.
+`Scripts/_mcp_smoke_test.py:alias_collision_checks` driving every host over
+live JSON-RPC.
 
-Which ten, though, is decided **textually**: that gate pairs its per-server probe
+Which files count as hosts, though, is decided **textually**: that gate pairs its per-server probe
 row against a search of the server's source for the resolver's *definition line*,
 and asserts the two agree. A text search cannot tell a definition from a
 quotation of one, so a server that defines no resolver can be made to look like a
@@ -463,9 +464,9 @@ that had reason to: `Scripts/mcp-git.py` reaches the same collision rule through
 no resolver at all, its aliasing being structural rather than table-driven, and
 explaining that in prose tripped the gate's own consistency row until the name
 was spelled around rather than out `Scripts/mcp-git.py:_passthrough_args`. So the
-ten is a census of a *spelling*, not of a mechanism, and the page-level claim it
-supports is the narrower one: ten files write this function, while the contract
-it implements is met by more — see [[scripts]].
+host list is a census of a *spelling*, not of a mechanism, and the page-level
+claim it supports is the narrower one: a set of files writes this function,
+while the contract it implements is met by more — see [[scripts]].
 
 That count is why the entry earns its space. ADR 0015 and section 7c of
 `Scripts/MCP_SKELETON.md` both record **nine** bodies with only clangd and cuda
@@ -477,11 +478,12 @@ grounds as the region counts above.
 
 ## The gate
 
-`tests/test_generated_region.py` gates the mechanism in six groups: A the live
-tree against the canonical sources, B the marker and hash contract, C the
-negative controls, D hygiene, E what each shared block actually *does*, and F tab
-safety. Exactly one case is informational — the hand-copy census — and every
-other is a gated failure.
+`tests/test_generated_region.py` gates the mechanism in lettered groups: A the
+live tree against the canonical sources, B the marker and hash contract, C the
+negative controls, D hygiene, E what each shared block actually *does*, F tab
+safety, and G the `--census` output this page renders — re-derived, proven
+sorted, and unable to write `tests/test_generated_region.py:group_census`. The
+hand-copy census is informational, and every other case is a gated failure.
 
 The case count is deliberately **not** repeated here. It is declared once, in the
 suite table, and asserted on every run against what the suite actually recorded
@@ -491,7 +493,7 @@ precisely the defect that table exists to prevent.
 Group E is not optional — the suite argues that a drift gate on its own would
 only ever prove that every copy agrees on the same bug `Scripts/_mcp_paging.py`.
 It loads each canonical source as a module and exercises every block that *has*
-behaviour, which is why the two value constants sit outside it by design, and
+behaviour, which is why the value constants sit outside it by design, and
 `_FENCE_LINE_RE` outside it by omission — see Known gaps.
 
 The format contract is spelled out **independently** of the generator rather than
@@ -515,7 +517,3 @@ rename that orphaned every region already written into a server.
   `X += 1` is refused with "defines no top-level `X`"
   `Scripts/amalgamate.py:render`. That is true of the block map and misleading
   about the cause; the refusal cannot yet tell the two apart.
-- **The census cannot see a hand copy that lives inside a class**, because the
-  block loader walks module top level only. At least one server's `_result` and
-  `_error` are exactly that: genuine hand copies, declared in
-  `Scripts/MCP_SKELETON.md`, absent from the census's count of four.

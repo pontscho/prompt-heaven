@@ -31,7 +31,7 @@ links:
 `Scripts/` holds standalone Python 3.9+ scripts: the MCP servers, the canonical
 sources their shared helpers are generated from `Scripts/amalgamate.py`, the
 `requirements.yaml` task utilities, and the search tools. The servers share that
-plumbing by generation rather than import; the five canonical sources, the
+plumbing by generation rather than import; the canonical sources, the
 rules deciding what may be a shared block, and the copies deliberately left in
 place are [[generated-regions]].
 
@@ -87,13 +87,13 @@ other request and read, from the caller's chair, as a connection that died and
 needed a restart. **Every live server now dispatches each request as its own task,
 with the stdin reader on an executor nothing else can take.** Do not copy the
 locking from one server into another: the transport is uniform but the
-concurrency decision is per-server, and four of them deliberately keep their
+concurrency decision is per-server, and some of them deliberately keep their
 handlers as coroutines on one event loop because their id-counter safety depends
 on it. The reasoning, the rejected alternatives, the per-server table and the six
 pre-existing bugs the conversion exposed are in
 [[0008-a-serialized-read-loop-looks-like-a-dead-server]].
 
-The three unregistered servers below were converted too, even though they never
+The unregistered servers below were converted too, even though they never
 launch: they are the template others get copied from, which is how one broken read
 loop became thirteen in the first place.
 
@@ -131,24 +131,24 @@ the gate keeps permanently — is frozen in
 [[0010-a-handler-failure-must-reach-iserror]].
 
 The predicate is tested at the **wrap**, on whatever the handler handed back,
-and across fifteen servers it has only two shapes. Eleven test a top-level
+and across the fleet it has only two shapes. Most servers test a top-level
 `error` key on a structured result — `is_error = "error" in result` in
 `Scripts/mcp-purity.py`, spelled `isinstance(result, dict) and "error" in
-result` where a non-dict can arrive. Three test the **type of the text**,
+result` where a non-dict can arrive. Others test the **type of the text**,
 because their dispatcher has already flattened the dict and cannot be
 restructured: `isinstance(result, _ErrorText)` in `Scripts/mcp-clangd.py`,
 `Scripts/mcp-cuda.py` and `Scripts/mcp-lua-lsp.py`. `mcp-jenkins.py` is the
 same condition with a name on it `Scripts/mcp-jenkins.py:_is_error`. There is
-no fourth shape; the illegal one this contract removed was returning a
+no other shape; the illegal one this contract removed was returning a
 pre-rendered failure **string** the wrap cannot distinguish from a success.
 
 Four things about the predicate are decisions, not details:
 
-- **Raising and returning are two routes to one flag — but only nine servers
-  route them through the predicate.** In the nine that carry `_handle_tool_call`
+- **Raising and returning are two routes to one flag — but only some servers
+  route them through the predicate.** In those that carry `_handle_tool_call`
   the wrap's own `except Exception` assigns the same `{"error": …}` dict a
   handler would have returned `Scripts/mcp-webfetch.py:McpServer`, so both routes
-  meet at the predicate above. The six `_dispatch_tool` servers return
+  meet at the predicate above. The `_dispatch_tool` servers return
   `self._tool_error(...)` straight out of the except block
   `Scripts/mcp-clangd.py:McpServer` — **skipping** the predicate rather than
   failing it. Section 3a of `Scripts/MCP_SKELETON.md` asserted the first shape of
@@ -174,10 +174,11 @@ Four things about the predicate are decisions, not details:
   successes. They were asked, and they answered.
 
 `_ErrorText` is a `str` subclass carrying the verdict a flattened reply would
-otherwise lose `Scripts/mcp-clangd.py:_ErrorText`. It exists as three
-byte-identical hand copies and is **declared** in `Scripts/MCP_SKELETON.md`
+otherwise lose `Scripts/mcp-clangd.py:_ErrorText`. It exists as
+byte-identical hand copies in `mcp-clangd.py`, `mcp-cuda.py` and
+`mcp-lua-lsp.py`, and is **declared** in `Scripts/MCP_SKELETON.md`
 rather than homed as a canonical block, even though it qualifies as one:
-blessing a second mechanism as generated infrastructure — in three servers that
+blessing a second mechanism as generated infrastructure — in servers that
 are never launched — would buy drift protection *for* the divergence instead of
 removing it. Record a divergence as a divergence.
 Everything above is about what the wrap **reports**. What it **records** is a
@@ -202,14 +203,14 @@ place to interpolate a payload [[0011-a-truncated-payload-carries-the-first-cook
 #### The gate, and the layer below it that the gate does not reach
 
 The contract is enforced by check 7 of the smoke harness,
-`Scripts/_mcp_smoke_test.py:error_envelope_checks`, which drives all fifteen
-servers over live JSON-RPC. It has two halves and both are load-bearing: a
+`Scripts/_mcp_smoke_test.py:error_envelope_checks`, which drives every server
+over live JSON-RPC. It has two halves and both are load-bearing: a
 positive probe (`function="__no_such_function__"` must come back `isError:
 True`, asserted on the **flag** and never the text, since several servers answer
 by listing their whole catalogue) and a negative control (omitting `function`
 entirely, which most servers answer with a status reply by design, must stay
 unflagged — without it, a server that flagged *everything* would pass). It
-ignores the `registered` flag on purpose: the three unregistered servers start
+ignores the `registered` flag on purpose: the unregistered servers start
 offline in milliseconds, so they are driven rather than excused.
 
 **Its limit is stated beside it, because an unstated scope is the same defect as
@@ -366,7 +367,7 @@ the exemption must un-prune every ancestor of an exempt path
 un-pruned ancestor's *other* children, surfacing `.claude/agents/**` merely
 because `.claude/tmp` is exempt. `Scripts/mcp-purity.py:_ignore_inherited` narrows
 it back by asking whether any ancestor is itself ignored, restoring what pruning
-used to deliver implicitly. All six call sites answer through one predicate
+used to deliver implicitly. Every call site answers through one predicate
 `Scripts/mcp-purity.py:_ignore_skips`.
 
 **Measured — and it is why the exemption looks like a no-op in this repo.** The
@@ -528,21 +529,21 @@ would miss `get_page`'s row and be rejected on a call whose every half was right
 
 The same word came back a second time from the *filter* side, and settled the
 scope question by construction instead of by argument. `search` and `list` were
-refusing `path` while filtering on `relpath.startswith(prefix)`
+refusing `path` while already filtering on the docs-relative path
 `Scripts/mcp-wiki.py:_fn_search`, so a whole docs-relative path was a legal
 *value* of path_prefix there too — it selects the single page it names — and the
 trainer is the same one: a hit line prints a path, and no answer the server
-renders ever utters path_prefix. `path` therefore reaches **three** canonical
-names across **five** rows (`slug`, `source`, and path_prefix three times over
-— `search`, `list` and now `freshness`), which is the global row's
+renders ever utters path_prefix. `path` therefore reaches **several** canonical
+names — `slug`, `source`, and path_prefix on every function that takes a scope
+`Scripts/mcp-wiki.py:PARAM_ALIASES_BY_FUNC` — which is the global row's
 epitaph: one table cannot spell one word two ways, so the row that was declined
 on diagnostics grounds would by now be declined on arithmetic. The case pins each
 spelling against the UNFILTERED answer rather than only against path_prefix's —
 two spellings that agree prove the alias *resolved*, and only a narrower answer
 proves it reached the filter. All of it is pinned by `wiki_recall` group N
 `tests/test_wiki_recall.py`. (The case count is deliberately not repeated here:
-the figure that stood in this sentence said 115, the declared count is 116, and
-it was labelling a GROUP with a SUITE total either way.)
+the figure that stood in this sentence said 115 against a declared 116 when
+`d56d138` removed it, and it was labelling a GROUP with a SUITE total either way.)
 
 ### A scope that selects nothing is a refusal, not an empty report
 
@@ -571,10 +572,18 @@ filtered set alone.
 The derivation chain that decided the placement, the five alternatives rejected
 on the way — filtering the rendered rows, recomputing the totals in the
 renderer, overloading `root` as the scope, leaving the filtering to the caller,
-and a second `freshness_subtree` function — and the gap left **declared rather
-than fixed**, that `str.startswith` is not a path boundary and correcting one of
-the three filters alone would make them disagree about what a prefix means, are
-frozen in [[0018-the-totals-must-describe-the-scope]].
+and a second `freshness_subtree` function — and the gap that decision left
+**declared rather than fixed**, that `str.startswith` is not a path boundary and
+correcting one filter alone would make the filters disagree about what a prefix
+means, are frozen in [[0018-the-totals-must-describe-the-scope]].
+
+That gap has since been closed for every scoped function at once: `35f4a89` gave
+them one shared predicate,
+`Scripts/mcp-wiki.py:_path_prefix_matches`. A whole page path matches exactly, a
+prefix ending at a `/` boundary matches everything beneath it, a prefix ending
+inside the final component still matches (so `adr/001` selects the 0010-0019
+records), and a prefix ending inside an earlier component matches nothing —
+`sub` is not a way to spell `subsystems/`.
 
 `status` resolves to `stats` `Scripts/mcp-wiki.py:FUNCTION_ALIASES` on the usual
 grounds: it is the spelling a caller reaches for, and as a FUNCTION name it can

@@ -637,7 +637,7 @@ Current: DDG works intermittently. Engine raises `SearxEngineCaptchaException` w
 
 ### 7.1 Script: `Scripts/search_duckduckgo.py`
 
-Three backends with auto-fallback:
+The backends, with auto-fallback:
 
 ```
 ┌─────────────────┐

@@ -54,9 +54,9 @@ fleet size from human hands — `tests/run.py` computes it from
 `Scripts/_mcp_smoke_test.py`'s own table, because a hand-maintained copy was
 wrong within a day of being written.
 
-`None` is **not** the default for a per-server suite, though, and three rows say
-so where somebody would go looking: `read_loop`, `wire_log` and `handler_crash`
-each emit a fixed multiple of the fleet size and each **types** its count anyway
+`None` is **not** the default for a per-server suite, though, and the per-server
+rows say so where somebody would go looking: `read_loop`, `wire_log`,
+`handler_crash` and `protocol_version` each emit a fixed multiple of the fleet size and each **types** its count anyway
 `tests/run.py`. The reason is written beside every one of them, and it is the
 exact inverse of `mcp_footprint`'s: there a moved count would fire on a
 legitimately added server, so pinning it would buy a false failure; here *a
@@ -68,8 +68,8 @@ off the shape.
 Note what this gate does **not** cover: it compares the `SUITES` table against
 the run, and nothing else. A case count repeated in a module docstring is
 outside it — which is why the convention is to never write one there, and why a
-docstring that still claims 94 cases for a suite that declares 119 can survive a
-fully green run (`tests/test_inspect_validate.py`).
+docstring in `tests/test_inspect_validate.py` claiming 94 cases for a suite then
+declaring 119 survived fully green runs until `57c1bda` removed it.
 
 ## Idea 2 — severity is argued, not assumed
 
@@ -113,7 +113,8 @@ printed data rather than a fresh audit (`tests/test_spawn_stdin.py`).
 ## The suppressor — and the one that was removed
 
 A **suppressor** is a documented contextual condition that demotes a candidate
-FAIL to an INFO-with-evidence row. Three are live in `tests/test_name_existence.py`:
+FAIL to an INFO-with-evidence row. The live ones are documented in
+`tests/test_name_existence.py`:
 a tool whose server is not registered cannot be granted, so naming it is a
 retirement note; an illustrative context on the mention line (`e.g.`, `for
 example`, `such as`, `etc.`); and a negative or delegating context — a
@@ -148,11 +149,11 @@ is the actual one.** Pass/fail accounting is driven by `problems` alone, so an
 INFO case that trips a hard invariant — non-zero exit, dirty stderr — still
 counts as a failure while keeping its informational label.
 
-There is also an undeclared fourth status. `SKIP` is not a harness constant; two
-suites define it locally as a plain string, and because a `SKIP` row carries no
+There is also an undeclared fourth status. `SKIP` is not a harness constant;
+`name_existence` and `mcp_footprint` define it locally as a plain string, and because a `SKIP` row carries no
 problems and is not `INFO`, the group tally counts it as a **PASS**. `purity_lsp`
 does the opposite, recording its skips as `INFO` so a host without clangd or
-lua-language-server stays green without inflating the pass count. Two suites, two
+lua-language-server stays green without inflating the pass count. Two
 incompatible conventions — worth knowing before reading a tally.
 
 Rendering has two modes so neither ported driver lost its output shape: streamed
@@ -216,7 +217,7 @@ is the registry, and the run is the only thing that knows the totals.
 | `mcp_first_guard` | the deny-guard hook: DENY iff the permission decision says so |
 | `sbx_gate` | the grant-only gate — the guard suite's inverted mirror, where empty stdout is the safe outcome |
 | `purity_lsp` | that `purity_call` really absorbed the retired clangd/luals servers, driven against live language servers |
-| `purity_file_ops` | the gitignore-aware file handlers: the `.claude/tmp` exemption **and** its narrowness, now across `find_file` too (off by default, `skip_ignored_files` / its inverse `no_ignore` to turn it on, `.git` never listed); `read_file`'s paging — `limit` as a line count from the resolved start, a resume hint that round-trips from a negative offset, a fractional float refused rather than truncated, and an offset past EOF answered with the past-the-end note instead of an inverted range, the same note `list_dir` and `find_file` now give past their last row; a missing directory — or a missing `search_for_pattern` root, whose file roots stay legal — reaching the caller as an error rather than as an empty reply; and a walk rooted at or inside `.git` refused in all three walkers, with `.github` / `x.git` and `read_file .git/HEAD` as the controls; a `search_for_pattern` root **outside** the project root — which the server admitted and then read nothing of — now searched as a file, a directory and one element of a list, with a symlink escaping *that* root still dropped (paired with the control rooted one level up, where the same link is read) and the escape refused under `--strict` by a second, strict server child `tests/test_purity_file_ops.py:group_k`; and search's two globs taken as a string or a list of strings, a non-string, empty or brace element refused by name, and a non-string `find_file` mask or `list_dir` filter refused the same way instead of surfacing as a raw `TypeError` `tests/test_purity_file_ops.py:group_g` — [[0017-a-silent-zero-is-the-defect]]; `regex:false` as a real literal search, `max_results` / `max` as `head_limit` and `paths_include` / `paths_exclude` as the glob filters, each refused beside its canonical spelling `tests/test_purity_file_ops.py:group_d`; and `only_matching` — one row per match, paged by match rows, refused beside `count` / `files_with_matches` or context lines `tests/test_purity_file_ops.py:group_n` |
+| `purity_file_ops` | the gitignore-aware file handlers: the `.claude/tmp` exemption **and** its narrowness, now across `find_file` too (off by default, `skip_ignored_files` / its inverse `no_ignore` to turn it on, `.git` never listed); `read_file`'s paging — `limit` as a line count from the resolved start, a resume hint that round-trips from a negative offset, a fractional float refused rather than truncated, and an offset past EOF answered with the past-the-end note instead of an inverted range, the same note `list_dir` and `find_file` now give past their last row; a missing directory — or a missing `search_for_pattern` root, whose file roots stay legal — reaching the caller as an error rather than as an empty reply; and a walk rooted at or inside `.git` refused in `list_dir`, `find_file` and `search_for_pattern`, with `.github` / `x.git` and `read_file .git/HEAD` as the controls; a `search_for_pattern` root **outside** the project root — which the server admitted and then read nothing of — now searched as a file, a directory and one element of a list, with a symlink escaping *that* root still dropped (paired with the control rooted one level up, where the same link is read) and the escape refused under `--strict` by a second, strict server child `tests/test_purity_file_ops.py:group_k`; and search's two globs taken as a string or a list of strings, a non-string, empty or brace element refused by name, and a non-string `find_file` mask or `list_dir` filter refused the same way instead of surfacing as a raw `TypeError` `tests/test_purity_file_ops.py:group_g` — [[0017-a-silent-zero-is-the-defect]]; `regex:false` as a real literal search, `max_results` / `max` as `head_limit` and `paths_include` / `paths_exclude` as the glob filters, each refused beside its canonical spelling `tests/test_purity_file_ops.py:group_d`; and `only_matching` — one row per match, paged by match rows, refused beside `count` / `files_with_matches` or context lines `tests/test_purity_file_ops.py:group_n` |
 | `mcp_git_params` | named params → `git` argv, fully offline with `subprocess` stubbed |
 | `name_existence` | prompt corpus + server text ↔ live MCP inventory, plus agent grants vs their own prescriptions |
 | `spawn_stdin` | every spawn site under `Scripts/` passes an explicit `stdin=` — AST-based, one case per site |
@@ -224,18 +225,18 @@ is the registry, and the run is the only thing that knows the totals.
 | `wiki_recall` | the wiki search relevance gate on a synthetic corpus — silence, calibration, type signal, aliases |
 | `wiki_index` | the server's INDEX renderer and orphan rule, the page-type vocabulary and helpers the server vendors from `_wikilib.py` compared side by side with it, and the `freshness.py` / `reindex.py` wrappers over the server: the six page-type constants equal between the copies and homed once on the skill side, a `roadmap-item` page counted in one line and never listed, the orphan exemption for archive pages but not for an unlinked `roadmap` page, both roadmap types freshness-untracked only while they carry no `sources:`, the `freshness.py` exit code equal to the server's `gating:` number (a dead body anchor gates, git lag never does), `reindex.py` failing on a duplicate slug through the server's answer, `reindex.py:render_index` kept only as a delegate, and exit 2 with no server, each oracle with a negative control that proves it can fire — [[0022-a-someday-maybe-is-a-roadmap-item]], [[0019-only-gate-on-what-you-can-prove]] |
 | `wiki_addendum` | `addendum.py`, the one legal write to an accepted ADR, driven as a child against a `mkdtemp` wiki root: the appended bytes exact and every old byte kept, the file mode kept and the inode fresh (temp file + `os.replace`); only an `active` `type: adr` page under the git top-level's `docs/` is written — a draft, another type, a missing page, and a path or symlink out of the root are refused; the staged item is exactly `title` + `body`, and a body line that is a level 1-2 heading (ATX or setext) is refused while `###` passes; the same heading is never appended twice; every refusal is exit 2, one stderr line, the page byte-identical `ClaudeCode/skills/wiki/scripts/addendum.py` |
-| `jira_cli` | the Jira CLI fully offline with the transport injected: auth mode, context-path URL join, lazy deployment probe, **four** pagers — the Cloud token model and the DC offset model behind one iterator, the agile `isLast`/`startAt` envelope that serves boards, sprints and create metadata, and `list_projects`, which is that same envelope hand-rolled a second time and was never counted with its three siblings, walked past page one with the caller's query re-sent every time and **bounded**, because a server that ignores `startAt` defeats all three stop conditions at once and the unbounded walk was measured at 5.58 GB before it was killed — `JIRA_READ_ONLY`, `--dry-run`, the error mappings and the byte-pinned multipart body |
-| `bitbucket_cli` | the Bitbucket Server/DC CLI fully offline with the transport injected: the context-path URL join, the two refusals at the door — an `http://` scheme that would hand the bearer PAT to the network in cleartext, and a userinfo base URL whose refusal is asserted **not** to reproduce the secret — the same-origin redirect handler gated component by component, `BITBUCKET_READ_ONLY` at **both** layers with `WRITE_COMMANDS` compared against the set *measured* by driving every handler through a verb-recording transport rather than against a second typed list, the four merge refusals each measured as **zero requests** rather than asserted as statement order, `pr-builds`' exit code pinned in Markdown **and** `--json` in one case, and byte parity with `jira.py`'s `_profile_path` — a copy that is deliberate and is gated on identity so the eventual unification stays mechanical, which is exactly what it bought: the copy was taken carrying a `$HOME` boundary that bound on neither side, and the identity gate is what forced the repair through **both** files in one change rather than one, with the boundary itself then *driven* through a real symlinked `$HOME` because identical text is not the same claim as identical behaviour |
+| `jira_cli` | the Jira CLI fully offline with the transport injected: auth mode, context-path URL join, lazy deployment probe, **every** pager — the Cloud token model and the DC offset model behind one iterator, the agile `isLast`/`startAt` envelope that serves boards, sprints and create metadata, and `list_projects`, which is that same envelope hand-rolled a second time and was never counted with its siblings, walked past page one with the caller's query re-sent every time and **bounded**, because a server that ignores `startAt` defeats all three stop conditions at once and the unbounded walk was measured at 5.58 GB before it was killed — `JIRA_READ_ONLY`, `--dry-run`, the error mappings and the byte-pinned multipart body |
+| `bitbucket_cli` | the Bitbucket Server/DC CLI fully offline with the transport injected: the context-path URL join, the refusals at the door — an `http://` scheme that would hand the bearer PAT to the network in cleartext, and a userinfo base URL whose refusal is asserted **not** to reproduce the secret — the same-origin redirect handler gated component by component, `BITBUCKET_READ_ONLY` at **both** layers with `WRITE_COMMANDS` compared against the set *measured* by driving every handler through a verb-recording transport rather than against a second typed list, the merge refusals each measured as **zero requests** rather than asserted as statement order, `pr-builds`' exit code pinned in Markdown **and** `--json` in one case, and byte parity with `jira.py`'s `_profile_path` — a copy that is deliberate and is gated on identity so the eventual unification stays mechanical, which is exactly what it bought: the copy was taken carrying a `$HOME` boundary that bound on neither side, and the identity gate is what forced the repair through **both** files in one change rather than one, with the boundary itself then *driven* through a real symlinked `$HOME` because identical text is not the same claim as identical behaviour |
 | `checkpoint` | `checkpoint.py` as a **writer**: `Start`/`End` land on the block and nothing else, the numbers describe the file *after* the region was inserted, `prepend` lands the block and the table it describes in one `os.replace`, a stale or duplicate-id segment is refused on content, and every refusal exits 2 leaving the file alone — [[0009-the-first-reader-is-a-cold-model]]. It also pins the **shape** of a new segment: every session must be followed at once by its own `## ACTIVATION S<NNN>` block, in fresh and `--overwrite` mode too, and the order in which the refusals fire is fixed `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:check_segment_shape`. A `### ACTIVATION` quoted inside a fenced code block does not count as the old in-block form. A group of its own `tests/test_checkpoint.py:group_l` covers the activation block's `A<NNN>` row read back through `session`, `activate`'s de-quoting, `nexts`' order with nothing printed on a refusal, and the read-only fallback to the old subsection. An empty prompt is refused on write and on read alike, and a file that is not UTF-8 is refused through the exit-2 route rather than crashing `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:read_lines` |
 | `roadmap` | `roadmap.py` as the single writer of the roadmap and its archive, run only inside a `mkdtemp` sandbox — the live roadmap is unreachable by construction, with the guards proven to bite before the script existed: round trip against a hand-written expected file, both wiki frontmatter parsers reading what it writes, the invariants and the WIP cap, the dependency graph and `ready`, the optimistic lock with its controls, `close`'s archive-first order and the archive-wins repair of a crash between its two writes, a golden export reproduced byte for byte, the section-7 refusals as one stderr line with the files byte-unchanged, and the CLI under an ASCII locale, a reader that closes early and an IO error on stdout; the security rules (stdlib only, one git spawn site with read-only subcommands, no shell, exact write-route callers) are gated on the source by AST — [[0022-a-someday-maybe-is-a-roadmap-item]] |
 | `generated_region` | every live generated region still matches its canonical source, and the source named on a region's `BEGIN` line is the one its names resolve against — plus a behavioural group so a shared helper is unit-tested once rather than only drift-checked — [[generated-regions]] |
 | `mcp_websocket` | the stdlib WebSocket client in `Scripts/_mcp_websocket.py` against an oracle written from RFC 6455 rather than from the module — the upgrade request with no `Origin`, the response checked by **exact** status line, `Upgrade`, `Connection` token and accept key (the RFC's own worked example pinned), every frame length form, the mask against a per-byte oracle, every refusal a frame header earns, fragments assembled around a ping, ping answered with its own payload, close echoed, the size caps and strict UTF-8 — then both hosts' generated copies, `mcp-gdc`'s `CdpSession` and the search script's `CDPSearcher`, driven against a loopback CDP peer; that host group was run red against the hand-written client first — [[0023-the-websocket-client-is-a-sixth-domain]] |
 | `read_loop` | every server's read loop carries the shape [[0008-a-serialized-read-loop-looks-like-a-dead-server]] decided: a single-thread reader executor no handler can take, and one task per message — with the pool/coroutine split declared per server rather than inferred |
 | `wire_log` | wire logging is structure only at both sites — protocol metadata and argument *keys*, never a payload body or value (F12/CWE-532) — with the shape each site may log declared per server, and `Scripts/MCP_SKELETON.md`'s own sample lifted by script and run through the same analyser — [[0011-a-truncated-payload-carries-the-first-cookie]] |
-| `handler_crash` | every tool-handler catch-all leaves a traceback at a level the default WARNING configuration emits, at **both** site layers — the `McpServer` wrap, which all fifteen have, and the module-level dispatcher, which nine do — each declared per server, plus one security clause: the format string must be a literal, so a payload cannot be interpolated into the one log that IS written |
+| `handler_crash` | every tool-handler catch-all leaves a traceback at a level the default WARNING configuration emits, at **both** site layers — the `McpServer` wrap, which every server has, and the module-level dispatcher, in the servers that carry one — each declared per server, plus one security clause: the format string must be a literal, so a payload cannot be interpolated into the one log that IS written |
 | `table_cells` | every table renderer either escapes its own delimiter and documents the scheme where the model reads it, or is whitespace-delimited and has none to escape — one declared row per renderer carrying the class and the reason, the real escapers imported and round-tripped rather than restated, and reversibility as a **separate** clause because an encoder that does not escape its own escape character still passes a column count — [[0016-a-cell-may-not-forge-a-boundary]] |
 | `protocol_version` | every server declares the handshake protocol version **once**, as the first member of `class McpServer`, and the `initialize` reply *reads* that member instead of restating the literal — the shape the live smoke handshake structurally cannot see, since a server inlining the **right** string is indistinguishable on the wire from one reading the constant, with the fleet's agreement asserted *between* the files so the suite never holds a copy of the number it polices |
-| `forge_dispatch` | `forge_call`'s own dispatcher, in-process: `status` answers exactly what the empty call answers on **all four** of its paths — missing config, parse error, validation errors, the ordinary reply — each with a control proving the fixture took that path, and the alias is named wherever the function list is — asserted as a parsed list item or exact spelling, because every one of those texts already said "status" before the alias existed |
+| `forge_dispatch` | `forge_call`'s own dispatcher, in-process: `status` answers exactly what the empty call answers on **every one** of its paths — missing config, parse error, validation errors, the ordinary reply — each with a control proving the fixture took that path, and the alias is named wherever the function list is — asserted as a parsed list item or exact spelling, because every one of those texts already said "status" before the alias existed |
 | `py_deps` | the fleet is pure Python 3.9 + stdlib: every import under `Scripts/`, `ClaudeCode/` and `tests/` whose top-level name is neither embedded 3.9 stdlib nor a repo module must be allowlisted and preceded by a literal `find_spec` guard, never `except ImportError`; no stdlib module removed since 3.9; every file parses with `feature_version=(3, 9)` — **syntax only**, 3.10+ API use is a declared blind spot; `mcp-webfetch.py` a per-name declared exception; and the stdlib Bing parser pinned to lxml's recorded fields on `tests/files/html/` — [[0024-pure-python-39-and-the-stdlib]] |
 | `smoke` | JSON-RPC plumbing invariants across every server file, including the error-envelope contract ([[scripts]]) |
 
@@ -277,7 +278,8 @@ are what would say so.
 fixtures, not code: nothing there is compiled, linked, shipped or imported.
 
 The `tf` prefix on every symbol is an **invariant, not a style choice** — a
-repo-wide search for a real symbol must never match this directory. Two files are
+repo-wide search for a real symbol must never match this directory.
+`tests/files/c/tf_broken.c` and `tests/files/lua/tf_broken.lua` are
 **deliberately broken** and carry a header telling you so: *"Do not fix this
 file. A test asserts that clangd reports a problem here; repairing it would
 silently disable that assertion."* Their defects are asserted at their planted
@@ -292,7 +294,7 @@ strictly.
 
 - **Never write a case count into a module docstring.** It is written once, in
   `tests/run.py`, where it is checked against the run. A second copy is a number
-  nobody verifies — and three modules already violate this.
+  nobody verifies.
 - **Every scanner suite must carry a negative control.** *"A checker that
   silently matches nothing is indistinguishable from a clean tree."*
   `tests/test_spawn_stdin.py`
@@ -309,12 +311,12 @@ strictly.
   matter who wrote it; `tests/test_purity_lsp.py:_pyc_problems` is that check
   with its reasoning attached, and it reports pre-existing files separately from
   newly written ones because the fix differs — delete the litter versus stop
-  producing it. Two delta sites carry a note saying which kind they are and
-  where the absolute form lives `tests/test_mcp_footprint.py`
-  `tests/test_spawn_stdin.py`. A third shape exists in exactly one place:
+  producing it. The delta sites in `tests/test_mcp_footprint.py` and
+  `tests/test_spawn_stdin.py` carry a note saying which kind they are and where
+  the absolute form lives. A third shape exists in exactly one place:
   `name_existence` pairs its delta FAIL with an INFO row listing stale `.pyc`
-  for the three modules it imports — unattributable to this run, but it must
-  stay visible `tests/test_name_existence.py`.
+  for the modules it imports `tests/test_name_existence.py:IMPORTED_MODULES` —
+  unattributable to this run, but it must stay visible.
 - **Neither bytecode set gets a count written down here.** Both move whenever a
   suite is added, and the number this page used to carry was not a measurement
   but one stale ancestor copied three ways — the same wrong "two" sat in
@@ -324,7 +326,7 @@ strictly.
   `tests/README.md` names one example of each kind with no count at all. This
   is also why `py_compile` must never be reintroduced `project-forge.yaml`.
 - **Two sandbox conventions coexist and are not interchangeable.** Some suites
-  use a system temp workspace; three use a per-run `.claude/tmp/<suite>/`
+  use a system temp workspace; others use a per-run `.claude/tmp/<suite>/`
   directory whose escape is structurally gated — a single write path and a single
   child launcher record every target, and the group fails if any recorded path
   leaves the sandbox.

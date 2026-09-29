@@ -119,8 +119,8 @@ reviewers cleared the work — not that its author believes it is done.
 
 None of the keys `/p:implement` writes *after* the gate appear in the validator's
 top-level allowlist `Scripts/task-validator.py:TOP_LEVEL_KEYS`, and an unrecognised
-top-level key draws an "unknown top-level key (typo?)" warning. Measured against the
-file at this commit: of its 21 top-level keys, 8 are in the allowlist and **13 are
+top-level key draws an "unknown top-level key (typo?)" warning. Measured on
+2026-09-29 against the file at `771e142`: of its 21 top-level keys, 8 are in the allowlist and **13 are
 not** — every implementation-record and documentation-record field, plus the
 two-key `archived:` / `archived_note:` marker the file grew once its graph was
 finished `requirements.yaml`. Re-running the validator on a post-implementation
@@ -143,9 +143,9 @@ claim [[0002-index-claims-no-freshness]] exists to prevent. It has since been cl
 
 ## Where the file is: one name, three resolutions
 
-The path is the one part of this contract that nothing enforces. Three `task-*.py`
-helpers read the same file name and none of them agrees with the others on how to
-find it: `task-show-details.py` walks up from the working directory, bounded by a
+The path is the one part of this contract that nothing enforces. The `task-*.py`
+helpers below read the same file name and none of them agrees with the others on
+how to find it: `task-show-details.py` walks up from the working directory, bounded by a
 hop count rather than by an owner — five levels, so where it stops is a function of
 how deep the working directory happens to be `Scripts/task-show-details.py:main`;
 `task-plan.py` takes the path as a positional argument and falls back to the working
@@ -177,7 +177,8 @@ The cost is measured rather than hypothetical: this path has held three task gra
 and consumed two of them. The Phase 0 clangd/cuda graph was replaced wholesale by
 the luals Phase 1 graph (`75d3d26`, 937 lines in and 1131 out), and that Phase 1
 graph — itself complete and inspector-verified — was replaced by the sandbox-run
-graph (`1446acb`, 1071 in and 953 out), which is what the file carries today. Each
+graph (`1446acb`, 1071 in and 953 out), which is what the file still carries at
+`771e142`. Each
 displaced graph survives only inside the commit that deleted it.
 
 That is the plainest argument for this wiki that the repo makes on its own. Both
@@ -188,7 +189,9 @@ into a page before the slot was reused. Whatever stayed only in the slot is gone
 ## `roadmap_item`: which roadmap item owns the slot
 
 The roadmap ([[0022-a-someday-maybe-is-a-roadmap-item]]) holds many items and
-allows up to three in `now`; this file holds one plan. Until the optional top-level
+caps how many may sit in `now` (its `wip_now`, which starts at
+`ClaudeCode/skills/roadmap/scripts/roadmap.py:WIP_DEFAULT`); this file holds one
+plan. Until the optional top-level
 `roadmap_item: R-NNNN` existed nothing connected the two, so the roadmap state
 `planned` had invariants but no meaning, and a planning run could silently
 overwrite the one plan a live item depended on. The field is the only link and it
