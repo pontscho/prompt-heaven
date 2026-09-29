@@ -45,6 +45,7 @@ Config precedence: environment variables first, CLI flags override when given.
 import argparse
 import asyncio
 import base64
+import contextvars
 import getpass
 import hashlib
 import hmac
@@ -90,6 +91,7 @@ def _configure_logging(debug, log_file):
 
 PROTOCOL_VERSION_3 = 196608           # 3.0
 SSL_REQUEST_CODE = 80877103           # magic for SSLRequest
+CANCEL_REQUEST_CODE = 80877102        # magic for CancelRequest (R-0043)
 
 # ---------------------------------------------------------------------------
 # Host parsing — scheme prefix carries the SSL hint
@@ -214,6 +216,15 @@ class PgConnection:
         self.tx_status = b"I"
         self.server_params: Dict[str, str] = {}
         self._broken = False
+        # R-0043: BackendKeyData, captured at startup -- what a CancelRequest
+        # quotes to name THIS backend. None until the server has sent it.
+        self.backend_pid: Optional[int] = None
+        self.backend_secret: Optional[int] = None
+        # Orders a CancelRequest against the end of the exchange it targets;
+        # see exchange() and send_cancel_request(). Short-held, except while a
+        # cancel is on the wire -- which is the point.
+        self._cancel_lock = threading.Lock()
+        self._exchange_owner: Optional["_Reclaim"] = None
 
     # -- config snapshot (no password) --------------------------------------
 
@@ -401,7 +412,11 @@ class PgConnection:
                 raise PgError(self._parse_error_fields(payload))
             elif mtype == b"S":             # ParameterStatus
                 self._record_parameter(payload)
-            elif mtype in (b"K", b"N"):     # BackendKeyData / NoticeResponse
+            elif mtype == b"K":             # BackendKeyData: what a cancel quotes
+                if len(payload) >= 8:
+                    self.backend_pid, self.backend_secret = struct.unpack(
+                        "!ii", payload[:8])
+            elif mtype == b"N":             # NoticeResponse
                 continue
             # anything else: ignore until ReadyForQuery
 
@@ -545,6 +560,98 @@ class PgConnection:
             offset = end + 1
         return fields
 
+    # -- cancellation (R-0043, the `pg-cancel` reclaim class) ---------------
+    #
+    # A cancelled MCP request used to leave its statement running on the
+    # backend and the worker thread parked in recv until it finished. Now the
+    # request's CancelledError arm (McpServer._serve) has a CancelRequest sent
+    # on a SECOND socket, and the backend answers the running statement with
+    # ErrorResponse 57014 + ReadyForQuery ON THE MAIN ONE.
+    #
+    # The worker thread keeps the exchange throughout: it is the one blocked in
+    # _read_query_results, it reads that error through ReadyForQuery exactly as
+    # it reads any failing statement, and only then does _run release the
+    # per-connection lock. Nothing but the worker ever reads this socket, so
+    # the drain cannot be skipped and the wire cannot desync (ADR 0008's
+    # neutered-lock control shows what a desync costs here).
+    #
+    # _cancel_lock closes the one real hazard, a LATE cancel. A CancelRequest
+    # names a backend, not a statement: sent after this exchange ended it would
+    # cancel whatever the backend runs NEXT -- another request's statement. So
+    # the cancel is sent only while _exchange_owner is still the cancelled
+    # request, under the lock, and exchange() cannot hand the connection back
+    # until it has taken the same lock -- i.e. until the postmaster has closed
+    # the cancel socket, which it does after signalling the backend. A signal
+    # that reaches an IDLE backend is discarded by PostgreSQL itself (it is
+    # reading a command), so the exchange ending first is harmless too.
+
+    def exchange(self, fn: Callable[["PgConnection"], Any],
+                 owner: Optional["_Reclaim"]) -> Any:
+        """Run one request/response exchange as ``owner``'s, cancellable.
+
+        The caller holds the per-connection lock. ``owner`` is the request's
+        _Reclaim, or None outside a request (nothing can cancel it then).
+        """
+        with self._cancel_lock:
+            if owner is not None and not owner.adopt(self):
+                # Cancelled before the first frame went out: send nothing.
+                raise RequestCancelled(self.target())
+            self._exchange_owner = owner
+        try:
+            return fn(self)
+        finally:
+            # Blocks while a CancelRequest for THIS exchange is on the wire,
+            # so the connection cannot move on to another statement first.
+            with self._cancel_lock:
+                self._exchange_owner = None
+
+    def send_cancel_request(self, owner: "_Reclaim") -> bool:
+        """Send a CancelRequest for ``owner``'s exchange, if it is still running.
+
+        Runs on a helper thread (it dials, so it may block for the connect
+        timeout), never on the event loop. The request goes out on a NEW
+        socket, negotiated exactly as connect() negotiates the main one --
+        SSLRequest first unless sslmode=disable, TLS when the server says `S`
+        -- and before any StartupMessage: a CancelRequest is the whole
+        conversation. The server never answers it; the socket is read to EOF,
+        which is the postmaster closing it after it has signalled the backend.
+
+        Best effort: any failure is logged and the statement simply runs on,
+        which is exactly the reply-only behaviour this replaces.
+        """
+        with self._cancel_lock:
+            if owner is None or self._exchange_owner is not owner:
+                return False    # finished, or never started: see the note above
+            if self.backend_pid is None or self.backend_secret is None:
+                return False    # the server sent no BackendKeyData
+            probe = PgConnection(self.host, self.port, self.user, self.password,
+                                 self.dbname, self.sslmode, self.timeout)
+            try:
+                probe.sock = socket.create_connection((self.host, self.port),
+                                                      timeout=self.timeout)
+                probe.sock.settimeout(self.timeout)
+                if self.sslmode != "disable":
+                    probe._negotiate_ssl()
+                probe._send_raw(struct.pack("!iiii", 16, CANCEL_REQUEST_CODE,
+                                            self.backend_pid, self.backend_secret))
+                try:
+                    while probe.sock.recv(1):
+                        pass
+                except OSError:
+                    pass        # a reset or a TLS close without close_notify
+                log.debug("CancelRequest sent for backend %s", self.backend_pid)
+                return True
+            except (OSError, ConnectionError, PgError) as exc:
+                log.warning("CancelRequest to %s:%s failed: %s",
+                            self.host, self.port, exc)
+                return False
+            finally:
+                if probe.sock is not None:
+                    try:
+                        probe.sock.close()
+                    except OSError:
+                        pass
+
     # -- shutdown -----------------------------------------------------------
 
     def close(self) -> None:
@@ -559,6 +666,59 @@ class PgConnection:
                 pass
         self.sock = None
         self._broken = True
+
+
+# ---------------------------------------------------------------------------
+# Request-scoped exchanges (R-0043: a cancel reaches the backend)
+# ---------------------------------------------------------------------------
+
+class _Reclaim:
+    """One request's connections, so cancelling the request cancels its SQL.
+
+    McpServer._serve makes one per request and publishes it through
+    _REQUEST_RECLAIM into the context the worker thread runs in.
+    PgConnection.exchange ADOPTS the connection it runs on; _serve's
+    CancelledError arm calls cancel() on the LOOP thread while the worker is
+    still blocked in recv. cancel() never blocks: each CancelRequest is dialled
+    from a short-lived daemon thread, and the worker thread -- not this --
+    drains the backend's answer.
+
+    The lock orders adopt() against cancel(): an exchange that would start
+    after the cancel is refused before its first frame, so a cancelled
+    request's statement is never sent.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._conns: List[PgConnection] = []
+        self.cancelled = False
+
+    def adopt(self, conn: PgConnection) -> bool:
+        """Record ``conn``; False if the request is already cancelled."""
+        with self._lock:
+            if self.cancelled:
+                return False
+            if conn not in self._conns:
+                self._conns.append(conn)
+            return True
+
+    def cancel(self) -> None:
+        with self._lock:
+            self.cancelled = True
+            conns = list(self._conns)
+        for conn in conns:
+            threading.Thread(target=conn.send_cancel_request, args=(self,),
+                             name="pg-cancel", daemon=True).start()
+
+
+# The current request's _Reclaim, or None outside a request (a direct caller).
+_REQUEST_RECLAIM: "contextvars.ContextVar[Optional[_Reclaim]]" = contextvars.ContextVar(
+    "pg_request_reclaim", default=None
+)
+
+
+class RequestCancelled(Exception):
+    """The request was cancelled before this exchange could start."""
 
 
 # ---------------------------------------------------------------------------
@@ -697,14 +857,23 @@ class ConnectionManager:
         # frame, and the reconnect-and-retry below. Split it anywhere and a
         # second thread's frames land in the middle of this one's.
         with self._lock_for(name):
+            # R-0043: the request this exchange belongs to. A request cancelled
+            # while it queued for the lock never dials and never sends.
+            reclaim = _REQUEST_RECLAIM.get()
+            if reclaim is not None and reclaim.cancelled:
+                raise RequestCancelled(name)
             conn = self.get(name)
             try:
-                return fn(conn)
+                return conn.exchange(fn, reclaim)
             except (ConnectionError, OSError):
                 # Socket-level failure → reconnect once and retry. A server-side
                 # PgError (bad SQL etc.) is NOT caught here, so it surfaces cleanly.
+                # Never for a CANCELLED request: the retry re-executes the
+                # statement, and a cancelled one must not run twice.
+                if reclaim is not None and reclaim.cancelled:
+                    raise
                 conn = self.get(name, force_reconnect=True)
-                return fn(conn)
+                return conn.exchange(fn, reclaim)
 
     def simple_query(self, name: str, sql: str) -> List[QueryResult]:
         return self._run(name, lambda c: c.simple_query(sql))
@@ -1895,8 +2064,25 @@ class McpServer:
 
     async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
         """One request, from dispatch to written reply. Runs as its own task."""
+        # R-0043: this request's connections, published into the context the
+        # worker thread runs in. The task already owns a private copy of the
+        # context, so the set() is invisible to every other request, and
+        # copy_context().run carries it across -- a thread starts with a fresh
+        # context, so without it ConnectionManager._run would see None.
+        reclaim = _Reclaim()
+        _REQUEST_RECLAIM.set(reclaim)
+        ctx = contextvars.copy_context()
         try:
-            response = await loop.run_in_executor(workers, self._handle_message, msg)
+            response = await loop.run_in_executor(
+                workers, ctx.run, self._handle_message, msg)
+        except asyncio.CancelledError:
+            # notifications/cancelled (or shutdown). The worker thread is still
+            # blocked in recv; the CancelRequest makes the backend end the
+            # statement, the worker drains its error to ReadyForQuery and
+            # releases the connection, and whatever it returns is discarded.
+            # Re-raised, so no reply is written.
+            reclaim.cancel()
+            raise
         except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
             log.exception("Unhandled exception while handling message")
             response = self._error(

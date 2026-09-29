@@ -36,10 +36,12 @@ via `python3 mcp-git.py --list`).
 import argparse
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -505,8 +507,13 @@ MAX_TIMEOUT_SEC = 300
 # Only `stash` can get through here: every other whitelisted subcommand is
 # read-only by construction (hash-object rejects -w, fetch demands --dry-run,
 # apply demands --check, config/branch/tag/remote reject their mutating flags).
-# The lock is held across subprocess.run, so MAX_TIMEOUT_SEC above is what keeps
-# it from being held forever.
+# The lock is held across the git run (_run_git_mutating), so MAX_TIMEOUT_SEC
+# above is what keeps it from being held forever. A cancel does NOT shorten it
+# (R-0043): the argv this lock serializes is exactly the argv whose child is
+# never adopted by the request's _Reclaim, because a stash killed mid-way can
+# leave index.lock or a half-applied stash behind. A cancel only suppresses the
+# reply -- or refuses to START a stash whose request was already cancelled.
+# Read-only git runs (_run_git) stay killable.
 #
 # Residual, stated rather than hidden: a read-only git command may still take
 # .git/index.lock briefly to refresh the index, so it can collide with a
@@ -521,6 +528,175 @@ _MUTATING_GIT_LOCK = threading.Lock()
 # allowlist — including the empty positional list, which git reads as an
 # implicit `push` — mutates.
 _READ_ONLY_STASH = {"list", "show"}
+
+
+# ---------------------------------------------------------------------------
+# Request-scoped git runs (R-0043: a cancel kills the child)
+# ---------------------------------------------------------------------------
+# The seconds a SIGTERM'd git group gets before the SIGKILL -- forge's grace.
+# Only READ-ONLY git runs are ever signalled: a mutating one (every stash but
+# list/show) is never adopted -- see _run_git_mutating.
+CANCEL_KILL_GRACE = 5.0
+
+
+class _Reclaim:
+    """One request's git children, so cancelling the request kills them.
+
+    McpServer._serve makes one per request and publishes it through
+    _REQUEST_RECLAIM into the context the worker thread runs in. _run_git
+    ADOPTS every read-only child it starts (a mutating one goes through
+    _run_git_mutating and is never adopted); _serve's CancelledError arm calls
+    cancel() on the LOOP thread while the worker is still blocked in
+    communicate() -- the signal is what unblocks it, and the thread's result
+    is then discarded.
+
+    The lock orders adopt() against cancel(): a child adopted after the cancel
+    is killed on the spot, so a cancelled request's child cannot escape.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._procs: List[subprocess.Popen] = []
+        self.cancelled = False
+
+    def adopt(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            if not self.cancelled:
+                self._procs.append(proc)
+                return
+        # Already cancelled: nobody wants this child's output.
+        _signal_group(proc, signal.SIGKILL)
+
+    def cancel(self, loop: asyncio.AbstractEventLoop) -> None:
+        """SIGTERM every adopted group now, SIGKILL survivors after the grace.
+
+        Never blocks: it runs on the event-loop thread, which is why the
+        escalation is a call_later and not a wait.
+        """
+        with self._lock:
+            self.cancelled = True
+            procs = list(self._procs)
+        for proc in procs:
+            _signal_group(proc, signal.SIGTERM)
+        if procs:
+            loop.call_later(CANCEL_KILL_GRACE, self._escalate, procs)
+
+    @staticmethod
+    def _escalate(procs: List[subprocess.Popen]) -> None:
+        for proc in procs:
+            _signal_group(proc, signal.SIGKILL)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal *proc*'s process group, if the child has not been reaped yet.
+
+    The group id is the child's pid (start_new_session makes it the leader).
+    No os.getpgid() round trip, on purpose: once the child is reaped
+    (returncode set) that pid may name somebody else's process, and while
+    returncode is None the worker's communicate() has not reaped it.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, sig)
+    except OSError:
+        pass
+
+
+# The current request's _Reclaim, or None outside a request (a direct caller).
+_REQUEST_RECLAIM: "contextvars.ContextVar[Optional[_Reclaim]]" = contextvars.ContextVar(
+    "git_request_reclaim", default=None
+)
+
+
+class RequestCancelled(Exception):
+    """The request was cancelled before this git run could start."""
+
+
+def _run_git(cmd: List[str], cwd: str, timeout: float) -> subprocess.CompletedProcess:
+    """`subprocess.run(cmd, capture_output=True, text=True, cwd=cwd,
+    stdin=subprocess.DEVNULL, timeout=timeout)`, with the child adopted by the
+    current request.
+
+    subprocess.run hands back no handle, so a cancel could never reach its
+    child; this is run()'s own body with the Popen kept (the shape of
+    mcp-tshark's _run_tshark). Two differences, and only two: the child leads
+    its own session (start_new_session, os.setsid in C between fork and exec)
+    so a cancel can signal its whole group -- hooks and helpers included --
+    and it is adopted by the current request's _Reclaim. The timeout path is
+    run()'s, verbatim: kill the child, reap it, re-raise TimeoutExpired.
+
+    stdin=DEVNULL: git must never consume the MCP stream.
+    """
+    reclaim = _REQUEST_RECLAIM.get()
+    if reclaim is not None and reclaim.cancelled:
+        raise RequestCancelled(cmd[0])
+    with subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as proc:
+        if reclaim is not None:
+            reclaim.adopt(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            # POSIX communicate already put the output so far on the exception.
+            proc.wait()
+            raise
+        except BaseException:
+            proc.kill()
+            raise
+        retcode = proc.poll()
+    return subprocess.CompletedProcess(proc.args, retcode, stdout, stderr)
+
+
+def _run_git_mutating(cmd: List[str], cwd: str,
+                      timeout: float) -> subprocess.CompletedProcess:
+    """_run_git for a MUTATING argv (_mutates_repo): the child is NOT adopted.
+
+    A cancel must never kill a stash mid-way. SIGTERM lets git's sigchain
+    handlers drop index.lock, but the SIGKILL escalation does not, and neither
+    signal can undo a half-applied stash: the index and worktree are left
+    between two states in the user's repository. So a mutating child runs to
+    completion under its existing timeout and a cancel only suppresses the
+    reply -- the reclaim class of this door is reply-only by design, declared
+    in tests/test_cancel.py's KILL_EXEMPT.
+
+    What stays: a request already cancelled before the spawn is refused here,
+    which is safe -- nothing has touched the repository yet. Otherwise this is
+    _run_git's body, run()'s own timeout path included.
+    """
+    reclaim = _REQUEST_RECLAIM.get()
+    if reclaim is not None and reclaim.cancelled:
+        raise RequestCancelled(cmd[0])
+    with subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as proc:
+        # NOT adopted, on purpose -- see the docstring.
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            # POSIX communicate already put the output so far on the exception.
+            proc.wait()
+            raise
+        except BaseException:
+            proc.kill()
+            raise
+        retcode = proc.poll()
+    return subprocess.CompletedProcess(proc.args, retcode, stdout, stderr)
 
 
 def _mutates_repo(function: str, args: List[str]) -> bool:
@@ -1177,18 +1353,16 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     # repository lock for the duration of the spawn and a read-only one does not.
     # nullcontext keeps the two paths one statement rather than an acquire /
     # release pair straddling the except clauses below.
-    guard = (_MUTATING_GIT_LOCK if _mutates_repo(function, args)
-             else contextlib.nullcontext())
+    # ONE decision drives both the lock and the runner, so the argv that is
+    # serialized is exactly the argv a cancel may not kill (R-0043).
+    mutating = _mutates_repo(function, args)
+    guard = _MUTATING_GIT_LOCK if mutating else contextlib.nullcontext()
+    # _run_git is subprocess.run with the child adopted by this request, so a
+    # cancel kills it; _run_git_mutating never hands its child to a cancel.
+    runner = _run_git_mutating if mutating else _run_git
     try:
         with guard:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,   # git must never consume the MCP stream
-                timeout=_run_timeout(params),
-            )
+            result = runner(cmd, cwd, _run_timeout(params))
     except FileNotFoundError:
         return {"error": "git executable not found in PATH"}
     except subprocess.TimeoutExpired:
@@ -1580,8 +1754,24 @@ class McpServer:
 
     async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
         """One request, from dispatch to written reply. Runs as its own task."""
+        # R-0043: this request's git children, published into the context the
+        # worker thread runs in. The task already owns a private copy of the
+        # context, so the set() is invisible to every other request, and
+        # copy_context().run carries it across -- a thread starts with a fresh
+        # context, so without it _run_git would see None.
+        reclaim = _Reclaim()
+        _REQUEST_RECLAIM.set(reclaim)
+        ctx = contextvars.copy_context()
         try:
-            response = await loop.run_in_executor(workers, self._handle_message, msg)
+            response = await loop.run_in_executor(
+                workers, ctx.run, self._handle_message, msg)
+        except asyncio.CancelledError:
+            # notifications/cancelled (or shutdown). The worker thread is still
+            # blocked in communicate(); killing the child's group is what lets it
+            # return, and whatever it returns is discarded. Re-raised, so no
+            # reply is written.
+            reclaim.cancel(loop)
+            raise
         except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
             log.exception("Unhandled exception while handling message")
             response = self._error(

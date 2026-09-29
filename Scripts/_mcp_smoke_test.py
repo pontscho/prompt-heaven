@@ -35,10 +35,10 @@ that the convergence patch guarantees:
                            loopback peer is never answered, a sibling targeted
                            only by ill-typed requestIds still is (R-0006; see
                            inflight_cancel_probe)
-  * in-flight kill       -> mcp-forge only: a cancelled test call's child
-                           process is killed, not left to finish, and the
-                           cancelled id is never answered (R-0006 phase 2; see
-                           inflight_kill_probe)
+  * in-flight kill       -> mcp-forge and mcp-wiki: a cancelled test / measure
+                           call's child process is killed, not left to
+                           finish, and the cancelled id is never answered
+                           (R-0006 phase 2, R-0043; see inflight_kill_probe)
 
 Usage:
   python3 _mcp_smoke_test.py                 # all servers
@@ -979,41 +979,86 @@ def _pid_alive(pid):
     return True
 
 
-def inflight_kill_probe(checks):
-    """R-0006 phase 2, end to end: a cancelled forge call KILLS its child.
+_KILL_PROBE_PAGE = """---
+name: hold
+title: Hold
+type: concept
+status: active
+description: R-0043 smoke kill probe page
+---
 
-    mcp-forge is a `kill`-class server (tests/test_cancel.py): the build/test
-    child a request spawns is adopted by that request, and the cancel signals
+# Hold
+
+<!-- BEGIN MEASURED: hold -->
+<!-- END MEASURED: 000000000000 -->
+"""
+
+
+def _kill_probe_project(which, project, pid_file):
+    """Write the throwaway project for one `kill`-class server.
+
+    Returns (server cfg, tools/call arguments) for a call whose child writes
+    its shell pid to `pid_file` and then `exec`s a 30s sleep -- so the pid on
+    disk IS the child the cancel must kill.
+    """
+    if which == "forge":
+        with open(os.path.join(project, "project-forge.yaml"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(_KILL_PROBE_YAML)
+        return ({"file": "mcp-forge.py", "tool": "forge_call",
+                 "args": ["--project-root", project]},
+                {"function": "test", "params": {"targets": ["hold"]}})
+    # wiki: `measure` runs the command docs/measurements.json names for the
+    # page's one measured region -- the request-scoped child _measure_run
+    # adopts.  It runs in the repo root, hence the absolute pid path.
+    import shlex
+    docs = os.path.join(project, "docs")
+    os.makedirs(docs, exist_ok=True)
+    registry = {"version": 1, "measurements": {"hold": {
+        "description": "R-0043 smoke: record the shell pid, then a 30s sleep",
+        "command": ["sh", "-c",
+                    "echo $$ > %s; exec sleep 30" % shlex.quote(pid_file)]}}}
+    with open(os.path.join(docs, "measurements.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(registry, fh)
+    with open(os.path.join(docs, "hold.md"), "w", encoding="utf-8") as fh:
+        fh.write(_KILL_PROBE_PAGE)
+    return ({"file": "mcp-wiki.py", "tool": "wiki_call",
+             "args": ["--project-root", project]},
+            {"function": "measure", "params": {"name": "hold"}})
+
+
+def inflight_kill_probe(checks, which="forge"):
+    """R-0006 phase 2 / R-0043, end to end: a cancelled call KILLS its child.
+
+    mcp-forge and mcp-wiki are `kill`-class servers (tests/test_cancel.py):
+    the child a request spawns -- forge's build/test command, wiki's
+    measurement command -- is adopted by that request, and the cancel signals
     its process group while the worker thread is still blocked in
     communicate().  A second instance is pointed at a throwaway project under
-    .claude/tmp whose one target writes its shell pid and then `exec`s a 30s
-    sleep, so the pid on disk IS the child.  After the cancel the child must be
+    .claude/tmp (see _kill_probe_project).  After the cancel the child must be
     gone well inside its 30s, the ping behind the cancel must be answered
     first, and the cancelled id must never be answered.
     """
     import tempfile
+    label = "kill probe" if which == "forge" else "%s kill probe" % which
     tmp_root = os.path.join(os.path.dirname(SCRIPT_DIR), ".claude", "tmp")
     os.makedirs(tmp_root, exist_ok=True)
-    project = tempfile.mkdtemp(prefix="forge_kill_smoke_", dir=tmp_root)
+    project = tempfile.mkdtemp(prefix="%s_kill_smoke_" % which, dir=tmp_root)
     pid_file = os.path.join(project, "child.pid")
-    with open(os.path.join(project, "project-forge.yaml"), "w",
-              encoding="utf-8") as fh:
-        fh.write(_KILL_PROBE_YAML)
-    srv = Server({"file": "mcp-forge.py", "tool": "forge_call",
-                  "args": ["--project-root", project]})
+    cfg, arguments = _kill_probe_project(which, project, pid_file)
+    srv = Server(cfg)
     srv.start()
     pid = None
     try:
         srv.send({"jsonrpc": "2.0", "id": "init", "method": "initialize",
                   "params": {}})
         if (srv.read() or {}).get("id") != "init":
-            checks.append(check("kill probe: second instance initializes",
+            checks.append(check("%s: second instance initializes" % label,
                                 False, "alive=%r" % srv.alive()))
             return
         srv.send({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                  "params": {"name": "forge_call",
-                             "arguments": {"function": "test",
-                                           "params": {"targets": ["hold"]}}}})
+                  "params": {"name": cfg["tool"], "arguments": arguments}})
         deadline = time.time() + 10.0
         while pid is None and time.time() < deadline:
             try:
@@ -1024,7 +1069,7 @@ def inflight_kill_probe(checks):
             if pid is None:
                 time.sleep(0.05)
         running = pid is not None and _pid_alive(pid)
-        checks.append(check("kill probe: the child is running in flight",
+        checks.append(check("%s: the child is running in flight" % label,
                             running, "pid=%r" % pid))
         if not running:
             return
@@ -1033,14 +1078,14 @@ def inflight_kill_probe(checks):
                   "params": {"requestId": 1, "reason": "smoke kill probe"}})
         srv.send({"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}})
         first = srv.read() or {}
-        checks.append(check("kill probe: no reply to the cancel, ping answered",
+        checks.append(check("%s: no reply to the cancel, ping answered" % label,
                             first.get("id") == 2,
                             "first reply=%s" % json.dumps(first)[:160]))
 
         deadline = time.time() + 8.0
         while _pid_alive(pid) and time.time() < deadline:
             time.sleep(0.05)
-        checks.append(check("kill probe: the cancelled call's child is killed",
+        checks.append(check("%s: the cancelled call's child is killed" % label,
                             not _pid_alive(pid),
                             "pid %d still alive %.0fs after the cancel "
                             "(its sleep is 30s)" % (pid, 8.0)))
@@ -1048,7 +1093,7 @@ def inflight_kill_probe(checks):
         srv.send({"jsonrpc": "2.0", "id": 3, "method": "ping", "params": {}})
         seen = _read_ids(srv, (3,), 10.0)
         seen += _read_ids(srv, ("never",), 1.0)
-        checks.append(check("kill probe: the cancelled call is never answered",
+        checks.append(check("%s: the cancelled call is never answered" % label,
                             1 not in seen and 3 in seen, "ids seen=%r" % seen))
     finally:
         srv.stop()
@@ -1158,6 +1203,11 @@ def run_server(cfg):
         #     flight kills the child it spawned (R-0006 phase 2, `kill` class).
         if cfg["tool"] == "forge_call":
             inflight_kill_probe(checks)
+
+        # 14. wiki-only: the same for a `measure` call's measurement child
+        #     (R-0043, `kill` class).
+        if cfg["tool"] == "wiki_call":
+            inflight_kill_probe(checks, which="wiki")
 
         status = "PASS" if all(ok for _, ok, _ in checks) else "FAIL"
         return (status, checks)

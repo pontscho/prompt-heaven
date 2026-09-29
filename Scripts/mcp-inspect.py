@@ -48,6 +48,7 @@ available via `python3 mcp-inspect.py --list`).
 
 import argparse
 import asyncio
+import contextvars
 import importlib.util
 import json
 import logging
@@ -55,6 +56,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -277,6 +279,131 @@ def _timeout_param(p: dict, default: int) -> int:
     return max(1, min(MAX_TIMEOUT_SEC, _int_param(p["timeout"], "timeout")))
 
 
+# ---------------------------------------------------------------------------
+# Request-scoped probe runs (R-0043: a cancel kills the child)
+# ---------------------------------------------------------------------------
+# The seconds a SIGTERM'd probe group gets before the SIGKILL -- forge's grace.
+CANCEL_KILL_GRACE = 5.0
+
+
+class _Reclaim:
+    """One request's probe children, so cancelling the request kills them.
+
+    McpServer._serve makes one per request and publishes it through
+    _REQUEST_RECLAIM into the context the worker thread runs in. _run_child
+    ADOPTS every child it starts; _serve's CancelledError arm calls cancel() on
+    the LOOP thread while the worker is still blocked in communicate() -- the
+    signal is what unblocks it, and the thread's result is then discarded.
+    A probe answered in-process (the validators, the socket and memory reads)
+    starts no child and stays reply-only.
+
+    The lock orders adopt() against cancel(): a child adopted after the cancel
+    is killed on the spot, so a cancelled request's child cannot escape.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._procs: List[subprocess.Popen] = []
+        self.cancelled = False
+
+    def adopt(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            if not self.cancelled:
+                self._procs.append(proc)
+                return
+        # Already cancelled: nobody wants this child's output.
+        _signal_group(proc, signal.SIGKILL)
+
+    def cancel(self, loop: asyncio.AbstractEventLoop) -> None:
+        """SIGTERM every adopted group now, SIGKILL survivors after the grace.
+
+        Never blocks: it runs on the event-loop thread, which is why the
+        escalation is a call_later and not a wait.
+        """
+        with self._lock:
+            self.cancelled = True
+            procs = list(self._procs)
+        for proc in procs:
+            _signal_group(proc, signal.SIGTERM)
+        if procs:
+            loop.call_later(CANCEL_KILL_GRACE, self._escalate, procs)
+
+    @staticmethod
+    def _escalate(procs: List[subprocess.Popen]) -> None:
+        for proc in procs:
+            _signal_group(proc, signal.SIGKILL)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal *proc*'s process group, if the child has not been reaped yet.
+
+    The group id is the child's pid (start_new_session makes it the leader).
+    No os.getpgid() round trip, on purpose: once the child is reaped
+    (returncode set) that pid may name somebody else's process, and while
+    returncode is None the worker's communicate() has not reaped it.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, sig)
+    except OSError:
+        pass
+
+
+# The current request's _Reclaim, or None outside a request (a direct caller).
+_REQUEST_RECLAIM: "contextvars.ContextVar[Optional[_Reclaim]]" = contextvars.ContextVar(
+    "inspect_request_reclaim", default=None
+)
+
+
+class RequestCancelled(Exception):
+    """The request was cancelled before this probe could start."""
+
+
+def _run_child(cmd: List[str], timeout: int,
+               stdin_text: Optional[str]) -> subprocess.CompletedProcess:
+    """`subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+    stdin=subprocess.DEVNULL)` -- or `input=stdin_text` in place of the
+    DEVNULL -- with the child adopted by the current request.
+
+    subprocess.run hands back no handle, so a cancel could never reach its
+    child; this is run()'s own body with the Popen kept (the shape of
+    mcp-tshark's _run_tshark). Two differences, and only two: the child leads
+    its own session (start_new_session, os.setsid in C between fork and exec)
+    so a cancel can signal its whole group, and it is adopted by the current
+    request's _Reclaim. The timeout path is run()'s, verbatim: kill the child,
+    reap it, re-raise TimeoutExpired.
+    """
+    reclaim = _REQUEST_RECLAIM.get()
+    if reclaim is not None and reclaim.cancelled:
+        raise RequestCancelled(cmd[0])
+    # PIPE only when there is input to feed -- run()'s own `input=` rule; the
+    # DEVNULL otherwise is _run's, see its docstring.
+    stdin = subprocess.DEVNULL if stdin_text is None else subprocess.PIPE
+    with subprocess.Popen(
+        cmd,
+        stdin=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as proc:
+        if reclaim is not None:
+            reclaim.adopt(proc)
+        try:
+            stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            # POSIX communicate already put the output so far on the exception.
+            proc.wait()
+            raise
+        except BaseException:
+            proc.kill()
+            raise
+        retcode = proc.poll()
+    return subprocess.CompletedProcess(proc.args, retcode, stdout, stderr)
+
+
 def _run(cmd: List[str], timeout: int = 15,
          stdin_text: Optional[str] = None) -> Tuple[int, str, str]:
     """Run an argv (shell=False) read-only. Never raises; returns (rc, out, err).
@@ -289,17 +416,14 @@ def _run(cmd: List[str], timeout: int = 15,
 
     `stdin_text` is the one exception: `node --check` reads a script from stdin,
     which is how inline `content` is validated without writing a temp file. It
-    goes through `input=` because subprocess.run refuses `input=` and `stdin=`
-    together, so the two forms are spelled out rather than built as kwargs --
-    the stdin choice stays visible AT the call.
+    goes through `input=` -- a PIPE fed by communicate() -- and every other
+    probe gets DEVNULL; _run_child makes that choice in one visible line.
+
+    The child is adopted by the current request (R-0043), so a cancelled call
+    kills its probe instead of leaving it to run to its timeout.
     """
     try:
-        if stdin_text is None:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=timeout, stdin=subprocess.DEVNULL)
-        else:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=timeout, input=stdin_text)
+        r = _run_child(cmd, timeout, stdin_text)
         return r.returncode, r.stdout or "", r.stderr or ""
     except FileNotFoundError:
         return 127, "", f"{cmd[0]}: not found in PATH"
@@ -2475,8 +2599,24 @@ class McpServer:
 
     async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
         """One request, from dispatch to written reply. Runs as its own task."""
+        # R-0043: this request's probe children, published into the context
+        # the worker thread runs in. The task already owns a private copy of
+        # the context, so the set() is invisible to every other request, and
+        # copy_context().run carries it across -- a thread starts with a fresh
+        # context, so without it _run_child would see None.
+        reclaim = _Reclaim()
+        _REQUEST_RECLAIM.set(reclaim)
+        ctx = contextvars.copy_context()
         try:
-            response = await loop.run_in_executor(workers, self._handle_message, msg)
+            response = await loop.run_in_executor(
+                workers, ctx.run, self._handle_message, msg)
+        except asyncio.CancelledError:
+            # notifications/cancelled (or shutdown). The worker thread is still
+            # blocked in communicate(); killing the child's group is what lets it
+            # return, and whatever it returns is discarded. Re-raised, so no
+            # reply is written.
+            reclaim.cancel(loop)
+            raise
         except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
             # Exception, NOT BaseException: the `finally` in run() cancels every
             # inflight task on shutdown, and a swallowed CancelledError would

@@ -52,12 +52,20 @@ it is per server, one column, so phase 2 changes a word and not a design:
 
   task        the asyncio work itself stops -- the handlers are coroutines on
               the loop and the CancelledError lands inside them (gdc, lldb).
-  kill        the request's CHILD PROCESS is killed (forge, tshark): every
+  kill        the request's CHILD PROCESS is killed (forge, git, inspect,
+              tshark, wiki): every
               request-scoped Popen is adopted by a per-request reclaim record,
               and the dispatch target's CancelledError arm signals the child's
               process group from the loop thread while the worker thread is
               still blocked in communicate(); the thread then returns and its
               result is discarded.
+  pg-cancel   the running statement is cancelled IN PostgreSQL (postgres,
+              R-0043): the connection's BackendKeyData is captured at startup,
+              and the dispatch target's CancelledError arm has a CancelRequest
+              (code 80877102) sent on a SECOND socket, negotiated like the main
+              one.  The worker thread still owns the exchange and reads the
+              backend's error through ReadyForQuery before the per-connection
+              lock is released, so the connection stays in sync.
   lsp-cancel  a semantic call is reclaimed IN the language server: the
               generated `_request` answers a CancelledError by dropping its
               `_pending` waiter and sending `$/cancelRequest` for the LSP id
@@ -78,10 +86,16 @@ claim it:
     carry a re-raising CancelledError arm in the dispatch target that reaches
     os.killpg;
   * an `lsp-cancel` row must carry a `_request` whose CancelledError arm pops
-    the `_pending` entry, names `$/cancelRequest`, and re-raises.
-The behaviour behind the last two is gated elsewhere: forge's kill live in the
-smoke harness (`inflight_kill_probe`), `_request`'s cancel arm in
-`test_generated_region` group E against the canonical source.
+    the `_pending` entry, names `$/cancelRequest`, and re-raises;
+  * a `pg-cancel` row must store BackendKeyData on the connection, carry the
+    CancelRequest code, build the packet in a function that opens its OWN
+    socket, and reach that function from a re-raising CancelledError arm in
+    the dispatch target.
+The behaviour behind the kill and lsp-cancel rows is gated elsewhere: forge's
+and wiki's kill live in the smoke harness (`inflight_kill_probe`), `_request`'s
+cancel arm in `test_generated_region` group E against the canonical source.
+The pg-cancel behaviour is gated HERE, group G, against a fake PostgreSQL
+server on a loopback socket.
 
 NEGATIVE CONTROL (group D) -- mandatory, and this suite was written RED: the
 fleet had no hook when it was first run, so the controls are what prove each
@@ -98,7 +112,9 @@ outside the scan root, removed in a `finally` unless --keep.
 The case count IS typed in run.py's SUITES table, for read_loop's reason: a
 server appearing without a declared row is the defect.
 
-Offline, AST only, starts nothing, ~1s.
+Offline.  Groups A-F are AST only; group G imports mcp-postgres.py and talks
+to an in-process fake server on 127.0.0.1 -- no subprocess, no network beyond
+loopback, ~2s.
 
 Usage:
   python3 tests/test_cancel.py
@@ -113,13 +129,19 @@ Groups:
   D  control  -- planted defects the analysers MUST flag, and correct ones
   E  GATE     -- MCP_SKELETON.md section 5's sample, lifted by script
   F  hygiene  -- every write under .claude/tmp, no bytecode, no new repo paths
+  G  BEHAVIOUR -- the PostgreSQL CancelRequest and its drain, fake server
 """
 
 import ast
+import contextvars
 import os
 import shutil
+import socket
+import struct
 import sys
 import tempfile
+import threading
+import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -143,6 +165,7 @@ GC = "C. ROSTER: the table covers the tree"
 GD = "D. negative control"
 GE = "E. GATE: the canonical skeleton"
 GF = "F. hygiene"
+GG = "G. BEHAVIOUR: the PostgreSQL cancel"
 
 FIXTURE_BASE = H.repo_path(".claude", "tmp", "test_cancel")
 WRITES = []
@@ -155,6 +178,7 @@ CANCEL_METHOD = "notifications/cancelled"
 TASK = "task"
 KILL = "kill"
 LSP_CANCEL = "lsp-cancel"
+PG_CANCEL = "pg-cancel"
 REPLY_ONLY = "reply-only"
 CLASSES = {
     TASK: "the asyncio work stops: handlers are coroutines on the loop",
@@ -164,6 +188,10 @@ CLASSES = {
     LSP_CANCEL: "a semantic call is reclaimed in the language server via "
                 "$/cancelRequest and its pending waiter dropped; file "
                 "operations stay reply-only",
+    PG_CANCEL: "the running statement is cancelled in PostgreSQL: a "
+               "CancelRequest with the captured BackendKeyData goes out on a "
+               "second socket, and the worker drains the backend's error to "
+               "ReadyForQuery before the connection lock is released",
     REPLY_ONLY: "the reply is suppressed; a thread, subprocess or remote peer "
                 "keeps working until it finishes",
 }
@@ -181,10 +209,11 @@ FLEET = {
                                     "and its process group killed on cancel"),
     "mcp-gdc.py":      (TASK,       "coroutine handlers: the CDP await is "
                                     "cancelled and the lane lock released"),
-    "mcp-git.py":      (REPLY_ONLY, "the git subprocess runs to completion in "
-                                    "its worker thread"),
-    "mcp-inspect.py":  (REPLY_ONLY, "the probe runs to completion in its worker "
-                                    "thread"),
+    "mcp-git.py":      (KILL,       "handle_git_call's git child is adopted "
+                                    "and its process group killed on cancel"),
+    "mcp-inspect.py":  (KILL,       "every probe _run starts is adopted and "
+                                    "its process group killed on cancel; "
+                                    "in-process probes stay reply-only"),
     "mcp-jenkins.py":  (REPLY_ONLY, "the HTTP call runs to completion in its "
                                     "worker thread"),
     "mcp-lldb.py":     (TASK,       "coroutine handlers: the whole-handler lock "
@@ -192,8 +221,9 @@ FLEET = {
     "mcp-lua-lsp.py":  (LSP_CANCEL, "the generated _request sends "
                                     "$/cancelRequest to lua-language-server "
                                     "and drops its waiter"),
-    "mcp-postgres.py": (REPLY_ONLY, "the query runs to completion in its worker "
-                                    "thread"),
+    "mcp-postgres.py": (PG_CANCEL,  "a CancelRequest on a second socket stops "
+                                    "the statement; the worker drains its "
+                                    "error under the connection lock"),
     "mcp-purity.py":   (LSP_CANCEL, "semantic calls: $/cancelRequest to "
                                     "clangd/luals; file ops on the default "
                                     "pool stay reply-only"),
@@ -202,21 +232,40 @@ FLEET = {
                                     "capture child is a session (KILL_EXEMPT)"),
     "mcp-webfetch.py": (REPLY_ONLY, "the fetch runs to completion in its worker "
                                     "thread (the drain-on-shutdown reason)"),
-    "mcp-wiki.py":     (REPLY_ONLY, "the search runs to completion in its worker "
-                                    "thread"),
+    "mcp-wiki.py":     (KILL,       "_measure_run's child is adopted and its "
+                                    "process group killed on cancel; the "
+                                    "vendored git() is exempt (KILL_EXEMPT)"),
 }
 
 DECLARED_TASK = 2
-DECLARED_KILL = 2
+DECLARED_KILL = 5
 DECLARED_LSP_CANCEL = 4
-DECLARED_REPLY_ONLY = 7
+DECLARED_PG_CANCEL = 1
+DECLARED_REPLY_ONLY = 3
 
-# A `kill` server's Popen sites that are NOT request-scoped, by (file, enclosing
+# A `kill` server's spawn sites a cancel does NOT reach, by (file, enclosing
 # function), each with the reason it may outlive the request that spawned it.
+# An exempt function is excused both checks: an unadopted Popen and a blocking
+# subprocess.run.  It is also HELD to its exemption: an exempt function that
+# adopts its child fails (KILL-EXEMPT-SPAWN-ADOPTED) -- for mcp-git that is the
+# rule that a mutating stash is never killed mid-way -- and a declared
+# exemption that no longer names a spawning function fails (KILL-EXEMPT-STALE),
+# so the row cannot outlive the code it excuses.
 KILL_EXEMPT = {
+    ("mcp-git.py", "_run_git_mutating"):
+        "the MUTATING git runs (the ones serialized by _MUTATING_GIT_LOCK: "
+        "every stash but list/show) are never killed mid-way -- a SIGKILLed "
+        "stash can leave index.lock or a half-applied stash in the user's "
+        "repo; they run to their timeout and a cancel only suppresses the "
+        "reply (a request cancelled BEFORE the spawn is still refused)",
     ("mcp-tshark.py", "handle_start_capture"):
         "the capture child IS the session: it outlives start_capture by design "
         "and is owned through SESSIONS by stop_capture and shutdown",
+    ("mcp-wiki.py", "git"):
+        "vendored code-identical with ClaudeCode/skills/wiki/scripts/"
+        "_wikilib.py's git() (test_wiki_index groups G and H record its "
+        "subprocess.run); each call is one local query bounded by "
+        "GIT_TIMEOUT_SEC, so a cancelled request's git query runs to its end",
 }
 
 TASK_FACTORIES = {"create_task", "ensure_future"}
@@ -251,6 +300,8 @@ KILL_NO_SESSION = "KILL-CHILD-NOT-OWN-GROUP"
 KILL_BLOCKING = "KILL-BLOCKING-SPAWN"
 KILL_NO_ARM = "KILL-NO-CANCEL-ARM"
 KILL_NO_SIGNAL = "KILL-ARM-NEVER-SIGNALS"
+KILL_EXEMPT_ADOPTED = "KILL-EXEMPT-SPAWN-ADOPTED"
+KILL_EXEMPT_STALE = "KILL-EXEMPT-STALE"
 
 # -- the `lsp-cancel` class --
 LSP_CANCEL_METHOD = "$/cancelRequest"
@@ -259,6 +310,18 @@ LSP_NO_ARM = "LSP-NO-CANCEL-ARM"
 LSP_NO_NOTICE = "LSP-ARM-SENDS-NO-CANCELREQUEST"
 LSP_LEAKS = "LSP-ARM-LEAVES-PENDING"
 LSP_ARM_SWALLOWS = "LSP-ARM-SWALLOWS-CANCEL"
+
+# -- the `pg-cancel` class --
+# The PostgreSQL CancelRequest code: (1234 << 16) | 5678.  NOT the SSLRequest
+# code 80877103 one above it, which every connect already sends.
+PG_CANCEL_CODE = 80877102
+PG_KEY_TYPE = b"K"                     # BackendKeyData
+PG_SOCKET_OPENERS = {"create_connection", "socket"}
+PG_NO_KEY = "PG-BACKENDKEYDATA-NOT-CAPTURED"
+PG_NO_CODE = "PG-NO-CANCELREQUEST-CODE"
+PG_SAME_SOCKET = "PG-CANCEL-NOT-ON-A-SECOND-SOCKET"
+PG_NO_ARM = "PG-NO-CANCEL-ARM"
+PG_ARM_NEVER_SENDS = "PG-ARM-NEVER-SENDS-CANCELREQUEST"
 
 
 # ---------------------------------------------------------------------------
@@ -668,9 +731,28 @@ def analyse_kill(path, source=None, exempt=()):
     index = _func_index(tree)
 
     adopted = 0
+    exempt_spawning = set()
     for funcs in index.values():
         for func in funcs:
             own = list(_own_nodes(func))
+            if func.name in exempt and any(
+                    isinstance(node, ast.Call)
+                    and _is_subprocess(node, BLOCKING_SPAWNS | {"Popen"})
+                    for node in own):
+                exempt_spawning.add(func.name)
+                result.detail.append("exempt: %s() -- %s"
+                                     % (func.name, exempt[func.name]))
+                # Held to it: an exempt child that IS adopted can be killed
+                # by a cancel, which is what the exemption exists to forbid.
+                for node in own:
+                    if isinstance(node, ast.Call) and _call_name(node) in RECORD_CALLS:
+                        result.fail(KILL_EXEMPT_ADOPTED,
+                                    "line %d: %s() is declared exempt -- its "
+                                    "child must never be killed by a cancel -- "
+                                    "but it passes the child to %s"
+                                    % (node.lineno, func.name,
+                                       sorted(RECORD_CALLS)))
+                continue
             for node in own:
                 if isinstance(node, ast.Call) and _is_subprocess(node, BLOCKING_SPAWNS):
                     result.fail(KILL_BLOCKING,
@@ -693,10 +775,6 @@ def analyse_kill(path, source=None, exempt=()):
                                            if isinstance(var, ast.Name) else None))
             if not popens:
                 continue
-            if func.name in exempt:
-                result.detail.append("exempt: %s() -- %s"
-                                     % (func.name, exempt[func.name]))
-                continue
             for call, var in popens:
                 recorded = var is not None and any(
                     isinstance(n, ast.Call) and _call_name(n) in RECORD_CALLS
@@ -718,6 +796,10 @@ def analyse_kill(path, source=None, exempt=()):
     if adopted == 0 and KILL_UNADOPTED not in result.problems:
         result.fail(KILL_NO_SPAWN, "no adopted subprocess.Popen anywhere -- "
                                    "nothing for a cancel to kill")
+    for name in sorted(set(exempt) - exempt_spawning):
+        result.fail(KILL_EXEMPT_STALE, "%s() is declared exempt but no function "
+                                       "of that name spawns a child -- the "
+                                       "row excuses code that is gone" % name)
     result.detail.insert(0, "adopted     : %d Popen site(s)" % adopted)
 
     cls = _find_class(tree)
@@ -783,6 +865,126 @@ def analyse_lsp(path, source=None):
     return result
 
 
+def _reach_refs(nodes, index):
+    """`_reach`, plus every def a call is HANDED by name as an argument --
+    `threading.Thread(target=conn.send_cancel)`, `run_in_executor(None,
+    fn)` -- because the pg-cancel arm must not block the loop thread, so the
+    sender is always passed rather than called.  As loose as `_reach`, for the
+    same reason."""
+    seen = set()
+    out = list(nodes)
+    queue = list(nodes)
+    while queue:
+        node = queue.pop()
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            names = [_call_name(sub)]
+            for arg in list(sub.args) + [kw.value for kw in sub.keywords]:
+                if isinstance(arg, ast.Name):
+                    names.append(arg.id)
+                elif isinstance(arg, ast.Attribute):
+                    names.append(arg.attr)
+            for name in names:
+                if name in index and name not in seen:
+                    seen.add(name)
+                    for d in index[name]:
+                        out.append(d)
+                        queue.append(d)
+    return out
+
+
+def _stores_attribute(stmts):
+    """True if the statements assign to an attribute (`self.x = ...`,
+    `self.a, self.b = ...`) -- the value is KEPT, not read and dropped."""
+    for n in _walk_all(stmts):
+        if isinstance(n, ast.Assign):
+            targets = n.targets
+        elif isinstance(n, (ast.AnnAssign, ast.AugAssign)):
+            targets = [n.target]
+        else:
+            continue
+        for t in targets:
+            for sub in ast.walk(t):
+                if isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Store):
+                    return True
+    return False
+
+
+def analyse_pg(path, source=None):
+    """The `pg-cancel` class: BackendKeyData kept, a CancelRequest built on a
+    socket of its own, and a cancel arm that reaches it."""
+    result = Reclaim(path)
+    tree = _parse(path, source, result)
+    if tree is None:
+        return result
+    index = _func_index(tree)
+
+    # -- BackendKeyData is STORED where it is read ---------------------------
+    kept = [n for n in ast.walk(tree)
+            if isinstance(n, ast.If) and _has_const([n.test], PG_KEY_TYPE)
+            and _stores_attribute(n.body)]
+    if not kept:
+        result.fail(PG_NO_KEY, "no branch on the %r message stores anything -- "
+                               "the process id and secret key a CancelRequest "
+                               "must quote are read and thrown away"
+                    % PG_KEY_TYPE)
+    result.detail.append("key stored  : %d branch(es)" % len(kept))
+
+    # -- the code, and the functions that build the packet with it ------------
+    code_names = set()
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) \
+                and n.value.value == PG_CANCEL_CODE:
+            code_names.update(t.id for t in n.targets if isinstance(t, ast.Name))
+    if not _has_const([tree], PG_CANCEL_CODE):
+        result.fail(PG_NO_CODE, "the CancelRequest code %d appears nowhere"
+                    % PG_CANCEL_CODE)
+        return result
+    senders = []
+    for funcs in index.values():
+        for func in funcs:
+            if any((isinstance(n, ast.Constant) and n.value == PG_CANCEL_CODE)
+                   or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                       and n.id in code_names)
+                   for n in ast.walk(func)):
+                senders.append(func)
+    own_socket = [f for f in senders
+                  if any(isinstance(n, ast.Call) and _call_name(n) in PG_SOCKET_OPENERS
+                         for n in ast.walk(f))]
+    result.detail.append("senders     : %s" % (", ".join(
+        "%s():%d" % (f.name, f.lineno) for f in senders) or "none"))
+    if not own_socket:
+        result.fail(PG_SAME_SOCKET, "no function that builds the CancelRequest "
+                                    "opens a socket of its own -- written into "
+                                    "the busy connection it is a protocol "
+                                    "violation the backend cannot even read "
+                                    "until the statement ends")
+
+    # -- the dispatch target's cancel arm reaches a sender --------------------
+    cls = _find_class(tree)
+    serve = None
+    if cls is not None:
+        methods = _methods(cls)
+        serve = next((methods[t] for t in sorted(DISPATCH_TARGETS)
+                      if t in methods), None)
+    arms = [] if serve is None else [
+        n for n in ast.walk(serve)
+        if isinstance(n, ast.ExceptHandler) and _names_cancelled(n) and _reraises(n)]
+    if not arms:
+        result.fail(PG_NO_ARM, "the dispatch target has no re-raising `except "
+                               "asyncio.CancelledError` arm -- the statement "
+                               "runs on and holds the connection")
+        return result
+    reached = {id(n) for n in _reach_refs([a for arm in arms for a in arm.body],
+                                          index)}
+    if not any(id(f) in reached for f in own_socket or senders):
+        result.fail(PG_ARM_NEVER_SENDS, "line %d: the cancel arm reaches no "
+                                        "function that sends the CancelRequest"
+                    % arms[0].lineno)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # groups
 # ---------------------------------------------------------------------------
@@ -843,6 +1045,10 @@ def group_declared(suite, files):
             got = analyse_lsp(path)
             problems.extend("declared %r: %s" % (klass, p) for p in got.problems)
             measured = ["  " + d for d in got.detail]
+        if klass == PG_CANCEL:
+            got = analyse_pg(path)
+            problems.extend("declared %r: %s" % (klass, p) for p in got.problems)
+            measured = ["  " + d for d in got.detail]
         suite.record(GB, name, problems,
                      detail=["declared    : %s -- %s"
                              % (klass, CLASSES.get(klass, "?")),
@@ -869,6 +1075,7 @@ def group_roster(suite, shapes, files):
 
     declared_totals = ((TASK, DECLARED_TASK), (KILL, DECLARED_KILL),
                        (LSP_CANCEL, DECLARED_LSP_CANCEL),
+                       (PG_CANCEL, DECLARED_PG_CANCEL),
                        (REPLY_ONLY, DECLARED_REPLY_ONLY))
     problems = []
     detail = []
@@ -1080,6 +1287,31 @@ _KILL_ARM = ("        except asyncio.CancelledError:\n"
              "            reclaim.cancel()\n"
              "            raise\n")
 
+_KILL_VENDORED = '''
+
+def vendored_git(args):
+    return subprocess.run(["git"] + args, stdin=subprocess.DEVNULL, timeout=30)
+'''
+
+# mcp-git's shape: a mutating runner that must NOT hand its child to a cancel.
+_KILL_MUTATING = '''
+
+def run_mutating(reclaim, argv):
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, start_new_session=True)
+    reclaim.adopt(proc)
+    return proc.communicate()
+'''
+_KILL_MUTATING_OK = _KILL_MUTATING.replace("    reclaim.adopt(proc)\n", "")
+
+# fixture name -> the exemption group B would pass for it
+RECLAIM_EXEMPT = {
+    "rcl_kill_exempt_declared.py": {"vendored_git": "a planted vendored copy"},
+    "rcl_kill_exempt_mutating_ok.py": {"run_mutating": "a planted mutating run"},
+    "rcl_kill_exempt_adopted.py": {"run_mutating": "a planted mutating run"},
+    "rcl_kill_exempt_stale.py": {"gone_helper": "a row whose code was deleted"},
+}
+
 GOOD_LSP = '''
 import asyncio
 
@@ -1110,6 +1342,61 @@ class Client:
 _LSP_ARM_HEAD = ("        except asyncio.CancelledError:\n"
                  "            self._pending.pop(req_id, None)\n")
 
+GOOD_PG = '''
+import asyncio
+import socket
+import struct
+import threading
+
+CANCEL_REQUEST_CODE = 80877102
+
+
+class Conn:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.sock = None
+        self.backend_key = None
+
+    def _read_until_ready(self, mtype, payload):
+        if mtype == b"K":
+            self.backend_key = struct.unpack("!ii", payload[:8])
+
+    def send_cancel(self):
+        pid, secret = self.backend_key
+        sock = socket.create_connection((self.host, self.port), timeout=5)
+        try:
+            sock.sendall(struct.pack("!iiii", 16, CANCEL_REQUEST_CODE, pid, secret))
+        finally:
+            sock.close()
+
+
+class _Reclaim:
+    def __init__(self):
+        self.conns = []
+
+    def cancel(self):
+        for conn in self.conns:
+            threading.Thread(target=conn.send_cancel, daemon=True).start()
+
+
+class McpServer:
+    async def _serve(self, loop, workers, msg):
+        reclaim = _Reclaim()
+        try:
+            response = await loop.run_in_executor(workers, self._handle, msg)
+        except asyncio.CancelledError:
+            reclaim.cancel()
+            raise
+        except Exception:
+            response = None
+        return response
+'''
+
+_PG_ARM = ("        except asyncio.CancelledError:\n"
+           "            reclaim.cancel()\n"
+           "            raise\n")
+
 RECLAIM_FIXTURES = {
     # name -> (class, source, expected problem codes)
     "rcl_kill_good.py": (KILL, GOOD_KILL, []),
@@ -1123,6 +1410,19 @@ RECLAIM_FIXTURES = {
                                 "    return proc.communicate()\n"),
         [KILL_BLOCKING]),
     "rcl_kill_no_arm.py": (KILL, GOOD_KILL.replace(_KILL_ARM, ""), [KILL_NO_ARM]),
+    # The exemption, as a pair: the SAME source is flagged when the helper is
+    # not declared and silent when it is -- so it is the declaration, not the
+    # helper's shape, that excuses it.
+    "rcl_kill_exempt_declared.py": (KILL, GOOD_KILL + _KILL_VENDORED, []),
+    "rcl_kill_exempt_undeclared.py": (KILL, GOOD_KILL + _KILL_VENDORED,
+                                      [KILL_BLOCKING]),
+    # An exemption is a promise the child is NOT killed: the mutating runner
+    # passes without an adopt(), fails with one, and a row naming no spawning
+    # function fails on its own.
+    "rcl_kill_exempt_mutating_ok.py": (KILL, GOOD_KILL + _KILL_MUTATING_OK, []),
+    "rcl_kill_exempt_adopted.py": (KILL, GOOD_KILL + _KILL_MUTATING,
+                                   [KILL_EXEMPT_ADOPTED]),
+    "rcl_kill_exempt_stale.py": (KILL, GOOD_KILL + "\n", [KILL_EXEMPT_STALE]),
     "rcl_kill_arm_never_signals.py": (
         KILL, GOOD_KILL.replace("            reclaim.cancel()\n",
                                 "            reclaim.procs.clear()\n"),
@@ -1139,7 +1439,28 @@ RECLAIM_FIXTURES = {
     "rcl_lsp_swallows.py": (
         LSP_CANCEL, GOOD_LSP.replace("            raise\n", "            return None\n"),
         [LSP_ARM_SWALLOWS]),
+    "rcl_pg_good.py": (PG_CANCEL, GOOD_PG, []),
+    "rcl_pg_key_dropped.py": (
+        PG_CANCEL, GOOD_PG.replace(
+            '            self.backend_key = struct.unpack("!ii", payload[:8])\n',
+            '            struct.unpack("!ii", payload[:8])\n'),
+        [PG_NO_KEY]),
+    "rcl_pg_no_code.py": (
+        PG_CANCEL, GOOD_PG.replace("80877102", "80877103"), [PG_NO_CODE]),
+    "rcl_pg_same_socket.py": (
+        PG_CANCEL, GOOD_PG.replace(
+            "        sock = socket.create_connection((self.host, self.port), timeout=5)\n",
+            "        sock = self.sock\n"),
+        [PG_SAME_SOCKET]),
+    "rcl_pg_no_arm.py": (PG_CANCEL, GOOD_PG.replace(_PG_ARM, ""), [PG_NO_ARM]),
+    "rcl_pg_arm_never_sends.py": (
+        PG_CANCEL, GOOD_PG.replace("            reclaim.cancel()\n",
+                                   "            reclaim.conns.clear()\n"),
+        [PG_ARM_NEVER_SENDS]),
 }
+
+RECLAIM_ANALYSERS = {KILL: analyse_kill, LSP_CANCEL: analyse_lsp,
+                     PG_CANCEL: analyse_pg}
 
 
 def write_fixtures(root):
@@ -1183,7 +1504,7 @@ def group_control(suite, fixture_root):
 
     # The reclaim-class analysers, planted the same way: group B's `kill` and
     # `lsp-cancel` verdicts are only worth what these prove each code can do.
-    good = {KILL: GOOD_KILL, LSP_CANCEL: GOOD_LSP}
+    good = {KILL: GOOD_KILL, LSP_CANCEL: GOOD_LSP, PG_CANCEL: GOOD_PG}
     flagged = 0
     for name, (klass, source, expected) in sorted(RECLAIM_FIXTURES.items()):
         problems = []
@@ -1191,7 +1512,10 @@ def group_control(suite, fixture_root):
             problems.append("the mutation did not apply -- the fixture is GOOD "
                             "under another name and proves nothing")
         path = os.path.join(fixture_root, name)
-        got_shape = analyse_kill(path) if klass == KILL else analyse_lsp(path)
+        if name in RECLAIM_EXEMPT:
+            got_shape = analyse_kill(path, exempt=RECLAIM_EXEMPT[name])
+        else:
+            got_shape = RECLAIM_ANALYSERS[klass](path)
         got = sorted(got_shape.problems)
         if got != sorted(expected):
             problems.append("codes %r != expected %r" % (got, sorted(expected)))
@@ -1291,6 +1615,350 @@ def group_hygiene(suite, pyc_before, tree_before):
                  [] if not added else ["%d new path(s): %s" % (len(added), added[:5])])
 
 
+# -- group G: the PostgreSQL cancel, against a fake server --------------------
+
+PG_SSL_REQUEST_CODE = 80877103
+PG_FAKE_PID = 4242
+PG_FAKE_SECRET = 0x5EED1234
+PG_QUERY_CANCELED = "57014"
+PG_WAIT = 10.0
+
+
+class FakePg:
+    """A loopback PostgreSQL that speaks just enough v3 for the cancel path.
+
+    Every connection starts the way a real server reads one: an 8-byte head.
+    An SSLRequest is refused with `N` (so `sslmode=prefer` falls back to plain
+    TCP on BOTH sockets, and whether the cancel socket negotiated at all is
+    recorded); a CancelRequest is recorded byte for byte and the socket closed
+    with no reply, as the real postmaster does; a StartupMessage is answered
+    with AuthenticationOk, BackendKeyData, one ParameterStatus and
+    ReadyForQuery.  After that, `SELECT hold` blocks until a CancelRequest has
+    arrived and then answers with ErrorResponse 57014 + ReadyForQuery -- the
+    backend's own answer to a cancelled statement -- and `SELECT hold_drop`
+    drops the connection instead.  Anything else is one row, `ok`.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.queries = []
+        self.cancels = []           # (ssl_request_came_first, 16 raw bytes)
+        self.startups = 0
+        self.cancel_event = threading.Event()
+        self.closed = False
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(8)
+        self.port = self.srv.getsockname()[1]
+        threading.Thread(target=self._accept, daemon=True,
+                         name="fake-pg-accept").start()
+
+    def close(self):
+        self.closed = True
+        try:
+            self.srv.close()
+        except OSError:
+            pass
+
+    def _accept(self):
+        while not self.closed:
+            try:
+                conn, _addr = self.srv.accept()
+            except OSError:
+                return
+            conn.settimeout(PG_WAIT)
+            threading.Thread(target=self._serve, args=(conn,), daemon=True,
+                             name="fake-pg-conn").start()
+
+    @staticmethod
+    def _recv(conn, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = conn.recv(n - len(buf))
+            if not chunk:
+                raise EOFError
+            buf += chunk
+        return buf
+
+    @staticmethod
+    def _send(conn, mtype, payload):
+        conn.sendall(mtype + struct.pack("!i", len(payload) + 4) + payload)
+
+    def _row(self, conn):
+        self._send(conn, b"T", struct.pack("!h", 1) + b"v\x00" + b"\x00" * 18)
+        self._send(conn, b"D", struct.pack("!hi", 1, 2) + b"ok")
+        self._send(conn, b"C", b"SELECT 1\x00")
+        self._send(conn, b"Z", b"I")
+
+    def _serve(self, conn):
+        try:
+            ssl_first = False
+            while True:
+                head = self._recv(conn, 8)
+                length, code = struct.unpack("!ii", head)
+                if length == 8 and code == PG_SSL_REQUEST_CODE:
+                    ssl_first = True
+                    conn.sendall(b"N")
+                    continue
+                if length == 16 and code == PG_CANCEL_CODE:
+                    body = self._recv(conn, 8)
+                    with self.lock:
+                        self.cancels.append((ssl_first, head + body))
+                    self.cancel_event.set()
+                    return
+                self._recv(conn, length - 8)
+                break
+            with self.lock:
+                self.startups += 1
+            self._send(conn, b"R", struct.pack("!i", 0))
+            self._send(conn, b"K", struct.pack("!ii", PG_FAKE_PID, PG_FAKE_SECRET))
+            self._send(conn, b"S", b"server_version\x0016.0\x00")
+            self._send(conn, b"Z", b"I")
+            while True:
+                mtype = self._recv(conn, 1)
+                length = struct.unpack("!i", self._recv(conn, 4))[0]
+                payload = self._recv(conn, length - 4) if length > 4 else b""
+                if mtype == b"X":
+                    return
+                if mtype != b"Q":
+                    continue
+                sql = payload.rstrip(b"\x00").decode("utf-8")
+                with self.lock:
+                    self.queries.append(sql)
+                if not sql.startswith("SELECT hold"):
+                    self._row(conn)
+                    continue
+                fired = self.cancel_event.wait(PG_WAIT)
+                if sql == "SELECT hold_drop":
+                    return
+                if not fired:
+                    self._row(conn)
+                    continue
+                self._send(conn, b"E",
+                           b"SERROR\x00C" + PG_QUERY_CANCELED.encode() + b"\x00"
+                           b"Mcanceling statement due to user request\x00\x00")
+                self._send(conn, b"Z", b"I")
+        except (OSError, EOFError, struct.error):
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+def _load_postgres():
+    """mcp-postgres.py as a module.  Its name has a hyphen, so by path."""
+    import importlib.util
+    path = H.repo_path(SCAN_ROOT, "mcp-postgres.py")
+    spec = importlib.util.spec_from_file_location("_cancel_mcp_postgres", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _in_request(pg, reclaim, fn, *args):
+    """Run `fn(*args)` on a thread, inside a context carrying `reclaim` the way
+    McpServer._serve publishes it -- a worker thread's view of a request."""
+    ctx = contextvars.copy_context()
+    ctx.run(pg._REQUEST_RECLAIM.set, reclaim)
+    box = {}
+
+    def body():
+        try:
+            box["value"] = ctx.run(fn, *args)
+        except BaseException as exc:                   # noqa: BLE001
+            box["error"] = exc
+
+    thread = threading.Thread(target=body, daemon=True, name="fake-pg-worker")
+    thread.start()
+    return thread, box
+
+
+def _wait_for(pred, timeout=PG_WAIT):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def _pg_manager(pg, fake):
+    return pg.ConnectionManager({"host": "127.0.0.1", "port": fake.port,
+                                 "user": "u", "password": "", "dbname": "d",
+                                 "sslmode": "prefer", "timeout": PG_WAIT})
+
+
+def _g_cancel_and_drain(pg):
+    """G1 + G2 from one run: the bytes on the wire, then the connection."""
+    fake = FakePg()
+    try:
+        mgr = _pg_manager(pg, fake)
+        reclaim = pg._Reclaim()
+        thread, box = _in_request(pg, reclaim, mgr.simple_query, "default",
+                                  "SELECT hold")
+        wire, sync = [], []
+        if not _wait_for(lambda: "SELECT hold" in fake.queries):
+            return (["the held statement never reached the fake server"],
+                    ["the held statement never reached the fake server"])
+        conn_before = mgr.connections.get("default")
+        reclaim.cancel()
+        thread.join(PG_WAIT)
+        want = struct.pack("!iiii", 16, PG_CANCEL_CODE, PG_FAKE_PID, PG_FAKE_SECRET)
+        if not fake.cancels:
+            wire.append("no CancelRequest arrived on any socket")
+        elif fake.cancels != [(True, want)]:
+            wire.append("cancels %r != [(True, %r)] -- one CancelRequest, "
+                        "after the same SSLRequest the main connection sent"
+                        % (fake.cancels, want))
+        if fake.startups != 1:
+            wire.append("%d StartupMessage(s) -- the cancel must not log in"
+                        % fake.startups)
+        if thread.is_alive():
+            sync.append("the worker is still blocked %.0fs after the cancel"
+                        % PG_WAIT)
+            return wire, sync
+        err = box.get("error")
+        if getattr(err, "sqlstate", None) != PG_QUERY_CANCELED:
+            sync.append("the worker ended with %r, not the backend's %s error"
+                        % (box.get("error", box.get("value")), PG_QUERY_CANCELED))
+        try:
+            after = mgr.simple_query("default", "SELECT 1")
+            rows = after[0].rows if after else None
+        except Exception as exc:                         # noqa: BLE001
+            rows = "raised %s: %s" % (type(exc).__name__, exc)
+        if rows != [["ok"]]:
+            sync.append("the next statement on the connection got %r, not "
+                        "[['ok']] -- the cancelled exchange was not drained"
+                        % (rows,))
+        if mgr.connections.get("default") is not conn_before:
+            sync.append("the connection was replaced -- a drained exchange "
+                        "leaves the SAME connection usable")
+        if fake.queries != ["SELECT hold", "SELECT 1"]:
+            sync.append("the server saw %r" % fake.queries)
+        return wire, sync
+    finally:
+        fake.close()
+
+
+def _g_cancel_after_exchange(pg):
+    fake = FakePg()
+    try:
+        mgr = _pg_manager(pg, fake)
+        reclaim = pg._Reclaim()
+        thread, box = _in_request(pg, reclaim, mgr.simple_query, "default",
+                                  "SELECT 1")
+        thread.join(PG_WAIT)
+        problems = []
+        if "error" in box:
+            problems.append("the statement itself failed: %r" % box["error"])
+        reclaim.cancel()
+        time.sleep(0.5)
+        if fake.cancels:
+            problems.append("a CancelRequest went out after the exchange had "
+                            "finished -- it could cancel the NEXT request's "
+                            "statement on the same connection")
+        return problems
+    finally:
+        fake.close()
+
+
+def _g_cancel_before_exchange(pg):
+    fake = FakePg()
+    try:
+        mgr = _pg_manager(pg, fake)
+        reclaim = pg._Reclaim()
+        reclaim.cancel()
+        thread, box = _in_request(pg, reclaim, mgr.simple_query, "default",
+                                  "SELECT 1")
+        thread.join(PG_WAIT)
+        problems = []
+        if not isinstance(box.get("error"), pg.RequestCancelled):
+            problems.append("a request cancelled before its exchange ended "
+                            "with %r, not RequestCancelled"
+                            % (box.get("error", box.get("value")),))
+        if fake.queries:
+            problems.append("the server still received %r" % fake.queries)
+        return problems
+    finally:
+        fake.close()
+
+
+def _g_no_reexecute(pg):
+    fake = FakePg()
+    try:
+        mgr = _pg_manager(pg, fake)
+        reclaim = pg._Reclaim()
+        thread, box = _in_request(pg, reclaim, mgr.simple_query, "default",
+                                  "SELECT hold_drop")
+        if not _wait_for(lambda: "SELECT hold_drop" in fake.queries):
+            return ["the held statement never reached the fake server"]
+        reclaim.cancel()
+        thread.join(PG_WAIT)
+        time.sleep(0.3)
+        problems = []
+        if "value" in box:
+            problems.append("the dropped statement returned %r" % box["value"])
+        runs = fake.queries.count("SELECT hold_drop")
+        if runs != 1:
+            problems.append("the statement ran %d times -- the reconnect-once "
+                            "path re-executed a CANCELLED statement" % runs)
+        if fake.startups != 1:
+            problems.append("%d logins -- the cancelled request dialled a new "
+                            "connection to retry on" % fake.startups)
+        return problems
+    finally:
+        fake.close()
+
+
+def group_behaviour(suite):
+    """G. the PostgreSQL cancel end to end, against FakePg."""
+    cases = [
+        ("CancelRequest: captured key, 16 bytes, second socket",
+         "the BackendKeyData from startup is quoted in a 16-byte CancelRequest "
+         "on a socket of its own, after the same SSLRequest the main "
+         "connection sent, with no login"),
+        ("drain: the 57014 error is read, the connection stays in sync",
+         "the worker reads the backend's error through ReadyForQuery before "
+         "the lock is released, so the next statement on the SAME connection "
+         "gets its own rows"),
+        ("a cancel after the exchange sends nothing",
+         "a late cancel must not reach the backend's next statement"),
+        ("a request cancelled before its exchange never sends the statement",
+         "RequestCancelled, and the server sees no Query"),
+        ("a cancelled statement is never re-executed on a dropped connection",
+         "_run's reconnect-once retry is for a failed socket, not a cancel: "
+         "no second run AND no redial"),
+    ]
+    try:
+        pg = _load_postgres()
+        missing = [n for n in ("_Reclaim", "_REQUEST_RECLAIM", "RequestCancelled")
+                   if not hasattr(pg, n)]
+        if missing:
+            raise AttributeError("mcp-postgres.py defines no %s"
+                                 % ", ".join(missing))
+    except Exception as exc:                             # noqa: BLE001
+        for title, why in cases:
+            suite.record(GG, title, ["%s: %s" % (type(exc).__name__, exc)],
+                         detail=["why         : %s" % why])
+        return
+    results = []
+    try:
+        wire, sync = _g_cancel_and_drain(pg)
+        results += [wire, sync]
+    except Exception as exc:                             # noqa: BLE001
+        results += [["raised %s: %s" % (type(exc).__name__, exc)]] * 2
+    for fn in (_g_cancel_after_exchange, _g_cancel_before_exchange,
+               _g_no_reexecute):
+        try:
+            results.append(fn(pg))
+        except Exception as exc:                         # noqa: BLE001
+            results.append(["raised %s: %s" % (type(exc).__name__, exc)])
+    for (title, why), problems in zip(cases, results):
+        suite.record(GG, title, problems, detail=["why         : %s" % why])
+
+
 # ---------------------------------------------------------------------------
 
 def run(opts=None):
@@ -1316,6 +1984,7 @@ def run(opts=None):
         group_roster(suite, shapes, files)
         group_control(suite, fixture_root)
         group_skeleton(suite)
+        group_behaviour(suite)
         group_hygiene(suite, pyc_before, tree_before)
     finally:
         if opts.keep:

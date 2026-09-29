@@ -68,14 +68,17 @@ Call `wiki_call` with no `function` to print the function list.
 
 import argparse
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -1402,6 +1405,93 @@ class _ExecutionGrant:
         self.function = function
 
 
+# ---------------------------------------------------------------------------
+# Request-scoped measurement runs (R-0043: a cancel kills the child)
+# ---------------------------------------------------------------------------
+# The seconds a SIGTERM'd measurement group gets before the SIGKILL -- forge's
+# grace.
+CANCEL_KILL_GRACE = 5.0
+
+
+class _Reclaim:
+    """One request's measurement children, so cancelling the request kills them.
+
+    McpServer._serve makes one per request and publishes it through
+    _REQUEST_RECLAIM into the context the worker thread runs in. _measure_run
+    ADOPTS every child it starts; _serve's CancelledError arm calls cancel() on
+    the LOOP thread while the worker is still blocked in communicate() -- the
+    signal is what unblocks it, and the thread's result is then discarded.
+
+    NOT used by git(): that helper is vendored code-identical with
+    `_wikilib.py`'s (tests/test_wiki_index.py groups G and H), and each of its
+    calls is one local query bounded by GIT_TIMEOUT_SEC, so a cancelled
+    request's git query runs to its end. The measurement command -- a whole
+    test suite or a tree walk, up to MEASURE_TIMEOUT_SEC -- is the child worth
+    reclaiming.
+
+    The lock orders adopt() against cancel(): a child adopted after the cancel
+    is killed on the spot, so a cancelled request's child cannot escape.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._procs: List[subprocess.Popen] = []
+        self.cancelled = False
+
+    def adopt(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            if not self.cancelled:
+                self._procs.append(proc)
+                return
+        # Already cancelled: nobody wants this child's output.
+        _signal_group(proc, signal.SIGKILL)
+
+    def cancel(self, loop: asyncio.AbstractEventLoop) -> None:
+        """SIGTERM every adopted group now, SIGKILL survivors after the grace.
+
+        Never blocks: it runs on the event-loop thread, which is why the
+        escalation is a call_later and not a wait.
+        """
+        with self._lock:
+            self.cancelled = True
+            procs = list(self._procs)
+        for proc in procs:
+            _signal_group(proc, signal.SIGTERM)
+        if procs:
+            loop.call_later(CANCEL_KILL_GRACE, self._escalate, procs)
+
+    @staticmethod
+    def _escalate(procs: List[subprocess.Popen]) -> None:
+        for proc in procs:
+            _signal_group(proc, signal.SIGKILL)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal *proc*'s process group, if the child has not been reaped yet.
+
+    The group id is the child's pid (start_new_session makes it the leader).
+    No os.getpgid() round trip, on purpose: once the child is reaped
+    (returncode set) that pid may name somebody else's process, and while
+    returncode is None the worker's communicate() has not reaped it.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, sig)
+    except OSError:
+        pass
+
+
+# The current request's _Reclaim, or None outside a request (a direct caller).
+_REQUEST_RECLAIM: "contextvars.ContextVar[Optional[_Reclaim]]" = contextvars.ContextVar(
+    "wiki_request_reclaim", default=None
+)
+
+
+class RequestCancelled(Exception):
+    """The request was cancelled before this measurement could start."""
+
+
 def _measure_run(name: str, entry: dict, repo: str,
                  grant: "_ExecutionGrant") -> Tuple[Optional[str], str]:
     """Run ONE measurement command; return (stdout, error).
@@ -1418,10 +1508,18 @@ def _measure_run(name: str, entry: dict, repo: str,
         that read it would eat protocol messages and desync the session, which
         is the same fix `git()` above carries and for the same reason.
       * an explicit timeout — see MEASURE_TIMEOUT_SEC.
+      * `start_new_session=True`, and the child ADOPTED by the current
+        request's _Reclaim (R-0043) — so a cancelled `measure` / `verify`
+        kills the command's whole process group instead of letting it run to
+        its timeout. This is subprocess.run's own body with the Popen kept
+        (run hands back no handle a cancel could reach); the timeout path is
+        run()'s, verbatim: kill the child, reap it, re-raise TimeoutExpired.
 
     A failure is RETURNED, never raised: one broken entry must not blind a
     corpus-wide report about the other regions, and the caller renders the
-    reason beside the region it belongs to.
+    reason beside the region it belongs to. The one exception is a CANCELLED
+    request, whose next measurement is not started at all: RequestCancelled
+    propagates, and nobody reads the answer it aborts.
     """
     if not isinstance(grant, _ExecutionGrant):
         raise TypeError(
@@ -1429,14 +1527,31 @@ def _measure_run(name: str, entry: dict, repo: str,
             "executes a command named by a repo file, and that capability is "
             "passed explicitly from the handler the caller asked for")
     argv = list(entry["command"])
+    reclaim = _REQUEST_RECLAIM.get()
+    if reclaim is not None and reclaim.cancelled:
+        raise RequestCancelled(argv[0])
     try:
-        proc = subprocess.run(
+        with subprocess.Popen(
             argv, cwd=repo,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True,
-            timeout=MEASURE_TIMEOUT_SEC,
-        )
+            start_new_session=True,
+        ) as child:
+            if reclaim is not None:
+                reclaim.adopt(child)
+            try:
+                stdout, stderr = child.communicate(timeout=MEASURE_TIMEOUT_SEC)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                # POSIX communicate already put the output so far on the exception.
+                child.wait()
+                raise
+            except BaseException:
+                child.kill()
+                raise
+            proc = subprocess.CompletedProcess(child.args, child.poll(),
+                                               stdout, stderr)
     except FileNotFoundError:
         return None, "no such command: %s" % argv[0]
     except PermissionError:
@@ -4006,8 +4121,24 @@ class McpServer:
 
     async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
         """One request, from dispatch to written reply. Runs as its own task."""
+        # R-0043: this request's measurement children, published into the
+        # context the worker thread runs in. The task already owns a private
+        # copy of the context, so the set() is invisible to every other
+        # request, and copy_context().run carries it across -- a thread starts
+        # with a fresh context, so without it _measure_run would see None.
+        reclaim = _Reclaim()
+        _REQUEST_RECLAIM.set(reclaim)
+        ctx = contextvars.copy_context()
         try:
-            response = await loop.run_in_executor(workers, self._handle_message, msg)
+            response = await loop.run_in_executor(
+                workers, ctx.run, self._handle_message, msg)
+        except asyncio.CancelledError:
+            # notifications/cancelled (or shutdown). The worker thread is still
+            # blocked in communicate(); killing the child's group is what lets it
+            # return, and whatever it returns is discarded. Re-raised, so no
+            # reply is written.
+            reclaim.cancel(loop)
+            raise
         except Exception as exc:  # noqa: BLE001 — CancelledError is a BaseException
             log.exception("Unhandled exception while handling message")
             response = self._error(

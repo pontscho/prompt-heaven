@@ -168,16 +168,51 @@ def operator_split(rendered):
 # offline plumbing: the server never gets to spawn git
 # ---------------------------------------------------------------------------
 
+class StubProc:
+    """What mcp-git's _run_git needs of a Popen, and nothing more: a context
+    manager whose communicate() hands back the canned output.  No process
+    exists; `pid` is never read because no request-scoped reclaim is set when
+    handle_git_call is driven directly."""
+
+    def __init__(self, args, returncode, stdout, stderr):
+        self.args = args
+        self.returncode = None
+        self._result = (returncode, stdout, stderr)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def communicate(self, input=None, timeout=None):
+        self.returncode = self._result[0]
+        return self._result[1], self._result[2]
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        pass
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 class StubSubprocess:
     """Stands in for the `subprocess` module inside the module under test.
 
-    Only the three attributes mcp-git touches are provided, so an unexpected use
-    of any other subprocess API shows up as an AttributeError instead of
-    silently reaching the real one.
+    Only the attributes mcp-git touches are provided, so an unexpected use of
+    any other subprocess API shows up as an AttributeError instead of silently
+    reaching the real one.  The spawn is a Popen since R-0043 -- _run_git keeps
+    the handle so a cancelled request can kill its child -- so that is what is
+    stubbed; every call is still recorded here and nothing is ever spawned.
     """
 
     DEVNULL = subprocess.DEVNULL
+    PIPE = subprocess.PIPE
     TimeoutExpired = subprocess.TimeoutExpired
+    CompletedProcess = subprocess.CompletedProcess
 
     def __init__(self):
         self.calls = []
@@ -185,10 +220,9 @@ class StubSubprocess:
         self.stdout = "STUB-STDOUT\n"
         self.stderr = ""
 
-    def run(self, cmd, **kwargs):
+    def Popen(self, cmd, **kwargs):
         self.calls.append(list(cmd))
-        return subprocess.CompletedProcess(list(cmd), self.returncode,
-                                           self.stdout, self.stderr)
+        return StubProc(list(cmd), self.returncode, self.stdout, self.stderr)
 
 
 def extract_cmdline(text):
@@ -1590,6 +1624,64 @@ def run(opts=None):
               note="`arguments` is a plausible guess that was deliberately NOT "
                    "claimed; recorded so the boundary of the set is visible "
                    "rather than assumed")
+
+        # R-0043: a cancel may kill a READ-ONLY git child, never a MUTATING one
+        # (a stash killed mid-way can leave index.lock or a half-applied stash).
+        # tests/test_cancel.py gates the runner's shape by AST; only a call can
+        # show which runner an argv is ROUTED to, so it is driven here, inside a
+        # context carrying a recording reclaim the way McpServer._serve does.
+        import contextvars
+
+        class RecordingReclaim:
+            def __init__(self, cancelled=False):
+                self.cancelled = cancelled
+                self.adopted = []
+
+            def adopt(self, proc):
+                self.adopted.append(list(proc.args))
+
+        def scoped(function, params, cancelled=False):
+            rec = RecordingReclaim(cancelled)
+            ctx = contextvars.copy_context()
+            ctx.run(drv.mod._REQUEST_RECLAIM.set, rec)
+            before = len(drv.stub.calls)
+            raised = None
+            try:
+                ctx.run(drv.mod.handle_git_call,
+                        {"function": function, "params": params}, H.REPO_ROOT)
+            except drv.mod.RequestCancelled as exc:
+                raised = exc
+            return rec.adopted, len(drv.stub.calls) - before, raised
+
+        problems, rows = [], []
+        for function, params, mutating in (
+                ("stash", {}, True),
+                ("stash", {"args": ["push"]}, True),
+                ("stash", {"args": ["list"]}, False),
+                ("log", {"args": ["-1"]}, False)):
+            adopted, spawned, _raised = scoped(function, params)
+            rows.append("%-5s %-18r mutating=%-5s spawned=%d adopted=%d"
+                        % (function, params, mutating, spawned, len(adopted)))
+            if spawned != 1:
+                problems.append("%s %r spawned %d, not 1" % (function, params,
+                                                             spawned))
+            elif mutating and adopted:
+                problems.append("%s %r is MUTATING but its child was adopted -- "
+                                "a cancel would kill it mid-way" % (function, params))
+            elif not mutating and not adopted:
+                problems.append("%s %r is read-only but its child was not "
+                                "adopted -- a cancel cannot reach it"
+                                % (function, params))
+        adopted, spawned, raised = scoped("stash", {"args": ["push"]},
+                                          cancelled=True)
+        rows.append("stash push, request ALREADY cancelled: spawned=%d raised=%s"
+                    % (spawned, type(raised).__name__ if raised else None))
+        if spawned or raised is None:
+            problems.append("a stash whose request was already cancelled was "
+                            "not refused before the spawn")
+        suite.record("H", "cancel-never-adopts-a-mutating-git", problems,
+                     detail=rows + ["why: the argv _MUTATING_GIT_LOCK serializes "
+                                    "is exactly the argv a cancel may not kill"])
 
         stub_ok = drv.mod.subprocess is drv.stub
         non_git = [c for c in drv.stub.calls if not c or c[0] != "git"]

@@ -266,7 +266,7 @@ SUITES = [
      "regex mode bounded the same way, the file left untouched on overrun",
      209),
     ("mcp_git_params", run_mcp_git_params,
-     "mcp-git named params -> git argv, offline", 298),
+     "mcp-git named params -> git argv, offline", 299),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,
@@ -437,7 +437,8 @@ SUITES = [
      "that refuses a bool or float requestId and never replies, initialize "
      "never cancellable, a dispatch target that lets the CancelledError "
      "through, and what a cancel reclaims declared per server and MEASURED "
-     "for the kill and lsp-cancel classes", 67),
+     "for the kill, lsp-cancel and pg-cancel classes -- the PostgreSQL "
+     "CancelRequest and its drain driven against a loopback fake server", 83),
     # TYPED for read_loop's reason above, not mcp_footprint's: a server that
     # appears without a declared row is the defect, so a moved count is the
     # alarm working.  The two per-server groups make it 2N + a fixed tail.
