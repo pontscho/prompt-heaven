@@ -167,7 +167,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 ### `/p:roadmap`
 
 **Inputs:**
-- A command from the user: `init`, `add`, `list`, `show`, `move`, `rank`, `link`, `close`, `render`, `wip`, `export`, or the skill-level `adopt` op (interactive)
+- A command from the user: `init`, `add`, `list`, `show`, `move`, `start`, `rank`, `link`, `edit`, `close`, `render`, `wip`, `export`, or the skill-level `adopt` op (interactive)
 - `docs/roadmap/roadmap.md` and `docs/roadmap/archive/*.md` (read by `roadmap.py` on every command; the default target resolves against the git top-level)
 - `adopt` only: the wiki root's ADR declared-limit sections, draft `spec` pages with `targets:`, "Open Questions" / "Next Steps" sections, and pending `requirements.yaml` leftovers — harvested read-only by `p:minion-explorer`
 

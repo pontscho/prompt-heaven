@@ -75,7 +75,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `jira_cli` | `test_jira_cli.py` | A–M |
 | `bitbucket_cli` | `test_bitbucket_cli.py` | A–K |
 | `checkpoint` | `test_checkpoint.py` | A–M |
-| `roadmap` | `test_roadmap.py` | A–L |
+| `roadmap` | `test_roadmap.py` | A–M |
 | `generated_region` | `test_generated_region.py` | A–G |
 | `mcp_websocket` | `test_mcp_websocket.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
@@ -258,7 +258,7 @@ tests/
   test_checkpoint.py         groups A-M   (drives a WRITER: every path is a
                                            mkdtemp path, never either of the
                                            script's own default targets)
-  test_roadmap.py            groups A-L   (drives the roadmap WRITER: every path
+  test_roadmap.py            groups A-M   (drives the roadmap WRITER: every path
                                            is a mkdtemp path and the default
                                            target is unreachable by construction;
                                            group K digests the live roadmap and

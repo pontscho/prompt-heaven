@@ -1,6 +1,6 @@
 ---
 name: roadmap
-description: Keep the project's known-but-unscheduled work in the wiki as roadmap items -- docs/roadmap/roadmap.md holds the live items in horizon lanes (now, next, later, inbox), and every closed item is archived as its own immutable page under docs/roadmap/archive/. Both are written ONLY by the bundled stdlib script roadmap.py; this skill is its operator contract. Trigger on `/p:roadmap`, `/p:roadmap adopt` (harvest candidates from ADR declared limits, draft specs and open-question sections, for the user to approve), "add to the roadmap", "what is next", "close R-0014", or any request to record, triage, reorder, link, close or export roadmap work.
+description: Keep the project's known-but-unscheduled work in the wiki as roadmap items -- docs/roadmap/roadmap.md holds the live items in horizon lanes (now, next, later, inbox), and every closed item is archived as its own immutable page under docs/roadmap/archive/. Both are written ONLY by the bundled stdlib script roadmap.py; this skill is its operator contract. Trigger on `/p:roadmap`, `/p:roadmap adopt` (harvest candidates from ADR declared limits, draft specs and open-question sections, for the user to approve), "add to the roadmap", "what is next", "close R-0014", or any request to record, triage, reorder, link, edit, close or export roadmap work.
 ---
 
 # Roadmap
@@ -130,7 +130,8 @@ when `/p:task-plan` wrote a plan naming it.
   and `[]` when empty. **Optional scalars are omitted** when unset. One spelling each.
 - The **why** is free markdown prose under the key lines. The **log** is
   append-only: every lane or state change adds one line with the date and the
-  reason. An item's age (`list --untriaged`) is counted from its first log line.
+  reason, and every `edit` adds one in the item's own lane with no state change
+  (`- 2026-09-29 next->next: edited title, tags: <reason>`). An item's age (`list --untriaged`) is counted from its first log line.
 - **Origin conventions:** `<repo-relative path>#<heading-slug>` for an item harvested
   from a document; `user:<YYYY-MM-DD>:<kebab-key>` for an idea a person raised.
 - **One harvested item per source section, by design.** A section with several
@@ -156,6 +157,7 @@ python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py start R-0014 [--rea
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py rank R-0014 --before R-0012            # reorder within a lane (or --top)
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py link R-0014 --item-file '<staged .json>'   # change origin / spec / blocked_by from a staged JSON object
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py link R-0014 [--spec 'SLUG' | --no-spec] [--blocked-by IDS] [--unblock IDS] [--follows ID | --no-follows]
+python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py edit R-0014 --item-file '<staged .json>' [--reason-file '<staged .txt>']   # change an OPEN item's title / why / tags; appends one log line
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py close R-0014 --commit 0123abc [--slug 'SLUG']   # done: the commit must exist; stored as the full sha; prints the archive path
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py close R-0014 --reason-file '<staged .txt>' [--slug 'SLUG']   # dropped
 python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py render                                 # regenerate the summary region; persists an archive-wins repair
@@ -166,8 +168,8 @@ python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py export [--out '<sta
 - `IDS` and `TAGS` are comma-separated and the flag may repeat (`--tags wiki,scripts`).
   `ID` accepts `R-0014`; write it that way. `L` is `now`, `next`, `later` or `inbox`
   (`unset` is accepted as the same lane). `S` is `idea`, `planned` or `active`.
-- `move`, `start`, `close` and `wip` take the reason as `--reason R` OR
-  `--reason-file PATH`, never both; `start` alone may omit it. `add` takes `--why TEXT` or `--why-file PATH`, never both.
+- `move`, `start`, `close`, `wip` and `edit` take the reason as `--reason R` OR
+  `--reason-file PATH`, never both; `start` and `edit` may omit it. `add` takes `--why TEXT` or `--why-file PATH`, never both.
   The inline `--reason R`, `--why TEXT`, `--title T`, `--origin O`, `--severity S` and
   `--tags TAGS` forms are **manual use only**: this skill always stages those values
   (the staging rule below).
@@ -176,6 +178,7 @@ python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py export [--out '<sta
   `--state`, `--spec`, `--blocked-by` and `--follows` may accompany it.
   `link --item-file` excludes `--origin`, `--spec`, `--no-spec` and `--blocked-by`;
   `--unblock`, `--follows` and `--no-follows` may accompany it.
+  `edit` has no inline value flags at all: `--item-file` is its only route.
 - **Default target.** Without `--file`, the target is `docs/roadmap/roadmap.md` under
   the git top-level of the working directory (the working directory itself outside a
   work tree), so invoking from a subdirectory never creates a second roadmap there.
@@ -266,7 +269,8 @@ the git top-level.
   key (on `add`) -- `start` WITHOUT a reason needs no staged file, because its default
   reason `started` is written by roadmap.py and never crosses the shell -- and an origin, spec or blocker change on an existing item via
   `link --item-file <path>` (keys `origin`, `spec`, `blocked_by`). `link --origin "..."`
-  is never typed;
+  is never typed; a title, why or tags change on an existing item via
+  `edit --item-file <path>` (keys `title`, `why`, `tags`);
 - staging file names start with `roadmap-stage-` (the adopt export: `roadmap-adopt-`),
   NEVER with `.roadmap-`, which is the writer's own temp prefix -- the same reason
   checkpoint's staging file avoids the checkpoint stem
@@ -301,6 +305,20 @@ optional; `horizon` defaults to the inbox, `reason` to `added`:
 }
 ```
 
+**The `edit` item file** -- a JSON object with at least one of `title`, `why`,
+`tags` (a list of strings, replacing the whole list), and no other key. Only an open
+item can be edited; a closed item's archive page is immutable. A field whose value
+equals the current one is not named in the log line; if none changes, the edit is
+refused as a no-op. Severity, origin, spec and blockers are not edit's (`link` owns
+the last three):
+
+```json
+{
+  "title": "Give _wikilib.git() the server's timeout",
+  "tags": ["scripts", "wiki"]
+}
+```
+
 An item file is refused if it is not a JSON object, repeats a key, carries a key the
 command does not take, lacks a required key, or holds a non-string where a string
 belongs. Its values then pass exactly the same checks as the flags: the file
@@ -325,7 +343,7 @@ bypasses nothing.
   back on the next harvest.
 - `now is full (...)` names the occupants: move one out, close one, or change the cap
   with `wip`.
-- A closed item is immutable: there is no reopen.
+- A closed item is immutable: there is no reopen and no `edit`.
 
 ## Tables and escaping
 
@@ -414,7 +432,8 @@ The machine proposes, a human decides, the script writes.
   `done`, `dropped`), and `items`. Each item carries `id`, `title`, `state`,
   `horizon`, `rank`, `ready`, `origin`, `spec`, `blocked_by`, `follows`, `severity`,
   `tags`, `why`, `log` (each entry `{"date", "from", "to", "reason", "state"}`, with
-  `from` null on the creation line and `state` `{"from", "to"}` or null), `closed`
+  `from` null on the creation line, `state` `{"from", "to"}` or null, and an `edit`
+  line an ordinary entry with `from` equal to `to` and `state` null), `closed`
   (null, or `{"date", "commit", "reason"}`) and `path` (relative to the wiki root's
   parent, e.g. `docs/roadmap/roadmap.md`).
 - **Determinism.** No wall clock anywhere; sorted keys, two-space indent, UTF-8; items

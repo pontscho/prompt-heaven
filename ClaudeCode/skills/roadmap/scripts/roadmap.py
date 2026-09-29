@@ -116,8 +116,10 @@ GIT_SAFE_ARGV = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev
 ITEM_FILE_KEYS = {
     "add": ("title", "origin", "why", "tags", "severity", "horizon", "reason"),
     "link": ("origin", "spec", "blocked_by"),
+    "edit": ("title", "why", "tags"),        # R-0039: an OPEN item's prose, after add
 }
-ITEM_FILE_REQUIRED = {"add": ("title", "origin"), "link": ()}   # link: at least one key
+# A command with no required key needs at least one of its keys (link, edit).
+ITEM_FILE_REQUIRED = {"add": ("title", "origin"), "link": (), "edit": ()}
 STAGED_MAX_BYTES = 65536   # --item-file / --why-file / --reason-file: small by contract
 # Cap for every other read_regular: roadmap.md, each archive entry, each wiki page of the
 # name scan. An UNARGUED starting value, like wip_now (adr 0022, after adr 0013): it
@@ -816,6 +818,12 @@ def check_list_item(field, value):
     return parse_id(value)
 
 
+def check_tags(values):
+    """A whole tag list, as add and edit both store it: each tag checked,
+    then sorted and de-duplicated."""
+    return tuple(sorted(set(check_list_item("tag", tag) for tag in values)))
+
+
 def check_why(text):
     """Why prose: newlines are fine, nothing that would split the item or the
     file is. Returns the text without leading and trailing blank lines (L3)."""
@@ -890,8 +898,9 @@ def parse_item_file(text, where, command):
         if key not in allowed:
             die("--item-file %s: unknown key %r for %s (want %s)"
                 % (where, key, command, ", ".join(allowed)))
-    if command == "link" and not obj:
-        die("--item-file %s: link needs at least one of origin, spec, blocked_by" % where)
+    if not ITEM_FILE_REQUIRED[command] and not obj:
+        die("--item-file %s: %s needs at least one of %s"
+            % (where, command, ", ".join(allowed)))
     for key in ITEM_FILE_REQUIRED[command]:
         if key not in obj:
             die("--item-file %s: %s is missing" % (where, key))
@@ -1684,7 +1693,7 @@ def cmd_add(path, item_file, title, origin, horizon, state, spec, blocked_by, fo
     origin = check_scalar("origin", origin)
     if severity is not None:
         severity = check_scalar("severity", severity)
-    tag_values = tuple(sorted(set(check_list_item("tag", tag) for tag in tag_values)))
+    tag_values = check_tags(tag_values)
     why = check_why(why or "")
     reason = check_reason(reason) if reason is not None else "added"
     lane = lane_input(horizon, "--horizon") if horizon is not None else "unset"
@@ -1881,6 +1890,45 @@ def cmd_link(path, raw_id, item_file, spec, no_spec, origin, blocked_by, unblock
     return 0
 
 
+def cmd_edit(path, raw_id, item_file, reason, reason_file):
+    """An OPEN item's title, why and/or tags, from a staged JSON object only
+    (R-0039): this is prose, so it never crosses the shell line. Every value
+    passes add's own checks. The log gains one line in the item's own lane
+    (lane->lane, no state) naming the fields that changed, so the export keeps
+    its shape. A closed item is refused: its archive page is immutable."""
+    if item_file is None:
+        die("edit needs --item-file PATH (a JSON object with any of %s)"
+            % ", ".join(ITEM_FILE_KEYS["edit"]))
+    values = parse_item_file(read_staged_file("--item-file", item_file), item_file, "edit")
+    new = {}
+    if "title" in values:
+        new["title"] = check_scalar("title", values["title"])
+    if "why" in values:
+        new["why"] = check_why(values["why"])
+    if "tags" in values:
+        new["tags"] = check_tags(values["tags"])
+    text = None
+    if reason is not None or reason_file is not None:
+        text = _staged_reason(reason, reason_file, None)
+    n = parse_id(raw_id)
+    current = load_state(path)
+    item, lane, index = resolve(current, n)
+    if lane is None:
+        refuse_closed(item)
+    fields = [key for key in ITEM_FILE_KEYS["edit"] if key in new]
+    changed = [key for key in fields if new[key] != getattr(item, key)]
+    if not changed:
+        die("%s: %s unchanged -- nothing to edit" % (fmt_id(n), ", ".join(fields)))
+    line = "edited %s" % ", ".join(changed) + (": %s" % text if text is not None else "")
+    entry = LogEntry(today(), lane, lane, None, None, line)
+    edited = item._replace(log=item.log + (entry,), **dict((key, new[key]) for key in changed))
+    lanes = _copy_lanes(current)
+    lanes[lane][index] = edited             # an edit keeps its rank
+    commit(current._replace(lanes=lanes))
+    emit("%s: edited (%s)" % (fmt_id(n), ", ".join(changed)))
+    return 0
+
+
 def cmd_render(path):
     """Re-render and persist any repair; nothing is written (the mtime stays)
     when the bytes would not change."""
@@ -2071,6 +2119,7 @@ COMMANDS = {
     "start": cmd_move,      # move ID now --state active, default reason `started`
     "rank": cmd_rank,
     "link": cmd_link,
+    "edit": cmd_edit,
     "render": cmd_render,
     "wip": cmd_wip,
     "close": cmd_close,
@@ -2088,6 +2137,7 @@ COMMAND_ARGS = {
     "rank": ("id", "before", "top"),
     "link": ("id", "item_file", "spec", "no_spec", "origin", "blocked_by", "unblock",
              "follows", "no_follows"),
+    "edit": ("id", "item_file", "reason", "reason_file"),
     "render": (),
     "wip": ("n", "reason", "reason_file"),
     "close": ("id", "commit", "reason", "reason_file", "slug"),
@@ -2169,6 +2219,13 @@ def build_parser():
     link.add_argument("--unblock", action="append", metavar="IDS")
     link.add_argument("--follows", metavar="ID")
     link.add_argument("--no-follows", action="store_true")
+
+    edit = sub.add_parser("edit", parents=[parent],
+                          help="edit an open item's title, why and tags")
+    edit.add_argument("id")
+    edit.add_argument("--item-file", metavar="PATH", help="any of title/why/tags as JSON")
+    edit.add_argument("--reason")
+    edit.add_argument("--reason-file", metavar="PATH")
 
     sub.add_parser("render", parents=[parent], help="re-render the file, persisting repairs")
 

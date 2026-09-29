@@ -78,6 +78,10 @@ Groups:
   L  the CLI surface: --today, the default target, UTF-8 under an ASCII
      locale, a non-UTF-8 path, a reader that closes early, an IO error on
      stdout
+  M  edit (R-0039): an open item's title, why and tags from a staged JSON
+     object, byte-exact against EXPECTED_B, one dated log line naming the
+     changed fields; every value refusal byte-identical to add's; archived
+     and twin ids refused; the lock in-process; the export shape unchanged
 
 The git sandboxes of G and H are built by this suite's own git (`git_run`),
 under the same isolation as every child; a git that cannot init or commit
@@ -132,6 +136,7 @@ GI = "I. refusals + staged input"
 GJ = "J. negative control"
 GK = "K. hygiene"
 GL = "L. CLI surface"
+GM = "M. edit"
 
 # The on-disk format contract, spelled out independently of the module: a test
 # that imported these would pass a rename that orphaned every file already
@@ -5044,6 +5049,322 @@ def group_k(suite, tree_before, pyc_before, live_before, workspace):
 
 
 # ---------------------------------------------------------------------------
+# M. edit -- an open item's title, why and tags after add (R-0039)
+# ---------------------------------------------------------------------------
+
+EDIT_TITLE = "Pin the export golden twice"
+EDIT_WHY = "Line one of the new why.\n\nA second paragraph, `with code`."
+_R4_ROW = ("next", "R-0004", "idea", "Pin the export golden", "yes")
+_R2_TITLE = "Unify the skill and server git helpers"
+_R2_ROW = ("next", "R-0002", "planned", _R2_TITLE, "no")
+_R1_LOG = "- 2026-09-29 later->now [idea->active]: picked up\n"
+_R4_LOG = "- 2026-09-28 new->next: added\n"
+
+
+def _edit_item(work, cid, body, name="edit.json"):
+    """A staged edit item file: a dict is JSON-encoded, a str staged raw."""
+    return staged(work, cid, name,
+                  body if isinstance(body, str) else json.dumps(body))
+
+
+def _edit_accepted(suite, work, cid, ident, body, want_out, changes, why,
+                   reason=None):
+    """One accepted edit, judged byte for byte: the file must be EXPECTED_B
+    with exactly `changes` applied, and a `render` right after must be a
+    no-op (the edit wrote the canonical form)."""
+    path = stage_roadmap(work, cid, EXPECTED_B)
+    argv = ["edit", ident, "--item-file", _edit_item(work, cid, body)]
+    if reason is not None:
+        argv += ["--reason-file", staged(work, cid, "r.txt", reason)]
+    code, out, err = cli(path, *argv)
+    problems = shape_problems(code, err, 0)
+    problems += problem_if(out != want_out + "\n", "stdout %r, want %r"
+                           % (out, want_out))
+    want = EXPECTED_B
+    for change in changes:
+        want, bad = mutated(want, change)
+        problems += [bad] if bad else []
+    text = read_utf8(path) if os.path.isfile(path) else ""
+    problems += problem_if(text != want, "the file is not EXPECTED_B with "
+                           "the edit applied: %s" % first_diff(text, want))
+    rcode, rout, rerr = cli(path, "render")
+    problems += shape_problems(rcode, rerr, 0)
+    problems += problem_if(not rout.startswith("unchanged: "),
+                           "render after the edit rewrote the file: %r"
+                           % rout.strip())
+    problems += problem_if(temp_leftovers(path), "temp left behind: %r"
+                           % temp_leftovers(path))
+    suite.record(GM, cid, problems,
+                 detail=[_d("why", why), _d("stdout", out.strip() or "<empty>"),
+                         _d("stderr", err.strip() or "<empty>")])
+
+
+def _group_m_accepted(suite, work):
+    _edit_accepted(
+        suite, work, "m-edit-title", "R-0004", {"title": EDIT_TITLE},
+        "R-0004: edited (title)",
+        [("## R-0004 %s Pin the export golden\n" % DOT,
+          "## R-0004 %s %s\n" % (DOT, EDIT_TITLE)),
+         (_ROW % _R4_ROW, _ROW % (_R4_ROW[:3] + (EDIT_TITLE, "yes"))),
+         (_R4_LOG + "\n## R-0002",
+          _R4_LOG + "- 2026-09-28 next->next: edited title\n\n## R-0002")],
+        "the heading and the summary row carry the new title; one log line")
+    _edit_accepted(
+        suite, work, "m-edit-why", "R-0001", {"why": EDIT_WHY},
+        "R-0001: edited (why)",
+        [(WHY_1, EDIT_WHY),
+         (_R1_LOG, _R1_LOG + "- 2026-09-28 now->now: edited why\n")],
+        "a multi-line why with a backtick replaces the old one")
+    _edit_accepted(
+        suite, work, "m-edit-why-added", "R-0004", {"why": "\nA why at last.\n\n"},
+        "R-0004: edited (why)",
+        [("tags: []\n\n### Log\n\n" + _R4_LOG,
+          "tags: []\n\nA why at last.\n\n### Log\n\n" + _R4_LOG
+          + "- 2026-09-28 next->next: edited why\n")],
+        "an item without a why gains one; blank edges trimmed like add")
+    _edit_accepted(
+        suite, work, "m-edit-why-cleared", "R-0001", {"why": "  \n"},
+        "R-0001: edited (why)",
+        [(WHY_1 + "\n\n", ""),
+         (_R1_LOG, _R1_LOG + "- 2026-09-28 now->now: edited why\n")],
+        "a blank why clears it, as an absent why does on add")
+    _edit_accepted(
+        suite, work, "m-edit-tags", "R-0003", {"tags": ["wiki", "adr", "adr"]},
+        "R-0003: edited (tags)",
+        [("tags: [adr, producer]\n", "tags: [adr, wiki]\n"),
+         ("- 2026-09-28 new->unset: added\n",
+          "- 2026-09-28 new->unset: added\n"
+          "- 2026-09-28 unset->unset: edited tags\n")],
+        "tags are replaced whole, sorted and de-duplicated like add's")
+    new_r2 = "Unify the two git helpers"
+    _edit_accepted(
+        suite, work, "m-edit-subset-with-reason", "R-0002",
+        {"title": new_r2, "why": WHY_2, "tags": ["scripts"]},
+        "R-0002: edited (title, tags)",
+        [("## R-0002 %s %s\n" % (DOT, _R2_TITLE),
+          "## R-0002 %s %s\n" % (DOT, new_r2)),
+         (_ROW % _R2_ROW, _ROW % (_R2_ROW[:3] + (new_r2, "no"))),
+         ("tags: [scripts, wiki]\n", "tags: [scripts]\n"),
+         ("- 2026-09-28 new->next [idea->planned]: harvested by adopt\n",
+          "- 2026-09-28 new->next [idea->planned]: harvested by adopt\n"
+          "- 2026-09-28 next->next: edited title, tags: typo in the title\n")],
+        "a subset: the unchanged why is not named; the staged reason ends "
+        "the log line; state, blocked_by and severity untouched",
+        reason="typo in the title\n")
+
+    cid = "m-why-wikilink-like-add"
+    path = stage_roadmap(work, cid, EXPECTED_B)
+    why = "See [[0022-a-someday-maybe-is-a-roadmap-item]] and <!-- x -->."
+    code, _out, err = cli(path, "add", "--item-file", _edit_item(
+        work, cid, {"title": "t", "origin": "user:m-wikilink", "why": why},
+        "add.json"))
+    problems = shape_problems(code, err, 0)
+    code, out, err = cli(path, "edit", "R-0004", "--item-file",
+                         _edit_item(work, cid, {"why": why}))
+    problems += shape_problems(code, err, 0)
+    problems += problem_if(read_utf8(path).count("\n%s\n" % why) != 2,
+                           "the why is not in both blocks verbatim")
+    suite.record(GM, cid, problems,
+                 detail=[_d("why", "R-0020 was dropped: add accepts a "
+                                   "wikilink and an HTML comment, so edit "
+                                   "does too -- parity with add is the rule"),
+                         _d("stderr", err.strip() or "<empty>")])
+
+
+# Values add refuses, per field; edit must refuse each with add's exact line.
+M_PARITY = (
+    ("title", ("a `b`", "[bracketed]", '"quoted"', "   ",
+               "a%sb" % chr(0x2028), "a%sb" % RLO)),
+    ("why", ("x\n## a heading", "x\n%s y" % BEGIN_PREFIX, "\n_(none)_\n",
+             "a%sb" % RLO, "a%sb" % chr(0x2028), "a\rb")),
+    ("tags", (["Not Kebab"], ["a`b"], ["-x"], [""])),
+)
+
+
+def _group_m_parity(suite, work):
+    for field, values in M_PARITY:
+        cid = "m-parity-" + field
+        path = stage_roadmap(work, cid, EXPECTED_B)
+        problems, lines = [], []
+        for index, value in enumerate(values):
+            add = {"title": "t", "origin": "user:m-parity"}
+            add[field] = value
+            add_file = _edit_item(work, cid, add, "add-%d.json" % index)
+            edit_file = _edit_item(work, cid, {field: value},
+                                   "edit-%d.json" % index)
+            got_add, err_add = check_refusal(path, ["add", "--item-file",
+                                                    add_file], [])
+            got_edit, err_edit = check_refusal(path, ["edit", "R-0004",
+                                                      "--item-file",
+                                                      edit_file], [])
+            problems += ["%r add: %s" % (value, p) for p in got_add]
+            problems += ["%r edit: %s" % (value, p) for p in got_edit]
+            problems += problem_if(err_add != err_edit,
+                                   "%r: edit said %r, add said %r"
+                                   % (value, err_edit.strip(),
+                                      err_add.strip()))
+            lines.append(err_edit.strip())
+        suite.record(GM, cid, problems,
+                     detail=[_d("why", "edit reuses add's validators: the "
+                                       "same value, the same refusal line")]
+                     + [_d("stderr", line) for line in lines])
+
+
+def _group_m_refusals(suite, work):
+    path = stage_roadmap(work, "m-refusals", EXPECTED_B)
+    for cid, body, extra, tokens, why in (
+            ("m-empty-object", "{}", [],
+             [": edit needs at least one of title, why, tags"],
+             "an empty subset edits nothing"),
+            ("m-unknown-key", {"title": "t", "severity": "low"}, [],
+             [": unknown key 'severity' for edit (want title, why, tags)"],
+             "any other key is refused by name"),
+            ("m-unknown-key-origin", {"origin": "user:x"}, [],
+             [": unknown key 'origin' for edit (want title, why, tags)"],
+             "origin changes through link, never edit"),
+            ("m-duplicate-key", '{"title": "a", "title": "b"}', [],
+             [": duplicate key 'title'"], "a repeated key"),
+            ("m-not-object", '["title"]', [], ["is not a JSON object ("],
+             "the top level must be an object"),
+            ("m-why-not-string", {"why": ["x"]}, [],
+             [": why must be a string"], "a JSON type check"),
+            ("m-tags-string", {"tags": "wiki"}, [],
+             [": tags must be a list of strings"], "tags are a list"),
+            ("m-noop", {"title": "Pin the export golden", "tags": []}, [],
+             ["R-0004: title, tags unchanged -- nothing to edit"],
+             "values equal to the current ones change nothing"),
+            ("m-reason-exclusive", {"title": "t"},
+             ["--reason", "x", "--reason-file", "nope.txt"],
+             ["--reason and --reason-file are exclusive"],
+             "the two reason routes exclude each other"),
+            ("m-reason-backtick", {"title": "t"}, ["--reason", "see `x`"],
+             ["reason value", "carries a backtick"],
+             "the reason is a single-line value")):
+        item = _edit_item(work, "m-refusals", body, cid + ".json")
+        record_refusal(suite, GM, cid, path,
+                       ["edit", "R-0004", "--item-file", item] + extra,
+                       tokens, why)
+    reason = staged(work, "m-refusals", "empty.txt", "\n")
+    item = _edit_item(work, "m-refusals", {"title": "t"}, "reason-empty.json")
+    record_refusal(suite, GM, "m-reason-file-empty", path,
+                   ["edit", "R-0004", "--item-file", item, "--reason-file",
+                    reason], ["reason is empty (after stripping whitespace)"],
+                   "a staged reason is checked like move's")
+    record_refusal(suite, GM, "m-no-item-file", path, ["edit", "R-0004"],
+                   ["edit needs --item-file PATH"],
+                   "the values travel only in a staged file")
+    record_refusal(suite, GM, "m-unknown-id", path,
+                   ["edit", "R-0099", "--item-file", item],
+                   ["unknown id R-0099"], "an unknown id")
+
+    path = stage_roadmap(work, "m-closed", EMPTY_TEXT, BOTH_ARCHIVES)
+    item = _edit_item(work, "m-closed", {"title": "t"})
+    for cid, ident, state in (("m-archived-done", "R-0001", "done"),
+                              ("m-archived-dropped", "R-0002", "dropped")):
+        record_refusal(suite, GM, cid, path,
+                       ["edit", ident, "--item-file", item],
+                       ["%s is closed (%s) -- closed items are immutable"
+                        % (ident, state)],
+                       "an archive page is immutable; edit changes only an "
+                       "open item")
+    path = stage_roadmap(work, "m-closed-twin", EXPECTED_B,
+                         {ARCHIVE_1_NAME: ARCHIVE_1})
+    item = _edit_item(work, "m-closed-twin", {"title": "t"})
+    record_refusal(suite, GM, "m-closed-twin", path,
+                   ["edit", "R-0001", "--item-file", item],
+                   ["R-0001 is closed (done) -- closed items are immutable"],
+                   "a close interrupted between its writes: the archive "
+                   "wins, so the live twin is closed too, and the refusal "
+                   "persists no repair")
+
+
+def _group_m_lock(suite, mod, work):
+    """The edit goes through commit's locked write: a concurrent change
+    between the read and the replace refuses with the concurrent bytes kept."""
+    theirs = EXPECTED_B.replace("wip_now: 4\n", "wip_now: 5\n").encode("utf-8")
+    for cid, concurrent in (("m-lock-conflict", True),
+                            ("m-lock-control-no-change", False)):
+        got = need(suite, GM, cid, mod, "cmd_edit", "load_state")
+        if got is None:
+            continue
+        _cmd_edit, load_state = got
+        path = stage_roadmap(work, cid, EXPECTED_B)
+        item = _edit_item(work, cid, {"title": EDIT_TITLE})
+
+        def racing(target, _real=load_state, _go=concurrent):
+            state = _real(target)
+            if _go:
+                write_file(target, theirs)
+            return state
+
+        with patched(mod, "load_state", racing):
+            code, _out, err = call_module(mod, "cmd_edit", path, "R-0004",
+                                          item, None, None)
+        now = read_bytes(path)
+        if concurrent:
+            problems = problem_if(code != 2, "exit %r, want 2" % code)
+            problems += problem_if(now != theirs, "roadmap.md does not hold "
+                                   "the CONCURRENT bytes")
+            problems += missing_tokens(err, ["changed since it was read",
+                                             "nothing written"])
+        else:
+            problems = problem_if(code not in (0, None), "exit %r: %s"
+                                  % (code, err.strip()))
+            problems += problem_if(("## R-0004 %s %s\n" % (DOT, EDIT_TITLE))
+                                   .encode("utf-8") not in now,
+                                   "the edit was not written")
+        problems += problem_if(temp_leftovers(path), "temp left behind: %r"
+                               % temp_leftovers(path))
+        suite.record(GM, cid, problems,
+                     detail=[_d("why", "load_state wrapped to write "
+                                       "concurrent bytes after the read"
+                                if concurrent else "control: no concurrent "
+                                                   "change, the edit lands"),
+                             _d("stderr", err.strip() or "<empty>")])
+
+
+def _group_m_export(suite, work):
+    cid = "m-export-shape-unchanged"
+    path = stage_roadmap(work, cid, EXPECTED_B)
+    problems, before = _export(path)
+    code, _out, err = cli(path, "edit", "R-0004", "--item-file",
+                          _edit_item(work, cid, {"title": EDIT_TITLE}))
+    problems += shape_problems(code, err, 0)
+    got, after = _export(path)
+    problems += got
+    if before is not None and after is not None:
+        problems += problem_if(sorted(before) != sorted(after),
+                               "top-level keys changed")
+        problems += problem_if(after.get("schema") != SCHEMA,
+                               "schema %r" % after.get("schema"))
+        def keys(doc):
+            return sorted(set(tuple(sorted(i)) for i in doc["items"]))
+
+        problems += problem_if(keys(before) != keys(after),
+                               "an item's key set changed")
+        item = [i for i in after["items"] if i["id"] == "R-0004"]
+        want_log = {"date": TODAY, "from": "next", "to": "next",
+                    "reason": "edited title", "state": None}
+        problems += problem_if(not item or item[0]["title"] != EDIT_TITLE,
+                               "the export does not carry the new title")
+        problems += problem_if(not item or item[0]["log"][-1] != want_log,
+                               "the edit log entry is %r"
+                               % (item[0]["log"][-1] if item else None))
+    suite.record(GM, cid, problems,
+                 detail=[_d("why", "the edit line is an ordinary log entry "
+                                   "(same lane, no state): %s keeps its shape"
+                                   % SCHEMA)])
+
+
+def group_m(suite, mod, work, wiki):
+    _group_m_accepted(suite, work)
+    _group_m_parity(suite, work)
+    _group_m_refusals(suite, work)
+    _group_m_lock(suite, mod, work)
+    _group_m_export(suite, work)
+
+
+# ---------------------------------------------------------------------------
 
 def _read(path):
     with open(path, "r", encoding="utf-8") as fh:
@@ -5088,7 +5409,7 @@ def run(opts=None):
             for group, body in ((GB, group_b), (GC, group_c), (GD, group_d),
                                 (GE, group_e), (GF, group_f), (GG, group_g),
                                 (GH, group_h), (GI, group_i), (GJ, group_j),
-                                (GL, group_l)):
+                                (GL, group_l), (GM, group_m)):
                 run_group(suite, group, body, suite, mod, work, wiki)
     finally:
         # Nothing here puts the wiki scripts' directory on sys.path or

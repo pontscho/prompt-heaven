@@ -375,9 +375,10 @@ SUITES = [
      "membership, and the security AST gates over its source -- stdlib only, "
      "one git spawn site with a pinned argv prefix and a read-only "
      "subcommand set, no shell, exact write-route caller sets -- the "
-     "behavioural groups, and hygiene that proves the sandbox guards bite "
-     "even before the script exists",
-     307),
+     "behavioural groups, the edit command held to add's validators, and "
+     "hygiene that proves the sandbox guards bite even before the script "
+     "exists",
+     336),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against; the "
