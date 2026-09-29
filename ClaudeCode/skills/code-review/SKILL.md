@@ -134,6 +134,9 @@ Collect each finder's candidates block. Emit ONE compact status: `Step 2: FIND โ
    verified findings.
 6. Render the console report (below). If `--output` includes `markdown`, also write the report
    file (Step 5 layout); create `docs/reviews/` if it does not exist.
+7. **Roadmap candidates.** For each finding the user will not fix now, offer one
+   `ROADMAP CANDIDATE:` block per `_lib/code-review-lenses.md` ยง Roadmap Candidates. Propose only;
+   nothing is written here.
 
 #### Console output format
 

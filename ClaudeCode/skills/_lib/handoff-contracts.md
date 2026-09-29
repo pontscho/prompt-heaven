@@ -139,7 +139,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 **Pipeline:** linear 4-Step fan-out (Scope → Find → Verify → Synthesize) orchestrated from the skill body. Step 2 fans out the 8 shared lenses from `_lib/code-review-lenses.md` to `p:minion-code-reviewer` (one per lens, parallel); Step 3 fans out `p:minion-code-verifier` (one per surviving candidate, parallel, `VERIFY_BUDGET=24`); Step 4 ranks/caps/scores in the skill body.
 
 **Side effects:**
-- Read-only. Writes ONLY the optional `docs/reviews/` report. **No intra-pipeline `.claude/tmp/` files** — finder/verifier handoff is via `Agent` return values (contrast `p:security-review`, which uses disk handoff). Never modifies source code.
+- Read-only. Writes ONLY the optional `docs/reviews/` report. **No intra-pipeline `.claude/tmp/` files** — finder/verifier handoff is via `Agent` return values (contrast `p:security-review`, which uses disk handoff). Never modifies source code. Deferred findings are only *proposed* as `ROADMAP CANDIDATE:` blocks (never staged or added by the skill).
 
 **Verdict semantics:** from the half-up aggregate of the 5 dimension scores — 7–8 EXCELLENT · 5–6 ACCEPTABLE · 3–4 NEEDS IMPROVEMENT · 1–2 POOR.
 
@@ -158,7 +158,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 **Pipeline:** same linear 4-Step fan-out as `/p:code-review`, scoped to the `<base>...HEAD` git diff (resolved via `mcp-git` `git_call`, never `Bash`+`sed`). Step 2 fans out **10** lenses = the 8 shared lenses from `_lib/code-review-lenses.md` PLUS 2 git lenses (`git-commit-hygiene`, `git-breaking-change-api`) defined in the branch-review skill body (not in `_lib`).
 
 **Side effects:**
-- Read-only. Writes ONLY the optional `docs/reviews/` report. **No intra-pipeline `.claude/tmp/` files** (handoff via `Agent` return values). Never modifies source code.
+- Read-only. Writes ONLY the optional `docs/reviews/` report. **No intra-pipeline `.claude/tmp/` files** (handoff via `Agent` return values). Never modifies source code. Deferred findings are only *proposed* as `ROADMAP CANDIDATE:` blocks, as `/p:code-review`.
 
 **Verdict semantics:** severity-driven (NOT score-driven) — any HIGH ⇒ REJECTED; else any MEDIUM ⇒ CHANGES REQUESTED; else APPROVED.
 
@@ -199,7 +199,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 | `docs/roadmap/archive/NNNN-<slug>.md` | `roadmap.py close` (exclusive create; immutable) | `p:wiki` (`search`; INDEX.md counts these in one line, never lists them) | markdown wiki page, type `roadmap-item` |
 | `.claude/tmp/roadmap-adopt-<ts>.json` | `/p:roadmap adopt` hop 1 (`roadmap.py export --out`) | `p:minion-explorer` (dedup of harvested candidates by origin) | JSON, `roadmap-export/2` |
 | `.claude/tmp/roadmap-stage-<ts>-<n>.json` / `.txt` | `/p:roadmap`, and `/p:task-plan` for its `move ... --state planned` reason (main context, `purity_call` `create_text_file`) | `roadmap.py` (`--item-file`, `--why-file`, `--reason-file`) | JSON item object / plain text |
-| `ROADMAP CANDIDATE:` block (inline in the producer's return value — no file) | a producer per `_lib/roadmap-proposal.md`: `p:minion-bug-hunter` (optional field of its diagnosis-only verdict) | main context: shown to the user; only an approved candidate is staged as the `roadmap-stage` item file above | `title` / `why` / `severity` (optional) / `tags` / `origin`, per `_lib/roadmap-proposal.md` |
+| `ROADMAP CANDIDATE:` block (inline in the producer's return value or chat reply — no file) | a producer per `_lib/roadmap-proposal.md`: `p:minion-bug-hunter` (optional field of its diagnosis-only verdict); `/p:checkpoint` Step 7 (deferred `THREADS` items in its chat reply, `user:` origin only, only when `docs/roadmap/roadmap.md` exists); `/p:code-review` and `/p:branch-review` Step 4 (one per finding the user will not fix now, `user:` origin only, per `_lib/code-review-lenses.md` § Roadmap Candidates) | main context: shown to the user; only an approved candidate is staged as the `roadmap-stage` item file above | `title` / `why` / `severity` (optional) / `tags` / `origin`, per `_lib/roadmap-proposal.md` |
 
 > **Note:** `/p:code-review` and `/p:branch-review` are standalone (not part of the feature-lifecycle pipeline) and produce **no `.claude/tmp/` intermediate files** — their finder→verifier→synthesize handoff is entirely via `Agent` return values held in the skill body, so the only files they emit are the optional `docs/reviews/` reports above.
 

@@ -250,6 +250,12 @@ After writing, produce a SHORT user-facing message in the conversation language.
 
 The prompt in that reply is NOT retyped: run `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py activate` after the `prepend` and paste its output. The file is the single source -- a prompt typed a second time into the reply is a second copy that can differ from the one the file carries, and `activate` already prints it paste-ready (header dropped, `> ` markers stripped). With no argument it prints the newest session's prompt, which after a `prepend` is the one you just wrote, never an older one. The triple-backtick wrapping around it is intentional -- it makes copy-paste trivial.
 
+### Step 7 -- Offer deferred THREADS as roadmap candidates (optional)
+
+Only when the project has `docs/roadmap/roadmap.md` (check with `purity_call` `find_file`, `file_mask: roadmap.md`, `relative_path: docs/roadmap`); otherwise skip this step silently. Go through the new block's `THREADS` and pick only the **deferred work** -- known work this work stream will not do. Leave out a limit that was decided and kept (a decision, not work: the kept-vs-deferred rule in `ClaudeCode/skills/roadmap/SKILL.md`) and anything this work stream does next session anyway (that belongs in `NEXT`). If nothing qualifies, say nothing.
+
+For each item that does, append one `ROADMAP CANDIDATE:` block per `_lib/roadmap-proposal.md` to the Step 6 reply: the surrounding sentence in the conversation language, the block fields in English. The `origin` is always `user:<YYYY-MM-DD>:<kebab-key>` -- today's date and a key naming the work -- never a path anchor, because the checkpoint file lives outside the repo. This skill is only a producer: it never runs `roadmap.py` and never stages an item file, so Critical Rule 10 still holds. If the user approves a candidate, the main context carries it out per the fragment's main-context half.
+
 ## Quality bar
 
 - **Detail level**: a competent dev who has NEVER seen this session should be able to resume from `checkpoint.py nexts` alone (mission + newest session + its activation block), without re-reading the prior conversation.

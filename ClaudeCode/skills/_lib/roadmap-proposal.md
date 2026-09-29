@@ -8,7 +8,10 @@
 > layer contract and `_lib/handoff-contracts.md` for the handoff row.
 
 Producers today: `p:minion-bug-hunter` (the `ROADMAP CANDIDATE:` field of its
-diagnosis-only verdict).
+diagnosis-only verdict); `p:checkpoint` (Step 7: deferred `THREADS` items, offered in
+its chat reply, always with a `user:` origin); `p:code-review` and `p:branch-review`
+(one block per finding the user will not fix now, per `_lib/code-review-lenses.md`
+§ Roadmap Candidates).
 
 ## The producer's half
 
@@ -32,7 +35,8 @@ diagnosis-only verdict).
 - **Field rules** — the ones `roadmap.py` will enforce anyway, so a candidate that
   breaks them is refused later, after the user already approved it:
   - `title`, `severity` and `origin` are single lines with no backtick; `why` has no
-    backtick and no level 1-3 heading. Anchors go in `origin`, never in `why`.
+    backtick and no level 1-3 heading. The anchor goes in `origin`, never in `why`;
+    a `file:line` cited as evidence may stay in `why` as plain text.
   - `severity` is optional and free text (roadmap.py takes any single-line value);
     it is producer information, never priority. Omit it rather than guess.
   - `tags` are kebab-case (`[a-z0-9-]`); `[]` when none fits.

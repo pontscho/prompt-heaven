@@ -117,6 +117,9 @@ each with the scope block + the candidate + the recall verdict-ladder from `_lib
 4. Apply `--severity` to the DISPLAYED findings list only.
 5. Render the console report. If `--output` includes markdown, write the report (Step 5); create
    `docs/reviews/` if missing.
+6. **Roadmap candidates.** For each finding the user will not fix now, offer one
+   `ROADMAP CANDIDATE:` block per `_lib/code-review-lenses.md` § Roadmap Candidates. Propose only;
+   nothing is written here.
 
 #### Console output format
 

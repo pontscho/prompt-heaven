@@ -282,3 +282,27 @@ correctness deducts ≥ quality for equal counts/verdict; floored at 1.
 `round_half_up(4.5) = 5` → ACCEPTABLE. The half-up rule resolves the `.5` boundary
 deterministically (never banker's rounding, never truncation), so repeat runs on the same
 verified set always land in the same band.
+
+---
+
+## § Roadmap Candidates (after the report)
+
+Both skills are *producers* per `_lib/roadmap-proposal.md` and stay read-only: they propose, they
+never run `roadmap.py` and never stage a file. After the report is rendered, ask the user which
+displayed findings they will NOT fix now, and offer each one as a `ROADMAP CANDIDATE:` block:
+
+- **One block per finding** (the Step 4 root-cause representative) — never one per severity
+  section, never one bundling several findings.
+- **Only deferred work.** A REFUTED candidate is not work and is never proposed; neither is a
+  finding the user decides to keep as it is (the kept/deferred rule).
+- **Fields:** `title` = the finding's summary; `why` = the failure scenario, the verdict, and why
+  it is deferred, with the file:line as plain text (no backtick anywhere — strip them from quoted
+  evidence); `severity` = the finding's derived severity (`high` | `medium` | `low`); `tags` = the
+  skill name (`code-review` or `branch-review`) plus any kebab theme that fits.
+- **Origin:** `user:<YYYY-MM-DD>:<kebab-key>` — today's date and a key naming the finding's
+  mechanism (e.g. `cache-proxy-reenters-session`). Never a file:line or a finding number: both
+  drift, and the origin is the dedup key.
+
+The main context then follows the main context's half of `_lib/roadmap-proposal.md` (show, approve,
+stage, add with reason `proposed by p:code-review` / `p:branch-review`); that write is not part of
+the review.
