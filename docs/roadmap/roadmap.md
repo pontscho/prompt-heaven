@@ -16,7 +16,7 @@ WIP now: 3 of 3. Archive: 29 closed items (26 done, 3 dropped).
 | now   | R-0039 | active | roadmap.py: edit an open item's title, why and tags after add                              | yes   |
 | now   | R-0011 | active | Answer ADR 0016's two open table questions (tshark padding, jenkins delimiter)             | yes   |
 | now   | R-0010 | active | Settle ADR 0014's open questions on generated regions                                      | yes   |
-| later | R-0003 | idea   | Wire a seccomp BPF filter into sbx on Linux                                                | yes   |
+| next  | R-0003 | idea   | Wire a seccomp BPF filter into sbx on Linux                                                | yes   |
 | later | R-0004 | idea   | Let the implement skill route a failed task to Quint                                       | yes   |
 | later | R-0006 | idea   | Honour notifications/cancelled in the MCP servers                                          | yes   |
 | later | R-0014 | idea   | ADR 0022 follow-ups: producer hooks, a kanban board, item edit commands                    | yes   |
@@ -78,12 +78,10 @@ Four open threads in one section: rule on the _json_ prefix for the JSON blocks;
 
 # next
 
-# later
-
 ## R-0003 · Wire a seccomp BPF filter into sbx on Linux
 
 state: idea
-horizon: later
+horizon: next
 origin: docs/adr/0005-approve-the-wrapper-not-the-command.md#consequences
 blocked_by: []
 tags: [sandbox]
@@ -94,6 +92,9 @@ sbx has a dormant seccomp seam that refuses to run when enabled, and no flag set
 
 - 2026-09-28 new->unset: harvested by adopt
 - 2026-09-28 unset->later: first triage 2026-09-28
+- 2026-09-29 later->next: User 2026-09-29: go.
+
+# later
 
 ## R-0004 · Let the implement skill route a failed task to Quint
 
