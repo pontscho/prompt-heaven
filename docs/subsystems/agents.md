@@ -7,11 +7,12 @@ description: Delegate-able sub-agents invoked via the Task tool to keep the main
 sources:
   - ClaudeCode/agents
 verified:
-  commit: 9eeb66c
-  date: 2026-08-10
+  commit: d0cc30c
+  date: 2026-09-29
 links:
   - overview
   - skills
+  - 0022-a-someday-maybe-is-a-roadmap-item
 ---
 
 # Minion Agents
@@ -77,7 +78,11 @@ root cause rather than re-deriving it, and fixes only a *contained* change: no
 public API or signature change, no new dependency, no schema, protocol, or
 on-disk-format change, no module-boundary refactor, no data mutation
 `ClaudeCode/agents/minion-bug-hunter.md`. Anything past that boundary is reported
-as a diagnosis with no code touched. Its evidence gate is a reproduction that
+as a diagnosis with no code touched; that report may carry an optional
+`ROADMAP CANDIDATE:` block, which Quint only proposes — it never runs
+`roadmap.py`, and the item is written only if the user approves it
+`ClaudeCode/skills/_lib/roadmap-proposal.md` — see
+[[0022-a-someday-maybe-is-a-roadmap-item]]. Its evidence gate is a reproduction that
 fails before the fix and passes after — promoted into the project's test tree as
 a regression test; when no reproduction can be built, `minion-code-verifier` must
 judge the root-cause claim before any edit, and no-reproduction plus
