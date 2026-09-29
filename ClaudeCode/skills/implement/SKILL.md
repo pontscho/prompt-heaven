@@ -25,6 +25,7 @@ This command takes a completed implementation plan (from `/p:task-plan`) and exe
 - The mason implements + builds + tests each task in its own sandbox (LSP for context, forge for build/test)
 - Audits completeness and security post-implementation via the validation fan-out (Section 4)
 - Syncs the project documentation wiki (`docs/`) with the shipped code as the final step, via `Skill(p:wiki, ingest)` → `p:minion-librarian` (Section 6)
+- When the plan names a roadmap item (`roadmap_item`), ends by printing the `roadmap.py close R-NNNN --commit <sha>` step for the User to run after committing — never runs it (Section 7)
 - Reports progress and handles errors
 
 # Minion Mindset — Your Eyes, Ears, and Hands
@@ -340,6 +341,27 @@ Page prose is owned by the librarian; task status stays owned by the mason / `ta
 - [ ] I surfaced every `[PROPOSE-*]` item to the user and executed only the approved ones (via `purity_call`).
 - [ ] I verified the librarian's self-check (anchors MCP-resolved, reindex + freshness clean, no silent body rewrites).
 - [ ] The YAML carries `documentation_updated` (true, or false with a reason).
+
+## 7. Roadmap handoff (only when `roadmap_item` is set)
+
+`/p:implement` does not commit — committing is the User's step. So it never closes a
+roadmap item itself; it names the step. After Section 6, and only if Phase C wrote
+`implementation_complete: true`, read the optional top-level `roadmap_item` from
+`requirements.yaml` (Read; `task-plan.py` does not print it). If it is set, end the
+final summary with exactly this next step, the id filled in and `<sha>` left for the
+User:
+
+```
+Next step, after you commit this work:
+  python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py close R-NNNN --commit <sha>
+```
+
+- Do NOT run `close` yourself, and do not commit to obtain a sha: `close --commit`
+  requires the commit to exist and stores it forever in an immutable archive page.
+- No `roadmap_item`, or a run that halted without `implementation_complete: true`:
+  print no roadmap step. The roadmap never mirrors task status, so nothing else about
+  the item is touched here (`ClaudeCode/skills/roadmap/SKILL.md`, "What the three live
+  states mean").
 
 # Error Recovery
 

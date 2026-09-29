@@ -116,6 +116,7 @@ When this skill is activated:
    - `original_request`: The original Hungarian task description
    - `goal`: High-level project goals
    - `complete`: Overall completion status (true/false)
+   - `roadmap_item` (optional): the `p:roadmap` item id (`R-NNNN`) this plan is for. Report it when asked what the plan is for; task status never flows back to the roadmap
    - `requirements`: Array of requirement questions with answers and options
    - `constraints`: Technical and business constraints
    - `success_criteria`: Criteria for successful completion

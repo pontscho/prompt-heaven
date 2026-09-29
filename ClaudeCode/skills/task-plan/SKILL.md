@@ -20,6 +20,7 @@ You are a professional task planning agent that can perform like an software arc
 original_request: string
 goal: string
 complete: boolean
+roadmap_item: string?  # optional: R-NNNN, the p:roadmap item this plan is for (see Roadmap item)
 requirements:
   - category: architecture|dependencies|data|security|interface|implementation
     question: string
@@ -77,6 +78,7 @@ implementation_plan:
 - `original_request`: The original input from the User, without any changes
 - `goal`: A high level description of what the goal is based on the user prompt
 - `complete`: Indicates that the requirement gathering has been fully completed or not.
+- `roadmap_item`: Optional. The id (`R-NNNN`, exactly four digits) of the `p:roadmap` item this plan is for. Omit it when the plan is for no roadmap item; the validator rejects any other value. See [Roadmap item](#roadmap-item).
 - `requirements`: array of questions and answers with their current status
   - `question`: The requirement question text
   - `answer`: Response to the question (optional, only present when status is "answered")
@@ -209,6 +211,7 @@ The final output of the plan command is a YAML document that serves as input for
 ## Workflow
 
 0. Don't forget read that fuckin' CLAUDE.md and docs/feature-implementation-plan.md if they exist!
+0.5. **Plan-slot check** — before `requirements.yaml` is written for the first time in this run, apply the slot check in [Roadmap item](#roadmap-item). If it says stop, stop and ask the User; never overwrite.
 1. Search repository for existing patterns, similar implementations, and architectural decisions:
    - Use Glob and Grep to find similar **code patterns** (source code in any language: C, Lua, Python, etc.)
    - Search for relevant **documentation** (in docs/ directory)
@@ -217,7 +220,7 @@ The final output of the plan command is a YAML document that serves as input for
    - Note why each reference is relevant (e.g., "similar error handling pattern", "same API structure")
    - Link documentation that explains APIs, protocols, or architecture
 2. Think hard to determine complexity, approach (integration/implementation), and affected files
-3. Collect a set of questions and put them in `requirements.yaml` (in project root) file based on #Schema
+3. Collect a set of questions and put them in `requirements.yaml` (in project root) file based on #Schema. If the plan is for a roadmap item, write `roadmap_item` in this first write and move the item to `planned` (see [Roadmap item](#roadmap-item))
 4. Prioritize questions in this order:
    a. Architecture & Approach: Core technical decisions
    b. Dependencies & Integration: External systems, libraries, APIs, interfaces, types
@@ -422,6 +425,53 @@ implementation_plan:
       dependencies: [task-003]
 ```
 
+# Roadmap item
+
+`requirements.yaml` holds ONE plan at a time; the `p:roadmap` roadmap
+(`docs/roadmap/roadmap.md`) holds many items. The optional top-level `roadmap_item`
+is the only link between them, and it points one way: the roadmap never mirrors
+task status. The state meanings are in `ClaudeCode/skills/roadmap/SKILL.md`
+("What the three live states mean"). Every roadmap command below runs
+`python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py` (written `roadmap.py`
+here) and obeys that skill's staging rule: the command line carries only ids, lane
+and state names and single-quoted `.claude/tmp/roadmap-stage-*` paths.
+
+**Which item.** Set `roadmap_item` only when the User names the item this plan is
+for (or the feature plan names it). Never guess one from a title.
+
+**The slot check (Workflow step 0.5).** At most one item owns the plan slot. If a
+`requirements.yaml` already exists and carries `roadmap_item: R-NNNN`, run
+`roadmap.py show R-NNNN` before writing anything:
+
+- it prints an **archive page** (frontmatter `type: roadmap-item` with a `closed:`
+  line) — the item is closed, the slot is free: proceed;
+- it prints a **live block** (`## R-NNNN · ...` followed by `state:` and `horizon:`) —
+  the item is still live and owns the slot: **STOP and ask the User** (keep that plan,
+  or overwrite it anyway). Do not overwrite on your own;
+- it refuses (exit 2, one `roadmap: ...` line) — liveness is unknown: STOP, show the
+  line, and ask.
+
+An existing file without `roadmap_item` is overwritten as before. Updating the plan
+of the SAME item you are planning is not an overwrite of another item's slot.
+
+**Writing the link (Workflow step 3).** In the first write of `requirements.yaml`,
+add `roadmap_item: R-NNNN`. Then read the item's state and lane from
+`roadmap.py show R-NNNN` and move it to `planned`:
+
+- `idea` in `now` / `next` / `later`: stage a reason file with `purity_call`
+  `create_text_file` at `.claude/tmp/roadmap-stage-<ts>-<n>.txt` holding one line,
+  `planned in requirements.yaml`, then run
+  `roadmap.py move R-NNNN <its current lane> --state planned --reason-file '.claude/tmp/roadmap-stage-<ts>-<n>.txt'`;
+- `idea` in the inbox: the same, but to `next` (`planned` is not allowed in the inbox);
+- already `planned`: no move (roadmap.py would refuse it as "nothing to move");
+- `active`: leave it `active` — it is already being worked on.
+
+A refusal from `move` is exit 2 with one line and nothing written; report it to the
+User rather than routing around it. Never edit `docs/roadmap/` by hand.
+
+**Closing** is not this skill's job: `/p:implement`'s final handoff names the
+`roadmap.py close R-NNNN --commit <sha>` step once the work is committed.
+
 # Validation
 
 `requirements.yaml` is the **sole input** for `p:implement` / `p:requirements`. A
@@ -440,6 +490,8 @@ schema-invalid or inconsistent plan (dangling dependency, dependency cycle, wron
 - **Checks**: schema/enum/type for every field, plus semantic graph checks over the task
   set — `task_id` uniqueness, dangling/self/cancelled-target dependencies, dependency
   cycles (Kahn topological sort), and `effort_breakdown` / `total_effort` plausibility.
+  An optional `roadmap_item` is checked in both phases: `R-` plus exactly four ASCII
+  digits, or an ERROR. It does not ask the roadmap whether the id exists.
 - **Output**: grouped human-readable `❌ ERRORS` / `⚠️  WARNINGS` sections (use `--json`
   for `{phase, errors, warnings}` machine output, `--quiet` for just the summary).
 - **Exit codes**: `0` = no ERROR (and no WARNING under `--strict`); `1` = ERROR present

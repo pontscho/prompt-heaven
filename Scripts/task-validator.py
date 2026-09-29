@@ -19,6 +19,8 @@ to parse, behind a clean import guard.
 Phase-aware:
   complete: false -> only requirements / constraints / success_criteria are required.
   complete: true  -> the full implementation_plan + context_summary are required too.
+In either phase an optional top-level roadmap_item (the p:roadmap id the plan is
+for, R-NNNN) is checked when present; anything else in it is an ERROR.
 
 Usage: task-validator.py [requirements.yaml] [--strict] [--quiet] [--json]
 
@@ -28,6 +30,7 @@ Exit codes:
   2  file not readable / YAML parse error / PyYAML missing
 """
 
+import re
 import sys
 
 try:
@@ -54,7 +57,13 @@ SIZE_ORDER       = ["ss", "s", "m", "l", "xl", "xxl"]  # for aggregation
 TOP_LEVEL_KEYS = {
 	"original_request", "goal", "complete", "requirements", "constraints",
 	"success_criteria", "context_summary", "implementation_plan",
+	"roadmap_item",
 }
+
+# Optional link to the p:roadmap item this plan is for (roadmap.py's id shape).
+# ASCII-only and used with fullmatch, so neither a non-ASCII digit nor a
+# trailing newline passes.
+ROADMAP_ITEM_RE = re.compile(r"R-[0-9]{4}", re.ASCII)
 
 
 class Issue:
@@ -124,6 +133,10 @@ class Validator:
 			for i, item in enumerate(sc):
 				if not self._is_nonempty_str(item):
 					self.error(f"success_criteria[{i}]", "must be a non-empty string")
+		if "roadmap_item" in d:
+			item = d["roadmap_item"]
+			if not isinstance(item, str) or not ROADMAP_ITEM_RE.fullmatch(item):
+				self.error("roadmap_item", "must be a roadmap id matching ^R-[0-9]{4}$ (e.g. R-0030), or be omitted")
 		for key in d:
 			if key not in TOP_LEVEL_KEYS:
 				self.warn(key, "unknown top-level key (typo?)")

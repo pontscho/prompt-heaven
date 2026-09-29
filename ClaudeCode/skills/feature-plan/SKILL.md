@@ -470,6 +470,8 @@ Delegate each refinement to `p:minion-feature-planner` (refinement mode) in resp
 
 After completing your exploration and design — and after the Round 0 fan-out + synthesis — the canonical implementation plan exists at `docs/feature-implementation-plan.md`, written by `p:minion-feature-planner` (you never hand-write or hand-edit it).
 
+**Roadmap item.** This skill never writes `requirements.yaml` and runs no roadmap command. When the User says the feature is a `p:roadmap` item, pass its id to the planner for the `Roadmap item:` line of the Requirements Summary; `/p:task-plan` reads it from there, runs the plan-slot check, writes `roadmap_item` and moves the item to `planned` (`ClaudeCode/skills/task-plan/SKILL.md`, "Roadmap item").
+
 **LANGUAGE REQUIREMENT: the plan document MUST be ENTIRELY IN ENGLISH.**
 Even if the conversation or requirements are in another language, the plan file must be in English. Pass this requirement to the planner in every fan-out / synthesis / refinement call.
 
@@ -482,6 +484,7 @@ The plan that `p:minion-feature-planner` produces — and the structure you pass
 
 ## Requirements Summary
 [Brief overview of what needs to be implemented]
+Roadmap item: [R-NNNN — ONLY when the User named the p:roadmap item this plan is for; omit the line otherwise]
 
 ### Success Criteria
 - [ ] [Specific, measurable criteria for completion]

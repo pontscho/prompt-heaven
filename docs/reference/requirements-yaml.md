@@ -17,6 +17,7 @@ links:
   - 0002-index-claims-no-freshness
   - spec-purity-unification
   - spec-purity-luals-phase1
+  - 0022-a-someday-maybe-is-a-roadmap-item
 ---
 
 # requirements.yaml
@@ -183,3 +184,19 @@ That is the plainest argument for this wiki that the repo makes on its own. Both
 displaced *features* still have readable designs here — [[spec-purity-unification]]
 and [[spec-purity-luals-phase1]] — because the durable half of each plan was moved
 into a page before the slot was reused. Whatever stayed only in the slot is gone.
+
+## `roadmap_item`: which roadmap item owns the slot
+
+The roadmap ([[0022-a-someday-maybe-is-a-roadmap-item]]) holds many items and
+allows up to three in `now`; this file holds one plan. Until the optional top-level
+`roadmap_item: R-NNNN` existed nothing connected the two, so the roadmap state
+`planned` had invariants but no meaning, and a planning run could silently
+overwrite the one plan a live item depended on. The field is the only link and it
+points one way — the roadmap never mirrors task status — because a second copy of
+status is a second thing to drift. It makes the slot ownable: `/p:task-plan` stops
+and asks before it overwrites a plan whose item is still live, and moves the item it
+plans to `planned` `ClaudeCode/skills/task-plan/SKILL.md`. The one sync point is the
+green end of `/p:implement`, which does not commit and so only prints the
+`close --commit` step `ClaudeCode/skills/implement/SKILL.md`. The validator checks
+the id's shape and nothing more `Scripts/task-validator.py:ROADMAP_ITEM_RE`: whether
+the item is live is a question for `roadmap.py`, which the validator never runs.

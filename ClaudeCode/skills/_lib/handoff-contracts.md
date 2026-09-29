@@ -66,9 +66,12 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
   - `implementation_plan` block with `tasks: [...]`
   - Each task: `id`, `title`, `description`, `status` (`pending`/`in_progress`/`completed`/`cancel`), `dependencies: [...]`, `code_references: [...]` (file paths + pattern excerpts), `verification_commands: [...]`
   - `reference_files: [...]` and `api_references: [...]`
+  - Optional `roadmap_item: R-NNNN` — the `p:roadmap` item the plan is for (named by the user, or by the feature plan's `Roadmap item:` line). The only link between the two files; the roadmap never mirrors task status
 
 **Side effects:**
-- Writes `requirements.yaml` only
+- Writes `requirements.yaml`
+- Plan-slot check: before overwriting a `requirements.yaml` whose `roadmap_item` names an item that `roadmap.py show` still prints as a live block, STOPS and asks the user
+- When it writes `roadmap_item`, moves that item to `planned` with `roadmap.py move` (reason staged in `.claude/tmp/roadmap-stage-<ts>-<n>.txt`; an inbox item goes to `next`)
 
 ---
 
@@ -87,6 +90,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
   - On open items at escape hatch: `implementation_open_items: [...]` and/or `implementation_security_open_items: [...]`
   - Documentation record (final step): `documentation_updated: true|false` (+ `documentation_skipped_reason` when false), `documentation_pages_touched: [...]`, `documentation_open_items: [...]`
 - Refreshed `docs/` wiki — pages updated (and, on user approval, created) to match the shipped code, via `Skill(p:wiki, ingest)` (→ `p:minion-librarian`) as the final step
+- When `roadmap_item` is set and `implementation_complete: true` was written: the final summary prints `roadmap.py close R-NNNN --commit <sha>` as the user's next step after committing. `/p:implement` does not commit and never runs `close` itself
 
 **Side effects:**
 - Source code modifications — delegated to `p:minion-mason` (per task; the orchestrator never edits code inline)
@@ -193,7 +197,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 | `docs/roadmap/roadmap.md` | `/p:roadmap` via `roadmap.py` (the only writer) | `p:wiki` (`wiki_call` `search`, INDEX.md), `/p:roadmap export` | markdown wiki page, type `roadmap`; format in the `p:roadmap` SKILL.md |
 | `docs/roadmap/archive/NNNN-<slug>.md` | `roadmap.py close` (exclusive create; immutable) | `p:wiki` (`search`; INDEX.md counts these in one line, never lists them) | markdown wiki page, type `roadmap-item` |
 | `.claude/tmp/roadmap-adopt-<ts>.json` | `/p:roadmap adopt` hop 1 (`roadmap.py export --out`) | `p:minion-explorer` (dedup of harvested candidates by origin) | JSON, `roadmap-export/1` |
-| `.claude/tmp/roadmap-stage-<ts>-<n>.json` / `.txt` | `/p:roadmap` (main context, `purity_call` `create_text_file`) | `roadmap.py` (`--item-file`, `--why-file`, `--reason-file`) | JSON item object / plain text |
+| `.claude/tmp/roadmap-stage-<ts>-<n>.json` / `.txt` | `/p:roadmap`, and `/p:task-plan` for its `move ... --state planned` reason (main context, `purity_call` `create_text_file`) | `roadmap.py` (`--item-file`, `--why-file`, `--reason-file`) | JSON item object / plain text |
 
 > **Note:** `/p:code-review` and `/p:branch-review` are standalone (not part of the feature-lifecycle pipeline) and produce **no `.claude/tmp/` intermediate files** — their finder→verifier→synthesize handoff is entirely via `Agent` return values held in the skill body, so the only files they emit are the optional `docs/reviews/` reports above.
 

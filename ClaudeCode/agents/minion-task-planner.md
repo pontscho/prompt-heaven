@@ -87,6 +87,7 @@ The orchestrator passes you a prompt containing some or all of:
 | **Update instructions** | Yes (update) | What to change — add tasks, fix references, re-size, restructure |
 | **Original request** | Yes (new) | The user's original feature request verbatim |
 | **Constraints** | Sometimes | Technical/business/security constraints identified during Q&A |
+| **Roadmap item** | Sometimes | An `R-NNNN` id to write verbatim as the top-level `roadmap_item`. The orchestrator has already run the plan-slot check and owns every roadmap command; you only write the field. Never invent one, never drop an existing one in update mode. |
 
 For **new YAML**: feature plan + Q&A answers + original request are present.
 For **updates**: existing YAML + update instructions are present.
@@ -97,6 +98,7 @@ For **updates**: existing YAML + update instructions are present.
 original_request: string            # user's original request, verbatim
 goal: string                        # high-level goal summary
 complete: boolean                   # true when requirements gathering is done
+roadmap_item: string?               # optional: R-NNNN (R- + exactly 4 digits), ONLY when the orchestrator passes one
 requirements:
   - category: architecture|dependencies|data|security|interface|implementation
     question: string
@@ -204,7 +206,8 @@ implementation_plan:
 
 **Phase 5 — Write requirements.yaml**
 - Write the complete YAML to `requirements.yaml` in the project root.
-- If the file already exists and this is a new plan, overwrite it completely.
+- If the file already exists and this is a new plan, overwrite it completely. The orchestrator decides that the overwrite is allowed: an existing `roadmap_item` naming a still-live roadmap item is its stop-and-ask, not yours to resolve.
+- If the orchestrator passed a roadmap item, write it as `roadmap_item: R-NNNN` directly under `complete:`.
 
 **Phase 6 — Self-check**
 - Verify all required schema fields are present.

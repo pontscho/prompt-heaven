@@ -34,6 +34,25 @@ Telling the two apart is a judgment on the sentence that states the limit, never
 regex. During `adopt` the explorer proposes the verdict with the quoted sentence
 as evidence, and the user decides.
 
+### What the three live states mean
+
+- **`idea`** -- the work is known, not worked out.
+- **`planned`** -- the item **has a plan**: either its `spec:` names a wiki page
+  carrying the design, or a `requirements.yaml` carries `roadmap_item: R-NNNN`
+  naming it. `/p:task-plan` writes that field and moves the item to `planned`
+  (`ClaudeCode/skills/task-plan/SKILL.md`, "Roadmap item").
+- **`active`** -- the item is being worked on. A small item goes `idea` -> `active`
+  directly with `start` and skips planning.
+
+The optional top-level `roadmap_item` in `requirements.yaml` is the ONLY link
+between the two files, and it points one way: the roadmap never mirrors task
+status. `requirements.yaml` holds one plan at a time, so at most one item owns
+that slot: `/p:task-plan` stops and asks before it overwrites a plan whose
+`roadmap_item` names an item that is still live. The one sync point is the green
+end of `/p:implement`, which does not commit: when `roadmap_item` is set, its final
+handoff prints `close R-NNNN --commit <sha>` as the next step to run after the
+user's commit, and never runs it.
+
 ### The four invariants (the writer enforces them)
 
 1. No horizon means state `idea`: the inbox holds untriaged ideas only.
@@ -88,8 +107,13 @@ Two copies of one helper drift; ADR 0012 declined a shared transport tier, not t
 
 ### Log
 
-- 2026-09-28 new->next [idea->planned]: harvested by adopt
+- 2026-09-28 new->unset: harvested by adopt
+- 2026-09-28 unset->next: first triage 2026-09-28
+- 2026-09-29 next->next [idea->planned]: planned in requirements.yaml
 ```
+
+`adopt` only ever adds an `idea` to the inbox; the item above became `planned` later,
+when `/p:task-plan` wrote a plan naming it.
 
 | Key | Required | Meaning |
 |-----|----------|---------|
