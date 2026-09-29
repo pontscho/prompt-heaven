@@ -170,6 +170,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 - A command from the user: `init`, `add`, `list`, `show`, `move`, `start`, `rank`, `link`, `edit`, `close`, `render`, `wip`, `export`, or the skill-level `adopt` op (interactive)
 - `docs/roadmap/roadmap.md` and `docs/roadmap/archive/*.md` (read by `roadmap.py` on every command; the default target resolves against the git top-level)
 - `adopt` only: the wiki root's ADR declared-limit sections, draft `spec` pages with `targets:`, "Open Questions" / "Next Steps" sections, and pending `requirements.yaml` leftovers — harvested read-only by `p:minion-explorer`
+- A `ROADMAP CANDIDATE:` block from a producer (`_lib/roadmap-proposal.md`) — added only after the user approves it; the producer never runs `roadmap.py`
 
 **Outputs:**
 - `docs/roadmap/roadmap.md` — wiki page of type `roadmap`: frontmatter (with `wip_now`), a generated summary region, the four lanes `# now` / `# next` / `# later` / `# inbox`, one `## R-NNNN · <title>` block per live item. **Written EXCLUSIVELY by `roadmap.py`** (whole-file render, optimistic two-digest lock, atomic replace)
@@ -198,6 +199,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 | `docs/roadmap/archive/NNNN-<slug>.md` | `roadmap.py close` (exclusive create; immutable) | `p:wiki` (`search`; INDEX.md counts these in one line, never lists them) | markdown wiki page, type `roadmap-item` |
 | `.claude/tmp/roadmap-adopt-<ts>.json` | `/p:roadmap adopt` hop 1 (`roadmap.py export --out`) | `p:minion-explorer` (dedup of harvested candidates by origin) | JSON, `roadmap-export/2` |
 | `.claude/tmp/roadmap-stage-<ts>-<n>.json` / `.txt` | `/p:roadmap`, and `/p:task-plan` for its `move ... --state planned` reason (main context, `purity_call` `create_text_file`) | `roadmap.py` (`--item-file`, `--why-file`, `--reason-file`) | JSON item object / plain text |
+| `ROADMAP CANDIDATE:` block (inline in the producer's return value — no file) | a producer per `_lib/roadmap-proposal.md`: `p:minion-bug-hunter` (optional field of its diagnosis-only verdict) | main context: shown to the user; only an approved candidate is staged as the `roadmap-stage` item file above | `title` / `why` / `severity` (optional) / `tags` / `origin`, per `_lib/roadmap-proposal.md` |
 
 > **Note:** `/p:code-review` and `/p:branch-review` are standalone (not part of the feature-lifecycle pipeline) and produce **no `.claude/tmp/` intermediate files** — their finder→verifier→synthesize handoff is entirely via `Agent` return values held in the skill body, so the only files they emit are the optional `docs/reviews/` reports above.
 

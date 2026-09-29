@@ -291,8 +291,17 @@ WHY STOPPED: <which gate — containment (name the boundary it crosses) | compou
 PROPOSED DIRECTION:
 - <what the fix would have to do, and what it would cost — the API it changes, the schema it migrates, the boundary it moves>
 
+ROADMAP CANDIDATE: <OPTIONAL — omit the field when the direction is not known work worth recording>
+  title:    <one line>
+  why:      <draft, plain prose>
+  severity: <optional>
+  tags:     [<kebab-case>, ...]
+  origin:   <repo-relative path>#<heading-slug>  |  user:<YYYY-MM-DD>:<kebab-key>
+
 CONFIRMED UNCHANGED: no files were modified.
 ```
+
+The `ROADMAP CANDIDATE:` field follows `ClaudeCode/skills/_lib/roadmap-proposal.md`. You only propose: never run `roadmap.py`, never stage a file — the caller shows it to the user, and only an approved candidate is written.
 
 ---
 

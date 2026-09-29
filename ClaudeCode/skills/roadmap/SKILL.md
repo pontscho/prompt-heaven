@@ -419,6 +419,12 @@ op is four hops:
    neither break the file nor add a key. roadmap.py's own origin dedup is the authority: a
    candidate Scott missed is refused there, not written twice.
 
+**Proposals from other producers.** A skill or minion that meets deferred work
+mid-run (today `p:minion-bug-hunter`'s diagnosis-only verdict) emits a
+`ROADMAP CANDIDATE:` block per `ClaudeCode/skills/_lib/roadmap-proposal.md` and never
+runs roadmap.py. Hops 3 and 4 then apply to it unchanged, with the reason
+`proposed by <producer>`.
+
 The machine proposes, a human decides, the script writes.
 
 ## Export contract (`roadmap-export/2`)
