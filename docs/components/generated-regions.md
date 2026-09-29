@@ -113,11 +113,11 @@ scanner, which is the rule that lets a page document the marker it also carries
 
 <!-- BEGIN MEASURED: generated-region-census -->
 - MCP servers matching `Scripts/mcp-*.py`: 15, of which 15 carry at least one generated region
-- live generated regions in them: 115
-- block instances those regions emit: 170
+- live generated regions in them: 116
+- block instances those regions emit: 171
 - distinct canonical blocks named on a marker: 40, out of the 44 defined by the 6 canonical sources
 
-Regions by how many blocks one marker names: 76 name 1 block; 38 name 2 blocks; 1 name 18 blocks.
+Regions by how many blocks one marker names: 77 name 1 block; 38 name 2 blocks; 1 name 18 blocks.
 
 The 39 region(s) that name more than one block, by the list written on the marker:
 
@@ -133,7 +133,7 @@ The 39 region(s) that name more than one block, by the list written on the marke
 
 Generated into every one of the 15 servers: `_configure_logging`, `_json_error_window`.
 Generated into every server but `Scripts/mcp-webfetch.py`: `_error`, `_result`.
-<!-- END MEASURED: 3b047949464f -->
+<!-- END MEASURED: 7ef1200ac337 -->
 
 A single region may name several blocks, and that is the whole of the gap between
 the region count and the block-instance count.
@@ -257,7 +257,7 @@ block's reach, while the fleet census above stays about the servers.
 | `DEFAULT_MAX_ANSWER_CHARS` | `Scripts/_mcp_paging.py` | 6 | `Scripts/mcp-context7.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-webfetch.py` |
 | `DEFAULT_MAX_CHARS` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-wiki.py` |
 | `PAGE_LINE_RESERVE` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-webfetch.py` |
-| `_FENCE_LINE_RE` | `Scripts/_mcp_paging.py` | 4 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-purity.py` |
+| `_FENCE_LINE_RE` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py` |
 | `_max_answer_chars` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py` |
 | `_offset` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py` |
 | `_rows_note` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py` |
@@ -285,7 +285,7 @@ block's reach, while the fleet census above stays about the servers.
 | `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/search_duckduckgo.py` |
 
 16 hosts scanned; 44 canonical blocks, of which 44 are generated into at least one host; every block reaches a host.
-<!-- END MEASURED: e5e4587351a3 -->
+<!-- END MEASURED: bfd34a70b370 -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and

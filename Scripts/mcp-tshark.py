@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -422,14 +423,58 @@ def _resolve_file(path: str, project_root: str) -> str:
 # ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
+# Every reply this server cuts is a fenced block (a JSON/text dissection, a
+# statistics table, a followed stream), so a cut routinely lands inside one.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_paging.py :: _FENCE_LINE_RE
+_FENCE_LINE_RE = re.compile(r"^(`{3,})", re.M)
+# END GENERATED: f6d18108dd1c
+
+
+def _balance_fences(body: str) -> str:
+    """Close a fenced block the head-kept cut landed inside.
+
+    A reply that stops mid-fence leaves the closing line looking like packet
+    output. An odd number of fence lines means exactly one is missing, and with
+    the head kept it is missing at the bottom.
+    """
+    fences = _FENCE_LINE_RE.findall(body)
+    if len(fences) % 2 == 0:
+        return body
+    return "%s\n%s" % (body.rstrip("\n"), fences[-1])
+
+
 def _truncate(text: str, max_chars: int) -> str:
-    """Truncate text with a trailing notice if it exceeds max_chars."""
+    """Cut `text` to `max_chars` on a LINE BOUNDARY, with the fleet's closing line.
+
+    ADR 0013 licenses this server's 500_000 DEFAULT (the sequence class) and
+    nothing else, so a cut closes exactly as every other server's does: the
+    head is kept, the cut lands on a newline where there is one, an open fence
+    is closed, and the last line says how much survived and what to do next.
+    """
     if max_chars <= 0 or len(text) <= max_chars:
         return text
-    return (
-        text[:max_chars]
-        + f"\n\n**(truncated — showing first {max_chars:,} chars of {len(text):,})**"
-    )
+    total = len(text)
+
+    def marker(kept: int) -> str:
+        return (f"\n[truncated: kept {kept} of {total} chars from the head; "
+                f"raise max_answer_chars or narrow the query]")
+
+    # marker(total) is the longest the line can get (kept <= total), and the
+    # repair fence can only be one of the fence tokens already present, so
+    # reserving both keeps the whole reply inside the ceiling.
+    fences = _FENCE_LINE_RE.findall(text)
+    keep = max_chars - len(marker(total))
+    if fences:
+        keep -= max(len(f) for f in fences) + 1
+    if keep <= 0:
+        # The ceiling is smaller than the accounting line itself. The line still
+        # wins: a payload with no accounting is worse than no payload.
+        return marker(0).lstrip("\n")
+    cut = text.rfind("\n", 0, keep + 1)
+    body = text[:cut] if cut > 0 else text[:keep]
+    # The count is the payload that survived; the repair fence comes after it.
+    return _balance_fences(body) + marker(len(body))
 
 
 def _md_cell(value: str) -> str:

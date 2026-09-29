@@ -615,6 +615,29 @@ def _tiny_pcap_bytes(packets=5):
     return b"".join(out)
 
 
+def _fleet_trunc_words():
+    """The fleet's closing-line spelling, READ from where it is written down once.
+
+    No canonical generation source holds the closing line -- `_mcp_paging.py`
+    says each host's `_cap_text` is a merge, not a lift -- so its one written
+    spelling is the footprint suite's `V1_TRUNC_*` constants. They are read with
+    `ast` rather than imported: importing a test module from here would run its
+    harness setup for three string literals.
+    """
+    import ast
+    path = os.path.join(os.path.dirname(SCRIPT_DIR), "tests", "test_mcp_footprint.py")
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), path)
+    found = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in ("V1_TRUNC_OPEN", "V1_TRUNC_CLOSE",
+                                           "V1_TRUNC_END_WORDS")):
+            found[node.targets[0].id] = ast.literal_eval(node.value)
+    return found["V1_TRUNC_OPEN"], found["V1_TRUNC_CLOSE"], found["V1_TRUNC_END_WORDS"]
+
+
 def tshark_ceiling_param_checks(srv, cfg, checks):
     """mcp-tshark's reply ceiling answers to the fleet spelling (roadmap R-0008).
 
@@ -687,17 +710,25 @@ def tshark_ceiling_param_checks(srv, cfg, checks):
         ctl_err, ctl_text = replies["control"]
         if "tshark not found" in ctl_text:
             return
+        # ADR 0013: a class licenses a deviation on the DEFAULT alone, so the
+        # cut must close with the fleet's line, naming the uncut total.
+        t_open, t_close, t_ends = _fleet_trunc_words()
         checks.append(check(
             "tshark: analyze with no ceiling param is not cut (control)",
             not ctl_err and "## Packet Analysis" in ctl_text
-            and "(truncated" not in ctl_text and len(ctl_text) > 64,
+            and t_open not in ctl_text and "truncated" not in ctl_text
+            and len(ctl_text) > 64,
             "isError=%r len=%d text=%r" % (ctl_err, len(ctl_text), ctl_text[:120])))
         for label in ("max_answer_chars", "max_output_chars"):
             err, text = replies[label]
+            last = text.rstrip("\n").rsplit("\n", 1)[-1]
             checks.append(check(
-                "tshark: %s=64 cuts the reply" % label,
-                not err and "(truncated" in text and "showing first 64 chars" in text,
-                "isError=%r len=%d text=%r" % (err, len(text), text[-160:])))
+                "tshark: %s=64 cuts the reply with the fleet closing line" % label,
+                not err and last.startswith(t_open) and last.endswith(t_close)
+                and "from the head" in last and "from the head" in t_ends
+                and (" of %d chars " % len(ctl_text)) in last
+                and text.count(t_open) == 1,
+                "isError=%r len=%d last=%r" % (err, len(text), last[-200:])))
     finally:
         shutil.rmtree(fixture_dir, ignore_errors=True)
 
