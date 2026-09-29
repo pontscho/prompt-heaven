@@ -275,6 +275,7 @@ All errors return `{"error":"message"}` in the tool response with `isError: true
 - Path escapes project root (sandbox violation)
 - File/directory not found
 - Invalid regex pattern
+- Search time budget exceeded (5 s per call) — a `search_for_pattern` regex runs in a killable child, so a catastrophically backtracking pattern such as `(a+)+$` is stopped and reported rather than hanging the server; simplify it or pass `regex: false`
 - Multiple occurrences when `allow_multiple_occurrences` is false
 
 ## Security

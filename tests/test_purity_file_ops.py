@@ -120,6 +120,17 @@ Groups:
      `head_limit`/`offset` counting match rows, a header that names both the
      match and the line count, and a refusal -- not a silent drop -- beside
      `count`, `files_with_matches` or any nonzero context
+  O  fnmatch character classes in find_file's path-style branch (R-0012):
+     `src/[ab].py`, `[!a]`, a range, a class in a directory segment and after
+     `**/` answer as the bare-mask branch does; a class never matches `/`, an
+     unclosed `[` stays literal, a bracketed filename is reached via `[[]`,
+     braces are still refused; search's and list_dir's globs as controls
+  P  a catastrophic search regex (`(a+)+$`) is BOUNDED (R-0016): each of the
+     four match sites answers an error naming the time budget within a stated
+     bound, on a fresh server that still answers afterwards; normal regexes
+     (`$`, CRLF, no final newline, form feed, non-ASCII, context, count,
+     files_with_matches, zero-length only_matching), literal mode and the
+     pattern-length ceiling as controls
 """
 
 import os
@@ -127,6 +138,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -2331,34 +2343,377 @@ def group_g(suite, root):
                 "reported : %s" % (", ".join(sorted(got)) or "-")],
         text=reply, showable=True)
 
-    # A divergence recorded rather than fixed, so it outlives the conversation
-    # that measured it.  `_compile_path_glob` walks the mask character by
-    # character and sends everything it does not recognise through `re.escape`
-    # (Scripts/mcp-purity.py:1127), so an fnmatch character class becomes a
-    # LITERAL `[ab]` in the path-style branch -- while the bare-mask branch
-    # (Scripts/mcp-purity.py:1159) hands the mask to fnmatch and honours it.
-    # One handler, two answers, and the only thing deciding which is whether the
-    # mask happens to carry a `/`.  INFO, not FAIL: nobody has asked for classes
-    # in a path mask, and inventing a second answer now would be a fix in search
-    # of a caller.
+    # Recorded as an INFO divergence by ADR 0017 and CLOSED by R-0012: the
+    # path-style branch (`_compile_path_glob`) used to send `[` through its
+    # `re.escape` fallthrough, so `src/[ab].py` looked for a LITERAL `[ab]`
+    # while the bare-mask branch's fnmatch honoured the class -- one handler,
+    # two answers, picked by the mask's `/`.  Now gated: the scoped answer must
+    # be the bare answer restricted to `src/`'s direct children.  Group O
+    # carries the rest of the class spellings.
     bare = found_paths(handler_text(
         mod.handle_find_file({"file_mask": "[ab].py"}, root)))
     scoped = found_paths(handler_text(
         mod.handle_find_file({"file_mask": "src/[ab].py"}, root)))
+    want = {p for p in bare if p.startswith("src/") and p.count("/") == 1}
     suite.record(
-        "G", "char-class-divergence-inside-find_file", (), status=H.INFO,
-        detail=["`[ab].py` (bare mask -> fnmatch on the basename, "
-                "Scripts/mcp-purity.py:1159) -> %s"
+        "G", "char-class-agrees-inside-find_file",
+        [] if want and scoped == want else
+        ["`src/[ab].py` -> %s, want %s (the bare answer under src/)"
+         % (sorted(scoped) or "nothing", sorted(want) or "nothing")],
+        detail=["`[ab].py` (bare mask -> fnmatch on the basename) -> %s"
                 % (", ".join(sorted(bare)) or "nothing"),
-                "`src/[ab].py` (path-style -> _compile_path_glob, "
-                "Scripts/mcp-purity.py:1127) -> %s"
+                "`src/[ab].py` (path-style -> _compile_path_glob) -> %s"
                 % (", ".join(sorted(scoped)) or "nothing"),
-                "the re.escape fallthrough at mcp-purity.py:1127 turns `[ab]` "
-                "into a LITERAL, so one handler answers a character class two "
-                "ways and the mask's `/` is what picks the answer",
-                "divergence present: %s"
-                % ("yes" if bare and not scoped else
-                   "NO -- the two branches now agree, update this row")])
+                "the declared divergence of ADR 0017, closed by R-0012: the",
+                "mask's `/` no longer picks the meaning of a character class"])
+
+
+# ---------------------------------------------------------------------------
+# Group O -- fnmatch character classes in find_file's path-style branch
+#
+# ADR 0017 declared, rather than fixed, one divergence inside find_file: a mask
+# holding `/` or `**` goes through `_compile_path_glob`, whose `re.escape`
+# fallthrough turned `[ab]` into a LITERAL, while a bare mask goes through
+# fnmatch and honours the class.  `[ab].py` found `a.py`; `src/[ab].py` found
+# nothing -- a silent zero picked by the mask's slash.  R-0012 closes it.
+#
+# In-process, like group G, and on its own tree so group G's measured rows do
+# not move.  The PATH-STYLE branch is the one under test; find_file is its only
+# caller (search_for_pattern's globs and list_dir's filter are fnmatch already),
+# so the two rows on those handlers are CONTROLS: they were green before the
+# fix and prove the three engines now agree on the same spelling.
+# ---------------------------------------------------------------------------
+
+# `lit/[ab].py` is a file whose NAME carries brackets.  Neither ADR 0017 nor
+# the code promised a literal-bracket spelling for it (0017's literal promise is
+# the comma-less `{{...}}` brace group); fnmatch's own escape `[[]` reaches it,
+# and after R-0012 that escape works in both branches.  `lit/[x.py` carries an
+# UNCLOSED bracket, which fnmatch reads as a literal `[` -- the translator must
+# too, rather than raise re.error or swallow the rest of the mask.
+CLASS_FILES = ("a.py", "b.py", "c.py",
+               "src/a.py", "src/b.py", "src/c.py", "src/deep/a.py",
+               "pkg1/m.py", "pkg2/m.py", "pkg3/m.py",
+               "lit/[ab].py", "lit/[x.py")
+
+
+def make_class_fixture(ws, subdir):
+    """Group O's tree, REALPATH'd for the same reason group G's is."""
+    ws.subdir(subdir)
+    for rel in CLASS_FILES:
+        ws.write_text(os.path.join(subdir, rel), LINE)
+    return os.path.realpath(ws.join(subdir))
+
+
+def record_o(suite, cid, handler, params, root, must, must_not,
+             extract=found_paths, detail=()):
+    """One in-process polarity row in group O; an exception is the failure."""
+    try:
+        text = handler_text(handler(params, root))
+        raised = None
+    except Exception as exc:                                     # noqa: BLE001
+        raised, text = exc, "%s: %s" % (type(exc).__name__, exc)
+    if raised is not None:
+        problems = ["raised %s: %s" % (type(raised).__name__, raised)]
+    else:
+        problems = polarity(text, False, must, must_not, extract)
+    return suite.record("O", cid, problems,
+                        detail=list(detail) + [
+                            "params       : %s" % (params,),
+                            "must find    : %s" % (", ".join(must) or "-"),
+                            "must not find: %s" % (", ".join(must_not) or "-"),
+                            "reported     : %s"
+                            % (", ".join(sorted(extract(text))) or "-")],
+                        text=text, showable=True)
+
+
+def group_o(suite, root):
+    """Character classes mean the same thing on both sides of find_file's `/`."""
+    mod = H.load_module_from_path("mcp_purity_classes", SERVER)
+    ff = mod.handle_find_file
+
+    # -- the divergence itself: the path-style branch honours the class -------
+    record_o(
+        suite, "path-class-matches", ff, {"file_mask": "src/[ab].py"}, root,
+        must=["src/a.py", "src/b.py"],
+        must_not=["src/c.py", "a.py", "b.py", "src/deep/a.py"],
+        detail=["the declared divergence: `src/[ab].py` must answer what",
+                "`[ab].py` answers, scoped to `src/` -- not a literal `[ab]`"])
+    record_o(
+        suite, "path-negated-class", ff, {"file_mask": "src/[!a].py"}, root,
+        must=["src/b.py", "src/c.py"], must_not=["src/a.py"],
+        detail=["`[!a]` is fnmatch's negation; it must not be read as a",
+                "literal `!` any more than `[ab]` is a literal pair"])
+    record_o(
+        suite, "path-range-class", ff, {"file_mask": "src/[a-b].py"}, root,
+        must=["src/a.py", "src/b.py"], must_not=["src/c.py"],
+        detail=["a range is a class too; `re.escape` turned its `-` into a",
+                "literal hyphen"])
+    record_o(
+        suite, "path-class-in-dir-segment", ff, {"file_mask": "pkg[12]/m.py"},
+        root, must=["pkg1/m.py", "pkg2/m.py"], must_not=["pkg3/m.py"],
+        detail=["a class in a DIRECTORY segment, not only in the basename"])
+    record_o(
+        suite, "globstar-then-class", ff, {"file_mask": "**/[ab].py"}, root,
+        must=["a.py", "b.py", "src/a.py", "src/b.py", "src/deep/a.py"],
+        must_not=["c.py", "src/c.py", "lit/[ab].py"],
+        detail=["globstar and a class in one mask: `**/` still means any",
+                "depth INCLUDING zero (ADR 0017), and the class still bites"])
+
+    # -- must-stay-green: the widening must not over-reach ---------------------
+    record_o(
+        suite, "bare-class-control", ff, {"file_mask": "[ab].py"}, root,
+        must=["a.py", "b.py", "src/a.py", "src/b.py", "src/deep/a.py"],
+        must_not=["c.py", "src/c.py"],
+        detail=["CONTROL: the bare-mask branch (fnmatch on the basename)",
+                "already honoured classes; it is the reference answer"])
+    record_o(
+        suite, "class-never-crosses-slash", ff,
+        {"file_mask": "**/src[!x]a.py"}, root,
+        must=[], must_not=["src/a.py"],
+        detail=["CONTROL: in the path-style branch `*` and `?` never match",
+                "`/`, so a negated class must not either -- fnmatch's own",
+                "`[!x]` WOULD match `/`, and `src[!x]a.py` must not reach",
+                "`src/a.py` by spending its class on the separator"])
+    record_o(
+        suite, "unclosed-bracket-is-literal", ff, {"file_mask": "lit/[x.py"},
+        root, must=["lit/[x.py"], must_not=[],
+        detail=["CONTROL: an unclosed `[` is a literal in fnmatch and stays",
+                "one here -- no re.error, no swallowed tail"])
+    record_o(
+        suite, "literal-bracket-name-via-escape", ff,
+        {"file_mask": "lit/[[]ab].py"}, root,
+        must=["lit/[ab].py"], must_not=[],
+        detail=["a filename that CARRIES brackets is reached with fnmatch's",
+                "escape `[[]`, in the path-style branch exactly as in the",
+                "bare one (`[[]ab].py`); no literal-bracket spelling was ever",
+                "promised by ADR 0017 or the docs, so none is kept"])
+
+    # -- brace alternation is still refused beside a class --------------------
+    try:
+        ff({"file_mask": "src/[ab].{py,txt}"}, root)
+        raised = None
+    except Exception as exc:                                     # noqa: BLE001
+        raised = exc
+    problems = []
+    if raised is None:
+        problems.append("expected ValueError, call was accepted")
+    elif not isinstance(raised, ValueError):
+        problems.append("expected ValueError, raised %s: %s"
+                        % (type(raised).__name__, raised))
+    elif "brace" not in str(raised).lower():
+        problems.append("refusal does not mention 'brace'")
+    suite.record(
+        "O", "brace-beside-class-still-refused", problems,
+        detail=["CONTROL: honouring `[...]` must not let `{a,b}` through --",
+                "ADR 0017's refusal runs before the translator is reached",
+                "outcome: %s" % (raised if raised is not None else "accepted")])
+
+    # -- the other two engines already agreed: controls, green before ---------
+    record_o(
+        suite, "search-include-class-control", mod.handle_search_for_pattern,
+        {"substring_pattern": NEEDLE, "paths_include_glob": "src/[ab].py"},
+        root, must=["src/a.py", "src/b.py"], must_not=["src/c.py", "a.py"],
+        extract=search_paths,
+        detail=["CONTROL: search_for_pattern's `_glob_matches` is fnmatch and",
+                "honoured the class before R-0012; find_file now agrees"])
+    record_o(
+        suite, "list_dir-filter-class-control", mod.handle_list_dir,
+        {"filter": "[ab].py", "relative_path": "src"}, root,
+        must=["src/a.py", "src/b.py"], must_not=["src/c.py"],
+        extract=lambda t: {p if p.startswith("src/") else "src/" + p
+                           for p in listing_paths(t)},
+        detail=["CONTROL: list_dir's filter is a bare fnmatch name and has",
+                "no path-style branch at all; it honoured the class already"])
+
+
+# ---------------------------------------------------------------------------
+# Group P -- a catastrophic regex is bounded, not a residual (R-0016)
+#
+# `(a+)+$` against forty `a`s and a `!` backtracks ~2^40 times.  CPython's re
+# cannot be interrupted from Python code, and on 3.9 it holds the GIL for the
+# whole match, so the old in-loop deadline never got a turn: the call never
+# returned and the server answered nothing else either.  Every catastrophic row
+# runs on its OWN fresh server with a harness-side timeout (P_RPC_TIMEOUT)
+# shorter than the suite's, so a regression FAILS in seconds instead of hanging
+# the suite, and the elapsed time is asserted against P_BOUND_SECS -- the
+# stated bound: the server's 5 s search budget plus spawn and kill slack.  The
+# four catastrophic rows are the four places the scan applies the regex:
+# content, content with context, count (search without a row) and
+# only_matching (finditer).  Each then asks the SAME server a normal search:
+# a runaway that was abandoned rather than killed would still be spinning.
+#
+# The controls pin what an out-of-process matcher has to reproduce exactly:
+# `$` before a line's `\n`, a CRLF line, a last line with no newline, a form
+# feed that is NOT a line break, and a non-ASCII match -- plus literal mode
+# and the pattern-length ceiling, the guard that existed before this group.
+# ---------------------------------------------------------------------------
+
+RD_EVIL = "evil.txt"
+RD_NORM = "norm.txt"
+RD_EVIL_PATTERN = "(a+)+$"
+RD_EVIL_LINE = "a" * 40 + "!\n"
+RD_NORM_BYTES = ("alpha here\n"
+                 "beta here\r\n"
+                 "gamma été here\n"
+                 "form\x0cfeed here\n"
+                 "last here").encode("utf-8")
+RD_NORM_ROWS = ["%s:1: alpha here" % RD_NORM,
+                "%s:2: beta here" % RD_NORM,
+                "%s:3: gamma été here" % RD_NORM,
+                "%s:4: form\x0cfeed here" % RD_NORM,
+                "%s:5: last here" % RD_NORM]
+P_RPC_TIMEOUT = 20.0
+P_BOUND_SECS = 12.0
+
+
+def make_redos_fixture(ws, subdir):
+    """Group P's tree: one catastrophic line, one line-shape zoo."""
+    ws.subdir(subdir)
+    ws.write_text(os.path.join(subdir, RD_EVIL), RD_EVIL_LINE)
+    ws.write_bytes(os.path.join(subdir, RD_NORM), RD_NORM_BYTES)
+    return os.path.realpath(ws.join(subdir))
+
+
+def rows_exact(text):
+    """`path:line: text` rows split on `\\n` ONLY -- str.splitlines() would cut
+    the form-feed row in two, which is the very thing a row pins."""
+    return [row for row in text.split("\n") if RX_MATCH_ROW.match(row)]
+
+
+def record_bounded(suite, cid, root, params, detail=()):
+    """A catastrophic search on a FRESH server must come back as an error
+    within P_BOUND_SECS, and the same server must answer a normal search
+    afterwards."""
+    drv = Driver(root, timeout=P_RPC_TIMEOUT)
+    problems = []
+    try:
+        t0 = time.monotonic()
+        is_error, text = drv.call("search_for_pattern", params)
+        elapsed = time.monotonic() - t0
+        low = text.lower()
+        if text.startswith("DRIVER-ERROR"):
+            problems.append("no reply within the %.0fs harness timeout (%s)"
+                            % (P_RPC_TIMEOUT, text[:160]))
+        elif not is_error:
+            problems.append("expected an error, call was accepted")
+        else:
+            for token in ("time budget", "backtrack", "regex:false"):
+                if token not in low:
+                    problems.append("error text does not mention %r" % token)
+        if elapsed > P_BOUND_SECS:
+            problems.append("took %.1fs, bound is %.0fs"
+                            % (elapsed, P_BOUND_SECS))
+        after = "(not asked: the first call never returned)"
+        if not text.startswith("DRIVER-ERROR"):
+            a_err, after = drv.call("search_for_pattern", {
+                "substring_pattern": "here$", "relative_path": RD_NORM,
+                "output_mode": "count"})
+            if a_err or "%s: 5" % RD_NORM not in [
+                    ln.strip() for ln in after.split("\n")]:
+                problems.append("server did not answer a normal search "
+                                "afterwards: %s" % after.strip()[:200])
+    finally:
+        drv.close()
+    return suite.record("P", cid, problems,
+                        detail=list(detail) + [
+                            "params : %s" % (params,),
+                            "elapsed: %.2fs (bound %.0fs)"
+                            % (elapsed, P_BOUND_SECS),
+                            "reply  : %s" % text.strip()[:300],
+                            "after  : %s" % after.strip()[:200]],
+                        text=text, showable=True)
+
+
+def record_norm(suite, cid, drv, params, want_rows=None, want_lines=(),
+                want_text=None, detail=()):
+    """A normal search must be answered exactly as before the bound existed."""
+    t0 = time.monotonic()
+    is_error, text = drv.call("search_for_pattern", params)
+    elapsed = time.monotonic() - t0
+    problems = []
+    if is_error:
+        problems.append("server returned an error")
+    if want_rows is not None and rows_exact(text) != list(want_rows):
+        problems.append("rows %r, want %r" % (rows_exact(text), list(want_rows)))
+    lines = [ln.strip() for ln in text.split("\n")]
+    for want in want_lines:
+        if want not in lines:
+            problems.append("no line equals %r" % want)
+    if want_text is not None and want_text not in text:
+        problems.append("reply does not contain %r" % want_text)
+    return suite.record("P", cid, problems,
+                        detail=list(detail) + [
+                            "params : %s" % (params,),
+                            "elapsed: %.2fs" % elapsed,
+                            "reply  : %s" % text.strip()[:400]],
+                        text=text, showable=True)
+
+
+def group_p(suite, drv, root):
+    evil = {"substring_pattern": RD_EVIL_PATTERN, "relative_path": RD_EVIL}
+    record_bounded(
+        suite, "catastrophic-content-bounded", root, dict(evil),
+        detail=["the default content mode: one pattern.search per line"])
+    record_bounded(
+        suite, "catastrophic-context-bounded", root,
+        dict(evil, context_lines=1),
+        detail=["the context branch reads the file whole before matching"])
+    record_bounded(
+        suite, "catastrophic-count-bounded", root,
+        dict(evil, output_mode="count"),
+        detail=["count mode: a search per line that renders no row"])
+    record_bounded(
+        suite, "catastrophic-only_matching-bounded", root,
+        dict(evil, only_matching=True),
+        detail=["only_matching drives finditer, not search"])
+
+    norm = {"relative_path": RD_NORM}
+    record_norm(
+        suite, "dollar-crlf-eof-formfeed-nonascii", drv,
+        dict(norm, substring_pattern="here$"), want_rows=RD_NORM_ROWS,
+        detail=["CONTROL: `$` matches before each line's `\\n`; the CRLF",
+                "line is one line; the unterminated last line matches; the",
+                "form feed does not split line 4; the non-ASCII line survives"])
+    record_norm(
+        suite, "only_matching-nonascii-exact", drv,
+        dict(norm, substring_pattern=r"\w+(?= here)", only_matching=True),
+        want_rows=["%s:1: alpha" % RD_NORM, "%s:2: beta" % RD_NORM,
+                   "%s:3: été" % RD_NORM, "%s:4: feed" % RD_NORM,
+                   "%s:5: last" % RD_NORM],
+        detail=["CONTROL: finditer's matches, a Unicode \\w among them"])
+    record_norm(
+        suite, "zero-length-only_matching-control", drv,
+        dict(norm, substring_pattern="z*", only_matching=True),
+        want_rows=[],
+        want_lines=["0 match(es) on 0 line(s), one row per match"],
+        detail=["CONTROL: `z*` matches only the empty string: no rows"])
+    record_norm(
+        suite, "context-lines-control", drv,
+        dict(norm, substring_pattern="^beta", context_lines=1),
+        want_text="%s:2:\nalpha here\nbeta here\ngamma été here"
+                  % RD_NORM,
+        detail=["CONTROL: the context branch's line numbers and window"])
+    record_norm(
+        suite, "count-control", drv,
+        dict(norm, substring_pattern="here$", output_mode="count"),
+        want_lines=["%s: 5" % RD_NORM],
+        detail=["CONTROL: count mode"])
+    record_norm(
+        suite, "files_with_matches-control", drv,
+        {"substring_pattern": "^beta", "output_mode": "files_with_matches"},
+        want_lines=[RD_NORM],
+        detail=["CONTROL: a whole-root walk; evil.txt does not match"])
+    record_norm(
+        suite, "literal-mode-evil-pattern-fast", drv,
+        dict(evil, regex=False), want_rows=[], want_lines=["0 match(es)"],
+        detail=["CONTROL: regex:false escapes the pattern, which is then",
+                "linear: the same text is answered, not refused"])
+    record_error(
+        suite, "P", "pattern-length-ceiling-still-refused", drv,
+        "search_for_pattern",
+        dict(norm, substring_pattern="a" * 1001),
+        must_say=["too long", "1000"],
+        detail=["CONTROL: the length ceiling that predates this group"])
 
 
 # ---------------------------------------------------------------------------
@@ -2499,9 +2854,27 @@ def run(opts=None):
         # handlers in-process, so it runs outside the driver lifetime entirely.
         group_g(suite, glob_root)
 
+        # Group O is in-process too, on its own tree (see CLASS_FILES).
+        class_root = make_class_fixture(ws, "classes")
+        suite.note("      fixture (O)   : %s  no .gitignore, files=%s"
+                   % (class_root, list(CLASS_FILES)))
+        group_o(suite, class_root)
+
+        # Group P owns its servers: every catastrophic row starts a fresh one
+        # (see record_bounded), the controls share drv_rd.
+        redos_root = make_redos_fixture(ws, "redos")
+        suite.note("      fixture (P)   : %s  no .gitignore, files=%s"
+                   % (redos_root, [RD_EVIL, RD_NORM]))
+        drv_rd = Driver(redos_root)
+        try:
+            group_p(suite, drv_rd, redos_root)
+            stderr_bytes += len(drv_rd.stderr_text)
+        finally:
+            drv_rd.close()
+
         workspaces = [basename_root, pathshaped_root, glob_root, multi_root,
                       read_root, git_root, outside_root, literal_root,
-                      onlymatch_root]
+                      onlymatch_root, class_root, redos_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()

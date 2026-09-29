@@ -238,8 +238,10 @@ SUITES = [
      "`regex:false` literal mode, `max_results`/`max` as head_limit, and "
      "`paths_include`/`paths_exclude` as the *_glob filters, and "
      "`only_matching` (rg -o): one row per match, paged by match rows, "
-     "refused beside count/files_with_matches/context",
-     173),
+     "refused beside count/files_with_matches/context, "
+     "find_file's path-style character classes, and a catastrophic "
+     "search regex bounded by the call's time budget",
+     197),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 298),
     ("name_existence", run_name_existence,

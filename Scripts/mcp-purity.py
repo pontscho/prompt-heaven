@@ -38,7 +38,10 @@ import logging
 import os
 import pathlib
 import re
+import selectors
 import shutil
+import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -79,6 +82,24 @@ def _configure_logging(debug, log_file):
 # ---------------------------------------------------------------------------
 # ReDoS guard (F4 / CWE-1333)
 # ---------------------------------------------------------------------------
+#
+# Two layers. The pattern-length ceiling refuses the oversized; the regex
+# WORKER is the bound (R-0016). CPython's re cannot be interrupted from Python
+# code: a match is one C call, and on 3.9 it holds the GIL for its whole
+# length, so a catastrophic `(a+)+$` on one 41-char line froze not just its
+# executor thread but the whole server -- the stdin reader and the event loop
+# included -- and the between-lines deadline check below never got a turn.
+# No length cap closes that: 2^n backtracking needs only a few dozen chars.
+#
+# So search_for_pattern evaluates a caller REGEX in a child interpreter it can
+# kill (_RegexWorker): one spawn per call (~60 ms), one pipe round trip per
+# file, and the call's _SEARCH_DEADLINE_SECS budget enforced on every reply.
+# Past it the child is killed and the caller gets an error (isError) naming
+# the budget, the file and regex:false. Literal mode (regex:false) stays
+# in-process: an re.escape()d pattern has nothing to backtrack over.
+#
+# NOT covered here: list_dir's `grep` and replace_content's regex mode still
+# match in-process; their own comments carry that residual.
 
 _MAX_REGEX_LEN = 1000          # caller-supplied pattern length ceiling
 _SEARCH_DEADLINE_SECS = 5.0    # wall-clock budget for multi-file scan loops
@@ -91,6 +112,174 @@ def _check_regex_len(pattern: str, param_name: str = "pattern") -> None:
             f"Regex pattern too long ({len(pattern)} chars); "
             f"maximum allowed is {_MAX_REGEX_LEN} chars (parameter: {param_name})"
         )
+
+
+# The child's whole program. stdlib only, run as `python -I -S -c`, so it
+# imports nothing from this file or the environment. Frames are an 8-byte
+# big-endian length plus payload: the first is the pattern, then one request
+# per file -- op byte (`s` search / `f` finditer) + the file's text -- each
+# answered by one JSON frame. Lines are rebuilt by splitting on "\n" ONLY,
+# which is exactly how the parent's text-mode readlines() cut them (newlines
+# already translated); str.splitlines() would also cut at \f, \x1c, U+2028...
+# `f` keeps a line's non-empty matches with the line terminator stripped --
+# the only_matching row rule, applied here so a zero-length `x*` does not ship
+# one empty string per character. RLIMIT_CPU is the child's own backstop: it
+# dies of SIGXCPU if the server is gone and nobody is left to kill it.
+_REGEX_WORKER_SRC = r'''
+import json, re, resource, struct, sys
+try:
+    _cpu = int(sys.argv[1])
+    resource.setrlimit(resource.RLIMIT_CPU, (_cpu, _cpu))
+except (ValueError, OSError, IndexError):
+    pass
+inp, out = sys.stdin.buffer, sys.stdout.buffer
+def frame():
+    head = inp.read(8)
+    if len(head) < 8:
+        sys.exit(0)
+    (n,) = struct.unpack("!Q", head)
+    body = inp.read(n)
+    if len(body) < n:
+        sys.exit(0)
+    return body
+pat = re.compile(frame().decode("utf-8", "surrogatepass"))
+while True:
+    req = frame()
+    op, text = req[:1], req[1:].decode("utf-8", "surrogatepass")
+    parts = text.split("\n")
+    lines = [p + "\n" for p in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    if op == b"s":
+        res = [i for i, ln in enumerate(lines) if pat.search(ln)]
+    else:
+        res = []
+        for i, ln in enumerate(lines):
+            hits = [h for h in (m.group(0).rstrip("\n") for m in pat.finditer(ln))
+                    if h]
+            if hits:
+                res.append([i, hits])
+    data = json.dumps(res).encode("ascii")
+    out.write(struct.pack("!Q", len(data)))
+    out.write(data)
+    out.flush()
+'''
+
+
+class _InProcessMatcher:
+    """search_for_pattern's matcher for a LITERAL pattern: no child, because an
+    re.escape()d pattern cannot backtrack. Same answers as _RegexWorker, whose
+    child program (_REGEX_WORKER_SRC) this mirrors line for line."""
+
+    def __init__(self, pattern: "re.Pattern") -> None:
+        self._p = pattern
+
+    def search_lines(self, lines: List[str], where: str) -> set:
+        return {i for i, ln in enumerate(lines) if self._p.search(ln)}
+
+    def finditer_lines(self, lines: List[str], where: str) -> Dict[int, List[str]]:
+        found: Dict[int, List[str]] = {}
+        for i, ln in enumerate(lines):
+            hits = [h for h in (m.group(0).rstrip("\n")
+                                for m in self._p.finditer(ln)) if h]
+            if hits:
+                found[i] = hits
+        return found
+
+    def close(self) -> None:
+        pass
+
+
+class _RegexWorker:
+    """search_for_pattern's matcher for a caller REGEX: a killable child (see
+    the ReDoS guard above). Started lazily on the first file, so a call that
+    reaches no file spawns nothing; every reply is awaited against the call's
+    absolute *deadline*, and a miss kills the child and raises ValueError.
+    close() is idempotent and is what the handler's ExitStack runs."""
+
+    def __init__(self, pattern_str: str, deadline: float) -> None:
+        self._pattern = pattern_str
+        self._deadline = deadline
+        self._proc: Optional[subprocess.Popen] = None
+        self._sel: Optional[selectors.BaseSelector] = None
+        self._closed = False
+
+    def _start(self) -> None:
+        if self._closed:
+            raise RuntimeError("regex worker already stopped for this call")
+        if not sys.executable:
+            raise RuntimeError(
+                "cannot evaluate the regex in a bounded worker: this "
+                "interpreter reports no executable path; pass regex:false "
+                "for a literal search")
+        cpu = int(_SEARCH_DEADLINE_SECS) + 2
+        self._proc = subprocess.Popen(
+            [sys.executable, "-I", "-S", "-c", _REGEX_WORKER_SRC, str(cpu)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, close_fds=True)
+        self._sel = selectors.DefaultSelector()
+        self._sel.register(self._proc.stdout, selectors.EVENT_READ)
+        self._send(self._pattern.encode("utf-8", "surrogatepass"))
+
+    def _send(self, payload: bytes) -> None:
+        try:
+            self._proc.stdin.write(struct.pack("!Q", len(payload)))
+            self._proc.stdin.write(payload)
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            self.close()
+            raise RuntimeError(f"regex worker exited unexpectedly: {exc}")
+
+    def _recv(self, n: int, where: str) -> bytes:
+        buf = bytearray()
+        fd = self._proc.stdout.fileno()
+        while len(buf) < n:
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0 or not self._sel.select(remaining):
+                self.close()
+                raise ValueError(
+                    f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s) "
+                    f"while matching the regex against {where}: the pattern may "
+                    "backtrack catastrophically (nested quantifiers such as "
+                    "(a+)+ or (a|a)*). The match was stopped. Simplify the "
+                    "pattern, narrow relative_path, or pass regex:false for a "
+                    "literal search")
+            chunk = os.read(fd, n - len(buf))
+            if not chunk:
+                self.close()
+                raise RuntimeError("regex worker exited unexpectedly while "
+                                   f"matching {where}")
+            buf += chunk
+        return bytes(buf)
+
+    def _ask(self, op: bytes, lines: List[str], where: str) -> list:
+        if self._proc is None:
+            self._start()
+        self._send(op + "".join(lines).encode("utf-8", "surrogatepass"))
+        (n,) = struct.unpack("!Q", self._recv(8, where))
+        return json.loads(self._recv(n, where).decode("ascii"))
+
+    def search_lines(self, lines: List[str], where: str) -> set:
+        return set(self._ask(b"s", lines, where))
+
+    def finditer_lines(self, lines: List[str], where: str) -> Dict[int, List[str]]:
+        return {i: hits for i, hits in self._ask(b"f", lines, where)}
+
+    def close(self) -> None:
+        self._closed = True
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        if self._sel is not None:
+            self._sel.close()
+            self._sel = None
+        with contextlib.suppress(OSError):
+            proc.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
+        for stream in (proc.stdin, proc.stdout):
+            with contextlib.suppress(OSError):
+                stream.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1338,13 +1527,49 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     return {"__raw_text__": f"{body}\n{note}" if note else body}
 
 
+def _path_glob_class(mask: str, i: int) -> Optional[tuple]:
+    """Translate the fnmatch character class opening at ``mask[i] == "["``.
+
+    Returns ``(regex, index_after_class)``, or None when the ``[`` is never
+    closed -- fnmatch reads an unclosed ``[`` as a literal, and so does the
+    caller. The closing ``]`` is located with fnmatch's own rule (a leading
+    ``!`` and then a leading ``]`` are class members, not terminators), and the
+    class text is handed to ``fnmatch.translate`` itself, so negation, ranges,
+    ``[[]`` escapes and empty ranges mean exactly what they mean in the
+    bare-mask branch. The only addition is a ``(?!/)`` guard: in a path glob
+    ``*`` and ``?`` never cross a separator, and neither may a class (fnmatch's
+    ``[!a]`` alone WOULD match ``/``).
+    """
+    j = i + 1
+    n = len(mask)
+    if j < n and mask[j] == "!":
+        j += 1
+    if j < n and mask[j] == "]":
+        j += 1
+    while j < n and mask[j] != "]":
+        j += 1
+    if j >= n:
+        return None
+    body = fnmatch.translate(mask[i : j + 1])
+    # translate() anchors its result: `\Z` through 3.13, `\z` from 3.14. The
+    # `(?s:...)` group it wraps the class in is kept -- a scoped flag group is
+    # valid anywhere inside a larger pattern.
+    if not body.endswith(("\\Z", "\\z")):
+        return None
+    return "(?:(?!/)" + body[:-2] + ")", j + 1
+
+
 def _compile_path_glob(mask: str) -> "re.Pattern[str]":
     """Translate a path-style glob to a regex, mirroring Glob semantics.
 
     ``**`` matches across directory separators (a leading ``**/`` also matches
-    zero directories), ``*`` matches within a single path segment, and ``?``
-    matches one non-separator character. Used by find_file so callers can pass
-    patterns like ``**/*.md`` or ``docs/*.md`` instead of getting no matches.
+    zero directories), ``*`` matches within a single path segment, ``?``
+    matches one non-separator character, and an fnmatch character class
+    (``[ab]``, ``[!a]``, ``[a-c]``) matches one non-separator character from
+    the class -- the same answer the bare-mask branch's fnmatch gives, so
+    ``src/[ab].py`` and ``[ab].py`` agree. An unclosed ``[`` is a literal, as
+    in fnmatch. Used by find_file so callers can pass patterns like ``**/*.md``
+    or ``docs/*.md`` instead of getting no matches.
     """
     i, n = 0, len(mask)
     out: List[str] = []
@@ -1362,6 +1587,13 @@ def _compile_path_glob(mask: str) -> "re.Pattern[str]":
             out.append("[^/]*")
         elif c == "?":
             out.append("[^/]")
+        elif c == "[":
+            cls = _path_glob_class(mask, i)
+            if cls is not None:
+                out.append(cls[0])
+                i = cls[1]
+                continue
+            out.append(re.escape(c))
         else:
             out.append(re.escape(c))
         i += 1
@@ -1682,6 +1914,15 @@ def _glob_matches(rel_path: str, glob: str) -> bool:
 
 
 def handle_search_for_pattern(params: dict, project_root: str, strict: bool = False) -> dict:
+    # The ExitStack owns the regex worker's lifetime (see the ReDoS guard): the
+    # child is killed on EVERY way out -- the rows, a refusal, the between-files
+    # deadline -- not only on the reply that timed out.
+    with contextlib.ExitStack() as cleanup:
+        return _search_for_pattern(params, project_root, strict, cleanup)
+
+
+def _search_for_pattern(params: dict, project_root: str, strict: bool,
+                        cleanup: contextlib.ExitStack) -> dict:
     pattern_str = params.get("substring_pattern")
     if not pattern_str:
         raise ValueError("Missing required parameter: substring_pattern")
@@ -1848,8 +2089,13 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
 
     # Wall-clock deadline: abort if the aggregate scan exceeds the budget.
     # Checked between files and every 256 lines within a file so a runaway
-    # multi-file scan is bounded even when no per-line match fires.
+    # multi-file scan is bounded even when no per-line match fires. Those checks
+    # run BETWEEN matches; the matcher enforces the same deadline DURING one
+    # (a regex runs in a killable child, see the ReDoS guard).
     _deadline = time.monotonic() + _SEARCH_DEADLINE_SECS
+    matcher = (_InProcessMatcher(pattern) if literal
+               else _RegexWorker(pattern_str, _deadline))
+    cleanup.callback(matcher.close)
 
     def _walk_roots():
         """Yield (is_single_file, bound, dirpath, dirnames, filenames) per root.
@@ -1965,13 +2211,14 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                     lines = fh.readlines()
                 finally:
                     fh.close()
+                hit_lines = matcher.search_lines(lines, file_rel)
                 for i, line in enumerate(lines):
                     if i % 256 == 0 and time.monotonic() > _deadline:
                         raise ValueError(
                             f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
                             "use a more specific path or pattern"
                         )
-                    if pattern.search(line):
+                    if i in hit_lines:
                         file_hit_count += 1
                         total_match_count += 1
                         if total_match_count <= offset:
@@ -1991,61 +2238,67 @@ def handle_search_for_pattern(params: dict, project_root: str, strict: bool = Fa
                             truncated = True
                             break
             else:
-                # Stream line-by-line — no need to hold entire file in memory
+                # The file is read whole (at most max_file_size): the matcher
+                # answers per FILE, because a regex is evaluated in a child the
+                # deadline can kill, one pipe round trip per file rather than
+                # per line (see the ReDoS guard).
                 try:
-                    for i, line in enumerate(fh):
-                        if i % 256 == 0 and time.monotonic() > _deadline:
-                            raise ValueError(
-                                f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
-                                "use a more specific path or pattern"
-                            )
-                        if only_matching:
-                            # Zero-length matches (`x*`) are skipped, and so
-                            # is a match that is only the line terminator:
-                            # either would be an empty row. A line whose
-                            # matches are all empty is not a matching line.
-                            hits = [m.group(0).rstrip("\n")
-                                    for m in pattern.finditer(line)]
-                            hits = [h for h in hits if h]
-                            if not hits:
-                                continue
-                            file_hit_count += 1
-                            total_line_count += 1
-                            for hit in hits:
-                                total_match_count += 1
-                                if total_match_count <= offset:
-                                    continue   # paged past: costs no budget
-                                entry = f"{file_rel}:{i + 1}: {hit}"
-                                if (row_budget > 0 and content_entries
-                                        and total_chars + len(entry) + 1 > row_budget):
-                                    truncated = True
-                                    break
-                                content_entries.append(entry)
-                                total_chars += len(entry) + 1
-                                if head_limit > 0 and len(content_entries) >= head_limit:
-                                    truncated = True
-                                    break
-                            if truncated:
-                                break
-                            continue
-                        if pattern.search(line):
-                            file_hit_count += 1
-                            total_match_count += 1
-                            if output_mode == "content":
-                                if total_match_count <= offset:
-                                    continue   # paged past: costs no budget
-                                entry = f"{file_rel}:{i + 1}: {line.rstrip(chr(10))}"
-                                if (row_budget > 0 and content_entries
-                                        and total_chars + len(entry) + 1 > row_budget):
-                                    truncated = True
-                                    break
-                                content_entries.append(entry)
-                                total_chars += len(entry) + 1
-                                if head_limit > 0 and len(content_entries) >= head_limit:
-                                    truncated = True
-                                    break
+                    lines = fh.readlines()
                 finally:
                     fh.close()
+                if only_matching:
+                    # Zero-length matches (`x*`) are skipped, and so is a
+                    # match that is only the line terminator: either would be
+                    # an empty row. A line whose matches are all empty is not
+                    # a matching line -- finditer_lines leaves it out.
+                    found = matcher.finditer_lines(lines, file_rel)
+                else:
+                    hit_lines = matcher.search_lines(lines, file_rel)
+                for i, line in enumerate(lines):
+                    if i % 256 == 0 and time.monotonic() > _deadline:
+                        raise ValueError(
+                            f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
+                            "use a more specific path or pattern"
+                        )
+                    if only_matching:
+                        hits = found.get(i)
+                        if not hits:
+                            continue
+                        file_hit_count += 1
+                        total_line_count += 1
+                        for hit in hits:
+                            total_match_count += 1
+                            if total_match_count <= offset:
+                                continue   # paged past: costs no budget
+                            entry = f"{file_rel}:{i + 1}: {hit}"
+                            if (row_budget > 0 and content_entries
+                                    and total_chars + len(entry) + 1 > row_budget):
+                                truncated = True
+                                break
+                            content_entries.append(entry)
+                            total_chars += len(entry) + 1
+                            if head_limit > 0 and len(content_entries) >= head_limit:
+                                truncated = True
+                                break
+                        if truncated:
+                            break
+                        continue
+                    if i in hit_lines:
+                        file_hit_count += 1
+                        total_match_count += 1
+                        if output_mode == "content":
+                            if total_match_count <= offset:
+                                continue   # paged past: costs no budget
+                            entry = f"{file_rel}:{i + 1}: {line.rstrip(chr(10))}"
+                            if (row_budget > 0 and content_entries
+                                    and total_chars + len(entry) + 1 > row_budget):
+                                truncated = True
+                                break
+                            content_entries.append(entry)
+                            total_chars += len(entry) + 1
+                            if head_limit > 0 and len(content_entries) >= head_limit:
+                                truncated = True
+                                break
 
             if file_hit_count > 0:
                 file_matches[file_rel] = file_hit_count
