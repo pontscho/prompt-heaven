@@ -13,6 +13,7 @@ WIP now: 0 of 3. Archive: 14 closed items (14 done, 0 dropped).
 
 | Lane  | Id     | State | Title                                                                                      | Ready |
 |-------|--------|-------|--------------------------------------------------------------------------------------------|-------|
+| next  | R-0030 | idea  | Define the handoff between a roadmap item and the one requirements.yaml plan               | yes   |
 | next  | R-0024 | idea  | Review whether roadmap.py is sized to its job                                              | yes   |
 | next  | R-0002 | idea  | Remove the hand-vendored duplication between the wiki CLI scripts and mcp-wiki             | yes   |
 | later | R-0001 | idea  | Retire the standalone clangd and cuda MCP servers (purity Phase 2)                         | yes   |
@@ -30,12 +31,26 @@ WIP now: 0 of 3. Archive: 14 closed items (14 done, 0 dropped).
 | later | R-0021 | idea  | Bound the memory roadmap.py spends reading the archive                                     | yes   |
 | inbox | R-0017 | idea  | DDG planned investigation (TLS capture diff, byte-identical handshake, __sc__ fingerprint) | yes   |
 | inbox | R-0018 | idea  | Answer the open DDG detection questions                                                    | yes   |
-| inbox | R-0030 | idea  | Define the handoff between a roadmap item and the one requirements.yaml plan               | yes   |
 <!-- ROADMAP:END -->
 
 # now
 
 # next
+
+## R-0030 · Define the handoff between a roadmap item and the one requirements.yaml plan
+
+state: idea
+horizon: next
+origin: user:2026-09-28:roadmap-plan-handoff
+blocked_by: []
+tags: [planning, roadmap]
+
+requirements.yaml holds one plan at a time while the now lane holds up to three active items, so task-planning a second active item overwrites the first one's plan. Proposal: an optional roadmap_item field in requirements.yaml as the only link, the roadmap never mirrors task status, p:implement closes the item on its green end, and at most one active item goes through task-plan at a time while small items skip planning.
+
+### Log
+
+- 2026-09-28 new->unset: raised in S028 while executing the now lane
+- 2026-09-29 unset->next: scope extended (user-approved S028): define state planned as 'has a plan' -- a spec: page or a requirements.yaml whose roadmap_item names it; at most one planned item owns the single plan slot; small items still go idea->active via start
 
 ## R-0024 · Review whether roadmap.py is sized to its job
 
@@ -295,17 +310,3 @@ What DDG's server side checks beyond TLS/HTTP2, whether curl_cffi can be made in
 ### Log
 
 - 2026-09-28 new->unset: harvested by adopt
-
-## R-0030 · Define the handoff between a roadmap item and the one requirements.yaml plan
-
-state: idea
-horizon: unset
-origin: user:2026-09-28:roadmap-plan-handoff
-blocked_by: []
-tags: [planning, roadmap]
-
-requirements.yaml holds one plan at a time while the now lane holds up to three active items, so task-planning a second active item overwrites the first one's plan. Proposal: an optional roadmap_item field in requirements.yaml as the only link, the roadmap never mirrors task status, p:implement closes the item on its green end, and at most one active item goes through task-plan at a time while small items skip planning.
-
-### Log
-
-- 2026-09-28 new->unset: raised in S028 while executing the now lane
