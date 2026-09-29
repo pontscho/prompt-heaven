@@ -96,7 +96,10 @@ Every page of console you fetch stays in the context that fetched it. The ceilin
 
 **Rule:** when you expect to read more than one page of log (anything past a `mode="pipeline"` overview and a short `log_tail`), do not read it in the main context. Spawn a sub-agent to read it and bring back only the conclusion.
 
-* **Which agent:** `general-purpose` (Agent tool, `subagent_type: "general-purpose"`). It inherits `jenkins_call`; the `p:` minions are NOT granted it, so handing the job to one of them fails at the first call.
+* **Which agent** — the two minions granted `jenkins_call`, read-only:
+  * `p:minion-watson` — *why* did it fail. Reads the failing stage and follows the error into the source; returns the root cause with `file:line` evidence. Changes nothing.
+  * `p:minion-bug-hunter` (Quint) — you want it *fixed*: he reads the build, reproduces locally, fixes a contained cause and proves it red-to-green.
+  * `general-purpose` — only for a plain log question with no code behind it ("which step timed out", "what version got deployed"). No other minion holds `jenkins_call`; handing the job to one fails at the first call.
 * **What to give it:** the `job_path`, the `build_number` (a number, not `lastBuild`, so it reads the same build you saw), the one question to answer, and the instruction to call `mcp__mcp-jenkins__jenkins_call` directly, never Bash/curl.
 * **How it should read:** the drill-down below: `inspect_build` → `get_build_log mode="pipeline"` → `mode="stage"` for the failing stage → `get_test_report only_failed=true`, paging with `max_lines` / `offset`, never `max_answer_chars: 0` on a console.
 * **What to ask back (and nothing more):** the failing stage; the FIRST real error with about 20 lines of verbatim context around it; the failing test names; its hypothesis for the cause; and the `stage_name` + `offset` where the evidence sits, so a follow-up can re-read exactly that slice.
