@@ -149,9 +149,12 @@ Exit code 0 iff every non-informational case passes.
 Groups:
   A  GATE     -- the escaper oracle, plus reversibility, per ESCAPED renderer
   B  GATE     -- a real table rendered through the real function keeps its
-                 column count
+                 column count; a row declared unpadded pays only for its own
+                 cells (ADR 0016 Option 4, R-0011)
   C  GATE     -- the scheme is documented where the model reads it
-  D  DECLARED -- the STRUCTURE renderers' reason is measured, not accepted
+  D  DECLARED -- the STRUCTURE renderers' reason is measured, not accepted;
+                 a jenkins two-space cell against the aligned and the
+                 delimiter reader (R-0011)
   E  ROSTER   -- the table covers the tree, totals hold, no row may declare
                  STRUCTURE for a pipe-delimited renderer
   F  control  -- escapers with one defect each that the oracle MUST reject, and
@@ -163,6 +166,7 @@ Groups:
 """
 
 import os
+import re
 import sys
 
 sys.dont_write_bytecode = True
@@ -199,7 +203,7 @@ DECLARED_STRUCTURE = 2
 class Row:
     def __init__(self, path, cls, renderer, escaper=None, delim="|",
                  reversible=False, deviation=(), desc_const=None,
-                 desc_tokens=(), fence=None, why=""):
+                 desc_tokens=(), fence=None, unpadded=False, why=""):
         self.path = path              # repo-relative source file
         self.cls = cls                # ESCAPED | STRUCTURE
         self.renderer = renderer      # attribute name of the table function
@@ -210,6 +214,7 @@ class Row:
         self.desc_const = desc_const  # module attr holding the tools/list dict
         self.desc_tokens = tuple(desc_tokens)
         self.fence = fence            # module attr wrapping output in a fence
+        self.unpadded = unpadded      # a row pays only for its own cells
         self.why = why
 
 
@@ -217,7 +222,7 @@ RENDERERS = {
     "mcp-postgres": Row(
         path="Scripts/mcp-postgres.py", cls=ESCAPED,
         renderer="_render_result", escaper="_escape_cell", delim="|",
-        reversible=True,
+        reversible=True, unpadded=True,
         desc_const="POSTGRES_CALL_TOOL", desc_tokens=("escaped", "\\|"),
         why="the canonical form. A custom `|`-delimited row format, unaligned "
             "because the reader is a model that parses on the delimiter; the "
@@ -228,7 +233,7 @@ RENDERERS = {
     "mcp-tshark": Row(
         path="Scripts/mcp-tshark.py", cls=ESCAPED,
         renderer="_markdown_table", escaper="_md_cell", delim="|",
-        reversible=True,
+        reversible=True, unpadded=True,
         desc_const="TSHARK_CALL_TOOL", desc_tokens=("escaped", "\\|"),
         why="`_md_cell` rather than postgres's `_escape_cell`: the name follows "
             "this file's own `_markdown_table`, and the fleet's other markdown "
@@ -295,9 +300,10 @@ RENDERERS = {
         renderer="_md_table", delim="  ", fence="_md_fence",
         why="two spaces separate columns, never a pipe, and the output is "
             "wrapped in a fence where GFM table parsing does not apply at all. "
-            "A `|` in a cell is just a character. Its real unguarded hazard is "
-            "a different one -- a cell containing two consecutive spaces -- and "
-            "that is not this suite's invariant"),
+            "A `|` in a cell is just a character. The two-space hazard ADR "
+            "0016 left open was MEASURED (R-0011) and does not forge: the "
+            "header offsets are the boundary, not the delimiter -- see "
+            "case_jenkins_two_spaces"),
 
     "mcp-inspect": Row(
         path="Scripts/mcp-inspect.py", cls=STRUCTURE,
@@ -652,6 +658,61 @@ def group_rendered(suite, loaded):
                            % (H.FAIL if problems else H.PASS, key,
                               "forged" if problems else "structure held"))
     case_checkpoint_coupling(suite, loaded)
+    group_unpadded(suite, loaded)
+
+
+# ADR 0016 Option 4 (roadmap R-0011): a `|`-delimited renderer whose reader
+# parses on the delimiter pays for no alignment.  Once every cell is escaped the
+# unescaped pipe IS the boundary -- tshark's own tools/list says so in those
+# words -- so padding a cell to the longest value in its column buys the model
+# nothing and charges every row for one outlier.  Postgres made this call first
+# and argued it; tshark kept the padding only because its escaping fix was
+# scoped to the escaping.  Measured the same way group B measures structure: two
+# renders, and the short row must come out byte-identical whether or not a long
+# value shares its table.
+PAD_HEADERS = ["frame", "info"]
+PAD_SHORT = [["1", "GET /"]]
+PAD_LONG = PAD_SHORT + [["2", "GET /" + "x" * 60 + " HTTP/1.1"]]
+
+
+def group_unpadded(suite, loaded):
+    """B, continued: a declared-unpadded row pays only for its own cells."""
+    for key in sorted(loaded):
+        got = loaded[key]
+        row = got.row
+        if not row.unpadded:
+            continue
+        problems = [p for p in got.problems if p in (NO_MODULE, NO_RENDERER)]
+        detail = ["file        : %s" % row.path,
+                  "renderer    : %s" % row.renderer]
+        if got.renderer is not None:
+            texts = []
+            for data in (PAD_SHORT, PAD_LONG):
+                if key == "mcp-postgres":
+                    texts.append(_render_postgres(got.module, PAD_HEADERS, data))
+                else:
+                    texts.append(got.renderer(PAD_HEADERS, data))
+            alone, shared = (t.splitlines() for t in texts)
+            # The short row's own line, and every line before it: the header and
+            # any rule line are furniture that a long value must not widen
+            # either.  Lines AFTER it are not compared -- postgres closes with a
+            # row-count note that honestly changes with the row count.
+            head = 1 + next((i for i, line in enumerate(alone)
+                             if PAD_SHORT[0][1] in line), len(alone) - 1)
+            if shared[:head] != alone[:head]:
+                problems.append(
+                    "PADDED-BY-ANOTHER-ROW: the short row and the lines above it "
+                    "changed when a long value joined the table: %r -> %r"
+                    % (alone[:head], shared[:head]))
+            detail += ["alone chars : %d" % len(texts[0]),
+                       "shared chars: %d" % len(texts[1])]
+            detail += ["  " + line for line in texts[1].splitlines()]
+        detail.append("note        : ADR 0016 Option 4, decided under R-0011")
+        suite.record(GB, key + ": a row pays only for its own cells", problems,
+                     detail=detail,
+                     brief="%s | %s-unpadded | %s"
+                           % (H.FAIL if problems else H.PASS, key,
+                              "padded" if problems else "unpadded"))
 
 
 # Git permits `|` in a ref name -- check-ref-format forbids space, `~^:?*[\` and
@@ -810,6 +871,100 @@ def group_structure(suite, loaded):
                      brief="%s | %s | %s"
                            % (H.FAIL if problems else H.PASS, key,
                               "misdeclared" if problems else "no pipe columns"))
+    case_jenkins_two_spaces(suite, loaded)
+
+
+# ADR 0016's second open question (roadmap R-0011): can a jenkins cell holding
+# two consecutive spaces forge a column against the two-space separator?
+#
+# MEASURED, red first, and the answer is NO -- but only once the question names
+# its reader.  The first draft asserted both readers and went red on the
+# DELIMITER reader for BOTH rows: the two-space row gained two columns, and the
+# second row, which holds no two-space cell at all, LOST two.  That second row
+# is the finding.  An empty cell in a padded column merges its padding into the
+# separators on either side, so splitting on the delimiter drops the column --
+# and an empty cell is routine here (a string parameter with no default and no
+# choices).  The delimiter reader therefore misreads real jenkins tables that
+# carry no double space anywhere; it was never a reader this table supported.
+# The reader it does support is the ALIGNED one -- the SKILL.md calls these
+# "whitespace-aligned tables", and mcp-inspect's row rests on the same claim --
+# and it recovers every cell, two-space ones included, because the widths are
+# per-column maxima and the header names hold no space.
+#
+# So the declared delimiter is presentation, the header offsets are the
+# boundary, and a double space cannot forge one.  The delimiter reader's two
+# failures are PINNED rather than tolerated: a jenkins renderer that started
+# escaping or dropped its padding would change them, and that is a decision
+# about how this table is read which must trip something.
+#
+# Not asserted, and measured in the detail: a NEWLINE in a cell still ends the
+# row under BOTH readers.  That is the ADR's other half of the defect, it is
+# reachable (a Jenkins parameter description is routinely multi-line), and it
+# is outside this suite's STRUCTURE invariant, which judges the pipe.
+JNK_HEADERS = ["name", "default", "choices", "description"]
+JNK_ROWS = [
+    ["a  b", "x", "y", "last  cell"],   # two spaces, in a padded AND the last col
+    ["plain", "", "", "d"],             # empty cells: a string param, no default
+]
+# What the delimiter reader makes of each row -- pinned, see above.
+JNK_DELIMITED = [
+    ["a", "b", "x", "y", "last", "cell"],
+    ["plain", "d"],
+]
+JNK_NEWLINE = [["n", "", "", "line one\nline two"]]
+
+
+def column_starts(header_line):
+    """Where each column begins, read off the header -- whose names hold no space."""
+    return [m.start() for m in re.finditer(r"\S+", header_line)]
+
+
+def split_positional(line, starts):
+    """The ALIGNED reader: slice the row at the header's column offsets."""
+    ends = starts[1:] + [None]
+    return [line[s:e].strip() for s, e in zip(starts, ends)]
+
+
+def split_delimited(line):
+    """The DELIMITER reader: a run of two or more spaces is a boundary."""
+    return re.split(r" {2,}", line.strip())
+
+
+def case_jenkins_two_spaces(suite, loaded):
+    """D, continued: two consecutive spaces in a jenkins cell, both readers."""
+    got = loaded.get("mcp-jenkins")
+    name = "mcp-jenkins: a two-space cell against the two-space separator"
+    if got is None or got.renderer is None:
+        suite.record(GD, name, ["%s: mcp-jenkins did not load" % NO_RENDERER])
+        return
+    lines = got.renderer(JNK_HEADERS, JNK_ROWS).splitlines()
+    starts = column_starts(lines[0])
+    problems = []
+    detail = ["starts      : %r" % starts]
+    if len(lines) != 1 + len(JNK_ROWS):
+        problems.append("%s: %d lines for %d rows"
+                        % (COLUMN_FORGED, len(lines), 1 + len(JNK_ROWS)))
+    for want, pinned, line in zip(JNK_ROWS, JNK_DELIMITED, lines[1:]):
+        pos = split_positional(line, starts)
+        dlm = split_delimited(line)
+        detail += ["row         : %r" % line,
+                   "  aligned   : %r" % pos,
+                   "  delimited : %r (pinned %r)" % (dlm, pinned)]
+        if pos != want:
+            problems.append("%s: the aligned reader got %r, want %r"
+                            % (COLUMN_FORGED, pos, want))
+        if dlm != pinned:
+            problems.append("%s: the delimiter reader got %r, pinned %r -- "
+                            "the table's reading changed"
+                            % (DEVIATION_DRIFTED, dlm, pinned))
+    nl = got.renderer(JNK_HEADERS, JNK_NEWLINE).splitlines()
+    detail += ["newline     : %d lines for 1 header + 1 row (not asserted -- "
+               "a newline ends the row under both readers)" % len(nl)]
+    detail += ["  " + line for line in nl]
+    suite.record(GD, name, problems, detail=detail,
+                 brief="%s | jenkins-two-spaces | %s"
+                       % (H.FAIL if problems else H.PASS,
+                          "forged" if problems else "cannot forge (aligned)"))
 
 
 # The census that found these seven: `.ljust(`/`.rjust(` across BOTH roots the
@@ -817,6 +972,9 @@ def group_structure(suite, loaded):
 # neither of which pads.  Re-run every time, so an eighth cannot arrive
 # unnoticed -- the seventh, roadmap.py, is the sweep doing exactly that: it
 # arrived undeclared and this sweep failed until its row was written.
+# `Scripts/mcp-tshark.py` left this set under R-0011, when it dropped its
+# padding (ADR 0016 Option 4); like postgres it is in the table by name, and a
+# tshark that started aligning again would reappear here as undeclared.
 #
 # The roots are two because the ROSTER is two.  It reached outside `Scripts/` by
 # hand for the Jira CLI while this sweep read `Scripts/` only, and that gap is
@@ -828,7 +986,6 @@ SWEEP_ROOTS = ("Scripts", "ClaudeCode/skills")
 SWEEP_EXPECTED = {
     "Scripts/mcp-inspect.py",
     "Scripts/mcp-jenkins.py",
-    "Scripts/mcp-tshark.py",
     "ClaudeCode/skills/checkpoint/scripts/checkpoint.py",
     "ClaudeCode/skills/roadmap/scripts/roadmap.py",
 }
@@ -874,10 +1031,11 @@ def group_roster(suite, loaded):
                  detail=["tokens      : %s" % ", ".join(ALIGN_TOKENS),
                          "roots       : %s" % ", ".join(SWEEP_ROOTS),
                          "found       : %s" % ", ".join(sorted(hits)),
-                         "note        : postgres and jira align nothing -- one "
-                         "joins on DELIM unpadded and the other emits a `---` "
-                         "GFM rule, so both are in the table by name rather "
-                         "than by this sweep"])
+                         "note        : postgres, tshark and jira align nothing "
+                         "-- postgres joins on DELIM unpadded, tshark dropped "
+                         "its padding under R-0011 (ADR 0016 Option 4), and "
+                         "jira emits a `---` GFM rule, so all three are in the "
+                         "table by name rather than by this sweep"])
 
     esc = sorted(k for k, r in RENDERERS.items() if r.cls == ESCAPED)
     stc = sorted(k for k, r in RENDERERS.items() if r.cls == STRUCTURE)

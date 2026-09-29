@@ -505,30 +505,23 @@ def _md_cell(value: str) -> str:
 
 
 def _markdown_table(headers: List[str], rows: List[List[str]]) -> str:
-    """Build a markdown table from headers and rows.
+    """Build a markdown table from headers and rows -- unpadded.
 
-    Cells are escaped BEFORE the widths are measured. Measuring the raw value
-    would mis-pad every row that gained an escape, and the widths exist for no
-    other purpose than to line the table up.
+    No cell is padded to its column's width (ADR 0016 Option 4, decided under
+    roadmap R-0011). The reader is a model that parses on the delimiter, and
+    once `_md_cell` has escaped every cell the unescaped `|` IS the boundary --
+    the tools/list description says so in those words. Alignment served only a
+    human eye, and charged every row for the single longest value in its
+    column: one long `_ws.col.Info` widened every line of the table, header and
+    rule included. `Scripts/mcp-postgres.py` made the same call first.
     """
     if not headers:
         return ""
     ncols = len(headers)
-    headers = [_md_cell(h) for h in headers]
-    rows = [[_md_cell(c) for c in row] for row in rows]
-    col_w = [len(h) for h in headers]
+    lines = ["| " + " | ".join(_md_cell(h) for h in headers) + " |",
+             "|" + "|".join("---" for _ in headers) + "|"]
     for row in rows:
-        for i in range(min(len(row), ncols)):
-            col_w[i] = max(col_w[i], len(row[i]))
-
-    hdr = "| " + " | ".join(h.ljust(col_w[i]) for i, h in enumerate(headers)) + " |"
-    sep = "|" + "|".join("-" * (w + 2) for w in col_w) + "|"
-    lines = [hdr, sep]
-    for row in rows:
-        cells = []
-        for i in range(ncols):
-            cell = row[i] if i < len(row) else ""
-            cells.append(cell.ljust(col_w[i]))
+        cells = [_md_cell(row[i]) if i < len(row) else "" for i in range(ncols)]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 

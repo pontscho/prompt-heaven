@@ -418,17 +418,21 @@ SUITES = [
      "rather than inferred, with the format string required to be a literal so "
      "a payload cannot be interpolated into a log that IS written", 58),
     # TYPED for the same reason again.  The count is 5 escapers + 5 rendered
-    # rows + 1 coupling + 2 documented + 2 structure + 4 roster + 12 control +
-    # 4 hygiene: a renderer that arrives or changes class moves it, which is the
-    # alarm.  The control group is the large one on purpose -- six defective
-    # escapers plus a four-way parser/renderer pairing, because this suite's one
-    # renderer-level defect lived in two functions and in neither alone.
+    # rows + 1 coupling + 2 unpadded + 2 documented + 2 structure + 1 jenkins
+    # two-space + 4 roster + 12 control + 4 hygiene: a renderer that arrives or
+    # changes class moves it, which is the alarm.  The control group is the
+    # large one on purpose -- six defective escapers plus a four-way
+    # parser/renderer pairing, because this suite's one renderer-level defect
+    # lived in two functions and in neither alone.  The unpadded pair and the
+    # jenkins two-space case answer ADR 0016's two open questions (R-0011).
     ("table_cells", run_table_cells,
      "a rendered table cell cannot forge a column boundary: every renderer "
      "either escapes its own delimiter and documents the scheme where the "
-     "model reads it, or is whitespace-delimited and has none to escape -- "
+     "model reads it, or is whitespace-aligned and has none to escape -- "
      "with reversibility a SEPARATE clause, because an encoder that does not "
-     "escape its own escape character passes a column count", 35),
+     "escape its own escape character passes a column count; a pipe renderer "
+     "declared unpadded charges no row for another row's width, and a jenkins "
+     "two-space cell is measured not to forge against the aligned reader", 38),
     # TYPED for the same reason again.  The count is 3 clauses x 15 servers +
     # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
     # being analysed IS the defect here, so a count that moves when the fleet
