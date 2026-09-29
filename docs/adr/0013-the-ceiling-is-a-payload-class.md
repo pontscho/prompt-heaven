@@ -236,3 +236,15 @@ Two registered servers had no reply ceiling at all, so this page's class model d
 Both now declare the verbatim class, 100_000, on the non-idempotent reason. Asking a build again means re-running it: minutes, and a new measurement rather than the rest of the first. A live page moves between calls, so a second DevTools snapshot is a new measurement too. forge keeps the tail for `test` and the head otherwise, with fence repair; gdc keeps the head without fence repair, because gdc fences nothing itself and a repair fence would invent page content. No new class and no new number.
 
 The gate now fails a registered, non-inert server that declares no ceiling or declares a value outside the three classes, with a negative control that must flag the old forge and gdc shapes.
+
+## Addendum (2026-09-29): tshark takes the fleet spelling; the old one stays an alias
+
+This page left `mcp-tshark`'s `max_output_chars` as an open thread. It was the fleet's one divergent spelling of the per-call reply ceiling. Closed as roadmap item R-0008.
+
+The canonical name is now `max_answer_chars`, as on every other server that takes a per-call ceiling. `analyze`, `statistics` and `follow_stream` all read it. `max_output_chars` stays accepted as a declared alias of it, next to `max_chars` and `max_len`, which used to point at the old name. A caller who learned the old spelling keeps working. That was the blast radius this page named, and an alias removes it. `mcp-webfetch` and `mcp-wiki` already accepted `max_output_chars` as an alias of `max_answer_chars`, so all three servers now read it the same way. The tools/list description advertises `max_chars/max_output_chars→max_answer_chars`.
+
+Sending both spellings in one call is refused. This is not a new rule. It is [[0015-ambiguity-is-the-defect]] applied to one more alias row, and the collision message names `max_answer_chars` as the key both spellings set.
+
+The rename covers the wire name only. The default stays 500_000, the sequence class above. The constant keeps its name, `DEFAULT_MAX_OUTPUT_CHARS`, because no caller sees it and the deviation gate's pattern already matches it. The closing truncation line is still tshark's own `**(truncated — showing first N chars of M)**`, not the fleet's line. That is the third criterion this page expects a deviating server to meet, and it is still unmet. It is separate work and was not folded in here.
+
+The gate is `tshark_ceiling_param_checks` in the `smoke` suite, written first and run red. It has two layers. The first is offline and needs no tshark binary: both collision pairs must be refused on `max_answer_chars`, and the description must name both spellings. The second writes a five-frame pcap under `.claude/tmp` and cuts it at 64 characters, once with the new name and once with the old one. A control with neither name must come back uncut. The red run failed the three offline checks and the new-name cut. The old-name cut and the control passed. When tshark is absent, the second layer adds no check, so an unmeasured effect is never scored as a pass.

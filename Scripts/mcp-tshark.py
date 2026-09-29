@@ -266,9 +266,13 @@ PARAM_ALIASES: Dict[str, str] = {
     "count":          "max_packets",
     "packets":        "max_packets",
     "max_pkts":       "max_packets",
-    # output truncation
-    "max_chars":      "max_output_chars",
-    "max_len":        "max_output_chars",
+    # output truncation. `max_answer_chars` is the fleet's spelling of the
+    # per-call reply ceiling; `max_output_chars` was this server's own until
+    # roadmap R-0008 and stays an alias so a caller who learned it keeps
+    # working. Sending both is refused like any other pair (ADR 0015).
+    "max_chars":        "max_answer_chars",
+    "max_len":          "max_answer_chars",
+    "max_output_chars": "max_answer_chars",
     # keep_file
     "keep":           "keep_file",
     # TLS keylog
@@ -734,12 +738,14 @@ def _bool_param(params: dict, key: str, default: bool) -> bool:
 # dissection that was ever going to finish.
 MAX_ANALYZE_SEC = 600
 
-# The output ceiling, named rather than inlined at three call sites. Spelled
-# after this server's own wire parameter (`max_output_chars`, the fleet's one
-# divergent spelling) and deliberately far above the fleet's 24000: a packet
-# dissection is a wide fixed-width table whose value is in the ROWS, and a cut
-# that lands after twenty packets answers a different question than the one
-# asked. Why the fleet carries three different ceilings at all is undecided.
+# The output ceiling, named rather than inlined at three call sites. The wire
+# parameter is the fleet's `max_answer_chars` (`max_output_chars`, this server's
+# old spelling, is an alias of it since R-0008); the constant keeps its old name
+# because it is not caller-visible. Deliberately far above the fleet's 24000:
+# a packet dissection is a wide fixed-width table whose value is in the ROWS,
+# and a cut that lands after twenty packets answers a different question than
+# the one asked. Why the fleet carries three ceilings is docs/adr/0013: each is
+# a payload class, and this is the sequence class.
 DEFAULT_MAX_OUTPUT_CHARS = 500_000
 
 
@@ -762,7 +768,7 @@ def _run_analyze(params: dict, project_root: str) -> str:
     keylog_file    = params.get("keylog_file", "")
     head_limit     = _int_param(params.get("head_limit"), 0)
     offset         = _offset(params)
-    max_chars      = _int_param(params.get("max_output_chars"), DEFAULT_MAX_OUTPUT_CHARS)
+    max_chars      = _int_param(params.get("max_answer_chars"), DEFAULT_MAX_OUTPUT_CHARS)
     timeout_sec    = min(MAX_ANALYZE_SEC, max(1, _int_param(params.get("timeout"), 120)))
 
     if custom_fields:
@@ -999,7 +1005,7 @@ def handle_statistics(params: dict, project_root: str) -> dict:
     protocol       = params.get("protocol", "tcp")
     interval       = params.get("interval", "0")
     display_filter = params.get("display_filter", "")
-    max_chars      = _int_param(params.get("max_output_chars"), DEFAULT_MAX_OUTPUT_CHARS)
+    max_chars      = _int_param(params.get("max_answer_chars"), DEFAULT_MAX_OUTPUT_CHARS)
 
     stat_arg = template.format(interval=interval, protocol=protocol)
     args = [tshark, "-r", file_path, "-z", stat_arg, "-q"]
@@ -1043,7 +1049,7 @@ def handle_follow_stream(params: dict, project_root: str) -> dict:
 
     protocol    = params.get("protocol", "tcp")
     output_mode = params.get("output_mode", "ascii")
-    max_chars   = _int_param(params.get("max_output_chars"), DEFAULT_MAX_OUTPUT_CHARS)
+    max_chars   = _int_param(params.get("max_answer_chars"), DEFAULT_MAX_OUTPUT_CHARS)
 
     args = [
         tshark, "-r", file_path,
@@ -1242,7 +1248,7 @@ TSHARK_CALL_TOOL = {
         "skip→offset, proto→protocol, stream→stream_id, stat→stat_type, "
         "duration→timeout, count/packets→max_packets, keep→keep_file, "
         "keylog/sslkeylog→keylog_file, decode→decode_as, "
-        "max_chars→max_output_chars, template→preset, op→action, "
+        "max_chars/max_output_chars→max_answer_chars, template→preset, op→action, "
         "data/settings→config, step→interval, render→output_mode."
     ),
     "inputSchema": {

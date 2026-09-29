@@ -26,6 +26,8 @@ that the convergence patch guarantees:
   * aliased params       -> a canonical parameter name and one of its own
                            aliases in the SAME call is refused, never silently
                            decided by wire position (see alias_collision_checks)
+  * tshark ceiling       -> max_answer_chars is canonical, max_output_chars a
+                           kept alias of it (see tshark_ceiling_param_checks)
 
 Usage:
   python3 _mcp_smoke_test.py                 # all servers
@@ -596,6 +598,110 @@ def purity_semantic_checks(srv, checks):
     _shutil.rmtree(_fixture_dir, ignore_errors=True)
 
 
+def _tiny_pcap_bytes(packets=5):
+    """A classic little-endian pcap of `packets` Ethernet frames, stdlib only.
+
+    The ethertype is 0x88B5 (IEEE local experimental), so tshark dissects each
+    frame as plain Ethernet II with a data payload -- no checksum, no protocol
+    state, nothing that could make the capture itself the reason a probe fails.
+    """
+    import struct
+    out = [struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)]
+    for i in range(packets):
+        frame = (b"\x02\x00\x00\x00\x00\x01" + b"\x02\x00\x00\x00\x00\x02"
+                 + b"\x88\xb5" + (b"smoke-%02d" % i) * 4)
+        out.append(struct.pack("<IIII", 1700000000 + i, 0, len(frame), len(frame)))
+        out.append(frame)
+    return b"".join(out)
+
+
+def tshark_ceiling_param_checks(srv, cfg, checks):
+    """mcp-tshark's reply ceiling answers to the fleet spelling (roadmap R-0008).
+
+    `max_answer_chars` is the canonical name, as on every other server that
+    takes a per-call ceiling; `max_output_chars` -- this server's own spelling
+    until R-0008 -- stays accepted as a declared ALIAS so a caller who learned
+    it keeps working. ADR 0015 makes two spellings of one parameter an error,
+    so sending both is refused rather than decided by wire position.
+
+    Two layers, and the second is optional on purpose:
+
+      RESOLVER -- offline, always run. A collision reply names the canonical
+        key it collided on, so `both set 'max_answer_chars'` proves which name
+        is canonical from the wire alone, with no tshark binary and no capture.
+        The tools/list description must advertise the fleet spelling.
+
+      EFFECT -- needs the tshark binary. A five-frame pcap is written under the
+        repo's .claude/tmp and analyzed three ways: with the new name, with the
+        old alias, and with neither (the control: the default ceiling must NOT
+        cut a reply this small, or the two positive halves would pass on any
+        ceiling at all). When the server reports tshark absent the half is not
+        run and adds no check: an unmeasured effect is not scored as a pass.
+    """
+    tool = cfg["tool"]
+    cid = 200
+
+    for pair in (("max_answer_chars", "max_output_chars"),
+                 ("max_chars", "max_answer_chars")):
+        is_error, text, _resp = _dispatch_call(srv, cid, tool, {
+            "function": "analyze",
+            "params": {pair[0]: 64, pair[1]: 64}})
+        cid += 1
+        checks.append(check(
+            "tshark: %s + %s -> refused on 'max_answer_chars'" % pair,
+            is_error is True and COLLISION_TOKEN in text
+            and "both set 'max_answer_chars'" in text,
+            "isError=%r; text=%r" % (is_error, text[:180])))
+
+    srv.send({"jsonrpc": "2.0", "id": cid, "method": "tools/list", "params": {}})
+    cid += 1
+    tl = srv.read() or {}
+    tools = tl.get("result", {}).get("tools", [])
+    desc = tools[0].get("description", "") if tools else ""
+    checks.append(check(
+        "tshark: description advertises max_answer_chars + the kept alias",
+        "max_answer_chars" in desc and "max_output_chars" in desc,
+        "description tail=%r" % desc[-240:]))
+
+    import tempfile
+    tmp_root = os.path.join(os.path.dirname(SCRIPT_DIR), ".claude", "tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    fixture_dir = tempfile.mkdtemp(prefix="tshark_smoke_", dir=tmp_root)
+    try:
+        pcap = os.path.join(fixture_dir, "tiny.pcap")
+        with open(pcap, "wb") as fh:
+            fh.write(_tiny_pcap_bytes())
+
+        replies = {}
+        for label, extra in (("control", {}),
+                             ("max_answer_chars", {"max_answer_chars": 64}),
+                             ("max_output_chars", {"max_output_chars": 64})):
+            params = {"file": pcap}
+            params.update(extra)
+            is_error, text, _resp = _dispatch_call(
+                srv, cid, tool, {"function": "analyze", "params": params},
+                timeout=30.0)
+            cid += 1
+            replies[label] = (is_error, text)
+
+        ctl_err, ctl_text = replies["control"]
+        if "tshark not found" in ctl_text:
+            return
+        checks.append(check(
+            "tshark: analyze with no ceiling param is not cut (control)",
+            not ctl_err and "## Packet Analysis" in ctl_text
+            and "(truncated" not in ctl_text and len(ctl_text) > 64,
+            "isError=%r len=%d text=%r" % (ctl_err, len(ctl_text), ctl_text[:120])))
+        for label in ("max_answer_chars", "max_output_chars"):
+            err, text = replies[label]
+            checks.append(check(
+                "tshark: %s=64 cuts the reply" % label,
+                not err and "(truncated" in text and "showing first 64 chars" in text,
+                "isError=%r len=%d text=%r" % (err, len(text), text[-160:])))
+    finally:
+        shutil.rmtree(fixture_dir, ignore_errors=True)
+
+
 def run_server(cfg):
     """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}."""
     srv = Server(cfg)
@@ -675,6 +781,11 @@ def run_server(cfg):
         # 9. purity-only: semantic dispatch + alias-routing checks (Phase 0, D2)
         if cfg["tool"] == "purity_call":
             purity_semantic_checks(srv, checks)
+
+        # 10. tshark-only: the reply ceiling answers to the fleet spelling,
+        #     with the old one kept as an alias (roadmap R-0008).
+        if cfg["tool"] == "tshark_call":
+            tshark_ceiling_param_checks(srv, cfg, checks)
 
         status = "PASS" if all(ok for _, ok, _ in checks) else "FAIL"
         return (status, checks)
