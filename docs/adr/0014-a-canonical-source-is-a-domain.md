@@ -201,3 +201,26 @@ across the 15 servers.
 ## Addendum (2026-09-29): the first canonical source proposed outside Scripts
 
 Roadmap item R-0002 asked whether the p:wiki helper module could become a canonical source rendered into `Scripts/mcp-wiki.py`. The domain rule would have admitted it: the wiki helpers are one domain, not a shelf. What refused it was location and indentation. The gated contract anchors every canonical source to a file under `Scripts/`, and the module is tab-indented, which the tab-safety rule rejects for a block; the generator converts spaces to tabs, never back. The CLI functions also call module-qualified or renamed names and so could not be blocks without rewriting the CLI. Lifting either rule is a change to this decision, not a registry entry, so R-0002 settled for parity gates instead.
+
+## Addendum (2026-09-29): the four open threads, settled
+
+Roadmap item R-0010 closes the four threads this page left open under "What this page does not settle". Three are settled below. The fourth, generate rather than import, now has its own page, [[0025-generate-do-not-import]].
+
+### 1. No retroactive `_json_` prefix
+
+The blocks that genuinely are JSON keep their names. Four reasons, each already on record:
+
+- The marker's source field names the domain. That is this page's own decision, so a prefix would repeat what `BEGIN GENERATED: _mcp_json.py :: ...` already says.
+- Every precedent set its prefix when the name was first written, never afterwards. The `_ws_*` names arrived with the websocket source ([[0023-the-websocket-client-is-a-sixth-domain]]), and tshark's `_md_cell` took the fleet's `_md_` prefix when it was written ([[0016-a-cell-may-not-forge-a-boundary]]). A prefix added later renames code that already works.
+- The prefix would be true on some blocks and false on others. `_ensure_dict` decodes with `json.loads`, and `_json_error_window` already carries the prefix. `_bool_param` and `_int_param` coerce wire values and hold no JSON at all. This is the measurement that refused Alternative 1, applied to the blocks that stayed. `_result` and `_error` are methods, and `d65132a` already noted that their receiver supplies the context a prefix would repeat.
+- A rename moves every call site across the fleet. A search at `0653fab` found 123 lines calling `_bool_param`, `_int_param`, `_ensure_dict` or `_json_error_window` in the servers alone. It would also drop the hand copies out of the hand-copy census, which is keyed on the canonical names `Scripts/amalgamate.py:hand_copies`, until each copy was renamed too.
+
+### 2. The per-block tab rule
+
+`d65132a` narrowed the tab refusal from per file to per block. The per-file rule refused every tab-indented host outright, which cost `mcp-forge` three hand copies that were byte-identical to the canonical text except for the indent character. The rule now decides each block with two independent checks `Scripts/amalgamate.py:block_is_tab_safe`: no implicit line join while a bracket is open, and every leading whitespace run a whole multiple of four spaces. Anything the checks cannot prove is unsafe: a tokenizer failure, a stray tab, a backslash continuation. An unsafe block in a tab host is refused by name `Scripts/amalgamate.py:render`. There is no fallback to spaces, because a file that mixes both indent styles is worse than either.
+
+R-0002 found the consequence for the sources themselves (`43140ae`, and this page's previous addendum). A canonical source must itself be space-indented. The generator converts spaces to tabs `Scripts/amalgamate.py:to_tabs` and never converts tabs to spaces, and a leading tab fails the check. The mechanics are in [[generated-regions]]. The gate is `tests/test_generated_region.py:group_tabs`.
+
+### 3. One-block sources stay separate
+
+`Scripts/_mcp_concurrency.py` and `Scripts/_mcp_logging.py` each hold one block, and neither is merged into another source. Block count never triggers a merge. This page already says so: "Block count is not the test; domain is." A merge would make the receiving source hold two domains, which is the shelf this page refuses. The question is revisited only if a source's domain argument fails, never because the source stayed small.

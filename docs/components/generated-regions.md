@@ -25,6 +25,7 @@ links:
   - 0014-a-canonical-source-is-a-domain
   - 0015-ambiguity-is-the-defect
   - 0023-the-websocket-client-is-a-sixth-domain
+  - 0025-generate-do-not-import
 ---
 
 # Generated regions
@@ -59,7 +60,11 @@ import is argued identically in **every** canonical source
 `Scripts/__pycache__` into *a tree every suite that snapshots bytecode asserts
 stays empty*; it would need a `sys.path` entry the test harness's
 `spec_from_file_location` never adds; and it would move the helpers out of the
-module attributes the footprint suite reaches for.
+module attributes the footprint suite reaches for. A fourth ground sits in the
+commit that made the decision, `8effd2f`, rather than in the docstrings: a user
+copying one server without its sibling would get an `ImportError`. The decision,
+all four grounds and why Cog was not used are recorded in
+[[0025-generate-do-not-import]].
 
 That middle clause is quoted rather than paraphrased, because its wording is
 itself the decision. It names the **property** instead of tallying the suites,
