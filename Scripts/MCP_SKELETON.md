@@ -338,6 +338,17 @@ WHY is `docs/adr/0008-a-serialized-read-loop-looks-like-a-dead-server.md`.
    stdin *raises* rather than returning `""`, a client hanging up mid-reply
    raises `BrokenPipeError`, and an unshut executor hangs exit via
    `concurrent.futures`' atexit join.
+5. **`notifications/cancelled` is handled on the read loop, before dispatch**
+   (roadmap R-0006; gated by `tests/test_cancel.py`, driven live by the smoke
+   harness). `by_id` maps a request id to its task, filled after dispatch and
+   emptied by a done-callback, so a finished id is unknown; `initialize` is
+   never registered. The requestId parse is hand-written per server (ADR 0012)
+   and accepts only a `str` or a non-`bool` `int` — `True == 1` hashes alike,
+   so a lax parse lets `requestId: true` cancel request 1. Anything else, and
+   an unknown id, is ignored; the notification is never answered and never
+   dispatched. `task.cancel()` suppresses the reply everywhere; what it
+   RECLAIMS is declared per server in that suite's table (`task` or
+   `reply-only`), since a worker thread runs on regardless.
 
 **The transport is uniform; the dispatch decision is not.** Two groups, spelled
 as the gate's `FLEET` table spells them — **`pool`** (8: forge, git, inspect,
@@ -358,6 +369,7 @@ Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
         workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
                                      thread_name_prefix="SERVER-call")
         inflight: set = set()
+        by_id: dict = {}                               # request id -> its task
         try:
             while True:
                 try:
@@ -396,15 +408,57 @@ Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
                     msg.get("method"), msg.get("id"), _p.get("name"),
                     list(_args.keys()),
                 )
+                # R-0006: on the loop thread, before dispatch, never answered.
+                if (msg.get("method") == "notifications/cancelled"
+                        and msg.get("id") is None):
+                    self._cancel_request(msg.get("params"), by_id)
+                    continue
                 task = loop.create_task(self._serve(loop, workers, msg))
                 inflight.add(task)
                 task.add_done_callback(inflight.discard)
+                self._track_request(msg, task, by_id)
         finally:
             for task in inflight:
                 task.cancel()
             reader.shutdown(wait=False)
             workers.shutdown(wait=False)
             log.info("MCP server shutting down")
+
+    @staticmethod
+    def _request_key(value):
+        """A str, or an int that is not a bool (True == 1); else None."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (str, int)):
+            return value
+        return None
+
+    def _track_request(self, msg: dict, task, by_id: dict) -> None:
+        """Register under the request id, forget when done; never initialize."""
+        if msg.get("method") == "initialize":
+            return
+        key = self._request_key(msg.get("id"))
+        if key is None:
+            return
+        by_id[key] = task
+
+        def _forget(done) -> None:
+            if by_id.get(key) is done:             # the id may have been reused
+                del by_id[key]
+
+        task.add_done_callback(_forget)
+
+    def _cancel_request(self, params, by_id: dict) -> None:
+        """notifications/cancelled: unknown/finished/malformed ids are ignored."""
+        if not isinstance(params, dict):
+            return
+        key = self._request_key(params.get("requestId"))
+        if key is None:
+            return
+        task = by_id.get(key)
+        if task is not None:
+            log.debug("cancelling id=%s", key)
+            task.cancel()
 
     async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
         """One request, from dispatch to written reply. Runs as its own task."""

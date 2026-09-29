@@ -1327,6 +1327,7 @@ class McpServer:
 		reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="webfetch-stdin")
 		workers = ThreadPoolExecutor(max_workers=MAX_INFLIGHT_REQUESTS,
 		                             thread_name_prefix="webfetch-call")
+		by_id: dict = {}  # R-0006: request id -> its in-flight task
 		try:
 			while True:
 				try:
@@ -1381,9 +1382,19 @@ class McpServer:
 				# request for the duration, so it goes to the worker pool —
 				# the same move mcp-jenkins and mcp-purity make for their sync
 				# backends.
+				#
+				# R-0006: a cancel is handled HERE, on the loop thread and
+				# before anything is dispatched -- never as a task of its own,
+				# which a saturated pool would queue behind the very request it
+				# names. It is a notification, so nothing is written back.
+				if (msg.get("method") == "notifications/cancelled"
+						and msg.get("id") is None):
+					self._cancel_request(msg.get("params"), by_id)
+					continue
 				task = asyncio.ensure_future(self._dispatch(loop, workers, msg))
 				self._inflight.add(task)
 				task.add_done_callback(self._inflight.discard)
+				self._track_request(msg, task, by_id)
 		finally:
 			# Drain BEFORE shutting the pools down, and drain rather than
 			# cancel: a fetch mid-flight may be part-way through writing
@@ -1399,6 +1410,62 @@ class McpServer:
 			reader.shutdown(wait=False)
 			workers.shutdown(wait=False)
 			log.info("MCP server shutting down")
+
+	# R-0006: notifications/cancelled. Hand-written in every server on purpose
+	# -- ADR 0012 keeps the transport tier per server -- and held to one shape
+	# by tests/test_cancel.py and the smoke harness's cancel checks.
+	@staticmethod
+	def _request_key(value):
+		"""`value` as an in-flight registry key, or None if it cannot be one.
+
+		A JSON-RPC id is a string or an integer. A bool is refused although
+		Python calls it an int: True == 1 and they hash alike, so accepting it
+		would let `requestId: true` cancel request 1. A float is refused for
+		the same reason (1.0 == 1), and anything else is not an id.
+		"""
+		if isinstance(value, bool):
+			return None
+		if isinstance(value, (str, int)):
+			return value
+		return None
+
+	def _track_request(self, msg: dict, task, by_id: dict) -> None:
+		"""Register `task` under its request id; forget it once it is done.
+
+		`initialize` is never registered, so the handshake cannot be cancelled.
+		"""
+		if msg.get("method") == "initialize":
+			return
+		key = self._request_key(msg.get("id"))
+		if key is None:
+			return
+		by_id[key] = task
+
+		def _forget(done) -> None:
+			# Only while the slot is still THIS task: a client that reused the
+			# id for a newer request owns it now.
+			if by_id.get(key) is done:
+				del by_id[key]
+
+		task.add_done_callback(_forget)
+
+	def _cancel_request(self, params, by_id: dict) -> None:
+		"""notifications/cancelled, on the loop thread. Never replies.
+
+		An unknown, finished or malformed requestId is ignored silently: the
+		request may simply have finished before the notice arrived. The reply
+		is what this suppresses -- the fetch itself runs on in its worker
+		thread, for the reason the shutdown drain above spells out.
+		"""
+		if not isinstance(params, dict):
+			return
+		key = self._request_key(params.get("requestId"))
+		if key is None:
+			return
+		task = by_id.get(key)
+		if task is not None:
+			log.debug("cancelling id=%s", key)
+			task.cancel()
 
 	async def _dispatch(self, loop: asyncio.AbstractEventLoop,
 	                    workers: ThreadPoolExecutor, msg: dict) -> None:

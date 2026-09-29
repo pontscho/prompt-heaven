@@ -154,6 +154,10 @@ def run_read_loop(opts):
     return run_python_suite("test_read_loop", opts)
 
 
+def run_cancel(opts):
+    return run_python_suite("test_cancel", opts)
+
+
 def run_wire_log(opts):
     return run_python_suite("test_wire_log", opts)
 
@@ -412,6 +416,15 @@ SUITES = [
      "every MCP server's read loop carries ADR 0008's shape: a single-thread "
      "reader executor no handler can take, and one task per message -- with "
      "the pool/coroutine split declared per server rather than inferred", 47),
+    # TYPED for read_loop's reason: a server that appears without a declared
+    # reclaim class is the defect, so a moved count is the alarm working.  The
+    # two per-server groups make it 2N + a fixed tail.
+    ("cancel", run_cancel,
+     "every MCP server honours notifications/cancelled on its read loop: a "
+     "request-id registry forgotten on completion, a hook before dispatch "
+     "that refuses a bool or float requestId and never replies, initialize "
+     "never cancellable, a dispatch target that lets the CancelledError "
+     "through, and what a cancel reclaims declared per server", 55),
     # TYPED for read_loop's reason above, not mcp_footprint's: a server that
     # appears without a declared row is the defect, so a moved count is the
     # alarm working.  The two per-server groups make it 2N + a fixed tail.

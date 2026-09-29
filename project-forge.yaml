@@ -216,6 +216,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|READLINE|READER|DISPATCH|SHUTDOWN'
 
+  cancel:
+    description: "The R-0006 cancellation gate: every Scripts/mcp-*.py must honour notifications/cancelled ON ITS READ LOOP -- a dict registry mapping a request id to its in-flight task, filled after dispatch and forgotten by a done-callback so a finished id is unknown; a hook on the method placed before the task factory that ends in continue, reads params.requestId behind an isinstance(params, dict) guard, refuses a bool (True == 1 hashes to request 1) and calls task.cancel() without ever replying; initialize never registered, so the handshake is not cancellable; and a dispatch target that lets the CancelledError through. What a cancel RECLAIMS is DECLARED per server in a table -- task (gdc, lldb: the coroutine work stops) or reply-only (the other thirteen: a thread, subprocess or language server finishes regardless) -- and a task row is checked against read_loop's measured coroutine dispatch. A synthetic control group plants each defect in turn, and Scripts/MCP_SKELETON.md's section 5 sample is lifted by script and gated the same way. The live half is in the smoke target. AST only -- starts nothing, writes only its sandbox."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py cancel
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|HOOK|REGISTRY|CANCEL|REQUESTID|PARAMS|INITIALIZE|FORGOTTEN'
+
   wire_log:
     description: "The F12/CWE-532 wire-logging gate: every Scripts/mcp-*.py must log protocol STRUCTURE at both wire sites -- McpServer._write outbound and McpServer.run inbound -- and never a payload body or value. Truncation is not a mitigation: out[:200] is the FRONT of the frame, where the method, the tool name and the first arguments live, so any payload-derived expression is refused whether sliced, f-string-interpolated or wrapped in json.dumps. The shape each site may log is DECLARED per server in a table (twelve servers at the canonical method+id+fn+keys form, one at method+id, two that log nothing on the read loop at all) and measured against it, never inferred -- inferring it would pass, green, on today's thirteen broken servers. A synthetic control group plants each defect in turn: a bare out, a sliced out[:200], the bare response parameter, a non-structural key on it, an f-string over the raw line, json.dumps(msg)[:200], a value reached inside arguments, and the arguments container logged whole -- plus three correct forms it must stay silent on. Scripts/MCP_SKELETON.md is GATED rather than surveyed, its section 5 sample lifted out of the markdown by script and handed to the same analyser, because that template is the proven propagation vector for this defect. AST only -- starts nothing, writes only its sandbox."
     requires: [syntax]

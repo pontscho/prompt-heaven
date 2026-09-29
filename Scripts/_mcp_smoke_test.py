@@ -28,6 +28,13 @@ that the convergence patch guarantees:
                            decided by wire position (see alias_collision_checks)
   * tshark ceiling       -> max_answer_chars is canonical, max_output_chars a
                            kept alias of it (see tshark_ceiling_param_checks)
+  * notifications/       -> an unknown, finished, bool, float or malformed
+    cancelled               requestId is ignored and NEVER answered, and the
+                           next ping still is (see cancel_notification_checks)
+  * in-flight cancel     -> mcp-jenkins only: a cancelled call held open by a
+                           loopback peer is never answered, a sibling targeted
+                           only by ill-typed requestIds still is (R-0006; see
+                           inflight_cancel_probe)
 
 Usage:
   python3 _mcp_smoke_test.py                 # all servers
@@ -40,8 +47,10 @@ import json
 import os
 import select
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -126,10 +135,12 @@ class Server:
         # zero .pyc in the tree.  If a server ever grows a repo-local import,
         # this stops being true and the suites asserting zero absolutely are
         # what will say so.
+        # `env` is absent from every SERVERS row, so None -- inherit -- is what
+        # the fleet runs with; only the in-flight cancel probe passes one.
         self.proc = subprocess.Popen(
             launch_prefix(self.cfg) + [path] + self.cfg["args"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,
+            text=True, bufsize=1, env=self.cfg.get("env"),
         )
 
     def send(self, obj):
@@ -733,6 +744,218 @@ def tshark_ceiling_param_checks(srv, cfg, checks):
         shutil.rmtree(fixture_dir, ignore_errors=True)
 
 
+# Every one of these names NO live request, so a server honouring R-0006 must
+# ignore it silently -- and so must one that predates it, which is why these
+# rows guard a regression rather than prove the feature: the proof is the
+# in-flight probe below.  `1` is the initialize id, already answered: a finished
+# id is unknown by definition.  `true` and `1.0` are the two spellings Python
+# hashes equal to 1, which a registry keyed on a naive parse would match.
+CANCEL_NOISE = [
+    ("unknown id",       {"requestId": 987654, "reason": "smoke"}),
+    ("finished id",      {"requestId": 1}),
+    ("requestId true",   {"requestId": True}),
+    ("requestId float",  {"requestId": 1.0}),
+    ("requestId null",   {"requestId": None}),
+    ("requestId list",   {"requestId": [1]}),
+    ("params missing",   None),
+    ("params not a dict", "x"),
+]
+
+
+def cancel_notification_checks(srv, checks):
+    """notifications/cancelled that names no live request: never answered.
+
+    One check per row, each followed by its own ping, so a failure names the
+    spelling that drew a reply (or killed the process) instead of reporting
+    "something in the batch".
+    """
+    cid = 300
+    for label, params in CANCEL_NOISE:
+        note = {"jsonrpc": "2.0", "method": "notifications/cancelled"}
+        if params is not None:
+            note["params"] = params
+        srv.send(note)
+        srv.send({"jsonrpc": "2.0", "id": cid, "method": "ping", "params": {}})
+        reply = srv.read() or {}
+        checks.append(check(
+            "cancel %s -> no reply, ping next" % label,
+            reply.get("id") == cid and reply.get("result") == {},
+            "first reply=%s alive=%r" % (json.dumps(reply)[:160], srv.alive())))
+        cid += 1
+
+
+class _HeldHttpPeer:
+    """A loopback HTTP peer that accepts each request and HOLDS it until told.
+
+    What makes the in-flight probe deterministic: the probe knows a call is in
+    flight because the peer has its request bytes, not because a sleep elapsed,
+    and nothing can finish until `release()` -- so a reply for a cancelled id
+    cannot slip out before the cancel is sent, and cannot be missed after.
+    """
+
+    BODY = b'{"jobs": []}'
+
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.sock.settimeout(0.25)
+        self.port = self.sock.getsockname()[1]
+        self._release = threading.Event()
+        self._closed = threading.Event()
+        self._cond = threading.Condition()
+        self.arrived = 0
+        self.answered = 0
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+
+    def _accept_loop(self):
+        while not self._closed.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._hold, args=(conn,), daemon=True).start()
+
+    def _hold(self, conn):
+        try:
+            conn.settimeout(10.0)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                data += chunk
+            with self._cond:
+                self.arrived += 1
+                self._cond.notify_all()
+            self._release.wait(timeout=30.0)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: %d\r\nConnection: close\r\n\r\n"
+                         % len(self.BODY) + self.BODY)
+            with self._cond:
+                self.answered += 1
+                self._cond.notify_all()
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def wait_for(self, attr, n, timeout):
+        deadline = time.time() + timeout
+        with self._cond:
+            while getattr(self, attr) < n:
+                left = deadline - time.time()
+                if left <= 0:
+                    return False
+                self._cond.wait(left)
+        return True
+
+    def release(self):
+        self._release.set()
+
+    def close(self):
+        self._release.set()
+        self._closed.set()
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def _read_ids(srv, until_ids, timeout):
+    """Read replies until every id in `until_ids` has been seen; return all ids."""
+    seen = []
+    deadline = time.time() + timeout
+    while not set(until_ids) <= set(seen):
+        left = deadline - time.time()
+        if left <= 0:
+            break
+        reply = srv.read(timeout=left)
+        if reply is None:
+            break
+        seen.append(reply.get("id"))
+    return seen
+
+
+def inflight_cancel_probe(checks):
+    """R-0006 end to end, on a request that is really in flight.
+
+    mcp-jenkins, because it is the one server whose slow path needs nothing
+    but a URL: its endpoint is a launch argument, so a loopback peer that
+    holds the HTTP request open makes `list_jobs` exactly as slow as the probe
+    wants and no slower.  gdc and lldb -- the two `task`-class servers, where
+    the cancel reclaims the work itself -- would need Chrome or an inferior
+    process, which the fleet smoke cannot assume.  Jenkins is `reply-only`: its
+    worker thread finishes the HTTP call regardless, so what this proves is the
+    UNIFORM half of phase 1 -- the cancelled id is never answered -- which is
+    the half every server shares.
+
+    Two calls are held open.  Call 1 is targeted only by requestIds that must
+    NOT match it -- `true` and `1.0` hash equal to 1, `"1"` is a different id
+    -- and must still be answered once released.  Call 2 is cancelled for real
+    and must never be answered, not even after its HTTP response arrives.
+    """
+    peer = _HeldHttpPeer()
+    env = {k: v for k, v in os.environ.items()
+           if k.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
+    env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost"
+    cfg = {"file": "mcp-jenkins.py", "tool": "jenkins_call", "env": env,
+           "args": ["--endpoint", "http://127.0.0.1:%d" % peer.port,
+                    "--username", "x", "--token", "y"]}
+    srv = Server(cfg)
+    srv.start()
+    try:
+        srv.send({"jsonrpc": "2.0", "id": "init", "method": "initialize",
+                  "params": {}})
+        if (srv.read() or {}).get("id") != "init":
+            checks.append(check("cancel probe: second instance initializes",
+                                False, "alive=%r" % srv.alive()))
+            return
+        for call_id in (1, 2):
+            srv.send({"jsonrpc": "2.0", "id": call_id, "method": "tools/call",
+                      "params": {"name": "jenkins_call",
+                                 "arguments": {"function": "list_jobs",
+                                               "params": {}}}})
+        both = peer.wait_for("arrived", 2, 10.0)
+        checks.append(check("cancel probe: both calls held in flight by the peer",
+                            both, "arrived=%d" % peer.arrived))
+        if not both:
+            return
+
+        for bogus in (True, 1.0, "1", [1]):
+            srv.send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                      "params": {"requestId": bogus}})
+        srv.send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                  "params": {"requestId": 2, "reason": "smoke probe"}})
+        srv.send({"jsonrpc": "2.0", "id": 3, "method": "ping", "params": {}})
+        first = srv.read() or {}
+        checks.append(check("cancel probe: no reply to a cancel, ping answered",
+                            first.get("id") == 3,
+                            "first reply=%s" % json.dumps(first)[:160]))
+
+        peer.release()
+        peer.wait_for("answered", 2, 10.0)
+        srv.send({"jsonrpc": "2.0", "id": 4, "method": "ping", "params": {}})
+        seen = _read_ids(srv, (1, 4), 10.0)
+        # A reply for 2 would be queued behind the same release as 1's; one more
+        # ping and a short linger give a straggler every chance to show up.
+        srv.send({"jsonrpc": "2.0", "id": 5, "method": "ping", "params": {}})
+        seen += _read_ids(srv, (5,), 10.0)
+        seen += _read_ids(srv, ("never",), 1.0)
+        checks.append(check(
+            "cancel probe: sibling not cancelled by true/1.0/\"1\"/[1]",
+            1 in seen, "ids seen=%r" % seen))
+        checks.append(check(
+            "cancel probe: the cancelled call is never answered",
+            2 not in seen and 5 in seen, "ids seen=%r" % seen))
+    finally:
+        srv.stop()
+        peer.close()
+
+
 def run_server(cfg):
     """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}."""
     srv = Server(cfg)
@@ -817,6 +1040,15 @@ def run_server(cfg):
         #     with the old one kept as an alias (roadmap R-0008).
         if cfg["tool"] == "tshark_call":
             tshark_ceiling_param_checks(srv, cfg, checks)
+
+        # 11. notifications/cancelled naming no live request is never
+        #     answered (R-0006), every server.
+        cancel_notification_checks(srv, checks)
+
+        # 12. jenkins-only: a cancel that lands on a call really in flight, in
+        #     a second instance pointed at a loopback peer.
+        if cfg["tool"] == "jenkins_call":
+            inflight_cancel_probe(checks)
 
         status = "PASS" if all(ok for _, ok, _ in checks) else "FAIL"
         return (status, checks)

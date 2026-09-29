@@ -80,6 +80,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `generated_region` | `test_generated_region.py` | A–G |
 | `mcp_websocket` | `test_mcp_websocket.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
+| `cancel` | `test_cancel.py` | A–F |
 | `wire_log` | `test_wire_log.py` | A–F |
 | `handler_crash` | `test_handler_crash.py` | A–E |
 | `table_cells` | `test_table_cells.py` | A–G |
@@ -121,6 +122,7 @@ python3 tests/test_roadmap.py
 python3 tests/test_generated_region.py
 python3 tests/test_mcp_websocket.py
 python3 tests/test_read_loop.py
+python3 tests/test_cancel.py
 python3 tests/test_wire_log.py
 python3 tests/test_handler_crash.py
 python3 tests/test_table_cells.py
@@ -172,7 +174,7 @@ Hard rule, enforced rather than hoped for:
   `tempfile.mkdtemp()` directory (`_harness.TempWorkspace`) and removed
   afterwards. `--keep` retains the directory and prints its path.
 * Suites that need scratch *inside* the repo — `name_existence`,
-  `spawn_stdin`, `mcp_footprint`, `read_loop`, `wire_log` — use a per-run
+  `spawn_stdin`, `mcp_footprint`, `read_loop`, `cancel`, `wire_log` — use a per-run
   `.claude/tmp/<suite>/run-<unique>/` directory instead, and that boundary is
   structurally gated: a single write path and a single child launcher record
   every target, and the group fails if any recorded path escapes the sandbox.
@@ -282,6 +284,13 @@ tests/
                                            Scripts/mcp-*.py, with the per-server
                                            pool/coroutine split declared in a
                                            table rather than inferred)
+  test_cancel.py             groups A-F   (offline, AST only, nothing spawned --
+                                           R-0006: every Scripts/mcp-*.py handles
+                                           notifications/cancelled on its read
+                                           loop before dispatch, through an id
+                                           registry that excludes initialize,
+                                           with what a cancel reclaims declared
+                                           per server; the live half is smoke)
   test_wire_log.py           groups A-F   (offline, AST only, nothing spawned --
                                            F12/CWE-532: both wire sites of every
                                            Scripts/mcp-*.py log protocol
