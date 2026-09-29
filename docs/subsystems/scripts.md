@@ -23,6 +23,7 @@ links:
   - 0017-a-silent-zero-is-the-defect
   - 0018-the-totals-must-describe-the-scope
   - 0021-contain-by-the-admitted-root
+  - 0024-pure-python-39-and-the-stdlib
 ---
 
 # Scripts & MCP Servers
@@ -41,6 +42,36 @@ below, this is a host-level fact with no in-repo anchor, so it was measured
 rather than read: on the symlink itself, and on the live process list, where
 every registered server runs from its absolute path under this repo and none
 from `~/.claude/scripts/`.
+
+## Dependencies — Python 3.9 and the stdlib
+
+**Every script here runs on a bare Python 3.9 interpreter with the standard
+library.** A third-party module is allowed only where the stdlib has no way to
+do the job, and only from an allowlist: `primp` and `curl_cffi` (browser TLS
+impersonation, which `ssl` cannot shape), `yaml` (no stdlib YAML parser), and
+`tomli` (the 3.9/3.10 backport of `tomllib`, which is stdlib only from 3.11 and
+is guarded the same way). The decision, why each entry is unavoidable and the
+alternatives rejected are [[0024-pure-python-39-and-the-stdlib]].
+
+Absence is detected with `importlib.util.find_spec("<name>")` **before** the
+import, never with `except ImportError` — `find_spec` does not import, so an
+installed-but-broken package still fails with its own traceback instead of being
+reported as missing. A required dependency that is absent produces one stderr
+line naming the package and a `pip install` for the running interpreter, and
+exit 2: `Scripts/search_duckduckgo.py:require_backend`,
+`Scripts/search_github.py:require_backend` (both at startup, for the backend
+this platform uses — not at the lazy import mid-run) and
+`Scripts/task-validator.py` for PyYAML. An optional one degrades as it always
+did: `Scripts/mcp-inspect.py:_v_yaml` / `_v_toml` answer LIMITED / SKIP.
+
+`Scripts/mcp-webfetch.py` is the one **declared, temporary exception**: it keeps
+`beautifulsoup4` + `markdownify` and its `uv run --script` launch (below). No
+other file carries a PEP 723 dependency or a `uv` launch.
+
+The rule is gated by `tests/test_py_deps.py` over `Scripts/`, `ClaudeCode/` and
+`tests/`: every non-stdlib import allowlisted and `find_spec`-guarded, no stdlib
+module removed after 3.9, and every file parsing as 3.9 **syntax** — which does
+not see 3.10+ stdlib API use; see [[tests]].
 
 ## MCP servers
 
@@ -234,7 +265,9 @@ Two things about that launch line are deliberate, not incidental:
 
 - **`uv run --script` is mandatory, not stylistic.** The PEP-723 block is the only
   place `beautifulsoup4` is declared and a bare `python3` lacking it dies at
-  import `Scripts/mcp-webfetch.py`. The smoke harness now starts it the same way
+  import `Scripts/mcp-webfetch.py`. That makes this server the fleet's one
+  exception to the stdlib-only rule, declared as temporary and listed by name in
+  `tests/test_py_deps.py` [[0024-pure-python-39-and-the-stdlib]]. The smoke harness now starts it the same way
   the registration does, through a per-server `launcher` argv prefix
   `Scripts/_mcp_smoke_test.py:launch_prefix` — so what the test measures is what
   actually runs, and this server's smoke went from SKIP to a full pass. The
@@ -655,7 +688,9 @@ Operate on the `requirements.yaml` workflow (see [[overview]]):
 `Scripts/task-plan.py` (status + dependency analysis), `task-update.py`,
 `task-show-all.py`, `task-show-details.py`, `task-batch-planner.py`,
 `task-implementation-plan.py` (token-efficient plan extraction), and
-`task-validator.py` (requirements.yaml schema validation). What the file they all
+`task-validator.py` (requirements.yaml schema validation — the one task utility
+that needs PyYAML, checked with `find_spec` at startup: absent, it prints one
+line and exits 2). What the file they all
 operate on is *for*, and why the plan-to-implement handoff needs a validated task
 graph beside the prose plan, is [[requirements-yaml]].
 
@@ -671,3 +706,12 @@ into a random browser — while the curl_cffi side keeps its pinned list
 `Scripts/search_duckduckgo.py:CURL_CFFI_PROFILES`, which rots loudly with an
 `ImpersonateError`. The DDG bot-detection research log is documented in
 [[spec-ddg]].
+
+The platform's backend is checked with `find_spec` before any request
+`Scripts/search_duckduckgo.py:require_backend`: absent, the script prints one
+line naming the package and exits 2 instead of dying in `create_session` after
+the run has started. The Bing results are parsed by a stdlib `html.parser` tree
+builder `Scripts/search_duckduckgo.py:parse_bing_results` that evaluates the four
+XPath expressions the old lxml parser used, including libxml2's implicit-close
+and end-tag-priority rules; it is pinned to lxml's recorded output on
+`tests/files/html/tf_bing_serp.html` [[0024-pure-python-39-and-the-stdlib]].

@@ -36,6 +36,21 @@ lua/  tf_mathlib.lua module table with functions and fields
 `tf_broken.*` are **meant to be broken**. Do not "fix" them; a test asserts that
 the LSP reports a problem in them. They are never part of a build.
 
+## html/ — not an LSP fixture
+
+```
+html/ tf_bing_serp.html           a hand-built Bing-like results page
+      tf_bing_serp.expected.json  the fields the old lxml XPath parser produced
+```
+
+Used by `tests/test_py_deps.py` group D, which pins the stdlib
+`parse_bing_results` in `Scripts/search_duckduckgo.py` to what lxml returned
+before lxml was removed (ADR 0024). The expected file is a **recorded
+measurement**, not something to regenerate from the current parser: doing that
+would make the pin agree with whatever the code does. The markup is untidy on
+purpose (an unclosed `<p>`, the header-div variant, an empty `href`, a
+lookalike class name); every URL is under `example.*`.
+
 ## Notes on the toolchain
 
 - No `compile_commands.json` is committed. It is inherently machine-specific and

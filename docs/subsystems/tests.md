@@ -23,6 +23,7 @@ links:
   - 0020-the-prompt-is-its-own-block
   - 0022-a-someday-maybe-is-a-roadmap-item
   - 0023-the-websocket-client-is-a-sixth-domain
+  - 0024-pure-python-39-and-the-stdlib
 ---
 
 # Test Fleet
@@ -235,6 +236,7 @@ is the registry, and the run is the only thing that knows the totals.
 | `table_cells` | every table renderer either escapes its own delimiter and documents the scheme where the model reads it, or is whitespace-delimited and has none to escape — one declared row per renderer carrying the class and the reason, the real escapers imported and round-tripped rather than restated, and reversibility as a **separate** clause because an encoder that does not escape its own escape character still passes a column count — [[0016-a-cell-may-not-forge-a-boundary]] |
 | `protocol_version` | every server declares the handshake protocol version **once**, as the first member of `class McpServer`, and the `initialize` reply *reads* that member instead of restating the literal — the shape the live smoke handshake structurally cannot see, since a server inlining the **right** string is indistinguishable on the wire from one reading the constant, with the fleet's agreement asserted *between* the files so the suite never holds a copy of the number it polices |
 | `forge_dispatch` | `forge_call`'s own dispatcher, in-process: `status` answers exactly what the empty call answers on **all four** of its paths — missing config, parse error, validation errors, the ordinary reply — each with a control proving the fixture took that path, and the alias is named wherever the function list is — asserted as a parsed list item or exact spelling, because every one of those texts already said "status" before the alias existed |
+| `py_deps` | the fleet is pure Python 3.9 + stdlib: every import under `Scripts/`, `ClaudeCode/` and `tests/` whose top-level name is neither embedded 3.9 stdlib nor a repo module must be allowlisted and preceded by a literal `find_spec` guard, never `except ImportError`; no stdlib module removed since 3.9; every file parses with `feature_version=(3, 9)` — **syntax only**, 3.10+ API use is a declared blind spot; `mcp-webfetch.py` a per-name declared exception; and the stdlib Bing parser pinned to lxml's recorded fields on `tests/files/html/` — [[0024-pure-python-39-and-the-stdlib]] |
 | `smoke` | JSON-RPC plumbing invariants across every server file, including the error-envelope contract ([[scripts]]) |
 
 There is **no auto-discovery**: adding a suite is three edits — the module, a

@@ -84,6 +84,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `table_cells` | `test_table_cells.py` | A–G |
 | `protocol_version` | `test_protocol_version.py` | A–E |
 | `forge_dispatch` | `test_forge_dispatch.py` | A–C |
+| `py_deps` | `test_py_deps.py` | A–E |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
@@ -124,6 +125,7 @@ python3 tests/test_handler_crash.py
 python3 tests/test_table_cells.py
 python3 tests/test_protocol_version.py
 python3 tests/test_forge_dispatch.py
+python3 tests/test_py_deps.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 
@@ -305,7 +307,13 @@ tests/
   test_forge_dispatch.py     groups A-C   (in-process, mkdtemp fixtures, starts
                                            no server -- `status` is the empty
                                            call on all four of its paths)
-  files/                     tf_-prefixed C and Lua fixtures for purity_lsp
+  test_py_deps.py            groups A-E   (offline, AST only, starts nothing --
+                                           pure Python 3.9 + stdlib: allowlisted,
+                                           find_spec-guarded third-party imports,
+                                           3.9 syntax, and the stdlib Bing parser
+                                           pinned to lxml's fields)
+  files/                     tf_-prefixed C and Lua fixtures for purity_lsp,
+                             plus html/ for py_deps
   README.md
 ```
 

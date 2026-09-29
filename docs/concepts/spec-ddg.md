@@ -12,6 +12,7 @@ verified:
 links:
   - scripts
   - 0023-the-websocket-client-is-a-sixth-domain
+  - 0024-pure-python-39-and-the-stdlib
 ---
 
 # DuckDuckGo Bot Detection — Technical Analysis & Bypass Research
@@ -692,13 +693,18 @@ Key details:
 
 ### 7.4 Bing Result Parsing
 
-Uses `lxml` XPath (same approach as deedy5/ddgs):
+Originally `lxml` XPath (same approach as deedy5/ddgs):
 ```python
 tree = document_fromstring(html_text)
 elements = tree.xpath("//li[contains(@class, 'b_algo')]")
 # Decode Bing's base64 redirect URLs
 href = base64.urlsafe_b64decode(u_param[2:] + padding).decode()
 ```
+
+Since 2026-09-29 the same four XPath expressions are evaluated by a stdlib
+`html.parser` tree builder (`Scripts/search_duckduckgo.py:parse_bing_results`),
+measured equal to the lxml version and pinned to its recorded output — see
+[[0024-pure-python-39-and-the-stdlib]]. The base64 URL decoding is unchanged.
 
 ### 7.5 Environment Variables
 

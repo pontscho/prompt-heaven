@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 selftest_probe.py -- LIVE self-test fixture for the sbx sandbox wrapper.
 

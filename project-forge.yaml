@@ -248,6 +248,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
+  py_deps:
+    description: "The ADR 0024 dependency gate: every Python file under Scripts/, ClaudeCode/ and tests/ plus the extensionless sbx is pure Python 3.9 + stdlib. AST-read imports (plain, from, function-local, and __import__/import_module with a literal name) whose top-level name is neither embedded 3.9 stdlib nor a repo module must be on the allowlist (primp, curl_cffi, yaml, tomli; tomllib as newer-than-3.9 stdlib) and preceded by an importlib.util.find_spec('<name>') literal, never wrapped in except ImportError; Scripts/mcp-webfetch.py's bs4/markdownify/primp/curl_cffi are a declared, temporary, per-NAME exception. No import of a stdlib module removed after 3.9. Every file parses with ast.parse(feature_version=(3, 9)) -- SYNTAX ONLY, 3.10+ stdlib API use is a declared blind spot. The embedded 3.9 stdlib table is cross-checked against sys.stdlib_module_names on 3.10+. The stdlib Bing parser in search_duckduckgo.py is pinned to the fields lxml produced on tests/files/html/tf_bing_serp.html. A control group plants each defect in turn. Starts nothing, writes only its .claude/tmp sandbox."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py py_deps
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|PROBLEM'
+
   smoke:
     description: "JSON-RPC plumbing invariants across the whole server fleet"
     requires: [syntax]

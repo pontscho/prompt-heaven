@@ -31,6 +31,7 @@ import random
 import time
 import os
 import argparse
+import importlib.util
 from urllib.parse import urlencode
 
 # ---------------------------------------------------------------------------
@@ -153,8 +154,36 @@ def parse_grep_results(data, limit):
 # Session management (platform-aware backend)
 # ---------------------------------------------------------------------------
 
+def _uses_primp():
+	"""ADR 0004's platform split: primp on Linux (it has impersonate_os),
+	curl_cffi everywhere else. The one place that decision is made."""
+	return platform.system() == "Linux"
+
+
+def require_backend():
+	"""Exit 2 with ONE stderr line if this platform's impersonation backend is absent.
+
+	Called at startup, before any request, so a missing package is reported up
+	front instead of as a traceback from create_session() mid-run. find_spec
+	locates the package WITHOUT importing it: an installed-but-broken package
+	still fails at the real import with its own honest traceback, where
+	`except ImportError` would misreport it as "not installed". The module names
+	are literals on purpose -- tests/test_py_deps.py looks for them.
+	"""
+	if _uses_primp():
+		missing = "primp" if importlib.util.find_spec("primp") is None else None
+	else:
+		missing = "curl_cffi" if importlib.util.find_spec("curl_cffi") is None else None
+	if missing:
+		print("search_github.py: missing Python package '%s' (browser "
+			"impersonation backend for this platform); install it with: "
+			"%s -m pip install %s" % (missing, sys.executable or "python3", missing),
+			file=sys.stderr)
+		sys.exit(2)
+
+
 def create_session(imp=None):
-	if platform.system() == "Linux":
+	if _uses_primp():
 		import primp
 		# "chrome" rotates the Chrome major on its own across whatever majors the
 		# installed primp supports, which is what the pinned bundle list was for.
@@ -308,6 +337,7 @@ Examples:
 	parser.add_argument('--path', help='Path filter')
 	parser.add_argument('--limit', type=int, default=10, help='Max results per query (default: 10)')
 	args = parser.parse_args()
+	require_backend()
 
 	output_sections, has_results = _run_github(
 		args.query, lang=args.lang, repo=args.repo, path=args.path, limit=args.limit

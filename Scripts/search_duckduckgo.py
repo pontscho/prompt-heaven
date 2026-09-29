@@ -33,9 +33,9 @@ import os
 import base64
 import hashlib  # the generated WebSocket client (cdp backend)
 import socket  # the generated WebSocket client (cdp backend)
+import importlib.util
+from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlparse
-
-from lxml.html import document_fromstring
 
 # ---------------------------------------------------------------------------
 # Impersonation profiles — platform-aware backend selection
@@ -184,29 +184,202 @@ def _decode_bing_url(href):
 	return href
 
 
+# This parser used to be lxml XPath (the deedy5/ddgs approach):
+#   results  //li[contains(@class, 'b_algo')]
+#   href     ./h2/a/@href | ./div[contains(@class, 'header')]/a/@href   (first)
+#   title    ./h2/a//text() | ./div[contains(@class, 'header')]/a/h2//text()
+#   snippet  .//p//text()
+# It is now a stdlib html.parser tree builder that evaluates those same four
+# expressions by hand, so the script needs no third-party parser. Equivalence was
+# measured against the lxml version on tests/files/html/tf_bing_serp.html, whose
+# expected fields are the lxml output; tests/test_py_deps.py pins them.
+
+# Elements with no content: never pushed on the open-element stack.
+_VOID_TAGS = frozenset({
+	"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+	"meta", "param", "source", "track", "wbr",
+})
+
+# new start tag -> the open elements it implicitly closes while one of them is on
+# TOP of the stack. Transcribed from libxml2's htmlStartClose table, which is
+# what lxml applied: e.g. a snippet <p> left unclosed before a <div> must not
+# swallow the div, and a result whose </h2> and </li> are both missing must not
+# swallow the next result. libxml2's `head` entries are left out on purpose:
+# nothing under <head> is ever a result, so they cannot change a field.
+_H = ("h1", "h2", "h3", "h4", "h5", "h6")
+_LISTING = ("address", "pre", "listing", "xmp")
+_FONTSTYLE = ("tt", "i", "b", "u", "s", "strike", "big", "small")
+_START_CLOSE = {tag: frozenset(closed) for tag, closed in {
+	"form": ("form", "p", "hr") + _H + ("dl", "ul", "ol", "menu", "dir") + _LISTING,
+	"title": ("p",),
+	"body": ("style", "script", "title"),
+	"frameset": ("style", "script", "title"),
+	"li": ("p",) + _H + ("dl",) + _LISTING + ("li",),
+	"hr": ("p",),
+	"h1": ("p", "h2", "h3", "h4", "h5", "h6"),
+	"h2": ("p", "h1", "h3", "h4", "h5", "h6"),
+	"h3": ("p", "h1", "h2", "h4", "h5", "h6"),
+	"h4": ("p", "h1", "h2", "h3", "h5", "h6"),
+	"h5": ("p", "h1", "h2", "h3", "h4", "h6"),
+	"h6": ("p", "h1", "h2", "h3", "h4", "h5"),
+	"dir": ("p",),
+	"address": ("p", "ul"),
+	"pre": ("p", "ul"),
+	"listing": ("p",),
+	"xmp": ("p",),
+	"blockquote": ("p",),
+	"dl": ("p", "dt", "menu", "dir") + _LISTING,
+	"dt": ("p", "menu", "dir") + _LISTING + ("dd",),
+	"dd": ("p", "menu", "dir") + _LISTING + ("dt",),
+	"ul": ("p", "ol", "menu", "dir") + _LISTING,
+	"ol": ("p", "ul"),
+	"menu": ("p", "ul"),
+	"p": ("p",) + _H + _FONTSTYLE,
+	"div": ("p",),
+	"noscript": ("script",),
+	"center": ("font", "b", "i", "p"),
+	"a": ("a",),
+	"caption": ("p",),
+	"colgroup": ("caption", "colgroup", "col", "p"),
+	"col": ("caption", "col", "p"),
+	"table": ("p",) + _H + ("pre", "listing", "xmp", "a"),
+	"th": ("th", "td", "p", "span", "font", "a", "b", "i", "u"),
+	"td": ("th", "td", "p", "span", "font", "a", "b", "i", "u"),
+	"tr": ("th", "td", "tr", "caption", "col", "colgroup", "p"),
+	"thead": ("caption", "col", "colgroup"),
+	"tfoot": ("th", "td", "tr", "caption", "col", "colgroup", "thead", "tbody", "p"),
+	"tbody": ("th", "td", "tr", "caption", "col", "colgroup", "thead", "tfoot",
+		"tbody", "p"),
+	"optgroup": ("option",),
+	"option": ("option",),
+	"fieldset": ("legend", "p") + _H + ("pre", "listing", "xmp", "a"),
+}.items()}
+
+# libxml2's end-tag priorities: an end tag may only close the open elements
+# above its match if none of them outranks it, otherwise it is IGNORED. So with
+# a stray <div> left open inside a result, `</li>` does not end the result and
+# the next <li class="b_algo"> nests inside it. Measured: without this rule a
+# single dropped </div> made 17 of the fixture's 26 variants disagree with lxml.
+_END_PRIORITY = {
+	"div": 150, "td": 160, "th": 160, "tr": 170, "thead": 180, "tbody": 180,
+	"tfoot": 180, "table": 190, "head": 200, "body": 200, "html": 220,
+}
+_END_PRIORITY_DEFAULT = 100
+
+
+class _Node:
+	__slots__ = ("tag", "attrs", "children")
+
+	def __init__(self, tag, attrs):
+		self.tag = tag
+		self.attrs = attrs
+		self.children = []  # _Node or str (a text node), in document order
+
+
+class _TreeBuilder(HTMLParser):
+	"""A minimal element tree: enough structure to answer the four XPaths."""
+
+	def __init__(self):
+		super().__init__(convert_charrefs=True)
+		self.root = _Node("#document", {})
+		self._stack = [self.root]
+
+	def handle_starttag(self, tag, attrs):
+		closes = _START_CLOSE.get(tag, ())
+		while len(self._stack) > 1 and self._stack[-1].tag in closes:
+			self._stack.pop()
+		node_attrs = {}
+		for name, value in attrs:
+			# first occurrence wins, and a bare attribute is the empty string
+			node_attrs.setdefault(name, "" if value is None else value)
+		node = _Node(tag, node_attrs)
+		self._stack[-1].children.append(node)
+		if tag not in _VOID_TAGS:
+			self._stack.append(node)
+
+	def handle_endtag(self, tag):
+		# close the nearest open element of this name, unless an element above it
+		# outranks the end tag (_END_PRIORITY); a stray end tag is ignored
+		priority = _END_PRIORITY.get(tag, _END_PRIORITY_DEFAULT)
+		for i in range(len(self._stack) - 1, 0, -1):
+			if self._stack[i].tag == tag:
+				del self._stack[i:]
+				return
+			if _END_PRIORITY.get(self._stack[i].tag, _END_PRIORITY_DEFAULT) > priority:
+				return
+
+	def handle_data(self, data):
+		self._stack[-1].children.append(data)
+
+
+def _child_elements(node, tag):
+	return [c for c in node.children if not isinstance(c, str) and c.tag == tag]
+
+
+def _descendant_text(node, out, only_under=None):
+	"""Append node's descendant text nodes in document order. With only_under,
+	only text that sits inside an element of that tag (below node) counts."""
+	todo = [(node, only_under is None)]
+	while todo:
+		current, counting = todo.pop()
+		if isinstance(current, str):
+			out.append(current)
+			continue
+		for child in reversed(current.children):
+			if isinstance(child, str):
+				if counting:
+					todo.append((child, True))
+			else:
+				todo.append((child, counting or child.tag == only_under))
+	return out
+
+
+def _iter_elements(root):
+	"""Every element below root, in document order."""
+	todo = list(reversed([c for c in root.children if not isinstance(c, str)]))
+	while todo:
+		node = todo.pop()
+		yield node
+		todo.extend(reversed([c for c in node.children if not isinstance(c, str)]))
+
+
 def parse_bing_results(html_text):
-	"""Parse Bing search results using lxml (same approach as deedy5/ddgs)."""
+	"""Parse Bing search results: stdlib html.parser, same fields as the old XPath."""
 	results = []
+	builder = _TreeBuilder()
 	try:
-		tree = document_fromstring(html_text)
+		builder.feed(html_text)
+		builder.close()
 	except Exception:
 		return results
 
-	elements = tree.xpath("//li[contains(@class, 'b_algo')]")
-	if not isinstance(elements, list):
-		return results
-
-	for e in elements:
-		hrefxpath = e.xpath("./h2/a/@href | ./div[contains(@class, 'header')]/a/@href")
-		href = str(hrefxpath[0]) if hrefxpath and isinstance(hrefxpath, list) else None
+	for e in _iter_elements(builder.root):
+		if e.tag != "li" or "b_algo" not in e.attrs.get("class", ""):
+			continue
+		hrefs = []
+		title_parts = []
+		for child in e.children:
+			if isinstance(child, str):
+				continue
+			if child.tag == "h2":
+				for a in _child_elements(child, "a"):
+					if "href" in a.attrs:
+						hrefs.append(a.attrs["href"])
+					_descendant_text(a, title_parts)
+			elif child.tag == "div" and "header" in child.attrs.get("class", ""):
+				for a in _child_elements(child, "a"):
+					if "href" in a.attrs:
+						hrefs.append(a.attrs["href"])
+					for h2 in _child_elements(a, "h2"):
+						_descendant_text(h2, title_parts)
+		href = hrefs[0] if hrefs else None
 		if not href:
 			continue
 
 		href = _decode_bing_url(href)
-		titlexpath = e.xpath("./h2/a//text() | ./div[contains(@class, 'header')]/a/h2//text()")
-		title = _normalize("".join(str(x) for x in titlexpath)) if titlexpath else ""
-		bodyxpath = e.xpath(".//p//text()")
-		snippet = _normalize("".join(str(x) for x in bodyxpath)).replace("\xa0", " ") if bodyxpath else ""
+		title = _normalize("".join(title_parts))
+		body = _descendant_text(e, [], only_under="p")
+		snippet = _normalize("".join(body)).replace("\xa0", " ")
 
 		results.append({
 			'url': href,
@@ -221,8 +394,36 @@ def parse_bing_results(html_text):
 # Session management (platform-aware backend)
 # ---------------------------------------------------------------------------
 
+def _uses_primp():
+	"""ADR 0004's platform split: primp on Linux (it has impersonate_os),
+	curl_cffi everywhere else. The one place that decision is made."""
+	return platform.system() == "Linux"
+
+
+def require_backend():
+	"""Exit 2 with ONE stderr line if this platform's impersonation backend is absent.
+
+	Called at startup, before any request, so a missing package is reported up
+	front instead of as a traceback from create_session() mid-run. find_spec
+	locates the package WITHOUT importing it: an installed-but-broken package
+	still fails at the real import with its own honest traceback, where
+	`except ImportError` would misreport it as "not installed". The module names
+	are literals on purpose -- tests/test_py_deps.py looks for them.
+	"""
+	if _uses_primp():
+		missing = "primp" if importlib.util.find_spec("primp") is None else None
+	else:
+		missing = "curl_cffi" if importlib.util.find_spec("curl_cffi") is None else None
+	if missing:
+		print("search_duckduckgo.py: missing Python package '%s' (browser "
+			"impersonation backend for this platform); install it with: "
+			"%s -m pip install %s" % (missing, sys.executable or "python3", missing),
+			file=sys.stderr)
+		sys.exit(2)
+
+
 def create_session(imp=None):
-	if platform.system() == "Linux":
+	if _uses_primp():
 		import primp
 		# "chrome" rotates the Chrome major on its own across whatever majors the
 		# installed primp supports (measured: 145/146/147/148 across fresh
@@ -915,6 +1116,9 @@ def main():
 
 	queries = sys.argv[1:]
 	forced = os.environ.get("DDG_BACKEND", "").lower()
+	if forced != "cdp":
+		# every backend but cdp opens an impersonating session: fail up front
+		require_backend()
 
 	if forced == "cdp":
 		output_sections, has_results = _run_cdp(queries)

@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import csv
+import importlib.util
 import io
 import json
 import os
@@ -279,14 +280,16 @@ def v_plist(data: bytes) -> Result:
 
 
 def v_toml(data: bytes) -> Result:
+	# tomllib is stdlib only from 3.11, tomli is its backport. find_spec, not
+	# `except ImportError`: absence degrades to SKIP, but a present-and-broken
+	# parser must fail with its own traceback, not pass as "not installed".
 	loads = None
-	for modname in ("tomllib", "tomli"):  # tomllib is 3.11+, tomli is the backport
-		try:
-			mod = __import__(modname)
-			loads = mod.loads
-			break
-		except ImportError:
-			continue
+	if importlib.util.find_spec("tomllib") is not None:
+		import tomllib
+		loads = tomllib.loads
+	elif importlib.util.find_spec("tomli") is not None:
+		import tomli
+		loads = tomli.loads
 	if loads is None:
 		return skipped("no TOML parser available (tomllib is Python 3.11+; "
 			"`pip install tomli` to validate TOML on 3.9/3.10)")
@@ -308,10 +311,12 @@ def v_yaml(data: bytes) -> Result:
 		text = decode_text(data)
 	except UnicodeDecodeError as e:
 		return fail("not valid UTF-8: %s" % e)
-	try:
-		import yaml  # PyYAML -- NOT stdlib
-	except ImportError:
+	# PyYAML -- NOT stdlib. Absent: degrade to the stdlib pre-check. find_spec
+	# rather than `except ImportError`, so a broken install is not mistaken for
+	# an absent one.
+	if importlib.util.find_spec("yaml") is None:
 		return _yaml_precheck(text)
+	import yaml
 	try:
 		# Validate every document in the stream; safe_load_all rejects arbitrary
 		# Python object construction.

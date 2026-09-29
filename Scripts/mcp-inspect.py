@@ -48,6 +48,7 @@ available via `python3 mcp-inspect.py --list`).
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -1571,13 +1572,16 @@ def _v_plist(data: bytes, name: str) -> _VResult:
 
 
 def _v_toml(data: bytes, name: str) -> _VResult:
+    # tomllib is stdlib only from 3.11, tomli is its backport.  find_spec, not
+    # `except ImportError`: absence degrades to SKIP, but a present-and-broken
+    # parser must fail with its own traceback, not pass as "not installed".
     loads = None
-    for modname in ("tomllib", "tomli"):   # tomllib is 3.11+, tomli the backport
-        try:
-            loads = __import__(modname).loads
-            break
-        except ImportError:
-            continue
+    if importlib.util.find_spec("tomllib") is not None:
+        import tomllib
+        loads = tomllib.loads
+    elif importlib.util.find_spec("tomli") is not None:
+        import tomli
+        loads = tomli.loads
     if loads is None:
         return _v_skip("no TOML parser available (tomllib is Python 3.11+; "
                        "`pip install tomli` to validate TOML on 3.9/3.10)")
@@ -1606,9 +1610,9 @@ def _v_yaml(data: bytes, name: str) -> _VResult:
         text = _v_decode(data)
     except UnicodeDecodeError as exc:
         return _v_fail(f"not valid UTF-8: {exc}")
-    try:
-        import yaml          # PyYAML — NOT stdlib
-    except ImportError:
+    # PyYAML — NOT stdlib.  find_spec rather than `except ImportError`, so a
+    # broken install fails honestly instead of passing as an absent one.
+    if importlib.util.find_spec("yaml") is None:
         # Conservative stdlib fallback: prove what can be proven and say
         # plainly that this is NOT a parse. (The p:verify skill additionally
         # balances flow collections; that heuristic is deliberately not
@@ -1623,6 +1627,7 @@ def _v_yaml(data: bytes, name: str) -> _VResult:
         return _v_limited("structural pre-check passed (UTF-8 decodes, no tab "
                           "indentation) — NOT a full parse; install PyYAML for "
                           "real YAML validation")
+    import yaml
     try:
         # Every document in the stream; safe_load_all refuses arbitrary Python
         # object construction.

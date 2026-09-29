@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<!--
+  FIXTURE ONLY -- see tests/files/README.md.  A hand-built Bing-like results
+  page for Scripts/search_duckduckgo.py:parse_bing_results.  The expected
+  fields in tf_bing_serp.expected.json were produced by the lxml XPath parser
+  this file replaced, so the stdlib parser is pinned to what lxml returned.
+  Every URL is under example.* / tf-* on purpose.  Do not "tidy" the markup:
+  the unclosed <p>, the header-div variant, the empty href and the lookalike
+  class names are each a case.
+-->
+<html lang="en"><head><meta charset="utf-8"><title>tf query - Search</title>
+<style>.b_algo{margin:0}</style>
+<script>var tf_bing_state = {"q":"tf query", "li":"<li class=\"b_algo\">"};</script>
+</head>
+<body>
+<div id="b_content"><main aria-label="Search Results">
+<ol id="b_results" class="">
+<li class="b_ad"><h2><a href="https://tf-ads.example.com/">Sponsored tf result</a></h2><div class="b_caption"><p>An advert, not an algo result.</p></div></li>
+
+<li class="b_algo" data-tag="" data-id="" data-bm="6"><div class="b_tpcn"><a class="tilk" href="https://tf-one.example.org/" aria-label="tf one" h="ID=SERP,5061.1"><div class="tpic"><div class="wr_fav"><img src="data:image/png;base64,AAAA" alt="Global web icon" /></div></div><div class="tptxt"><div class="tptt">tf-one.example.org</div><div class="tpmeta"><div class="b_attribution"><cite>https://tf-one.example.org</cite></div></div></div></a></div><h2><a href="https://tf-one.example.org/docs/intro" h="ID=SERP,5061.2">The <strong>tf</strong> one &ndash; introduction &amp; overview</a></h2><div class="b_caption" role="contentinfo"><p class="b_lineclamp2 b_algoSlug"><span class="algoSlug_icon" data-priority="2">Web</span>A first result with <strong>bold</strong> words, an&nbsp;nbsp and an entity &lt;tag&gt; inside.</p></div></li>
+
+<li class="b_algo" data-bm="7"><div class="b_algoheader"><a href="https://www.bing.com/ck/a?!&amp;&amp;p=deadbeef&amp;u=a1aHR0cHM6Ly90Zi10d28uZXhhbXBsZS5uZXQvcGF0aD9hPTEmYj0y&amp;ntb=1" h="ID=SERP,5080.1"><h2>Header-variant <em>title</em> two</h2></a></div><div class="b_caption"><p>Second snippet, first paragraph.</p><p>Second paragraph   with
+   odd
+whitespace.</p></div></li>
+
+<li class="b_algo b_vtl_deeplinks" data-bm="8"><h2><a href="https://tf-three.example.com/">Three: deep links</a></h2><div class="b_caption"><p class="b_lineclamp3">Main snippet for three<span> with a nested span</span>.</p></div><div class="b_deep"><ul class="b_vList"><li><a href="https://tf-three.example.com/a">Deep A</a><p>Deep A text.</p></li><li><a href="https://tf-three.example.com/b">Deep B</a><p>Deep B text.</p></li></ul></div></li>
+
+<li class="b_algo" data-bm="9"><h2><a href="">Empty href must be skipped</a></h2><div class="b_caption"><p>Skipped.</p></div></li>
+
+<li class="b_algo" data-bm="10"><div class="b_title"><a href="https://tf-nohref.example.com/">A div that is not a header</a></div><div class="b_caption"><p>No h2 and no header div, so no href: skipped.</p></div></li>
+
+<li class="b_algo" data-bm="11"><h2><a href="https://tf-five.example.com/" title="five">Five &#8211; no paragraph</a></h2><div class="b_caption"><div class="b_snippet">Text outside any p is not a snippet.</div></div></li>
+
+<li class="b_algo" data-bm="12"><h2><a href="https://tf-six.example.com/">Six <!-- a comment --> unclosed p</a></h2><div class="b_caption"><p>Six snippet that is never closed<div class="b_factrow">after the implicit close</div></div></li>
+
+<li class="b_algoSlug" data-bm="13"><h2><a href="https://tf-seven.example.com/">Seven: class contains b_algo as a substring</a></h2><p>Seven snippet directly under the li.</p></li>
+
+<li class="b_algo" data-bm="14"><h2><a href="https://tf-eight.example.com/one">Eight first</a><a href="https://tf-eight.example.com/two">Eight second</a></h2><div class="b_caption"><p>Eight: two anchors, the first href wins, both titles join.<br>After a br.</p></div></li>
+
+<li class="b_algo" data-bm="15"><h2><a href="https://tf-nine.example.com/">Nine &#39;quoted&#39; &quot;title&quot;</a></h2><div class="b_caption"><p>   </p></div></li>
+
+<li class="b_algo" data-bm="16"><div class="b_algoheader"><a href="https://tf-ten.example.com/"><div class="b_tpcn">not an h2</div><h2>Ten <span>spanned</span></h2></a></div><div class="b_caption"><p>Ten: header div whose a holds a div before the h2.</p></div></li>
+
+<li class="b_pag"><nav role="navigation"><h4>Pagination</h4><a href="/search?q=tf+query&amp;first=11">Next</a></nav></li>
+</ol>
+</main></div>
+</body></html>

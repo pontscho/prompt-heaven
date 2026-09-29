@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.9"
-# dependencies = ["PyYAML>=6"]
-# ///
 """
 task-validator.py - Semantic validator for requirements.yaml (p:task-plan output).
 
@@ -30,16 +26,21 @@ Exit codes:
   2  file not readable / YAML parse error / PyYAML missing
 """
 
+import importlib.util
 import re
 import sys
 
-try:
-	import yaml
-except ImportError:
+# find_spec, not `try: import yaml / except ImportError`: it locates PyYAML
+# WITHOUT importing it, so an installed-but-broken PyYAML (a bad C extension, a
+# syntax error inside it) still fails below with its own honest traceback
+# instead of being misreported as "not installed".
+if importlib.util.find_spec("yaml") is None:
 	sys.stderr.write(
-		"ERROR: PyYAML is required but not installed.\n"
-		"       Install it with: pip install 'PyYAML>=6'\n")
+		"ERROR: PyYAML is required but not installed; install it with: "
+		"%s -m pip install 'PyYAML>=6'\n" % (sys.executable or "python3"))
 	sys.exit(2)
+
+import yaml  # noqa: E402
 
 
 ERROR = "ERROR"

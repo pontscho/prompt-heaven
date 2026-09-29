@@ -170,6 +170,10 @@ def run_forge_dispatch(opts):
     return run_python_suite("test_forge_dispatch", opts)
 
 
+def run_py_deps(opts):
+    return run_python_suite("test_py_deps", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -431,6 +435,11 @@ SUITES = [
      "forge_call dispatch: `status` answers exactly what the empty call "
      "answers on all four of its paths, each with a control proving the "
      "fixture took it, and is advertised wherever the function list is", 13),
+    ("py_deps", run_py_deps,
+     "pure Python 3.9 + stdlib: every non-stdlib import allowlisted and "
+     "find_spec-guarded (never except ImportError), no removed stdlib module, "
+     "every file parsing as 3.9 SYNTAX, and the stdlib Bing parser pinned to "
+     "lxml's fields", 36),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

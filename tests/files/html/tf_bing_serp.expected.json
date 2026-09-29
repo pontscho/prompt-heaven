@@ -1,0 +1,47 @@
+[
+  {
+    "url": "https://tf-one.example.org/docs/intro",
+    "title": "The tf one – introduction & overview",
+    "snippet": "WebA first result with bold words, an nbsp and an entity <tag> inside."
+  },
+  {
+    "url": "https://tf-two.example.net/path?a=1&b=2",
+    "title": "Header-variant title two",
+    "snippet": "Second snippet, first paragraph.Second paragraph with odd whitespace."
+  },
+  {
+    "url": "https://tf-three.example.com/",
+    "title": "Three: deep links",
+    "snippet": "Main snippet for three with a nested span.Deep A text.Deep B text."
+  },
+  {
+    "url": "https://tf-five.example.com/",
+    "title": "Five – no paragraph",
+    "snippet": "No snippet available"
+  },
+  {
+    "url": "https://tf-six.example.com/",
+    "title": "Six unclosed p",
+    "snippet": "Six snippet that is never closed"
+  },
+  {
+    "url": "https://tf-seven.example.com/",
+    "title": "Seven: class contains b_algo as a substring",
+    "snippet": "Seven snippet directly under the li."
+  },
+  {
+    "url": "https://tf-eight.example.com/one",
+    "title": "Eight firstEight second",
+    "snippet": "Eight: two anchors, the first href wins, both titles join.After a br."
+  },
+  {
+    "url": "https://tf-nine.example.com/",
+    "title": "Nine 'quoted' \"title\"",
+    "snippet": "No snippet available"
+  },
+  {
+    "url": "https://tf-ten.example.com/",
+    "title": "Ten spanned",
+    "snippet": "Ten: header div whose a holds a div before the h2."
+  }
+]
