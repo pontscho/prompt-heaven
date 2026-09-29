@@ -356,6 +356,12 @@ def _run_whitebox(suite, gate, ws):
          "%s --dry-run -- echo hi" % wrapper, repo_real),
         ("<WRAPPER> --dry-run --write . -- touch f (combines with a scope)",
          "%s --dry-run --write . -- touch f" % wrapper, repo_real),
+        # --seccomp only NARROWS: it adds a syscall filter to a run the gate would
+        # already allow, and off Linux x86_64 the helper refuses to run at all.
+        ("<WRAPPER> --seccomp -- true (a filter only narrows)",
+         "%s --seccomp -- true" % wrapper, repo_real),
+        ("<WRAPPER> --seccomp --write . -- touch f (combines with a scope)",
+         "%s --seccomp --write . -- touch f" % wrapper, repo_real),
     ]
     for name, cmd, cwd in autoallow:
         ok, reason = _clean(gate, cmd, cwd, wrapper_real)
@@ -392,6 +398,14 @@ def _run_whitebox(suite, gate, ws):
         # --dry-run must NOT rescue a --net invocation: --net is refused first (R11).
         ("R11 --dry-run --net (dry-run does not rescue --net)",
          "%s --dry-run --net -- curl x" % wrapper, repo_real),
+        # --seccomp is recognized ONLY as the exact bare token (store_true rejects
+        # the equals-form), and it does not rescue --net or an outside scope.
+        ("R12b --seccomp=1 (equals-form of a store_true, M-B)",
+         "%s --seccomp=1 -- true" % wrapper, repo_real),
+        ("R11 --seccomp --net (seccomp does not rescue --net)",
+         "%s --seccomp --net -- curl x" % wrapper, repo_real),
+        ("R12 --seccomp --write /etc (seccomp does not rescue a scope)",
+         "%s --seccomp --write /etc -- touch x" % wrapper, repo_real),
     ]
     for name, cmd, cwd in flag_prompt:
         ok, reason = _clean(gate, cmd, cwd, wrapper_real)

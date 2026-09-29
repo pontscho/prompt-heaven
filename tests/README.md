@@ -63,6 +63,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `inspect_validate` | `test_inspect_validate.py` | A–R |
 | `mcp_first_guard` | `test_mcp_first_guard.py` | A–O |
 | `sbx_gate` | `test_sbx_gate.py` | A–Q |
+| `sbx_seccomp` | `test_sbx_seccomp.py` | A–D, H |
 | `purity_lsp` | `test_purity_lsp.py` | A–J |
 | `purity_file_ops` | `test_purity_file_ops.py` | A–Q |
 | `mcp_git_params` | `test_mcp_git_params.py` | A–N |

@@ -70,6 +70,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
+  sbx_seccomp:
+    description: "The sbx --seccomp Linux syscall filter (R-0003): the x86_64 classic-BPF allowlist executed by the suite's own interpreter against an independent copy of the kernel syscall table -- arch check first, foreign arch and the x32 bit KILL_PROCESS, every allowlisted call ALLOW and every other number EPERM, the dangerous names absent, socket domains, ioctl TIOCSTI/TIOCLINUX and clone CLONE_NEW* checked by argument, clone3 ENOSYS; _bwrap_argv emitting exactly --seccomp N and staying pure; main() refusing off Linux x86_64; and a live prctl probe on Linux x86_64 (INFO elsewhere). Writes nothing."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py sbx_seccomp
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|PROBLEM'
+
   purity_lsp:
     description: "purity_call semantic navigation against live clangd + lua-language-server. The slow one, ~45s."
     requires: [syntax]

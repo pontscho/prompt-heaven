@@ -1,6 +1,6 @@
 ---
 name: sandbox-run
-description: Run a shell command inside an OS-level sandbox via the bundled `sbx` wrapper -- macOS Seatbelt or Linux bwrap, fail-closed on any other platform or missing sandbox binary. PREFER THIS over a bare Bash invocation whenever the command's effects are not fully known in advance: a throwaway script just written to `.claude/tmp/`, a generated one-liner, anything third-party or unread, or a command that writes and you are not certain where. It costs nothing extra -- the paired `sbx-gate.py` PreToolUse(Bash) hook auto-allows a clean, in-project, network-free invocation of the ONE deployed wrapper WITHOUT a permission prompt, so a command that is not already allow-listed runs prompt-free under `sbx` and prompts without it. Defaults with no flags: writes default-deny except `<cwd>/.claude/tmp`; network off; `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.claude` (except its read-only `skills/` and `scripts/`) and every ancestor `.git/config` unreadable even inside a writable scope. `--write DIR` (repeatable; `--write .` opts the repo in) widens writes and still auto-allows inside the project; `--ro` denies every write; `--dry-run` prints the resolved plan and runs nothing. Do NOT reach for it for build/test/clean (that is `forge_call`), read-only system inspection (`inspect_call`), or anything needing the network -- `--net` is never auto-allowed and always prompts, by design. The gate matches the deployed wrapper by canonical-path IDENTITY, never by filename; its registration is manual and the user's responsibility, and there is no installer.
+description: Run a shell command inside an OS-level sandbox via the bundled `sbx` wrapper -- macOS Seatbelt or Linux bwrap, fail-closed on any other platform or missing sandbox binary. PREFER THIS over a bare Bash invocation whenever the command's effects are not fully known in advance: a throwaway script just written to `.claude/tmp/`, a generated one-liner, anything third-party or unread, or a command that writes and you are not certain where. It costs nothing extra -- the paired `sbx-gate.py` PreToolUse(Bash) hook auto-allows a clean, in-project, network-free invocation of the ONE deployed wrapper WITHOUT a permission prompt, so a command that is not already allow-listed runs prompt-free under `sbx` and prompts without it. Defaults with no flags: writes default-deny except `<cwd>/.claude/tmp`; network off; `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.claude` (except its read-only `skills/` and `scripts/`) and every ancestor `.git/config` unreadable even inside a writable scope. `--write DIR` (repeatable; `--write .` opts the repo in) widens writes and still auto-allows inside the project; `--ro` denies every write; `--seccomp` adds a syscall allowlist on Linux x86_64 (refused elsewhere) and still auto-allows; `--dry-run` prints the resolved plan and runs nothing. Do NOT reach for it for build/test/clean (that is `forge_call`), read-only system inspection (`inspect_call`), or anything needing the network -- `--net` is never auto-allowed and always prompts, by design. The gate matches the deployed wrapper by canonical-path IDENTITY, never by filename; its registration is manual and the user's responsibility, and there is no installer.
 model: sonnet
 ---
 
@@ -18,7 +18,7 @@ This skill has two independent halves that must never be conflated (see **Trust 
 Stdlib-only Python (no `.py` extension -- the CLI name is intentional). Build order is pure-pieces-first / execvp-last: it resolves the writable scopes, the secret deny set, and the per-backend sandbox argv as pure data, then applies `resource.setrlimit` and `os.execvp` exactly once. Everything after the FIRST bare `--` is the target command, handed to `os.execvp` as argv LIST elements -- never through a shell -- so it can never inject into the sandbox profile.
 
 ```
-~/.claude/skills/p/skills/sandbox-run/scripts/sbx [--write DIR]... [--net] [--ro] [--dry-run] -- <cmd> [args...]
+~/.claude/skills/p/skills/sandbox-run/scripts/sbx [--write DIR]... [--net] [--ro] [--seccomp] [--dry-run] -- <cmd> [args...]
 ```
 
 Flags (parsed left of the first bare `--`):
@@ -26,6 +26,7 @@ Flags (parsed left of the first bare `--`):
 - `--write DIR` (repeatable) -- add a writable scope; `--write .` opts the repo itself in. Each scope is `realpath`-canonicalized and REJECTED (fail-closed) if it contains a shell/SBPL metacharacter (`"` `'` `(` `)` `\` newline).
 - `--net` -- allow the network (denied by default). NOTE: a `--net` invocation is never auto-allowed by the gate; it always prompts.
 - `--ro` -- deny ALL writes, including the default scratch scope.
+- `--seccomp` -- **Linux x86_64 only, off by default.** Adds a seccomp syscall **allowlist** that bwrap installs in the target (`bwrap --seccomp FD`): a call not on the list gets `EPERM`; a foreign architecture or an x32 call kills the process. On macOS, or on a Linux machine that is not x86_64, `sbx --seccomp` **refuses to run** (exit 3) rather than run without the filter. Auto-allowed by the gate like `--ro`, because it only narrows. See **Platforms** for what it blocks.
 - `--dry-run` -- print the resolved plan and run NOTHING (no child is exec'd, no scratch dir is created; the helper exits 0). NOTE: unlike `--net`, a `--dry-run` invocation IS auto-allowed by the gate -- running nothing grants strictly less than the plain `sbx -- <cmd>` form the gate already allows, so it needs no extra trust. It is also the only auto-allowed form that completes inside Claude Code's own command sandbox (a real run needs a nested `sandbox-exec`, which that sandbox refuses -- see the nesting caveat under **Registration**), which makes it the live diagnostic for checking that the gate is registered and firing.
 
 Defaults with no flags: the sole writable scope is `<cwd>/.claude/tmp` (scratch, created on demand); the network is denied; and the secret deny set -- `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.claude`, plus the `.git/config` of EVERY ancestor `.git` from `cwd` up to the filesystem root -- is denied both read and write, even inside a writable scope.
@@ -43,6 +44,7 @@ Invoke the bundled helper by its **absolute deployed path** (there is no `$ARGUM
 ~/.claude/skills/p/skills/sandbox-run/scripts/sbx --write . -- make build           # repo writable, no net
 ~/.claude/skills/p/skills/sandbox-run/scripts/sbx --net -- curl https://example.com  # network allowed (will PROMPT)
 ~/.claude/skills/p/skills/sandbox-run/scripts/sbx --ro -- python3 analyze.py         # no writes at all
+~/.claude/skills/p/skills/sandbox-run/scripts/sbx --seccomp -- ./tool               # + syscall allowlist (Linux x86_64)
 ~/.claude/skills/p/skills/sandbox-run/scripts/sbx --dry-run --write . -- make        # preview the plan, run nothing
 ```
 
@@ -52,7 +54,7 @@ Invoke the bundled helper by its **absolute deployed path** (there is no `$ARGUM
 
 ### Step 1 -- Parse arguments
 
-- Collect every `--write DIR` (repeatable), and detect `--net`, `--ro`, `--dry-run` in the invocation. Everything after the FIRST bare `--` is the target command, taken verbatim.
+- Collect every `--write DIR` (repeatable), and detect `--net`, `--ro`, `--seccomp`, `--dry-run` in the invocation. Everything after the FIRST bare `--` is the target command, taken verbatim.
 - Do NOT expand, rewrite, or shell-interpret the target command -- it is passed through to `sbx` as argv elements, which hands them straight to `os.execvp`. Quoting/globbing/substitution is neither performed nor honored here.
 - A missing `--`, or nothing after it, is a usage error: `sbx` reports it on stderr and exits non-zero. There is no default command.
 
@@ -72,11 +74,12 @@ The gate's **recognized flag set** left of the bare `--` -- the accept-set that 
 |---|---|
 | `--net` | **refused** -- always prompts (R11) |
 | `--ro` | accepted (argument-less; imposes no scope) |
+| `--seccomp` | accepted (argument-less; only NARROWS -- adds a syscall filter, and the helper refuses to run where it cannot apply one) |
 | `--write DIR` / `--write=DIR` | accepted ONLY if `DIR` resolves separator-safe-contained inside the project root; otherwise prompt |
 | `--dry-run` | accepted (argument-less; runs NOTHING, so it grants strictly less than a plain `sbx -- <cmd>`) |
 | **anything else** | **hard prompt** -- never skipped |
 
-The gate matches argparse's grammar and is never MORE permissive than it: `--dry-run` is recognized ONLY as the exact bare token, because the helper's `store_true` rejects `--dry-run=1`, so that equals-form is an unrecognized token and hard-prompts. Likewise ANY other token before the `--` -- an unknown flag, an unhandled equals-form, a stray argument -- is a hard prompt, never silently skipped. This section and the gate's docstring / `is_clean_sbx` accept-set are the two ends that the H2 fix keeps in sync: the gate's accept-set and this documented invocation form MUST intersect, so edit them together or not at all.
+The gate matches argparse's grammar and is never MORE permissive than it: `--dry-run` and `--seccomp` are recognized ONLY as the exact bare token, because the helper's `store_true` rejects `--dry-run=1` / `--seccomp=1`, so those equals-forms are unrecognized tokens and hard-prompt. Likewise ANY other token before the `--` -- an unknown flag, an unhandled equals-form, a stray argument -- is a hard prompt, never silently skipped. This section and the gate's docstring / `is_clean_sbx` accept-set are the two ends that the H2 fix keeps in sync: the gate's accept-set and this documented invocation form MUST intersect, so edit them together or not at all.
 
 ## Trust boundary
 
@@ -127,7 +130,14 @@ Replace `/abs/path/to/` with the real path to your `ClaudeCode/hooks/` directory
 
 Adding a third OS later touches exactly one builder function plus one `BACKENDS` entry -- nothing else.
 
-**seccomp (Linux) is OFF by default.** There is a dormant `if scope.seccomp:` seam inside `_bwrap_argv` (locked decision 8) marking where a future BPF syscall filter would plug in without a new code path. No `sbx` flag ever sets it, so the branch is never taken; if it ever were set with no filter wired, it refuses (raises) rather than silently running without the promised filtering. Until then, bwrap's namespace + no-net + read-only bind is the enforced Linux boundary.
+**seccomp (Linux x86_64) is OFF by default; `--seccomp` turns it on.** Without the flag, bwrap's namespace + no-net + read-only bind is the Linux boundary and the argv is unchanged. With it, `sbx` builds a classic-BPF program in pure Python (no libseccomp), writes it to an inheritable memfd, and `_bwrap_argv` -- still a pure function, inside its existing `if scope.seccomp:` branch (locked decision 8) -- adds `--seccomp <fd>`. The program is an **allowlist**:
+
+- the architecture is checked first -- anything but x86_64 (e.g. an i386 `int 0x80` call) and any x32 call **kills** the process;
+- the ordinary syscalls a CLI needs (file and directory I/O, memory, fork/exec/wait, threads and futexes, signals, timers, polling, sockets) are allowed;
+- `socket()` is allowed for `AF_UNIX`, `AF_INET` and `AF_INET6` only; `ioctl()` is allowed except `TIOCSTI`/`TIOCLINUX` (terminal input injection); `clone()` is allowed except with any `CLONE_NEW*` namespace flag; `clone3()` answers `ENOSYS`, so libc falls back to the checked `clone()`;
+- everything else -- `ptrace`, `mount`, `unshare`, `setns`, `bpf`, `keyctl`, `perf_event_open`, `io_uring_*`, module loading, `kexec`, `userfaultfd`, `personality`, credential changes, and any syscall added to the kernel later -- gets **`EPERM`**, a clean error rather than a kill.
+
+x86_64 is the only syscall table: on any other machine, and on macOS, `sbx --seccomp` refuses to run (exit 3). The in-process filter is **live-verified** on an Ubuntu 24.04 x86_64 host (`seccomp_probe.py`, below). The **bwrap end-to-end path is NOT yet verified**: it needs a host with bubblewrap and unprivileged user namespaces.
 
 ## Resource limits
 
@@ -159,3 +169,13 @@ Probe **(d) is mandatory**. It is the ONLY proof that the secret-deny actually t
 This self-test is **on-demand and platform-specific** (it needs a real `sandbox-exec` / `bwrap`) and is **explicitly NOT part of portable CI** (`forge test all`). Wiring a platform-specific live probe into portable CI would either break on the other OS or, worse, stay green while the secret boundary silently regressed. The offline pure-builder suite pins the deterministic argv/profile contract in CI; this probe is the live complement, run by hand on the host OS.
 
 **Nested-sandbox caveat.** Running the probe requires an **un-nested** context: a nested `sandbox-exec` invocation is refused, so the self-test cannot be driven from inside an already-sandboxed shell. Run it from a normal (un-sandboxed) terminal.
+
+### The seccomp probe -- seccomp_probe.py
+
+`seccomp_probe.py` checks the `--seccomp` program **without bwrap** (Linux x86_64 only): it builds the program from the given `sbx`, cross-checks every embedded syscall number against the host's `asm/unistd_64.h`, installs the program into itself with `prctl(PR_SET_NO_NEW_PRIVS)` + `prctl(PR_SET_SECCOMP)`, then shows that denied calls get `EPERM` (each chosen to fail DIFFERENTLY without the filter, so the filter is proven to be the cause), that an x32 call is killed by `SIGSYS`, and that `python3`, `ls`, `git`, `sh`, `bash`, `cat`, threads and subprocesses still work. Run it as its own process -- the filter cannot be removed:
+
+```
+python3 -I ClaudeCode/skills/sandbox-run/scripts/seccomp_probe.py ClaudeCode/skills/sandbox-run/scripts/sbx
+```
+
+The offline suite (`forge test sbx_seccomp`) runs the same program through its own BPF interpreter on any OS, and runs this probe as a child when the host is Linux x86_64.

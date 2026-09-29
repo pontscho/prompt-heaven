@@ -184,3 +184,53 @@ neither trusting the other.
   if it were ever set with no filter wired it refuses (raises) rather than running
   unfiltered. Until then, bwrap's namespace + no-net + read-only bind is the
   enforced Linux boundary.
+
+## Addendum (2026-09-29): seccomp wired: an x86_64 syscall allowlist behind --seccomp (R-0003)
+
+The dormant seam named in the last Consequences bullet is now reachable. `sbx --seccomp` (off by default) makes `main()` build a classic-BPF program in pure Python (`struct`, no libseccomp -- ADR 0024), write it to an inheritable memfd and store the fd NUMBER on `Scope.seccomp_fd`. `_bwrap_argv` stays a pure `Scope -> argv` function: its existing `if scope.seccomp:` branch (NFR-9, locked decision 8) only emits `--seccomp <fd>`, and still refuses when the flag is set with no usable fd. Without the flag the argv is byte-for-byte what it was.
+
+### Allowlist, chosen by the user
+
+The user chose an ALLOWLIST over a denylist (2026-09-29). A denylist protects only against the syscalls someone thought to list, and the kernel keeps adding new ones (`io_uring_*`, the `fsopen` family, `landlock_*`, `lsm_*`). Each new call stays open until somebody notices it. An allowlist denies them by default. The price is that a legitimate call missing from the list breaks a program. The default action softens that: it is `ERRNO(EPERM)`, not KILL, so a program probing an optional call gets a clean error it already handles. KILL_PROCESS is used for only two cases, and both can only be an evasion attempt: a foreign audit arch (e.g. i386 `int 0x80`, whose numbers mean different calls) and the x32 bit.
+
+Four entries are checked by argument instead of by number alone:
+
+- `socket()` is allowed only for AF_UNIX/INET/INET6.
+- `ioctl()` refuses TIOCSTI/TIOCLINUX. bwrap is not given `--new-session`, so without this a contained process could type into the terminal that started sbx.
+- `clone()` refuses any CLONE_NEW* flag. Without that check, leaving `unshare`/`setns` off the list would mean nothing.
+- `clone3()` gets ENOSYS. Its flags live in a struct seccomp cannot read, and on ENOSYS libc falls back to the checked `clone()`.
+
+Also left off the list, and denied: `ptrace`, `mount`/`umount2`/`pivot_root`/`chroot`, `unshare`/`setns`, the keyring calls, `bpf`, `perf_event_open`, `kexec_*`, module loading, `open_by_handle_at`, `userfaultfd`, `iopl`/`ioperm`, `reboot`, `swapon`/`swapoff`, `personality`, credential changes and SysV/POSIX-mq IPC.
+
+### x86_64 only, fail-closed elsewhere
+
+Syscall numbers are per architecture. Only the x86_64 table is embedded, because no other table could be sourced and verified here, and an invented number is a hole. On any other machine, and on macOS (Seatbelt has no seccomp), `sbx --seccomp` exits 3 and runs nothing. It never runs the same command without the filter.
+
+The numbers are copied from `/usr/include/x86_64-linux-gnu/asm/unistd_64.h` on t42: Ubuntu 24.04, linux-libc-dev 6.8.0-38.38, sha256 `e34e39ab6237ba98b63d03e677f80c780c7416b9374b747f46c474d1920809fe`. The x86_64 syscall ABI is append-only. `tests/test_sbx_seccomp.py` checks every embedded number against an independent copy of that header and runs the program through its own BPF interpreter on any OS. `seccomp_probe.py` cross-checks the numbers against the live host's header.
+
+The gate (`sbx-gate.py`) now accepts the exact bare token `--seccomp`, the same way it accepts `--ro`: the flag only narrows a run the gate would already allow. `--seccomp=1` still hard-prompts (M-B).
+
+### What was validated, and what was not
+
+**Validated in-process on t42** (kernel 6.8.0-38, Python 3.12.3, 2026-09-29). `seccomp_probe.py` installed the program into itself with `prctl(PR_SET_NO_NEW_PRIVS)` + `prctl(PR_SET_SECCOMP)` and reported 26 pass, 0 fail:
+
+- All 251 embedded numbers matched the host header.
+- Nine calls were each chosen to fail DIFFERENTLY without the filter, and all got the filtered answer:
+  - `ptrace` ESRCH -> EPERM
+  - `unshare(0x1)` EINVAL -> EPERM
+  - `umount2` EINVAL -> EPERM
+  - `keyctl` ENOTSUP -> EPERM
+  - `personality` ok -> EPERM
+  - `socket(AF_NETLINK)` ok -> EPERM
+  - `ioctl(TIOCSTI)` ENOTTY -> EPERM
+  - `clone(CLONE_NEWNS|CLONE_FS)` EINVAL -> EPERM
+  - `clone3` EINVAL -> ENOSYS
+- An x32 call was killed by SIGSYS.
+- fork and threads worked.
+- `python3`, `ls /`, `git --version`, `sh -c true`, `bash -c 'echo ok'`, `cat /etc/os-release`, a threaded python spawning a subprocess, and an AF_UNIX socketpair all exited 0.
+
+The run used only a `mktemp -d /tmp/sbx-seccomp.XXXXXX` directory holding `sbx` and the probe. The directory was removed and `test ! -e` confirmed it gone. There was no sudo, no install and no other write.
+
+The tests caught two defects on the way. `getpid` and `sched_yield` had been left off the list; the suite's required-core row caught it. The probe's first `clone(CLONE_NEWUSER)` check did not discriminate on Ubuntu, because the kernel already answers it EPERM without a filter; it was replaced by `CLONE_NEWNS|CLONE_FS`.
+
+**NOT yet validated: the bwrap `--seccomp` path end-to-end.** In that path bwrap reads the fd and installs the program in the target after its own namespace setup. This needs a host with bubblewrap and unprivileged user namespaces. t42 has neither: `unprivileged_userns_clone=0`, `apparmor_restrict_unprivileged_userns=1`, and bubblewrap is not installed. Until that run exists, the Linux claim is: the program's content is verified and interpreted offline, and its effect is verified in-process. How bwrap delivers it is not measured.

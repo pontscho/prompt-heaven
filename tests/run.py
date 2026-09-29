@@ -86,6 +86,10 @@ def run_sbx_gate(opts):
     return run_python_suite("test_sbx_gate", opts)
 
 
+def run_sbx_seccomp(opts):
+    return run_python_suite("test_sbx_seccomp", opts)
+
+
 def run_purity_lsp(opts):
     return run_python_suite("test_purity_lsp", opts)
 
@@ -221,7 +225,17 @@ SUITES = [
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 381),
     ("sbx_gate", run_sbx_gate,
-     "sbx PreToolUse grant-only gate", 94),
+     "sbx PreToolUse grant-only gate", 99),
+    # TYPED: a fixed case table.  The one Linux-only row per group C and D is
+    # recorded as INFO on any other host rather than omitted, so the count is
+    # the same on macOS and on Linux.
+    ("sbx_seccomp", run_sbx_seccomp,
+     "sbx --seccomp: the x86_64 BPF allowlist run through an independent "
+     "interpreter against an independent copy of the syscall table -- arch "
+     "check first, x32 killed, EPERM by default, the argument-checked socket, "
+     "ioctl and clone entries, clone3 ENOSYS -- the pure `--seccomp N` argv "
+     "wiring, the fail-closed refusal off Linux x86_64, and the live prctl "
+     "probe on Linux", 29),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 152),
     ("purity_file_ops", run_purity_file_ops,

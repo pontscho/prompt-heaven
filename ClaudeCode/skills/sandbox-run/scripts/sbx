@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 sbx -- run a command inside an OS sandbox (default-deny writes, no network).
-Usage: sbx [--write DIR]... [--net] [--ro] -- <cmd> [args...]
+Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] -- <cmd> [args...]
 
 Everything after the FIRST bare `--` is the target command. It is handed to
 os.execvp as argv LIST ELEMENTS, never through a shell, so it can never inject
 into the sandbox profile. `--write DIR` (repeatable) adds a writable scope
 (`--write .` opts into the repo), `--net` allows the network, `--ro` denies ALL
-writes including the default scratch scope, and `--dry-run` prints the resolved
-plan and runs NOTHING.
+writes including the default scratch scope, `--seccomp` adds the Linux x86_64
+syscall allowlist (R-0003; refused anywhere else), and `--dry-run` prints the
+resolved plan and runs NOTHING.
 
 This feature is a SECURITY BOUNDARY, so the helper is built pure-pieces-first /
 execvp-last. This file is the SKELETON (task-001): the argument model, the manual
@@ -34,10 +35,11 @@ import argparse
 import os
 import resource
 import shutil
+import struct
 import sys
 from dataclasses import dataclass
 
-USAGE = "Usage: sbx [--write DIR]... [--net] [--ro] -- <cmd> [args...]"
+USAGE = "Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] -- <cmd> [args...]"
 
 
 @dataclass
@@ -78,11 +80,14 @@ class Scope:
       engine       the resolved sandbox-engine binary path -- filled by the
                    fail-closed detection in task-002 (BACKENDS + shutil.which);
                    None until a backend is resolved.
-      seccomp      OFF-by-default, dormant Linux syscall-filter seam consumed by
-                   _bwrap_argv (locked decision 8 / NFR-9). No sbx flag ever sets
-                   it True, so the `if scope.seccomp:` branch is never taken; it
-                   exists so a future seccomp layer plugs in without a new code
-                   path or a class hierarchy.
+      seccomp      OFF-by-default Linux syscall filter, set only by `--seccomp`
+                   (R-0003) and consumed by the `if scope.seccomp:` branch inside
+                   _bwrap_argv (locked decision 8 / NFR-9) -- an `if`, not a new
+                   code path or a class hierarchy.
+      seccomp_fd   the inheritable fd holding the compiled BPF program, resolved
+                   by _seccomp_fd() in main() -- the ONE place that does the
+                   memfd I/O -- so _bwrap_argv only prints the NUMBER and stays
+                   pure. None until resolved; the flag with no fd refuses.
     """
     writes: list
     net: bool
@@ -93,6 +98,7 @@ class Scope:
     shadow_write_denies: tuple = None
     engine: str = None
     seccomp: bool = False
+    seccomp_fd: int = None
 
 
 # ---------------------------------------------------------------------------
@@ -274,10 +280,13 @@ def _bwrap_argv(scope):
     the host /proc over it.
 
     seccomp is an OFF-by-default `if scope.seccomp:` branch INSIDE this function
-    (locked decision 8 / NFR-9): a dormant, documented seam that no sbx flag ever
-    enables, so it is never taken; it marks WHERE a future BPF syscall-filter would
-    plug in without a new code path. Pure: no I/O -- the is_dir bit rides in on the
-    secret set instead of being stat'ed here. The deny set and the carve-out set are
+    (locked decision 8 / NFR-9), taken only under `--seccomp`: it emits
+    `--seccomp <fd>` for the program main() already wrote to an inheritable fd
+    (scope.seccomp_fd), and REFUSES when that fd is missing or not a plain
+    non-negative int -- never an unfiltered argv for a filtered request, and never
+    a caller-supplied string spliced into argv. Pure: no I/O -- the is_dir bit rides
+    in on the secret set instead of being stat'ed here, and the program fd rides in
+    as a number. The deny set and the carve-out set are
     read off scope.secret_paths / scope.carveouts (both resolved ONCE in main()), so
     this builder is side-effect-free.
     """
@@ -352,15 +361,20 @@ def _bwrap_argv(scope):
     if not scope.net:
         argv.append("--unshare-net")
     argv.append("--die-with-parent")
-    # seccomp: a DORMANT, OFF-by-default syscall-filter seam (locked decision 8 /
-    # NFR-9). No sbx flag sets scope.seccomp, so this branch is never taken; it is a
-    # documented plug-in point for a future compiled BPF program (bwrap consumes it
-    # as `--seccomp FD`). Until such a program is wired there is nothing to pass, so
-    # the seam refuses rather than silently running without the promised filtering.
+    # seccomp: the OFF-by-default syscall filter (locked decision 8 / NFR-9, R-0003),
+    # set only by `--seccomp`. bwrap reads a compiled classic-BPF program from the
+    # fd and installs it in the target right before exec. The fd was opened and
+    # filled by main() (_seccomp_fd), so this branch only prints its NUMBER. With
+    # the flag set and no usable fd there is no program to pass, so it refuses
+    # rather than silently running without the promised filtering. bool is an int
+    # subclass and is refused on purpose: True would print "True".
     if scope.seccomp:
-        raise NotImplementedError(
-            "seccomp syscall filtering is a documented but unimplemented seam "
-            "(locked decision 8); no BPF filter program is wired")
+        fd = scope.seccomp_fd
+        if isinstance(fd, bool) or not isinstance(fd, int) or fd < 0:
+            raise ValueError(
+                "--seccomp requested but no BPF program fd was resolved (got %r); "
+                "refusing to build an unfiltered bwrap argv" % (fd,))
+        argv += ["--seccomp", str(fd)]
     argv.append("--")             # end-of-options terminator (bubblewrap honors "--")
     argv += scope.argv
     return argv
@@ -448,6 +462,9 @@ def _build_parser():
                    help="allow network access (denied by default)")
     p.add_argument("--ro", action="store_true",
                    help="deny ALL writes, including the default scratch scope")
+    p.add_argument("--seccomp", action="store_true",
+                   help="Linux x86_64 only: add the syscall allowlist (EPERM for "
+                        "anything else); refused on any other platform")
     p.add_argument("--dry-run", action="store_true",
                    help="print the resolved plan and exit WITHOUT running anything")
     return p
@@ -738,6 +755,7 @@ def _format_plan(scope):
         "  secret_paths: %r" % (scope.secret_paths,),
         "  carveouts   : %r" % (scope.carveouts,),
         "  shadow_write_denies: %r" % (scope.shadow_write_denies,),
+        "  seccomp     : %r" % (scope.seccomp,),
     ])
 
 
@@ -745,6 +763,277 @@ def _usage_error(msg):
     """Write a one-line reason + usage to stderr and exit non-zero (P4 house style)."""
     sys.stderr.write("sbx: error: %s\n%s\n" % (msg, USAGE))
     sys.exit(2)
+
+
+# ---------------------------------------------------------------------------
+# Linux seccomp syscall filter (R-0003): `--seccomp`.
+#
+# bwrap's namespaces, read-only bind and unshared network are the Linux boundary;
+# they do not shrink the KERNEL surface a contained process can call into. This
+# adds a classic-BPF seccomp program that bwrap installs in the target right
+# before exec (`bwrap --seccomp FD`). Built here with struct alone -- no
+# libseccomp binding (ADR 0024) -- as pure module-level data plus one pure
+# builder; the only I/O (the memfd that carries it to bwrap) is _seccomp_fd(),
+# called from main(), so _bwrap_argv stays a pure Scope -> argv function.
+#
+# ALLOWLIST, not denylist (the user's decision): a syscall nobody listed -- every
+# one the kernel adds after this table was written -- is DENIED. The default
+# action is ERRNO(EPERM), not KILL: a program probing an optional call sees a
+# clean error it already handles, instead of dying. KILL_PROCESS is reserved for
+# the two cases that can only be an evasion attempt: a foreign audit arch (e.g.
+# i386 `int 0x80` from a 64-bit process, whose numbers mean different calls) and
+# the x32 bit, which reaches the same handlers under numbers this table never
+# checks.
+#
+# x86_64 ONLY. Syscall numbers are per-architecture; no other table is embedded,
+# because the numbers could not be sourced and verified here, and an invented
+# number is a hole. On any other machine seccomp_program() refuses, and sbx
+# refuses to run with --seccomp rather than run without it (fail-closed).
+#
+# The numbers are copied from /usr/include/x86_64-linux-gnu/asm/unistd_64.h on an
+# Ubuntu 24.04 host (linux-libc-dev 6.8.0-38.38, sha256 e34e39ab...809fe). The
+# x86_64 syscall ABI is append-only, so they cannot change under a newer kernel;
+# the suite checks every one against an independent copy of that header.
+# ---------------------------------------------------------------------------
+
+# AUDIT_ARCH_* for the machines a table exists for (uname -m -> audit arch).
+_AUDIT_ARCH = {"x86_64": 0xC000003E}
+
+# The x86_64 numbers of every syscall the program names: the plain allowlist
+# below plus the four argument-checked or rerouted entries (socket, ioctl, clone,
+# clone3). Grouped by purpose; what is NOT here is denied.
+_SECCOMP_X86_64 = {
+    # files, directories, descriptors
+    "read": 0, "write": 1, "open": 2, "close": 3, "stat": 4, "fstat": 5,
+    "lstat": 6, "poll": 7, "lseek": 8, "pread64": 17, "pwrite64": 18,
+    "readv": 19, "writev": 20, "access": 21, "pipe": 22, "select": 23,
+    "dup": 32, "dup2": 33, "sendfile": 40, "fcntl": 72, "flock": 73,
+    "fsync": 74, "fdatasync": 75, "truncate": 76, "ftruncate": 77,
+    "getdents": 78, "getcwd": 79, "chdir": 80, "fchdir": 81, "rename": 82,
+    "mkdir": 83, "rmdir": 84, "creat": 85, "link": 86, "unlink": 87,
+    "symlink": 88, "readlink": 89, "chmod": 90, "fchmod": 91, "chown": 92,
+    "fchown": 93, "lchown": 94, "umask": 95, "utime": 132, "mknod": 133,
+    "statfs": 137, "fstatfs": 138, "sync": 162, "readahead": 187,
+    "setxattr": 188, "lsetxattr": 189, "fsetxattr": 190, "getxattr": 191,
+    "lgetxattr": 192, "fgetxattr": 193, "listxattr": 194, "llistxattr": 195,
+    "flistxattr": 196, "removexattr": 197, "lremovexattr": 198,
+    "fremovexattr": 199, "getdents64": 217, "fadvise64": 221, "utimes": 235,
+    "inotify_init": 253, "inotify_add_watch": 254, "inotify_rm_watch": 255,
+    "openat": 257, "mkdirat": 258, "mknodat": 259, "fchownat": 260,
+    "futimesat": 261, "newfstatat": 262, "unlinkat": 263, "renameat": 264,
+    "linkat": 265, "symlinkat": 266, "readlinkat": 267, "fchmodat": 268,
+    "faccessat": 269, "pselect6": 270, "ppoll": 271, "splice": 275,
+    "tee": 276, "sync_file_range": 277, "utimensat": 280, "fallocate": 285,
+    "dup3": 292, "pipe2": 293, "inotify_init1": 294, "preadv": 295,
+    "pwritev": 296, "syncfs": 306, "renameat2": 316, "memfd_create": 319,
+    "copy_file_range": 326, "preadv2": 327, "pwritev2": 328, "statx": 332,
+    "close_range": 436, "openat2": 437, "faccessat2": 439, "fchmodat2": 452,
+    # memory
+    "mmap": 9, "mprotect": 10, "munmap": 11, "brk": 12, "mremap": 25,
+    "msync": 26, "mincore": 27, "madvise": 28, "mlock": 149, "munlock": 150,
+    "mlockall": 151, "munlockall": 152, "get_mempolicy": 239,
+    "membarrier": 324, "mlock2": 325, "pkey_mprotect": 329, "pkey_alloc": 330,
+    "pkey_free": 331, "map_shadow_stack": 453,
+    # processes, threads, identity (read-only), limits, scheduling
+    "sched_yield": 24, "getpid": 39, "fork": 57, "vfork": 58, "execve": 59, "exit": 60, "wait4": 61,
+    "kill": 62, "uname": 63, "getrlimit": 97, "getrusage": 98, "sysinfo": 99,
+    "times": 100, "getuid": 102, "getgid": 104, "geteuid": 107,
+    "getegid": 108, "setpgid": 109, "getppid": 110, "getpgrp": 111,
+    "setsid": 112, "getgroups": 115, "getresuid": 118, "getresgid": 120,
+    "getpgid": 121, "getsid": 124, "capget": 125, "capset": 126,
+    "getpriority": 140, "setpriority": 141, "sched_setparam": 142,
+    "sched_getparam": 143, "sched_setscheduler": 144,
+    "sched_getscheduler": 145, "sched_get_priority_max": 146,
+    "sched_get_priority_min": 147, "sched_rr_get_interval": 148,
+    "prctl": 157, "arch_prctl": 158, "setrlimit": 160, "gettid": 186,
+    "tkill": 200, "sched_setaffinity": 203, "sched_getaffinity": 204,
+    "set_tid_address": 218, "restart_syscall": 219, "exit_group": 231,
+    "tgkill": 234, "waitid": 247, "ioprio_set": 251, "ioprio_get": 252,
+    "set_robust_list": 273, "get_robust_list": 274, "prlimit64": 302,
+    "getcpu": 309, "sched_setattr": 314, "sched_getattr": 315,
+    "seccomp": 317, "getrandom": 318, "execveat": 322, "rseq": 334,
+    "pidfd_send_signal": 424, "pidfd_open": 434,
+    "landlock_create_ruleset": 444, "landlock_add_rule": 445,
+    "landlock_restrict_self": 446,
+    # signals
+    "rt_sigaction": 13, "rt_sigprocmask": 14, "rt_sigreturn": 15, "pause": 34,
+    "alarm": 37, "getitimer": 36, "setitimer": 38, "rt_sigpending": 127,
+    "rt_sigtimedwait": 128, "rt_sigqueueinfo": 129, "rt_sigsuspend": 130,
+    "sigaltstack": 131, "signalfd": 282, "signalfd4": 289,
+    "rt_tgsigqueueinfo": 297,
+    # time and timers (reading and sleeping; setting the clock is denied)
+    "nanosleep": 35, "gettimeofday": 96, "time": 201, "timer_create": 222,
+    "timer_settime": 223, "timer_gettime": 224, "timer_getoverrun": 225,
+    "timer_delete": 226, "clock_gettime": 228, "clock_getres": 229,
+    "clock_nanosleep": 230, "timerfd_create": 283, "timerfd_settime": 286,
+    "timerfd_gettime": 287,
+    # waiting and events
+    "futex": 202, "epoll_create": 213, "epoll_wait": 232, "epoll_ctl": 233,
+    "epoll_pwait": 281, "eventfd": 284, "eventfd2": 290,
+    "epoll_create1": 291, "epoll_pwait2": 441, "futex_waitv": 449,
+    "futex_wake": 454, "futex_wait": 455, "futex_requeue": 456,
+    # sockets (the network itself is unshared unless --net; socket() is
+    # additionally checked by domain, below)
+    "connect": 42, "accept": 43, "sendto": 44, "recvfrom": 45, "sendmsg": 46,
+    "recvmsg": 47, "shutdown": 48, "bind": 49, "listen": 50,
+    "getsockname": 51, "getpeername": 52, "socketpair": 53, "setsockopt": 54,
+    "getsockopt": 55, "accept4": 288, "recvmmsg": 299, "sendmmsg": 307,
+    # argument-checked or rerouted -- NOT in _SECCOMP_ALLOW
+    "socket": 41, "ioctl": 16, "clone": 56, "clone3": 435,
+}
+
+# Allowed unconditionally: every table entry except the four special ones.
+_SECCOMP_ALLOW = tuple(sorted(
+    (n for n in _SECCOMP_X86_64 if n not in ("socket", "ioctl", "clone",
+                                             "clone3")),
+    key=_SECCOMP_X86_64.get))
+
+# socket(domain, ...): AF_UNIX, AF_INET, AF_INET6 only. Everything else --
+# AF_NETLINK, AF_PACKET, AF_ALG, AF_VSOCK, ... -- is kernel surface a CLI does
+# not need (glibc falls back cleanly when a netlink socket is refused).
+_SECCOMP_SOCKET_DOMAINS = (1, 2, 10)
+# ioctl(fd, cmd, ...): TIOCSTI and TIOCLINUX push bytes into a terminal's input
+# queue -- a contained process could type commands into the shell that started
+# sbx, since bwrap is not given --new-session. Checked on the low 32 bits, which
+# is all the kernel reads of `cmd`.
+_SECCOMP_IOCTL_DENY = (0x5412, 0x541C)
+# clone(flags, ...): any CLONE_NEW{NS,CGROUP,UTS,IPC,USER,PID,NET} is refused,
+# which is what makes the omitted unshare/setns mean something. clone3 passes
+# its flags in a struct seccomp cannot read, so it gets ENOSYS: glibc (and every
+# runtime that uses clone3) then falls back to the checked clone.
+_SECCOMP_CLONE_NS_MASK = 0x7E020000
+
+# classic-BPF opcodes (linux/filter.h) and seccomp return actions (seccomp.h).
+_BPF_LD_W_ABS = 0x20
+_BPF_JEQ_K = 0x15
+_BPF_JSET_K = 0x45
+_BPF_RET_K = 0x06
+_SECCOMP_RET_KILL_PROCESS = 0x80000000
+_SECCOMP_RET_ERRNO = 0x00050000
+_SECCOMP_RET_ALLOW = 0x7FFF0000
+_EPERM = 1
+_ENOSYS = 38
+_X32_SYSCALL_BIT = 0x40000000
+# offsets into struct seccomp_data {int nr; u32 arch; u64 ip; u64 args[6];};
+# an argument is read by its LOW 32 bits, which on little-endian x86_64 sit at
+# the start of the 8-byte slot.
+_SD_NR, _SD_ARCH, _SD_ARG0, _SD_ARG1 = 0, 4, 16, 24
+
+
+def seccomp_program(machine):
+    """Pure: the seccomp BPF allowlist for `machine` (uname -m) as the bytes of a
+    struct sock_filter[] array, or ValueError when no table exists for it.
+
+    Layout, top to bottom:
+      load arch; != this machine's AUDIT_ARCH -> KILL_PROCESS
+      load nr;   x32 bit set                  -> KILL_PROCESS
+      socket -> load arg0; AF_UNIX/INET/INET6 -> ALLOW, else EPERM
+      ioctl  -> load arg1; TIOCSTI/TIOCLINUX  -> EPERM, else ALLOW
+      clone  -> load arg0; any CLONE_NEW* bit -> EPERM, else ALLOW
+      clone3                                  -> ENOSYS
+      one `nr == N -> ALLOW` pair per allowlisted syscall, in number order
+      default                                 -> ERRNO(EPERM)
+    Every conditional block ends in its own RET, so the accumulator never has to
+    be reloaded and every jump is 0 or a short forward skip (classic BPF jump
+    offsets are one byte). Packed little-endian "<HBBI" -- the only table is
+    x86_64 -- so the bytes are the same on whatever host builds them.
+    """
+    arch = _AUDIT_ARCH.get(machine) if isinstance(machine, str) else None
+    if arch is None:
+        raise ValueError(
+            "no seccomp syscall table for machine %r (only %s is built)"
+            % (machine, ", ".join(sorted(_AUDIT_ARCH))))
+    nr = _SECCOMP_X86_64
+    deny = _SECCOMP_RET_ERRNO | _EPERM
+    allow = _SECCOMP_RET_ALLOW
+    insns = [
+        (_BPF_LD_W_ABS, 0, 0, _SD_ARCH),
+        (_BPF_JEQ_K, 1, 0, arch),
+        (_BPF_RET_K, 0, 0, _SECCOMP_RET_KILL_PROCESS),
+        (_BPF_LD_W_ABS, 0, 0, _SD_NR),
+        (_BPF_JSET_K, 0, 1, _X32_SYSCALL_BIT),
+        (_BPF_RET_K, 0, 0, _SECCOMP_RET_KILL_PROCESS),
+    ]
+
+    def block(name, body):
+        # `nr == name` falls into body (which ends in a RET); otherwise skip it.
+        insns.append((_BPF_JEQ_K, 0, len(body), nr[name]))
+        insns.extend(body)
+
+    body = [(_BPF_LD_W_ABS, 0, 0, _SD_ARG0)]
+    for domain in _SECCOMP_SOCKET_DOMAINS:
+        body += [(_BPF_JEQ_K, 0, 1, domain), (_BPF_RET_K, 0, 0, allow)]
+    block("socket", body + [(_BPF_RET_K, 0, 0, deny)])
+
+    body = [(_BPF_LD_W_ABS, 0, 0, _SD_ARG1)]
+    for cmd in _SECCOMP_IOCTL_DENY:
+        body += [(_BPF_JEQ_K, 0, 1, cmd), (_BPF_RET_K, 0, 0, deny)]
+    block("ioctl", body + [(_BPF_RET_K, 0, 0, allow)])
+
+    block("clone", [(_BPF_LD_W_ABS, 0, 0, _SD_ARG0),
+                    (_BPF_JSET_K, 0, 1, _SECCOMP_CLONE_NS_MASK),
+                    (_BPF_RET_K, 0, 0, deny),
+                    (_BPF_RET_K, 0, 0, allow)])
+    block("clone3", [(_BPF_RET_K, 0, 0, _SECCOMP_RET_ERRNO | _ENOSYS)])
+
+    for name in _SECCOMP_ALLOW:
+        block(name, [(_BPF_RET_K, 0, 0, allow)])
+    insns.append((_BPF_RET_K, 0, 0, deny))
+    return b"".join(struct.pack("<HBBI", *insn) for insn in insns)
+
+
+def _host_machine():
+    """The kernel's machine name (`uname -m`). A function of its own so the
+    offline suite can stand in a foreign machine without patching os.uname for
+    the whole test process."""
+    return os.uname().machine
+
+
+def _seccomp_refuse(reason):
+    """One line to stderr and exit 3: --seccomp was asked for and cannot be
+    honoured, so NOTHING runs -- never the same command without the filter."""
+    sys.stderr.write(
+        "sbx: error: --seccomp: %s; refusing to run without the requested "
+        "syscall filter (fail-closed)\n" % (reason,))
+    sys.exit(3)
+
+
+def _seccomp_fd():
+    """Build the program for THIS host and hand it to bwrap on an inheritable fd;
+    return the fd NUMBER. The one I/O site of the seccomp layer -- called from
+    main() only, after the engine is resolved and before the pure builder runs.
+
+    Fail-closed on every path: a non-Linux platform (Seatbelt has no seccomp), a
+    machine with no table, or a host that cannot create the memfd all refuse.
+
+    A memfd rather than a pipe: bwrap reads the fd to EOF after sbx has exec'd it,
+    so the whole program must already be in the fd, and a pipe's capacity drops
+    to a single 4 KiB page once the user exceeds pipe-user-pages-soft -- a
+    program that size would block the write forever. The memfd has no such
+    ceiling; it is rewound to offset 0 so bwrap reads it from the start, and it
+    is created WITHOUT MFD_CLOEXEC and marked inheritable so it survives the exec.
+    """
+    platform = _platform_key(sys.platform)
+    if platform != "linux":
+        _seccomp_refuse("it is a Linux (bwrap) syscall filter and this platform "
+                        "is %r" % (sys.platform,))
+    try:
+        program = seccomp_program(_host_machine())
+    except ValueError as exc:
+        _seccomp_refuse(str(exc))
+    memfd_create = getattr(os, "memfd_create", None)
+    if memfd_create is None:
+        _seccomp_refuse("this Python has no os.memfd_create to carry the program")
+    try:
+        fd = memfd_create("sbx-seccomp", 0)
+        view = memoryview(program)
+        while view:
+            view = view[os.write(fd, view):]
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.set_inheritable(fd, True)
+    except OSError as exc:
+        _seccomp_refuse("cannot write the program to a memfd: %s" % (exc,))
+    return fd
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +1133,7 @@ def main(argv=None):
         carveouts=carveout_paths(),       # read-ONLY holes in the ~/.claude deny
         # write-ONLY deny on the OTHER spelling of ~/.claude's symlinked-out trees
         shadow_write_denies=shadow_write_denies(),
+        seccomp=args.seccomp,             # OFF unless --seccomp (R-0003)
     )
 
     # --dry-run previews the resolved plan and runs NOTHING. Engine resolution
@@ -863,6 +1153,12 @@ def main(argv=None):
     # unsandboxed fallback, EVER.
     builder, engine = _detect_engine()
     scope.engine = engine
+
+    # --seccomp: build the BPF program and park it on an inheritable fd NOW, so
+    # the pure builder below only has to print the fd number. Refuses (exit 3,
+    # nothing run) off Linux x86_64 -- never the same command unfiltered.
+    if scope.seccomp:
+        scope.seccomp_fd = _seccomp_fd()
 
     # Build the OS-sandbox invocation from the fully-validated Scope via the
     # platform's pure builder (task-004 Seatbelt / task-005 bwrap). argv is a

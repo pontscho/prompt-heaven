@@ -137,7 +137,7 @@ def is_clean_sbx(cmd, cwd):
         return (False, "")
 
     # Parse sbx's OWN flags up to the first bare "--", matching argparse's grammar
-    # EXACTLY (M-B): --net, --ro, --dry-run, `--write DIR` AND the equals-form
+    # EXACTLY (M-B): --net, --ro, --seccomp, --dry-run, `--write DIR` AND the equals-form
     # `--write=DIR` (split on the FIRST "="). Refuse on --net (R11). Every --write
     # must be separator-safe-contained (KD-8). ANY unrecognized token before "--" --
     # an unknown flag OR an unhandled equals-form -- is a HARD PROMPT (bare return),
@@ -153,6 +153,14 @@ def is_clean_sbx(cmd, cwd):
         if tok == "--net":                        # R11: --net never auto-allows
             return (False, "")
         if tok == "--ro":
+            i += 1
+            continue
+        if tok == "--seccomp":                    # argument-less boolean, like --ro
+            # SAFE TO AUTO-ALLOW: it only NARROWS -- it adds a syscall allowlist to
+            # a run this gate would already allow, and wherever the helper cannot
+            # honour it (anything but Linux x86_64) the helper refuses to run at
+            # all. ONLY the exact bare token: `--seccomp=1` is refused by argparse's
+            # store_true and must fall to the R12b hard prompt below (M-B).
             i += 1
             continue
         if tok == "--dry-run":                    # argument-less boolean, like --ro
