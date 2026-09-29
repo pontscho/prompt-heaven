@@ -7,7 +7,7 @@ description: Delegate-able sub-agents invoked via the Task tool to keep the main
 sources:
   - ClaudeCode/agents
 verified:
-  commit: d0cc30c
+  commit: 5f419b3
   date: 2026-09-29
 links:
   - overview
@@ -37,6 +37,12 @@ suite treats writing one as a defect. And `webfetch` is not a tool name: the
 dispatcher is `webfetch_call`, routed by `function="fetch"` — the only function
 this fleet's prose may name, because it is the one the server advertises when it
 refuses an unknown one.
+
+Jenkins is granted the same way and to exactly two minions: `minion-watson` and
+`minion-bug-hunter` list `mcp__mcp-jenkins__jenkins_call`, read-only — each
+file prohibits `start_build`, `run_and_wait`, `replay_build` and `cancel_build`,
+because a CI run is an outward-facing action on shared infrastructure
+`ClaudeCode/agents/minion-bug-hunter.md` `ClaudeCode/agents/minion-watson.md`.
 
 ## Roster
 
@@ -70,6 +76,13 @@ planning chain is written by `minion-feature-planner` (implementation plan) then
 `minion-task-planner` (`requirements.yaml`); the `p:code-review` / `p:branch-review`
 pipeline fans out `minion-code-reviewer` (one per lens) into `minion-code-verifier`
 (one per candidate); and `minion-librarian` maintains the `docs/` wiki.
+
+Both `minion-watson` and `minion-bug-hunter` accept a failed Jenkins build
+(`job_path` + `build_number`) as input and read it themselves, drilling down to
+the failing stage instead of pulling the console
+`ClaudeCode/agents/minion-watson.md`; the `p:mcp-jenkins` skill's big-log rule
+sends a *why* to Watson, a *fix it* to Quint, and only a code-free log question
+to `general-purpose` `ClaudeCode/skills/mcp-jenkins/SKILL.md`.
 
 A *reported* bug — one with a symptom attached — goes to `minion-bug-hunter`, the
 fleet's second executor `ClaudeCode/ARCHITECTURE.md`, where `minion-watson`
