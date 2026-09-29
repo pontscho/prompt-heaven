@@ -258,7 +258,8 @@ SUITES = [
      "source_to_pages per-hit description, MEASURED state labels, "
      "file-relative line windows, the page type as a ranking signal, "
      "the frontmatter aliases synonym field, "
-     "the frozen-record advisory carve-out", 160),
+     "the frozen-record advisory carve-out, "
+     "the dead [[slug]] wikilink gate, roadmap pages as frozen records", 170),
     ("wiki_index", run_wiki_index,
      "INDEX.md rendering and the page-type constants: the server's "
      "render_index never listing a roadmap-item and counting them in one "

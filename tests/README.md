@@ -69,7 +69,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `name_existence` | `test_name_existence.py` | A–I |
 | `spawn_stdin` | `test_spawn_stdin.py` | A–D |
 | `mcp_footprint` | `test_mcp_footprint.py` | A–H |
-| `wiki_recall` | `test_wiki_recall.py` | A–S |
+| `wiki_recall` | `test_wiki_recall.py` | A–T |
 | `wiki_index` | `test_wiki_index.py` | A–H |
 | `wiki_addendum` | `test_wiki_addendum.py` | A–E |
 | `jira_cli` | `test_jira_cli.py` | A–M |
@@ -231,7 +231,7 @@ tests/
   test_name_existence.py     groups A-I
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
   test_mcp_footprint.py      groups A-H   (AST + one handshake per server)
-  test_wiki_recall.py        groups A-S   (synthetic corpus, offline)
+  test_wiki_recall.py        groups A-T   (synthetic corpus, offline)
   test_wiki_index.py         groups A-H   (the server's INDEX renderer -- archive
                                            pages counted, never listed -- both
                                            copies of the six page-type constants
