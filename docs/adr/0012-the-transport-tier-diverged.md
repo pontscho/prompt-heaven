@@ -190,3 +190,9 @@ hosts and squarely in that domain, and was still refused, because its only free
 name `encode_lsp_message` is a module-level `def` rather than an import
 `Scripts/MCP_SKELETON.md`. Reasons One and Three are not touched. The transport
 tier stays closed.
+
+## Addendum (2026-09-29): the skill-to-server wiki copies have their rung named
+
+Roadmap item R-0002 took a census of what `Scripts/mcp-wiki.py` vendors from the p:wiki scripts: 19 function pairs and 12 constants. With docstrings, annotations, the skill's module qualifier and renames set aside, exactly one piece of code had drifted: `_source_path` carried the `str()` coercion on the server side only, although the commit that introduced it said it landed identically on both. There are two intentional divergences (the gating vocabulary and the freshness gating line, both per ADR 0019) and one restructure (the server splits `analyze` into a per-page classifier).
+
+The rung is a parity gate, not an extraction: every vendored function is compared as normalised code and every constant by value, a shared name nobody declared fails, and the rendered freshness report must agree line for line apart from the gating line. The drift was converged onto the server's version. This keeps the duplication and makes it impossible to diverge silently; it does not make a change land once.

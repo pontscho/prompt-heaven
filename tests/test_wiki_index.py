@@ -36,6 +36,21 @@ GROUPS
   F  hygiene: the live docs/INDEX.md, the repo tree, bytecode, the sandbox
   G  the git helper, both copies: the server's timeout and the roadmap's
      hardening (GIT_SAFE_ARGV prefix, GIT_NO_LAZY_FETCH=1)
+  H  everything else the server vendors: each function compared as CODE (AST,
+     docstring / annotations / name / `w.` qualifier taken out), each constant
+     by value, the two restructured freshness halves by output, and a census
+     that names any shared name no case compares
+
+WHY PARITY GATES AND NOT GENERATION (roadmap R-0002)
+----------------------------------------------------
+Rendering the server's copies from `_wikilib.py` as generated regions was
+measured and refused by the generator's own gated contract, not by taste:
+`anchored-on-file` pins every canonical source to `Scripts/<name>`, and
+`tab-safety-real-blocks` pins the tab-unsafe set to `_rows_note` -- every
+block of the tab-indented skill module would join it, and the generator only
+converts spaces to tabs, never back.  An import is out for the fleet-wide
+reason (a server never imports a sibling; no server does today).  So the
+copies stay, and every one of them is compared here.
 
 THE GIT HELPER IS A THIRD SHARED THING
 --------------------------------------
@@ -58,9 +73,11 @@ The case count lives only in the SUITES table of tests/run.py.
 import ast
 import collections
 import contextlib
+import difflib
 import io
 import os
 import posixpath
+import re
 import subprocess
 import sys
 import types
@@ -86,6 +103,7 @@ GD = "D. freshness: roadmap types untracked, the CLI gates only orphaned-source"
 GE = "E. negative control"
 GF = "F. hygiene"
 GG = "G. the git helper, both copies: timeout and hardening"
+GH = "H. vendored code: every other shared function and constant, both copies"
 
 # The argv every group-G call passes through `git()`: the shape of
 # `repo_root()`, the one call both copies make on every run.
@@ -100,6 +118,54 @@ CONSTANTS = ("TYPE_ORDER", "INDEX_LABELLED", "STATUS_FORBIDDEN",
 
 ROADMAP_TYPE = "roadmap"
 ITEM_TYPE = "roadmap-item"
+
+# Group H: every OTHER thing the server vendors from the skill scripts.  The
+# six CONSTANTS above and the git pair (group G) are gated where they were
+# first gated; this is the rest, so that no duplicated line is left ungated.
+#
+# (skill script, name there, name in the server) -- a function compared as
+# CODE, not as output: its AST, with only the differences declared in
+# `normalized_function` taken out.  The server renamed four on the way in.
+SKILL_ALIAS = "w"            # `import _wikilib as w` in freshness.py/reindex.py
+VENDORED_FUNCTIONS = (
+    ("_wikilib.py", "git", "git"),
+    ("_wikilib.py", "repo_root", "repo_root"),
+    ("_wikilib.py", "split_frontmatter", "split_frontmatter"),
+    ("_wikilib.py", "_unquote", "_unquote"),
+    ("_wikilib.py", "_parse_scalar", "_parse_scalar"),
+    ("_wikilib.py", "_collect_block", "_collect_block"),
+    ("_wikilib.py", "parse_frontmatter", "parse_frontmatter"),
+    ("_wikilib.py", "read_page", "read_page"),
+    ("_wikilib.py", "iter_pages", "iter_pages"),
+    ("_wikilib.py", "extract_wikilinks", "extract_wikilinks"),
+    ("_wikilib.py", "as_list", "as_list"),
+    ("freshness.py", "_changed_files", "_changed_files"),
+    ("freshness.py", "_source_path", "_source_path"),
+    ("freshness.py", "_evaluate", "_evaluate"),
+    ("freshness.py", "_detail", "_fresh_detail"),
+    ("reindex.py", "collect", "reindex_collect"),
+    ("reindex.py", "render_index", "render_index"),
+    ("reindex.py", "_counted_lines", "_counted_lines"),
+    ("reindex.py", "render_report", "render_reindex_report"),
+)
+# (skill script, constant) -- compared by VALUE, same name on both sides.
+VENDORED_CONSTANTS = (
+    ("_wikilib.py", "SKIP_FILES"),
+    ("_wikilib.py", "SKIP_DIRS"),
+    ("_wikilib.py", "_WIKILINK_RE"),
+    ("freshness.py", "DETAIL_STATUSES"),
+    ("freshness.py", "ADVISORY_STATUSES"),
+    ("freshness.py", "_INVALID"),
+)
+# Same name in both, different on purpose -- the only names the census case
+# lets through undeclared.  `main` is two different programs' argv parsing.
+# `GATING_STATUSES` (freshness.py) and `GATING_CLASSES` (server) are not listed
+# because they share no name: the CLI can prove one class, the server three
+# (adr 0019), and `freshness-render-shared-lines` gates everything else the two
+# renderers print.
+DECLARED_DIFFERENT = ("main",)
+# Already gated elsewhere in this suite, so the census counts them as declared.
+GATED_ELSEWHERE = ("GIT_TIMEOUT_SEC", "GIT_SAFE_ARGV")
 
 
 def _d(label, value):
@@ -526,6 +592,162 @@ def git_call_problems(label, calls, want_argv, want_timeout):
     if kwargs.get("stdin") is not subprocess.DEVNULL:
         problems.append("%s: stdin=%r, want DEVNULL" % (label, kwargs.get("stdin")))
     return problems
+
+
+class _Normalize(ast.NodeTransformer):
+    """Take out the differences between the copies that are DECLARED, and
+    nothing else: annotations (erased at run time; the server annotates, the
+    skill scripts mostly do not) and, on the skill side only, the `w.`
+    qualifier the scripts reach _wikilib through."""
+
+    def __init__(self, alias=None):
+        self.alias = alias
+
+    def visit_Attribute(self, node):
+        self.generic_visit(node)
+        if (self.alias and isinstance(node.value, ast.Name)
+                and node.value.id == self.alias):
+            return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
+        return node
+
+    def visit_arg(self, node):
+        node.annotation = None
+        return node
+
+    def visit_AnnAssign(self, node):
+        self.generic_visit(node)
+        if node.value is None or not node.simple:
+            return node
+        return ast.copy_location(ast.Assign(targets=[node.target],
+                                            value=node.value), node)
+
+
+def top_level_function(source, name):
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name == name:
+            return node
+    return None
+
+
+def normalized_function(node, alias=None):
+    """The function as comparable code: docstring, annotations, its own name
+    and (skill side) the `w.` qualifier removed.  A docstring is where the two
+    copies are ALLOWED to differ -- the server's git() says why stdin=DEVNULL
+    guards its JSON-RPC stream, which the CLI's has no reason to say."""
+    body = list(node.body)
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:] or [ast.Pass()]
+    node = ast.FunctionDef(name="_", args=node.args, body=body,
+                           decorator_list=node.decorator_list, returns=None,
+                           type_comment=None)
+    node = _Normalize(alias).visit(node)
+    return ast.fix_missing_locations(node)
+
+
+def code_parity_problems(skill_src, skill_name, server_src, server_name,
+                         label):
+    """One vendored function: the skill copy and the server copy must be the
+    same code once the declared differences are taken out."""
+    ours = top_level_function(skill_src, skill_name)
+    theirs = top_level_function(server_src, server_name)
+    if ours is None:
+        return ["%s defines no top-level %s" % (label, skill_name)]
+    if theirs is None:
+        return ["the server defines no top-level %s" % server_name]
+    a = normalized_function(ours, SKILL_ALIAS)
+    b = normalized_function(theirs)
+    if ast.dump(a) == ast.dump(b):
+        return []
+    diff = [ln for ln in difflib.unified_diff(
+        ast.unparse(a).splitlines(), ast.unparse(b).splitlines(),
+        "%s:%s" % (label, skill_name), "mcp-wiki.py:%s" % server_name,
+        n=0, lineterm="") if not ln.startswith("@@")]
+    return ["%s:%s and mcp-wiki.py:%s are different code: %s"
+            % (label, skill_name, server_name, " | ".join(diff[2:8]))]
+
+
+def constant_parity_problems(skill_mod, server_mod, name, label):
+    if not hasattr(server_mod, name):
+        return ["the server has no %s" % name]
+    if not hasattr(skill_mod, name):
+        return ["%s has no %s" % (label, name)]
+    a, b = getattr(skill_mod, name), getattr(server_mod, name)
+    if type(a) is not type(b):
+        return ["%s: %s is a %s, the server's a %s"
+                % (name, label, type(a).__name__, type(b).__name__)]
+    if isinstance(a, re.Pattern):
+        a, b = (a.pattern, a.flags), (b.pattern, b.flags)
+    if a != b:
+        return ["%s differs: %s %r, server %r" % (name, label, a, b)]
+    return []
+
+
+def top_level_names(source):
+    """Names a module DEFINES at top level: def, class, and single-name
+    assignment.  Imports are not definitions."""
+    out = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) \
+                else [node.target]
+            out.update(t.id for t in targets if isinstance(t, ast.Name))
+    return out
+
+
+def undeclared_shared_names(skill_sources, server_src):
+    """Every name a skill script and the server both define that no case in
+    this suite compares -- a new vendored copy lands here, by name."""
+    declared = set(CONSTANTS) | set(GATED_ELSEWHERE) | set(DECLARED_DIFFERENT)
+    declared |= {name for _f, name in VENDORED_CONSTANTS}
+    declared |= {name for _f, name, _s in VENDORED_FUNCTIONS}
+    server = top_level_names(server_src)
+    out = []
+    for label, source in sorted(skill_sources.items()):
+        out += ["%s: %s" % (label, name) for name in
+                sorted((top_level_names(source) & server) - declared)]
+    return out
+
+
+def freshness_render_fixture():
+    """A report with one page in every status the classifier can return."""
+    def page(status, **extra):
+        return dict({"name": "p-" + status, "path": "x/%s.md" % status,
+                     "type": "concept", "status": status}, **extra)
+    pages = [
+        page("stale", changed_sources=["a.py", "b.py"], verified_at="abc1234"),
+        page("orphaned-source", missing=["gone.py"], changed_sources=[],
+             verified_at="abc1234"),
+        page("unverified", reason="no verified.commit"),
+        page("promotable", materialized=["new.py"]),
+        page("planned"), page("current", verified_at="abc1234"),
+        page("untracked"), page("no-sources"),
+    ]
+    summary = {}
+    for p in pages:
+        summary[p["status"]] = summary.get(p["status"], 0) + 1
+    return {"root": "docs", "head": "abc1234", "pages": pages,
+            "summary": summary}
+
+
+def render_shared_line_problems(skill_text, server_text):
+    """The two freshness renderers must print the same report but for the one
+    line that is theirs by design: `gating:` (adr 0019 -- what each can prove)."""
+    def shared(text):
+        return [ln for ln in text.splitlines() if not ln.startswith("gating: ")]
+    a, b = shared(skill_text), shared(server_text)
+    if a == b:
+        return []
+    diff = [ln for ln in difflib.unified_diff(a, b, "freshness.py", "server",
+                                              n=0, lineterm="")
+            if not ln.startswith("@@")]
+    return ["the renderers differ outside the gating line: %s"
+            % " | ".join(diff[2:8])]
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1250,144 @@ def group_g(suite, srv, lib):
                                    "recorded assertion above")])
 
 
+def _skill_sources():
+    return {name: _read(os.path.join(SCRIPTS_DIR, name))
+            for name in ("_wikilib.py", "freshness.py", "reindex.py")}
+
+
+def group_h(suite, srv, fresh_mod, lib, roots):
+    """Everything the server vendors that groups A and G do not already gate.
+
+    Functions are compared as CODE (see `normalized_function`), because the
+    fixture corpora cannot reach every branch -- a quoted scalar, a nested
+    dict, a `path:symbol` anchor -- and a copy that drifted in an unreached
+    branch would pass any output comparison.  The two renamed-and-restructured
+    halves, freshness `analyze`/`render`, are compared by OUTPUT instead: the
+    server split classification out into `_classify_page` and grew a scope and
+    a verify-backed gating line, so their code legitimately differs."""
+    sources = _skill_sources()
+    server_src = _read(SERVER)
+    for label, skill_name, server_name in VENDORED_FUNCTIONS:
+        problems = code_parity_problems(sources[label], skill_name, server_src,
+                                        server_name, label)
+        suite.record(GH, "code-parity-" + skill_name, problems,
+                     detail=[_d("copies", "%s:%s, mcp-wiki.py:%s"
+                                % (label, skill_name, server_name)),
+                             _d("ignored", "docstring, annotations, the "
+                                           "function's own name, `%s.`"
+                                % SKILL_ALIAS)])
+
+    mods = {"_wikilib.py": lib, "freshness.py": fresh_mod}
+    for label, name in VENDORED_CONSTANTS:
+        problems = constant_parity_problems(mods[label], srv, name, label)
+        suite.record(GH, "value-parity-" + name, problems,
+                     detail=[_d(label, repr(getattr(mods[label], name, None))),
+                             _d("server", repr(getattr(srv, name, None)))])
+
+    undeclared = undeclared_shared_names(sources, server_src)
+    suite.record(GH, "every-shared-name-is-gated",
+                 ["defined in a skill script AND the server, compared by no "
+                  "case: %s" % ", ".join(undeclared)] if undeclared else [],
+                 detail=[_d("declared", "%d function pair(s), %d constant(s) "
+                            "here, %d in group A, %d in group G, %d different "
+                            "on purpose" % (len(VENDORED_FUNCTIONS),
+                                            len(VENDORED_CONSTANTS),
+                                            len(CONSTANTS),
+                                            len(GATED_ELSEWHERE),
+                                            len(DECLARED_DIFFERENT)))])
+
+    report = freshness_render_fixture()
+    skill_text = fresh_mod.render(report)
+    server_text = srv.freshness_render(report)
+    suite.record(GH, "freshness-render-shared-lines",
+                 render_shared_line_problems(skill_text, server_text),
+                 detail=[_d("statuses", ", ".join(sorted(report["summary"]))),
+                         _d("excluded", "the `gating:` line (adr 0019)")],
+                 text=server_text)
+
+    problems = []
+    for variant in ALL_VARIANTS:
+        root = roots[variant.label]
+        ours, theirs = fresh_mod.analyze(root, "HEAD"), \
+            srv.freshness_analyze(root, "HEAD")
+        if ours != theirs:
+            problems.append("%s: freshness.py analyze %r, server %r"
+                            % (variant.label, ours.get("summary"),
+                               theirs.get("summary")))
+    suite.record(GH, "analyze-parity-every-corpus", problems,
+                 detail=[_d("corpora", "%d, every fixture variant"
+                            % len(ALL_VARIANTS)),
+                         _d("compared", "the whole report: root, head, every "
+                                        "page dict, summary")])
+
+
+def group_e_vendored(suite, srv, fresh_mod):
+    """Controls for group H's oracles: each must FIRE on a planted defect and
+    stay SILENT on every difference it declares acceptable."""
+    base = ('def f(value):\n    """doc"""\n    if value is None:\n'
+            '        return []\n    return [value]\n')
+    quiet = ('def g(value: "Any") -> list:\n    """other doc"""\n'
+             '    if value is None:\n        return []\n'
+             '    return [value]\n')
+    qualified = ('def f(value):\n    if w.value is None:\n        return []\n'
+                 '    return [value]\n')
+    plain = ('def f(value):\n    if value is None:\n        return []\n'
+             '    return [value]\n')
+    drifted = ('def f(value):\n    value = str(value)\n    if value is None:'
+               '\n        return []\n    return [value]\n')
+    problems = []
+    if code_parity_problems(base, "f", quiet, "g", "planted.py"):
+        problems.append("fired on a docstring/annotation/name-only difference")
+    if code_parity_problems(qualified, "f", plain, "f", "planted.py"):
+        problems.append("fired on the skill side's `w.` qualifier")
+    fired = code_parity_problems(base, "f", drifted, "f", "planted.py")
+    if not fired or "str(value)" not in fired[0]:
+        problems.append("missed one added statement: %r" % fired)
+    suite.record(GE, "control-code-parity-fires-only-on-code", problems,
+                 detail=[_d("fired", repr(fired)),
+                         _d("silent on", "docstring, annotations, function "
+                                         "name, `w.` qualifier")])
+
+    ctl = types.SimpleNamespace(DETAIL_STATUSES=list(fresh_mod.DETAIL_STATUSES)
+                                + ["planned"],
+                                _WIKILINK_RE=re.compile(r"\[\[([^\]]+)\]\]",
+                                                        re.I))
+    fired = (constant_parity_problems(ctl, srv, "DETAIL_STATUSES", "planted")
+             + constant_parity_problems(ctl, srv, "_WIKILINK_RE", "planted"))
+    problems = ["the value oracle missed %s" % name
+                for name in ("DETAIL_STATUSES", "_WIKILINK_RE")
+                if not any(name in f for f in fired)]
+    suite.record(GE, "control-value-parity-fires", problems,
+                 detail=[_d("planted", "an extra detail status; the wikilink "
+                                       "regex with re.I"),
+                         _d("fired", repr(fired))])
+
+    planted = {"planted.py": "def as_list(v):\n    return v\nMAIN_ONLY = 1\n"
+                             "def render_index(e):\n    return e\n"}
+    server_src = "def as_list(v):\n    return v\nNEW_SHARED = 2\n" \
+                 "def brand_new(x):\n    return x\n"
+    planted["planted.py"] += "NEW_SHARED = 2\ndef brand_new(x):\n    return x\n"
+    fired = undeclared_shared_names(planted, server_src)
+    problems = []
+    if fired != ["planted.py: NEW_SHARED", "planted.py: brand_new"]:
+        problems.append("the census reported %r, want exactly the two "
+                        "undeclared shared names" % fired)
+    suite.record(GE, "control-census-names-an-undeclared-copy", problems,
+                 detail=[_d("fired", repr(fired))])
+
+    report = freshness_render_fixture()
+    skill_text = fresh_mod.render(report)
+    tampered = skill_text.replace("advisory: ", "advisory:  ", 1)
+    fired = render_shared_line_problems(skill_text, tampered)
+    gating_only = "\n".join(ln + "X" if ln.startswith("gating: ") else ln
+                            for ln in skill_text.splitlines())
+    problems = [] if fired else ["missed a one-space advisory change"]
+    if render_shared_line_problems(skill_text, gating_only):
+        problems.append("fired on a gating-line-only difference")
+    suite.record(GE, "control-render-oracle-skips-only-gating", problems,
+                 detail=[_d("fired", repr(fired))])
+
+
 def group_f(suite, pyc_before, tree_before, live_before, work_path):
     live_after = (H.sha256_file(LIVE_INDEX) if os.path.isfile(LIVE_INDEX)
                   else None)
@@ -1084,6 +1444,8 @@ def run(opts=None):
         group_d(suite, srv, fresh_mod, roots)
         group_e(suite, srv, reindex_mod, lib, roots)
         group_g(suite, srv, lib)
+        group_h(suite, srv, fresh_mod, lib, roots)
+        group_e_vendored(suite, srv, fresh_mod)
     finally:
         # Loading reindex.py / freshness.py put their directory on sys.path and
         # _wikilib into sys.modules; no later suite in this process inherits

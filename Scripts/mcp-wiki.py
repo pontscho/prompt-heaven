@@ -41,7 +41,9 @@ Functions:
                    a hand edit is refused, never silently overwritten
 
 The stdlib-only frontmatter parser is vendored from the p:wiki `_wikilib.py`
-(kept in sync by hand — the p:wiki schema's §5 parseable subset is the contract).
+(kept in sync by hand — the p:wiki schema's §5 parseable subset is the contract),
+and so are the reindex/freshness helpers; tests/test_wiki_index.py compares
+every vendored function as code and every shared constant by value.
 Symbol-level anchor verification is the WEAK half here on purpose: `verify` runs
 a stdlib text matcher and declares its own limits, while the authoritative
 resolution stays with the LLM (p:minion-librarian) via the language MCP servers.
@@ -361,6 +363,7 @@ def safe_path(project_root: str, relative_path: str, strict: bool = False) -> st
 # ---------------------------------------------------------------------------
 # Vendored wiki helpers (from p:wiki/scripts/_wikilib.py; tabs -> 4 spaces).
 # Keep in sync with the p:wiki schema §5 (the stdlib-parseable frontmatter subset).
+# A change here that the skill copy lacks fails tests/test_wiki_index.py group H.
 # ---------------------------------------------------------------------------
 
 def git(args: List[str], cwd: str) -> Tuple[int, str, str]:

@@ -197,3 +197,7 @@ same domain.
 The figure stamped at `8d56b6d` stands for the commit it names. Re-measured at
 `11a3542`: five sources, 18 blocks, 103 live regions emitting 133 block instances
 across the 15 servers.
+
+## Addendum (2026-09-29): the first canonical source proposed outside Scripts
+
+Roadmap item R-0002 asked whether the p:wiki helper module could become a canonical source rendered into `Scripts/mcp-wiki.py`. The domain rule would have admitted it: the wiki helpers are one domain, not a shelf. What refused it was location and indentation. The gated contract anchors every canonical source to a file under `Scripts/`, and the module is tab-indented, which the tab-safety rule rejects for a block; the generator converts spaces to tabs, never back. The CLI functions also call module-qualified or renamed names and so could not be blocks without rewriting the CLI. Lifting either rule is a change to this decision, not a registry entry, so R-0002 settled for parity gates instead.

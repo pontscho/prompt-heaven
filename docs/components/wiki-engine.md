@@ -196,7 +196,17 @@ unverified pages reported as advisory per [[0019-only-gate-on-what-you-can-prove
 vendors the script logic instead of importing it, and the fleet's generator
 renders only into `Scripts/mcp-*.py` `Scripts/amalgamate.py:TARGET_GLOB`, so it
 never reaches the skill's copies — a change to either copy must still be
-mirrored in the other by hand.
+mirrored in the other by hand. What changed is that the mirroring can no longer
+be forgotten: `tests/test_wiki_index.py:group_h` compares every vendored
+function as code (its AST, with only the docstring, the annotations, its own
+name and the scripts' `w.` qualifier taken out), every shared constant by value,
+and the two freshness halves the server restructured by their output, and a
+census names any name both sides define that no case compares. Rendering the
+server's copies from `_wikilib.py` as generated regions was refused by the
+generator's own gated contract rather than by preference: every canonical source
+is pinned to `Scripts/<name>` `tests/test_generated_region.py:group_contract`,
+and the skill module is tab-indented, which the per-block tab rule cannot carry
+into a space-indented host `Scripts/amalgamate.py:block_is_tab_safe`.
 
 Hand-maintained is no longer the whole story for this file, though. Several
 spans of `Scripts/mcp-wiki.py` are rendered into it from the fleet's canonical

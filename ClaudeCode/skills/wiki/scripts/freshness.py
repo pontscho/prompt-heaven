@@ -77,6 +77,7 @@ def _source_path(source: str, repo=None) -> str:
 	`p:<name>` dir in the path and a trailing `:symbol` are handled. Without
 	`repo`, fall back to splitting at the first ':'.
 	"""
+	source = str(source)
 	if repo is None:
 		return source.split(":", 1)[0]
 	if os.path.exists(os.path.join(repo, source)):
