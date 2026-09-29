@@ -13,7 +13,7 @@ WIP now: 1 of 3. Archive: 32 closed items (29 done, 3 dropped).
 
 | Lane  | Id     | State  | Title                                                                                      | Ready |
 |-------|--------|--------|--------------------------------------------------------------------------------------------|-------|
-| now   | R-0003 | active | Wire a seccomp BPF filter into sbx on Linux                                                | yes   |
+| now   | R-0003 | active | Prove sbx --seccomp end to end through bwrap on a Linux host                               | yes   |
 | later | R-0004 | idea   | Let the implement skill route a failed task to Quint                                       | yes   |
 | later | R-0006 | idea   | Honour notifications/cancelled in the MCP servers                                          | yes   |
 | later | R-0014 | idea   | ADR 0022 follow-ups: producer hooks and a kanban board                                     | yes   |
@@ -24,7 +24,7 @@ WIP now: 1 of 3. Archive: 32 closed items (29 done, 3 dropped).
 
 # now
 
-## R-0003 · Wire a seccomp BPF filter into sbx on Linux
+## R-0003 · Prove sbx --seccomp end to end through bwrap on a Linux host
 
 state: active
 horizon: now
@@ -32,7 +32,7 @@ origin: docs/adr/0005-approve-the-wrapper-not-the-command.md#consequences
 blocked_by: []
 tags: [sandbox]
 
-sbx has a dormant seccomp seam that refuses to run when enabled, and no flag sets it. Until it exists, the Linux boundary is namespaces, no network and a read-only bind.
+The x86_64 syscall allowlist behind sbx --seccomp shipped (see ADR 0005's R-0003 addendum) and was validated in-process with prctl on t42, but the real path -- bwrap receiving the program via --seccomp FD and installing it -- is unproven. t42 cannot run it: bubblewrap is not installed, unprivileged_userns_clone=0 and apparmor_restrict_unprivileged_userns=1. Needs a Linux x86_64 host with a working bwrap: run seccomp_probe.py under sbx --seccomp, compare with a control run without the flag, clean up.
 
 ### Log
 
@@ -41,6 +41,7 @@ sbx has a dormant seccomp seam that refuses to run when enabled, and no flag set
 - 2026-09-29 later->next: User 2026-09-29: go.
 - 2026-09-29 next->now: User 2026-09-29: go.
 - 2026-09-29 now->now [idea->active]: User 2026-09-29: go.
+- 2026-09-29 now->now: edited title, why: Filter shipped in 95f5692; only the bwrap end-to-end proof remains, pending a host with bwrap.
 
 # next
 
