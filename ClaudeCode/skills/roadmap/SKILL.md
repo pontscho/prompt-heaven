@@ -1,6 +1,6 @@
 ---
 name: roadmap
-description: Keep the project's known-but-unscheduled work in the wiki as roadmap items -- docs/roadmap/roadmap.md holds the live items in horizon lanes (now, next, later, inbox), and every closed item is archived as its own immutable page under docs/roadmap/archive/. Both are written ONLY by the bundled stdlib script roadmap.py; this skill is its operator contract. Trigger on `/p:roadmap`, `/p:roadmap adopt` (harvest candidates from ADR declared limits, draft specs and open-question sections, for the user to approve), "add to the roadmap", "what is next", "close R-0014", or any request to record, triage, reorder, link, edit, close or export roadmap work.
+description: Keep the project's known-but-unscheduled work in the wiki as roadmap items -- docs/roadmap/roadmap.md holds the live items in horizon lanes (now, next, later, inbox), and every closed item is archived as its own immutable page under docs/roadmap/archive/. Both are written ONLY by the bundled stdlib script roadmap.py; this skill is its operator contract. Trigger on `/p:roadmap`, `/p:roadmap adopt` (harvest candidates from ADR declared limits, draft specs and open-question sections, for the user to approve), "add to the roadmap", "what is next", "close R-0014", or any request to record, triage, reorder, link, edit, close or export roadmap work, or to show it as a kanban board.
 ---
 
 # Roadmap
@@ -244,12 +244,14 @@ are shell-inert by construction, and everything else travels in a file.
 - a commit sha (hex digits) and a date (`YYYY-MM-DD`);
 - the integer for `wip`;
 - staged-file paths, including the export's `--out` path, **only single-quoted and
-  only when they match `.claude/tmp/roadmap-(stage|adopt)-[a-z0-9-]+\.(json|txt)`**.
+  only when they match `.claude/tmp/roadmap-(stage|adopt)-[a-z0-9-]+\.(json|txt)`**,
+  and the board's `--out` page **only single-quoted and only when it matches
+  `.claude/tmp/roadmap-board-[a-z0-9-]+\.html`** (the board below).
   The name part is chosen by this skill -- a timestamp plus a counter, for example
   `roadmap-stage-20260928t1412-3.json` -- and NEVER derived from harvested text: a
   title or an origin must never become part of a path the shell sees. roadmap.py does
   not check this pattern (a manual caller may stage anywhere); it is this skill's
-  contract;
+  contract. board.py DOES check the name part of its `--out` (not the directory);
 - `--spec` and `--slug` values, **only single-quoted and only when they match
   `[a-z0-9-]+`** (roadmap.py refuses anything else for these two flags, so the
   quoting is belt and braces).
@@ -350,7 +352,9 @@ bypasses nothing.
 Every table roadmap.py renders (the summary region, `list`) escapes a cell with the
 ADR 0016 vocabulary: `\\` for a backslash, `\|` for a pipe, and `\n`, `\r`, `\t` for
 those characters. A title with a pipe in it reads back as the title, never as a
-second column.
+second column. The board's markdown tables (below) use the same vocabulary,
+unpadded, on every cell -- the `why` cell included, so a multi-line why is one
+cell with `\n` in it.
 
 ## Regressions
 
@@ -420,7 +424,7 @@ op is four hops:
    candidate Scott missed is refused there, not written twice.
 
 **Proposals from other producers.** A skill or minion that meets deferred work
-mid-run (today `p:minion-bug-hunter`'s diagnosis-only verdict) emits a
+mid-run (the producers are listed in the fragment itself) emits a
 `ROADMAP CANDIDATE:` block per `ClaudeCode/skills/_lib/roadmap-proposal.md` and never
 runs roadmap.py. Hops 3 and 4 then apply to it unchanged, with the reason
 `proposed by <producer>`.
@@ -460,6 +464,37 @@ The machine proposes, a human decides, the script writes.
   contract.
 - **Kanban mapping** (documented, not encoded): columns = horizon
   (inbox | later | next | now | done | dropped); `state` is a card badge.
+
+## The board -- ~/.claude/skills/p/skills/roadmap/scripts/board.py
+
+A read-only kanban view over ONE export (R-0042): stdlib-only, it never reads or
+writes roadmap.md or the archive, and it refuses any `schema` other than
+`roadmap-export/2`. It reads a file, or `-` for stdin:
+
+```
+python3 ~/.claude/skills/p/skills/roadmap/scripts/roadmap.py export --out '.claude/tmp/roadmap-stage-<ts>.json'
+python3 ~/.claude/skills/p/skills/roadmap/scripts/board.py '.claude/tmp/roadmap-stage-<ts>.json'                     # markdown on stdout
+python3 ~/.claude/skills/p/skills/roadmap/scripts/board.py '.claude/tmp/roadmap-stage-<ts>.json' --format html --out '.claude/tmp/roadmap-board-<ts>.html'
+```
+
+- **Columns** are inbox, later, next, now, done, dropped, in that order: an open item
+  sits in its horizon (`unset` is the inbox), a closed item in the column of its
+  state. Within a column the export's order is kept. The board computes the
+  reverse `blocks` edges from `blocked_by` (only ids in the export count).
+- **`--format md`** (the default): one `## <column> (<n>)` section per column, each
+  an unpadded pipe table `id | title | state | severity | tags | ready | blocked_by |
+  blocks | why`, every cell escaped as in "Tables and escaping" above. `ready` is
+  `yes`, `no`, or empty for a closed item. Show it to the user as is.
+- **`--format html --out PATH`**: one static page, prints `board: PATH`. It loads
+  the Vue 3.4.21 global production build from unpkg.com (exact pinned version, no
+  SRI hash), so **viewing it needs network access**; without JavaScript it shows one
+  line pointing at the markdown form. The data is embedded as escaped JSON and
+  rendered as text only: `why` is shown as plain pre-wrapped text, never as rendered
+  markdown. `--out` must match the pattern in the staging rule, an existing symlink
+  is refused, and `--out` is refused with `--format md`.
+- It refuses, exit 2 with one `board: ` line on stderr, a document or item field it
+  cannot render, and a control, format or line-separator character other than
+  newline, CR and tab -- the same characters roadmap.py's reader refuses.
 
 ## Wiki integration
 

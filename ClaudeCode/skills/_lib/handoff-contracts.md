@@ -176,6 +176,7 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 - `docs/roadmap/roadmap.md` — wiki page of type `roadmap`: frontmatter (with `wip_now`), a generated summary region, the four lanes `# now` / `# next` / `# later` / `# inbox`, one `## R-NNNN · <title>` block per live item. **Written EXCLUSIVELY by `roadmap.py`** (whole-file render, optimistic two-digest lock, atomic replace)
 - `docs/roadmap/archive/NNNN-<slug>.md` — wiki page of type `roadmap-item`, one per closed item (NNNN = the item id). Created exclusively by `roadmap.py close`, complete on publication, never rewritten
 - `roadmap.py export` — JSON `roadmap-export/2` on stdout or to `--out` (contract in the `p:roadmap` SKILL.md)
+- `board.py` — read-only kanban board over one export: markdown on stdout, or one static HTML page to `--out '.claude/tmp/roadmap-board-<ts>.html'` (R-0042; usage in the `p:roadmap` SKILL.md)
 
 **Side effects:**
 - Writes staged input files `.claude/tmp/roadmap-stage-<ts>-<n>.json|.txt` (via `purity_call` `create_text_file`) and, during `adopt`, the export `.claude/tmp/roadmap-adopt-<ts>.json`; untrusted text reaches `roadmap.py` only through these files, never the shell line
@@ -198,6 +199,8 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 | `docs/roadmap/roadmap.md` | `/p:roadmap` via `roadmap.py` (the only writer) | `p:wiki` (`wiki_call` `search`, INDEX.md), `/p:roadmap export` | markdown wiki page, type `roadmap`; format in the `p:roadmap` SKILL.md |
 | `docs/roadmap/archive/NNNN-<slug>.md` | `roadmap.py close` (exclusive create; immutable) | `p:wiki` (`search`; INDEX.md counts these in one line, never lists them) | markdown wiki page, type `roadmap-item` |
 | `.claude/tmp/roadmap-adopt-<ts>.json` | `/p:roadmap adopt` hop 1 (`roadmap.py export --out`) | `p:minion-explorer` (dedup of harvested candidates by origin) | JSON, `roadmap-export/2` |
+| `.claude/tmp/roadmap-stage-<ts>.json` (board input) | `/p:roadmap` board (`roadmap.py export --out`) | `board.py` (read-only) | JSON, `roadmap-export/2` |
+| `.claude/tmp/roadmap-board-<ts>.html` | `/p:roadmap` board (`board.py --format html --out`; name checked by board.py) | end-user (opened in a browser; loads Vue 3.4.21 from unpkg.com, so viewing needs network) | static HTML page, data embedded as escaped JSON |
 | `.claude/tmp/roadmap-stage-<ts>-<n>.json` / `.txt` | `/p:roadmap`, and `/p:task-plan` for its `move ... --state planned` reason (main context, `purity_call` `create_text_file`) | `roadmap.py` (`--item-file`, `--why-file`, `--reason-file`) | JSON item object / plain text |
 | `ROADMAP CANDIDATE:` block (inline in the producer's return value or chat reply — no file) | a producer per `_lib/roadmap-proposal.md`: `p:minion-bug-hunter` (optional field of its diagnosis-only verdict); `/p:checkpoint` Step 7 (deferred `THREADS` items in its chat reply, `user:` origin only, only when `docs/roadmap/roadmap.md` exists); `/p:code-review` and `/p:branch-review` Step 4 (one per finding the user will not fix now, `user:` origin only, per `_lib/code-review-lenses.md` § Roadmap Candidates) | main context: shown to the user; only an approved candidate is staged as the `roadmap-stage` item file above | `title` / `why` / `severity` (optional) / `tags` / `origin`, per `_lib/roadmap-proposal.md` |
 

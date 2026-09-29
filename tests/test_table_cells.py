@@ -9,7 +9,7 @@ row silently grows a column: still valid output, still parses, just not the
 table that was meant.  The model then reads one field's value under another
 field's name and has no way to know.
 
-MEASURED over `Scripts/` AND `ClaudeCode/skills/*/scripts/`, seven renderers
+MEASURED over `Scripts/` AND `ClaudeCode/skills/*/scripts/`, eight renderers
 exist and they split two ways:
 
   * `Scripts/mcp-postgres.py`  escapes, reversibly, and SAYS SO on the wire.
@@ -23,6 +23,10 @@ exist and they split two ways:
   * `ClaudeCode/skills/roadmap/scripts/roadmap.py`  renders the roadmap
     summary region and `list` as a padded GFM table whose Title cell is free
     user text, and escapes with checkpoint's vocabulary.
+  * `ClaudeCode/skills/roadmap/scripts/board.py`  renders the kanban board
+    over roadmap-export/2 (R-0042) as UNPADDED GFM tables whose title and why
+    cells are free text, with the same vocabulary.  Unpadded, so the alignment
+    sweep cannot see it: it is in the table by name, as postgres and tshark are.
   * `Scripts/mcp-jenkins.py` and `Scripts/mcp-inspect.py` do not escape the
     pipe and do not need to: their delimiter is whitespace, not `|`.  (jenkins
     does escape CR/LF, the ROW boundary -- case_jenkins_newline.)
@@ -198,7 +202,7 @@ STRUCTURE = "STRUCTURE"
 
 # Declared totals, so a silent re-classification of one renderer trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_ESCAPED = 5
+DECLARED_ESCAPED = 6
 DECLARED_STRUCTURE = 2
 
 
@@ -296,6 +300,19 @@ RENDERERS = {
             "Title cell is free user text. Same vocabulary as checkpoint's "
             "_toc_cell; out of group C like checkpoint, because a skill script "
             "has no tools/list -- the scheme is documented in the skill body"),
+
+    "roadmap-board": Row(
+        path="ClaudeCode/skills/roadmap/scripts/board.py", cls=ESCAPED,
+        renderer="render_table", escaper="_md_cell", delim="|",
+        reversible=True, unpadded=True,
+        desc_const=None, desc_tokens=(),
+        why="the read-only kanban board over roadmap-export/2 (R-0042): one "
+            "UNPADDED GFM table per column whose title and why cells are free "
+            "text -- why is raw markdown and routinely multi-line. roadmap.py's "
+            "vocabulary; unpadded per ADR 0016 Option 4, because its reader "
+            "parses on the delimiter. Out of group C like roadmap.py: a skill "
+            "script has no tools/list, so the scheme is documented in the "
+            "p:roadmap skill body"),
 
     "mcp-jenkins": Row(
         path="Scripts/mcp-jenkins.py", cls=STRUCTURE,
@@ -1387,7 +1404,7 @@ def group_hygiene(suite, loaded, pyc_before, tree_before):
                  else ["new=%r touched=%r" % (new, touched)],
                  detail=["pyc before=%d after=%d"
                          % (len(pyc_before), len(pyc_after)),
-                         "note        : this suite IMPORTS seven modules, so "
+                         "note        : this suite IMPORTS eight modules, so "
                          "this case is load-bearing here rather than "
                          "ceremonial"])
 

@@ -142,6 +142,10 @@ def run_roadmap(opts):
     return run_python_suite("test_roadmap", opts)
 
 
+def run_roadmap_board(opts):
+    return run_python_suite("test_roadmap_board", opts)
+
+
 def run_generated_region(opts):
     return run_python_suite("test_generated_region", opts)
 
@@ -397,6 +401,14 @@ SUITES = [
      "hygiene that proves the sandbox guards bite even before the script "
      "exists",
      336),
+    ("roadmap_board", run_roadmap_board,
+     "board.py, the read-only kanban board over roadmap-export/2: anything "
+     "but that schema refused with one line, the markdown board byte for "
+     "byte with ADR 0016 cells decoded back and the reverse blocks edges, an "
+     "html page whose embedded data cannot close its script block and which "
+     "renders without v-html through one pinned Vue build, and --out held "
+     "to the roadmap-board-*.html name and refused through a symlink",
+     46),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against; the "
@@ -445,9 +457,11 @@ SUITES = [
      "McpServer wrap and the module-level dispatcher, each declared per server "
      "rather than inferred, with the format string required to be a literal so "
      "a payload cannot be interpolated into a log that IS written", 58),
-    # TYPED for the same reason again.  The count is 5 escapers + 5 rendered
-    # rows + 1 coupling + 2 unpadded + 2 documented + 2 structure + 1 jenkins
-    # two-space + 4 roster + 12 control + 4 hygiene: a renderer that arrives or
+    # TYPED for the same reason again.  The count is 6 escapers + 6 rendered
+    # rows + 1 coupling + 3 unpadded + 2 documented + 2 structure + 1 jenkins
+    # two-space + 1 jenkins newline + 4 roster + 12 control + 4 hygiene (the
+    # sixth escaper, rendered row and unpadded row are the R-0042 board): a
+    # renderer that arrives or
     # changes class moves it, which is the alarm.  The control group is the
     # large one on purpose -- six defective escapers plus a four-way
     # parser/renderer pairing, because this suite's one renderer-level defect
@@ -462,7 +476,7 @@ SUITES = [
      "escape its own escape character passes a column count; a pipe renderer "
      "declared unpadded charges no row for another row's width, a jenkins "
      "two-space cell is measured not to forge against the aligned reader, "
-     "and a CR/LF in a jenkins cell is escaped so it cannot end its row", 39),
+     "and a CR/LF in a jenkins cell is escaped so it cannot end its row", 42),
     # TYPED for the same reason again.  The count is 3 clauses x 15 servers +
     # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
     # being analysed IS the defect here, so a count that moves when the fleet

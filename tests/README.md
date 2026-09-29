@@ -77,6 +77,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `bitbucket_cli` | `test_bitbucket_cli.py` | A–K |
 | `checkpoint` | `test_checkpoint.py` | A–M |
 | `roadmap` | `test_roadmap.py` | A–M |
+| `roadmap_board` | `test_roadmap_board.py` | A–F |
 | `generated_region` | `test_generated_region.py` | A–G |
 | `mcp_websocket` | `test_mcp_websocket.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
@@ -119,6 +120,7 @@ python3 tests/test_jira_cli.py
 python3 tests/test_bitbucket_cli.py
 python3 tests/test_checkpoint.py
 python3 tests/test_roadmap.py
+python3 tests/test_roadmap_board.py
 python3 tests/test_generated_region.py
 python3 tests/test_mcp_websocket.py
 python3 tests/test_read_loop.py
@@ -266,6 +268,12 @@ tests/
                                            target is unreachable by construction;
                                            group K digests the live roadmap and
                                            archive and runs last, always)
+  test_roadmap_board.py      groups A-F   (runs the read-only board as a child
+                                           in a mkdtemp sandbox -- markdown
+                                           cells decoded back, an html data
+                                           block that cannot close its script
+                                           tag, --out name/symlink refusals;
+                                           the live roadmap is digested)
   test_generated_region.py   groups A-G   (in-memory only, writes nothing --
                                            re-renders every generated region
                                            from the canonical source its own
