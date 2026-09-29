@@ -355,14 +355,12 @@ SUITES = [
     ("roadmap", run_roadmap,
      "roadmap.py, the single writer of docs/roadmap: the on-disk format "
      "contract spelled independently of the module, the wiki type "
-     "membership, and the AST gates over its source -- stdlib only, one git "
-     "spawn site with a pinned argv prefix and a read-only subcommand set, no "
-     "shell, IO only in section 3, the clock only in today(), the standard "
-     "streams named in four functions, exact write-route caller sets, the IO "
-     "error rule PER CALL, one reader, re.ASCII and fullmatch only -- each "
-     "scanner with a planted control, and hygiene that proves the sandbox "
-     "guards bite even before the script exists",
-     360),
+     "membership, and the security AST gates over its source -- stdlib only, "
+     "one git spawn site with a pinned argv prefix and a read-only "
+     "subcommand set, no shell, exact write-route caller sets -- the "
+     "behavioural groups, and hygiene that proves the sandbox guards bite "
+     "even before the script exists",
+     307),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against", 92),

@@ -27,11 +27,12 @@ the live copy (the archive page is complete by construction: it is published
 by linking a fully written, fsynced temp file) and says so. Read commands
 repair in memory and note it; mutating commands persist the repair.
 
-IO LIVES IN ONE SECTION. Everything that touches the filesystem, a process or
-a clock is in section 3 (and `today()`), and every IO call there sits in the
-body of a `try` that names OSError, so an IO failure is one `roadmap:` line on
-stderr and exit 2, never a traceback. Parsing, validation and rendering are
-pure functions of strings. The suite gates these rules on the source by AST.
+IO LIVES IN ONE SECTION. Everything that touches the filesystem or a process
+is in section 3; parsing, validation and rendering are pure functions of
+strings. An IO error becomes one `roadmap:` line on stderr and exit 2: mapped
+where a caller has something better to say, otherwise by the one
+`except OSError` in main(). Pure code raises no OSError, so a bug there still
+surfaces as a traceback. A reader that closes early (`| head`) exits 0.
 
 UNTRUSTED TEXT IS DATA. Titles, origins and whys harvested from a repository
 reach this script through staged files (--item-file, --why-file,
@@ -44,7 +45,6 @@ import collections
 import datetime
 import errno
 import hashlib
-import io
 import json
 import os
 import re
@@ -100,15 +100,14 @@ LIST_COLUMNS = ("Lane", "Id", "State", "Title", "Ready", "Blocked by")
 UNTRIAGED_COLUMNS = ("Id", "Title", "Age (days)", "Origin")
 TMP_PREFIX = ".roadmap-"
 TMP_SUFFIX = ".tmp"
-EXPORT_SCHEMA = "roadmap-export/1"
+EXPORT_SCHEMA = "roadmap-export/2"   # /2: source.dirty removed (R-0024)
 GIT_TIMEOUT_SEC = 30
 # Every git spawn starts with these, and runs with GIT_NO_LAZY_FETCH=1 in its env.
 # Cheap hardening, DECLARED, not a gated guarantee (adr 0022): the local .git/config
 # is trusted (clone does not transfer it; write access to it already equals code
-# execution as the user). What IS relied on: roadmap.py never runs an index-refreshing
-# command (git status/diff/add); the export's dirty flag is hashed in Python
-# (worktree_dirty). hooksPath is pinned so a future write-ish call inherits the guard;
-# protocol.allow=never and GIT_NO_LAZY_FETCH keep a read from reaching the network.
+# execution as the user). roadmap.py runs only read-only subcommands (rev-parse,
+# cat-file). hooksPath is pinned so a future write-ish call inherits the guard;
+# protocol.allow=never and GIT_NO_LAZY_FETCH are meant to keep a read off the network.
 # safe.bareRepository=explicit stops discovery from cwd=docs/roadmap adopting a bare
 # repository planted there as tracked files, whose config clone DOES transfer.
 GIT_SAFE_ARGV = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
@@ -121,12 +120,12 @@ ITEM_FILE_KEYS = {
 ITEM_FILE_REQUIRED = {"add": ("title", "origin"), "link": ()}   # link: at least one key
 STAGED_MAX_BYTES = 65536   # --item-file / --why-file / --reason-file: small by contract
 # Cap for every other read_regular: roadmap.md, each archive entry, each wiki page of the
-# name scan, each worktree file worktree_dirty hashes. An UNARGUED starting value, like
-# wip_now (adr 0022, after adr 0013): it bounds memory against a planted huge file, and
-# no measurement chose it. Change it with a reason, never silently.
+# name scan. An UNARGUED starting value, like wip_now (adr 0022, after adr 0013): it
+# bounds memory against a planted huge file, and no measurement chose it. Change it
+# with a reason, never silently.
 PAGE_MAX_BYTES = 4 * 1024 * 1024
 # read_regular's reasons (returned, never raised); each caller maps them to its own
-# refusal, skip or verdict. An OSError is returned as the exception itself. A caller
+# refusal or skip. An OSError is returned as the exception itself. A caller
 # that must report READ_MISSING through io_fail passes a REAL exception,
 # FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path), so io_fail's
 # contract ("exc is an OSError") has no special case (L1).
@@ -189,26 +188,42 @@ _TODAY = None   # set once by main() from --today; in-process tests may set it d
 
 
 # ---------------------------------------------------------------------------
-# 2. errors & output -- each names a stream and hands it to _write_stream
+# 2. errors & output -- every standard-stream write goes through _write_stream
 # ---------------------------------------------------------------------------
 
+def _write_stream(stream, text):
+    """UTF-8 bytes through .buffer when the stream has one (a real terminal or
+    pipe); plain text otherwise (the StringIO that tests' captured() installs).
+    The U+00B7 in item headings must not depend on the locale's encoding (R21).
+    backslashreplace: a PATH decoded from non-UTF-8 argv or filesystem bytes
+    carries lone surrogates; naming it in a refusal must never raise (NFR-4).
+    A failed write raises; main() ends a closed reader's run with exit 0."""
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        stream.flush()
+        buffer.write(text.encode("utf-8", "backslashreplace"))
+        buffer.flush()
+    else:
+        stream.write(text)
+
+
 def die(message):
-    _write_stream(sys.stderr, "roadmap: %s\n" % escape_unsafe(message), "stderr")
+    _write_stream(sys.stderr, "roadmap: %s\n" % escape_unsafe(message))
     sys.exit(2)
 
 
 def note(message):
-    _write_stream(sys.stderr, "roadmap: %s\n" % escape_unsafe(message), "stderr")
+    _write_stream(sys.stderr, "roadmap: %s\n" % escape_unsafe(message))
 
 
 def emit(text):
-    _write_stream(sys.stdout, text + "\n", "stdout")
+    _write_stream(sys.stdout, text + "\n")
 
 
 def emit_raw(text):
     """Verbatim: `show` of an archived item must reproduce the file's bytes,
     and `export` on stdout must equal `export --out` byte for byte."""
-    _write_stream(sys.stdout, text, "stdout")
+    _write_stream(sys.stdout, text)
 
 
 def today():
@@ -218,57 +233,14 @@ def today():
 
 
 # ---------------------------------------------------------------------------
-# 3. io -- the ONLY section that touches a file, a process or a descriptor.
-#    Every IO call sits in the body of a try whose handlers name OSError.
+# 3. io -- the ONLY section that touches a file or a process. An OSError not
+#    mapped here reaches main()'s one except OSError.
 # ---------------------------------------------------------------------------
 
-def _write_stream(stream, text, role):
-    """UTF-8 bytes through .buffer when the stream has one (a real terminal or
-    pipe); plain text otherwise (the StringIO that tests' captured() installs).
-    The U+00B7 in item headings must not depend on the locale's encoding.
-    backslashreplace: a PATH decoded from non-UTF-8 argv or filesystem bytes
-    carries lone surrogates; naming it in a refusal must never raise (NFR-4).
-    role is "stdout" or "stderr"; it picks the exit code of a failed write (M2)."""
-    buffer = getattr(stream, "buffer", None)
-    try:
-        if buffer is not None:
-            stream.flush()
-            buffer.write(text.encode("utf-8", "backslashreplace"))
-            buffer.flush()
-        else:
-            stream.write(text)
-    except OSError as exc:
-        _silence(stream)                # no "Exception ignored" at shutdown
-        if role == "stderr":
-            sys.exit(2)                 # the refusal channel itself is gone
-        if isinstance(exc, BrokenPipeError):
-            sys.exit(0)                 # the reader stopped reading: not our failure
-        die("cannot write to standard output: %s"
-            % (exc.strerror or exc.__class__.__name__))
-
-
-def _silence(stream):
-    """Point the stream's descriptor at /dev/null, best effort (M2). A stream
-    with no real descriptor (a test's StringIO or fake) has nothing to
-    silence, and is never dup2-ed over."""
-    fileno = getattr(stream, "fileno", None)
-    if fileno is None:
-        return
-    try:
-        target = fileno()
-        fd = os.open(os.devnull, os.O_WRONLY)
-        try:
-            os.dup2(fd, target)
-        finally:
-            os.close(fd)
-    except (OSError, ValueError, AttributeError, io.UnsupportedOperation):
-        pass
-
-
 def io_fail(op, path, exc):
-    """The backstop refusal for an IO error. op names the operation in plain
-    words ("read", "list", "create directory", "create a temporary file in",
-    "write", "link", "replace", "stat", "resolve the working directory")."""
+    """One refusal line for an IO error a caller maps itself. op names the
+    operation in plain words ("read", "create a temporary file in", "write",
+    "create", "encode the text for")."""
     reason = getattr(exc, "strerror", None) or (
         os.strerror(exc.errno) if getattr(exc, "errno", None) else exc.__class__.__name__)
     die("cannot %s %s: %s" % (op, path, reason))
@@ -284,11 +256,12 @@ def _discard(tmp):
 
 
 def read_regular(path, cap):
-    """Read a REGULAR file of at most cap bytes. Never follows a final symlink,
-    never blocks on a FIFO, never reads past cap. Returns (data, None) or
-    (None, why): why is READ_MISSING, READ_NOT_REGULAR, READ_TOO_LARGE or the
-    OSError itself. It never raises OSError; each caller maps `why` to its own
-    refusal (die), skip (note) or verdict (dirty)."""
+    """Read a REGULAR file of at most cap bytes. Never follows a symlink,
+    never reads past cap. Returns (data, None) or (None, why): why is
+    READ_MISSING, READ_NOT_REGULAR, READ_TOO_LARGE or the OSError itself.
+    It never raises OSError; each caller maps `why` to its own refusal (die)
+    or skip (note). A FIFO or device cannot arrive by clone; a tracked
+    symlink can, and lstat refuses it before any open."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -299,18 +272,10 @@ def read_regular(path, cap):
         return None, READ_NOT_REGULAR
     if st.st_size > cap:
         return None, READ_TOO_LARGE
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(path, flags)       # ELOOP if swapped for a symlink since the lstat
-    except FileNotFoundError:
-        return None, READ_MISSING
-    except OSError as exc:
-        return None, exc
-    try:                                # outer: guards the reads AND the close (H1)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):   # swapped for a FIFO/device since the lstat
-                return None, READ_NOT_REGULAR
-            chunks, left = [], cap + 1
+            chunks, left = [], cap
             while left > 0:
                 chunk = os.read(fd, min(left, 65536))
                 if not chunk:
@@ -319,12 +284,11 @@ def read_regular(path, cap):
                 left -= len(chunk)
         finally:
             os.close(fd)
+    except FileNotFoundError:
+        return None, READ_MISSING
     except OSError as exc:
         return None, exc
-    data = b"".join(chunks)
-    if len(data) > cap:                 # grew since the lstat
-        return None, READ_TOO_LARGE
-    return data, None
+    return b"".join(chunks), None
 
 
 def read_archive_entry(path):
@@ -379,8 +343,6 @@ def take_snapshot(path):
         names = os.listdir(archive_dir)
     except FileNotFoundError:
         names = []
-    except OSError as exc:
-        io_fail("list", archive_dir, exc)
     return Snapshot(roadmap, _archive_digest(names))
 
 
@@ -500,11 +462,11 @@ def _publish_link(tmp, final, data, exists_message):
     _discard(tmp)
 
 
-def git(args, cwd, binary=False):
+def git(args, cwd):
     """Run one read-only git command; report through the rc, never raise.
     124 on timeout, 127 if git is missing, 126 on any other spawn failure.
-    stdout is os.fsdecode-d (it cannot fail) unless binary=True."""
-    empty = b"" if binary else ""
+    stdout is os.fsdecode-d (it cannot fail)."""
+    empty = ""
     try:
         proc = subprocess.run(
             list(GIT_SAFE_ARGV) + list(args), cwd=cwd,
@@ -519,8 +481,7 @@ def git(args, cwd, binary=False):
         return 124, empty, "git %s timed out after %ds" % (args[0] if args else "", GIT_TIMEOUT_SEC)
     except OSError as exc:
         return 126, empty, "cannot run git: %s" % (exc.strerror or exc.__class__.__name__)
-    out = proc.stdout if binary else os.fsdecode(proc.stdout)
-    return proc.returncode, out, proc.stderr.decode("utf-8", "replace")
+    return proc.returncode, os.fsdecode(proc.stdout), proc.stderr.decode("utf-8", "replace")
 
 
 def verify_commit(sha, cwd):
@@ -551,14 +512,8 @@ def resolve_target(file_arg):
     the git top-level of the cwd, falling back to the cwd -- so a run from a
     subdirectory never creates a second docs/roadmap there."""
     if file_arg is not None:
-        try:
-            return os.path.abspath(file_arg)
-        except OSError as exc:
-            io_fail("resolve the working directory for", file_arg, exc)
-    try:
-        cwd = os.getcwd()
-    except OSError as exc:
-        io_fail("resolve the working directory for", DEFAULT_FILE, exc)
+        return os.path.abspath(file_arg)
+    cwd = os.getcwd()
     rc, out, _err = git(["rev-parse", "--show-toplevel"], cwd)
     top = out.rstrip("\n") if rc == 0 else ""
     return os.path.normpath(os.path.join(top or cwd, DEFAULT_FILE))
@@ -579,19 +534,16 @@ def check_containment(path):
         probe = parent
     rc, out, _err = git(["rev-parse", "--show-toplevel"], probe)
     top = out.rstrip("\n") if rc == 0 else ""
-    try:
-        base = os.path.realpath(top or wiki)
-        real = os.path.realpath(roadmap_dir)
-    except OSError as exc:
-        io_fail("resolve", roadmap_dir, exc)
+    base = os.path.realpath(top or wiki)
+    real = os.path.realpath(roadmap_dir)
     if real != base and not real.startswith(base.rstrip(os.sep) + os.sep):
         die("%s resolves to %s, outside %s -- refusing to write through a symlinked directory"
             % (roadmap_dir, real, base))
 
 
-def refuse_symlink(path, what, message=None):
+def refuse_symlink(path, what):
     if os.path.islink(path):
-        die(message % path if message else "%s %s is a symlink -- refusing" % (what, path))
+        die("%s %s is a symlink -- refusing" % (what, path))
 
 
 def refuse_existing(path):
@@ -602,10 +554,7 @@ def refuse_existing(path):
 def ensure_archive_dir(path):
     """Create archive/ (and roadmap/, and any missing parent) when absent."""
     refuse_symlink(path, "archive directory")
-    try:
-        os.makedirs(path, exist_ok=True)
-    except OSError as exc:
-        io_fail("create directory", path, exc)
+    os.makedirs(path, exist_ok=True)
 
 
 def archive_names_for_id(archive_dir, n):
@@ -616,30 +565,19 @@ def archive_names_for_id(archive_dir, n):
         names = os.listdir(archive_dir)
     except FileNotFoundError:
         return []
-    except OSError as exc:
-        io_fail("list", archive_dir, exc)
     return sorted(name for name in names if name.startswith(prefix) and name.endswith(".md"))
 
 
 def check_out_path(out, roadmap_path):
-    """export --out: never a symlink (S-L2), a directory, the roadmap or
-    anything inside its archive; its parent must be an existing directory, so
-    mkstemp in a missing one is a friendly line, not a traceback (round-3 H1).
-    write_atomic's io_fail stays the backstop for a parent that vanishes."""
-    refuse_symlink(out, "--out")
-    if os.path.isdir(out):
-        die("--out %s is a directory" % out)
-    try:
-        real = os.path.realpath(out)
-        own = os.path.realpath(roadmap_path)
-        archive = os.path.realpath(archive_dir_of(roadmap_path))
-        parent = os.path.dirname(os.path.abspath(out))
-    except OSError as exc:
-        io_fail("resolve", out, exc)
+    """export --out is never the roadmap or anything inside its archive: an
+    unlocked write there would bypass the lock. Everything else (a missing
+    parent, a directory) is write_atomic's one-line io_fail; a symlinked --out
+    is replaced by os.replace, never written through."""
+    real = os.path.realpath(out)
+    own = os.path.realpath(roadmap_path)
+    archive = os.path.realpath(archive_dir_of(roadmap_path))
     if real == own or real == archive or real.startswith(archive + os.sep):
         die("--out %s is the roadmap or its archive -- refusing" % out)
-    if not os.path.isdir(parent):
-        die("--out %s: directory %s does not exist" % (out, parent))
 
 
 def read_state_files(path):
@@ -648,8 +586,6 @@ def read_state_files(path):
     the lock compares what was parsed. Display paths are relative to the wiki
     root's parent, computed here so pure code never needs relpath."""
     archive_dir = archive_dir_of(path)
-    refuse_symlink(path, "roadmap",
-                   "%s is a symlink -- roadmap.py reads and replaces only a regular file it owns")
     refuse_symlink(archive_dir, "archive directory")
     data, why = read_regular(path, PAGE_MAX_BYTES)
     if why == READ_MISSING:
@@ -664,18 +600,13 @@ def read_state_files(path):
         names = os.listdir(archive_dir)
     except FileNotFoundError:
         names = []                      # a fresh clone: git keeps no empty directory (M5)
-    except OSError as exc:
-        io_fail("list", archive_dir, exc)
     kept = sorted(name for name in names if not name.startswith(TMP_PREFIX))
     for name in kept:
         if not ARCHIVE_NAME_RE.fullmatch(name):
             die("unexpected file in archive/: %s (want NNNN-slug.md)" % name)
     archive = dict((name, read_archive_entry(os.path.join(archive_dir, name))) for name in kept)
     snapshot = Snapshot(digest(data), _archive_digest(names))
-    try:
-        rel = os.path.relpath(path, os.path.dirname(wiki_root_of(path)))
-    except OSError as exc:
-        io_fail("resolve", path, exc)
+    rel = os.path.relpath(path, os.path.dirname(wiki_root_of(path)))
     display = {"path": path, "roadmap": rel,
                "archive": os.path.join(os.path.dirname(rel), ARCHIVE_DIRNAME)}
     return data, archive, snapshot, display
@@ -735,17 +666,10 @@ def _frontmatter_name(text):
     return None
 
 
-def read_staged_file(flag, path, roadmap_path):
+def read_staged_file(flag, path):
     """The one reader of --item-file, --why-file and --reason-file (S-H1): a
-    small regular file that is neither the roadmap nor inside its archive."""
-    try:
-        real = os.path.realpath(path)
-        own = os.path.realpath(roadmap_path)
-        archive = os.path.realpath(archive_dir_of(roadmap_path))
-    except OSError as exc:
-        io_fail("resolve", path, exc)
-    if real == own or real == archive or real.startswith(archive + os.sep):
-        die("%s %s is the roadmap or its archive -- refusing" % (flag, path))
+    small regular file. Passing the roadmap itself is refused downstream by
+    the value checks (a heading line, a second line, not JSON)."""
     data, why = read_regular(path, STAGED_MAX_BYTES)
     if why == READ_MISSING:
         die("%s %s does not exist" % (flag, path))
@@ -757,83 +681,6 @@ def read_staged_file(flag, path, roadmap_path):
     if why is not None:
         io_fail("read", path, why)
     return decode(path, data)
-
-
-def worktree_dirty(roadmap_dir):
-    """Whether the working-tree content of the roadmap directory differs
-    from HEAD's tree for it (S2-2): True, False, or None when it cannot be
-    known (not a work tree, an unborn HEAD, an object format git cannot
-    name, a git failure, a malformed ls-tree record). Filter-free on
-    purpose: every blob is hashed here, from ls-tree plus the working files,
-    so no command this runs refreshes the index and no clean filter or
-    fsmonitor configured in the repository ever executes. The direction of
-    error is declared: it can over-report (autocrlf, a clean filter, an
-    ignored file), never under-report. It never raises and never dies: a
-    per-entry OSError means "possibly different", so True (L3)."""
-    rc, out, _err = git(["rev-parse", "--show-toplevel"], roadmap_dir)
-    top = out.rstrip("\n")
-    if rc != 0 or not top:
-        return None
-    rc, out, _err = git(["rev-parse", "--show-object-format"], roadmap_dir)
-    fmt = out.strip()
-    if rc != 0 or fmt not in ("sha1", "sha256"):
-        return None
-    oid_len = 40 if fmt == "sha1" else 64
-
-    def _reraise(exc):
-        raise exc                       # an unlistable directory is dirty, never skipped
-
-    try:
-        real_top = os.path.realpath(top)
-        real_dir = os.path.realpath(roadmap_dir)
-        spec = os.path.relpath(real_dir, real_top).replace(os.sep, "/")
-        rc, raw, _err = git(["ls-tree", "-r", "-z", "HEAD", "--", spec], real_top, binary=True)
-        if rc != 0:
-            return None
-        records = raw.split(b"\0")
-        if records and records[-1] == b"":
-            records.pop()               # every record is TERMINATED by NUL (I2)
-        tracked = {}
-        for record in records:
-            meta, tab, name = record.partition(b"\t")
-            fields = meta.split(b" ")
-            if not tab or not name or len(fields) != 3:
-                return None
-            mode, _kind, oid = fields
-            oid = oid.decode("ascii", "replace")
-            if len(oid) != oid_len or not FULL_SHA_RE.fullmatch(oid):
-                return None
-            tracked[os.fsdecode(name)] = (mode, oid)
-        for rel, (mode, oid) in sorted(tracked.items()):
-            full = os.path.join(real_top, *rel.split("/"))
-            st = os.lstat(full)         # never followed (S3-1)
-            if mode == b"120000":
-                if not stat.S_ISLNK(st.st_mode):
-                    return True
-                data = os.readlink(os.fsencode(full))
-            elif mode in (b"100644", b"100755"):
-                if not stat.S_ISREG(st.st_mode) or st.st_size > PAGE_MAX_BYTES:
-                    return True
-                if bool(st.st_mode & stat.S_IXUSR) != (mode == b"100755"):
-                    return True
-                data, why = read_regular(full, PAGE_MAX_BYTES)
-                if why is not None:
-                    return True
-            else:
-                return True             # a submodule, an unknown mode
-            if hashlib.new(fmt, b"blob %d\x00" % len(data) + data).hexdigest() != oid:
-                return True
-        prefix = "" if spec == "." else spec + "/"
-        for dirpath, dirnames, filenames in os.walk(real_dir, onerror=_reraise):
-            sub = os.path.relpath(dirpath, real_dir).replace(os.sep, "/")
-            base = prefix if sub == "." else prefix + sub + "/"
-            linked = [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]
-            for name in filenames + linked:
-                if base + name not in tracked:
-                    return True         # untracked: an ignored file and a temp name included
-        return False
-    except OSError:
-        return True
 
 
 # ---------------------------------------------------------------------------
@@ -909,19 +756,23 @@ def escape_unsafe(text):
                    for ch in text)
 
 
+def _unsafe_kind(ch):
+    """(name, consequence) of an unsafe_char, or None: the ONE classification
+    check_line and check_why name in their refusals."""
+    if _line_break(ch):
+        return "line separator", " -- it would split the line it is written on"
+    if 0xD800 <= ord(ch) <= 0xDFFF:
+        return "lone surrogate", " -- it cannot be written as UTF-8"
+    return ("control character", "") if unsafe_char(ch) else None
+
+
 def check_line(field, value):
     """The ONE character rule for a single-line value (S-M1): no unsafe_char
     (line separator, lone surrogate, control or format character), no backtick."""
     for ch in value:
-        code = ord(ch)
-        if _line_break(ch):
-            die("%s value %r carries a line separator (U+%04X) -- it would split the line "
-                "it is written on" % (field, value, code))
-        if 0xD800 <= code <= 0xDFFF:
-            die("%s value %r carries a lone surrogate (U+%04X) -- it cannot be written as "
-                "UTF-8" % (field, value, code))
-        if unsafe_char(ch):
-            die("%s value %r carries a control character (U+%04X)" % (field, value, code))
+        kind = _unsafe_kind(ch)
+        if kind is not None:
+            die("%s value %r carries a %s (U+%04X)%s" % (field, value, kind[0], ord(ch), kind[1]))
         if ch == "`":
             die("%s value %r carries a backtick -- generated roadmap text is backtick-free "
                 "(verify would read it as an anchor)" % (field, value))
@@ -971,16 +822,13 @@ def check_why(text):
     lines = text.split("\n")
     for lineno, line in enumerate(lines, 1):
         for ch in line:
-            code = ord(ch)
-            if _line_break(ch):
+            kind = _unsafe_kind(ch) if ch != "\t" else None
+            if kind is not None and kind[0] == "line separator":
                 die("the why text carries a line separator other than a newline (U+%04X) on "
-                    "line %d -- use plain newlines" % (code, lineno))
-            if 0xD800 <= code <= 0xDFFF:
-                die("the why text carries a lone surrogate (U+%04X) on line %d -- it cannot "
-                    "be written as UTF-8" % (code, lineno))
-            if ch != "\t" and unsafe_char(ch):
-                die("the why text carries a control character (U+%04X) on line %d"
-                    % (code, lineno))
+                    "line %d -- use plain newlines" % (ord(ch), lineno))
+            if kind is not None:
+                die("the why text carries a %s (U+%04X) on line %d%s"
+                    % (kind[0], ord(ch), lineno, kind[1]))
         if WHY_HEADING_RE.fullmatch(line):
             die("the why text carries a heading on line %d (%r) -- a level 1-3 heading "
                 "would split the item" % (lineno, line))
@@ -1782,7 +1630,7 @@ def _copy_lanes(state):
     return dict((lane, list(items)) for lane, items in state.lanes.items())
 
 
-def _staged_reason(reason, reason_file, path, missing, default=None):
+def _staged_reason(reason, reason_file, missing, default=None):
     if reason is not None and reason_file is not None:
         die("--reason and --reason-file are exclusive")
     if reason is None and reason_file is None:
@@ -1791,7 +1639,7 @@ def _staged_reason(reason, reason_file, path, missing, default=None):
         die(missing)
     if reason is not None:
         return check_reason(reason)
-    return reason_from_file(read_staged_file("--reason-file", reason_file, path), reason_file)
+    return reason_from_file(read_staged_file("--reason-file", reason_file), reason_file)
 
 
 def cmd_init(path):
@@ -1820,7 +1668,7 @@ def cmd_add(path, item_file, title, origin, horizon, state, spec, blocked_by, fo
     if why is not None and why_file is not None:
         die("--why and --why-file are exclusive")
     if item_file is not None:
-        values = parse_item_file(read_staged_file("--item-file", item_file, path),
+        values = parse_item_file(read_staged_file("--item-file", item_file),
                                  item_file, "add")
         title, origin = values["title"], values["origin"]
         why, severity = values.get("why"), values.get("severity")
@@ -1830,7 +1678,7 @@ def cmd_add(path, item_file, title, origin, horizon, state, spec, blocked_by, fo
         if title is None or origin is None:
             die("add needs --title and --origin")
         if why_file is not None:
-            why = read_staged_file("--why-file", why_file, path)
+            why = read_staged_file("--why-file", why_file)
         tag_values = _split_values(tags)
     title = check_scalar("title", title)
     origin = check_scalar("origin", origin)
@@ -1915,7 +1763,7 @@ def cmd_move(path, raw_id, lane, reason, reason_file, state, default_reason=None
     target = lane_input(lane, None)
     if state is not None:
         check_state(state)
-    text = _staged_reason(reason, reason_file, path,
+    text = _staged_reason(reason, reason_file,
                           "a lane or state change needs --reason or --reason-file",
                           default_reason)
     n = parse_id(raw_id)
@@ -1987,7 +1835,7 @@ def cmd_link(path, raw_id, item_file, spec, no_spec, origin, blocked_by, unblock
     adds = _split_values(blocked_by)
     removes = _split_values(unblock)
     if item_file is not None:
-        values = parse_item_file(read_staged_file("--item-file", item_file, path),
+        values = parse_item_file(read_staged_file("--item-file", item_file),
                                  item_file, "link")
         origin, spec, adds = values.get("origin"), values.get("spec"), values.get(
             "blocked_by", [])
@@ -2050,7 +1898,7 @@ def cmd_wip(path, n, reason, reason_file):
     if not isinstance(n, str) or not POS_INT_RE.fullmatch(n):
         die("wip needs a positive integer, got %r (at most 9 digits)" % (n,))
     value = int(n)
-    text = _staged_reason(reason, reason_file, path,
+    text = _staged_reason(reason, reason_file,
                           "a WIP change needs --reason or --reason-file")
     current = load_state(path)
     cap = current.meta["wip_now"]
@@ -2086,7 +1934,7 @@ def cmd_close(path, raw_id, commit_sha, reason, reason_file, slug):
     if commit_sha is not None:
         full = verify_commit(commit_sha, os.path.dirname(path))
     else:
-        text = check_scalar("reason", _staged_reason(reason, reason_file, path, None))
+        text = check_scalar("reason", _staged_reason(reason, reason_file, None))
     if slug is not None:
         check_line("slug", slug)
         if not SLUG_RE.fullmatch(slug):
@@ -2136,7 +1984,7 @@ def cmd_close(path, raw_id, commit_sha, reason, reason_file, slug):
 
 
 # ---------------------------------------------------------------------------
-# 10. export -- deterministic JSON (roadmap-export/1): no clock, sorted keys,
+# 10. export -- deterministic JSON (roadmap-export/2): no clock, sorted keys,
 #     a fixed item order, so the same inputs give the same bytes
 # ---------------------------------------------------------------------------
 
@@ -2162,11 +2010,10 @@ def _export_item(item, rank, is_ready):
             "path": item.path, "rank": rank, "ready": is_ready}
 
 
-def build_export(state, head, dirty, closed_since, open_only):
+def build_export(state, head, closed_since, open_only):
     """The export document: live items in file order, then the closed items
     in scope by ascending id; counts describe exactly the items emitted
-    (ADR 0018). A path that is not UTF-8 refuses here, before either route
-    writes, so stdout and --out behave identically (L4)."""
+    (ADR 0018)."""
     counts = dict((key, 0) for key in ("untriaged", "later", "next", "now", "done", "dropped"))
     items = []
     for lane in HORIZONS:
@@ -2180,13 +2027,7 @@ def build_export(state, head, dirty, closed_since, open_only):
                 continue
             items.append(_export_item(item, None, None))
             counts[item.state] += 1
-    for entry in items:
-        for ch in entry["path"]:
-            if 0xD800 <= ord(ch) <= 0xDFFF:
-                die("export path %r carries a lone surrogate (U+%04X; a directory name that "
-                    "is not UTF-8) -- rename it; the export is UTF-8 JSON"
-                    % (entry["path"], ord(ch)))
-    return {"schema": EXPORT_SCHEMA, "source": {"head": head, "dirty": dirty},
+    return {"schema": EXPORT_SCHEMA, "source": {"head": head},
             "scope": {"open": True, "closed": not open_only, "closed_since": closed_since},
             "counts": counts, "wip_limit": {"now": state.meta["wip_now"]}, "items": items}
 
@@ -2206,11 +2047,9 @@ def cmd_export(path, out, closed_since, open_only):
         check_out_path(out, path)
     current = load_state(path)
     _note_repairs(current)
-    roadmap_dir = os.path.dirname(path)
-    rc, head, _err = git(["rev-parse", "--short", "HEAD"], roadmap_dir)
+    rc, head, _err = git(["rev-parse", "--short", "HEAD"], os.path.dirname(path))
     head = head.strip() if rc == 0 and head.strip() else None
-    dirty = worktree_dirty(roadmap_dir)
-    text = export_text(build_export(current, head, dirty, closed_since, open_only))
+    text = export_text(build_export(current, head, closed_since, open_only))
     if out is None:
         emit_raw(text)
     else:
@@ -2355,14 +2194,27 @@ def build_parser():
 
 def main():
     global _TODAY
-    args = build_parser().parse_args()
-    path = resolve_target(args.file)
-    check_target_shape(path)
-    check_containment(path)
-    if args.today is not None:
-        _TODAY = check_date("--today", args.today)
-    command = COMMANDS[args.command]
-    sys.exit(command(path, *[getattr(args, name) for name in COMMAND_ARGS[args.command]]))
+    try:
+        args = build_parser().parse_args()
+        path = resolve_target(args.file)
+        check_target_shape(path)
+        check_containment(path)
+        if args.today is not None:
+            _TODAY = check_date("--today", args.today)
+        command = COMMANDS[args.command]
+        code = command(path, *[getattr(args, name) for name in COMMAND_ARGS[args.command]])
+    except BrokenPipeError:
+        # The reader stopped reading (`| head`): not our failure. stdout now points
+        # at /dev/null, so the interpreter's final flush prints no "Exception ignored".
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        code = 0
+    except OSError as exc:
+        # Every IO error nothing nearer mapped is one refusal line (adr 0022 D10, as
+        # refined by R-0024). Not a catch-all: pure code raises no OSError, so a
+        # bug there still surfaces as a traceback.
+        where = " on %s" % exc.filename if exc.filename is not None else ""
+        die("IO error%s: %s" % (where, exc.strerror or exc.__class__.__name__))
+    sys.exit(code)
 
 
 if __name__ == "__main__":

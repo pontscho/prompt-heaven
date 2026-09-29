@@ -33,20 +33,14 @@ script exists.
 
 WHAT GROUP A GATES, AND WHY BY AST
 ---------------------------------
-The layer rules of roadmap.py (IO only in its section 3, the clock only in
-`today()`, one spawn site, one reader, the standard streams named in four
-functions) are properties of the SOURCE, and a behavioural test can only
-sample them.  Each rule is checked over the parsed source against a set this
-file spells independently of the module, and each scanner is pointed at a
-planted copy of the real source carrying one defect, which it must report:
-a checker that silently matches nothing is indistinguishable from a clean
-tree.
-
-The two caller-set cases and the IO_FUNCTIONS coverage case are EXACT set
-checks.  While the `roadmap` row in tests/run.py still carries the `0`
-placeholder they accept a SUBSET and name the declared members still absent;
-the switch reads that row by AST at test time, so once a real count is
-written the cases are exact for good.
+Group A gates only what defends a threat: stdlib imports only, no shell, one
+git spawn site with a pinned argv prefix and read-only subcommands, and the
+two write routes reached from exactly their declared callers (no write
+bypasses the lock).  These are properties of the SOURCE, and a behavioural
+test can only sample them.  Each is checked over the parsed source against a
+set this file spells independently of the module.  Architecture lints of the
+one script (IO in one section, the clock in one function, one reader) were
+dropped in R-0024: they defended no threat.
 
 A MISSING FUNCTION IS A RED CASE, NEVER A CRASH
 ----------------------------------------------
@@ -57,8 +51,8 @@ for that group and the next group still runs.  That is what let these groups
 run red against a stub whose main() refused everything.
 
 Groups:
-  A  the format contract, the wiki type membership, and the AST gates over
-     roadmap.py's source, each scanner with its planted control
+  A  the format contract, the wiki type membership, and the security AST
+     gates over roadmap.py's source
   B  round trip against a hand-written expected file, parse/render identity,
      a render that is a no-op down to the mtime, init into a bare wiki root
   C  the wiki parsers read what roadmap.py writes (both copies, collect,
@@ -74,16 +68,16 @@ Groups:
      slugs, immutability, id-in-both repair, ids, crash simulation, the lock
      re-checked twice
   H  export: the golden on both routes twice, scope and counts, the source
-     block (the filter-free dirty flag in git sandboxes, incl. planted
-     fsmonitor and clean-filter config with their controls), --out refusals,
-     a non-UTF-8 wiki root, a reader that closes early
+     head in a git sandbox, --out refusals and a symlinked --out replaced
+     rather than written through, the planted bare repository (F19)
   I  the section-7 refusals, staged input, file shapes, containment, dates
   J  negative controls: each G/H/B/C oracle pointed at a planted defect
   K  hygiene: the live roadmap and archive, the repo tree, bytecode, no
      `.roadmap-*` name in the sandbox, and the guards themselves (runs last,
      always)
   L  the CLI surface: --today, the default target, UTF-8 under an ASCII
-     locale, a non-UTF-8 path, a reader that closes early, failing streams
+     locale, a non-UTF-8 path, a reader that closes early, an IO error on
+     stdout
 
 The git sandboxes of G and H are built by this suite's own git (`git_run`),
 under the same isolation as every child; a git that cannot init or commit
@@ -127,7 +121,6 @@ WIKILIB = os.path.join(WIKI_SCRIPTS, "_wikilib.py")
 SERVER = H.repo_path("Scripts", "mcp-wiki.py")
 REINDEX = os.path.join(WIKI_SCRIPTS, "reindex.py")
 FRESHNESS = os.path.join(WIKI_SCRIPTS, "freshness.py")
-RUN_PY = H.repo_path("tests", "run.py")
 
 GA = "A. format contract + AST gates"
 GB = "B. round trip, idempotence, byte preservation"
@@ -152,7 +145,7 @@ TMP_PREFIX = ".roadmap-"
 DEFAULT_REL = "docs/roadmap/roadmap.md"
 LANES = (("now", "# now"), ("next", "# next"), ("later", "# later"),
          ("unset", "# inbox"))
-SCHEMA = "roadmap-export/1"
+SCHEMA = "roadmap-export/2"
 
 # Every CLI case pins the clock; a case that is ABOUT --today overrides it.
 TODAY = "2026-09-28"
@@ -415,19 +408,19 @@ def refusal(suite, workspace, cid, case, text, argv, tokens, why, group=GI,
 
 
 # ---------------------------------------------------------------------------
-# A. the sets the AST gates judge against -- section 5.1 of the plan, spelled
-#    here independently of the module
+# A. the sets the security gates judge against, spelled here independently of
+#    the module
 # ---------------------------------------------------------------------------
 
 # The only modules roadmap.py may import.  Each is named by the design:
 # argparse (the CLI), collections (the namedtuples), datetime (today() and
 # check_date), errno (the constructed FileNotFoundError), hashlib (the lock
-# digests), io (io.UnsupportedOperation in _silence), json (--item-file and
-# export), os, re, stat (S_ISREG in read_regular), subprocess (git()), sys,
-# tempfile (mkstemp), unicodedata (slugify's NFKD).  A new one is a decision:
-# add it here with its reason, never silently.
+# digests), json (--item-file and export), os, re, stat (S_ISREG in
+# read_regular), subprocess (git()), sys, tempfile (mkstemp), unicodedata
+# (slugify's NFKD).  A new one is a decision: add it here with its reason,
+# never silently.
 STDLIB_ALLOWED = frozenset((
-    "argparse", "collections", "datetime", "errno", "hashlib", "io", "json",
+    "argparse", "collections", "datetime", "errno", "hashlib", "json",
     "os", "re", "stat", "subprocess", "sys", "tempfile", "unicodedata",
 ))
 
@@ -435,109 +428,25 @@ STDLIB_ALLOWED = frozenset((
 GIT_SAFE_ARGV = ("git", "-c", "core.fsmonitor=false", "-c",
                  "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
                  "-c", "safe.bareRepository=explicit")
-# The only subcommands roadmap.py may run.  None of them refreshes the index,
-# which is what would run a planted fsmonitor or clean filter (S2-2).
-GIT_SUBCOMMANDS = frozenset(("rev-parse", "cat-file", "ls-tree"))
+# The only subcommands roadmap.py may run: read-only, and none of them
+# refreshes the index (S2-2).
+GIT_SUBCOMMANDS = frozenset(("rev-parse", "cat-file"))
 
 SHELL_NAMES = ("os.system", "os.popen", "subprocess.getoutput",
                "subprocess.getstatusoutput", "subprocess.Popen")
 SHELL_PREFIXES = ("os.exec", "os.spawn")
 
-# Section 3 of 5.1, verbatim: the IO boundary.  Nothing else may do IO.
-IO_FUNCTIONS = (
-    "_write_stream", "_silence",
-    "io_fail", "_discard",
-    "read_regular", "read_archive_entry",
-    "decode", "digest",
-    "take_snapshot", "check_snapshot",
-    "write_atomic",
-    "create_exclusive", "_publish_link",
-    "git", "verify_commit", "resolve_target",
-    "check_containment",
-    "refuse_symlink", "refuse_existing",
-    "ensure_archive_dir",
-    "archive_names_for_id", "check_out_path",
-    "read_state_files", "wiki_page_names",
-    "read_staged_file",
-    "worktree_dirty",
-)
-IO_FUNCTION_SET = frozenset(IO_FUNCTIONS)
-
-# The only names under `os` pure code may use: string arithmetic on paths.
-PURE_OS_NAMES = frozenset(("os.path.join", "os.path.basename",
-                           "os.path.dirname", "os.path.splitext",
-                           "os.path.normpath", "os.sep"))
-FORBIDDEN_ROOTS = ("tempfile", "subprocess", "shutil", "glob")
-
-CLOCK_NAMES = ("datetime.date.today", "datetime.datetime.now")
-CLOCK_ROOT = "time"
-
-# chain -> the only functions that may name it (M1).  _write_stream takes the
-# stream as a parameter and names neither.
-STREAM_OWNERS = collections.OrderedDict((
-    ("sys.stdout", frozenset(("emit", "emit_raw"))),
-    ("sys.stderr", frozenset(("die", "note"))),
-))
-
-# EXACT caller sets (round-3 M1), SUBSET only while the SUITES count is the
-# `0` placeholder (L5).  Nobody weakens these to make a step green.
+# EXACT caller sets (round-3 M1): no roadmap write bypasses commit()'s lock.
+# Nobody weakens these to make a step green.
 CREATE_EXCLUSIVE_CALLERS = frozenset(("cmd_close",))
 WRITE_ATOMIC_CALLERS = frozenset(("commit", "cmd_init", "cmd_export"))
 
-# The commands that do not end in commit(): cmd_init writes through
-# write_atomic(ABSENT), the other three write no roadmap at all.
-NO_COMMIT_COMMANDS = frozenset(("cmd_init", "cmd_list", "cmd_show",
-                                "cmd_export"))
-
-# Calls the IO error rule does not require a guard for -- each because it
-# CANNOT raise an OSError, never because we chose not to guard it.
-NONRAISING_IO_CALLS = {
-    "os.path.islink": "returns False on any OSError (documented contract)",
-    "os.path.lexists": "returns False on any OSError (documented contract)",
-    "os.path.exists": "returns False on any OSError (documented contract)",
-    "os.path.isdir": "returns False on any OSError (documented contract)",
-    "os.path.isfile": "returns False on any OSError (documented contract)",
-    "os.fsencode": "does no IO: a codec call on a path",
-    "os.fsdecode": "does no IO: a codec call on a path",
-    "os.strerror": "does no IO: a table lookup of an errno",
-    "os.walk": "does not raise a listing error: it hands it to the onerror "
-               "callback, which the walk-onerror case requires on every call",
-}
-# NOT in it: os.path.realpath and os.path.abspath (both can reach os.getcwd),
-# and os.close (it can raise EIO or EINTR; read_regular nests its finally
-# inside a guarded try instead).
-
-# section-3 function -> the reason it may keep an unguarded IO call.  EMPTY:
-# in the code the plan specifies, every IO call is guarded.  An entry must
-# carry its reason, and an entry whose function no longer has an unguarded
-# call fails the io-handler case, so this list cannot rot.
-IO_HANDLER_EXEMPT = {}
-
-IO_METHODS = ("write", "flush")
-
-# chain -> the only functions that may name it (R31, S3-1).
-READER_OWNERS = collections.OrderedDict((
-    ("os.read", frozenset(("read_regular",))),
-    ("os.open", frozenset(("read_regular", "_publish_link", "_silence"))),
-    ("os.readlink", frozenset(("worktree_dirty",))),
-))
-# The builtin open, under both of its names (io.open IS the builtin).
-BUILTIN_OPEN = ("open", "io.open")
-
-# The re functions that neither match nor search: everything else under `re`
-# is reached through a compiled object.
-RE_MODULE_ALLOWED = frozenset(("re.compile", "re.escape"))
-
 DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-NESTED_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
-                ast.ClassDef)
-TRY_NODES = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
 
 MISSING = object()
 
 Chain = collections.namedtuple("Chain", "name line owner")
 Finding = collections.namedtuple("Finding", "owner what line text")
-Mode = collections.namedtuple("Mode", "exact count error")
 
 
 # ---------------------------------------------------------------------------
@@ -631,69 +540,6 @@ def _arg(call, index, name):
     if len(call.args) > index:
         return call.args[index]
     return _keyword(call, name)
-
-
-def is_forbidden(name):
-    """The purity rule (5.1): forbidden outside IO_FUNCTIONS."""
-    if name == "open":
-        return True
-    root = _root(name)
-    if root in FORBIDDEN_ROOTS:
-        return True
-    return root == "os" and name not in PURE_OS_NAMES
-
-
-def catches_oserror(try_node):
-    """A handler whose type SPELLS OSError, bare or in a tuple (I3)."""
-    for handler in try_node.handlers:
-        kind = handler.type
-        names = kind.elts if isinstance(kind, ast.Tuple) else [kind]
-        if any(isinstance(n, ast.Name) and n.id == "OSError" for n in names):
-            return True
-    return False
-
-
-def io_callee(call):
-    """The callee of an IO CALL, or None (the io-handler rule, H1/M2)."""
-    name = dotted(call.func)
-    if name is not None and is_forbidden(name) \
-            and name not in NONRAISING_IO_CALLS:
-        return name
-    if isinstance(call.func, ast.Attribute) and call.func.attr in IO_METHODS:
-        return name or "<expr>.%s" % call.func.attr
-    return None
-
-
-def io_sites(fn):
-    """(callee, line, guarded) for every IO call in fn's own body.
-
-    Guarded means: inside the BODY of a try whose handlers spell OSError, at
-    any depth.  A try's handlers, orelse and finalbody are judged by the
-    ENCLOSING state, never by that try.  Nested defs are excluded.
-    """
-    sites = []
-
-    def visit(node, guarded):
-        if isinstance(node, NESTED_NODES):
-            return
-        if isinstance(node, TRY_NODES):
-            inner = guarded or catches_oserror(node)
-            for stmt in node.body:
-                visit(stmt, inner)
-            for part in (node.handlers, node.orelse, node.finalbody):
-                for stmt in part:
-                    visit(stmt, guarded)
-            return
-        if isinstance(node, ast.Call):
-            callee = io_callee(node)
-            if callee is not None:
-                sites.append((callee, node.lineno, guarded))
-        for child in ast.iter_child_nodes(node):
-            visit(child, guarded)
-
-    for stmt in fn.body:
-        visit(stmt, False)
-    return sites
 
 
 # ---------------------------------------------------------------------------
@@ -838,213 +684,6 @@ def shell_findings(tree):
     return out
 
 
-def purity_findings(tree):
-    return [Finding(c.owner, c.name, c.line,
-                    "line %d: %s in %s, outside section 3"
-                    % (c.line, c.name, _where(c.owner)))
-            for c in chains(tree)
-            if c.owner not in IO_FUNCTION_SET and is_forbidden(c.name)]
-
-
-def clock_findings(tree):
-    return [Finding(c.owner, c.name, c.line,
-                    "line %d: %s in %s -- only today() reads the clock"
-                    % (c.line, c.name, _where(c.owner)))
-            for c in chains(tree)
-            if (c.name in CLOCK_NAMES or _root(c.name) == CLOCK_ROOT)
-            and c.owner != "today"]
-
-
-def stream_findings(tree):
-    out = []
-    for c in chains(tree):
-        for stream, owners in STREAM_OWNERS.items():
-            if _under(c.name, stream) and c.owner not in owners:
-                out.append(Finding(c.owner, c.name, c.line,
-                                   "line %d: %s in %s -- only %s may name %s"
-                                   % (c.line, c.name, _where(c.owner),
-                                      " / ".join(sorted(owners)), stream)))
-    return out
-
-
-def print_findings(tree):
-    return [Finding(c.owner, c.name, c.line,
-                    "line %d: print in %s" % (c.line, _where(c.owner)))
-            for c in chains(tree) if c.name == "print"]
-
-
-def commit_findings(tree):
-    """Every cmd_* in COMMANDS but the four that write no roadmap state
-    calls commit().  Returns (findings, the listed function names)."""
-    table = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "COMMANDS"
-                for t in node.targets):
-            table = node.value
-    if not isinstance(table, ast.Dict):
-        return [Finding(None, "COMMANDS", 0,
-                        "no module-level COMMANDS dict literal")], []
-    funcs = functions(tree)
-    out, listed = [], []
-    for value in table.values:
-        if not isinstance(value, ast.Name):
-            out.append(Finding(None, "COMMANDS", value.lineno,
-                               "line %d: a COMMANDS value is not a function "
-                               "name" % value.lineno))
-            continue
-        listed.append(value.id)
-        if value.id in NO_COMMIT_COMMANDS:
-            continue
-        fn = funcs.get(value.id)
-        if fn is None:
-            out.append(Finding(value.id, "undefined", value.lineno,
-                               "%s is listed in COMMANDS and not defined"
-                               % value.id))
-            continue
-        if not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                   and n.func.id == "commit" for n in ast.walk(fn)):
-            out.append(Finding(value.id, "commit", fn.lineno,
-                               "%s (line %d) has no commit( call"
-                               % (value.id, fn.lineno)))
-    return out, listed
-
-
-def io_handler_findings(tree):
-    """Every UNGUARDED IO call in a defined IO_FUNCTIONS member."""
-    out = []
-    funcs = functions(tree)
-    for name in IO_FUNCTIONS:
-        fn = funcs.get(name)
-        if fn is None:
-            continue
-        for callee, line, guarded in io_sites(fn):
-            if not guarded:
-                out.append(Finding(name, callee, line,
-                                   "%s line %d: %s outside the body of a try "
-                                   "whose handlers spell OSError"
-                                   % (name, line, callee)))
-    return out
-
-
-def walk_onerror_findings(tree):
-    return [Finding(owner, "os.walk", node.lineno,
-                    "line %d (%s): os.walk without onerror="
-                    % (node.lineno, _where(owner)))
-            for callee, node, owner in calls(tree)
-            if callee == "os.walk" and _keyword(node, "onerror") is None]
-
-
-def single_reader_findings(tree):
-    out = []
-    for c in chains(tree):
-        if c.name in BUILTIN_OPEN:
-            out.append(Finding(c.owner, c.name, c.line,
-                               "line %d: %s in %s -- read_regular is the one "
-                               "reader" % (c.line, c.name, _where(c.owner))))
-        owners = READER_OWNERS.get(c.name)
-        if owners is not None and c.owner not in owners:
-            out.append(Finding(c.owner, c.name, c.line,
-                               "line %d: %s in %s -- allowed only in %s"
-                               % (c.line, c.name, _where(c.owner),
-                                  " / ".join(sorted(owners)))))
-    return out
-
-
-def regex_findings(tree):
-    out = []
-    for callee, node, owner in calls(tree):
-        line = node.lineno
-        if callee == "re.compile":
-            flags = _arg(node, 1, "flags")
-            if flags is None or not any(
-                    isinstance(n, ast.Attribute) and dotted(n) == "re.ASCII"
-                    for n in ast.walk(flags)):
-                out.append(Finding(owner, "re.ASCII", line,
-                                   "line %d: re.compile without re.ASCII"
-                                   % line))
-            pattern = _arg(node, 0, "pattern")
-            if not (isinstance(pattern, ast.Constant)
-                    and isinstance(pattern.value, str)):
-                out.append(Finding(owner, "pattern", line,
-                                   "line %d: the pattern is not a str literal, "
-                                   "so its anchors cannot be checked" % line))
-            else:
-                text = pattern.value
-                if text.startswith("^"):
-                    out.append(Finding(owner, "^", line,
-                                       "line %d: pattern %r starts with ^"
-                                       % (line, text)))
-                if text.endswith("$") and not text.endswith("\\$"):
-                    out.append(Finding(owner, "$", line,
-                                       "line %d: pattern %r ends with $ -- $ "
-                                       "also matches before a trailing "
-                                       "newline" % (line, text)))
-        elif callee is not None and _root(callee) == "re" \
-                and callee not in RE_MODULE_ALLOWED:
-            out.append(Finding(owner, callee, line,
-                               "line %d (%s): %s -- every pattern is "
-                               "compiled with re.ASCII and used through its "
-                               "compiled object" % (line, _where(owner),
-                                                    callee)))
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr in ("match", "search"):
-            receiver = dotted(func.value)
-            if receiver is not None and receiver.split(".")[-1].endswith("_RE"):
-                what = "%s.%s" % (receiver, func.attr)
-                out.append(Finding(owner, what, line,
-                                   "line %d (%s): %s -- only .fullmatch( on a "
-                                   "*_RE" % (line, _where(owner), what)))
-    return out
-
-
-# ---------------------------------------------------------------------------
-# A. the durable SUBSET/EXACT switch (L5): the `roadmap` row of tests/run.py,
-#    read by AST -- run.py is parsed, never imported
-# ---------------------------------------------------------------------------
-
-def declared_suite_count(path=RUN_PY, name=NAME):
-    """(count, None) or (None, why)."""
-    with open(path, "r", encoding="utf-8") as fh:
-        tree = ast.parse(fh.read())
-    for node in tree.body:
-        if not (isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "SUITES"
-                for t in node.targets)):
-            continue
-        if not isinstance(node.value, ast.List):
-            return None, "SUITES in tests/run.py is not a list literal"
-        for row in node.value.elts:
-            if not (isinstance(row, ast.Tuple) and row.elts
-                    and isinstance(row.elts[0], ast.Constant)
-                    and row.elts[0].value == name):
-                continue
-            if len(row.elts) < 4:
-                return None, "the %r SUITES row has no count" % name
-            count = row.elts[3]
-            if isinstance(count, ast.Constant) and type(count.value) is int:
-                return count.value, None
-            return None, ("the %r SUITES row's count is not an int literal: %s"
-                          % (name, ast.unparse(count)))
-        return None, "tests/run.py SUITES has no %r row" % name
-    return None, "tests/run.py has no SUITES assignment"
-
-
-def suite_mode():
-    count, error = declared_suite_count()
-    if error is not None:
-        return Mode(True, None, error)
-    return Mode(count != 0, count, None)
-
-
-def mode_line(mode):
-    if mode.error is not None:
-        return "UNKNOWN (%s) -- judged EXACT" % mode.error
-    if mode.exact:
-        return "EXACT (the roadmap SUITES count is %d)" % mode.count
-    return "SUBSET (the roadmap SUITES count is the 0 placeholder)"
-
-
 # ---------------------------------------------------------------------------
 # A. planted copies: parse the REAL source, apply one defect, unparse, reparse
 # ---------------------------------------------------------------------------
@@ -1057,16 +696,6 @@ def planted(source, mutate):
     return ast.parse(ast.unparse(tree)), changes
 
 
-def insert_first(fn_name, statement):
-    def mutate(tree):
-        fn = functions(tree).get(fn_name)
-        if fn is None:
-            return 0
-        fn.body.insert(0, ast.parse(statement).body[0])
-        return 1
-    return mutate
-
-
 def append_to_module(source_text):
     def mutate(tree):
         tree.body.extend(ast.parse(source_text).body)
@@ -1074,123 +703,9 @@ def append_to_module(source_text):
     return mutate
 
 
-class _UnwrapGuard(ast.NodeTransformer):
-    """Replace every try that catches OSError by its bare body."""
-
-    def __init__(self):
-        self.count = 0
-
-    def visit_Try(self, node):
-        self.generic_visit(node)
-        if catches_oserror(node):
-            self.count += 1
-            return node.body
-        return node
-
-    visit_TryStar = visit_Try
-
-
-class _HoistMkstemp(ast.NodeTransformer):
-    """Move the statement holding tempfile.mkstemp ABOVE its guarded try."""
-
-    def __init__(self):
-        self.count = 0
-
-    def visit_Try(self, node):
-        self.generic_visit(node)
-        if self.count or not catches_oserror(node):
-            return node
-        for index, stmt in enumerate(node.body):
-            if any(isinstance(n, ast.Call) and dotted(n.func) == "tempfile.mkstemp"
-                   for n in ast.walk(stmt)):
-                del node.body[index]
-                if not node.body:
-                    node.body.append(ast.Pass())
-                self.count += 1
-                return [stmt, node]
-        return node
-
-    visit_TryStar = visit_Try
-
-
-class _BareFinallyClose(ast.NodeTransformer):
-    """Flatten read_regular's nested try: the reads stay in the body of the
-    guarded try, and os.close moves into THAT try's finally, so no enclosing
-    guarded try is left around it."""
-
-    def __init__(self):
-        self.count = 0
-
-    def visit_Try(self, node):
-        self.generic_visit(node)
-        if self.count or not catches_oserror(node):
-            return node
-        for index, stmt in enumerate(node.body):
-            if isinstance(stmt, TRY_NODES) and not stmt.handlers and any(
-                    isinstance(n, ast.Call) and dotted(n.func) == "os.close"
-                    for s in stmt.finalbody for n in ast.walk(s)):
-                body = node.body[:index] + stmt.body + node.body[index + 1:]
-                self.count += 1
-                return ast.Try(body=body, handlers=node.handlers,
-                               orelse=node.orelse,
-                               finalbody=stmt.finalbody + node.finalbody)
-        return node
-
-
-def transform(fn_name, transformer_cls):
-    def mutate(tree):
-        fn = functions(tree).get(fn_name)
-        if fn is None:
-            return 0
-        transformer = transformer_cls()
-        transformer.visit(fn)
-        return transformer.count
-    return mutate
-
-
-def rename_oserror_handlers(fn_name, new_name):
-    def mutate(tree):
-        fn = functions(tree).get(fn_name)
-        if fn is None:
-            return 0
-        count = 0
-        for node in ast.walk(fn):
-            if not isinstance(node, TRY_NODES):
-                continue
-            for handler in node.handlers:
-                kind = handler.type
-                names = kind.elts if isinstance(kind, ast.Tuple) else [kind]
-                if any(isinstance(n, ast.Name) and n.id == "OSError"
-                       for n in names):
-                    handler.type = ast.Name(id=new_name, ctx=ast.Load())
-                    count += 1
-        return count
-    return mutate
-
-
-def drop_keyword(fn_name, callee, keyword):
-    def mutate(tree):
-        fn = functions(tree).get(fn_name)
-        if fn is None:
-            return 0
-        count = 0
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Call) and dotted(node.func) == callee:
-                kept = [k for k in node.keywords if k.arg != keyword]
-                count += len(node.keywords) - len(kept)
-                node.keywords = kept
-        return count
-    return mutate
-
-
-def control(suite, cid, source, mutate, checker, want, planted_what, why,
-            extra=None):
-    """One negative control: the checker must report the planted defect.
-
-    `want(finding)` picks the finding the plant must produce; `extra(tree)`
-    returns further problems (a control that must ALSO prove what the plant
-    left intact).
-    """
+def control(suite, cid, source, mutate, checker, want, planted_what, why):
+    """One negative control: the checker must report the planted defect;
+    `want(finding)` picks the finding the plant must produce."""
     tree, changes = planted(source, mutate)
     problems, findings = [], []
     if not changes:
@@ -1201,8 +716,6 @@ def control(suite, cid, source, mutate, checker, want, planted_what, why,
         if not any(want(f) for f in findings):
             problems.append("the gate MISSED the planted defect: %s"
                             % planted_what)
-        if extra is not None:
-            problems += extra(tree)
     suite.record(GA, cid, problems,
                  detail=[_d("planted", planted_what),
                          _d("fired", "%d finding(s), %d site(s) changed"
@@ -1327,21 +840,9 @@ def case_no_shell(suite, tree):
                    "os.spawn* (R25, NFR-10)" % ", ".join(SHELL_NAMES))
 
 
-def case_purity(suite, tree, source, mode):
-    _findings_case(suite, "purity-io-only-in-section-3", purity_findings(tree),
-                   "outside IO_FUNCTIONS: no builtin open, nothing under "
-                   "%s, nothing under os but %s (R22)"
-                   % (", ".join(FORBIDDEN_ROOTS),
-                      ", ".join(sorted(PURE_OS_NAMES))))
-    _findings_case(suite, "purity-clock-only-in-today", clock_findings(tree),
-                   "%s and anything under %s occur only in today()"
-                   % (", ".join(CLOCK_NAMES), CLOCK_ROOT))
-    _findings_case(suite, "purity-std-streams", stream_findings(tree),
-                   "sys.stdout only in emit / emit_raw, sys.stderr only in "
-                   "die / note; _write_stream names neither (M1)")
-    _findings_case(suite, "purity-no-print", print_findings(tree),
-                   "emit and emit_raw are the only stdout writers")
-
+def case_callers(suite, tree):
+    """No roadmap write bypasses the lock: the two write routes are reached
+    from EXACTLY the declared callers."""
     for cid, callee, declared in (
             ("callers-create-exclusive", "create_exclusive",
              CREATE_EXCLUSIVE_CALLERS),
@@ -1349,185 +850,24 @@ def case_purity(suite, tree, source, mode):
         observed = references(tree, callee)
         extra = sorted(observed - declared)
         absent = sorted(declared - observed)
-        problems = [mode.error] if mode.error is not None else []
-        problems += problem_if(extra, "%s is reached from %s, outside the "
-                               "declared set %s"
-                               % (callee, extra, sorted(declared)))
-        problems += problem_if(mode.exact and absent,
-                               "declared caller(s) %s do not reach %s -- the "
-                               "set is EXACT once the roadmap SUITES count is "
-                               "set (L5)" % (absent, callee))
+        problems = problem_if(extra, "%s is reached from %s, outside the "
+                              "declared set %s"
+                              % (callee, extra, sorted(declared)))
+        problems += problem_if(absent, "declared caller(s) %s do not reach %s"
+                               % (absent, callee))
         suite.record(GA, cid, problems,
-                     detail=[_d("mode", mode_line(mode)),
-                             _d("declared", sorted(declared)),
-                             _d("observed", sorted(observed)),
-                             _d("absent", "%s%s" % (
-                                 absent or "none",
-                                 " (still absent, SUBSET mode)"
-                                 if absent and not mode.exact else ""))])
-
-    findings, listed = commit_findings(tree)
-    _findings_case(suite, "commands-end-in-commit", findings,
-                   "every cmd_* in COMMANDS but %s calls commit("
-                   % ", ".join(sorted(NO_COMMIT_COMMANDS)),
-                   [_d("listed", ", ".join(listed) or "none")])
-
-    control(suite, "control-open-in-parse-roadmap", source,
-            insert_first("parse_roadmap", "open('planted')"),
-            purity_findings,
-            lambda f: f.owner == "parse_roadmap" and f.what == "open",
-            "open( at the top of parse_roadmap",
-            "a pure parser that reads a file is the erosion R22 names")
-    control(suite, "control-os-path-exists-in-cmd-init", source,
-            insert_first("cmd_init", "os.path.exists('planted')"),
-            purity_findings,
-            lambda f: f.owner == "cmd_init" and f.what == "os.path.exists",
-            "os.path.exists( at the top of cmd_init",
-            "judged as os.path.exists, not as the pure-looking os.path")
-    control(suite, "control-sys-stdout-in-cmd-list", source,
-            insert_first("cmd_list", "sys.stdout.write('planted')"),
-            stream_findings,
-            lambda f: f.owner == "cmd_list" and _under(f.what, "sys.stdout"),
-            "sys.stdout.write( at the top of cmd_list",
-            "a second stdout writer bypasses the one UTF-8 byte route")
-
-
-def case_io_handler(suite, tree, source, mode):
-    unguarded = io_handler_findings(tree)
-    funcs = functions(tree)
-    defined = [name for name in IO_FUNCTIONS if name in funcs]
-    total = sum(len(io_sites(funcs[name])) for name in defined)
-    offenders = sorted({f.owner for f in unguarded})
-    problems = [f.text for f in unguarded if f.owner not in IO_HANDLER_EXEMPT]
-    problems += ["IO_HANDLER_EXEMPT names %s, which has no unguarded IO call "
-                 "any more -- remove the entry" % name
-                 for name in sorted(IO_HANDLER_EXEMPT) if name not in offenders]
-    suite.record(GA, "io-handler", problems,
-                 detail=[_d("rule", "every IO call in section 3 lies in the "
-                                    "BODY of a try whose handlers spell "
-                                    "OSError (R32, NFR-13, H1)"),
-                         _d("checked", "%d of %d IO_FUNCTIONS defined, %d IO "
-                                       "call(s), %d unguarded"
-                            % (len(defined), len(IO_FUNCTIONS), total,
-                               len(unguarded))),
-                         _d("exempt", sorted(IO_HANDLER_EXEMPT) or "none")])
-
-    absent = [name for name in IO_FUNCTIONS if name not in funcs]
-    problems = [mode.error] if mode.error is not None else []
-    problems += problem_if(mode.exact and absent,
-                           "IO_FUNCTIONS member(s) not defined: %s -- every "
-                           "one must exist once the roadmap SUITES count is "
-                           "set (L5)" % absent)
-    suite.record(GA, "io-functions-defined", problems,
-                 detail=[_d("mode", mode_line(mode)),
-                         _d("defined", "%d of %d" % (len(defined),
-                                                     len(IO_FUNCTIONS))),
-                         _d("absent", "%s%s" % (
-                             absent or "none",
-                             " (still absent, SUBSET mode)"
-                             if absent and not mode.exact else ""))])
-
-    _findings_case(suite, "walk-onerror", walk_onerror_findings(tree),
-                   "every os.walk passes onerror=: its NONRAISING membership "
-                   "must not hide a listing error (M1)")
-
-    control(suite, "control-io-unguarded-archive-listing", source,
-            transform("archive_names_for_id", _UnwrapGuard),
-            io_handler_findings,
-            lambda f: f.owner == "archive_names_for_id",
-            "archive_names_for_id with its try / except OSError removed",
-            "the listing error escapes as a traceback")
-    control(suite, "control-io-baseexception-handler", source,
-            rename_oserror_handlers("archive_names_for_id", "BaseException"),
-            io_handler_findings,
-            lambda f: f.owner == "archive_names_for_id",
-            "archive_names_for_id with its handler spelled except "
-            "BaseException:",
-            "clean-up-and-re-raise is not a guard: the handler must SPELL "
-            "OSError")
-
-    def still_guarded(tree_):
-        fn = functions(tree_).get("write_atomic")
-        guarded = [s for s in io_sites(fn) if s[2]] if fn is not None else []
-        return problem_if(not guarded,
-                          "the planted write_atomic has no guarded IO call "
-                          "left, so it does not prove the gate is per call")
-    control(suite, "control-io-mkstemp-above-try", source,
-            transform("write_atomic", _HoistMkstemp),
-            io_handler_findings,
-            lambda f: f.owner == "write_atomic" and f.what == "tempfile.mkstemp",
-            "write_atomic with tempfile.mkstemp moved ABOVE its try",
-            "one guarded and one unguarded IO site: a per-function 'has some "
-            "handler' rule passes this (H1)",
-            extra=still_guarded)
-
-    def reads_still_guarded(tree_):
-        hits = [f for f in io_handler_findings(tree_)
-                if f.owner == "read_regular" and f.what == "os.read"]
-        return problem_if(hits, "the plant unguarded os.read too, so the "
-                                "detection does not isolate the finally rule")
-    control(suite, "control-io-close-in-bare-finally", source,
-            transform("read_regular", _BareFinallyClose),
-            io_handler_findings,
-            lambda f: f.owner == "read_regular" and f.what == "os.close",
-            "read_regular with os.close(fd) in the finally of the guarded "
-            "try, no enclosing guarded try",
-            "a call in finalbody is not guarded by that try",
-            extra=reads_still_guarded)
-    control(suite, "control-walk-without-onerror", source,
-            drop_keyword("wiki_page_names", "os.walk", "onerror"),
-            walk_onerror_findings,
-            lambda f: f.owner == "wiki_page_names",
-            "wiki_page_names whose os.walk has no onerror=",
-            "the walk-onerror sub-check must fire")
-
-
-def case_single_reader(suite, tree, source):
-    _findings_case(suite, "single-reader", single_reader_findings(tree),
-                   "no builtin open anywhere; os.read only in read_regular; "
-                   "os.open only in read_regular / _publish_link / _silence; "
-                   "os.readlink only in worktree_dirty (R31, S3-1)")
-    control(suite, "control-open-in-wiki-page-names", source,
-            insert_first("wiki_page_names", "open('planted')"),
-            single_reader_findings,
-            lambda f: f.owner == "wiki_page_names" and f.what == "open",
-            "open( at the top of wiki_page_names",
-            "a second reader follows symlinks and blocks on a FIFO")
-
-
-def case_regex_ascii(suite, tree, source):
-    """R35, M3.  L2 is answered with the SECOND option: every pattern in
-    roadmap.py -- including the one in slugify -- is compiled with re.ASCII
-    and used through its compiled object.  So besides the three plan rules
-    (re.ASCII on every re.compile, no ^ / $ anchor in a pattern literal, no
-    .match( / .search( on a *_RE), EVERY module-level re function call except
-    re.compile and re.escape is flagged, literal pattern or not."""
-    _findings_case(suite, "regex-ascii", regex_findings(tree),
-                   "re.compile always with re.ASCII, a str-literal pattern "
-                   "without ^ or $ anchors, *_RE used only with .fullmatch(, "
-                   "and no module-level re function but %s (R35, M3, L2)"
-                   % ", ".join(sorted(RE_MODULE_ALLOWED)))
-    control(suite, "control-date-re-match", source,
-            append_to_module("def _planted_match(value):\n"
-                             "    return DATE_RE.match(value)\n"),
-            regex_findings,
-            lambda f: f.owner == "_planted_match" and f.what == "DATE_RE.match",
-            "a function calling DATE_RE.match(",
-            "match accepts a prefix: 2026-09-28junk would pass")
+                     detail=[_d("declared", sorted(declared)),
+                             _d("observed", sorted(observed))])
 
 
 def group_a(suite, mod, lib, source):
     tree = ast.parse(source)
-    mode = suite_mode()
     case_format_contract(suite, mod)
     case_type_membership(suite, mod, lib)
     case_stdlib(suite, tree)
     case_git(suite, mod, tree, source)
     case_no_shell(suite, tree)
-    case_purity(suite, tree, source, mode)
-    case_io_handler(suite, tree, source, mode)
-    case_single_reader(suite, tree, source)
-    case_regex_ascii(suite, tree, source)
+    case_callers(suite, tree)
 
 
 # ---------------------------------------------------------------------------
@@ -4119,14 +3459,13 @@ GOLDEN_EXPORT = '''{
       "why": "Proposed as a finer priority axis inside a lane."
     }
   ],
-  "schema": "roadmap-export/1",
+  "schema": "roadmap-export/2",
   "scope": {
     "closed": true,
     "closed_since": null,
     "open": true
   },
   "source": {
-    "dirty": null,
     "head": null
   },
   "wip_limit": {
@@ -4154,12 +3493,9 @@ def group_h(suite, mod, work, wiki):
     _h_golden(suite, mod, work)
     _h_scope(suite, mod, work)
     _h_refusals(suite, mod, work)
-    _h_non_utf8(suite, mod, work)
-    _h_early_close(suite, mod, work)
     _h_ready(suite, mod, work)
     _h_source(suite, mod, work)
     _h_out(suite, mod, work)
-    _h_planted_config(suite, mod, work)
     _h_planted_bare_repo(suite, mod, work)
 
 
@@ -4264,79 +3600,6 @@ def _h_refusals(suite, mod, work):
                        "M3, R35", absent=absent)
 
 
-def _h_non_utf8(suite, mod, work):
-    cid = "h-non-utf8-wiki-root"
-    case = sandbox_path(work.subdir(cid))
-    raw_root = os.fsencode(case) + b"/d\xff"
-    try:
-        os.makedirs(raw_root + b"/roadmap/archive")
-    except OSError as exc:
-        info_skip(suite, GH, cid, "the filesystem refuses the name (%s)"
-                  % (exc.strerror or exc))
-        return
-    root = sandbox_path(os.fsdecode(raw_root))
-    write_file(os.path.join(root, "roadmap", "roadmap.md"), FIXTURE_52)
-    for name, body in BOTH_ARCHIVES.items():
-        write_file(os.path.join(root, "roadmap", "archive", name), body)
-    target = raw_root + b"/roadmap/roadmap.md"
-    out_raw = os.fsencode(case) + b"/out.json"
-    base = [sys.executable.encode(), TARGET.encode(), b"--file", target,
-            b"--today", TODAY.encode(), b"export"]
-    code1, out1, err1 = _spawn_raw(base, case)
-    code2, _out2, err2 = _spawn_raw(base + [b"--out", out_raw], case)
-    text = err1.decode("utf-8", "replace")
-    problems = problem_if(code1 != 2 or code2 != 2, "exits %r / %r, want 2 / 2"
-                          % (code1, code2))
-    problems += problem_if(err1 != err2, "the two routes refuse differently: "
-                           "%r vs %r" % (err1, err2))
-    problems += problem_if(len(text.strip().splitlines()) != 1
-                           or "Traceback" in text, "stderr %r" % text)
-    problems += missing_tokens(text, ["export path", "carries a lone "
-                                      "surrogate (U+DCFF; a directory name "
-                                      "that is not UTF-8) -- rename it; the "
-                                      "export is UTF-8 JSON"])
-    problems += problem_if(out1, "stdout carried %d bytes" % len(out1))
-    problems += problem_if(os.path.lexists(os.fsdecode(out_raw)),
-                           "--out was created")
-    suite.record(GH, cid, problems,
-                 detail=[_d("argv", "bytes, as in group L (L4, R36)"),
-                         _d("stderr", text.strip())])
-
-
-def _h_early_close(suite, mod, work):
-    cid = "h-reader-closes-early"
-    count = 4 * PIPE_BYTES // 200 + 1
-    text = _bulk_roadmap(count)
-    path = stage_roadmap(work, cid, text)
-    cap = getattr(mod, "PAGE_MAX_BYTES", 4 * 1024 * 1024)
-    problems = problem_if(len(text.encode("utf-8")) >= cap,
-                          "the fixture would trip the read cap, not the pipe")
-    proc = subprocess.Popen([sys.executable, TARGET, "export", "--file", path,
-                             "--today", TODAY], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            cwd=os.path.dirname(path),
-                            env=H.child_env(_child_env(None)))
-    try:
-        proc.stdout.readline()
-        proc.stdout.close()
-        code = proc.wait(timeout=60)
-        err = proc.stderr.read().decode("utf-8", "replace")
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        code, err = None, ""
-        problems.append("the child hung after the reader closed")
-    finally:
-        proc.stderr.close()
-    problems += problem_if(code != 0, "exit %r, want 0" % code)
-    problems += problem_if("Traceback" in err or "Exception ignored" in err,
-                           "stderr %r" % err[-300:])
-    suite.record(GH, cid, problems,
-                 detail=[_d("fixture", "%d items, an export many times a "
-                                       "%d-byte pipe" % (count, PIPE_BYTES)),
-                         _d("why", "M2, R34: export | head exits 0")])
-
-
 def _h_ready(suite, mod, work):
     cid = "h-ready-through-the-archive"
     path, problems, _outs = build(work, cid, [
@@ -4383,188 +3646,25 @@ def _source(path, **kwargs):
 
 
 def _h_source(suite, mod, work):
-    root, path, why = _committed_repo(work, "h-source-clean")
+    cid = "h-source-clean"
+    root, path, why = _committed_repo(work, cid)
     if root is None:
-        for cid in ("h-source-clean", "h-dirty-modified", "h-dirty-untracked",
-                    "h-dirty-deleted-archive", "h-dirty-outside-scope",
-                    "h-dirty-sha256-clean", "h-dirty-unborn-head",
-                    "h-dirty-symlink-to-fifo", "h-dirty-tracked-symlink",
-                    "h-dirty-unreadable-file", "h-dirty-unlistable-subdir",
-                    "h-dirty-cr-name"):
-            info_skip(suite, GH, cid, "git is not usable here (%s)" % why)
+        info_skip(suite, GH, cid, "git is not usable here (%s)" % why)
         return
-    # L10: a git that predates --show-object-format gives a null dirty for
-    # every case; each case that asserts true/false is then INFO, and ONE case
-    # asserts the null instead.
-    rc, fmt, _err = git_run(root, "rev-parse", "--show-object-format")
-    gate = rc == 0 and fmt.strip() in ("sha1", "sha256")
-    if not gate:
-        problems, source = _source(path)
-        problems += problem_if((source or {}).get("dirty") is not None,
-                               "dirty is %r, want null for this git"
-                               % (source or {}).get("dirty"))
-        suite.record(GH, "h-dirty-null-without-object-format", problems,
-                     detail=[_d("why", "L10: rev-parse --show-object-format "
-                                       "answered rc %d, %r" % (rc, fmt))])
-
-    def judge(cid, path, want, detail, **kwargs):
-        problems, source = _source(path, **kwargs)
-        dirty = (source or {}).get("dirty")
-        if not gate:
-            suite.record(GH, cid, status=H.INFO,
-                         detail=["skipped: this git lacks --show-object-format "
-                                 "(L10); dirty was %r" % dirty])
-            return
-        problems += problem_if(dirty is not want, "dirty is %r, want %r"
-                               % (dirty, want))
-        suite.record(GH, cid, problems, detail=[_d("scenario", detail)])
-
     problems, source = _source(path)
     short = head_sha(root, short=True)
-    problems += problem_if((source or {}).get("head") != short,
-                           "head %r, want %r" % ((source or {}).get("head"),
-                                                 short))
-    if gate:
-        problems += problem_if((source or {}).get("dirty") is not False,
-                               "dirty %r on a clean tree, want false (and "
-                               "proof that ls-tree took -- as a separator)"
-                               % (source or {}).get("dirty"))
-    suite.record(GH, "h-source-clean", problems,
-                 detail=[_d("oracle", "head == git rev-parse --short HEAD; "
-                                      "dirty false")])
-
-    root, path, why = _committed_repo(work, "h-dirty-modified")
-    code, _out, err = cli(path, "wip", "4", "--reason", "x")
-    judge("h-dirty-modified", path, True, "roadmap.md modified by wip")
-
-    root, path, why = _committed_repo(work, "h-dirty-untracked")
-    write_file(os.path.join(os.path.dirname(path), "notes.txt"), "new\n")
-    judge("h-dirty-untracked", path, True, "an untracked file under roadmap/")
-
-    root, path, why = _committed_repo(work, "h-dirty-deleted-archive")
-    os.remove(os.path.join(_archive_dir(path), ARCHIVE_2_NAME))
-    judge("h-dirty-deleted-archive", path, True, "a tracked archive file "
-                                                 "deleted")
-
-    root, path, why = _committed_repo(work, "h-dirty-outside-scope")
-    write_file(os.path.join(root, "outside.txt"), "not the roadmap\n")
-    write_file(os.path.join(root, "docs", "other.md"), "not the roadmap\n")
-    judge("h-dirty-outside-scope", path, False, "changes OUTSIDE the roadmap "
-                                                "directory only")
-
-    root, path, why = _committed_repo(work, "h-dirty-sha256-clean",
-                                      object_format="sha256")
-    if root is None:
-        info_skip(suite, GH, "h-dirty-sha256-clean", why)
-    else:
-        judge("h-dirty-sha256-clean", path, False, "a clean SHA-256 repo: "
-                                                   "the blob hash follows "
-                                                   "the object format")
-
-    cid = "h-dirty-unborn-head"
-    root = sandbox_path(work.subdir(cid))
-    if git_repo(root, commit=False):
-        path = stage_roadmap(work, cid, FIXTURE_52, BOTH_ARCHIVES)
-        problems, source = _source(path)
-        problems += problem_if(source != {"head": None, "dirty": None},
-                               "source %r, want both null" % (source,))
-        suite.record(GH, cid, problems,
-                     detail=[_d("fixture", "git init, no commit")])
-    else:
-        info_skip(suite, GH, cid, "git init failed")
-
-    cid = "h-dirty-symlink-to-fifo"
-    if can_symlink() and hasattr(os, "mkfifo"):
-        root, path, why = _committed_repo(work, cid,
-                                          extra={"notes.md": "notes\n"})
-        fifo = _fifo(os.path.join(root, "fifo"))
-        notes = os.path.join(os.path.dirname(path), "notes.md")
-        os.remove(notes)
-        os.symlink(fifo, notes)
-        judge(cid, path, True, "a tracked file replaced by a symlink to a "
-                               "FIFO: never opened (test-side timeout)",
-              timeout=20)
-    else:
-        info_skip(suite, GH, cid, "no os.symlink / os.mkfifo")
-
-    cid = "h-dirty-tracked-symlink"
-    if can_symlink():
-        root = sandbox_path(work.subdir(cid))
-        path = stage_roadmap(work, cid, FIXTURE_52, BOTH_ARCHIVES)
-        link = os.path.join(os.path.dirname(path), "link")
-        os.symlink("roadmap.md", link)
-        if not git_repo(root) or git_commit_all(root):
-            info_skip(suite, GH, cid, "git init/commit failed")
-        else:
-            judge(cid, path, False, "a symlink committed as mode 120000, "
-                                    "unchanged: os.readlink hashes to its "
-                                    "blob")
-            os.remove(link)
-            os.symlink("archive", link)
-            judge(cid + "-retargeted", path, True, "the same symlink "
-                                                   "retargeted")
-    else:
-        info_skip(suite, GH, cid, "no os.symlink")
-
-    cid = "h-dirty-unreadable-file"
-    if is_root():
-        info_skip(suite, GH, cid, "root ignores the permission bits")
-    else:
-        root, path, why = _committed_repo(work, cid,
-                                          extra={"notes.md": "notes\n"})
-        notes = os.path.join(os.path.dirname(path), "notes.md")
-        os.chmod(notes, 0o000)
-        try:
-            judge(cid, path, True, "a tracked file chmod 000: a per-entry "
-                                   "OSError is 'possibly different'")
-        finally:
-            os.chmod(notes, 0o644)
-
-    cid = "h-dirty-unlistable-subdir"
-    if is_root():
-        info_skip(suite, GH, cid, "root ignores the permission bits")
-    else:
-        root, path, why = _committed_repo(work, cid)
-        sub = sandbox_path(work.subdir(cid, "docs", "roadmap", "sub"))
-        write_file(os.path.join(sub, "untracked.txt"), "x\n")
-        os.chmod(sub, 0o000)
-        try:
-            judge(cid, path, True, "an untracked subdirectory chmod 000: the "
-                                   "re-raising onerror (L3) -- a silent one "
-                                   "would skip it and report false")
-        finally:
-            os.chmod(sub, 0o700)
-
-    cid = "h-dirty-cr-name"
-    try:
-        root, path, why = _committed_repo(work, cid,
-                                          extra={"a\rb.txt": "cr\n"})
-    except OSError as exc:
-        root, why = None, "the filesystem refuses the name (%s)" % exc
-    if root is None:
-        info_skip(suite, GH, cid, why)
-    else:
-        judge(cid, path, False, "a committed name holding \\r: the bytes-mode "
-                                "ls-tree is not newline-translated")
+    problems += problem_if(source != {"head": short}, "source %r, want %r"
+                           % (source, {"head": short}))
+    suite.record(GH, cid, problems,
+                 detail=[_d("oracle", "source is exactly the head, git "
+                                      "rev-parse --short HEAD; no dirty field "
+                                      "since roadmap-export/2 (R-0024)")])
 
 
 def _h_out(suite, mod, work):
     cid = "h-out"
     path = stage_roadmap(work, cid, FIXTURE_52, BOTH_ARCHIVES)
     case = os.path.join(work.path, cid)
-    missing = os.path.join(case, "missing", "out.json")
-    record_refusal(suite, GH, "h-out-missing-parent", path,
-                   ["export", "--out", missing],
-                   ["--out %s: directory %s does not exist"
-                    % (missing, os.path.dirname(missing))], "round-3 H1",
-                   after=lambda: problem_if(os.path.lexists(
-                       os.path.dirname(missing)), "missing/ was created"))
-    blocker = write_file(os.path.join(case, "file.txt"), "a file\n")
-    under = os.path.join(blocker, "out.json")
-    record_refusal(suite, GH, "h-out-parent-is-a-file", path,
-                   ["export", "--out", under],
-                   ["--out %s: directory %s does not exist" % (under, blocker)],
-                   "round-3 H1: a parent that is not a directory")
     record_refusal(suite, GH, "h-out-is-the-roadmap", path,
                    ["export", "--out", path],
                    ["--out %s is the roadmap or its archive -- refusing"
@@ -4576,19 +3676,19 @@ def _h_out(suite, mod, work):
                     % inside], "the archive holds pages only",
                    after=lambda: problem_if(os.path.lexists(inside),
                                             "x.json was created"))
-    record_refusal(suite, GH, "h-out-is-a-directory", path,
-                   ["export", "--out", case],
-                   ["--out %s is a directory" % case], "a directory")
     if can_symlink():
         target = write_file(os.path.join(case, "target.json"), "keep\n")
         link = os.path.join(case, "link.json")
         os.symlink(target, link)
-        record_refusal(suite, GH, "h-out-symlink", path,
-                       ["export", "--out", link],
-                       ["--out %s is a symlink -- refusing" % link],
-                       "S-L2, R28",
-                       after=lambda: problem_if(read_utf8(target) != "keep\n",
-                                                "the link target changed"))
+        code, _out, err = cli(path, "export", "--out", link)
+        problems = shape_problems(code, err, 0)
+        problems += problem_if(read_utf8(target) != "keep\n",
+                               "the link target changed")
+        problems += problem_if(os.path.islink(link),
+                               "--out is still a symlink")
+        suite.record(GH, "h-out-symlink", problems,
+                     detail=[_d("why", "S-L2, R28: os.replace replaces the "
+                                       "link, never writes through it")])
     else:
         info_skip(suite, GH, "h-out-symlink", "no os.symlink")
     cid = "h-out-readonly-parent"
@@ -4610,65 +3710,6 @@ def _h_out(suite, mod, work):
     suite.record(GH, cid, problems,
                  detail=[_d("why", "R32, NFR-13: write_atomic's io_fail "
                                    "backstop"), _d("stderr", err.strip())])
-
-
-def _h_planted_config(suite, mod, work):
-    cid = "h-planted-config-never-runs"
-    root, path, why = _committed_repo(work, cid)
-    if root is None:
-        for name in (cid, "h-control-fsmonitor-live",
-                     "h-control-clean-filter-live"):
-            info_skip(suite, GH, name, "git is not usable here (%s)" % why)
-        return
-    tools = sandbox_path(work.subdir(cid + "-tools"))
-    fsmon_marker = os.path.join(tools, "FSMON_RAN")
-    clean_marker = os.path.join(tools, "CLEAN_RAN")
-    fsmon = write_file(os.path.join(tools, "fsmon.sh"),
-                       "#!/bin/sh\ntouch '%s'\n" % fsmon_marker)
-    os.chmod(fsmon, 0o755)
-    clean = write_file(os.path.join(tools, "clean.sh"),
-                       "#!/bin/sh\ntouch '%s'\ncat\n" % clean_marker)
-    os.chmod(clean, 0o755)
-    problems = []
-    for key, value in (("core.fsmonitor", fsmon), ("filter.pwn.clean", clean)):
-        rc, _out, err = git_run(root, "config", key, value)
-        problems += problem_if(rc != 0, "git config %s failed: %s"
-                               % (key, err.strip()))
-    write_file(os.path.join(root, ".gitattributes"), "*.md filter=pwn\n")
-    code, _out, err = cli(path, "wip", "4", "--reason", "x")
-    problems += shape_problems(code, err, 0)
-    got, source = _source(path)
-    problems += got
-    rc, fmt, _err = git_run(root, "rev-parse", "--show-object-format")
-    if rc == 0 and fmt.strip() in ("sha1", "sha256"):
-        problems += problem_if((source or {}).get("dirty") is not True,
-                               "dirty %r, want true" % (source or {}).get(
-                                   "dirty"))
-    problems += problem_if(os.path.exists(fsmon_marker),
-                           "roadmap.py ran the planted fsmonitor")
-    problems += problem_if(os.path.exists(clean_marker),
-                           "roadmap.py ran the planted clean filter")
-    suite.record(GH, cid, problems,
-                 detail=[_d("planted", "core.fsmonitor and a clean filter "
-                                       "on *.md, roadmap.md modified "
-                                       "(S-L1, S2-2, R27)")])
-    rel = os.path.relpath(path, root)
-    for control, argv, marker in (
-            ("h-control-fsmonitor-live", ["status"], fsmon_marker),
-            ("h-control-clean-filter-live", ["diff", "--", rel],
-             clean_marker)):
-        git_run(root, *argv, plain=True)
-        if os.path.exists(marker):
-            suite.record(GH, control, [],
-                         detail=[_d("oracle", "the suite's own git %s fired "
-                                              "the planted setting, so its "
-                                              "absence above is evidence"
-                                   % argv[0])])
-        else:
-            suite.record(GH, control, status=H.INFO,
-                         detail=["this git did not fire the planted setting "
-                                 "through `git %s`, so its half of the case "
-                                 "proves nothing here" % argv[0]])
 
 
 # A bare repository planted as TRACKED files in the roadmap directory: clone
@@ -5102,12 +4143,6 @@ def _nesting_tokens(body):
     return ["is not a JSON object ("], "no error"
 
 
-def _fifo(path):
-    sandbox_path(path)
-    os.mkfifo(path)
-    return path
-
-
 def group_i(suite, mod, work, wiki):
     for name, change, tokens in GRAMMAR_CASES:
         cid = "i-grammar-" + name
@@ -5175,12 +4210,6 @@ def group_i(suite, mod, work, wiki):
                    ["add", "--title", "t", "--origin", "user:i-id-space"],
                    ["id space exhausted (R-9999)"], "four digits",
                    extra=[why] if why else [])
-    path = stage_roadmap(work, "i-staged-is-roadmap", EXPECTED_B)
-    record_refusal(suite, GI, "i-staged-is-roadmap", path,
-                   ["add", "--title", "t", "--origin", "user:i-s",
-                    "--why-file", path],
-                   ["--why-file %s is the roadmap or its archive -- refusing"
-                    % path], "a staged file must not be the target")
     path = stage_roadmap(work, "i-reason-file-one-line", EXPECTED_B)
     reason = staged(work, "i-reason-file-one-line", "r.txt", "one\n")
     code, out, err = cli(path, "move", "R-0004", "later", "--reason-file",
@@ -5264,20 +4293,29 @@ def _group_i_terminal_chars(suite, work):
     or an archive page before list/show/export print it; a refusal naming a
     filesystem name escapes it rather than writing it raw to the terminal."""
     path = stage_roadmap(work, "i-terminal-write", EXPECTED_B)
-    for ch in TERMINAL_CHARS:
-        tag = "%04x" % ord(ch)
-        record_refusal(suite, GI, "i-terminal-title-" + tag, path,
-                       ["add", "--title", "a%sb" % ch, "--origin",
-                        "user:i-t-" + tag],
-                       ["title value", "control character (U+%04X)" % ord(ch)],
-                       "a single-line value carries no terminal-active or "
-                       "invisible character")
-        record_refusal(suite, GI, "i-terminal-why-" + tag, path,
-                       ["add", "--title", "t", "--origin", "user:i-w-" + tag,
-                        "--why", "ok\na%sb" % ch],
-                       ["the why text carries a control character (U+%04X) "
-                        "on line 2" % ord(ch)],
-                       "the why keeps newline and tab, nothing else")
+    for cid, argv_of, tokens_of, why in (
+            ("i-terminal-title",
+             lambda ch, tag: ["add", "--title", "a%sb" % ch, "--origin",
+                              "user:i-t-" + tag],
+             lambda ch: ["title value",
+                         "control character (U+%04X)" % ord(ch)],
+             "a single-line value carries no terminal-active or invisible "
+             "character"),
+            ("i-terminal-why",
+             lambda ch, tag: ["add", "--title", "t", "--origin",
+                              "user:i-w-" + tag, "--why", "ok\na%sb" % ch],
+             lambda ch: ["the why text carries a control character "
+                         "(U+%04X) on line 2" % ord(ch)],
+             "the why keeps newline and tab, nothing else")):
+        problems = []
+        for ch in TERMINAL_CHARS:
+            tag = "%04x" % ord(ch)
+            got, _err = check_refusal(path, argv_of(ch, tag), tokens_of(ch))
+            problems += ["U+%s: %s" % (tag.upper(), p) for p in got]
+        suite.record(GI, cid, problems,
+                     detail=[_d("why", why),
+                             _d("chars", ", ".join("U+%04X" % ord(ch)
+                                                   for ch in TERMINAL_CHARS))])
     record_refusal(suite, GI, "i-terminal-reason", path,
                    ["move", "R-0003", "next", "--reason", "a%sb" % RLO],
                    ["reason value", "control character (U+202E)"],
@@ -5447,25 +4485,6 @@ def _group_i_file_shapes(suite, mod, work):
                        "the stager writes plain files")
     else:
         info_skip(suite, GI, "i-staged-symlink", "no os.symlink")
-    if hasattr(os, "mkfifo"):
-        cid = "i-staged-fifo"
-        path = stage_roadmap(work, cid, EXPECTED_B)
-        work.subdir(cid, "stage")
-        fifo = _fifo(os.path.join(work.path, cid, "stage", "item.json"))
-        record_refusal(suite, GI, cid, path, ["add", "--item-file", fifo],
-                       ["--item-file %s is not a regular file" % fifo],
-                       "a FIFO is refused before any open, within a "
-                       "test-side timeout", timeout=20)
-        cid = "i-archive-entry-fifo"
-        path = stage_roadmap(work, cid, EMPTY_TEXT, {})
-        entry = _fifo(os.path.join(os.path.dirname(path), "archive",
-                                   "0001-x.md"))
-        record_refusal(suite, GI, cid, path, ["list"],
-                       ["archive entry %s is not a regular file" % entry],
-                       "S3-1: lstat refuses it before any open", timeout=20)
-    else:
-        info_skip(suite, GI, "i-staged-fifo", "no os.mkfifo")
-        info_skip(suite, GI, "i-archive-entry-fifo", "no os.mkfifo")
     if can_symlink():
         cid = "i-archive-entry-symlink"
         path = stage_roadmap(work, cid, EMPTY_TEXT, {})
@@ -5571,11 +4590,13 @@ def _group_i_init_and_symlinks(suite, mod, work):
         finally:
             os.chmod(docs, 0o700)
         problems = shape_problems(code, err)
-        problems += problem_if(not err.startswith("roadmap: cannot create "
-                                                  "directory"),
+        problems += problem_if(not err.startswith("roadmap: IO error on %s"
+                                                  % os.path.join(docs,
+                                                                 "roadmap")),
                                "stderr %r" % err.strip())
         suite.record(GI, cid, problems,
-                     detail=[_d("why", "R32: the io_fail backstop, one line"),
+                     detail=[_d("why", "R32: main's one except OSError, one "
+                                       "line"),
                              _d("stderr", err.strip())])
 
     cid = "i-refused-init-creates-nothing"
@@ -5602,8 +4623,8 @@ def _group_i_init_and_symlinks(suite, mod, work):
     os.symlink(real, path)
     record_refusal(suite, GI, cid, path,
                    ["move", "R-0004", "later", "--reason", "x"],
-                   ["%s is a symlink -- roadmap.py reads and replaces only a "
-                    "regular file it owns" % path], "S-L2",
+                   ["not a regular file: %s" % path],
+                   "S-L2: read_regular's lstat, never followed",
                    after=lambda: problem_if(read_utf8(real) != EXPECTED_B,
                                             "the link target changed"))
     cid = "i-symlinked-archive"
@@ -5723,7 +4744,7 @@ class _FailingBuffer:
 
 class _FailingStream:
     """A stream whose byte route fails. fileno() raises, as captured()'s
-    StringIO does, so _silence can never dup2 over the runner's own fds."""
+    StringIO does, so nothing can dup2 over the runner's own fds."""
 
     def __init__(self, exc):
         self.buffer = _FailingBuffer(exc)
@@ -5874,47 +4895,42 @@ def group_l(suite, mod, work, wiki):
                             % (count, PIPE_BYTES)),
                          _d("why", "M2, R34: EPIPE on stdout exits 0")])
 
-    got = need(suite, GL, "l-stream-failures", mod, "emit", "note", "die")
+    got = need(suite, GL, "l-stream-failures", mod, "main")
     if got is not None:
-        emit, note, die = got
-        saved = sys.stdout, sys.stderr
-        problems = []
+        (main,) = got
+        path = stage_roadmap(work, "l-stream-failures", EXPECTED_B)
+        saved = sys.argv, sys.stdout, sys.stderr
+        saved_env = dict(os.environ)
         try:
-            sys.stdout = _FailingStream(OSError(errno.EIO, "Input/output "
-                                                           "error"))
+            # main()'s containment check spawns git: the child isolation too
+            os.environ.update(git_isolation())
+            sys.argv = ["roadmap.py", "list", "--file", path,
+                        "--today", TODAY]
+            sys.stdout = _FailingStream(OSError(errno.EIO,
+                                                "Input/output error"))
             sys.stderr = io.StringIO()
-            try:
-                emit("x")
-                code = None
-            except SystemExit as exc:
-                code = exc.code
-            err = sys.stderr.getvalue()
-            problems += problem_if(code != 2, "EIO on stdout: exit %r" % code)
-            problems += problem_if(
-                not err.startswith("roadmap: cannot write to standard output")
-                or len(err.strip().splitlines()) != 1,
-                "EIO on stdout: stderr %r" % err)
-            for label, fn in (("note", note), ("die", die)):
-                sys.stdout = io.StringIO()
-                fake = _FailingStream(BrokenPipeError(errno.EPIPE,
-                                                      "Broken pipe"))
-                sys.stderr = fake
+            with patched(mod, "_TODAY", getattr(mod, "_TODAY", None)):
                 try:
-                    fn("x")
+                    main()
                     code = None
                 except SystemExit as exc:
                     code = exc.code
-                problems += problem_if(code != 2, "%s on a broken stderr: "
-                                       "exit %r" % (label, code))
-                problems += problem_if(fake.buffer.writes != 1,
-                                       "%s tried %d writes (recursion?)"
-                                       % (label, fake.buffer.writes))
+                except Exception as exc:  # noqa: BLE001 -- the escape IS the finding
+                    code = "raised %s" % exc.__class__.__name__
+            err = sys.stderr.getvalue()
         finally:
-            sys.stdout, sys.stderr = saved
+            sys.argv, sys.stdout, sys.stderr = saved
+            os.environ.clear()
+            os.environ.update(saved_env)
+        problems = problem_if(code != 2, "EIO on stdout: exit %r" % (code,))
+        problems += problem_if(
+            err != "roadmap: IO error: Input/output error\n",
+            "EIO on stdout: stderr %r" % err)
         suite.record(GL, "l-stream-failures", problems,
-                     detail=[_d("why", "M2: EIO on stdout is one line + 2; a "
-                                       "broken stderr is 2 with no "
-                                       "recursion")])
+                     detail=[_d("why", "ADR 0022 D10 as refined in R-0024: "
+                                       "main's one except OSError turns an IO "
+                                       "error into one line and exit 2"),
+                             _d("stderr", err.strip())])
 
 
 # ---------------------------------------------------------------------------

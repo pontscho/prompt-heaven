@@ -403,13 +403,13 @@ op is four hops:
 
 The machine proposes, a human decides, the script writes.
 
-## Export contract (`roadmap-export/1`)
+## Export contract (`roadmap-export/2`)
 
 `export` is read-only and takes no lock. It writes JSON to stdout, or to `--out`
 (the same bytes either way).
 
-- **Shape.** Top-level keys: `schema` (`"roadmap-export/1"`), `source`
-  (`{"head", "dirty"}`), `scope` (`{"open", "closed", "closed_since"}`), `wip_limit`
+- **Shape.** Top-level keys: `schema` (`"roadmap-export/2"`), `source`
+  (`{"head"}`), `scope` (`{"open", "closed", "closed_since"}`), `wip_limit`
   (`{"now": N}`), `counts` (always all six: `untriaged`, `later`, `next`, `now`,
   `done`, `dropped`), and `items`. Each item carries `id`, `title`, `state`,
   `horizon`, `rank`, `ready`, `origin`, `spec`, `blocked_by`, `follows`, `severity`,
@@ -427,13 +427,10 @@ The machine proposes, a human decides, the script writes.
   `rank` is the 0-based position in the lane (null for closed items). Reverse edges
   (`blocks`) are the consumer's to compute.
 - **`why` is raw markdown.** HTML escaping is the CONSUMER's job.
-- **`source.dirty` is ADVISORY.** It compares the roadmap directory's raw working-tree
-  bytes with HEAD's stored blobs, hashed in Python, without running `git status` -- so
-  no repository-configured filter or hook ever runs. It can therefore over-report
-  `true` (under `core.autocrlf`, a clean filter, an ignored or temp file under the
-  directory) but never under-report. `null` means unknown: outside a work tree, on an
-  unborn branch, or when git fails. `source.head` is the short HEAD sha, or null.
-- **Versioning.** An additive field keeps `/1`; a breaking change bumps the version.
+- **`source.head`** is the short HEAD sha, or null outside a work tree, on an unborn
+  branch, or when git fails. `/1` also carried `source.dirty`; it had no consumer and
+  was removed in `/2` (R-0024, ADR 0022 addendum).
+- **Versioning.** An additive field keeps the version; a breaking change bumps it.
   There is no JSON Schema file; this section and the suite's golden export are the
   contract.
 - **Kanban mapping** (documented, not encoded): columns = horizon
