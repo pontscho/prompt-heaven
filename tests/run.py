@@ -424,15 +424,17 @@ SUITES = [
     # large one on purpose -- six defective escapers plus a four-way
     # parser/renderer pairing, because this suite's one renderer-level defect
     # lived in two functions and in neither alone.  The unpadded pair and the
-    # jenkins two-space case answer ADR 0016's two open questions (R-0011).
+    # jenkins two-space case answer ADR 0016's two open questions (R-0011); the
+    # jenkins newline case closes the finding that measurement left open.
     ("table_cells", run_table_cells,
      "a rendered table cell cannot forge a column boundary: every renderer "
      "either escapes its own delimiter and documents the scheme where the "
      "model reads it, or is whitespace-aligned and has none to escape -- "
      "with reversibility a SEPARATE clause, because an encoder that does not "
      "escape its own escape character passes a column count; a pipe renderer "
-     "declared unpadded charges no row for another row's width, and a jenkins "
-     "two-space cell is measured not to forge against the aligned reader", 38),
+     "declared unpadded charges no row for another row's width, a jenkins "
+     "two-space cell is measured not to forge against the aligned reader, "
+     "and a CR/LF in a jenkins cell is escaped so it cannot end its row", 39),
     # TYPED for the same reason again.  The count is 3 clauses x 15 servers +
     # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
     # being analysed IS the defect here, so a count that moves when the fleet

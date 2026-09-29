@@ -77,6 +77,8 @@ So `list_jobs` with no params lists the jobs inside the project.
 
 Replies are **markdown**: a `## heading`, `**label**: value` lines, whitespace-aligned tables inside a fence for row data, a fence for verbatim blobs (console logs, artifacts). Absent fields are omitted rather than printed as null.
 
+Table cells are **escaped** so one row is always one line: a backslash is `\\`, a newline `\n`, a carriage return `\r`, a tab `\t` (a multi-line parameter description arrives as `line one\nline two`). Decode left to right, a backslash consuming the next character. A `|` is not escaped: columns are aligned by the header's offsets, never split on `|`.
+
 Every function accepts **`max_answer_chars`** (int, default **24000** ≈ 6k tokens). Pass `0` to disable the ceiling when you genuinely want the whole thing.
 
 * **Row-shaped payloads** (log lines, job lists, test cases) drop whole ROWS and close with

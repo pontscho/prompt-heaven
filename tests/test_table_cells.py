@@ -23,8 +23,9 @@ exist and they split two ways:
   * `ClaudeCode/skills/roadmap/scripts/roadmap.py`  renders the roadmap
     summary region and `list` as a padded GFM table whose Title cell is free
     user text, and escapes with checkpoint's vocabulary.
-  * `Scripts/mcp-jenkins.py` and `Scripts/mcp-inspect.py` do not escape either
-    and do not need to: their delimiter is whitespace, not `|`.
+  * `Scripts/mcp-jenkins.py` and `Scripts/mcp-inspect.py` do not escape the
+    pipe and do not need to: their delimiter is whitespace, not `|`.  (jenkins
+    does escape CR/LF, the ROW boundary -- case_jenkins_newline.)
 
 That last pair is why this suite has two halves rather than one rule.
 
@@ -154,7 +155,8 @@ Groups:
   C  GATE     -- the scheme is documented where the model reads it
   D  DECLARED -- the STRUCTURE renderers' reason is measured, not accepted;
                  a jenkins two-space cell against the aligned and the
-                 delimiter reader (R-0011)
+                 delimiter reader (R-0011); a CR/LF in a jenkins cell
+                 cannot end its row
   E  ROSTER   -- the table covers the tree, totals hold, no row may declare
                  STRUCTURE for a pipe-delimited renderer
   F  control  -- escapers with one defect each that the oracle MUST reject, and
@@ -897,10 +899,10 @@ def group_structure(suite, loaded):
 # escaping or dropped its padding would change them, and that is a decision
 # about how this table is read which must trip something.
 #
-# Not asserted, and measured in the detail: a NEWLINE in a cell still ends the
-# row under BOTH readers.  That is the ADR's other half of the defect, it is
-# reachable (a Jenkins parameter description is routinely multi-line), and it
-# is outside this suite's STRUCTURE invariant, which judges the pipe.
+# The NEWLINE half was first recorded here as measured-not-asserted: a newline in
+# a cell ended the row under BOTH readers, reachably, because a Jenkins
+# parameter description is routinely multi-line.  It is asserted now (one
+# header plus one row, two lines) and closed by case_jenkins_newline below.
 JNK_HEADERS = ["name", "default", "choices", "description"]
 JNK_ROWS = [
     ["a  b", "x", "y", "last  cell"],   # two spaces, in a padded AND the last col
@@ -958,13 +960,81 @@ def case_jenkins_two_spaces(suite, loaded):
                             "the table's reading changed"
                             % (DEVIATION_DRIFTED, dlm, pinned))
     nl = got.renderer(JNK_HEADERS, JNK_NEWLINE).splitlines()
-    detail += ["newline     : %d lines for 1 header + 1 row (not asserted -- "
-               "a newline ends the row under both readers)" % len(nl)]
+    if len(nl) != 1 + len(JNK_NEWLINE):
+        problems.append("%s: a newline in a cell gave %d lines for 1 header + "
+                        "%d row -- it ended the row"
+                        % (COLUMN_FORGED, len(nl), len(JNK_NEWLINE)))
+    detail += ["newline     : %d lines for 1 header + 1 row" % len(nl)]
     detail += ["  " + line for line in nl]
     suite.record(GD, name, problems, detail=detail,
                  brief="%s | jenkins-two-spaces | %s"
                        % (H.FAIL if problems else H.PASS,
                           "forged" if problems else "cannot forge (aligned)"))
+    case_jenkins_newline(suite, loaded)
+
+
+# The newline half of ADR 0016's defect, in jenkins.  Its STRUCTURE route answers
+# the pipe and nothing else: a CR or LF in a cell is a ROW boundary in every
+# plain-text table, whitespace-aligned or not, so it needs the fleet's one
+# escape vocabulary -- postgres's and tshark's `\\` first, then `\n`/`\r`/`\t`
+# -- minus the `\|`, which jenkins' delimiter does not need.  The backslash row
+# is what makes the round trip mean something: without `\\` a literal `\n` in a
+# description and an escaped newline would render identically.  Widths are
+# measured on the ESCAPED text, so the aligned reader still slices cleanly.
+JNL_ROWS = [
+    ["lf", "x", "", "line one\nline two"],
+    ["crlf", "", "", "windows\r\nline"],
+    ["cr", "y", "", "old mac\rline"],
+    ["back", "", "z", "C:\\new\\dir and a\\nliteral"],
+    ["plain", "", "", "d"],
+]
+JNL_SKILL = "ClaudeCode/skills/mcp-jenkins/SKILL.md"
+JNL_SKILL_TOKENS = ("\\n", "\\\\")
+
+
+def case_jenkins_newline(suite, loaded):
+    """D, continued: a CR, LF or CRLF in a jenkins cell cannot end its row."""
+    got = loaded.get("mcp-jenkins")
+    name = "mcp-jenkins: a newline in a cell cannot end the row"
+    if got is None or got.renderer is None:
+        suite.record(GD, name, ["%s: mcp-jenkins did not load" % NO_RENDERER])
+        return
+    problems = []
+    text = got.renderer(JNK_HEADERS, JNL_ROWS)
+    physical = text.split("\n")
+    if len(physical) != 1 + len(JNL_ROWS) or "\r" in text:
+        problems.append("%s: %d physical lines (CR present: %s) for 1 header + "
+                        "%d rows -- a cell ended its row"
+                        % (COLUMN_FORGED, len(physical), "\r" in text,
+                           len(JNL_ROWS)))
+    detail = ["physical    : %d lines, want %d"
+              % (len(physical), 1 + len(JNL_ROWS))]
+    lines = text.splitlines()
+    starts = column_starts(lines[0])
+    for want, line in zip(JNL_ROWS, lines[1:]):
+        pos = split_positional(line, starts)
+        decoded = []
+        for cell in pos:
+            value, problem = decode_cell(cell)
+            decoded.append(value if not problem else "<%s>" % problem)
+        detail += ["row         : %r" % line, "  decoded   : %r" % decoded]
+        if decoded != want:
+            problems.append("%s: the aligned reader decoded %r, want %r"
+                            % (NOT_REVERSIBLE, decoded, want))
+    with open(H.repo_path(*JNL_SKILL.split("/")), encoding="utf-8") as fh:
+        skill = fh.read()
+    missing = [t for t in JNL_SKILL_TOKENS if t not in skill]
+    if missing:
+        problems.append("%s: %s never mentions %s, so a model reading a cell "
+                        "cannot tell an escaped newline from a literal one"
+                        % (UNDOCUMENTED, JNL_SKILL,
+                           ", ".join(repr(m) for m in missing)))
+    detail.append("documented  : %s (the tools/list text defers to the skill)"
+                  % JNL_SKILL)
+    suite.record(GD, name, problems, detail=detail,
+                 brief="%s | jenkins-newline | %s"
+                       % (H.FAIL if problems else H.PASS,
+                          "row ended" if problems else "one line per row"))
 
 
 # The census that found these seven: `.ljust(`/`.rjust(` across BOTH roots the

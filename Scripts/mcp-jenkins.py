@@ -592,9 +592,27 @@ def _md_fields(payload: dict, keys, labels: Optional[Dict[str, str]] = None) -> 
     return out
 
 
+def _md_cell(value: str) -> str:
+    r"""Escape one cell so it cannot end its row. Reversible: \\ \n \r \t.
+
+    The fleet's one vocabulary (ADR 0016: postgres `_escape_cell`, tshark
+    `_md_cell`) minus `\|` -- the pipe is not a column boundary here, the
+    header offsets are. A CR or LF is a ROW boundary in any plain-text table,
+    and a Jenkins parameter description is routinely multi-line. The backslash
+    goes FIRST, or a literal `\n` in a description would read as a newline.
+    """
+    value = value.replace("\\", "\\\\")
+    return value.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
 def _md_table(header: List[str], rows: List[List[str]]) -> str:
     """Whitespace-aligned rows; the last column is left unpadded so a long
-    trailing cell (a URL, a description) cannot blow up the table width."""
+    trailing cell (a URL, a description) cannot blow up the table width.
+
+    Every cell goes through `_md_cell` BEFORE the widths are measured, so the
+    columns align on the text actually emitted."""
+    header = [_md_cell(h) for h in header]
+    rows = [[_md_cell(c) for c in r] for r in rows]
     widths = [len(h) for h in header]
     for row in rows:
         for i, cell in enumerate(row):
