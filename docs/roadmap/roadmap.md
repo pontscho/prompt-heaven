@@ -21,6 +21,7 @@ WIP now: 2 of 3. Archive: 34 closed items (31 done, 3 dropped).
 | inbox | R-0040 | idea   | Review findings propose roadmap candidates                                                 | yes   |
 | inbox | R-0041 | idea   | Checkpoint THREADS propose roadmap candidates                                              | yes   |
 | inbox | R-0042 | idea   | A read-only kanban board over roadmap-export/2                                             | yes   |
+| inbox | R-0043 | idea   | Reclaim the work of a cancelled call in git, inspect, wiki and postgres                    | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -152,3 +153,17 @@ Split from R-0014. ADR 0022 shipped only the export contract. A board consumes r
 ### Log
 
 - 2026-09-29 new->unset: User 2026-09-29: split from R-0014.
+
+## R-0043 · Reclaim the work of a cancelled call in git, inspect, wiki and postgres
+
+state: idea
+horizon: unset
+origin: user:2026-09-29:r0006-remaining-reclaim
+blocked_by: []
+tags: [mcp, scripts]
+
+Split from R-0006, whose scope the user cut to reply suppression plus the cheap reclaims (forge and tshark kill the child, LSP servers send the cancel request). git, inspect and wiki run their children through subprocess.run, so a cancel stops only the reply until they move to a recorded Popen that the cancel path can kill; their clamped timeouts make the gain small. postgres would need a PostgreSQL CancelRequest on a second connection, because abandoning a query mid-exchange desyncs the wire (ADR 0008). jenkins, webfetch and context7 block in socket reads that cannot be interrupted and stay reply-only.
+
+### Log
+
+- 2026-09-29 new->unset: User 2026-09-29: split from R-0006.
