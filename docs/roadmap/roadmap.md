@@ -13,6 +13,7 @@ WIP now: 0 of 3. Archive: 21 closed items (19 done, 2 dropped).
 
 | Lane  | Id     | State | Title                                                                                      | Ready |
 |-------|--------|-------|--------------------------------------------------------------------------------------------|-------|
+| next  | R-0036 | idea  | Clear the five gating wiki pages and the stale README group column                         | yes   |
 | later | R-0001 | idea  | Retire the standalone clangd and cuda MCP servers (purity Phase 2)                         | yes   |
 | later | R-0003 | idea  | Wire a seccomp BPF filter into sbx on Linux                                                | yes   |
 | later | R-0004 | idea  | Let the implement skill route a failed task to Quint                                       | yes   |
@@ -32,6 +33,20 @@ WIP now: 0 of 3. Archive: 21 closed items (19 done, 2 dropped).
 # now
 
 # next
+
+## R-0036 · Clear the five gating wiki pages and the stale README group column
+
+state: idea
+horizon: next
+origin: user:2026-09-29:wiki-gating-dead-anchors
+blocked_by: []
+tags: [tests, wiki]
+
+The server-side wiki freshness reports five gating pages with seven dead anchors. ADR 0022 still anchors roadmap.py:worktree_dirty twice after R-0024 removed it; spec-sandbox-run, layer-contract and requirements-yaml anchor docs/feature-implementation-plan.md, renamed in a6461d3; spec-sandbox-run anchors a tests/test_sbx.py that never existed; ADR 0017 uses example paths under tests/ that read as anchors. Accepted ADR bodies take only addenda, so the ADR cases need a decision on how an immutable page drops a dead anchor. The freshness.py CLI reports gating 0 because it gates only orphaned sources, which is how this stayed hidden. Separately, the groups column in tests/README.md is stale for purity_file_ops, wiki_index and checkpoint, and generated-regions.md types the server count its census region already renders.
+
+### Log
+
+- 2026-09-29 new->next: added
 
 # later
 
