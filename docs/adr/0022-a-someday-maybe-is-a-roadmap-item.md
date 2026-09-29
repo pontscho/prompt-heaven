@@ -469,3 +469,15 @@ Every value passes exactly the checks add applies, through the same functions ra
 Archive immutability is unchanged. Only an open item can be edited: an archived id, done or dropped, is refused as closed, and so is a live copy of an archived id left by an interrupted close, because the archive wins and the refusal persists no repair. The write is the ordinary whole-file render through commit, under the same two-digest lock; no new write route exists, so the write-route caller sets gated by the suite did not change.
 
 The item's log gains one dated line in its own lane with no state change, naming the fields that actually changed and the reason if one was given, for example next->next: edited title, tags: a reason. A field equal to its current value is not named, and an edit that changes nothing is refused. That line fits the existing log grammar, so the export stays roadmap-export/2 with no new field; the one new thing a consumer can see is a log entry whose from equals its to with a null state, which the skill's export contract now says.
+
+## Addendum (2026-09-29): producers propose through one fragment (R-0014)
+
+Closed as roadmap item R-0014, which held the two threads the R-0039 addendum left it: the producer hooks and a kanban board.
+
+The producer hooks now have one protocol, written once so the producers cannot drift apart: `ClaudeCode/skills/_lib/roadmap-proposal.md`. A producer never runs roadmap.py, not even one holding Bash, and writes no staged file; it emits a ROADMAP CANDIDATE block (title, why, optional severity, tags, origin). The main context shows it to the user and, only on approval, stages and adds it the way adopt hop 4 does, with the reason proposed by the producer and no horizon, so the item lands in the inbox. The origin is a document anchor when a section states the work, otherwise a user: key, and a dedup refusal is an answer, never a prompt to invent a second origin. This is the rule the machine proposes, a human decides, the script writes, applied to producers other than adopt; roadmap.py did not change.
+
+The first producer is the bug hunter: its diagnosis-only verdict carries an optional ROADMAP CANDIDATE field `ClaudeCode/agents/minion-bug-hunter.md`, and the handoff contract has the candidate-block row `ClaudeCode/skills/_lib/handoff-contracts.md`.
+
+Of the other producers the Consequences list, two were dropped rather than built. Recap writes AI-Soul memories, not the repository, so its open threads have no roadmap route to hook. ADR authoring needs no producer: an ADR states its deferred work in its Consequences, which is exactly what adopt harvests, one item per section, so a producer would only duplicate adopt. Unfixed review findings, checkpoint open threads and the kanban board were split into R-0040, R-0041 and R-0042. The board's form (static HTML from a stdlib script, which needs the staging path pattern widened, or a terminal rendering under ADR 0016's cell escaping) is left to that item.
+
+Declared, not gated: like the staging rule's caller half, the protocol is prose followed by a model.
