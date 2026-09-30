@@ -7,12 +7,13 @@ description: Why DDG blocks Python HTTP clients, and the DDG-first/Bing-fallback
 sources:
   - Scripts/search_duckduckgo.py
 verified:
-  commit: 1bade65
-  date: 2026-08-04
+  commit: 9cfa7e1
+  date: 2026-09-30
 links:
   - scripts
   - 0023-the-websocket-client-is-a-sixth-domain
   - 0024-pure-python-39-and-the-stdlib
+  - 0004-never-pin-a-browser-impersonation-version
 ---
 
 # DuckDuckGo Bot Detection — Technical Analysis & Bypass Research
@@ -425,6 +426,81 @@ Two navigation-only headers ride along into the XHR POST, because a per-request 
 One staged value is rewritten in flight and it is **not ours to fix**: primp stages `accept-encoding: gzip, deflate, br, zstd` (character-identical to the old dict) and its transport then rewrites the outgoing value to `gzip, br`, matching what it can actually decode. No header we set changes that.
 
 **If DDG throughput ever regresses, suspect these two before suspecting a missing key**: that `accept-encoding` rewrite, and header **order** — order is itself a fingerprint, and an echo endpoint cannot reveal it, so "11 of 13 character-identical" says nothing about the sequence DDG sees them in.
+### 2.9 Loopback Fingerprint Measurement vs Chrome 153, and a Pure-Python PoC (R-0017)
+
+**Date**: 2026-09-29/30
+**Host**: macOS; python3 3.14 / OpenSSL 3.6.0, curl_cffi 0.15.0, primp 1.3.1, real Chrome 153.0
+
+§2.2–§2.5 compared hashes from `tls.peet.ws` and an off-host capture that cannot see inside TLS. This round put a TLS + h2 server on loopback that terminates the connection itself, so it sees the whole ClientHello **and** the decrypted h2 preface, SETTINGS, WINDOW_UPDATE and HEADERS (HPACK decoded). The dump server, the diff report and the PoC are throwaway artefacts under the git-ignored `.claude/tmp/` scratch directory (`clienthello_dump.py`, `chdump/diff_report.md`, `chdump/sni/sni_report.md`, `chpoc/chrome_poc.py`) — none of them is in the repo, and nothing below is wired into `Scripts/search_duckduckgo.py`.
+
+#### Method
+
+- Real Chrome was driven through the gdc MCP: 30 connections (12 fresh, 18 resumed; 4 of them top-level document navigations). Every client configuration got 20 connections.
+- Chrome's captures are GREASE-normalised and compared per feature as *constant* vs *varying* across connections; a difference counts as **fixed** only when it holds on every connection.
+- **JA3 is useless for Chrome-family clients**: Chrome shuffles the extension order per connection, so JA3 (and JA4_o) took a distinct value on every one of its 12 fresh connections. **JA4**, which sorts the extensions, is the stable key and is what the tables below use.
+
+#### Chrome 153 reference
+
+| Signal | Value |
+|--------|-------|
+| JA4, fresh | `t13d1517h2_8daaf6152771_cb7bf5808d99` |
+| JA4, resumed | `t13d1518h2_8daaf6152771_e2d80978ab2e` — adds `pre_shared_key` (41), always last |
+| Akamai h2 | `1:65536;2:0;4:6291456;6:262144\|15663105\|0\|m,a,s,p` |
+| HEADERS frame (navigation) | flags `0x25`, priority exclusive, weight 256 |
+
+Chrome sends 17 non-GREASE extensions, not the 16 of §2.5: the newcomer is **51764 / `0xca34`**, Trust Anchor Identifiers, with a 186-byte payload that was byte-constant across all 30 Chrome ClientHellos. `signature_algorithms` now starts with `GREASE, 0904, 0905, 0906` (ML-DSA) before the eight classic algorithms.
+
+#### curl_cffi 0.15.0 (`chrome146`, its newest Chrome target)
+
+At the TLS layer it differs from Chrome 153 in exactly two fixed ways, and everything else (ciphers, groups, key shares, ALPN, ALPS `h2`, ECH GREASE lengths, extension shuffling) falls inside Chrome's own variation:
+
+1. extension 51764 (Trust Anchor Identifiers) is absent, and
+2. `signature_algorithms` lacks the `GREASE, 0904, 0905, 0906` prefix.
+
+That is why its JA4 is `t13d1516h2_8daaf6152771_d8a2da3f94cd` — the value §2.2 and §2.5 recorded as an *exact* match against Chrome 146/148, and which Chrome 153 no longer produces. Its h2 SETTINGS, WINDOW_UPDATE, HEADERS flags/priority and pseudo-header order match Chrome's navigation exactly; the remaining h2 differences are the version-bearing header values (`user-agent`, `sec-ch-ua`) and `accept-language`. `chrome136` and `chrome145` show the same TLS picture.
+
+#### primp 1.3.1 — fixed tells
+
+These are properties of primp's impersonation itself, visible on every connection and not fixable by picking another version string:
+
+- **Frozen extension order.** Chrome shuffles per connection; primp sends one constant order, so JA3 is constant across all 20 connections — a static signature Chrome never produces.
+- **ALPS payload `000403c9bb32`.** Chrome sends `0003026832` (`h2`); primp advertises a bogus protocol id instead of `h2`.
+- **ECH GREASE payload lengths are not bucketed.** Chrome only ever uses {144, 176, 208, 240}; primp's `chrome` group produced 16 distinct lengths in 20 connections, and 18 of those 20 connections used a length Chrome never sends.
+- **HPACK Huffman-codes every literal.** Chrome sends several values raw (e.g. `sec-ch-ua-mobile`, `sec-ch-ua-platform`, `upgrade-insecure-requests`, `sec-fetch-user`); primp Huffman-codes all of them.
+- **Header order is wrong for `chrome_148`** (`user-agent` at position 5, `sec-ch-ua` at 11, where Chrome has 8 and 4); the bare `chrome` / `edge` aliases hit that order on part of their connections.
+- **The `chrome` / `edge` aliases pick a random major per `Client`** (5 distinct UAs in 20 connections) — by design for `Scripts/search_duckduckgo.py:PRIMP_ALIASES`, but it means no two clients look alike.
+- `verify=False` is ignored; reaching a self-signed loopback server needs `ca_cert_file`.
+
+This matters for the Linux branch of both impersonating scripts, which is primp by design `Scripts/search_duckduckgo.py:create_session` `Scripts/mcp-webfetch.py:_create_session`, and it adds a reason beyond silent version rot to [[0004-never-pin-a-browser-impersonation-version]]'s distrust of primp: its fingerprint carries tells a pin cannot fix.
+
+#### ECH GREASE length vs SNI length
+
+Measured separately over 109 Chrome connections (48 fresh, 61 resumed) with SNI lengths from 11 to 70 bytes:
+
+- the ECH GREASE payload is **always one of {144, 176, 208, 240}**, regardless of SNI length;
+- ECH extension length = payload + 42, `enc` length 32;
+- fresh ClientHello length (handshake message incl. its 4-byte header) = **1759 + len(SNI) + payload**, with no padding extension.
+
+So Chrome does not size its GREASE ECH by the SNI; a client reproducing it needs only the four-value choice, not an SNI-dependent size.
+
+#### The PoC: a pure-stdlib Chrome 153 client
+
+A single stdlib-only Python file (Python 3.9 compatible, roughly 2200 lines on 2026-09-30), everything in it copied from the Chrome captures rather than guessed:
+
+- pure-Python X25519, **ML-KEM-768** (FIPS 203; cross-checked in both directions against OpenSSL 3.6 — OpenSSL encapsulates / PoC decapsulates and the reverse), AES-GCM, ChaCha20-Poly1305 and the TLS 1.3 key schedule;
+- the Chrome 153 ClientHello, including extension shuffling, the ECH GREASE buckets, ALPS `h2` and extension 51764;
+- an HPACK encoder following quiche's decisions (Huffman only when strictly shorter) that reproduces all 12 captured Chrome header blocks byte-identical;
+- an h2 client that follows same-origin redirects as new streams on the same connection, with a basic cookie jar.
+
+**Loopback result**: JA4 matched Chrome on every connection. The diff report lists **no fixed TLS difference** against Chrome and, at the h2 level, only `cache-control: max-age=0` — which Chrome sent because its capture was a reload, and which the PoC omits on purpose because a typed navigation does not send it. The only other residue is `peetprint_md5`, a hash over the *random* GREASE sigalg value, which fell outside the 12-sample Chrome set on 6 of 20 connections — a sample-size artefact, not a structural difference. An `openssl s_server` matrix (X25519MLKEM768, X25519, all three TLS 1.3 suites) passed. Handshake median ~115 ms, of which ML-KEM decapsulation is ~58 ms.
+
+**Not done, and it matters**: the certificate chain and CertificateVerify are **not verified** (loopback-only by intent); the client-side ALPS EncryptedExtensions message is not implemented (DDG did not negotiate ALPS, so it was not exercised); `br` / `zstd` bodies cannot be decoded with the stdlib.
+
+#### Live result — one sample
+
+User-authorized, 3 requests in total. `lite.duckduckgo.com` negotiated X25519MLKEM768 + `TLS_AES_256_GCM_SHA384`, ALPS not negotiated. `GET /lite/?q=test` answered 302; following the redirect returned a brotli-encoded 200, "test at DuckDuckGo", with 10 result links and no anomaly / CAPTCHA markers.
+
+**This is a single sample.** It shows a Chrome-153-shaped ClientHello and h2 preface from pure Python *can* get a result page; it does not show that the fingerprint is what DDG gates on — §2.6 and §2.8 found request shape and IP history mattering more than TLS, and one GET from an unburnt session tests neither.
 
 
 ---
@@ -476,9 +552,13 @@ Evidence suggesting behavioral detection:
 - Advanced search syntax queries trigger CAPTCHA more frequently
 - Chinese locales are blocked from pagination entirely (hardcoded in SearXNG)
 
-### 3.5 TCP/IP Fingerprinting (NOT a Factor)
+### 3.5 TCP/IP Fingerprinting (Measured, Not the Deciding Factor)
 
-TCP fingerprinting (JA4T) operates at the OS level, not the application level. A Python script and Chrome running on the same Linux machine produce **identical** TCP SYN packets (same TTL=64, window size, TCP options). This cannot distinguish curl_cffi from a real browser on the same host.
+This section used to say that a Python script and Chrome on the same host send **identical** TCP SYNs. The page's own measurements say otherwise, so only the measured part is kept:
+
+- **What is OS-level and therefore shared on one host**: initial TTL and TCP option ordering (§2.7 Issue 3). These tell the OS, not the client.
+- **What is not**: the receive window and window scale derive from the application's `SO_RCVBUF`. The 2026-05-24 captures measured curl_cffi at window 502 / scale 128 and real Chrome at 2070 / 64 (§2.5), so JA4T *can* separate them.
+- **Why it still is not the lever**: a shim moved curl_cffi to 16384 / 4 and DDG's CAPTCHA verdict did not change, while Chrome with yet another window passed (§2.6). Nothing in this page measured TCP behaviour beyond the SYN (retransmission, ACK timing), and the 2026-09-29/30 loopback work of §2.9 does not see TCP at all.
 
 ### 3.6 curl_cffi Header Override Problem
 
@@ -637,26 +717,35 @@ Current: DDG works intermittently. Engine raises `SearxEngineCaptchaException` w
 
 ### 7.1 Script: `Scripts/search_duckduckgo.py`
 
-The backends, with auto-fallback:
+`DDG_BACKEND` picks one of three runs `Scripts/search_duckduckgo.py:main`; every one
+except `cdp` first checks that this platform's impersonation package is installed and
+exits 2 with one line if not `Scripts/search_duckduckgo.py:require_backend`.
+
+Default (unset or `ddg`) — DDG first, Bing on the first CAPTCHA
+`Scripts/search_duckduckgo.py:_run_ddg_with_bing_fallback`:
 
 ```
-┌─────────────────┐
-│  DDG Lite (POST) │ ──CAPTCHA──→ ┌──────────────┐
-│  curl_cffi       │              │  Bing (GET)   │
-│  chrome146       │              │  curl_cffi    │
-└────────┬────────┘              │  always works │
-         │OK                      └──────────────┘
-         ▼
-    Return results
+create_session()  primp "chrome"+linux on Linux | curl_cffi random CURL_CFFI_PROFILES elsewhere
+   │
+warmup GET lite.duckduckgo.com/lite/  (navigation headers from the impersonation profile)
+   │
+   ▼  per query (new session + warmup every ROTATE_EVERY queries)
+DDG Lite POST /lite/ (XHR headers, §2.8) ── anomaly-modal / "Please complete" ──→ Bing GET /search
+   │ OK                                      (new session + Bing warmup;         non-200 → no results
+   ▼                                          this AND all remaining queries)
+ parse_lite_results → results
 ```
 
-**Optional CDP backend** (`DDG_BACKEND=cdp`):
+`DDG_BACKEND=bing` runs the Bing leg alone `Scripts/search_duckduckgo.py:_run_bing`.
+Bing is not checked for a CAPTCHA at all: a non-200 answer yields no results
+`Scripts/search_duckduckgo.py:search_bing`, so "always works" is an observation, not
+something the code guarantees.
+
+**Optional CDP backend** (`DDG_BACKEND=cdp`) `Scripts/search_duckduckgo.py:_run_cdp`:
 ```
-┌──────────────────┐
-│  Chrome (real)    │
-│  CDP WebSocket    │
-│  fetch() from JS  │ ── always works, requires running Chrome
-└──────────────────┘
+_discover_chrome() ── none found ──→ exit 1
+   │
+Chrome (real) over CDP WebSocket → Runtime.evaluate: fetch() POST to lite from an open page
 ```
 
 ### 7.2 Impersonation Configuration (Minimal Headers)
@@ -725,17 +814,17 @@ measured equal to the lxml version and pinned to its recorded output — see
 
 ### 8.2 Planned Investigation
 
-- **tcpdump MCP server**: Capture and compare raw TCP/TLS packets between real Chrome and curl_cffi to find the exact divergence point
-- **Custom TLS library**: Build a solution with an external library that produces byte-identical TLS handshakes to a real browser
+- **Packet capture via `mcp-tshark`**: the repo's capture server is `Scripts/mcp-tshark.py` (`tshark_call` — `start_capture` / `stop_capture` / `analyze` / `follow_stream`); there is no tcpdump MCP server. It can compare raw TCP/TLS packets between real Chrome and a Python client on the wire. For the ClientHello and h2 layers the loopback dump of §2.9 has since answered the question more directly than an off-host capture could (it sees the decrypted h2 frames); what a capture would still add is the TCP layer of §2.5/§3.5 against the real DDG endpoint.
+- **Custom TLS library**: *done as a throwaway PoC, see §2.9* — a pure-stdlib client whose ClientHello and h2 preface match Chrome 153 on loopback. Not wired into `Scripts/search_duckduckgo.py`; one live sample only.
 - **Browser engine fingerprint replication**: Potentially use the `__sc__` DOM parsing fingerprint values for the main site endpoint
 
 ### 8.3 Assessed as Non-viable
 
-- Waiting for curl_cffi/primp to improve — both are already near-perfect at TLS/HTTP2 level
-- JA3/Akamai string overrides — the fingerprints already match
+- Waiting for curl_cffi/primp to improve — at the level tls.peet.ws hashes measure (§2.2) they were near-perfect for Chrome 146/148; against Chrome 153 on loopback (§2.9) curl_cffi lags by one extension and the ML-DSA sigalgs, and primp carries fixed tells no upgrade of the version string fixes
+- JA3/Akamai string overrides — Akamai h2 already matches; JA3 is meaningless for Chrome (shuffled per connection, §2.9)
 - Random UA/fingerprint rotation — DDG doesn't use JA3 hash matching (JA3 changes per connection due to GREASE)
 - DDG Instant Answer API — doesn't provide full search results
-- TCP/IP fingerprint spoofing — TCP is OS-level, already matches between curl_cffi and Chrome on same host
+- TCP/IP fingerprint spoofing — not because TCP is identical (the receive window is app-controlled and was measured different, §2.5), but because changing it did not change DDG's verdict (§2.6); see §3.5
 
 ---
 
