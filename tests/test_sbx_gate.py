@@ -335,6 +335,26 @@ def _file_mask_at(bw, path):
             if bw[i] == "--ro-bind-data" and bw[i + 2] == path]
 
 
+# R-0061: the standard pathname-socket directories bwrap hides without --net,
+# spelled here independently of the helper so the oracle cannot drift with it.
+SOCKET_DIRS = ("/run", "/tmp")
+
+
+def _strip_socket_masks(bw):
+    """bw minus --unshare-net and every `--tmpfs|--remount-ro <socket dir>` pair --
+    what the --net argv must equal token for token."""
+    out, i = [], 0
+    while i < len(bw):
+        if bw[i] in ("--tmpfs", "--remount-ro") and i + 1 < len(bw) \
+                and bw[i + 1] in SOCKET_DIRS:
+            i += 2
+            continue
+        if bw[i] != "--unshare-net":
+            out.append(bw[i])
+        i += 1
+    return out
+
+
 # ---------------------------------------------------------------------------
 # White-box groups M / N + the R6b PATH-shadow case (identity must pass first,
 # so these call is_clean_sbx directly with WRAPPER_PATH pointed at a fixture).
@@ -1137,16 +1157,17 @@ def _run_offline(suite, helper, ws):
     # docs claimed otherwise (measured). Only (allow network*) actually opens it.
     # Linux was unaffected (--net drops --unshare-net, which really does share the
     # host net), so bwrap must be UNCHANGED by this fix -- asserted by requiring that
-    # the two bwrap argvs differ in exactly the --unshare-net token and nothing else.
+    # the two bwrap argvs differ in exactly the --unshare-net token and the R-0061
+    # socket-directory masks (which --net drops too, see (b2)) and nothing else.
     problems = []
     if "(allow network*)" not in seat_net:
         problems.append("--net emits no (allow network*) -- (deny default) at the "
                         "top keeps the network shut, so the flag is INERT")
     if "(allow network*)" in profile:
         problems.append("default profile grants network* without --net (fail-open)")
-    if [t for t in bw if t != "--unshare-net"] != bw_net:
-        problems.append("bwrap argv changed by more than the --unshare-net token: "
-                        "%r vs %r" % (bw, bw_net))
+    if _strip_socket_masks(bw) != bw_net:
+        problems.append("bwrap argv changed by more than --unshare-net and the "
+                        "socket masks: %r vs %r" % (bw, bw_net))
     _rec(suite, GRP_Q,
          "(b) Seatbelt: --net emits (allow network*), not just a missing deny; "
          "bwrap unchanged", problems)
@@ -1158,6 +1179,94 @@ def _run_offline(suite, helper, ws):
         problems.append("bwrap --net still unshares net")
     _rec(suite, GRP_Q, "(b) bwrap: --unshare-net default, omitted under --net",
          problems)
+
+    # (b2) R-0061: a pathname AF_UNIX socket is a FILESYSTEM object, so neither
+    # --unshare-net nor the read-only `--ro-bind / /` stops connect() on it (measured
+    # on Ubuntu 22.04: /run/dbus/system_bus_socket, the session bus and gpg-agent
+    # under /run/user/<uid>, an ssh-agent and tmux under /tmp all CONNECTED from
+    # inside sbx). Without --net the two standard socket directories are replaced by
+    # fresh EMPTY tmpfs mounts: FIRST after /dev, so every bind/mask the caller asked
+    # for lands on top of them and wins; and remounted READ-ONLY after the last
+    # bind/mask, so the private tmpfs is as unwritable as the host one it hides.
+    # Under --net they are NOT masked -- the same parity Seatbelt has, where
+    # (allow network*) also opens unix-socket connect (measured), and /etc/resolv.conf
+    # is a symlink into /run on systemd-resolved hosts.
+    problems = []
+    for d in SOCKET_DIRS:
+        tm = [i for i in range(len(bw) - 1) if bw[i] == "--tmpfs" and bw[i + 1] == d]
+        rr = [i for i in range(len(bw) - 1)
+              if bw[i] == "--remount-ro" and bw[i + 1] == d]
+        if len(tm) != 1:
+            problems.append("socket dir %s: %d --tmpfs masks (want 1)" % (d, len(tm)))
+        if len(rr) != 1:
+            problems.append("socket dir %s: %d --remount-ro (want 1)" % (d, len(rr)))
+        if len(tm) != 1 or len(rr) != 1:
+            continue
+        dev_ro = [i for i in range(len(bw) - 1)
+                  if bw[i] == "--remount-ro" and bw[i + 1] == "/dev"]
+        if not dev_ro or tm[0] < dev_ro[0]:
+            problems.append("--tmpfs %s not after the fresh /dev" % d)
+        later = [i for i, t in enumerate(bw)
+                 if t in ("--bind", "--ro-bind", "--ro-bind-data") and i > 1]
+        if later and tm[0] > min(later):
+            problems.append("--tmpfs %s at %d after a bind at %d -- it would bury "
+                            "the caller's scopes and masks" % (d, tm[0], min(later)))
+        mounts = [i for i, t in enumerate(bw)
+                  if t in ("--bind", "--ro-bind", "--ro-bind-data", "--tmpfs")]
+        if rr[0] < max(mounts):
+            problems.append("--remount-ro %s precedes the last mount" % d)
+        proc_i = bw.index("--proc") if "--proc" in bw else -1
+        if proc_i >= 0 and rr[0] > proc_i:
+            problems.append("--remount-ro %s after --proc" % d)
+    for d in SOCKET_DIRS:
+        if any(bw_net[i] in ("--tmpfs", "--remount-ro") and bw_net[i + 1] == d
+               for i in range(len(bw_net) - 1)):
+            problems.append("--net still masks socket dir %s" % d)
+    _rec(suite, GRP_Q,
+         "(b2) bwrap: /run and /tmp masked by an empty tmpfs before every bind, "
+         "remounted ro after the last mount; not under --net (R-0061)", problems)
+
+    # (b3) a cwd UNDER a masked socket directory would vanish with the tmpfs, and
+    # bwrap then silently chdirs to $HOME (--ro) or into an empty skeleton. It is
+    # re-bound READ-ONLY right after the masks, before every writable bind (so
+    # `--write .` still wins over it) and before the secret masks (so an ancestor
+    # .git/config stays masked). A cwd elsewhere, or a cwd that IS the socket
+    # directory (which would re-expose all of it), gets no re-bind.
+    problems = []
+    cases = (("/tmp/proj", True), ("/run/user/1000/w", True), ("/tmpfoo/proj", False),
+             ("/tmp", False), ("/home/u/p", False), (None, False))
+    if "cwd" not in getattr(helper.Scope, "__dataclass_fields__", {}):
+        problems.append("Scope has no cwd field -- a cwd under /tmp is buried")
+        cases = ()
+    for cwd, want in cases:
+        base = cwd or "/x"
+        got = helper._bwrap_argv(helper.Scope(
+            writes=[base + "/.claude/tmp"], net=False, ro=False, argv=["true"],
+            secret_paths=((base + "/.git/config", False),), carveouts=(),
+            file_mask_fds=(5,), cwd=cwd))
+        rb = [i for i in range(len(got) - 2)
+              if got[i] == "--ro-bind" and got[i + 1] == cwd and got[i + 2] == cwd]
+        if not want:
+            if rb:
+                problems.append("cwd %r wrongly re-bound" % cwd)
+            continue
+        if len(rb) != 1:
+            problems.append("cwd %r: %d read-only re-binds (want 1)" % (cwd, len(rb)))
+            continue
+        tms = [i for i in range(len(got) - 1) if got[i] == "--tmpfs"
+               and got[i + 1] in SOCKET_DIRS]
+        if not tms:
+            problems.append("cwd %r: no socket-dir masks emitted" % cwd)
+            continue
+        tm = max(tms)
+        bi = got.index("--bind")
+        mi = got.index("--ro-bind-data")
+        if not tm < rb[0] < bi < mi:
+            problems.append("cwd %r re-bind out of order: tmpfs %d, rebind %d, "
+                            "bind %d, mask %d" % (cwd, tm, rb[0], bi, mi))
+    _rec(suite, GRP_Q,
+         "(b3) bwrap: a cwd under /tmp or /run re-bound ro after the socket masks, "
+         "before binds and secret masks", problems)
 
     # (c) writes confined; --ro yields ZERO writable scopes on both backends.
     wa = '(allow file-write* (subpath "%s"))' % scratch

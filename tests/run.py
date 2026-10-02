@@ -245,7 +245,7 @@ SUITES = [
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 381),
     ("sbx_gate", run_sbx_gate,
-     "sbx PreToolUse grant-only gate", 99),
+     "sbx PreToolUse grant-only gate", 101),
     # TYPED: a fixed case table.  The one Linux-only row per group C and D is
     # recorded as INFO on any other host rather than omitted, so the count is
     # the same on macOS and on Linux.

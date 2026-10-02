@@ -521,14 +521,18 @@ def _run_program(suite, helper):
 
 # A fresh /dev first (the host one is nodev, every node EACCES); the FILE secret
 # masked with an empty `--ro-bind-data` file (`--ro-bind /dev/null` is nodev too).
+# The socket directories (R-0061) are emptied before every bind and made read-only
+# after the last one.
 GOLDEN = [
     "bwrap", "--ro-bind", "/", "/",
     "--dev", "/dev", "--remount-ro", "/dev",
+    "--tmpfs", "/run", "--tmpfs", "/tmp",
     "--bind", "/w", "/w",
     "--tmpfs", "/h/.ssh",
     "--ro-bind", "/h/.claude/skills", "/h/.claude/skills",
     "--ro-bind", "/r/ClaudeCode", "/r/ClaudeCode",
     "--ro-bind-data", "5", "/r/.git/config",
+    "--remount-ro", "/run", "--remount-ro", "/tmp",
     "--unshare-pid", "--unshare-ipc", "--proc", "/proc",
     "--unshare-net",
     "--new-session",

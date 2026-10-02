@@ -41,6 +41,14 @@ from dataclasses import dataclass
 
 USAGE = "Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] -- <cmd> [args...]"
 
+# R-0061: the standard directories of pathname AF_UNIX sockets (docker, the D-Bus
+# system and session buses, gpg-agent, ssh-agent, tmux, X11). A socket is a
+# filesystem object, so neither --unshare-net nor a read-only bind stops connect()
+# on it; without --net bwrap hides these behind an empty tmpfs (Linux only --
+# Seatbelt's (deny network*) already denies unix-socket connect, measured).
+# /var/run is a symlink to /run on every current distribution.
+SOCKET_DIRS = ("/run", "/tmp")
+
 
 @dataclass
 class Scope:
@@ -91,6 +99,9 @@ class Scope:
       file_mask_fds
                    one fd on /dev/null per FILE secret, in order, opened by
                    main() for the bwrap `--ro-bind-data` masks (Linux only).
+      cwd          the working directory sbx was started in; bwrap re-binds it
+                   read-only when it lies under a SOCKET_DIRS entry, which the
+                   socket mask would otherwise bury (Linux only).
     """
     writes: list
     net: bool
@@ -103,6 +114,7 @@ class Scope:
     seccomp: bool = False
     seccomp_fd: int = None
     file_mask_fds: tuple = None
+    cwd: str = None
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +255,9 @@ def _seatbelt_argv(scope):
 def _bwrap_argv(scope):
     """Pure Linux bwrap builder (task-005): a Scope -> the bwrap argv LIST (never a
     shell string -- argv-as-list is the injection-safe construction). Order:
-      --ro-bind / /  (read-all host) / --dev /dev --remount-ro /dev / per writable
+      --ro-bind / /  (read-all host) / --dev /dev --remount-ro /dev / UNLESS
+      scope.net --tmpfs per SOCKET_DIRS entry, plus --ro-bind <cwd> <cwd> when the
+      cwd lies under one (R-0061) / per writable
       scope --bind <canonical> <canonical> UNLESS scope.ro (R21: then no writable bind) / per secret_paths
       entry a mask layered AFTER the binds so it WINS over the ro-bind of /
       (R16/R17/R22/R22b) -- the mask PRIMITIVE is chosen by the entry's own
@@ -257,7 +271,7 @@ def _bwrap_argv(scope):
       <realpath>, re-mounting the divergent spelling read-only / per FILE secret the
       --ro-bind-data <fd> mask, LAST of the binds, so a .git/config inside a
       carve-out or a shadow subtree stays masked (ADR 0007; itself read-only, so
-      the shadows' write-deny still stands) /
+      the shadows' write-deny still stands) / --remount-ro per masked socket dir /
       --unshare-pid --unshare-ipc + --proc /proc / --unshare-net UNLESS scope.net
       (R18) / --new-session / --die-with-parent / the `--` end-of-options
       terminator / then *scope.argv.
@@ -303,6 +317,17 @@ def _bwrap_argv(scope):
     # not recursive, so the device nodes and the private devpts stay writable,
     # which leaves no persistent state. FIRST, so no later mount under /dev is buried.
     argv += ["--dev", "/dev", "--remount-ro", "/dev"]
+    # R-0061: without --net, an EMPTY tmpfs over each pathname-socket directory --
+    # BEFORE every bind and mask, so a --write scope, a secret mask or a carve-out
+    # under one of them lands on top and wins. A cwd under one is re-bound read-only
+    # so the project does not vanish (bwrap would silently chdir elsewhere). --net
+    # skips this: it reopens unix sockets on macOS too, and /etc/resolv.conf points
+    # into /run on systemd-resolved hosts.
+    sockets = () if scope.net else SOCKET_DIRS
+    for d in sockets:
+        argv += ["--tmpfs", d]
+    if scope.cwd and any(scope.cwd.startswith(d + "/") for d in sockets):
+        argv += ["--ro-bind", scope.cwd, scope.cwd]
     # per writable scope: read-write bind -- UNLESS --ro, which emits NO writable
     # bind at all so even the scratch default is denied (R21).
     if not scope.ro:
@@ -364,6 +389,11 @@ def _bwrap_argv(scope):
                          "secret unmasked" % (len(files), len(fds)))
     for secret, fd in zip(files, fds):
         argv += ["--ro-bind-data", str(fd), secret]
+    # The socket tmpfs read-only, AFTER the last bind/mask (their mountpoints are
+    # created in it first). Not recursive, like /dev: the binds on top keep their
+    # own mode, and the hidden directory stays as unwritable as the host one was.
+    for d in sockets:
+        argv += ["--remount-ro", d]
     # A FRESH procfs in a PID namespace we own. Without this, `--ro-bind / /` above
     # imports the HOST /proc, and /proc/<pid>/root/<path> resolves in the HOST mount
     # namespace -- which walks around every --tmpfs mask emitted above -- while
@@ -1166,6 +1196,7 @@ def main(argv=None):
         # write-ONLY deny on the OTHER spelling of ~/.claude's symlinked-out trees
         shadow_write_denies=shadow_write_denies(),
         seccomp=args.seccomp,             # OFF unless --seccomp (R-0003)
+        cwd=cwd,                          # re-bound if under a socket dir (R-0061)
     )
 
     # --dry-run previews the resolved plan and runs NOTHING. Engine resolution
