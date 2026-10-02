@@ -1294,7 +1294,7 @@ def tree_builder_problems(tree, deps):
 
 
 def group_webfetch_deps(suite):
-    """G. webfetch's PEP 723 block is bounded and lxml-free (R-0058)."""
+    """G. webfetch's PEP 723 block is bounded and builds with a declared lxml (R-0058)."""
     try:
         with open(WEBFETCH, encoding="utf-8") as fh:
             src = fh.read()
