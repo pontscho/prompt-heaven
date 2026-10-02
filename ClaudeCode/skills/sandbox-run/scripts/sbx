@@ -60,7 +60,7 @@ class Scope:
                    `(path, is_dir)` PAIRS. The is_dir bit is resolved THERE, in
                    the one function that already performs the existence I/O, so
                    _bwrap_argv can pick the correct mask primitive (tmpfs for a
-                   directory, ro-bind /dev/null for a file) while staying PURE, and both
+                   directory, ro-bind-data for a file) while staying PURE, and both
                    builders use it to emit the FILE masks after the carve-outs.
       carveouts    the read-ONLY carve-out set produced by carveout_paths(): the
                    named subtrees of a denied secret that must stay READABLE
@@ -88,6 +88,9 @@ class Scope:
                    by _seccomp_fd() in main() -- the ONE place that does the
                    memfd I/O -- so _bwrap_argv only prints the NUMBER and stays
                    pure. None until resolved; the flag with no fd refuses.
+      file_mask_fds
+                   one fd on /dev/null per FILE secret, in order, opened by
+                   main() for the bwrap `--ro-bind-data` masks (Linux only).
     """
     writes: list
     net: bool
@@ -99,6 +102,7 @@ class Scope:
     engine: str = None
     seccomp: bool = False
     seccomp_fd: int = None
+    file_mask_fds: tuple = None
 
 
 # ---------------------------------------------------------------------------
@@ -239,23 +243,24 @@ def _seatbelt_argv(scope):
 def _bwrap_argv(scope):
     """Pure Linux bwrap builder (task-005): a Scope -> the bwrap argv LIST (never a
     shell string -- argv-as-list is the injection-safe construction). Order:
-      --ro-bind / /  (read-all host) / per writable scope --bind <canonical>
-      <canonical> UNLESS scope.ro (R21: then no writable bind) / per secret_paths
+      --ro-bind / /  (read-all host) / --dev /dev --remount-ro /dev / per writable
+      scope --bind <canonical> <canonical> UNLESS scope.ro (R21: then no writable bind) / per secret_paths
       entry a mask layered AFTER the binds so it WINS over the ro-bind of /
       (R16/R17/R22/R22b) -- the mask PRIMITIVE is chosen by the entry's own
       `is_dir` BIT: a DIRECTORY secret gets --tmpfs <p>, a regular-FILE secret (the
-      .git/config entries) gets --ro-bind /dev/null <p> because --tmpfs needs a
+      .git/config entries) gets --ro-bind-data <fd> <p> because --tmpfs needs a
       directory mountpoint (a file -> bwrap ensure_dir() ENOTDIR -> die() BEFORE
       exec) -- the DIRECTORY masks here, the FILE masks last of the binds / per
       scope.carveouts entry --ro-bind <p> <p> layered AFTER the directory masks so
       the LATER mount wins and the subtree is readable again (read-only, so it gains
       no write) / per scope.shadow_write_denies entry --ro-bind <realpath>
       <realpath>, re-mounting the divergent spelling read-only / per FILE secret the
-      --ro-bind /dev/null mask, LAST of the binds, so a .git/config inside a
+      --ro-bind-data <fd> mask, LAST of the binds, so a .git/config inside a
       carve-out or a shadow subtree stays masked (ADR 0007; itself read-only, so
       the shadows' write-deny still stands) /
-      --unshare-pid + --proc /proc / --unshare-net UNLESS scope.net (R18) /
-      --die-with-parent / the `--` end-of-options terminator / then *scope.argv.
+      --unshare-pid --unshare-ipc + --proc /proc / --unshare-net UNLESS scope.net
+      (R18) / --new-session / --die-with-parent / the `--` end-of-options
+      terminator / then *scope.argv.
 
     Mount ORDER is load-bearing in every direction here: bwrap applies filesystem
     operations strictly in argv order and a LATER operation on the same path wins, so
@@ -285,12 +290,19 @@ def _bwrap_argv(scope):
     (scope.seccomp_fd), and REFUSES when that fd is missing or not a plain
     non-negative int -- never an unfiltered argv for a filtered request, and never
     a caller-supplied string spliced into argv. Pure: no I/O -- the is_dir bit rides
-    in on the secret set instead of being stat'ed here, and the program fd rides in
-    as a number. The deny set and the carve-out set are
+    in on the secret set instead of being stat'ed here, and the program fd and the
+    file-mask fds ride in as numbers. The deny set and the carve-out set are
     read off scope.secret_paths / scope.carveouts (both resolved ONCE in main()), so
     this builder is side-effect-free.
     """
     argv = ["bwrap", "--ro-bind", "/", "/"]
+    # A fresh minimal /dev (null, zero, full, random, urandom, tty, pts): every bind
+    # but --dev-bind is nodev, so the host /dev imported by `--ro-bind / /` is
+    # EACCES on every node (measured: `git --version` rc 128 on /dev/null).
+    # --remount-ro makes the tmpfs read-only (no new files in /dev, /dev/shm); it is
+    # not recursive, so the device nodes and the private devpts stay writable,
+    # which leaves no persistent state. FIRST, so no later mount under /dev is buried.
+    argv += ["--dev", "/dev", "--remount-ro", "/dev"]
     # per writable scope: read-write bind -- UNLESS --ro, which emits NO writable
     # bind at all so even the scratch default is denied (R21).
     if not scope.ro:
@@ -303,12 +315,11 @@ def _bwrap_argv(scope):
     # the path, so this builder stays pure (no I/O):
     #   * a DIRECTORY secret (the home-anchored ~/.ssh .. ~/.claude) -> --tmpfs <p>,
     #     which is the correct primitive only for a directory mountpoint.
-    #   * a regular-FILE secret (the .git/config of every ancestor repo) -> --ro-bind
-    #     /dev/null <p>. --tmpfs on a regular file makes bwrap's ensure_dir() return
-    #     ENOTDIR and die() BEFORE exec -- which would make EVERY Linux run inside a
-    #     git repo dead-on-arrival. A read-only bind of /dev/null masks a file
-    #     correctly: reads return empty (secret content hidden) and writes are DENIED
-    #     by the read-only mount (R17/R22 preserved).
+    #   * a regular-FILE secret (the .git/config of every ancestor repo) ->
+    #     --ro-bind-data <fd> <p>, the fd on /dev/null: an EMPTY read-only file, so
+    #     reads return empty and writes are DENIED (R17/R22 preserved). --tmpfs on a
+    #     regular file makes bwrap die() with ENOTDIR BEFORE exec, and `--ro-bind
+    #     /dev/null <p>` is nodev, i.e. EACCES rather than empty (measured).
     # The bit replaces the old `endswith(".git/config")` name heuristic outright:
     # STRUCTURE is now read from the filesystem once, not guessed from a suffix.
     # The FILE masks are layered separately, LAST of the binds -- see below.
@@ -336,18 +347,23 @@ def _bwrap_argv(scope):
     # the read-only root.
     for path in scope.shadow_write_denies or ():
         argv += ["--ro-bind", path, path]
-    # per FILE secret (every ancestor .git/config): the /dev/null mask, LAST of the
+    # per FILE secret (every ancestor .git/config): the empty-file mask, LAST of the
     # binds -- after the carve-outs AND the shadow re-mounts. Both are subtree binds
     # whose SOURCE is resolved in the pristine host root, so they carry no mask with
     # them: a .git/config under ~/.claude/skills on a copy-deployed install (R-0005),
     # or inside a checkout that a ~/.claude symlink resolves to (R-0031), was buried
     # by the later subtree mount and readable again (ADR 0007 Consequences). Emitting
     # it after the shadows keeps their write protection: the mask is itself a
-    # READ-ONLY bind of /dev/null, so the final mount on every covered path is still
-    # read-only and the last word on writes is still a deny.
-    for secret, is_dir in scope.secret_paths or ():
-        if not is_dir:
-            argv += ["--ro-bind", "/dev/null", secret]
+    # READ-ONLY bind, so the final mount on every covered path is still read-only and
+    # the last word on writes is still a deny. One fd per mask (main() opens them);
+    # a missing one refuses rather than leave a secret unmasked.
+    files = [secret for secret, is_dir in scope.secret_paths or () if not is_dir]
+    fds = scope.file_mask_fds or ()
+    if len(fds) != len(files):
+        raise ValueError("%d file secret(s) but %d mask fd(s); refusing to leave a "
+                         "secret unmasked" % (len(files), len(fds)))
+    for secret, fd in zip(files, fds):
+        argv += ["--ro-bind-data", str(fd), secret]
     # A FRESH procfs in a PID namespace we own. Without this, `--ro-bind / /` above
     # imports the HOST /proc, and /proc/<pid>/root/<path> resolves in the HOST mount
     # namespace -- which walks around every --tmpfs mask emitted above -- while
@@ -356,10 +372,13 @@ def _bwrap_argv(scope):
     # namespace flag, order-insensitive, and is REQUIRED for the mount: the kernel
     # only grants a fresh procfs to a process in its own PID namespace. bwrap itself
     # stays PID 1 and reaps, so the target is an ordinary child process.
-    argv += ["--unshare-pid", "--proc", "/proc"]
+    # --unshare-ipc: SysV shm/sem/msg and POSIX mqueues are otherwise the host's.
+    argv += ["--unshare-pid", "--unshare-ipc", "--proc", "/proc"]
     # network unshared by default; --net omits this (R18).
     if not scope.net:
         argv.append("--unshare-net")
+    # setsid(): no controlling tty, so /dev/tty is ENXIO and TIOCSTI cannot inject.
+    argv.append("--new-session")
     argv.append("--die-with-parent")
     # seccomp: the OFF-by-default syscall filter (locked decision 8 / NFR-9, R-0003),
     # set only by `--seccomp`. bwrap reads a compiled classic-BPF program from the
@@ -545,8 +564,8 @@ def secret_paths(cwd):
     Each entry is a `(path, is_dir)` PAIR, not a bare string. The bit is resolved
     here because this function is ALREADY the one place that touches the filesystem
     (the existence filter below), and it is what keeps _bwrap_argv PURE: bwrap needs
-    a DIRECTORY mountpoint for --tmpfs and a FILE mountpoint for --ro-bind
-    /dev/null, and the builder used to guess which was which from the path ending in
+    a DIRECTORY mountpoint for --tmpfs and a FILE mountpoint for --ro-bind-data,
+    and the builder used to guess which was which from the path ending in
     `<sep>.git<sep>config`. That name heuristic is GONE -- structure is measured, not
     inferred, so a future file-shaped secret cannot be silently mis-masked into a
     pre-exec bwrap die().
@@ -894,8 +913,9 @@ _SECCOMP_ALLOW = tuple(sorted(
 _SECCOMP_SOCKET_DOMAINS = (1, 2, 10)
 # ioctl(fd, cmd, ...): TIOCSTI and TIOCLINUX push bytes into a terminal's input
 # queue -- a contained process could type commands into the shell that started
-# sbx, since bwrap is not given --new-session. Checked on the low 32 bits, which
-# is all the kernel reads of `cmd`.
+# sbx. bwrap's --new-session already removes the controlling tty; this deny is
+# defence in depth. Checked on the low 32 bits, which is all the kernel reads of
+# `cmd`.
 _SECCOMP_IOCTL_DENY = (0x5412, 0x541C)
 # clone(flags, ...): any CLONE_NEW{NS,CGROUP,UTS,IPC,USER,PID,NET} is refused,
 # which is what makes the omitted unshare/setns mean something. clone3 passes
@@ -1036,6 +1056,18 @@ def _seccomp_fd():
     return fd
 
 
+def _file_mask_fds(secrets):
+    """One inheritable fd on /dev/null per FILE secret, in order -- the empty
+    source of each `--ro-bind-data` mask. Called from main() only, so _bwrap_argv
+    stays pure."""
+    fds = []
+    for _secret, is_dir in secrets or ():
+        if not is_dir:
+            fds.append(os.open(os.devnull, os.O_RDONLY))
+            os.set_inheritable(fds[-1], True)
+    return tuple(fds)
+
+
 # ---------------------------------------------------------------------------
 # Bounded blast radius (task-006 / R19 / NFR-5): the resource limits' SINGLE
 # source (KD-2). These ceilings are applied to THIS process immediately BEFORE
@@ -1159,6 +1191,10 @@ def main(argv=None):
     # nothing run) off Linux x86_64 -- never the same command unfiltered.
     if scope.seccomp:
         scope.seccomp_fd = _seccomp_fd()
+
+    # bwrap file masks: one empty fd per FILE secret (Seatbelt needs none).
+    if builder is _bwrap_argv:
+        scope.file_mask_fds = _file_mask_fds(scope.secret_paths)
 
     # Build the OS-sandbox invocation from the fully-validated Scope via the
     # platform's pure builder (task-004 Seatbelt / task-005 bwrap). argv is a

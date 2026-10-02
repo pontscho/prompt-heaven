@@ -13,7 +13,8 @@ What it does, in order:
   1. loads the sbx helper from the given path and builds seccomp_program() for
      this machine;
   2. cross-checks every syscall number sbx embeds against this host's
-     asm/unistd_64.h, when the header is installed (INFO when it is not);
+     asm/unistd_64.h, when the header is installed (INFO when it is not): a
+     DIFFERENT number is FAIL, a name an older header lacks is INFO;
   3. makes each DISCRIMINATING call once BEFORE the filter and records its errno
      -- a call the kernel would already refuse with EPERM proves nothing, so each
      one is chosen to fail with a DIFFERENT errno (or succeed) unfiltered;
@@ -27,9 +28,10 @@ Output: one `PASS|FAIL|INFO <name>: <detail>` line per check, then
 `RESULT: <n> pass, <m> fail`. Exit 0 iff nothing failed; 2 when the host is not
 Linux x86_64 (nothing is installed then).
 
-This is NOT the bwrap end-to-end proof: bwrap installs the program itself, in
-the target, after its own namespace setup. That needs a host with bwrap and
-unprivileged user namespaces, and is recorded as pending in ADR 0005.
+Run it UNDER `sbx --seccomp` and it becomes the bwrap end-to-end check: the
+filter is then already installed, so the discriminating calls answer EPERM
+(clone3 ENOSYS) BEFORE step 4 and report FAIL -- that FAIL is the evidence that
+bwrap delivered the program (ADR 0005, R-0003 addendum).
 
 Python 3, standard library only.
 """
@@ -66,7 +68,8 @@ X32_SYSCALL_BIT = 0x40000000
 
 libc = ctypes.CDLL(None, use_errno=True)
 libc.syscall.restype = ctypes.c_long
-libc.prctl.restype = ctypes.c_int
+if hasattr(libc, "prctl"):     # Linux only; off Linux main() SKIPs before using it,
+    libc.prctl.restype = ctypes.c_int   # and the pure parts stay importable
 
 COUNTS = {"PASS": 0, "FAIL": 0, "INFO": 0}
 
@@ -112,11 +115,27 @@ def header_crosscheck(sbx):
             if len(parts) == 3 and parts[0] == "#define" and \
                     parts[1].startswith("__NR_") and parts[2].isdigit():
                 table[parts[1][5:]] = int(parts[2])
-    bad = ["%s=%d (header %r)" % (n, v, table.get(n))
-           for n, v in sorted(sbx._SECCOMP_X86_64.items()) if table.get(n) != v]
-    report("FAIL" if bad else "PASS", "header",
-           "%s: %s" % (path, "; ".join(bad)) if bad else
-           "%d embedded numbers match %s" % (len(sbx._SECCOMP_X86_64), path))
+    for verdict, name, detail in header_verdicts(sbx._SECCOMP_X86_64, table, path):
+        report(verdict, name, detail)
+
+
+def header_verdicts(embedded, table, path):
+    """Pure: [(verdict, name, detail)]. FAIL only for a DIFFERENT number; a name
+    an older header lacks (Ubuntu 22.04: futex_waitv 449 ..) is INFO."""
+    wrong = ["%s=%d (header %d)" % (n, v, table[n])
+             for n, v in sorted(embedded.items()) if n in table and table[n] != v]
+    absent = ["%s=%d" % (n, v)
+              for n, v in sorted(embedded.items()) if n not in table]
+    if wrong:
+        out = [("FAIL", "header", "%s: %s" % (path, "; ".join(wrong)))]
+    else:
+        out = [("PASS", "header", "%d embedded numbers match %s"
+                % (len(embedded) - len(absent), path))]
+    if absent:
+        out.append(("INFO", "header absent",
+                    "%d embedded names not defined in %s (an older header; not "
+                    "cross-checked): %s" % (len(absent), path, "; ".join(absent))))
+    return out
 
 
 class SockFprog(ctypes.Structure):

@@ -322,6 +322,19 @@ def _rec(suite, group, name, problems, note="", extra=()):
                  brief=brief, text="; ".join(problems))
 
 
+def _mask_fds(scope):
+    """One fake fd per FILE secret, as main() would open them."""
+    n = sum(1 for _p, is_dir in scope.secret_paths or () if not is_dir)
+    scope.file_mask_fds = tuple(range(100, 100 + n))
+    return scope
+
+
+def _file_mask_at(bw, path):
+    """Indices of the bwrap FILE mask `--ro-bind-data <fd> <path>`."""
+    return [i for i in range(len(bw) - 2)
+            if bw[i] == "--ro-bind-data" and bw[i + 2] == path]
+
+
 # ---------------------------------------------------------------------------
 # White-box groups M / N + the R6b PATH-shadow case (identity must pass first,
 # so these call is_clean_sbx directly with WRAPPER_PATH pointed at a fixture).
@@ -600,7 +613,7 @@ def _run_offline(suite, helper, ws):
     # checkout becomes a shadow target (re-bound onto itself read-only on bwrap),
     # and its .git/config is a file secret when the cwd is inside it. A bwrap bind
     # takes its SOURCE from the pristine host, so a shadow --ro-bind emitted after
-    # the /dev/null mask carries no mask with it and buries it -- the same class
+    # the file mask carries no mask with it and buries it -- the same class
     # R-0005 closed for the carve-outs. Seatbelt is immune: its shadow rule is a
     # write-only deny and grants no read.
     linkedrepo = ws.subdir("linkedrepo")
@@ -646,6 +659,8 @@ def _run_offline(suite, helper, ws):
                             net=False, ro=True, argv=["echo", "hi"],
                             secret_paths=secrets, carveouts=carveouts,
                             shadow_write_denies=shadow)
+    for s in (scope, scope_net, scope_ro):
+        _mask_fds(s)
 
     profile = helper._seatbelt_argv(scope)[2].split("\n")
     seat_net = helper._seatbelt_argv(scope_net)[2].split("\n")
@@ -713,7 +728,7 @@ def _run_offline(suite, helper, ws):
     # (a) bwrap: each secret masked by the CORRECT primitive PER ENTRY, AFTER the
     # binds. The primitive is selected by the entry's own `is_dir` BIT (resolved in
     # secret_paths, which already stats the path) -- a DIRECTORY secret gets --tmpfs
-    # <p>; a regular-FILE secret (the .git/config entries) gets --ro-bind /dev/null
+    # <p>; a regular-FILE secret (the .git/config entries) gets --ro-bind-data <fd>
     # <p>, NOT --tmpfs, which on a file makes bwrap die() with ENOTDIR before exec.
     # Asserting the primitive PER ENTRY is what makes this test FAIL on the old
     # --tmpfs-for-files code and PASS on the fix; driving the expectation off the BIT
@@ -728,37 +743,34 @@ def _run_offline(suite, helper, ws):
                 problems.append("no --tmpfs mask for dir secret %s" % s)
             elif found[0] <= last_bind:
                 problems.append("mask for %s not after binds" % s)
-        else:                                    # regular FILE -> ro-bind /dev/null
-            found = [i for i in range(len(bw) - 2)
-                     if bw[i] == "--ro-bind" and bw[i + 1] == "/dev/null"
-                     and bw[i + 2] == s]
+        else:                                    # regular FILE -> ro-bind-data
+            found = _file_mask_at(bw, s)
             if not found:
-                problems.append("no --ro-bind /dev/null mask for file secret %s" % s)
+                problems.append("no --ro-bind-data <fd> mask for file secret %s" % s)
             elif found[0] <= last_bind:
                 problems.append("mask for %s not after binds" % s)
             if any(bw[i] == "--tmpfs" and bw[i + 1] == s
                    for i in range(len(bw) - 1)):
                 problems.append("file secret %s wrongly masked with --tmpfs" % s)
     _rec(suite, GRP_Q,
-         "(a) bwrap: file secrets ro-bind /dev/null, dir secrets --tmpfs, after binds",
+         "(a) bwrap: file secrets ro-bind-data, dir secrets --tmpfs, after binds",
          problems)
 
     # (a) the primitive follows the BIT, not the NAME. The old builder recognized a
     # file by `path.endswith(<sep>.git<sep>config)`; that heuristic is GONE, and this
     # case is what stops anyone reinstating it "as a fallback". Two synthetic entries
     # invert the name/structure correlation the real fixtures happen to have: a
-    # file-shaped secret NOT named .git/config must still get --ro-bind /dev/null,
+    # file-shaped secret NOT named .git/config must still get --ro-bind-data,
     # and a directory-shaped one that IS named .git/config must still get --tmpfs.
     # The builder is pure, so neither path needs to exist on disk.
     odd_file = os.path.join(plain, "creds.txt")
     odd_dir = os.path.join(plain, "weird", ".git", "config")
-    bw_odd = helper._bwrap_argv(helper.Scope(
+    bw_odd = helper._bwrap_argv(_mask_fds(helper.Scope(
         writes=[], net=False, ro=True, argv=["true"],
-        secret_paths=((odd_file, False), (odd_dir, True)), carveouts=()))
+        secret_paths=((odd_file, False), (odd_dir, True)), carveouts=())))
     problems = []
-    if not any(bw_odd[i] == "--ro-bind" and bw_odd[i + 1] == "/dev/null"
-               and bw_odd[i + 2] == odd_file for i in range(len(bw_odd) - 2)):
-        problems.append("is_dir=False secret %s not masked with --ro-bind /dev/null "
+    if not _file_mask_at(bw_odd, odd_file):
+        problems.append("is_dir=False secret %s not masked with --ro-bind-data "
                         "(name heuristic reinstated?)" % odd_file)
     if not any(bw_odd[i] == "--tmpfs" and bw_odd[i + 1] == odd_dir
                for i in range(len(bw_odd) - 1)):
@@ -772,18 +784,16 @@ def _run_offline(suite, helper, ws):
     scope_n = helper.Scope(writes=helper.compute_writes([], False, nsub),
                            net=False, ro=False, argv=["true"],
                            secret_paths=secrets_n, carveouts=carveouts)
-    bw_n = helper._bwrap_argv(scope_n)
+    bw_n = helper._bwrap_argv(_mask_fds(scope_n))
     problems = []
     for cfg in (cfg_sub, cfg_root):
-        if not any(bw_n[i] == "--ro-bind" and bw_n[i + 1] == "/dev/null"
-                   and bw_n[i + 2] == cfg
-                   for i in range(len(bw_n) - 2)):
-            problems.append("no --ro-bind /dev/null mask for %s" % cfg)
+        if not _file_mask_at(bw_n, cfg):
+            problems.append("no --ro-bind-data <fd> mask for %s" % cfg)
         if any(bw_n[i] == "--tmpfs" and bw_n[i + 1] == cfg
                for i in range(len(bw_n) - 1)):
             problems.append("%s wrongly masked with --tmpfs (ENOTDIR pre-exec)" % cfg)
     _rec(suite, GRP_Q,
-         "(a) bwrap nested-.git: BOTH .git/config masked with ro-bind /dev/null",
+         "(a) bwrap nested-.git: BOTH .git/config masked with ro-bind-data",
          problems)
 
     # --- (a2) the read-only carve-out: ~/.claude stays a WRITE-denied secret, but
@@ -883,13 +893,11 @@ def _run_offline(suite, helper, ws):
          "(a2) Seatbelt: .git/config under a carve-out denied AFTER it (copy-deploy)",
          problems)
 
-    bw_cd = helper._bwrap_argv(scope_cd)
+    bw_cd = helper._bwrap_argv(_mask_fds(scope_cd))
     problems = []
-    mask_cd = [i for i in range(len(bw_cd) - 2)
-               if bw_cd[i] == "--ro-bind" and bw_cd[i + 1] == "/dev/null"
-               and bw_cd[i + 2] == cfg_deployed]
+    mask_cd = _file_mask_at(bw_cd, cfg_deployed)
     if not mask_cd:
-        problems.append("no --ro-bind /dev/null mask for %s" % cfg_deployed)
+        problems.append("no --ro-bind-data <fd> mask for %s" % cfg_deployed)
     else:
         for c in carveouts:
             found = [i for i in range(len(bw_cd) - 2)
@@ -905,27 +913,25 @@ def _run_offline(suite, helper, ws):
 
     # (a3) bwrap: a .git/config under a SHADOW target stays masked (R-0031). The
     # shadow --ro-bind <t> <t> re-mounts the whole checkout from the pristine host,
-    # so it must come BEFORE the /dev/null mask or it buries the mask and the git
+    # so it must come BEFORE the file mask or it buries the mask and the git
     # remote credentials read back. Asserted by INDEX against the containing shadow
     # target. Masks-after-shadows keeps the shadow's write protection: the mask is a
     # read-only bind too, so no later mount grants a write.
     scope_lr = helper.Scope(writes=[linkedrepo_real], net=False, ro=False,
                             argv=["true"], secret_paths=secrets_lr,
                             carveouts=carveouts, shadow_write_denies=shadow)
-    bw_lr = helper._bwrap_argv(scope_lr)
+    bw_lr = helper._bwrap_argv(_mask_fds(scope_lr))
     problems = []
     if linkedrepo_real not in shadow:
         problems.append("fixture: %s is not a shadow target" % linkedrepo_real)
     if cfg_linked not in [p for p, _d in secrets_lr]:
         problems.append("fixture: %s not in the secret set" % cfg_linked)
-    mask_lr = [i for i in range(len(bw_lr) - 2)
-               if bw_lr[i] == "--ro-bind" and bw_lr[i + 1] == "/dev/null"
-               and bw_lr[i + 2] == cfg_linked]
+    mask_lr = _file_mask_at(bw_lr, cfg_linked)
     shadow_lr = [i for i in range(len(bw_lr) - 2)
                  if bw_lr[i] == "--ro-bind" and bw_lr[i + 1] == linkedrepo_real
                  and bw_lr[i + 2] == linkedrepo_real]
     if not mask_lr:
-        problems.append("no --ro-bind /dev/null mask for %s" % cfg_linked)
+        problems.append("no --ro-bind-data <fd> mask for %s" % cfg_linked)
     elif not shadow_lr:
         problems.append("no shadow --ro-bind for %s" % linkedrepo_real)
     elif shadow_lr[-1] > mask_lr[-1]:

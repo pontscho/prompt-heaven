@@ -255,7 +255,7 @@ SUITES = [
      "check first, x32 killed, EPERM by default, the argument-checked socket, "
      "ioctl and clone entries, clone3 ENOSYS -- the pure `--seccomp N` argv "
      "wiring, the fail-closed refusal off Linux x86_64, and the live prctl "
-     "probe on Linux", 29),
+     "probe on Linux", 33),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 155),
     ("purity_file_ops", run_purity_file_ops,

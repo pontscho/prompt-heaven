@@ -130,14 +130,14 @@ Replace `/abs/path/to/` with the real path to your `ClaudeCode/hooks/` directory
 
 Adding a third OS later touches exactly one builder function plus one `BACKENDS` entry -- nothing else.
 
-**seccomp (Linux x86_64) is OFF by default; `--seccomp` turns it on.** Without the flag, bwrap's namespace + no-net + read-only bind is the Linux boundary and the argv is unchanged. With it, `sbx` builds a classic-BPF program in pure Python (no libseccomp), writes it to an inheritable memfd, and `_bwrap_argv` -- still a pure function, inside its existing `if scope.seccomp:` branch (locked decision 8) -- adds `--seccomp <fd>`. The program is an **allowlist**:
+**seccomp (Linux x86_64) is OFF by default; `--seccomp` turns it on.** Without the flag, the Linux boundary is bwrap's read-only bind of `/`, a fresh read-only `/dev`, private PID and IPC namespaces, no network, and a new session (`--new-session`: no controlling terminal, so `/dev/tty` is `ENXIO` and `TIOCSTI` cannot reach the launching shell); the argv is unchanged by the flag. With it, `sbx` builds a classic-BPF program in pure Python (no libseccomp), writes it to an inheritable memfd, and `_bwrap_argv` -- still a pure function, inside its existing `if scope.seccomp:` branch (locked decision 8) -- adds `--seccomp <fd>`. The program is an **allowlist**:
 
 - the architecture is checked first -- anything but x86_64 (e.g. an i386 `int 0x80` call) and any x32 call **kills** the process;
 - the ordinary syscalls a CLI needs (file and directory I/O, memory, fork/exec/wait, threads and futexes, signals, timers, polling, sockets) are allowed;
 - `socket()` is allowed for `AF_UNIX`, `AF_INET` and `AF_INET6` only; `ioctl()` is allowed except `TIOCSTI`/`TIOCLINUX` (terminal input injection); `clone()` is allowed except with any `CLONE_NEW*` namespace flag; `clone3()` answers `ENOSYS`, so libc falls back to the checked `clone()`;
 - everything else -- `ptrace`, `mount`, `unshare`, `setns`, `bpf`, `keyctl`, `perf_event_open`, `io_uring_*`, module loading, `kexec`, `userfaultfd`, `personality`, credential changes, and any syscall added to the kernel later -- gets **`EPERM`**, a clean error rather than a kill.
 
-x86_64 is the only syscall table: on any other machine, and on macOS, `sbx --seccomp` refuses to run (exit 3). The in-process filter is **live-verified** on an Ubuntu 24.04 x86_64 host (`seccomp_probe.py`, below). The **bwrap end-to-end path is NOT yet verified**: it needs a host with bubblewrap and unprivileged user namespaces.
+x86_64 is the only syscall table: on any other machine, and on macOS, `sbx --seccomp` refuses to run (exit 3). The in-process filter is **live-verified** on an Ubuntu 24.04 x86_64 host (`seccomp_probe.py`, below), and the **bwrap end-to-end path** on Ubuntu 22.04 / bubblewrap 0.6.1 (2026-10-02, ADR 0005): under `--seccomp` the target shows `Seccomp: 2` and the denied calls already answer `EPERM` before the probe installs its own copy.
 
 ## Resource limits
 
@@ -172,7 +172,7 @@ This self-test is **on-demand and platform-specific** (it needs a real `sandbox-
 
 ### The seccomp probe -- seccomp_probe.py
 
-`seccomp_probe.py` checks the `--seccomp` program **without bwrap** (Linux x86_64 only): it builds the program from the given `sbx`, cross-checks every embedded syscall number against the host's `asm/unistd_64.h`, installs the program into itself with `prctl(PR_SET_NO_NEW_PRIVS)` + `prctl(PR_SET_SECCOMP)`, then shows that denied calls get `EPERM` (each chosen to fail DIFFERENTLY without the filter, so the filter is proven to be the cause), that an x32 call is killed by `SIGSYS`, and that `python3`, `ls`, `git`, `sh`, `bash`, `cat`, threads and subprocesses still work. Run it as its own process -- the filter cannot be removed:
+`seccomp_probe.py` checks the `--seccomp` program **without bwrap** (Linux x86_64 only): it builds the program from the given `sbx`, cross-checks every embedded syscall number against the host's `asm/unistd_64.h` (a name an older header lacks is INFO, a different number is FAIL), installs the program into itself with `prctl(PR_SET_NO_NEW_PRIVS)` + `prctl(PR_SET_SECCOMP)`, then shows that denied calls get `EPERM` (each chosen to fail DIFFERENTLY without the filter, so the filter is proven to be the cause), that an x32 call is killed by `SIGSYS`, and that `python3`, `ls`, `git`, `sh`, `bash`, `cat`, threads and subprocesses still work. Run it as its own process -- the filter cannot be removed:
 
 ```
 python3 -I ClaudeCode/skills/sandbox-run/scripts/seccomp_probe.py ClaudeCode/skills/sandbox-run/scripts/sbx

@@ -27,15 +27,19 @@ Groups:
   B  ARGV -- _bwrap_argv stays a pure Scope -> argv function: flag off is the
      golden argv byte-for-byte, flag on inserts exactly `--seccomp N` before the
      terminator, the flag with no fd resolved still refuses, a non-int fd refuses,
-     and the builder performs no I/O.
+     and the builder performs no I/O; every argv carries `--new-session` and
+     `--unshare-ipc`, and a FILE secret without its mask fd refuses.
   C  CLI -- main() in-process with exec, rlimits and engine detection stubbed:
      the flag exists and is off by default, --dry-run shows it and creates no fd,
      a non-Linux platform and a non-x86_64 Linux both REFUSE (exit 3, nothing
-     exec'd), and on a real Linux x86_64 host the exec'd argv names an inheritable
-     fd whose content is the program (INFO elsewhere).
+     exec'd), a FILE secret's mask fd is inheritable and empty, and on a real
+     Linux x86_64 host the exec'd argv names an inheritable fd whose content is
+     the program (INFO elsewhere).
   D  LIVE -- Linux x86_64 only, INFO elsewhere: seccomp_probe.py loads the program
      into ITSELF via prctl in a child process and proves ordinary CLIs still run
      while the denied calls get EPERM.
+  P  PROBE -- the header cross-check: an absent name is INFO, a differing
+     number FAIL.
   H  hygiene -- no bytecode left behind.
 
 Usage:
@@ -62,6 +66,7 @@ GRP_A = "A. PROGRAM (interpreted, any OS)"
 GRP_B = "B. ARGV (_bwrap_argv stays pure)"
 GRP_C = "C. CLI (main in-process, exec stubbed)"
 GRP_D = "D. LIVE (Linux x86_64 prctl probe)"
+GRP_P = "P. PROBE header cross-check (pure, any OS)"
 GRP_H = "H. hygiene"
 
 # ---------------------------------------------------------------------------
@@ -253,15 +258,16 @@ def emulate(prog, nr, arch=AUDIT_ARCH_X86_64, args=()):
     raise ValueError("program did not terminate")
 
 
-def _load_helper(name):
+def _load_helper(name, path=HELPER):
     """The helper is extension-less: an explicit SourceFileLoader, bytecode-free
-    (the same loader test_sbx_gate.py uses, for the same reason)."""
+    (the same loader test_sbx_gate.py uses, for the same reason). Also loads the
+    probe, by path, for group P."""
     import importlib.machinery
     import importlib.util
     prev = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
     try:
-        loader = importlib.machinery.SourceFileLoader(name, HELPER)
+        loader = importlib.machinery.SourceFileLoader(name, path)
         spec = importlib.util.spec_from_loader(name, loader)
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
@@ -513,15 +519,19 @@ def _run_program(suite, helper):
 # B: _bwrap_argv
 # ---------------------------------------------------------------------------
 
+# A fresh /dev first (the host one is nodev, every node EACCES); the FILE secret
+# masked with an empty `--ro-bind-data` file (`--ro-bind /dev/null` is nodev too).
 GOLDEN = [
     "bwrap", "--ro-bind", "/", "/",
+    "--dev", "/dev", "--remount-ro", "/dev",
     "--bind", "/w", "/w",
     "--tmpfs", "/h/.ssh",
     "--ro-bind", "/h/.claude/skills", "/h/.claude/skills",
     "--ro-bind", "/r/ClaudeCode", "/r/ClaudeCode",
-    "--ro-bind", "/dev/null", "/r/.git/config",
-    "--unshare-pid", "--proc", "/proc",
+    "--ro-bind-data", "5", "/r/.git/config",
+    "--unshare-pid", "--unshare-ipc", "--proc", "/proc",
     "--unshare-net",
+    "--new-session",
     "--die-with-parent",
     "--", "true", "x",
 ]
@@ -531,7 +541,8 @@ def _scope(helper, **kw):
     base = dict(writes=["/w"], net=False, ro=False, argv=["true", "x"],
                 secret_paths=(("/h/.ssh", True), ("/r/.git/config", False)),
                 carveouts=("/h/.claude/skills",),
-                shadow_write_denies=("/r/ClaudeCode",))
+                shadow_write_denies=("/r/ClaudeCode",),
+                file_mask_fds=(5,))
     base.update(kw)
     return helper.Scope(**base)
 
@@ -579,6 +590,29 @@ def _run_argv(suite, helper):
         return problems, []
     _guard(suite, GRP_B, "a non-int or negative fd refuses (no argv injection)",
            bad_fd)
+
+    def session_and_ipc():
+        problems = []
+        for kw in ({}, dict(net=True), dict(ro=True, writes=[])):
+            got = helper._bwrap_argv(_scope(helper, **kw))
+            for flag in ("--new-session", "--unshare-ipc"):
+                if got[:got.index("--")].count(flag) != 1:
+                    problems.append("%r: %s not emitted once" % (kw, flag))
+        return problems, []
+    _guard(suite, GRP_B, "every argv carries `--new-session` and `--unshare-ipc`",
+           session_and_ipc)
+
+    def mask_fd_missing():
+        problems = []
+        for fds in (None, (), (5, 6)):
+            try:
+                got = helper._bwrap_argv(_scope(helper, file_mask_fds=fds))
+            except ValueError:
+                continue
+            problems.append("mask fds %r accepted: %r" % (fds, got))
+        return problems, []
+    _guard(suite, GRP_B, "a FILE secret without exactly one mask fd refuses",
+           mask_fd_missing)
 
     def pure():
         import builtins
@@ -737,6 +771,25 @@ def _run_cli(suite, helper):
     _guard(suite, GRP_C, "flag off: no fd created, no --seccomp in the exec'd "
            "argv", off_unchanged)
 
+    def file_masks_wired():
+        saved = helper.secret_paths        # stubbed: deterministic, writes nothing
+        helper.secret_paths = lambda _cwd: (("/x/.git/config", False),
+                                            ("/x/.ssh", True))
+        try:
+            with _Stubbed(helper, platform="linux", machine="x86_64") as st:
+                st.main(["--ro", "--", "true"])
+        finally:
+            helper.secret_paths = saved
+        argv = st.execs[0]
+        fd = int(argv[argv.index("/x/.git/config") - 1])
+        try:
+            ok = os.get_inheritable(fd) and os.read(fd, 1) == b""
+        finally:
+            os.close(fd)
+        return ([] if ok else ["mask fd %d not inheritable+empty" % fd]), []
+    _guard(suite, GRP_C, "file masks: the exec'd argv names an inheritable, "
+           "EMPTY fd for the FILE secret", file_masks_wired)
+
     if not (_live_host() and hasattr(os, "memfd_create")):
         _info(suite, GRP_C, "Linux x86_64: exec'd argv names an inheritable fd "
               "holding the program", "needs Linux x86_64 with os.memfd_create; "
@@ -797,6 +850,30 @@ def _run_live(suite):
 
 
 # ---------------------------------------------------------------------------
+# P: the probe's header cross-check, as a pure function
+# ---------------------------------------------------------------------------
+
+def _run_probe_header(suite):
+    """An older header lacks the newest names (Ubuntu 22.04: futex_waitv 449 ..):
+    absence is INFO; only a DIFFERENT number is FAIL."""
+    def verdicts():
+        probe = _load_helper("sbx_seccomp_probe_suite", PROBE)
+        got = probe.header_verdicts({"read": 0, "write": 1, "futex_waitv": 449},
+                                    {"read": 0, "write": 2}, "/h.h")
+        rows = ["%s %s: %s" % row for row in got]
+        fail = [r for r in rows if r.startswith("FAIL")]
+        info = [r for r in rows if r.startswith("INFO")]
+        problems = []
+        if len(fail) != 1 or "write=1" not in fail[0] or "futex" in fail[0]:
+            problems.append("want one FAIL naming only write")
+        if len(info) != 1 or "futex_waitv=449" not in info[0]:
+            problems.append("want one INFO naming futex_waitv")
+        return problems, rows
+    _guard(suite, GRP_P, "a name absent from the header is INFO; a different "
+           "number is FAIL", verdicts)
+
+
+# ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
 
@@ -810,6 +887,7 @@ def run(opts=None):
     _run_argv(suite, helper)
     _run_cli(suite, helper)
     _run_live(suite)
+    _run_probe_header(suite)
     after = H.pycache_snapshot()
     new = sorted(set(after) - set(before))
     _rec(suite, GRP_H, "no __pycache__ left behind",
