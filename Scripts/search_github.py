@@ -60,6 +60,7 @@ import hashlib  # the generated Chrome client
 import hmac  # the generated Chrome client
 import http.client  # the generated Chrome client
 import ipaddress  # the generated Chrome client
+import logging  # the generated Chrome client
 import socket  # the generated Chrome client
 import ssl  # the generated Chrome client
 import struct  # the generated Chrome client
@@ -2758,7 +2759,8 @@ class _ChTls:
 	group we already sent a share for, or one not in our supported_groups
 	(a GREASE value included), is illegal_parameter; secp384r1 is "tls:
 	HelloRetryRequest selected secp384r1 (not implemented)" (P-256 only,
-	FLAG-2); a second one is "tls: second HelloRetryRequest"; the transcript
+	FLAG-2), preceded by a WARNING on the stdlib `chrome-client` logger that
+	names the host and roadmap R-0048; a second one is "tls: second HelloRetryRequest"; the transcript
 	restarts as message_hash(Hash(CH1)) || HRR (section 4.4.1), a compat
 	ChangeCipherSpec precedes CH2 (profile["hrr_compat_ccs"], hrr/ 20/20)
 	and the ServerHello that follows must repeat the HRR's cipher. Server
@@ -3155,6 +3157,7 @@ class _ChTls:
 			raise ChromeClientError("tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we did not offer" % group)
 		if group not in self._profile["hrr_groups"]:
 			if group == 0x0018:
+				logging.getLogger("chrome-client").warning("tls: a real server (%s) sent a HelloRetryRequest selecting secp384r1 (P-384), which is not implemented -- see roadmap R-0048", self._host)
 				raise ChromeClientError("tls: HelloRetryRequest selected secp384r1 (not implemented)")
 			raise ChromeClientError("tls: handshake_failure: HelloRetryRequest selected group 0x%04x (not implemented)" % group)
 		cookie = None
@@ -7055,7 +7058,7 @@ def _ch_session_new(decoders=None, connect_policy=None, timeout=30, max_bytes=0,
 		verified). Anything else is ChromeClientError("transport: ...").
 	"""
 	return _ChSession(decoders, connect_policy, timeout, max_bytes, log, tls12_fallback, allow_downgrade, rand, ssl_context_factory, transport)
-# END GENERATED: e8ffc37bd03b
+# END GENERATED: c70f44c20a37
 
 _DECODERS = {"br": _brotli_decompress, "zstd": _zstd_decompress}
 

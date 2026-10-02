@@ -92,7 +92,7 @@ table is one key per line.
 block shape the generator recognises (a `def`, a `class`, a single-target
 assignment); a module-level loop or a second binding of a name would be skipped
 or collapsed silently. A block reads only builtins, the stdlib names this
-module imports (`codecs`, `hashlib`, `hmac`, `http`, `ipaddress`, `os`,
+module imports (`codecs`, `hashlib`, `hmac`, `http`, `ipaddress`, `logging`, `os`,
 `socket`, `ssl`, `struct`, `time`, `urllib`, `zlib`), its own arguments and the
 blocks co-listed on the same marker, dependency first. Blocks spell
 `urllib.parse.urlsplit(...)` and `http.client.HTTPSConnection`, never a bare
@@ -115,6 +115,7 @@ import hashlib
 import hmac
 import http.client
 import ipaddress
+import logging
 import os
 import socket
 import ssl
@@ -2399,7 +2400,8 @@ class _ChTls:
     group we already sent a share for, or one not in our supported_groups
     (a GREASE value included), is illegal_parameter; secp384r1 is "tls:
     HelloRetryRequest selected secp384r1 (not implemented)" (P-256 only,
-    FLAG-2); a second one is "tls: second HelloRetryRequest"; the transcript
+    FLAG-2), preceded by a WARNING on the stdlib `chrome-client` logger that
+    names the host and roadmap R-0048; a second one is "tls: second HelloRetryRequest"; the transcript
     restarts as message_hash(Hash(CH1)) || HRR (section 4.4.1), a compat
     ChangeCipherSpec precedes CH2 (profile["hrr_compat_ccs"], hrr/ 20/20)
     and the ServerHello that follows must repeat the HRR's cipher. Server
@@ -2796,6 +2798,7 @@ class _ChTls:
             raise ChromeClientError("tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we did not offer" % group)
         if group not in self._profile["hrr_groups"]:
             if group == 0x0018:
+                logging.getLogger("chrome-client").warning("tls: a real server (%s) sent a HelloRetryRequest selecting secp384r1 (P-384), which is not implemented -- see roadmap R-0048", self._host)
                 raise ChromeClientError("tls: HelloRetryRequest selected secp384r1 (not implemented)")
             raise ChromeClientError("tls: handshake_failure: HelloRetryRequest selected group 0x%04x (not implemented)" % group)
         cookie = None

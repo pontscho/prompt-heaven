@@ -264,6 +264,7 @@ import http.client
 import io
 import ipaddress
 import json
+import logging
 import os
 import re
 import select
@@ -2108,6 +2109,27 @@ def group_hrr(suite, mod, cc, facts, ws):
             return problems, ["HRR selecting 0x%04x" % g + (extra or "")]
         return fn
     run_row(suite, GH, "hrr-secp384r1-flag-2", refused(0x0018, "tls: HelloRetryRequest selected secp384r1 (not implemented)"), src + "; P-256 only (FLAG-2)")
+
+    def p384_warning():
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        logger = logging.getLogger("chrome-client")
+        propagate = logger.propagate
+        logger.addHandler(handler)
+        logger.propagate = False
+        try:
+            peer = ScriptedPeer(mod)
+            problems = refusal(lambda: peer.tls.feed(peer.hrr_record(0x0018)), mod.ChromeClientError, "tls: HelloRetryRequest selected secp384r1 (not implemented)", peer.tls)
+        finally:
+            logger.removeHandler(handler)
+            logger.propagate = propagate
+        warnings = [r for r in records if r.levelno == logging.WARNING]
+        text = warnings[0].getMessage() if len(warnings) == 1 else ""
+        problems += problem_if(len(warnings) != 1, "%d WARNING record(s) on 'chrome-client', wanted 1" % len(warnings))
+        problems += problem_if(not all(s in text for s in ("secp384r1", "P-384", "R-0048", peer.tls._host)), "warning %r does not name secp384r1, P-384, R-0048 and the host" % text)
+        return problems, ["WARNING %r, then the unchanged refusal" % text]
+    run_row(suite, GH, "hrr-secp384r1-logs-a-warning-naming-r-0048", p384_warning, src + "; roadmap R-0048: a real P-384 HRR must be noticed")
     run_row(suite, GH, "hrr-already-shared-x25519", refused(0x001D, "tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we already sent a key share for"), src)
     run_row(suite, GH, "hrr-already-shared-x25519mlkem768", refused(0x11EC, "tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we already sent a key share for"), src)
     run_row(suite, GH, "hrr-not-offered-0x0019", refused(0x0019, "tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we did not offer"), src)
