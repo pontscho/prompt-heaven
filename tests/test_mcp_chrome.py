@@ -205,7 +205,11 @@ Groups:
                    (the positive row is the plan's FALLBACK predicate: no live
                    challenge page was ever observed), sticky per endpoint and
                    the Bing leg's rotation; AST rows (two block-branch Chrome
-                   sites, _run_cdp opens no session, R14, no rand=)
+                   sites, _run_cdp opens no session, R14, no rand=). For both
+                   hosts, main() under a guard on every network entry point:
+                   -h / --help print usage and exit 0, an unknown option
+                   (alone or after a query) exits 2, none reaching the network
+                   -- with a control that the guard stops a real query
   O. WEBFETCH:     Scripts/mcp-webfetch.py loaded by path with stub bs4 /
                    markdownify, handle_fetch driven over loopback: rows not
                    about the Chrome path run on the DEFAULT verified transport
@@ -7525,6 +7529,82 @@ def host_hygiene_rows(suite, host, originals, tag):
                  detail=["every ladder row clears the per-process switch in finally"])
 
 
+# --- M. hosts: the command line answers -h / --help / an option before any network ---
+
+class NetworkRefused(Exception):
+    """Raised by every network entry point cli_run guards."""
+
+
+def cli_run(host, script, argv):
+    """host.main() with sys.argv = [script] + argv under a guard on every network entry point.
+
+    create_session, _ch_session_new, socket.socket, socket.create_connection
+    and socket.getaddrinfo each record their name and raise NetworkRefused, so
+    a search attempt is stopped at its first step and no socket is ever
+    opened. DDG_BACKEND is unset for the call. Returns (exit code, stdout,
+    stderr, guarded calls); NetworkRefused escaping main is exit code None.
+    """
+    calls = []
+
+    def guard(name):
+        def refuse(*_args, **_kw):
+            calls.append(name)
+            raise NetworkRefused(name)
+        return refuse
+    out, err = io.StringIO(), io.StringIO()
+    backend = os.environ.pop("DDG_BACKEND", None)
+    rc = None
+    try:
+        with Swapped((host, "create_session", guard("create_session")), (host, "_ch_session_new", guard("_ch_session_new")),
+                     (socket, "socket", guard("socket.socket")), (socket, "create_connection", guard("socket.create_connection")),
+                     (socket, "getaddrinfo", guard("socket.getaddrinfo")),
+                     (sys, "argv", [script] + list(argv)), (sys, "stdout", out), (sys, "stderr", err)):
+            try:
+                host.main()
+                rc = 0
+            except SystemExit as exc:
+                rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+            except NetworkRefused:
+                rc = None
+    finally:
+        if backend is not None:
+            os.environ["DDG_BACKEND"] = backend
+    return rc, out.getvalue(), err.getvalue(), calls
+
+
+def cli_rows(suite, host, script, tag):
+    src = "Scripts/%s main(): the command line, judged before any network" % script
+
+    def helps(flag):
+        def fn():
+            rc, out, err, calls = cli_run(host, script, [flag])
+            first = out.splitlines()[0] if out else ""
+            return (problem_if(rc != 0, "exit code %r, wanted 0" % rc)
+                    + problem_if(not first.lower().startswith("usage: ") or script not in first, "stdout starts %r, wanted 'usage: ... %s'" % (first[:80], script))
+                    + problem_if(err, "stderr %r" % err[:200])
+                    + problem_if(calls, "network entry points reached: %r" % calls)), ["%s -> exit 0, %d stdout line(s) starting %r, nothing on stderr, no network entry point reached" % (flag, len(out.splitlines()), first[:60])]
+        return fn
+    run_row(suite, GM, "%s-cli-help-long-prints-usage-exit-0-no-network" % tag, helps("--help"), src)
+    run_row(suite, GM, "%s-cli-help-short-prints-usage-exit-0-no-network" % tag, helps("-h"), src)
+
+    def refused(argv, named):
+        def fn():
+            rc, out, err, calls = cli_run(host, script, argv)
+            return (problem_if(rc != 2, "exit code %r, wanted 2" % rc)
+                    + problem_if(out, "stdout %r" % out[:200])
+                    + problem_if(not err.strip() or (named and "-x" not in err), "stderr %r, wanted a refusal%s" % (err[:200], " naming -x" if named else ""))
+                    + problem_if(calls, "network entry points reached: %r" % calls)), ["%r -> exit 2, stderr %r, no network entry point reached" % (argv, err.strip().splitlines()[-1][:120] if err.strip() else "")]
+        return fn
+    run_row(suite, GM, "%s-cli-unknown-option-alone-is-refused-exit-2-no-network" % tag, refused(["-x"], False), src)
+    run_row(suite, GM, "%s-cli-unknown-option-after-a-query-is-refused-exit-2-no-network" % tag, refused(["q", "-x"], True), src)
+
+    def control():
+        rc, _out, _err, calls = cli_run(host, script, ["q"])
+        return problem_if(not calls or calls[0] != "create_session" or rc is not None, "a real query reached %r, exit code %r: the guard does not see a search" % (calls, rc)), \
+            ["a plain query 'q' under the same guard: stopped at %r (exit code %r) -- the guard sees a real search, so the rows above prove its absence" % (calls[:1], rc)]
+    run_row(suite, GM, "control-%s-cli-guard-catches-a-real-search" % tag, control, "negative control")
+
+
 def group_hosts(suite, cc):
     """Group M: the GENERATED copies in search_github.py and search_duckduckgo.py driven over loopback, their policy, the verified-first ladders, the AST rules."""
     host = H.load_module_from_path("search_github_under_test", GH_HOST)
@@ -7545,6 +7625,7 @@ def group_hosts(suite, cc):
         for srv in (s2, vp):
             srv.close()
     host_hygiene_rows(suite, host, originals, "github")
+    cli_rows(suite, host, "search_github.py", "github")
 
     ddg = H.load_module_from_path("search_duckduckgo_under_test", DDG_HOST)
     with open(DDG_HOST, encoding="utf-8") as fh:
@@ -7564,6 +7645,7 @@ def group_hosts(suite, cc):
         for srv in (hp, dvp):
             srv.close()
     host_hygiene_rows(suite, ddg, ddg_originals, "ddg")
+    cli_rows(suite, ddg, "search_duckduckgo.py", "ddg")
 
     group_webfetch(suite, cc)
 

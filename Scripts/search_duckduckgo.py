@@ -8108,12 +8108,38 @@ def _run_ddg_with_bing_fallback(queries):
 	return output_sections, has_results
 
 
+_USAGE = """\
+Usage: python3 search_duckduckgo.py "search phrase" ["query2" ...]
+
+Searches DuckDuckGo Lite (Bing when DDG CAPTCHAs) and prints Markdown results.
+Every argument is ONE query: quote a multi-word phrase. Several quoted queries
+in one call run in batch mode, one result section per query.
+
+Options:
+  -h, --help      print this text and exit
+An argument starting with '-' is never searched: any other option is refused
+(exit 2), so a query cannot start with '-'.
+
+Environment:
+  DDG_BACKEND     force backend: "bing", "cdp", or "ddg" (default: ddg with bing fallback)
+  CHROME_CDP_URL  Chrome debug endpoint for the cdp backend (default: http://localhost:9222)"""
+
+
 def main():
 	if len(sys.argv) < 2:
 		print("Usage: python3 search_duckduckgo.py \"search phrase\" [\"query2\" ...]", file=sys.stderr)
 		sys.exit(1)
 
 	queries = sys.argv[1:]
+	# Options are judged before any network: --help must never be searched.
+	if "-h" in queries or "--help" in queries:
+		print(_USAGE)
+		sys.exit(0)
+	options = [arg for arg in queries if arg.startswith("-")]
+	if options:
+		print(f"search_duckduckgo.py: unknown option {options[0]!r} (every argument is one query; see --help)", file=sys.stderr)
+		sys.exit(2)
+
 	forced = os.environ.get("DDG_BACKEND", "").lower()
 
 	if forced == "cdp":

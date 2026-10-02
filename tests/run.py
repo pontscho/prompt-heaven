@@ -509,6 +509,9 @@ SUITES = [
      "the DDG and Bing ladders, the reflected-text predicate rows with their "
      "substring controls, sticky per endpoint, the Bing leg's rotation, AST "
      "rows); "
+     "both hosts' main() under a network guard (-h / --help print usage and "
+     "exit 0, an unknown option exits 2, no network entry point reached, a "
+     "control that the guard stops a real query); "
      "mcp-webfetch's handle_fetch over loopback with stub bs4/markdownify "
      "(the verified default with the test-CA factory injected, the "
      "profile=chrome opt-in and its impersonate alias, 403 x3 with the hint, "
@@ -518,7 +521,7 @@ SUITES = [
      "fix rows (cache keyed on allow_private, 0700/0600 modes, printable URL "
      "and header echoes), one uv stdio row); "
      "every refusal and the hmac.compare_digest tag gate, the generator block "
-     "contract, and the AES-256-GCM decrypt floor", 833),
+     "contract, and the AES-256-GCM decrypt floor", 843),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That
