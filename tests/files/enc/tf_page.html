@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tf-enc fixture page</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: sans-serif; margin: 2em auto; max-width: 42em; line-height: 1.5; }
+h1, h2 { font-weight: 600; }
+.tf-card { border: 1px solid #ccc; border-radius: 4px; padding: 0.5em 1em; margin: 1em 0; }
+.tf-card a { color: #0645ad; text-decoration: none; }
+.tf-note { color: #555; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<h1>tf-enc fixture page</h1>
+<p class="tf-note">A small, hand-written HTML page used as the plain original of the
+brotli, zstd and gzip encoded fixtures in this directory. It is not a real site;
+every link points under example.* and nothing here is loaded by the project.</p>
+
+<h2>Cards</h2>
+<div class="tf-card">
+<h3><a href="https://example.com/tf/alpha">tf alpha: the first card</a></h3>
+<p>The quick brown fox jumps over the lazy dog. Pack my box with five dozen
+liquor jugs. Sphinx of black quartz, judge my vow.</p>
+</div>
+<div class="tf-card">
+<h3><a href="https://example.org/tf/beta?q=tf+beta&amp;page=2">tf beta: the second card</a></h3>
+<p>How vexingly quick daft zebras jump. The five boxing wizards jump quickly.
+Jackdaws love my big sphinx of quartz.</p>
+</div>
+<div class="tf-card">
+<h3><a href="https://example.net/tf/gamma#section-3">tf gamma: the third card</a></h3>
+<p>Non-ASCII on purpose, so a decoder that mangles bytes is caught:
+&#8212; em dash as an entity, and as raw UTF-8: — é ö ű 漢字 ✓.</p>
+</div>
+
+<h2>A table</h2>
+<table>
+<tr><th>key</th><th>value</th></tr>
+<tr><td>tf-one</td><td>1</td></tr>
+<tr><td>tf-two</td><td>22</td></tr>
+<tr><td>tf-three</td><td>333</td></tr>
+<tr><td>tf-four</td><td>4444</td></tr>
+</table>
+
+<h2>A list</h2>
+<ul>
+<li>tf item one &mdash; plain text</li>
+<li>tf item two &mdash; <em>emphasised</em> text</li>
+<li>tf item three &mdash; <code>tf_inline_code()</code></li>
+<li>tf item four &mdash; <a href="https://example.com/tf/four">a link</a></li>
+</ul>
+
+<footer class="tf-note">tf-enc fixture &middot; example.com &middot; example.org &middot; example.net</footer>
+</body>
+</html>

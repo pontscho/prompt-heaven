@@ -41,6 +41,24 @@ B  every scanned file parses with `ast.parse(src, feature_version=(3, 9))`.
 D  the one behavioural consequence of the rule: `lxml` left
    Scripts/search_duckduckgo.py, and its stdlib replacement is pinned to the
    exact fields lxml produced on tests/files/html/tf_bing_serp.html.
+F  two rules the import gate cannot see, both read with `ast`:
+     * SYSTEM LIBRARIES.  `ctypes` is stdlib, so a shared library loaded
+       through it never shows up as an import.  Every literal library name --
+       the first argument of ctypes.CDLL / PyDLL / cdll.LoadLibrary /
+       ctypes.util.find_library, and every lib<stem>.(so|dylib) element of a
+       top-level tuple whose name contains SONAMES or FILES -- must reduce to
+       a stem declared in SYSTEM_LIBS with the reason the stdlib cannot do the
+       job (brotlidec, zstd).  CDLL(None) names no library -- it is the
+       process's own namespace -- and is listed, not judged.  A declared stem
+       no scanned file names is a stale licence.
+     * NO 3.10+ API in NEW_39_SCOPE (the Chrome client, the two decoders and
+       the capture tool).  A LIST of known APIs, not a model of the stdlib:
+       int.bit_count; zip/map(strict=); int.to_bytes/from_bytes without the
+       length/bytes AND byteorder arguments (both optional only from 3.11);
+       bisect.*(key=); itertools.pairwise; create_connection(all_errors=);
+       hashlib.file_digest; ssl.VERIFY_X509_PARTIAL_CHAIN; `X | Y` in an
+       annotation.  A listed file that does not exist yet is INFO, not PASS.
+   Its own planted controls and baits sit in the same group.
 
 THE STDLIB SET IS EMBEDDED, NOT DERIVED -- AND WHY
 --------------------------------------------------
@@ -62,10 +80,16 @@ DECLARED BLIND SPOTS
   control flow: it proves the author wrote the guard, not that every path
   reaches it.
 * A computed dynamic import is listed, not judged.
-* Syntax only, as stated in B.
+* Syntax only, as stated in B -- outside NEW_39_SCOPE; inside it group F
+  checks the APIs it lists and no others, and does not parse a string
+  annotation.
+* A ctypes load with a computed name is not judged; the literal it is
+  computed from is, only when it sits in a *SONAMES* / *FILES* tuple.  A
+  find_library stem held in any other literal (the decoders' ("find_library",
+  "zstd") attempt pair) is not read.
 
-NEGATIVE CONTROL (group C) -- mandatory: planted defects the checker MUST flag
-and bait it must not, all in `.claude/tmp/test_py_deps/run-<unique>/`, outside
+NEGATIVE CONTROL (groups C and F) -- mandatory: planted defects the checker
+MUST flag and bait it must not, all in `.claude/tmp/test_py_deps/run-<unique>/`, outside
 every scan root, removed in a `finally` unless --keep.
 
 Offline, starts nothing, writes only its sandbox.
@@ -78,6 +102,7 @@ Exit code 0 iff every non-informational case passes.
 import ast
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -101,15 +126,32 @@ PRUNE_DIRS = {"__pycache__", ".git", ".claude"}
 # module -> why the stdlib cannot do this job.  An entry here is permission to
 # import the module AT ALL; the find_spec guard is required on top.
 ALLOWLIST = {
-    "primp": "TLS/HTTP2 browser impersonation with an OS knob (Linux side of "
-             "ADR 0004); urllib/ssl cannot shape a ClientHello",
-    "curl_cffi": "TLS/HTTP2 browser impersonation (non-Linux side of ADR "
-                 "0004); urllib/ssl cannot shape a ClientHello",
     "yaml": "a YAML parser: there is none in the stdlib, and a regex cannot "
             "tell well-formed YAML from not",
     "tomli": "the TOML parser backport for 3.9/3.10, where tomllib does not "
              "exist; only ever a fallback, degrading to SKIP when absent",
 }
+
+# System shared library stem -> why the stdlib cannot do this job.  The ctypes
+# counterpart of ALLOWLIST (group F): `ctypes` IS the stdlib, so the import gate
+# never sees a library loaded through it.  A stem here is permission to name
+# lib<stem>.so / lib<stem>.dylib in a ctypes load or a *SONAMES* / *FILES*
+# tuple; the library may be ABSENT on a host and the loader must degrade to a
+# one-line LookupError (ADR 0024 addendum).
+SYSTEM_LIBS = {
+    "brotlidec": "a brotli (RFC 7932) decoder: the stdlib has none on any "
+                 "version (Scripts/_mcp_brotli.py)",
+    "zstd": "a zstd (RFC 8878) decoder: the stdlib has none before "
+            "compression.zstd in 3.14, far above the 3.9 floor "
+            "(Scripts/_mcp_zstd.py)",
+}
+
+# Files that must not use a stdlib API newer than 3.9 (group F).  Syntax is
+# group B's job; these are the new sources written against the floor, where an
+# API check is cheap and exact.  A listed file that does not exist yet is an
+# INFO row, never a vacuous PASS.
+NEW_39_SCOPE = ("Scripts/_mcp_chrome.py", "Scripts/_mcp_brotli.py",
+                "Scripts/_mcp_zstd.py", "Scripts/chrome_capture.py")
 
 # stdlib on a newer interpreter, ABSENT on the 3.9 floor -- so it needs the
 # same guard as a third-party module.  module -> first version that has it.
@@ -122,9 +164,10 @@ NEWER_STDLIB = {
 # excepted file still fails.
 EXCEPTIONS = {
     "Scripts/mcp-webfetch.py": (
-        frozenset({"bs4", "markdownify", "primp", "curl_cffi"}),
+        frozenset({"bs4", "markdownify"}),
         "DECLARED, TEMPORARY (ADR 0024): launched with `uv run --script`, "
-        "whose PEP 723 block resolves these; the HTML->Markdown conversion "
+        "whose PEP 723 block resolves these; the fetch itself is the stdlib "
+        "Chrome client now, but the HTML->Markdown conversion "
         "(bs4 + markdownify) has no stdlib replacement in the tree yet",
     ),
 }
@@ -189,6 +232,7 @@ GB = "B. syntax: every file parses as Python 3.9 (syntax only)"
 GC = "C. negative control"
 GD = "D. the lxml replacement, pinned to lxml's own output"
 GE = "E. hygiene"
+GF = "F. ctypes system libraries declared; no 3.10+ API in the new sources"
 
 FIXTURE_BASE = H.repo_path(".claude", "tmp", "test_py_deps")
 WRITES = []
@@ -412,6 +456,174 @@ def scan(base, roots, extra=()):
 
 
 # ---------------------------------------------------------------------------
+# group F checkers: ctypes library stems, and 3.10+ stdlib API use
+# ---------------------------------------------------------------------------
+
+# lib<stem>[.N...].(so|dylib)[.N...], optionally behind a directory.  The stem
+# is matched lazily so a version between the stem and the suffix
+# (libbrotlidec.1.dylib) is not swallowed into it.
+_LIB_NAME_RX = re.compile(
+    r"^(?:.*/)?lib([A-Za-z0-9_+-]+?)(?:\.[0-9]+)*\.(?:so|dylib)(?:\.[0-9]+)*$")
+
+# ctypes calls whose first argument names a library FILE (ctypes.CDLL,
+# ctypes.PyDLL, ctypes.cdll.LoadLibrary); find_library takes a bare STEM.
+_CTYPES_LOADERS = frozenset({"CDLL", "PyDLL", "LoadLibrary"})
+
+# A top-level tuple whose name carries one of these is a load-order table.
+_LIB_TABLE_WORDS = ("SONAMES", "FILES")
+
+
+def _call_name(call):
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def _is_name(node, name):
+    return isinstance(node, ast.Name) and node.id == name
+
+
+def _lib_stem(text):
+    """The stem of a library file name, or None when it is not one."""
+    match = _LIB_NAME_RX.match(text)
+    return match.group(1) if match else None
+
+
+def library_stems(tree):
+    """(sites, own) for one parsed module.
+
+    sites [(lineno, form, literal, stem)]  every literal library name: the
+          first argument of a ctypes load or find_library, and every lib-named
+          string element of a top-level *SONAMES* / *FILES* tuple.  stem is
+          None when a load names something that is not lib<stem>.(so|dylib).
+    own   [lineno]  CDLL(None): the process's own namespace, no library named.
+    A load with a COMPUTED name is not a site: the literal it is computed from
+    is, when it sits in a load-order table.
+    """
+    sites, own = [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node)
+        if name not in _CTYPES_LOADERS and name != "find_library":
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        value = node.args[0].value
+        if value is None and name in _CTYPES_LOADERS:
+            own.append(node.lineno)
+        elif isinstance(value, str):
+            stem = _lib_stem(value)
+            if name == "find_library" and stem is None:
+                stem = value
+            sites.append((node.lineno, name, value, stem))
+    for stmt in tree.body:
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and isinstance(stmt.value, (ast.Tuple, ast.List))):
+            continue
+        table = stmt.targets[0].id
+        if not any(word in table for word in _LIB_TABLE_WORDS):
+            continue
+        for elt in stmt.value.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                stem = _lib_stem(elt.value)
+                if stem is not None:
+                    sites.append((elt.lineno, table, elt.value, stem))
+    return sorted(sites), sorted(own)
+
+
+# (module, name) pairs that do not exist on 3.9 when imported by name.
+_NEW_FROM_IMPORTS = {
+    ("itertools", "pairwise"): "itertools.pairwise (3.10)",
+    ("hashlib", "file_digest"): "hashlib.file_digest (3.11)",
+    ("ssl", "VERIFY_X509_PARTIAL_CHAIN"): "ssl.VERIFY_X509_PARTIAL_CHAIN (3.10)",
+}
+
+_BISECT_FUNCS = frozenset({"bisect", "bisect_left", "bisect_right", "insort",
+                           "insort_left", "insort_right"})
+
+# int.to_bytes / int.from_bytes: the first parameter's keyword name.  Both
+# gained defaults for it AND for byteorder in 3.11; on 3.9 both are required.
+_INT_BYTES_FIRST = {"to_bytes": "length", "from_bytes": "bytes"}
+
+
+def _annotations(node):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = node.args
+        params = (list(getattr(args, "posonlyargs", [])) + args.args
+                  + args.kwonlyargs + [a for a in (args.vararg, args.kwarg)
+                                       if a is not None])
+        return [p.annotation for p in params if p.annotation is not None] \
+            + ([node.returns] if node.returns is not None else [])
+    if isinstance(node, ast.AnnAssign):
+        return [node.annotation]
+    return []
+
+
+def api_310(tree):
+    """[(lineno, what)] -- every 3.10+ stdlib API use this rule knows, sorted.
+
+    The rule is a LIST of known APIs, not a model of the stdlib: an API not
+    listed here is not seen (declared blind spot), and a string annotation is
+    not parsed.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            if node.attr == "bit_count":
+                found.append((node.lineno, "int.bit_count (3.10)"))
+            elif node.attr == "VERIFY_X509_PARTIAL_CHAIN":
+                found.append((node.lineno,
+                              "ssl.VERIFY_X509_PARTIAL_CHAIN (3.10)"))
+            elif node.attr == "pairwise" and _is_name(node.value, "itertools"):
+                found.append((node.lineno, "itertools.pairwise (3.10)"))
+            elif node.attr == "file_digest" and _is_name(node.value,
+                                                         "hashlib"):
+                found.append((node.lineno, "hashlib.file_digest (3.11)"))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            for alias in node.names:
+                what = _NEW_FROM_IMPORTS.get((node.module, alias.name))
+                if what:
+                    found.append((node.lineno, what))
+        elif isinstance(node, ast.Call):
+            name = _call_name(node)
+            kw = {k.arg for k in node.keywords if k.arg}
+            splat = (any(k.arg is None for k in node.keywords)
+                     or any(isinstance(a, ast.Starred) for a in node.args))
+            if name in ("zip", "map") and isinstance(node.func, ast.Name) \
+                    and "strict" in kw:
+                found.append((node.lineno, "%s(strict=) (%s)"
+                              % (name, "3.10" if name == "zip" else "3.14")))
+            elif name in _BISECT_FUNCS and "key" in kw \
+                    and (isinstance(node.func, ast.Name)
+                         or _is_name(node.func.value, "bisect")):
+                found.append((node.lineno, "bisect.%s(key=) (3.10)" % name))
+            elif name == "create_connection" and "all_errors" in kw:
+                found.append((node.lineno,
+                              "create_connection(all_errors=) (3.11)"))
+            elif name in _INT_BYTES_FIRST \
+                    and isinstance(node.func, ast.Attribute) and not splat:
+                first = len(node.args) >= 1 or _INT_BYTES_FIRST[name] in kw
+                order = len(node.args) >= 2 or "byteorder" in kw
+                if not (first and order):
+                    found.append((node.lineno,
+                                  "%s without an explicit %s (defaults are "
+                                  "3.11)" % (name, " and ".join(
+                                      w for w, ok in
+                                      ((_INT_BYTES_FIRST[name], first),
+                                       ("byteorder", order)) if not ok))))
+        for ann in _annotations(node):
+            if any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr)
+                   for n in ast.walk(ann)):
+                found.append((ann.lineno, "X | Y in an annotation (3.10)"))
+    return sorted(found)
+
+
+# ---------------------------------------------------------------------------
 # negative control fixtures
 # ---------------------------------------------------------------------------
 
@@ -431,6 +643,11 @@ FIXTURES = {
     "unlisted_requests.py": (
         "import requests\n",
         [[V_UNLISTED]]),
+    # the browser-impersonation libraries left the allowlist when the stdlib
+    # Chrome client replaced them: importing one again must be refused
+    "unlisted_primp.py": (
+        "import primp\n",
+        [[V_UNLISTED]]),
     "unlisted_dynamic.py": (
         "import importlib\n"
         "lx = importlib.import_module('lxml.html')\n"
@@ -442,15 +659,15 @@ FIXTURES = {
     "guard_after_import.py": (
         "import importlib.util\n"
         "def go():\n"
-        "    import primp\n"
-        "    return primp\n"
-        "HAVE = importlib.util.find_spec('primp') is not None\n",
+        "    import tomli\n"
+        "    return tomli\n"
+        "HAVE = importlib.util.find_spec('tomli') is not None\n",
         [[V_UNGUARDED]]),
     "guard_other_module.py": (
         "import importlib.util\n"
         "if importlib.util.find_spec('yaml') is None:\n"
         "    raise SystemExit(2)\n"
-        "from curl_cffi import requests\n",
+        "import tomli\n",
         [[V_UNGUARDED]]),
     "masked_except_importerror.py": (
         "import importlib.util\n"
@@ -477,9 +694,9 @@ FIXTURES = {
     "ok_guarded.py": (
         "import importlib.util\n"
         "import sys\n"
-        "if importlib.util.find_spec('curl_cffi') is None:\n"
+        "if importlib.util.find_spec('yaml') is None:\n"
         "    sys.exit(2)\n"
-        "from curl_cffi import requests\n",
+        "from yaml import safe_load\n",
         [[V_OK]]),
     "ok_guarded_fallback.py": (
         "import importlib.util\n"
@@ -502,6 +719,84 @@ FIXTURES = {
     "_fixture_sibling.py": (
         "VALUE = 1\n",
         []),
+    # -- group F: every import below is stdlib, so the import gate stays
+    # silent ([]); GF_FIXTURES says which group-F rule judges each file, and
+    # the lines that rule MUST flag end in `# FLAG` -- everything else is bait.
+    "undeclared_soname.py": (
+        "import ctypes\n"
+        "import ctypes.util\n"
+        "LIB = ctypes.CDLL('libfoo.so.1')  # FLAG\n"
+        "ALT = ctypes.cdll.LoadLibrary('/usr/lib/libbar.dylib')  # FLAG\n"
+        "PATH = ctypes.util.find_library('crypto')  # FLAG\n"
+        "ODD = ctypes.CDLL('msvcrt')  # FLAG\n"
+        "FOO_SONAMES = ('libfoo.so.2',)  # FLAG\n",
+        []),
+    "declared_soname.py": (
+        "import ctypes\n"
+        "import ctypes.util\n"
+        "ZSTD = ctypes.CDLL('libzstd.so.1')\n"
+        "BR = ctypes.cdll.LoadLibrary('/opt/homebrew/lib/libbrotlidec.1.dylib')\n"
+        "PATH = ctypes.util.find_library('zstd')\n"
+        "OWN = ctypes.CDLL(None, use_errno=True)\n"
+        "DYN = ctypes.CDLL(PATH)\n"
+        "BAR_SONAMES = ('libbrotlidec.so.1', 'libzstd.1.dylib')\n"
+        "DATA_FILES = ('README.md', 'notes.txt')\n"
+        "DOC = \"ctypes.CDLL('libfoo.so.1')\"\n"
+        "# ctypes.CDLL('libfoo.so.1')  a comment is not a load\n",
+        []),
+    "api_310.py": (
+        "import bisect\n"
+        "import hashlib\n"
+        "import itertools\n"
+        "import socket\n"
+        "import ssl\n"
+        "from itertools import pairwise  # FLAG\n"
+        "x = 5\n"
+        "b = b'ab'\n"
+        "n = x.bit_count()  # FLAG\n"
+        "t0 = (5).to_bytes()  # FLAG\n"
+        "t1 = (5).to_bytes(byteorder='big')  # FLAG\n"
+        "t2 = (5).to_bytes(2, signed=False)  # FLAG\n"
+        "f0 = int.from_bytes(b, signed=True)  # FLAG\n"
+        "v = ssl.VERIFY_X509_PARTIAL_CHAIN  # FLAG\n"
+        "z = zip([1], [2], strict=True)  # FLAG\n"
+        "m = map(abs, [1], strict=True)  # FLAG\n"
+        "i = bisect.bisect_left([1], 1, key=abs)  # FLAG\n"
+        "p = itertools.pairwise([1, 2])  # FLAG\n"
+        "c = socket.create_connection(('127.0.0.1', 1), all_errors=True)  # FLAG\n"
+        "d = hashlib.file_digest(None, 'sha256')  # FLAG\n"
+        "def f(a: int | None) -> None:  # FLAG\n"
+        "    return None\n"
+        "y: int | None = None  # FLAG\n",
+        []),
+    "api_39_ok.py": (
+        "import bisect\n"
+        "import ssl\n"
+        "b = b'ab'\n"
+        "x = 5\n"
+        "t0 = (5).to_bytes(2, byteorder='big')\n"
+        "t1 = (5).to_bytes(2, 'big', signed=True)\n"
+        "t2 = (5).to_bytes(length=2, byteorder='big')\n"
+        "f0 = int.from_bytes(b, 'big')\n"
+        "f1 = int.from_bytes(bytes=b, byteorder='little')\n"
+        "n = x.bit_length()\n"
+        "z = zip([1], [2])\n"
+        "i = bisect.bisect_left([1], 1)\n"
+        "v = ssl.VERIFY_X509_TRUSTED_FIRST\n"
+        "g = x | 1\n"
+        "def f(a: int = 0) -> int:\n"
+        "    return a\n"
+        "DOC = 'x.bit_count() and zip(strict=True)'\n",
+        []),
+}
+
+# group F: fixture -> the rule that judges it ("lib" = library_stems against
+# SYSTEM_LIBS, "api" = api_310).  Expected hits are the `# FLAG` lines.
+GF_FIXTURES = {
+    "undeclared_soname.py": "lib",
+    "declared_soname.py": "lib",
+    "api_310.py": "api",
+    "api_39_ok.py": "api",
 }
 
 # Syntax controls: name -> (source, must_fail_under_3_9)
@@ -809,6 +1104,126 @@ def group_bing(suite):
                          "is empty' and the old parser returned []"])
 
 
+def _parse_file(path):
+    """(tree, None) or (None, error text)."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return ast.parse(fh.read(), filename=path), None
+    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+        return None, "%s: %s" % (type(exc).__name__, exc)
+
+
+def _lib_hits(sites):
+    return [(line, "%s(%r) -> %s" % (form, lit, stem or "(not lib<stem>)"))
+            for line, form, lit, stem in sites
+            if stem is None or stem not in SYSTEM_LIBS]
+
+
+def group_system_libs(suite, root):
+    """F. ctypes libraries declared; no 3.10+ stdlib API in NEW_39_SCOPE."""
+    files = source_files(H.REPO_ROOT, SCAN_ROOTS, EXTRA_FILES)
+    sites, own, errors = [], [], []
+    for rel in files:
+        tree, err = _parse_file(os.path.join(H.REPO_ROOT, rel))
+        if tree is None:
+            errors.append("%s (%s)" % (rel, err))
+            continue
+        found, mine = library_stems(tree)
+        sites.extend((rel,) + s for s in found)
+        own.extend("%s:%d" % (rel, line) for line in mine)
+
+    bad = [s for s in sites if s[4] is None or s[4] not in SYSTEM_LIBS]
+    suite.record(GF, "every ctypes library stem is declared in SYSTEM_LIBS",
+                 (["%d undeclared library name(s): %s"
+                   % (len(bad), ", ".join("%s:%d %r" % (p, ln, lit)
+                                          for p, ln, _f, lit, _s in bad))]
+                  if bad else [])
+                 + (["%d file(s) could not be analysed: %s"
+                     % (len(errors), "; ".join(errors))] if errors else []),
+                 detail=["declared    : %s" % ", ".join(
+                             "%s (%s)" % kv for kv in sorted(SYSTEM_LIBS.items())),
+                         "sites       : %d literal library name(s) in %d "
+                         "file(s)" % (len(sites), len({s[0] for s in sites})),
+                         "read        : the first argument of ctypes.CDLL / "
+                         "PyDLL / cdll.LoadLibrary / find_library, and every "
+                         "lib-named element of a top-level *SONAMES* / *FILES* "
+                         "tuple",
+                         "fix         : declare the stem with the reason the "
+                         "stdlib cannot do the job, and record it in ADR 0024"])
+
+    used = {s[4] for s in sites}
+    stale = sorted(set(SYSTEM_LIBS) - used)
+    suite.record(GF, "declared system libraries are still live",
+                 ["SYSTEM_LIBS declares %s but no scanned file names it"
+                  % ", ".join(stale)] if stale else [],
+                 detail=["%-10s %s" % (stem, ", ".join(sorted(
+                     {s[0] for s in sites if s[4] == stem})) or "(unused)")
+                         for stem in sorted(SYSTEM_LIBS)]
+                 + ["rule        : a declaration that licenses nothing is a "
+                    "stale licence; delete it"])
+
+    suite.record(GF, "CDLL(None): the process's own namespace (declared)", [],
+                 status=H.INFO,
+                 detail=["sites       : %s" % (", ".join(own) or "none"),
+                         "why         : no library is named, nothing can be "
+                         "absent -- not a system-library dependency"])
+
+    for rel in NEW_39_SCOPE:
+        cid = "no 3.10+ stdlib API: " + rel
+        path = os.path.join(H.REPO_ROOT, rel)
+        if not os.path.isfile(path):
+            suite.record(GF, cid, [], status=H.INFO,
+                         detail=["NOT PRESENT YET: nothing to judge -- INFO, "
+                                 "not a vacuous PASS"])
+            continue
+        tree, err = _parse_file(path)
+        if tree is None:
+            suite.record(GF, cid, ["could not be analysed: %s" % err])
+            continue
+        hits = api_310(tree)
+        suite.record(GF, cid,
+                     ["%d 3.10+ API use(s): %s"
+                      % (len(hits), "; ".join("line %d %s" % h for h in hits))]
+                     if hits else [],
+                     detail=["rule        : a LIST of known 3.10+ APIs (see "
+                             "api_310), not a model of the stdlib; the real "
+                             "3.9 interpreter is the complete check"])
+
+    for name, rule in sorted(GF_FIXTURES.items()):
+        source = FIXTURES[name][0]
+        expected = [n for n, line in enumerate(source.splitlines(), 1)
+                    if line.endswith("# FLAG")]
+        tree, err = _parse_file(os.path.join(root, name))
+        if tree is None:
+            suite.record(GF, "control-" + name, ["fixture unparsable: %s"
+                                                 % err])
+            continue
+        problems = []
+        if rule == "lib":
+            fsites, fown = library_stems(tree)
+            hits = _lib_hits(fsites)
+            if name == "declared_soname.py":
+                if len(fsites) < 5:
+                    problems.append("only %d site(s) read, 5 planted: the "
+                                    "reader is blind" % len(fsites))
+                if not fown:
+                    problems.append("CDLL(None) not recognised as the "
+                                    "process's own namespace")
+        else:
+            hits = api_310(tree)
+        got = [line for line, _what in hits]
+        if got != expected:
+            problems.insert(0, "flagged lines %r != expected %r"
+                            % (got, expected))
+        suite.record(GF, "control-" + name, problems,
+                     detail=["rule        : %s" % {"lib": "library_stems vs "
+                                                   "SYSTEM_LIBS",
+                                                   "api": "api_310"}[rule],
+                             "expected    : %r (the `# FLAG` lines)"
+                             % expected]
+                     + ["hit         : line %d %s" % h for h in hits])
+
+
 def group_hygiene(suite, root, pyc_before, tree_before):
     """E. every write under .claude/tmp, no bytecode, no new repo paths."""
     stray = [p for p in WRITES if not os.path.abspath(p).startswith(
@@ -855,6 +1270,7 @@ def run(opts=None):
         group_syntax(suite)
         group_control(suite, root)
         group_bing(suite)
+        group_system_libs(suite, root)
         group_hygiene(suite, root, pyc_before, tree_before)
     finally:
         if opts.keep:

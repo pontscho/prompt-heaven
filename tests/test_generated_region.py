@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Generated-region drift gate -- groups A-G.
 
+`Scripts/_mcp_brotli.py`, `Scripts/_mcp_chrome.py`,
 `Scripts/_mcp_concurrency.py`, `Scripts/_mcp_json.py`,
-`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`,
-`Scripts/_mcp_paging.py` and `Scripts/_mcp_websocket.py` are the canonical
+`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`, `Scripts/_mcp_paging.py`,
+`Scripts/_mcp_websocket.py` and `Scripts/_mcp_zstd.py` are the canonical
 sources for the helpers the MCP servers share, and
 `Scripts/amalgamate.py` inlines their named blocks into each server between
-`# BEGIN GENERATED` / `# END GENERATED` markers -- and into the one non-server
-host its `DECLARED_HOSTS` names, which group A gates alongside the fleet and
-which the websocket blocks' own behaviour suite (`tests/test_mcp_websocket.py`)
-drives end to end, so group E does not repeat it. The servers stay
+`# BEGIN GENERATED` / `# END GENERATED` markers -- and into the non-server
+hosts its `DECLARED_HOSTS` names, which group A gates alongside the fleet. The
+websocket and Chrome blocks have behaviour suites of their own
+(`tests/test_mcp_websocket.py`, `tests/test_mcp_chrome.py`,
+`tests/test_mcp_decoders.py`) that drive them end to end, so group E does not
+repeat them. The servers stay
 single-file on purpose (an imported sibling would write `Scripts/__pycache__`
 into a tree every suite that snapshots bytecode asserts stays empty, and would
 move the helpers out of the module attributes `test_mcp_footprint` reaches
@@ -151,6 +154,9 @@ LOGGING_CANONICAL_NAME = "_mcp_logging.py"
 LSP_CANONICAL_NAME = "_mcp_lsp.py"
 PAGING_CANONICAL_NAME = "_mcp_paging.py"
 WEBSOCKET_CANONICAL_NAME = "_mcp_websocket.py"
+BROTLI_CANONICAL_NAME = "_mcp_brotli.py"
+CHROME_CANONICAL_NAME = "_mcp_chrome.py"
+ZSTD_CANONICAL_NAME = "_mcp_zstd.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
@@ -158,10 +164,11 @@ WEBSOCKET_CANONICAL_NAME = "_mcp_websocket.py"
 # reason the markers are, and the mirror earns its keep on exactly this kind of
 # edit: a fifth source added to the generator and not to this tuple fails
 # `sources-registered` by name instead of being adopted silently.
-CANONICAL_NAMES = (CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
+CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
+                   CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
                    LOGGING_CANONICAL_NAME,
                    LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME,
-                   WEBSOCKET_CANONICAL_NAME)
+                   WEBSOCKET_CANONICAL_NAME, ZSTD_CANONICAL_NAME)
 
 # The hosts OUTSIDE `TARGET_GLOB`, mirrored for the reason the source registry
 # is: the generator names them by hand so a script cannot become a target by
@@ -169,7 +176,22 @@ CANONICAL_NAMES = (CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
 # any edit to it. `target-glob` asserts the two spellings agree, and
 # `fleet-ok` gates these alongside the servers -- a declared host the gate did
 # not walk would be a target whose drift nothing reports.
-DECLARED_HOSTS = ("search_duckduckgo.py",)
+DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py")
+
+# The sources a host takes WHOLE or not at all (G-c): the Chrome client and its
+# two decoders are one state machine whose blocks call one another, so a host
+# carrying some of a source's blocks and not the rest is a violation, never a
+# choice. The generator does not enforce it -- `whole-source-regions` does --
+# and it is mirrored for the reason the registry is: a test that read the tuple
+# back off the generator would agree with a source quietly dropped from it.
+# `sources-registered` asserts the two spellings agree.
+WHOLE_SOURCES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
+                 ZSTD_CANONICAL_NAME)
+
+# The one row `--census hosts` renders for a whole source whose blocks all share
+# one host set. Spelled here, not imported, because it is a page format the
+# census-hosts case parses; `%d` is the source's block count.
+WHOLE_SOURCE_ROW = "all %d blocks (whole source)"
 
 # The websocket blocks call one another, and `host_provides` offers a region
 # only the host's imports -- so no websocket block can stand in a region of its
@@ -308,19 +330,34 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
     The websocket source paid it a fourth time, for `base64`, `hashlib` and
     `socket` -- and its one tab host is the search script, the first host that
     is not a server at all.
+
+    The Chrome client and its two decoders paid it a fifth time, for `codecs`,
+    `ctypes`, `hmac`, `http`, `ipaddress`, `ssl`, `struct`, `time`, `urllib`
+    and `zlib` -- and the first time for sources a host takes WHOLE, so the
+    fixture is driven with one marker per source rather than one per block.
     """
     return (
         '"""A tab-indented target."""\n'
         "import asyncio\n"
         "import base64\n"
+        "import codecs\n"
+        "import ctypes.util\n"
         "import hashlib\n"
+        "import hmac\n"
+        "import http.client\n"
+        "import ipaddress\n"
         "import json\n"
         "import logging\n"
         "import os\n"
         "import pathlib\n"
         "import re\n"
         "import socket\n"
+        "import ssl\n"
+        "import struct\n"
         "import sys\n"
+        "import time\n"
+        "import urllib.parse\n"
+        "import zlib\n"
         "from typing import Any\n"
         "from urllib.parse import urlparse\n"
         "from urllib.request import url2pathname\n"
@@ -357,6 +394,30 @@ def problem_if(condition, message):
     return [message] if condition else []
 
 
+def whole_source_problems(host, source, names, sources):
+    """G-c for one region: *names* must be ALL of *source*'s blocks, in order.
+
+    The order is the block map's insertion order, which is source order. One
+    checker serves the live walk and the negative controls, so a checker that
+    waved everything through would fail its own controls first.
+    """
+    want = list(sources.get(source, {}))
+    names = list(names)
+    if names == want:
+        return []
+    missing = [name for name in want if name not in names]
+    extra = [name for name in names if name not in want]
+    kept = [name for name in names if name in want]
+    order = [name for name in want if name in kept]
+    brk = next((i for i, (a, b) in enumerate(zip(kept, order)) if a != b), None)
+    return ["%s: its %s region is not the whole source -- missing %s, extra %s, "
+            "first order break %s"
+            % (host, source, missing, extra,
+               "none" if brk is None
+               else "at #%d (%s where the source has %s)"
+                    % (brk, kept[brk], order[brk]))]
+
+
 # --- groups -------------------------------------------------------------------
 
 def group_gate(suite, mod):
@@ -376,8 +437,19 @@ def group_gate(suite, mod):
     problems += ["%s: not a file at %s" % (name, path)
                  for name, path in sorted(mod.CANONICAL_SOURCES.items())
                  if not path.is_file()]
+    # The whole-source list is part of the same registry: a source dropped from
+    # the generator's tuple would stop being checked by `whole-source-regions`
+    # without anything else noticing.
+    problems += problem_if(
+        tuple(getattr(mod, "WHOLE_SOURCES", ())) != WHOLE_SOURCES,
+        "generator WHOLE_SOURCES is %r, the on-disk contract is %r"
+        % (getattr(mod, "WHOLE_SOURCES", None), WHOLE_SOURCES),
+    )
+    problems += ["%s: a whole source that is not a registered source" % name
+                 for name in WHOLE_SOURCES if name not in CANONICAL_NAMES]
     suite.record(GA, "sources-registered", problems,
-                 detail=["registered: %s" % ", ".join(registry)])
+                 detail=["registered: %s" % ", ".join(registry),
+                         "whole: %s" % ", ".join(WHOLE_SOURCES)])
 
     # The COUNT is not asserted: it grows every time a block is extracted, and a
     # number typed here would fail on progress rather than on a regression.
@@ -541,6 +613,44 @@ def group_gate(suite, mod):
     ), detail=["%s: %d name(s) requested"
                % (source, len([1 for s, _n in listed if s == source]))
                for source in sorted(CANONICAL_NAMES)])
+
+    # G-c: a host takes a WHOLE_SOURCES source whole, in source order, or not at
+    # all. `listed` above is a set of pairs, which forgets both the host and the
+    # order, so this walks the regions again. The checker is proven on two
+    # synthetic markers first -- one name missing, two names swapped -- because
+    # a checker that silently matches nothing is indistinguishable from a clean
+    # tree.
+    problems, walked = [], []
+    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)) + declared:
+        for region in mod.audit(path, sources):
+            if region.source in WHOLE_SOURCES:
+                walked.append("%s: %s (%d names)"
+                              % (path.name, region.source, len(region.names)))
+                problems += whole_source_problems(path.name, region.source,
+                                                  region.names, sources)
+    controls = []
+    for source in WHOLE_SOURCES:
+        names = list(sources.get(source, {}))
+        if len(names) < 2:
+            problems.append("%s: fewer than two blocks, so the controls below "
+                            "prove nothing" % source)
+            continue
+        dropped = names[:-1]
+        swapped = [names[1], names[0]] + names[2:]
+        for what, bad, needle in (("one name missing", dropped, names[-1]),
+                                  ("two names swapped", swapped, names[1])):
+            found = whole_source_problems("control.py", source, bad, sources)
+            if not found or needle not in found[0] or "control.py" not in found[0]:
+                problems.append("%s: the checker let a marker with %s through "
+                                "(or did not name it): %r" % (source, what, found))
+        problems += ["%s: the checker refused the whole source itself: %s"
+                     % (source, found)
+                     for found in [whole_source_problems("control.py", source,
+                                                         names, sources)] if found]
+        controls.append("%s: %d names, 2 mutations refused" % (source, len(names)))
+    suite.record(GA, "whole-source-regions", problems,
+                 detail=(walked or ["no whole-source region in any host yet"])
+                 + controls)
 
 
 def group_contract(suite, mod):
@@ -1734,9 +1844,16 @@ def group_tabs(suite, mod):
     for name in sources.get(WEBSOCKET_CANONICAL_NAME, {}):
         extra = () if name in WEBSOCKET_CORE else (name,)
         paired[name] = ", ".join(WEBSOCKET_CORE + extra)
-    problems = []
+    problems, emitted = [], 0
     for name in safe:
         source = next(s for s, blocks in sources.items() if name in blocks)
+        # A whole source's blocks are rendered below, once per SOURCE: a marker
+        # per block carrying the whole source each time would be O(N^2) in a
+        # source of a hundred-odd blocks, and a single-block marker is a shape
+        # no host may use for it (R2-L2).
+        if source in WHOLE_SOURCES:
+            continue
+        emitted += 1
         regions = mod.audit_text(
             "tabby.py", tab_host(paired.get(name, name), source), sources)
         if len(regions) != 1:
@@ -1752,8 +1869,41 @@ def group_tabs(suite, mod):
                                  for n in regions[0].names) + "\n"
         if untab(body) != expected:
             problems.append("%s: de-tabbing does not round-trip to canonical" % name)
+    # Each whole source ONCE, as the one marker every host spells: all of its
+    # names in source order. The case then asserts every one of them landed in
+    # that single region (L3), so a render that quietly dropped a block cannot
+    # pass on the blocks it kept.
+    for source in WHOLE_SOURCES:
+        names = list(sources.get(source, {}))
+        if not names:
+            problems.append("%s: no blocks loaded, so nothing was emitted" % source)
+            continue
+        refused = [n for n in names if not verdicts.get(n)]
+        if refused:
+            problems.append("%s: a whole source carries tab-unsafe block(s) %s"
+                            % (source, refused))
+            continue
+        regions = mod.audit_text(
+            "tabby.py", tab_host(", ".join(names), source), sources)
+        if len(regions) != 1:
+            problems.append("%s: expected one region, got %d" % (source, len(regions)))
+            continue
+        emitted += len(names)
+        problems += problem_if(
+            list(regions[0].names) != names,
+            "%s: the region holds %d name(s), the source defines %d; missing %s"
+            % (source, len(regions[0].names), len(names),
+               [n for n in names if n not in regions[0].names]))
+        body = regions[0].wanted
+        if any(line.startswith(" ") for line in body.splitlines()):
+            problems.append("%s: a line still begins with a SPACE" % source)
+        expected = "\n\n\n".join(sources[source][n].rstrip("\n")
+                                 for n in names) + "\n"
+        if untab(body) != expected:
+            problems.append("%s: de-tabbing does not round-trip to canonical" % source)
     suite.record(GF, "tab-emission-is-all-tabs", problems,
-                 detail=["%d block(s) emitted into a tab host" % len(safe)])
+                 detail=["%d block(s) emitted into a tab host, %d whole source(s) "
+                         "rendered once each" % (emitted, len(WHOLE_SOURCES))])
 
     # Host style comes from the host's own INDENT tokens. The marker's column
     # cannot answer it -- every fixture above puts the marker at column 0, which
@@ -1770,13 +1920,14 @@ def group_tabs(suite, mod):
         mod.host_indent(tab_host("_offset")) != "tab",
         "a column-0 marker in a tab file was not detected as a tab host",
     )
-    # The declared hosts are outside the glob above, and the one there is tabs
-    # throughout -- the fleet's first tab host that is not a server.
+    # The declared hosts are outside the glob above, and both search scripts
+    # are tabs throughout -- the fleet's tab hosts that are not servers.
     declared_styles = {name: mod.host_indent(Path(SCRIPTS, name).read_text(encoding="utf-8"))
                        for name in DECLARED_HOSTS}
     problems += problem_if(
-        declared_styles != {"search_duckduckgo.py": "tab"},
-        "expected the search script to be a tab host, got %s" % declared_styles,
+        declared_styles != {"search_duckduckgo.py": "tab",
+                            "search_github.py": "tab"},
+        "expected both search scripts to be tab hosts, got %s" % declared_styles,
     )
     suite.record(GF, "host-indent-from-tokens", problems,
                  detail=["tab: %s" % ", ".join(tabbed),
@@ -2157,10 +2308,26 @@ def group_census(suite, mod):
                              int(cells[2]), census_spans(cells[3])))
         return rows
 
+    def whole_collapsed(want):
+        """The WHOLE_SOURCES whose blocks all share one oracle host set."""
+        out = {}
+        for src in WHOLE_SOURCES:
+            sets = [held for (s, _b), held in want.items() if s == src]
+            if sets and all(held == sets[0] for held in sets):
+                out[src] = sets[0]
+        return out
+
     def hosts_check(paths, text, where):
         want = hosts_oracle(paths)
         rows = hosts_rows(text)
-        keys = sorted(("Scripts/%s" % src, block) for src, block in want)
+        # A whole source whose blocks all share one host set is ONE row; the
+        # moment a block's set differs it falls back to a row per block, so a
+        # partial host is visible on the page.
+        collapsed = whole_collapsed(want)
+        keys = sorted(set(
+            ("Scripts/%s" % src, WHOLE_SOURCE_ROW % len(sources[src])
+             if src in collapsed else block)
+            for src, block in want))
         # Membership AND order in one comparison: exactly one row per block
         # every source defines, hosted or not, in (source, block) order.
         out = problem_if(
@@ -2174,7 +2341,104 @@ def group_census(suite, mod):
                 out.append("%s: %s says %d %r, the walk finds %d %r"
                            % (where, block, row[0], row[1], len(held),
                               sorted(held)))
+        # M-2: the loop above looks rows up by BLOCK name and skips a key with
+        # no row, so a collapsed row -- whose key is no block name -- would
+        # never have its numbers compared. Each one is compared here.
+        for (spelled, block), count, names in rows:
+            if not block.endswith("blocks (whole source)"):
+                continue
+            src = spelled.split("/", 1)[-1]
+            if src not in WHOLE_SOURCES:
+                out.append("%s: %s is collapsed to one row but is not a whole "
+                           "source" % (where, spelled))
+                continue
+            # (a) every block of the source carries the same host set.
+            if src not in collapsed:
+                out.append("%s: %s is collapsed to one row although its blocks' "
+                           "host sets differ" % (where, src))
+                continue
+            # (b) the row's numbers are that shared set's.
+            shared = collapsed[src]
+            if (count, names) != (len(shared), sorted(shared)):
+                out.append("%s: %s's whole-source row says %d %r, the walk "
+                           "finds %d %r" % (where, src, count, names,
+                                            len(shared), sorted(shared)))
+            # (c) N is the source's block count, parsed, not assumed.
+            digits = block.split(" ")[1] if block.startswith("all ") else ""
+            if not digits.isdigit() or int(digits) != len(sources[src]):
+                out.append("%s: %s's row claims %r, the source defines %d "
+                           "blocks" % (where, src, block, len(sources[src])))
         return out, want
+
+    def whole_row_controls():
+        """Negative controls for the collapsed whole-source row (M-2).
+
+        Two planted hosts exist only in memory: `mod.audit` is wrapped for the
+        duration, because `census_hosts` reaches it by its global name and this
+        suite writes nothing. One takes a whole source whole; the other drops
+        that source's last block, which is exactly a partial host.
+        """
+        out = []
+        src = WHOLE_SOURCES[0]
+        names = list(sources.get(src, {}))
+        if len(names) < 2:
+            return ["%s: fewer than two blocks, so the whole-row controls prove "
+                    "nothing" % src]
+        whole_path = Path(SCRIPTS) / "planted_whole.py"
+        part_path = Path(SCRIPTS) / "planted_partial.py"
+        planted = {whole_path: tab_host(", ".join(names), src),
+                   part_path: tab_host(", ".join(names[:-1]), src)}
+        real_audit = mod.audit
+        mod.audit = lambda path, srcs: (
+            mod.audit_text(path.name, planted[path], srcs) if path in planted
+            else real_audit(path, srcs))
+        try:
+            whole_text = mod.census_text("hosts", sources, [whole_path])
+            part_text = mod.census_text("hosts", sources, [part_path])
+            found, _w = hosts_check([whole_path], whole_text, "planted whole host")
+            out += found
+            spelled = "Scripts/%s" % src
+            lines = whole_text.splitlines(keepends=True)
+            at = next((i for i, line in enumerate(lines)
+                       if "`%s`" % (WHOLE_SOURCE_ROW % len(names)) in line
+                       and "`%s`" % spelled in line), None)
+            if at is None:
+                out.append("a host carrying all of %s did not collapse it to one "
+                           "row: %r" % (src, whole_text))
+            else:
+                row = lines[at]
+                for what, mutant in (
+                        ("the count changed by one",
+                         row.replace("| 1 |", "| 2 |", 1)),
+                        ("one host name replaced",
+                         row.replace("`Scripts/planted_whole.py`",
+                                     "`Scripts/mcp-purity.py`", 1))):
+                    if mutant == row:
+                        out.append("control %r could not be built from %r"
+                                   % (what, row))
+                        continue
+                    found, _w = hosts_check(
+                        [whole_path],
+                        "".join(lines[:at] + [mutant] + lines[at + 1:]),
+                        "control")
+                    if not any(src in problem for problem in found):
+                        out.append("a whole-source row with %s was not refused "
+                                   "by name: %r" % (what, found))
+            # The partial host: the census must fall back to a row per block
+            # for that source, and the checker must agree with the fallback.
+            blocks = [block for (s, block), _c, _n in hosts_rows(part_text)
+                      if s == spelled]
+            out += problem_if(
+                sorted(blocks) != sorted(names),
+                "a partial host of %s did not make the census fall back to "
+                "per-block rows: %r" % (src, blocks))
+            found, _w = hosts_check([part_path], part_text, "planted partial host")
+            out += found
+        except SystemExit as exc:
+            out.append("a planted whole-source host was refused: %s" % exc)
+        finally:
+            mod.audit = real_audit
+        return out
 
     hosts_text = ""
     refusal = expect_exit(lambda: mod.census_text("hosts", sources,
@@ -2207,6 +2471,7 @@ def group_census(suite, mod):
                                          (hosted, "blocks with a host"))
                      if value not in closing]
         problems += main_problems("hosts", hosts_text)
+        problems += whole_row_controls()
         detail = ["%s: %d" % (block, len(held))
                   for (_src, block), held in sorted(want.items(),
                                                     key=lambda kv: kv[0][1])]

@@ -216,7 +216,7 @@ FLEET = {
     "mcp-tshark.py":   ("tshark-stdin",   "pool",      "tshark-call",    "arg",
                         "registry + config locks"),
     "mcp-webfetch.py": ("webfetch-stdin", "pool",      "webfetch-call",  "arg",
-                        "converted here; blocking curl_cffi/primp fetch needs a "
+                        "converted here; blocking stdlib Chrome fetch needs a "
                         "thread, and its timeout is caller-supplied and unclamped"),
     "mcp-wiki.py":     ("wiki-stdin",     "pool",      "wiki-call",      "arg",
                         "none -- its index is build-fresh-and-swap"),

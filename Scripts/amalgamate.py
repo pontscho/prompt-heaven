@@ -74,21 +74,32 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 # over `_mcp_*.py` would silently promote the next helper file somebody drops
 # into Scripts/ to a generation source, and a region naming it would read as
 # legitimate as any other. Adding a source is a deliberate edit here.
-CANONICAL_NAMES = ("_mcp_concurrency.py", "_mcp_json.py", "_mcp_logging.py",
-                   "_mcp_lsp.py", "_mcp_paging.py", "_mcp_websocket.py")
+CANONICAL_NAMES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_concurrency.py",
+                   "_mcp_json.py", "_mcp_logging.py", "_mcp_lsp.py",
+                   "_mcp_paging.py", "_mcp_websocket.py", "_mcp_zstd.py")
 CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 
 # Hosts OUTSIDE `TARGET_GLOB` that take generated blocks, each named by hand for
 # the reason the source registry is: widening the glob would make every script
 # in Scripts/ a target by merely existing. A host listed here is a single-file
-# script with the same import-free constraint as a server -- agents run the
-# search script by path and without -B, so an imported sibling would write
-# Scripts/__pycache__ on every search, and a copy of the one file taken alone
-# would stop at an ImportError. It takes the default run and `--check` exactly
-# as a server does; the
+# script with the same import-free constraint as a server -- agents run the two
+# search scripts (search_duckduckgo.py and search_github.py) by path and
+# without -B, so an imported sibling would write Scripts/__pycache__ on every
+# search, and a copy of the one file taken alone would stop at an ImportError.
+# Each takes the default run and `--check` exactly as a server does; the
 # `--census fleet` count stays the MCP glob's, because that census is ABOUT the
 # server fleet and says so in its first line.
-DECLARED_HOSTS = ("search_duckduckgo.py",)
+DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py")
+
+# Canonical sources a host takes WHOLE or not at all (G-c): the Chrome client
+# and its two decoders are one state machine whose blocks call each other, so a
+# host carrying some of their blocks and not others is a violation, never a
+# choice. The generator does not enforce it -- the generated_region suite does,
+# and the `--census hosts` page collapses such a source to one row only while
+# every one of its blocks has the same host set, so a partial host shows up as
+# per-block rows. tests/test_generated_region.py mirrors this tuple the way it
+# mirrors `CANONICAL_NAMES`.
+WHOLE_SOURCES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_zstd.py")
 
 # The repo root, derived the same way `SCRIPTS_DIR` is and for the same reason:
 # `Scripts/` is a directory of this repository, so its parent is the root that
@@ -832,11 +843,30 @@ def census_hosts(sources: Dict[str, Dict[str, str]],
         path = CANONICAL_SOURCES.get(source)
         return repo_relative(path) if path else source
 
+    # A whole source (G-c) whose blocks ALL share one host set is one fact, so
+    # it is one row -- in the per-block row's own four-cell shape, first cell a
+    # code span, so a reader of the table parses it unchanged. The moment one
+    # block's host set differs (a partial host) the source falls back to a row
+    # per block, so the violation is on the page, not inside a summary.
+    collapsed: Dict[str, Set[str]] = {}
+    for source in WHOLE_SOURCES:
+        sets = [held for (src, _block), held in hosts.items() if src == source]
+        if sets and all(held == sets[0] for held in sets):
+            collapsed[source] = sets[0]
+
     out = ["| Canonical block | Source | Hosts | Generated into |",
            "|---|---|---|---|"]
+    emitted: Set[str] = set()
     for (source, block), held in sorted(hosts.items(),
                                         key=lambda kv: (spelled(kv[0][0]),
                                                         kv[0][1])):
+        if source in collapsed:
+            if source in emitted:
+                continue
+            emitted.add(source)
+            block = "all %d blocks (whole source)" % sum(
+                1 for (src, _block) in hosts if src == source)
+            held = collapsed[source]
         out.append("| `%s` | `%s` | %d | %s |"
                    % (block, spelled(source), len(held),
                       census_names(sorted(held)) if held else "no host"))

@@ -80,8 +80,6 @@ exactly — naming every top-level and dynamically-imported third-party package:
 #     "beautifulsoup4",
 #     "markdownify",
 #     "lxml",
-#     "primp",
-#     "curl_cffi",
 # ]
 # ///
 ```

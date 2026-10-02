@@ -1,0 +1,254 @@
+{
+  "format": "chrome_capture/fixture/v1",
+  "label": "h1-tls",
+  "meta": {
+    "chrome_version": "153.0.8010.37",
+    "captured_on": "2026-09-30",
+    "mode": "tls",
+    "source": "h1-tls-057.json",
+    "index": 57,
+    "exported_by": "chrome_capture.py export"
+  },
+  "client_hello_hex": "010007dc03033421c3d06d529ccfa6f0c5382f105626470bf27b578d82296f3f5bdb4546d5522098b1a420a33a277492ab0893f7c08548e9d44a6f2c9b1e3948b16045f6c80c2f00200a0a130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f003501000773baba0000003304ef04edeaea00010011ec04c015e141c0cb00ac9baf533cab6dda6945a64ffe4b029910cd103b9c07f790954291e21b633ca14b05675a9a8342f8db169d9b3a856731c9494c8d445f5d775d538c8a464a1eaca1ac30f94b77398f6e1b5c4dc64489688ea9290d5b59259d367a317183845482d5b838c1f91da3b064e798b005009b0cf3238a48cf19e4cabd39717d82733ec4ca3154a1f2593d55127d99f06bf53149d60a8c2cdc4443d5b71b6c1a8d929ffa22b01bb21c1d9990ca8231c5bcb5c374b07c3c27806c4744263d54e603e222a3a9f324243689d9003756c7a3523237ea6018a862022c5a98983a2c29c97e84385471779f95f139f6e29f8c896c57c215094570a187c69ab5134d364cb3550d17e2769b9b820f27385cd2c6b6cc0f15fc80ce790cff43352d7a56f6802b98590a5e403b0adc97967734044b389ba84559abbcc6e98ae9384333252fd7d6a60706882aa538d05c2b3538cd3c5c687cb7acff38ac544b82d73acf963aa82ec3c4e30515375037169331422073b764c8f4640b523cc22b0350d5a974d9922330d3ced2a860fe0b64af946cacbaaa52f73c76f9103f38ad9214713a05af484a3aff516e3b91736d62252e9b100ea60c5c50150eda0b495bccd3087062ac9a809858f9c81c56305098fc6efca894ef8ab944015ec5ecbcdc968251997ca8227d8d2c3f35f5a2789c1434c3155d2a219e07b5ec6451c8fca4795c3a8bd490bae3bbd40299a9fbbc71d17d51a48cb72b475b646b6e4b2f9d3b54755bce7d92477286114261b919f479562506e2147b0dbb842f712508c20efe906feea6aac51410f10431f6a14b19516dd845b789d81fcc70196f654470f86902aa31db258bf027a5efdc5dc818c71cf05315b49ae7dc10feea99f71c85831815d26c6f7cb70d4c073f140466d43c64e127a491817551dc42b2a4c13544aea0789d7026c875b66a63442851b92b5bdb142f2554e40bcb38c563ab3b902e368d6fd99c6cf21f3ad888ba590b66f8799a04049aac2464e07c0b051e8325020ef26ddcd96f8d5429d1250cb26a47d50baa66f13191f61783fb2e9d60099fa867a403beeeb857c7fb833572ac6bfa66339538d53c8a8274216d57524c191b3a8cb7fe259a3f08675c8aab6ae1852ffc399f101192fb0760318295006b4c2347f935a82f6c05d0f89752f8858e8b0277d861411a2c86445fc8c1ba22306f2dd917299a424b8944e6f8875e23bdc0d48cdd0134590968bdb605b55c61caa831dbd728bfe16ca45aa73721a8dfb53b9e46911dfbcd92e754bc7aa6d3fa3affac96c20849645aa03439389e1782ea05caccc778cae55ae3485dbc9409b4344debcc21bee96b9325bf37418f2cc9c982cb5d3f8c13aff6af9d52a4f6b72d0c89bb650a9248d17029921e87f101da1679ff8080022cb04d8443ab827f8be8c9add3c87d45b5d3624001f383ebd49123e0112f79a4e4740e7b78348ddcce137208645476cd55a583584ee89a87033954808c8305c77dc34acebf3032063a85125cbb8d7620ecc3a61b949ba8a03b6c0a66ed58c75096b3bf66cf73dbcb1467a47ae827cf8165d92c3317a47c8ab845cd45ad09ec5a219c6bd7794272f80cfad230205650d9607db1cb970a9c0012999cba758df21a44ae391af54c2f9835c63caf2685fb5b3526c15258e5ecd961299a12a8a45857f479dbe5c4f166faac5ea9867aa8b0c82658ad7309001d0020563c5f62bf86c88fcc1f40e1f50c85e82c985f03cd101f59ef8c04582d413a7d00170000ca3400ba00b808839a648c9b2d01070582df13020604d67909060582df1302130582df13021204d679090c08839a648c9b2d010b04d67909050582df13020f0582df13021404d679090a04d679090104d67909040582df1302010582df13020e08839a648c9b2d011204d679090f08839a648c9b2d011304d679090808839a648c9b2d01080582df13020d04d679090708839a648c9b2d010d04d679090d08839a648c9b2d010c08839a648c9b2d010904d679090b08839a648c9b2d010aff01000100001b00030200020012000000230000000000160014000011636170747572652e6c6f63616c686f7374002b000706fafa03040303000b0002010044cd00050003026832002d00020101000500050100000000000d001a00181a1a09040905090604030804040105030805050108060601000a000c000aeaea11ec001d00170018fe0d011a0000010001dc00206ef2e99296d929037e57632e716b9f2770d688c698fedb873846c05fa861826700f007c52f64c6f0a63fa5dc165303a495df8ef3558d07af78043a27a16b289a298a68b4f4f7eee5bc2102b0ac9cdabb595e401e3a2c0d31e2e126446080770c77b4d3d4cc42867d29f180e01634a9084f5d2b0ad5906fab15f820a415ae2f3313645acedeadff1fbac8cfdedbca6591f644e688d8d7225d7e920abce879b12cffe54a80d159a713f80317b78c8e2dccefc3bce148a8b7aff8c3bf51c3edae4bb93a4452cb9e486953834f07e5d6157d48ba191567333faf13df908c96c97f85bc6807ed30202d98732e176c05a27135a2c249e8afcef963194fc566a4b23fcf912cafa23dda5527ae8e1f952b392a76c1b40010000e000c02683208687474702f312e318a8a000100",
+  "client_hello_record_lengths": [
+    2016
+  ],
+  "sni": "capture.localhost",
+  "ech_payload_len": 240,
+  "fingerprints": {
+    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,51-23-51764-65281-27-18-35-0-43-11-17613-45-5-13-10-65037-16,4588-29-23-24,0",
+    "ja3_md5": "9e89723b8736a6aff80cb042502906fd",
+    "ja4": "t13d1517h2_8daaf6152771_cb7bf5808d99",
+    "ja4_r": "t13d1517h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,ca34,fe0d,ff01_0904,0905,0906,0403,0804,0401,0503,0805,0501,0806,0601",
+    "ja4_o": "t13d1517h2_acb858a92679_bca31eaf4bba",
+    "ja4_ro": "t13d1517h2_1301,1302,1303,c02b,c02f,c02c,c030,cca9,cca8,c013,c014,009c,009d,002f,0035_0033,0017,ca34,ff01,001b,0012,0023,0000,002b,000b,44cd,002d,0005,000d,000a,fe0d,0010_0904,0905,0906,0403,0804,0401,0503,0805,0501,0806,0601"
+  },
+  "tls": {
+    "version": "TLSv1.3",
+    "alpn": "http/1.1"
+  },
+  "h2": null,
+  "h1": {
+    "request_head": "GET / HTTP/1.1\r\nHost: capture.localhost:48437\r\nConnection: keep-alive\r\nsec-ch-ua: \"Google Chrome\";v=\"153\", \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"153\"\r\nsec-ch-ua-mobile: ?0\r\nsec-ch-ua-platform: \"macOS\"\r\nUpgrade-Insecure-Requests: 1\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\r\nSec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-User: ?1\r\nSec-Fetch-Dest: document\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nAccept-Language: en-GB,en-US;q=0.9,en;q=0.8",
+    "requests": [
+      {
+        "request_head": "GET / HTTP/1.1\r\nHost: capture.localhost:48437\r\nConnection: keep-alive\r\nsec-ch-ua: \"Google Chrome\";v=\"153\", \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"153\"\r\nsec-ch-ua-mobile: ?0\r\nsec-ch-ua-platform: \"macOS\"\r\nUpgrade-Insecure-Requests: 1\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\r\nSec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-User: ?1\r\nSec-Fetch-Dest: document\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nAccept-Language: en-GB,en-US;q=0.9,en;q=0.8",
+        "method": "GET",
+        "target": "/",
+        "version": "HTTP/1.1",
+        "headers": [
+          {
+            "name": "Host",
+            "value": "capture.localhost:48437"
+          },
+          {
+            "name": "Connection",
+            "value": "keep-alive"
+          },
+          {
+            "name": "sec-ch-ua",
+            "value": "\"Google Chrome\";v=\"153\", \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"153\""
+          },
+          {
+            "name": "sec-ch-ua-mobile",
+            "value": "?0"
+          },
+          {
+            "name": "sec-ch-ua-platform",
+            "value": "\"macOS\""
+          },
+          {
+            "name": "Upgrade-Insecure-Requests",
+            "value": "1"
+          },
+          {
+            "name": "User-Agent",
+            "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+          },
+          {
+            "name": "Accept",
+            "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+          },
+          {
+            "name": "Sec-Fetch-Site",
+            "value": "none"
+          },
+          {
+            "name": "Sec-Fetch-Mode",
+            "value": "navigate"
+          },
+          {
+            "name": "Sec-Fetch-User",
+            "value": "?1"
+          },
+          {
+            "name": "Sec-Fetch-Dest",
+            "value": "document"
+          },
+          {
+            "name": "Accept-Encoding",
+            "value": "gzip, deflate, br, zstd"
+          },
+          {
+            "name": "Accept-Language",
+            "value": "en-GB,en-US;q=0.9,en;q=0.8"
+          }
+        ],
+        "header_order": [
+          "Host",
+          "Connection",
+          "sec-ch-ua",
+          "sec-ch-ua-mobile",
+          "sec-ch-ua-platform",
+          "Upgrade-Insecure-Requests",
+          "User-Agent",
+          "Accept",
+          "Sec-Fetch-Site",
+          "Sec-Fetch-Mode",
+          "Sec-Fetch-User",
+          "Sec-Fetch-Dest",
+          "Accept-Encoding",
+          "Accept-Language"
+        ],
+        "body_len": 0,
+        "body_hex": "",
+        "body_truncated": false
+      },
+      {
+        "request_head": "GET /.well-known/appspecific/com.chrome.devtools.json HTTP/1.1\r\nHost: capture.localhost:48437\r\nConnection: keep-alive\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: empty\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nAccept-Language: en-GB,en-US;q=0.9,en;q=0.8",
+        "method": "GET",
+        "target": "/.well-known/appspecific/com.chrome.devtools.json",
+        "version": "HTTP/1.1",
+        "headers": [
+          {
+            "name": "Host",
+            "value": "capture.localhost:48437"
+          },
+          {
+            "name": "Connection",
+            "value": "keep-alive"
+          },
+          {
+            "name": "Sec-Fetch-Site",
+            "value": "same-origin"
+          },
+          {
+            "name": "Sec-Fetch-Mode",
+            "value": "no-cors"
+          },
+          {
+            "name": "Sec-Fetch-Dest",
+            "value": "empty"
+          },
+          {
+            "name": "User-Agent",
+            "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+          },
+          {
+            "name": "Accept-Encoding",
+            "value": "gzip, deflate, br, zstd"
+          },
+          {
+            "name": "Accept-Language",
+            "value": "en-GB,en-US;q=0.9,en;q=0.8"
+          }
+        ],
+        "header_order": [
+          "Host",
+          "Connection",
+          "Sec-Fetch-Site",
+          "Sec-Fetch-Mode",
+          "Sec-Fetch-Dest",
+          "User-Agent",
+          "Accept-Encoding",
+          "Accept-Language"
+        ],
+        "body_len": 0,
+        "body_hex": "",
+        "body_truncated": false
+      },
+      {
+        "request_head": "GET /favicon.ico HTTP/1.1\r\nHost: capture.localhost:48437\r\nConnection: keep-alive\r\nsec-ch-ua-platform: \"macOS\"\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36\r\nsec-ch-ua: \"Google Chrome\";v=\"153\", \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"153\"\r\nsec-ch-ua-mobile: ?0\r\nAccept: image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: image\r\nReferer: https://capture.localhost:48437/\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nAccept-Language: en-GB,en-US;q=0.9,en;q=0.8",
+        "method": "GET",
+        "target": "/favicon.ico",
+        "version": "HTTP/1.1",
+        "headers": [
+          {
+            "name": "Host",
+            "value": "capture.localhost:48437"
+          },
+          {
+            "name": "Connection",
+            "value": "keep-alive"
+          },
+          {
+            "name": "sec-ch-ua-platform",
+            "value": "\"macOS\""
+          },
+          {
+            "name": "User-Agent",
+            "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+          },
+          {
+            "name": "sec-ch-ua",
+            "value": "\"Google Chrome\";v=\"153\", \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"153\""
+          },
+          {
+            "name": "sec-ch-ua-mobile",
+            "value": "?0"
+          },
+          {
+            "name": "Accept",
+            "value": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+          },
+          {
+            "name": "Sec-Fetch-Site",
+            "value": "same-origin"
+          },
+          {
+            "name": "Sec-Fetch-Mode",
+            "value": "no-cors"
+          },
+          {
+            "name": "Sec-Fetch-Dest",
+            "value": "image"
+          },
+          {
+            "name": "Referer",
+            "value": "https://capture.localhost:48437/"
+          },
+          {
+            "name": "Accept-Encoding",
+            "value": "gzip, deflate, br, zstd"
+          },
+          {
+            "name": "Accept-Language",
+            "value": "en-GB,en-US;q=0.9,en;q=0.8"
+          }
+        ],
+        "header_order": [
+          "Host",
+          "Connection",
+          "sec-ch-ua-platform",
+          "User-Agent",
+          "sec-ch-ua",
+          "sec-ch-ua-mobile",
+          "Accept",
+          "Sec-Fetch-Site",
+          "Sec-Fetch-Mode",
+          "Sec-Fetch-Dest",
+          "Referer",
+          "Accept-Encoding",
+          "Accept-Language"
+        ],
+        "body_len": 0,
+        "body_hex": "",
+        "body_truncated": false
+      }
+    ],
+    "end_reason": "timeout"
+  },
+  "hrr": null,
+  "server_set_cookie_names": [],
+  "capture_errors": []
+}

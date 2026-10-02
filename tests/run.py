@@ -154,6 +154,18 @@ def run_mcp_websocket(opts):
     return run_python_suite("test_mcp_websocket", opts)
 
 
+def run_mcp_decoders(opts):
+    return run_python_suite("test_mcp_decoders", opts)
+
+
+def run_chrome_capture(opts):
+    return run_python_suite("test_chrome_capture", opts)
+
+
+def run_mcp_chrome(opts):
+    return run_python_suite("test_mcp_chrome", opts)
+
+
 def run_read_loop(opts):
     return run_python_suite("test_read_loop", opts)
 
@@ -414,12 +426,99 @@ SUITES = [
      "a region's BEGIN line is the one its names resolve against; the "
      "generator's census read path -- fleet, sources, per-block hosts and the "
      "hand-copy walk with its declared reasons -- derived, sorted, writes "
-     "nothing", 96),
+     "nothing", 97),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
      "the size caps and strict UTF-8 -- then both hosts' generated copies "
      "driven against a loopback CDP peer", 42),
+    # TYPED: a fixed case table.  Every row that needs the host's libbrotlidec
+    # or libzstd is recorded as INFO when the library is absent rather than
+    # omitted, so the count is the same on every host.
+    ("mcp_decoders", run_mcp_decoders,
+     "the ctypes brotli and zstd decoders: the per-platform load order under "
+     "a stubbed platform with zero find_library calls on Linux and only "
+     "absolute paths handed to dlopen on darwin, the fixtures byte-exact, the "
+     "output budget at its exact boundary, bombs and the window-27 frame "
+     "refused, legacy zstd frames refused at the start and mid-stream, a "
+     "one-line LookupError when the library is absent, lying libraries "
+     "refused, a two-thread race on the first load, and the generator block "
+     "contract", 150),
+    # TYPED: group A reads ONE committed fixture and never iterates a
+    # directory, so committing more Chrome captures moves this number by zero.
+    # The one row that depends on the local OpenSSL (a stdlib client answering
+    # the scripted HRR) is recorded as INFO rather than omitted when it cannot
+    # run, so the count is the same everywhere. The one case that re-exports
+    # every committed fixture under tests/files/chrome/ is ONE case however
+    # many fixtures it reads (INFO when there are none).
+    ("chrome_capture", run_chrome_capture,
+     "the Chrome capture harness, the independent oracle the stdlib Chrome "
+     "client is measured with: JA3/JA4 of one committed Chrome 153 "
+     "ClientHello against a JA4 written from the spec and the value R-0017 "
+     "recorded, HPACK against RFC 7541 C.1-C.6, serve driven over loopback "
+     "(h2 streams sharing one HPACK state, h1 over TLS, plaintext h1, the "
+     "scripted HelloRetryRequest, owner-only records, path labels refused, "
+     "control bytes escaped in the summary), diff naming one removed "
+     "signature algorithm and not a hostname-length change nor a one-sided "
+     "resumed group, export refusing a foreign cookie name or value, a "
+     "non-loopback Referer, credential headers and unscripted bodies, never "
+     "writing through a planted .tmp symlink, while "
+     "re-exporting the committed fixtures unchanged, and every non-loopback "
+     "bind refused", 52),
+    # TYPED: a fixed case table.  The rows that need an OpenSSL binary (the AES
+    # ECB cross-check, and the two ML-KEM directions that need >= 3.5) and the
+    # optional tests/files/mlkem/ row are recorded as INFO rather than omitted
+    # when they cannot run, so the count is the same on every host.  So are
+    # the seven openssl s_server rows (>= 3.5) and the P-256-only ssl server
+    # row when set_ecdh_curve does not restrict the TLS 1.3 groups, and the br
+    # and zstd session rows when libbrotlidec / libzstd is absent, and the
+    # group O uv stdio row when uv is absent or cannot prepare its env.  The
+    # AES-256-GCM floor row is INFO in [floor/10, floor): only a tenfold
+    # shortfall FAILs, because a wall-clock rate flaps under load.
+    ("mcp_chrome", run_mcp_chrome,
+     "the stdlib Chrome client's crypto and TLS 1.3 layers (Gates G3, G4, G5): "
+     "X25519 (RFC 7748), P-256 ECDH (RFC 5903), AES-GCM (Wycheproof), "
+     "ChaCha20-Poly1305 (RFC 8439), HKDF (RFC 5869) and the RFC 8448 key "
+     "schedule as pasted vectors, ML-KEM-768 cross-checked with OpenSSL both "
+     "ways; the ClientHello judged by chrome_capture's parser and diff against "
+     "the Chrome 153 captures; TLS 1.3 against MemoryBIO, loopback and "
+     "openssl s_server peers, the RFC 8448 trace and a scripted peer (ALPS, "
+     "ceilings, KeyUpdate, every refusal), and the HelloRetryRequest path; "
+     "HPACK against RFC 7541 and every committed HEADERS block, the header "
+     "profiles and caller-header rules; HTTP/2 against a test-side RFC 9113 "
+     "responder (first flight, every flood and ceiling at N and N+1); "
+     "the whole session over loopback h2 / h1-over-TLS / cleartext peers "
+     "(redirects, downgrade, injected decoders, cookies and their caps, "
+     "cross-origin headers and Referer); "
+     "body and decode limits, on_headers, one row per SSRF address form, the "
+     "public-only policy and the ordered opener against recorders, per-hop "
+     "vetting and the re-vetted reconnect; the TLS 1.2 fallback verified by "
+     "the test CA, *_PROXY ignored, AST rows for trust material, the "
+     "environment and the late binding of _ch_open_socket; "
+     "the verified default transport vs transport=\"chrome\" (labels, "
+     "verified: refusals, parity, the weakest-hop chain label, the decoded "
+     "cap, the call-site AST rule with a planted control); "
+     "search_github's generated copy driven over loopback (the captured cors "
+     "GET and referer, create_session()'s policy, a redirect into metadata "
+     "space refused, the verified default end to end, the verified-first "
+     "block ladder over stub sessions, the sticky switch, AST rows with "
+     "planted controls, the NFR-5 startup delta as INFO); "
+     "search_duckduckgo's generated copy the same way (the warm-up then the "
+     "cors POST on one connection vs the cors-post capture, the Bing GET vs "
+     "the navigate capture, the policy rows, the verified default end to end, "
+     "the DDG and Bing ladders, the reflected-text predicate rows with their "
+     "substring controls, sticky per endpoint, the Bing leg's rotation, AST "
+     "rows); "
+     "mcp-webfetch's handle_fetch over loopback with stub bs4/markdownify "
+     "(the verified default with the test-CA factory injected, the "
+     "profile=chrome opt-in and its impersonate alias, 403 x3 with the hint, "
+     "max_bytes, headers before size per transport, header refusals before "
+     "the cache, the policy split, every transport label, cache admission "
+     "and the S3 chain-honesty rows, the status reply, the security-review "
+     "fix rows (cache keyed on allow_private, 0700/0600 modes, printable URL "
+     "and header echoes), one uv stdio row); "
+     "every refusal and the hmac.compare_digest tag gate, the generator block "
+     "contract, and the AES-256-GCM decrypt floor", 833),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That
@@ -500,8 +599,9 @@ SUITES = [
     ("py_deps", run_py_deps,
      "pure Python 3.9 + stdlib: every non-stdlib import allowlisted and "
      "find_spec-guarded (never except ImportError), no removed stdlib module, "
-     "every file parsing as 3.9 SYNTAX, and the stdlib Bing parser pinned to "
-     "lxml's fields", 36),
+     "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
+     "lxml's fields, every ctypes system library declared, and no 3.10+ API "
+     "in the new sources", 52),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]
