@@ -264,3 +264,28 @@ The fix:
 ### The probe's header cross-check
 
 para's header is older and lacks the six embedded names numbered 449-456. A name the host header does not define is now INFO, not FAIL; a different number is still FAIL. `tests/test_sbx_seccomp.py` still checks every embedded name against the independent t42 header copy.
+
+## Addendum (2026-10-02): host daemon sockets hidden from bwrap without --net; a cwd under /run or /var/snap refused (R-0061)
+
+The Linux boundary named in the last Consequences bullet -- namespace, no-net, read-only bind -- did not cover pathname `AF_UNIX` sockets. A pathname socket is a filesystem object: `--unshare-net` does not reach it, and a read-only mount does not block `connect()` on a socket. Measured on host para (Ubuntu 22.04, bubblewrap 0.6.1), these were all CONNECTED from inside sbx: the D-Bus system and session buses, gpg-agent, tmux, a throwaway listener under `/tmp` and one under `/run/user`, and `/var/snap/lxd/common/lxd/unix.socket` (the lxd group is root-equivalent).
+
+### The fix (329653d, 87e478e)
+
+- Without `--net`, `_bwrap_argv` mounts a fresh `--tmpfs` on each of `/run`, `/tmp` and `/var/snap` right after the fresh `/dev` and before every bind, so a `--write` scope or a mask under them still lands on top and wins. After the last mount it emits `--remount-ro` on each `ClaudeCode/skills/sandbox-run/scripts/sbx:_bwrap_argv`, `ClaudeCode/skills/sandbox-run/scripts/sbx:SOCKET_DIRS`. Every socket above was measured blocked afterwards (ENOENT). `docker.sock` is covered through the `/var/run` -> `/run` symlink.
+- A `cwd` strictly under `/tmp` is re-bound read-only, so the project does not vanish. A `cwd` strictly under `/run` or `/var/snap` is REFUSED: the builder raises and `main()` exits 3 with one stderr line and runs nothing `ClaudeCode/skills/sandbox-run/scripts/sbx:main`. The first commit re-bound such a cwd too; the security triage of 329653d found that the re-bind reopens that subtree's sockets (e.g. cwd `/run/user/<uid>` reached D-Bus and gpg-agent again), and the user chose refusal (2026-10-02).
+- Under `--net` nothing is masked. That matches macOS, where `--net` also reopens unix-socket connect, and keeps `/etc/resolv.conf` (a symlink into `/run` on systemd-resolved hosts) readable.
+- macOS needed no change: Seatbelt's existing `(deny network*)` already blocks a unix-socket `connect()` (measured EPERM for `/tmp`, `$TMPDIR`, `/var/run/mDNSResponder` and a socket inside the project).
+
+Red to green: `tests/test_sbx_gate.py` rows (b2) and (b3) of the offline group, and the golden argv in `tests/test_sbx_seccomp.py`.
+
+### Behaviour change
+
+Without `--net`, `/tmp`, `/run` and `/var/snap` look empty inside the sandbox; they were already read-only. Snap applications did not run under sbx before this change either (the root was already read-only), so masking `/var/snap` is not a regression.
+
+### Declared limits, not fixed
+
+- A socket inside the project -- including a project that lives under `/tmp`, whose re-bind brings its sockets back -- or under `$HOME` stays connectable.
+- A distribution where `/var/run` is a real directory rather than a symlink to `/run`.
+- Any other non-standard socket location.
+
+User decisions, 2026-10-02: fix it; mask `/var/snap`; refuse a cwd under `/run` (and `/var/snap`); the `/tmp` subtree is the declared limit.

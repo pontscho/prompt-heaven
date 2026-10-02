@@ -9,7 +9,7 @@ sources:
   - Scripts/search_github.py
   - Scripts/_mcp_chrome.py
 verified:
-  commit: 3fbe5bf
+  commit: 87e478e
   date: 2026-10-02
 links:
   - scripts
@@ -185,7 +185,7 @@ The shim changed the window/scale combination but **did not match Chrome's exact
 Status: 202, len: 14235, CAPTCHA: True
 ```
 
-That 202 is still the only challenge answer this page has recorded, and it was judged by a body substring. The R-0044 live runs of 2026-09-30 and 2026-10-01 (§2.9) never received a challenge page on any transport, so the structural location of the challenge element — the thing a block predicate should match instead of a substring — is **unmeasured**; the predicate that shipped is the fallback described in §2.9.
+That 202 is still the only challenge answer this page has recorded, and it was judged by a body substring. The R-0044 live runs of 2026-09-30 and 2026-10-01 (§2.9) never received a challenge page on any transport, so the structural location of the challenge element — the thing a block predicate should match instead of a substring — is **unmeasured**; the predicate that shipped is the fallback described in §2.9, and since R-0052 that 202 is itself a block signal there.
 
 **DDG still returned the anomaly modal even with:**
 - Identical JA4 (`t13d1516h2_8daaf6152771_d8a2da3f94cd`)
@@ -557,7 +557,7 @@ What each search script now treats as a block was decided from those rows, and o
 
 - **grep.app** — measured: a 403, OR a 429 whose body is a non-JSON `text/html` page, OR a 200 whose body is not JSON, provided the body decoded; a 429 carrying JSON stays a rate limit `Scripts/search_github.py:_grep_app_blocked`.
 - **Bing** — not measured: Bing answered the verified transport with results, so the 403 rule is declared rather than observed, and a challenge served as a 200 that parses to nothing is not detected `Scripts/search_duckduckgo.py:_bing_blocked`.
-- **DDG** — not measured either, and this is the **fallback** predicate, not the structural match the plan wanted: since no challenge page was observed, the challenge *element* could not be located. What shipped requires the answer to come from `lite.duckduckgo.com`, to parse to **zero** results, and to contain a challenge marker the query does not itself contain — so neither a reflected query nor a marker inside a third-party snippet (a page with a snippet has a result) can trip it `Scripts/search_duckduckgo.py:_ddg_blocked`. Replacing the marker test with the element is open until a real challenge page is recorded.
+- **DDG** — partly measured, and still not the structural match the plan wanted: since no challenge page was observed, the challenge *element* could not be located. What shipped requires the answer to come from `lite.duckduckgo.com` and to parse to **zero** results. On top of that it needs one of two signals. The first is an HTTP **202**, the one challenge answer this page recorded (§2.6), which the user has since seen live; lite results answer 200 (R-0052). The second is the **fallback** predicate: a challenge marker the query does not itself contain. Neither a reflected query nor a marker inside a third-party snippet (a page with a snippet has a result) can trip it `Scripts/search_duckduckgo.py:_ddg_blocked`. Replacing the marker test with the element is open until a real challenge page is recorded.
 
 #### The fallback, live (R-0044, grep.app)
 
@@ -812,7 +812,8 @@ DDG Lite POST /lite/ (cors profile, §2.8)
    ├─ error / undecodable body ── NOT a block ──→ no results for this query (no re-issue, no Bing)
    │
    └─ block = host is lite.duckduckgo.com AND zero parsed results
-              AND a challenge marker the query does not contain   (_ddg_blocked; fallback predicate, §2.9)
+              AND (status 202 OR a challenge marker the query does not contain)
+                                          (_ddg_blocked; 202 since R-0052, marker = fallback predicate, §2.9)
                 │
                 ├─ session was verified ──→ sticky switch: "ddg" → _CHROME_AFTER_BLOCK (per process, never persisted)
                 │                            ONE re-issue: new Chrome-path session + warmup + the same POST

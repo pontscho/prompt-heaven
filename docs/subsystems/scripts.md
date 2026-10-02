@@ -7,7 +7,7 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 3fbe5bf
+  commit: 87e478e
   date: 2026-10-02
 links:
   - overview
@@ -73,8 +73,13 @@ the decoder raises `LookupError` on first use and the caller reports one decode
 error line `Scripts/_mcp_brotli.py`.
 
 `Scripts/mcp-webfetch.py` is the one **declared, temporary exception**: it keeps
-`beautifulsoup4` + `markdownify` and its `uv run --script` launch (below). No
-other file carries a PEP 723 dependency or a `uv` launch.
+`beautifulsoup4` + `markdownify` and its `uv run --script` launch (below), and
+`lxml` as bs4's tree builder. lxml is kept on purpose: in a measured comparison
+`html.parser`, which has no implied end tags, collapsed lists and tables
+`Scripts/mcp-webfetch.py:_soup`. The PEP 723 block bounds each of the three to
+its current major version, and `tests/test_py_deps.py:group_webfetch_deps`
+gates the bounds and the declared builder. No other file carries a PEP 723
+dependency or a `uv` launch.
 
 The rule is gated by `tests/test_py_deps.py` over `Scripts/`, `ClaudeCode/` and
 `tests/`: every non-stdlib import allowlisted and `find_spec`-guarded, no stdlib
@@ -761,9 +766,10 @@ fallback**, not a default and not a platform choice:
   unverified transport. grep.app: a 403, a 429 whose body is a non-JSON
   `text/html` page, or a 200 that is not JSON; a 429 carrying JSON stays a rate
   limit `Scripts/search_github.py:_grep_app_blocked`. Bing: a 403
-  `Scripts/search_duckduckgo.py:_bing_blocked`. DDG: zero parsed results plus a
-  challenge marker the query does not itself contain, so neither a reflected
-  query nor a third-party snippet can trip it
+  `Scripts/search_duckduckgo.py:_bing_blocked`. DDG: zero parsed results plus
+  either an HTTP 202 (the one challenge status recorded) or a challenge marker
+  the query does not itself contain, so neither a reflected query nor a
+  third-party snippet can trip it
   `Scripts/search_duckduckgo.py:_ddg_blocked`.
 - **A search body is capped at 2 MiB**, not the client's 64 MiB ceiling: every
   search session passes `SEARCH_MAX_BYTES` as `max_bytes`, and an oversized
