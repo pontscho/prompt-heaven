@@ -13,6 +13,7 @@ verified:
   date: 2026-10-02
 links:
   - scripts
+  - tests
   - generated-regions
   - chrome-profile-refresh
   - 0023-the-websocket-client-is-a-sixth-domain
@@ -837,6 +838,14 @@ re-issue and sticky switch `Scripts/search_duckduckgo.py:_run_bing`. Bing's only
 signal is a 403 from `www.bing.com` itself; any other non-200 answer yields no results
 `Scripts/search_duckduckgo.py:search_bing`, and a challenge served as a 200 is not
 detected, so "always works" is an observation, not something the code guarantees.
+
+The lite answer is parsed by one `html.parser` pass keyed on the `result-link`
+anchor and the `result-snippet` cell, never on an implied end tag
+`Scripts/search_duckduckgo.py:_LiteParser`. Until R-0057 it was a regex `findall`
+over `<tr>` rows that went super-linear on a hostile body (F32); the new pass
+returns the same fields and is gated in [[tests]] (`search_parsers`). Its result
+count is one input of the DDG block predicate ("zero parsed results" above), so a
+parser change is a block-rule change `Scripts/search_duckduckgo.py:parse_lite_results`.
 
 **Optional CDP backend** (`DDG_BACKEND=cdp`) `Scripts/search_duckduckgo.py:_run_cdp`:
 ```

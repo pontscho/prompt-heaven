@@ -46,14 +46,13 @@ decoded); a larger body is a transport failure (an error line, no results),
 never a block.
 """
 import sys
-import re
-import html as html_mod
 import json
 import random
 import time
 import os
 import argparse
 from urllib.parse import urlencode
+from html.parser import HTMLParser
 import codecs  # the generated Chrome client
 import ctypes.util  # the generated brotli/zstd decoders
 import hashlib  # the generated Chrome client
@@ -75,19 +74,10 @@ ROTATE_EVERY = 4
 
 # The body cap of every search session (_ch_session_new max_bytes: the wire
 # AND the decoded limit). A grep.app answer is tens of KiB; without it the
-# client falls back to its 64 MiB default (F32). Past it the call raises
+# client falls back to its 64 MiB default (F32; the snippet parser is a single
+# html.parser pass since R-0057). Past it the call raises
 # ChromeBodyTooLarge, which search_github treats as a transport failure.
 SEARCH_MAX_BYTES = 2 * 1024 * 1024
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-def clean_html_tags(text):
-	text = re.sub(r'<[^>]+>', '', text)
-	text = html_mod.unescape(text)
-	return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -113,13 +103,57 @@ def detect_language(file_path):
 	return EXT_TO_LANG.get(ext)
 
 
+# The snippet used to be scanned with re.finditer(r'<tr data-line="(\d+)">.*?'
+# r'<pre>(.*?)</pre>', DOTALL), which rescans to the end of the input for every
+# unterminated opener -- quadratic or worse on a hostile body (F32, R-0057).
+# This is one html.parser pass with the same rules, keyed on the raw start tags
+# and never on an implied end tag (html.parser has none): a line starts at an
+# exact `<tr data-line="N">`, takes the first exact `<pre>` after it and ends at
+# the first </pre>; any `<tr data-line>` before that `<pre>` is skipped, the
+# text has its tags dropped and entities decoded, and an empty line is skipped.
+class _SnippetParser(HTMLParser):
+
+	_TR_OPEN = '<tr data-line="'
+
+	def __init__(self):
+		super().__init__(convert_charrefs=True)
+		self.lines = []
+		self._line_no = None
+		self._parts = None  # the open <pre>'s text, None outside one
+
+	def handle_starttag(self, tag, attrs):
+		if self._parts is not None:
+			return
+		raw = self.get_starttag_text() or ""
+		if tag == "tr" and self._line_no is None:
+			digits = raw[len(self._TR_OPEN):-2]
+			if (raw.startswith(self._TR_OPEN) and raw.endswith('">')
+					and digits and digits.isdecimal()):
+				self._line_no = int(digits)
+		elif tag == "pre" and self._line_no is not None and raw == "<pre>":
+			self._parts = []
+
+	def handle_endtag(self, tag):
+		if tag == "pre" and self._parts is not None:
+			code_text = "".join(self._parts).strip()
+			if code_text:
+				self.lines.append((self._line_no, code_text))
+			self._line_no = None
+			self._parts = None
+
+	def handle_data(self, data):
+		if self._parts is not None:
+			self._parts.append(data)
+
+
 def extract_code_from_snippet(html_snippet):
-	lines = []
-	for m in re.finditer(r'<tr data-line="(\d+)">.*?<pre>(.*?)</pre>', html_snippet, re.DOTALL):
-		code_text = clean_html_tags(m.group(2)).rstrip()
-		if code_text:
-			lines.append((int(m.group(1)), code_text))
-	return lines
+	parser = _SnippetParser()
+	try:
+		parser.feed(html_snippet)
+		parser.close()
+	except Exception:
+		pass
+	return parser.lines
 
 
 def build_github_url(repo, path, branch, line_number=None):

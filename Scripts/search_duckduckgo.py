@@ -56,7 +56,6 @@ never a block.
 """
 import sys
 import re
-import html as html_mod
 import json
 import random
 import time
@@ -85,21 +84,16 @@ ROTATE_EVERY = 4
 
 # The body cap of every search session (_ch_session_new max_bytes: the wire
 # AND the decoded limit). A results page is tens of KiB; without it the client
-# falls back to its 64 MiB default, and the lite parser's regexes are
-# super-linear on a hostile body (F32). Past it the call raises
-# ChromeBodyTooLarge, which the search functions treat as a transport failure.
+# falls back to its 64 MiB default (F32; the lite parser is a single html.parser
+# pass since R-0057, so the cap bounds memory and time, not a quadratic scan).
+# Past it the call raises ChromeBodyTooLarge, which the search functions treat
+# as a transport failure.
 SEARCH_MAX_BYTES = 2 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-def clean_html_tags(text):
-	text = re.sub(r'<[^>]+>', '', text)
-	text = html_mod.unescape(text)
-	return text.strip()
-
 
 def _normalize(text):
 	return re.sub(r'\s+', ' ', text).strip() if text else ""
@@ -121,29 +115,107 @@ def decode_duckduckgo_url(ddg_url):
 	return ddg_url
 
 
+def _raw_href(start_tag):
+	"""The href value exactly as written in a raw start tag, entities NOT decoded.
+
+	The regex parser this replaced captured `href=['"]([^'"]+)['"]` from the raw
+	markup, so a direct (non-uddg) link kept its `&amp;`; html.parser decodes
+	attribute values, so the raw tag is read instead. One left-to-right pass.
+	"""
+	pos = start_tag.find("href=")
+	while pos >= 0:
+		quote_at = pos + 5
+		if quote_at < len(start_tag) and start_tag[quote_at] in "'\"":
+			end = quote_at + 1
+			while end < len(start_tag) and start_tag[end] not in "'\"":
+				end += 1
+			if end < len(start_tag) and end > quote_at + 1:
+				return start_tag[quote_at + 1:end]
+			pos = end
+		else:
+			pos = quote_at
+		pos = start_tag.find("href=", pos)
+	return None
+
+
+def _has_class(attrs, value):
+	return any(name == "class" and val == value for name, val in attrs)
+
+
+# The lite page used to be cut into rows with re.findall(r'<tr[^>]*>(.*?)</tr>')
+# and each row searched for a result-link anchor and a result-snippet cell. On
+# a hostile body (the endpoint, or a MITM on the unverified Chrome path) those
+# lazy DOTALL scans rescan to the end of the input for every unterminated
+# opener: quadratic in the body (F32, R-0057). This is one html.parser pass with
+# the same rules, keyed on start tags and attributes and never on an implied end
+# tag (html.parser has none): a row is a <tr> up to the first </tr>, an
+# unterminated row is dropped, a row's first result-link anchor wins over any
+# result-snippet cell in it, and a title or snippet is the text up to the first
+# </a> or </td>, tags dropped and entities decoded.
+class _LiteParser(HTMLParser):
+
+	def __init__(self):
+		super().__init__(convert_charrefs=True)
+		self.rows = []  # (link_url, link_title, snippet), one per closed row
+		self._in_row = False
+		self._link = None  # [url, parts, closed]
+		self._snippet = None  # [parts, closed]
+
+	def handle_starttag(self, tag, attrs):
+		if tag == "tr":
+			if not self._in_row:
+				self._in_row = True
+				self._link = None
+				self._snippet = None
+			return
+		if not self._in_row:
+			return
+		if tag == "a" and self._link is None and _has_class(attrs, "result-link"):
+			href = _raw_href(self.get_starttag_text() or "")
+			if href:
+				self._link = [href, [], False]
+		elif tag == "td" and self._snippet is None and _has_class(attrs, "result-snippet"):
+			self._snippet = [[], False]
+
+	def handle_endtag(self, tag):
+		if not self._in_row:
+			return
+		if tag == "tr":
+			link = self._link if self._link and self._link[2] else None
+			snippet = self._snippet if self._snippet and self._snippet[1] else None
+			self.rows.append((
+				link[0] if link else None,
+				"".join(link[1]) if link else None,
+				"".join(snippet[0]) if snippet else None,
+			))
+			self._in_row = False
+			self._link = None
+			self._snippet = None
+		elif tag == "a" and self._link and not self._link[2]:
+			self._link[2] = True
+		elif tag == "td" and self._snippet and not self._snippet[1]:
+			self._snippet[1] = True
+
+	def handle_data(self, data):
+		if not self._in_row:
+			return
+		if self._link and not self._link[2]:
+			self._link[1].append(data)
+		if self._snippet and not self._snippet[1]:
+			self._snippet[0].append(data)
+
+
 def parse_lite_results(html_content):
 	results = []
-	rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html_content, re.DOTALL)
+	parser = _LiteParser()
+	try:
+		parser.feed(html_content)
+		parser.close()
+	except Exception:
+		pass
 
 	current = {}
-	for row in rows:
-		link_url = None
-		link_title = None
-
-		m = re.search(
-			r"""<a[^>]*class=['"]result-link['"][^>]*href=['"]([^'"]+)['"][^>]*>(.*?)</a>""",
-			row, re.DOTALL,
-		)
-		if m:
-			link_url, link_title = m.group(1), m.group(2)
-		else:
-			m = re.search(
-				r"""<a[^>]*href=['"]([^'"]+)['"][^>]*class=['"]result-link['"][^>]*>(.*?)</a>""",
-				row, re.DOTALL,
-			)
-			if m:
-				link_url, link_title = m.group(1), m.group(2)
-
+	for link_url, link_title, snippet in parser.rows:
 		if link_url:
 			if current.get('title') and current.get('url'):
 				if 'snippet' not in current:
@@ -151,16 +223,12 @@ def parse_lite_results(html_content):
 				results.append(current)
 			current = {
 				'url': decode_duckduckgo_url(link_url),
-				'title': clean_html_tags(link_title),
+				'title': link_title.strip(),
 			}
 			continue
 
-		snippet_match = re.search(
-			r"""<td[^>]*class=['"](result-snippet)['"][^>]*>(.*?)</td>""",
-			row, re.DOTALL,
-		)
-		if snippet_match and current.get('title'):
-			current['snippet'] = clean_html_tags(snippet_match.group(2))
+		if snippet is not None and current.get('title'):
+			current['snippet'] = snippet.strip()
 			results.append(current)
 			current = {}
 

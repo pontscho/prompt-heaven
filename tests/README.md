@@ -88,6 +88,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `protocol_version` | `test_protocol_version.py` | A–E |
 | `forge_dispatch` | `test_forge_dispatch.py` | A–C |
 | `py_deps` | `test_py_deps.py` | A–E |
+| `search_parsers` | `test_search_parsers.py` | A–C, E |
 | `smoke` | `Scripts/_mcp_smoke_test.py` | — |
 
 ## Commands
@@ -131,6 +132,7 @@ python3 tests/test_table_cells.py
 python3 tests/test_protocol_version.py
 python3 tests/test_forge_dispatch.py
 python3 tests/test_py_deps.py
+python3 tests/test_search_parsers.py
 python3 Scripts/_mcp_smoke_test.py
 ```
 

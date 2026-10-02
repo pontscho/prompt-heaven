@@ -856,3 +856,22 @@ builder `Scripts/search_duckduckgo.py:parse_bing_results` that evaluates the fou
 XPath expressions the old lxml parser used, including libxml2's implicit-close
 and end-tag-priority rules; it is pinned to lxml's recorded output on
 `tests/files/html/tf_bing_serp.html` [[0024-pure-python-39-and-the-stdlib]].
+
+The DDG lite results and the grep.app snippets are parsed the same way since
+R-0057: each is one `html.parser` pass keyed on start tags and attributes, never
+on an implied end tag (`html.parser` has none)
+`Scripts/search_duckduckgo.py:_LiteParser` `Scripts/search_github.py:_SnippetParser`.
+They replaced regex `findall` / `finditer` scans whose lazy DOTALL patterns
+rescanned to the end of the input for every unterminated opener — super-linear
+on a hostile body, which the endpoint or a MITM on the unverified Chrome path
+controls (security finding F32). The body cap above therefore bounds memory and
+time, no longer a quadratic scan. The lite parser reads a result link's href off
+the raw start tag `Scripts/search_duckduckgo.py:_raw_href`, because `html.parser`
+decodes attribute values and the regex kept a direct link's `&amp;` as written.
+Both parsers return exactly the fields the regex parsers produced, pinned as
+literals, and a hostile body just under the cap is gated in wall time by the
+`search_parsers` suite [[tests]]. One divergence is declared rather than fixed:
+on Python 3.14 `html.parser` treats an unclosed `<title>` as raw text to the end
+of the page, so a page that drops its `</title>` parses to no results
+`tests/test_search_parsers.py`. The record of the change is the R-0057 addendum
+to [[0026-speak-chrome-from-the-stdlib-verify-by-default]].

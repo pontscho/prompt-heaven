@@ -304,6 +304,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|PROBLEM'
 
+  search_parsers:
+    description: "The search scripts' result parsers as single html.parser passes (R-0057, F32): search_duckduckgo's parse_lite_results and search_github's extract_code_from_snippet / parse_grep_results, imported in-process, must return the exact fields the regex parsers they replaced produced -- recorded from them and pinned as literals: the uddg redirect unwrapped, a direct href kept as written, the default snippet, the row a link wins, an unterminated row dropped, a grep.app row whose <pre> is in a later row, limit and defaults. Then four hostile bodies shaped from the old patterns' worst case (unterminated <tr> openers, one row of classless anchors, unterminated data-line rows, rows with an unclosed <pre>), each one KiB under the module's SEARCH_MAX_BYTES, parsed in a child process that must finish within a 10 s bound (the regex parsers ran past a 60 s timeout on all four). Writes nothing."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py search_parsers
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared'
+
   webfetch_roots:
     description: "mcp-webfetch's two roots (R-0054), imported in-process with stub bs4/markdownify and _fetch_once/_check_host_allowed swapped (no network): --cache-root names the cache directory itself (entries <dir>/<sha256>.json, nothing under the project root), and without it the cache is $XDG_CACHE_HOME/web-fetch when that is set, non-empty and absolute, else ~/.cache/web-fetch; save_to lands under the project root and a save_to into the cache dir -- absolute or ../ relative -- is refused before any fetch; the dispatcher and the status reply carry the cache dir, the tool description names it and the default, and main() threads --cache-root (~ expanded) to handle_fetch and McpServer with both swapped. HOME and XDG_CACHE_HOME are pinned into the mkdtemp sandbox for the whole run and the real default cache dir is asserted not created -- starts no server."
     requires: [syntax]

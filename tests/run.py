@@ -198,6 +198,10 @@ def run_py_deps(opts):
     return run_python_suite("test_py_deps", opts)
 
 
+def run_search_parsers(opts):
+    return run_python_suite("test_search_parsers", opts)
+
+
 def run_webfetch_roots(opts):
     return run_python_suite("test_webfetch_roots", opts)
 
@@ -610,6 +614,11 @@ SUITES = [
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
      "builder declared", 57),
+    ("search_parsers", run_search_parsers,
+     "the DDG lite and grep.app result parsers as single html.parser passes "
+     "(R-0057, F32): the fields the regex parsers produced, pinned as "
+     "literals, and a body shaped from the regexes' worst case one KiB under "
+     "SEARCH_MAX_BYTES parsed within a wall-time bound in a child", 18),
     ("webfetch_roots", run_webfetch_roots,
      "mcp-webfetch's two roots (R-0054): --cache-root names the cache "
      "directory itself, default $XDG_CACHE_HOME/web-fetch (absolute only) "
