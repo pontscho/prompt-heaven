@@ -7,7 +7,7 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 87e478e
+  commit: 3108b4e
   date: 2026-10-02
 links:
   - overview
@@ -274,7 +274,7 @@ the call sites beneath it as unproven until measured.
 rather than only this one. That registration is the one claim on this page with
 no in-repo anchor: it lives in `~/.claude.json`, outside the tree and mode 0600.
 The recorded launch line is
-`uv run --script Scripts/mcp-webfetch.py --project-root ~/.claude`.
+`uv run --script Scripts/mcp-webfetch.py --project-root . --cache-root /Users/zoltan.ponekker/.cache/web-fetch`.
 
 The server was near-totally rewritten on 2026-08-04 and registered immediately
 after. Its HTTP client is the stdlib one generated from `Scripts/_mcp_chrome.py`
@@ -312,13 +312,32 @@ Two things about that launch line are deliberate, not incidental:
   fallback is deliberate rather than absent: a `launcher` whose binary is not on
   `PATH` degrades to the interpreter, reproducing the old SKIP with a stderr tail
   instead of killing the run on a missing `uv`.
-- **`--project-root` is pinned to `~/.claude` rather than left at its cwd
-  default** `Scripts/mcp-webfetch.py`, which puts the cache at
-  `~/.claude/.cache/webfetch/`. A user-scope server starts in every project, so
-  the default would scatter a `.cache/webfetch/` into every repo it was launched
-  from — and only this repo ignores that path `.gitignore`. A fetch cache is also
-  keyed by URL, not by project, so one shared tree makes a second project's fetch
-  of the same page a cache hit instead of a duplicate download.
+- **Two roots, and neither is under `~/.claude`.** `--cache-root DIR` names the
+  cache directory itself — entries are `DIR/<sha256>.json`, nothing appended
+  `Scripts/mcp-webfetch.py:_cache_dir` — and `--project-root` contains `save_to`;
+  they are separate flags `Scripts/mcp-webfetch.py:main`, and the cache root
+  reaches nothing but the cache `Scripts/mcp-webfetch.py:handle_fetch`. Without the
+  flag the cache is `$XDG_CACHE_HOME/web-fetch` when that variable is set,
+  non-empty and absolute, otherwise `~/.cache/web-fetch` — never the project root
+  `Scripts/mcp-webfetch.py:_default_cache_root`. The server expands `~` in the flag
+  itself, so a `~` spelling holds whether or not a shell sits in between
+  `Scripts/mcp-webfetch.py:_resolve_cache_root`. The registration passes the
+  default explicitly, by user request; the value equals what the flag-less server
+  would pick. One per-user cache outside every project is the point: a user-scope
+  server starts in every project, and a project-relative cache would scatter a
+  cache directory into every repo it was launched from; a fetch cache is also keyed
+  by URL, not by project, so one shared directory makes a second project's fetch
+  of the same page a cache hit instead of a duplicate download. The project root
+  is `.`, the Claude Code session's project directory (the process cwd), the
+  convention the rest of the fleet registers with. Until R-0054 a single
+  `--project-root ~/.claude` carried both jobs — the cache at
+  `~/.claude/.cache/webfetch/` — so `save_to` inherited the cache's root by
+  accident: a relative `save_to` landed under `~/.claude` in every project, and the
+  project actually being worked in sat outside containment
+  `Scripts/mcp-webfetch.py:_resolve_save_path`. The split first kept the cache
+  under `~/.claude` behind its own flag; on 2026-10-02 the user moved it out to the
+  XDG cache directory, and `--cache-root` stopped meaning a parent of
+  `.cache/webfetch` and became the directory itself.
 
 Other servers: `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`,
 `mcp-postgres.py`.
@@ -380,11 +399,19 @@ replace an existing file, enforced by an exclusive `open(..., "x")` rather than 
 caller whose write was refused saw a success exit and went on to read a file that
 was never written.
 
-**Measured** over nine cases through the `--test` CLI (the evidence is a CLI run,
-not a suite — this server has none): all nine passed, including the containment
-case, where a save to `.claude/tmp/webfetch-verify/outlink/escaped.md` was refused
-because it resolved to `/private/tmp/escaped.md`. Nothing was written outside the
-project root.
+**Measured** over nine cases through the `--test` CLI (the evidence was a CLI run,
+not a suite — the server had none then): all nine passed, including the
+containment case, where a save to `.claude/tmp/webfetch-verify/outlink/escaped.md`
+was refused because it resolved to `/private/tmp/escaped.md`. Nothing was written
+outside the project root. The server now has a suite, `webfetch_roots`
+`tests/test_webfetch_roots.py` ([[tests]]), but it gates the two-root split rather
+than this whole section: `--cache-root` naming the cache directory itself, the
+flag-less default resolving per the XDG rule above (set, unset or empty, relative)
+`tests/test_webfetch_roots.py:group_x`, a relative `save_to` landing under the
+project root, and a `save_to` into the cache directory — absolute or `../` —
+refused as outside the project root, before any fetch
+`tests/test_webfetch_roots.py:group_b`. The symlink, overwrite and non-2xx rules
+above are gated by no suite.
 
 ### What `purity_call`'s ignore filter will and will not hide
 

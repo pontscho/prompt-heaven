@@ -7873,7 +7873,8 @@ def wf_fetch(wf, root, params, trusted=True, news=None, swaps=()):
             kw["ssl_context_factory"] = trusted_context
         return original(*args, **kw)
     with Swapped((wf, "_ch_session_new", session_new), (wf, "random", NoWait), *swaps):
-        return wf.handle_fetch(dict(params), root)
+        # root doubles as the cache directory: never the real XDG default (R-0054).
+        return wf.handle_fetch(dict(params), root, root)
 
 
 def wf_parts(result):
@@ -8486,7 +8487,7 @@ def wf_optin_rows(suite, wf, root, vp, dp):
             return original(*args, **kw)
         dmark = dp.mark()
         with Swapped((wf, "_ch_session_new", session_new)):
-            got = wf.handle_webfetch_call({"function": "fetch", "params": {"url": durl + "/o", "impersonate": "chrome", "allow_private": True, "cache_ttl": 0}}, root)
+            got = wf.handle_webfetch_call({"function": "fetch", "params": {"url": durl + "/o", "impersonate": "chrome", "allow_private": True, "cache_ttl": 0}}, root, root)
         dseen, _dc = dp.since(dmark)
         return (wf_report(got, durl + "/o", 200, WF_CHROME)
                 + problem_if([n.get("transport") for n in news] != ["chrome"] or [q["sid"] is not None for q in dseen] != [True], "transports %r, requests %r" % ([n.get("transport") for n in news], [(q["sid"], q["path"]) for q in dseen]))), ["webfetch_call fetch with impersonate='chrome' (the alias): transport chrome, the h2 peer answered, %r" % WF_CHROME]
@@ -8511,7 +8512,7 @@ def wf_status_row(suite, wf, root):
         finds, cdlls = [], []
         before = (dict(wf._BR_STATE), dict(wf._ZSTD_STATE))
         with Swapped((ctypes.util, "find_library", recorder_of(finds, ctypes.util.find_library)), (ctypes, "CDLL", recorder_of(cdlls, ctypes.CDLL))):
-            got = wf.handle_webfetch_call({}, root)
+            got = wf.handle_webfetch_call({}, root, root)
         text = got.get("__raw_text__") or ""
         lines = text.split("\n")
         backend = [ln for ln in lines if ln.startswith("Default transport: verified (")]
@@ -8638,7 +8639,7 @@ def wf_uv_row(suite, s1p, ws):
     s1p.plan["/uv"] = (200, [("content-type", "text/html; charset=utf-8")], b"<html><body><h1>uv row</h1><p>hello from loopback</p></body></html>")
     url = "http://127.0.0.1:%d/uv" % s1p.port
     mark = s1p.mark()
-    got = outcome(lambda: H.run_process([uv, "run", "--script", WF_HOST, "--test", url, "--allow-private", "--no-cache", "--project-root", ws], timeout=WF_UV_TIMEOUT, cwd=ws))
+    got = outcome(lambda: H.run_process([uv, "run", "--script", WF_HOST, "--test", url, "--allow-private", "--no-cache", "--project-root", ws, "--cache-root", ws], timeout=WF_UV_TIMEOUT, cwd=ws))
     seen, _conns = s1p.since(mark)
     if got[0] == "exc":
         suite.record(GO, cid, ["raised %s(%r)" % (type(got[1]).__name__, str(got[1])[:200])])
@@ -8676,7 +8677,20 @@ def group_webfetch(suite, cc):
     dp = DualPeer(cc)
     s1p = SessionPeer("h1-plain", cc)
     t12 = Tls12Peer()
+    # Every call below names its cache directory; HOME and XDG_CACHE_HOME are
+    # pinned into the sandbox as well, so a call that forgot cannot reach the
+    # real default cache (R-0054: $XDG_CACHE_HOME/web-fetch or ~/.cache/web-fetch).
+    saved_env = dict((k, os.environ.get(k)) for k in ("HOME", "XDG_CACHE_HOME"))
+
+    def restore_env():
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     try:
+        os.environ["HOME"] = ws.subdir("home")
+        os.environ["XDG_CACHE_HOME"] = ws.subdir("xdg-cache")
         root = ws.path
         wf_basic_rows(suite, wf, root, vp, vp2, dp)
         wf_policy_rows(suite, wf, root, vp, vp2, dp, s1p)
@@ -8686,10 +8700,14 @@ def group_webfetch(suite, cc):
         wf_optin_rows(suite, wf, root, vp, dp)
         wf_status_row(suite, wf, root)
         wf_hardening_rows(suite, wf, root, vp)
+        # Restored first: the uv child needs the real HOME for uv's own cache,
+        # and it is handed --cache-root explicitly.
+        restore_env()
         wf_uv_row(suite, s1p, root)
     finally:
         for srv in (vp, vp2, dp, s1p, t12):
             srv.close()
+        restore_env()
         ws.cleanup()
     wf_hygiene_rows(suite, wf, originals, gai)
 

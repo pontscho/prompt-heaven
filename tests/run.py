@@ -198,6 +198,10 @@ def run_py_deps(opts):
     return run_python_suite("test_py_deps", opts)
 
 
+def run_webfetch_roots(opts):
+    return run_python_suite("test_webfetch_roots", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -606,6 +610,15 @@ SUITES = [
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
      "builder declared", 57),
+    ("webfetch_roots", run_webfetch_roots,
+     "mcp-webfetch's two roots (R-0054): --cache-root names the cache "
+     "directory itself, default $XDG_CACHE_HOME/web-fetch (absolute only) "
+     "else ~/.cache/web-fetch and never the project root, while save_to "
+     "stays contained by the project root -- a save_to into the cache dir "
+     "refused before the fetch -- with the dispatcher, the status reply, the "
+     "tool description and both CLI entry points (~ expanded) threading it, "
+     "HOME and XDG_CACHE_HOME pinned and the real default dir asserted "
+     "untouched, network stubbed", 22),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

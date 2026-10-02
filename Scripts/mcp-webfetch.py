@@ -39,7 +39,9 @@ block to every header the response carried, and `save_to` puts the WHOLE
 converted document on disk — contained inside the project root, because the
 path is model-authored and the process runs as the developer (_save_body).
 
-Cache: file-based disk cache under <project_root>/.cache/webfetch/, keyed by
+Cache: file-based, in the cache directory set by --cache-root (default
+$XDG_CACHE_HOME/web-fetch, else ~/.cache/web-fetch; save_to containment stays
+on the project root), keyed by
 SHA256(method + url + allow_private + request-affecting headers), directory
 0700, entries 0600. Default TTL 900s (15 min);
 cache_ttl=0 bypasses it entirely. A stale entry is revalidated with
@@ -7173,7 +7175,25 @@ _DECODERS = {"br": _brotli_decompress, "zstd": _zstd_decompress}
 # Disk cache
 # ---------------------------------------------------------------------------
 
-CACHE_DIR = ".cache/webfetch"
+# The cache directory's name under the XDG cache home. --cache-root names the
+# cache directory ITSELF (entries are <dir>/<sha256>.json); absent, it is
+# $XDG_CACHE_HOME/web-fetch, or ~/.cache/web-fetch when that variable is unset,
+# empty or relative (the XDG spec says a relative value is to be ignored).
+CACHE_DIR_NAME = "web-fetch"
+
+
+def _default_cache_root() -> str:
+	"""The default cache directory, realpath-ed: $XDG_CACHE_HOME/web-fetch or ~/.cache/web-fetch."""
+	xdg = os.environ.get("XDG_CACHE_HOME", "")
+	base = xdg if xdg and os.path.isabs(xdg) else os.path.join(os.path.expanduser("~"), ".cache")
+	return os.path.realpath(os.path.join(base, CACHE_DIR_NAME))
+
+
+def _resolve_cache_root(cache_root: Optional[str]) -> str:
+	"""--cache-root expanded (~) and realpath-ed, or the default when absent."""
+	if cache_root:
+		return os.path.realpath(os.path.expanduser(cache_root))
+	return _default_cache_root()
 
 # Total budget for the cache tree. Entries hold whole raw HTML documents, so
 # without a ceiling this grows for as long as the project lives.
@@ -7217,8 +7237,9 @@ def _cache_key(url: str, method: str, extra_headers: Dict[str, str], allow_priva
 	return h.hexdigest()
 
 
-def _cache_dir(project_root: str) -> str:
-	return os.path.join(project_root, CACHE_DIR)
+def _cache_dir(cache_root: str) -> str:
+	# The cache root IS the cache directory: no suffix is appended (R-0054).
+	return cache_root
 
 
 def _cache_path(project_root: str, key: str) -> str:
@@ -7932,7 +7953,10 @@ def _fetch_once(
 		_close_session(session)
 
 
-def handle_fetch(params: dict, project_root: str) -> dict:
+def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = None) -> dict:
+	# Two roots, two jobs: save_to is contained by project_root, the disk cache
+	# IS cache_root (--cache-root), by default the XDG cache directory.
+	cache_root = cache_root or _default_cache_root()
 	url = (params.get("url") or "").strip()
 	if not url:
 		return {"error": "url is required"}
@@ -8017,7 +8041,7 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 		return {"error": blocked}
 
 	key = _cache_key(url, method, extra_headers, allow_private)
-	entry = _cache_load(project_root, key) if ttl > 0 else None
+	entry = _cache_load(cache_root, key) if ttl > 0 else None
 	# The guard above vets the REQUESTED host only; a stored body may come from a
 	# redirect hop into loopback or metadata space that only allow_private=true
 	# could reach. The key already separates the two modes; an entry whose own
@@ -8113,7 +8137,7 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 		if _transport_rank(result.get("transport")) < _transport_rank(entry.get("transport")):
 			entry["transport"] = result.get("transport")
 			entry["cert_verified"] = result.get("cert_verified")
-		_cache_save(project_root, key, entry)
+		_cache_save(cache_root, key, entry)
 		return _format_response(
 			entry.get("status", 200), entry.get("final_url", url),
 			entry.get("headers", {}), entry.get("body", ""),
@@ -8127,7 +8151,7 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 	# above would not have run, and storing that empty body under status 304
 	# would make every within-TTL call serve an empty document.
 	if ttl > 0 and 200 <= status < 400 and status != 304:
-		_cache_save(project_root, key, {
+		_cache_save(cache_root, key, {
 			"url": url,
 			"method": method,
 			"status": status,
@@ -8155,7 +8179,7 @@ def handle_fetch(params: dict, project_root: str) -> dict:
 # Handler registry + dispatcher
 # ---------------------------------------------------------------------------
 
-HANDLERS: Dict[str, Callable[[dict, str], dict]] = {
+HANDLERS: Dict[str, Callable[[dict, str, Optional[str]], dict]] = {
 	"fetch": handle_fetch,
 	# aliases
 	"get":   handle_fetch,
@@ -8241,7 +8265,8 @@ def _decoder_status(label: str, state: dict, attempts: Callable[[], list],
 	return f"{label}: not loaded yet (no explicit candidate path; the loader search runs on first use)"
 
 
-def handle_webfetch_call(arguments: dict, project_root: str) -> dict:
+def handle_webfetch_call(arguments: dict, project_root: str, cache_root: Optional[str] = None) -> dict:
+	cache_root = cache_root or _default_cache_root()
 	function = (arguments.get("function") or arguments.get("f") or "").strip()
 	raw_params = arguments.get("params") or arguments.get("p") or {}
 	try:
@@ -8261,7 +8286,7 @@ def handle_webfetch_call(arguments: dict, project_root: str) -> dict:
 			"(certificates verified, not impersonated); no proxy support\n"
 			f"{_decoder_status('br', _BR_STATE, _br_attempts, _br_exists)}\n"
 			f"{_decoder_status('zstd', _ZSTD_STATE, _zstd_attempts, _zstd_exists)}\n"
-			f"Cache dir: {_cache_dir(project_root)}\n"
+			f"Cache dir: {_cache_dir(cache_root)}\n"
 			f"Available functions:\n{funcs}"
 		)}
 
@@ -8298,7 +8323,7 @@ def handle_webfetch_call(arguments: dict, project_root: str) -> dict:
 	# every valid impersonation profile once came back uncapped. The cap is the
 	# rule, whatever the message: an exception's text is not ours to size.
 	try:
-		result = handler(params, project_root)
+		result = handler(params, project_root, cache_root)
 	except (ValueError, FileNotFoundError, OSError) as exc:
 		result = {"error": str(exc)}
 	except Exception as exc:
@@ -8366,7 +8391,9 @@ WEBFETCH_CALL_TOOL = {
 		"Non-textual content-types (PDF, images, archives) are REFUSED rather than "
 		"converted, because decoding a binary body yields replacement-character "
 		"mojibake instead of content.\n\n"
-		"Cache: file-based under <project_root>/.cache/webfetch/, keyed on method + "
+		"Cache: file-based in the cache directory (set by --cache-root; default "
+		"$XDG_CACHE_HOME/web-fetch, else ~/.cache/web-fetch; the status reply "
+		"names it), keyed on method + "
 		"url + allow_private + request-affecting headers. Default TTL 900s; `cache_ttl=0` bypasses. A "
 		"stale entry is revalidated with If-None-Match/If-Modified-Since and refreshed "
 		"in place on a 304.\n\n"
@@ -8432,8 +8459,11 @@ class McpServer:
 
 	PROTOCOL_VERSION = "2024-11-05"
 
-	def __init__(self, project_root: str):
+	def __init__(self, project_root: str, cache_root: Optional[str] = None):
 		self.project_root = os.path.realpath(project_root)
+		# The disk cache directory (--cache-root, default the XDG cache dir),
+		# resolved once here; save_to stays on project_root.
+		self.cache_root = _resolve_cache_root(cache_root)
 		# Handlers run in executor threads, so two responses can be ready at
 		# once; interleaved writes would corrupt the line protocol.
 		self._write_lock = threading.Lock()
@@ -8444,7 +8474,8 @@ class McpServer:
 
 	async def run(self) -> None:
 		loop = asyncio.get_running_loop()
-		log.info("MCP server starting, project_root=%s", self.project_root)
+		log.info("MCP server starting, project_root=%s, cache_root=%s",
+		         self.project_root, self.cache_root)
 		# TWO executors, and one task per request. The task half was already
 		# here; the executor half was not, and half of this shape is not a
 		# smaller version of it — it is a higher threshold for the same outage.
@@ -8724,7 +8755,7 @@ class McpServer:
 			return self._tool_error(
 				msg_id, f"'arguments' must be an object; got {type(arguments).__name__}.")
 		try:
-			result = handle_webfetch_call(arguments, self.project_root)
+			result = handle_webfetch_call(arguments, self.project_root, self.cache_root)
 		except Exception as exc:
 			log.exception("Unhandled exception in handle_webfetch_call")
 			result = {"error": f"Internal server error: {type(exc).__name__}: {exc}"}
@@ -8759,7 +8790,11 @@ class McpServer:
 def main() -> None:
 	parser = argparse.ArgumentParser(description="mcp-webfetch MCP server")
 	parser.add_argument("--project-root", default=os.getcwd(),
-	                    help="Project root (cache + sandbox base). Default: cwd.")
+	                    help="Project root (save_to containment base). Default: cwd.")
+	parser.add_argument("--cache-root", default=None,
+	                    help="The disk cache directory itself (entries are "
+	                         "<dir>/<sha256>.json); ~ is expanded. Default: "
+	                         "$XDG_CACHE_HOME/web-fetch, else ~/.cache/web-fetch.")
 	parser.add_argument("--list", action="store_true",
 	                    help="List handlers and exit")
 	parser.add_argument("--test", metavar="URL",
@@ -8821,7 +8856,8 @@ def main() -> None:
 		# purpose for an unknown --profile reaches the user as a traceback
 		# instead of as the message that names `chrome` and the verified default.
 		try:
-			result = handle_fetch(params, os.path.realpath(args.project_root))
+			project_root = os.path.realpath(args.project_root)
+			result = handle_fetch(params, project_root, _resolve_cache_root(args.cache_root))
 		except (ValueError, FileNotFoundError, OSError) as exc:
 			result = {"error": str(exc)}
 		print(result.get("__raw_text__") or result.get("error", "no output"))
@@ -8832,7 +8868,7 @@ def main() -> None:
 			sys.exit(1)
 		return
 
-	asyncio.run(McpServer(args.project_root).run())
+	asyncio.run(McpServer(args.project_root, args.cache_root).run())
 
 
 if __name__ == "__main__":
