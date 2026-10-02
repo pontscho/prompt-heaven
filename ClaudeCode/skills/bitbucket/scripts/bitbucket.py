@@ -1433,6 +1433,10 @@ def cmd_pr_create(args: argparse.Namespace, client: Bitbucket) -> int:
 		"toRef": {"id": to_ref, "repository": dict(ref_repo)},
 		"reviewers": [{"user": {"name": name}} for name in reviewers],
 	}								# type: Dict[str, Any]
+	# VERIFIED 2026-10-02 against Bitbucket 9.4.23: draft=true opened PR 1224
+	# as a draft (the response echoed draft: true).
+	if args.draft:
+		body["draft"] = True
 
 	path = pr_path(project, repo)
 	if args.dry_run:
@@ -1963,6 +1967,8 @@ def build_parser() -> argparse.ArgumentParser:
 	p.add_argument("--reviewer", action="append",
 		help="repeatable; %s asks the server which reviewers this branch pair "
 			"would be given" % SENTINEL_DEFAULT)
+	p.add_argument("--draft", action="store_true",
+		help="open the pull request as a draft (Bitbucket 8.18+)")
 
 	p = sub.add_parser("pr-comment", parents=[common, scoped, dry],
 		help="add a general comment to a pull request")
