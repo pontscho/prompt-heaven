@@ -8,13 +8,14 @@ sources:
   - tests
   - project-forge.yaml
 verified:
-  commit: 3fbe5bf
+  commit: 4061b15
   date: 2026-10-02
 links:
   - agents
   - scripts
   - generated-regions
   - layer-contract
+  - 0005-approve-the-wrapper-not-the-command
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
   - 0009-the-first-reader-is-a-cold-model
   - 0011-a-truncated-payload-carries-the-first-cookie
@@ -218,6 +219,7 @@ is the registry, and the run is the only thing that knows the totals.
 | `inspect_validate` | the `mcp-inspect` validation family against fixtures, including the reported error line number |
 | `mcp_first_guard` | the deny-guard hook: DENY iff the permission decision says so |
 | `sbx_gate` | the grant-only gate — the guard suite's inverted mirror, where empty stdout is the safe outcome |
+| `sbx_seccomp` | `sbx --seccomp`: the x86_64 BPF allowlist run through the suite's own BPF interpreter against an independent copy of the syscall header, on any OS; `_bwrap_argv` kept a pure `Scope -> argv` function whose golden argv carries the fresh `/dev`, the `--ro-bind-data` file masks, `--unshare-ipc` and `--new-session`, refusing a FILE secret without its mask fd; `main()` in-process with exec stubbed, refusing off Linux x86_64 and wiring an inheritable, empty mask fd; the live prctl probe on Linux (INFO elsewhere); and the probe's header cross-check, where a name an older header lacks is INFO and only a different number FAILs `tests/test_sbx_seccomp.py` — [[0005-approve-the-wrapper-not-the-command]] |
 | `purity_lsp` | that `purity_call` really absorbed the retired clangd/luals servers, driven against live language servers |
 | `purity_file_ops` | the gitignore-aware file handlers: the `.claude/tmp` exemption **and** its narrowness, now across `find_file` too (off by default, `skip_ignored_files` / its inverse `no_ignore` to turn it on, `.git` never listed); `read_file`'s paging — `limit` as a line count from the resolved start, a resume hint that round-trips from a negative offset, a fractional float refused rather than truncated, and an offset past EOF answered with the past-the-end note instead of an inverted range, the same note `list_dir` and `find_file` now give past their last row; a missing directory — or a missing `search_for_pattern` root, whose file roots stay legal — reaching the caller as an error rather than as an empty reply; and a walk rooted at or inside `.git` refused in `list_dir`, `find_file` and `search_for_pattern`, with `.github` / `x.git` and `read_file .git/HEAD` as the controls; a `search_for_pattern` root **outside** the project root — which the server admitted and then read nothing of — now searched as a file, a directory and one element of a list, with a symlink escaping *that* root still dropped (paired with the control rooted one level up, where the same link is read) and the escape refused under `--strict` by a second, strict server child `tests/test_purity_file_ops.py:group_k`; and search's two globs taken as a string or a list of strings, a non-string, empty or brace element refused by name, and a non-string `find_file` mask or `list_dir` filter refused the same way instead of surfacing as a raw `TypeError` `tests/test_purity_file_ops.py:group_g` — [[0017-a-silent-zero-is-the-defect]]; `regex:false` as a real literal search, `max_results` / `max` as `head_limit` and `paths_include` / `paths_exclude` as the glob filters, each refused beside its canonical spelling `tests/test_purity_file_ops.py:group_d`; and `only_matching` — one row per match, paged by match rows, refused beside `count` / `files_with_matches` or context lines `tests/test_purity_file_ops.py:group_n`; `find_file`'s path-style mask honouring character classes exactly as the bare mask does `tests/test_purity_file_ops.py:group_o`; and a catastrophic caller regex answered with an error inside the call's time budget, the same server answering the next search `tests/test_purity_file_ops.py:group_p`; and `replace_content`'s regex mode bounded the same way, the file's bytes untouched on overrun and backrefs / match-count answers unchanged `tests/test_purity_file_ops.py:group_q` |
 | `mcp_git_params` | named params → `git` argv, fully offline with `subprocess` stubbed; also that a mutating stash is never adopted by the cancel reclaim `Scripts/mcp-git.py:_run_git_mutating` |

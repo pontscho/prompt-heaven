@@ -234,3 +234,33 @@ The run used only a `mktemp -d /tmp/sbx-seccomp.XXXXXX` directory holding `sbx` 
 The tests caught two defects on the way. `getpid` and `sched_yield` had been left off the list; the suite's required-core row caught it. The probe's first `clone(CLONE_NEWUSER)` check did not discriminate on Ubuntu, because the kernel already answers it EPERM without a filter; it was replaced by `CLONE_NEWNS|CLONE_FS`.
 
 **NOT yet validated: the bwrap `--seccomp` path end-to-end.** In that path bwrap reads the fd and installs the program in the target after its own namespace setup. This needs a host with bubblewrap and unprivileged user namespaces. t42 has neither: `unprivileged_userns_clone=0`, `apparmor_restrict_unprivileged_userns=1`, and bubblewrap is not installed. Until that run exists, the Linux claim is: the program's content is verified and interpreted offline, and its effect is verified in-process. How bwrap delivers it is not measured.
+
+## Addendum (2026-10-02): bwrap end-to-end on para; a usable /dev, a new session and an IPC namespace (R-0003)
+
+The bwrap `--seccomp` path is now validated end to end, on host para: Ubuntu 22.04.4, kernel 5.15.0-186, bubblewrap 0.6.1, Python 3.10.12, 2026-10-02. This supersedes the "NOT yet validated: the bwrap `--seccomp` path end-to-end" paragraph of the 2026-09-29 addendum. Nothing was installed on para and no sudo was used; all work was inside `~/sbx`.
+
+### What the run measured
+
+- `/proc/self/status` under sbx shows `Seccomp: 0` and `Seccomp_filters: 0` without the flag, and `Seccomp: 2` and `Seccomp_filters: 1` with `--seccomp`.
+- Under `--seccomp`, the nine discriminating calls of `seccomp_probe.py` already get the filtered answer (EPERM; ENOSYS for `clone3`) BEFORE the probe installs its own copy. The probe reports them as FAIL. That is by design: it was written for the run without bwrap, where the unfiltered answer comes first. Here the FAIL is the evidence.
+- Direct calls: `unshare(0x1)` and `ptrace` give EPERM under `--seccomp`, and EINVAL and ESRCH without it.
+- The control run without `--seccomp` gives 26 pass, 0 fail. Under `--seccomp` every command check passes (`python3`, `ls`, `git`, `sh`, `bash`, `cat`, threads with a subprocess, an AF_UNIX socketpair), x32 is killed by SIGSYS, and fork and threads work.
+
+### The defect it found: sbx had never run a real command on Linux
+
+`--ro-bind / /` gives every bind MS_NODEV, so the host `/dev` arrived nodev and every device node was EACCES. git died on `/dev/null`, and `subprocess(stdin=DEVNULL)` failed. The `.git/config` mask, `--ro-bind /dev/null <file>`, was EACCES too, not "reads empty" as the code claimed. That also retires the mask named in the Linux bullet of Consequences.
+
+The fix:
+
+- `--dev /dev --remount-ro /dev` right after `--ro-bind / /`: a fresh minimal `/dev`, so the host's device nodes are no longer visible. The remount is not recursive, so the device nodes and the private devpts stay writable. This leaves no persistent state.
+- A FILE secret is masked with `--ro-bind-data <fd> <file>`, one fd per mask, each opened on `/dev/null` in `main()`. Measured: reads empty, writes EROFS, and git runs clean.
+
+### What the security review of the fix found
+
+- The fresh `/dev` re-exposed `/dev/tty`. Without `--seccomp`, a contained process with piped stdio could open the controlling terminal and inject keystrokes with TIOCSTI; para's 5.15 kernel still allows legacy TIOCSTI. Fix: `--new-session` (setsid, so no controlling terminal). Measured: `/dev/tty` is ENXIO; before the fix it was openable. The TIOCSTI deny under `--seccomp` stays, as defence in depth; the reason the 2026-09-29 addendum gave for it (bwrap is not given `--new-session`) no longer holds. The cost, declared: a program under sbx has no controlling terminal, so no job control and no terminal signals. An interactive TUI is not a use case for sbx.
+- A gap older than this change: there was no IPC namespace, so the host's SysV shm, sem and msg and its POSIX mqueues were reachable. Fix: `--unshare-ipc`. Measured: a distinct ipc namespace, and the host shm segment is no longer visible.
+- Raised and rejected as findings, because they are outside the threat model: sealing the seccomp memfd, an fstat check on the mask fd, and refusing an fd below 3. Declared, not done.
+
+### The probe's header cross-check
+
+para's header is older and lacks the six embedded names numbered 449-456. A name the host header does not define is now INFO, not FAIL; a different number is still FAIL. `tests/test_sbx_seccomp.py` still checks every embedded name against the independent t42 header copy.
