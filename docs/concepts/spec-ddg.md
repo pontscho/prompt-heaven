@@ -9,7 +9,7 @@ sources:
   - Scripts/search_github.py
   - Scripts/_mcp_chrome.py
 verified:
-  commit: a8c3443
+  commit: bdbf852
   date: 2026-10-02
 links:
   - scripts

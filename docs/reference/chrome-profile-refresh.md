@@ -16,7 +16,7 @@ sources:
   - tests/test_mcp_chrome.py:profile_problems
   - tests/files/chrome/154/README.md
 verified:
-  commit: 3fbe5bf
+  commit: bdbf852
   date: 2026-10-02
 links:
   - 0004-never-pin-a-browser-impersonation-version

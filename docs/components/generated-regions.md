@@ -17,7 +17,7 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: 3fbe5bf
+  commit: bdbf852
   date: 2026-10-02
 links:
   - scripts
