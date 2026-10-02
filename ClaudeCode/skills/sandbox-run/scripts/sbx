@@ -46,8 +46,10 @@ USAGE = "Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] -- <cmd> [args..
 # filesystem object, so neither --unshare-net nor a read-only bind stops connect()
 # on it; without --net bwrap hides these behind an empty tmpfs (Linux only --
 # Seatbelt's (deny network*) already denies unix-socket connect, measured).
-# /var/run is a symlink to /run on every current distribution.
-SOCKET_DIRS = ("/run", "/tmp")
+# /var/run is a symlink to /run on every current distribution; /var/snap holds snap
+# daemons' sockets (lxd: root-equivalent for the lxd group). Snap binaries live
+# under /snap, which stays visible.
+SOCKET_DIRS = ("/run", "/tmp", "/var/snap")
 
 
 @dataclass
@@ -100,8 +102,9 @@ class Scope:
                    one fd on /dev/null per FILE secret, in order, opened by
                    main() for the bwrap `--ro-bind-data` masks (Linux only).
       cwd          the working directory sbx was started in; bwrap re-binds it
-                   read-only when it lies under a SOCKET_DIRS entry, which the
-                   socket mask would otherwise bury (Linux only).
+                   read-only when it lies under /tmp, which the socket mask would
+                   otherwise bury, and refuses it under /run or /var/snap (Linux
+                   only).
     """
     writes: list
     net: bool
@@ -257,7 +260,8 @@ def _bwrap_argv(scope):
     shell string -- argv-as-list is the injection-safe construction). Order:
       --ro-bind / /  (read-all host) / --dev /dev --remount-ro /dev / UNLESS
       scope.net --tmpfs per SOCKET_DIRS entry, plus --ro-bind <cwd> <cwd> when the
-      cwd lies under one (R-0061) / per writable
+      cwd lies under /tmp (under the others: ValueError, refused) (R-0061) / per
+      writable
       scope --bind <canonical> <canonical> UNLESS scope.ro (R21: then no writable bind) / per secret_paths
       entry a mask layered AFTER the binds so it WINS over the ro-bind of /
       (R16/R17/R22/R22b) -- the mask PRIMITIVE is chosen by the entry's own
@@ -319,15 +323,23 @@ def _bwrap_argv(scope):
     argv += ["--dev", "/dev", "--remount-ro", "/dev"]
     # R-0061: without --net, an EMPTY tmpfs over each pathname-socket directory --
     # BEFORE every bind and mask, so a --write scope, a secret mask or a carve-out
-    # under one of them lands on top and wins. A cwd under one is re-bound read-only
-    # so the project does not vanish (bwrap would silently chdir elsewhere). --net
-    # skips this: it reopens unix sockets on macOS too, and /etc/resolv.conf points
-    # into /run on systemd-resolved hosts.
+    # under one of them lands on top and wins. A cwd under /tmp is re-bound
+    # read-only so the project does not vanish (bwrap would silently chdir
+    # elsewhere); its own sockets come back with it, the declared "sockets inside
+    # the project" limit. A cwd under /run or /var/snap is REFUSED instead: a
+    # re-bind there would reopen exactly the daemons this hides (cwd=/run/user/<uid>
+    # -> D-Bus, gpg-agent). --net skips all of this: it reopens unix sockets on
+    # macOS too, and /etc/resolv.conf points into /run on systemd-resolved hosts.
     sockets = () if scope.net else SOCKET_DIRS
     for d in sockets:
         argv += ["--tmpfs", d]
-    if scope.cwd and any(scope.cwd.startswith(d + "/") for d in sockets):
-        argv += ["--ro-bind", scope.cwd, scope.cwd]
+    for d in sockets:
+        if scope.cwd and scope.cwd.startswith(d + "/"):
+            if d != "/tmp":
+                raise ValueError(
+                    "refusing to run from %r: it lies under %s, whose sockets a "
+                    "re-bind would reopen; run sbx from elsewhere" % (scope.cwd, d))
+            argv += ["--ro-bind", scope.cwd, scope.cwd]
     # per writable scope: read-write bind -- UNLESS --ro, which emits NO writable
     # bind at all so even the scratch default is denied (R21).
     if not scope.ro:
@@ -1230,8 +1242,13 @@ def main(argv=None):
     # Build the OS-sandbox invocation from the fully-validated Scope via the
     # platform's pure builder (task-004 Seatbelt / task-005 bwrap). argv is a
     # LIST: the target cmd/args are argv ELEMENTS, never a shell string, so they
-    # can never inject into the profile (NFR-4).
-    argv = builder(scope)
+    # can never inject into the profile (NFR-4). A builder refusal (ValueError) is
+    # one stderr line and exit 3 -- nothing is run.
+    try:
+        argv = builder(scope)
+    except ValueError as exc:
+        sys.stderr.write("sbx: error: %s\n" % exc)
+        return 3
 
     # Create ONLY the default scratch scope, and only when it is actually in the
     # writable set (no flags -> [<cwd>/.claude/tmp]; --ro -> [] so nothing is

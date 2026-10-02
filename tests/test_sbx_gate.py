@@ -337,7 +337,39 @@ def _file_mask_at(bw, path):
 
 # R-0061: the standard pathname-socket directories bwrap hides without --net,
 # spelled here independently of the helper so the oracle cannot drift with it.
-SOCKET_DIRS = ("/run", "/tmp")
+SOCKET_DIRS = ("/run", "/tmp", "/var/snap")
+
+
+def _main_in(helper, cwd, argv):
+    """helper.main(argv) as if started in `cwd` on a bwrap host, with exec,
+    rlimits, engine detection and the mask fds stubbed: (rc, stderr, execs)."""
+    import io
+    execs = []
+    saved = (os.getcwd, os.execvp, helper._apply_rlimits, helper._detect_engine,
+             helper._file_mask_fds, sys.stdout, sys.stderr)
+
+    def _exec(path, args):
+        execs.append(list(args))
+        raise OSError("exec stubbed by the suite")
+    os.getcwd = lambda: cwd
+    os.execvp = _exec
+    helper._apply_rlimits = lambda: None
+    helper._detect_engine = lambda: (helper._bwrap_argv, "/usr/bin/bwrap")
+    helper._file_mask_fds = lambda paths: tuple(
+        range(100, 100 + sum(1 for _p, d in paths or () if not d)))
+    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+    try:
+        try:
+            rc = helper.main(argv)
+        except SystemExit as exc:
+            rc = exc.code
+        except Exception as exc:          # noqa: BLE001 -- a crash is a finding
+            rc = "raised %r" % (exc,)
+        err = sys.stderr.getvalue()
+    finally:
+        (os.getcwd, os.execvp, helper._apply_rlimits, helper._detect_engine,
+         helper._file_mask_fds, sys.stdout, sys.stderr) = saved
+    return rc, err, execs
 
 
 def _strip_socket_masks(bw):
@@ -1223,7 +1255,7 @@ def _run_offline(suite, helper, ws):
                for i in range(len(bw_net) - 1)):
             problems.append("--net still masks socket dir %s" % d)
     _rec(suite, GRP_Q,
-         "(b2) bwrap: /run and /tmp masked by an empty tmpfs before every bind, "
+         "(b2) bwrap: /run, /tmp, /var/snap masked by an empty tmpfs before every bind, "
          "remounted ro after the last mount; not under --net (R-0061)", problems)
 
     # (b3) a cwd UNDER a masked socket directory would vanish with the tmpfs, and
@@ -1231,19 +1263,34 @@ def _run_offline(suite, helper, ws):
     # re-bound READ-ONLY right after the masks, before every writable bind (so
     # `--write .` still wins over it) and before the secret masks (so an ancestor
     # .git/config stays masked). A cwd elsewhere, or a cwd that IS the socket
-    # directory (which would re-expose all of it), gets no re-bind.
+    # directory (which would re-expose all of it), gets no re-bind. Only /tmp is
+    # re-bound: a read-only bind does NOT stop connect(), so the re-bound subtree's
+    # sockets come back with it -- acceptable for a project under /tmp (the declared
+    # "sockets inside the project" limit), not for /run (cwd=/run/user/<uid> would
+    # reopen D-Bus and gpg-agent) or /var/snap. A cwd under those is REFUSED: the
+    # pure builder raises, and main() turns that into one stderr line and exit 3.
     problems = []
-    cases = (("/tmp/proj", True), ("/run/user/1000/w", True), ("/tmpfoo/proj", False),
+    cases = (("/tmp/proj", True), ("/run/user/1000/w", "refuse"),
+             ("/var/snap/lxd/common/x", "refuse"), ("/tmpfoo/proj", False),
              ("/tmp", False), ("/home/u/p", False), (None, False))
     if "cwd" not in getattr(helper.Scope, "__dataclass_fields__", {}):
         problems.append("Scope has no cwd field -- a cwd under /tmp is buried")
         cases = ()
     for cwd, want in cases:
         base = cwd or "/x"
-        got = helper._bwrap_argv(helper.Scope(
-            writes=[base + "/.claude/tmp"], net=False, ro=False, argv=["true"],
-            secret_paths=((base + "/.git/config", False),), carveouts=(),
-            file_mask_fds=(5,), cwd=cwd))
+        try:
+            got = helper._bwrap_argv(helper.Scope(
+                writes=[base + "/.claude/tmp"], net=False, ro=False, argv=["true"],
+                secret_paths=((base + "/.git/config", False),), carveouts=(),
+                file_mask_fds=(5,), cwd=cwd))
+        except ValueError:
+            if want != "refuse":
+                problems.append("cwd %r wrongly refused" % cwd)
+            continue
+        if want == "refuse":
+            problems.append("cwd %r NOT refused -- its sockets are reachable: %r"
+                            % (cwd, got))
+            continue
         rb = [i for i in range(len(got) - 2)
               if got[i] == "--ro-bind" and got[i + 1] == cwd and got[i + 2] == cwd]
         if not want:
@@ -1264,9 +1311,16 @@ def _run_offline(suite, helper, ws):
         if not tm < rb[0] < bi < mi:
             problems.append("cwd %r re-bind out of order: tmpfs %d, rebind %d, "
                             "bind %d, mask %d" % (cwd, tm, rb[0], bi, mi))
+    # ...and through main(): one stderr line, exit 3, nothing exec'd.
+    rc, err, execs = _main_in(helper, "/run/user/1000/w", ["--", "true"])
+    if rc != 3 or execs or len(err.strip().splitlines()) != 1 \
+            or not err.startswith("sbx: error:"):
+        problems.append("main() under cwd /run/user/1000/w: rc %r, execs %r, "
+                        "stderr %r (want rc 3, no exec, one 'sbx: error:' line)"
+                        % (rc, execs, err))
     _rec(suite, GRP_Q,
-         "(b3) bwrap: a cwd under /tmp or /run re-bound ro after the socket masks, "
-         "before binds and secret masks", problems)
+         "(b3) bwrap: a cwd under /tmp re-bound ro after the socket masks, before "
+         "binds and secret masks; under /run or /var/snap refused (exit 3)", problems)
 
     # (c) writes confined; --ro yields ZERO writable scopes on both backends.
     wa = '(allow file-write* (subpath "%s"))' % scratch
