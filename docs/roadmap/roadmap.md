@@ -14,10 +14,10 @@ WIP now: 0 of 3. Archive: 53 closed items (45 done, 8 dropped).
 | Lane  | Id     | State | Title                                                                                               | Ready |
 |-------|--------|-------|-----------------------------------------------------------------------------------------------------|-------|
 | next  | R-0058 | idea  | Pin or bound mcp-webfetch's PEP 723 dependencies, or finish removing lxml                           | yes   |
-| next  | R-0052 | idea  | Measure the DDG challenge page's structural marker and replace the fallback block predicate         | yes   |
 | later | R-0051 | idea  | Refresh the Chrome profile                                                                          | yes   |
 | later | R-0060 | idea  | DDG main endpoint: replicate the __sc__ DOM fingerprint                                             | yes   |
 | later | R-0048 | idea  | Answer a HelloRetryRequest that selects P-384 (FLAG-2)                                              | yes   |
+| later | R-0052 | idea  | Measure the DDG challenge page's structural marker and replace the fallback block predicate         | yes   |
 | inbox | R-0047 | idea  | implement certificate verification in _ChTls so fingerprint and authenticity stop being a trade-off | yes   |
 | inbox | R-0054 | idea  | mcp-webfetch save_to and cache are rooted at ~/.claude, not the session's project                   | yes   |
 | inbox | R-0057 | idea  | Single-pass HTMLParser for DDG lite, Bing and grep.app result parsing                               | yes   |
@@ -42,22 +42,6 @@ Security review 20261001-082224, finding F47 (LOW, pre-existing): the PEP 723 bl
 
 - 2026-10-01 new->unset: deferred by security review 20261001-082224
 - 2026-10-02 unset->next: User 2026-10-02: approved -- bs4 on html.parser, lxml leaves, bound bs4/markdownify versions.
-
-## R-0052 · Measure the DDG challenge page's structural marker and replace the fallback block predicate
-
-state: idea
-horizon: next
-origin: docs/adr/0026-speak-chrome-from-the-stdlib-verify-by-default.md#d16--the-block-rules-and-the-limits-declared-rather-than-gated
-blocked_by: []
-severity: medium
-tags: [search, security]
-
-D16 (S1) wants DDG's block to be structural: zero parsed results AND the challenge marker as an element outside the results container, never a body substring. No challenge page was observed in either live sample (Gate G6 on 2026-09-30, task-038; the cost run on 2026-10-01, task-044), so the element was never measured and the plan's FALLBACK predicate shipped in _ddg_blocked of Scripts/search_duckduckgo.py: own host AND zero results AND a marker in the page AND the query does not contain that marker. The open work is to record a real DDG challenge page, locate the marker element, and replace the marker test with the structural match (with group M rows proving a reflected query or snippet still cannot trip it). Spec-ddg section 2.9 records the same gap.
-
-### Log
-
-- 2026-10-01 new->unset: follow-up of R-0044 (task-056)
-- 2026-10-02 unset->next: User 2026-10-02: option 2 -- treat own host + zero results + HTTP 202 as a block alongside the marker branch; the user has seen DDG answer a challenge with 202 live. Keep the structural element open for when a real page is recorded.
 
 # later
 
@@ -105,6 +89,23 @@ Chrome 153 offers P-384 (0x0018) alongside P-256 in supported_groups, but the st
 
 - 2026-10-01 new->unset: follow-up of R-0044 (task-056, FLAG-2)
 - 2026-10-02 unset->later: User 2026-10-02: keep it recorded; log a warning when a server does select P-384 so a real case gets noticed.
+
+## R-0052 · Measure the DDG challenge page's structural marker and replace the fallback block predicate
+
+state: idea
+horizon: later
+origin: docs/adr/0026-speak-chrome-from-the-stdlib-verify-by-default.md#d16--the-block-rules-and-the-limits-declared-rather-than-gated
+blocked_by: []
+severity: medium
+tags: [search, security]
+
+D16 (S1) wants DDG's block to be structural: zero parsed results AND the challenge marker as an element outside the results container, never a body substring. No challenge page was observed in either live sample (Gate G6 on 2026-09-30, task-038; the cost run on 2026-10-01, task-044), so the element was never measured and the plan's FALLBACK predicate shipped in _ddg_blocked of Scripts/search_duckduckgo.py: own host AND zero results AND a marker in the page AND the query does not contain that marker. The open work is to record a real DDG challenge page, locate the marker element, and replace the marker test with the structural match (with group M rows proving a reflected query or snippet still cannot trip it). Spec-ddg section 2.9 records the same gap.
+
+### Log
+
+- 2026-10-01 new->unset: follow-up of R-0044 (task-056)
+- 2026-10-02 unset->next: User 2026-10-02: option 2 -- treat own host + zero results + HTTP 202 as a block alongside the marker branch; the user has seen DDG answer a challenge with 202 live. Keep the structural element open for when a real page is recorded.
+- 2026-10-02 next->later: 202 signal shipped in 92f1d38; the structural marker element stays open until a real challenge page is recorded.
 
 # inbox
 
