@@ -30,6 +30,8 @@ Groups:
   D  the CLI: --cache-root default and ~ expansion, both entry points
   X  the default's XDG resolution: set, unset, relative
   L  eviction is LRU: a hit refreshes the entry's mtime, never its content
+  S  save_to refuses .git/, .claude/hooks/, .claude/settings*.json and the
+     root .mcp.json (case-folded, symlinks resolved), before any fetch
   E  hygiene
 """
 
@@ -611,6 +613,105 @@ def group_l(suite, wf, ws):
 
 
 # ---------------------------------------------------------------------------
+# Group S -- save_to refuses the project's own control files (R-0062)
+# ---------------------------------------------------------------------------
+
+# (case id, save_to, overwrite).  Refused: git's config and hooks (code
+# execution on the next git command), Claude Code's settings and hooks, and the
+# project-root .mcp.json -- by case-folded relative path on the realpath'd
+# target, so neither `.GIT/` nor a symlink into `.git` routes around it.
+S_REFUSED = (
+    ("git-config", ".git/config", True),
+    ("git-hook-existing-overwrite", ".git/hooks/pre-commit", True),
+    ("git-config-case-folded", ".GIT/config", True),
+    ("git-via-symlink-into-dot-git", "link/config", True),
+    ("claude-settings-json", ".claude/settings.json", True),
+    ("claude-settings-local-json", ".claude/settings.local.json", False),
+    ("claude-hooks-script", ".claude/hooks/x.sh", False),
+    ("root-mcp-json", ".mcp.json", False),
+)
+# Still allowed: ordinary paths, and near-miss names that are not the files.
+S_ALLOWED = (
+    ("docs-file", "docs/x.md"),
+    ("claude-notes", ".claude/notes.md"),
+    ("nested-mcp-json", "sub/.mcp.json"),
+    ("gitignore", ".gitignore"),
+    ("github-dir", ".github/x.md"),
+)
+
+
+def s_project(ws):
+    """A project with a .git (config + an existing hook), .claude/, link -> .git."""
+    proj, cache = roots(ws, "s")
+    for rel, body in ((".git/config", "[core]\n"),
+                      (".git/hooks/pre-commit", "#!/bin/sh\nexit 0\n"),
+                      (".claude/keep", "")):
+        full = os.path.join(proj, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(body)
+    os.symlink(".git", os.path.join(proj, "link"))
+    return proj, cache
+
+
+def snapshot(proj):
+    """{relative path: bytes} of every regular file under proj (links not followed)."""
+    out = {}
+    for dirpath, _dirs, files in os.walk(proj):
+        for name in files:
+            full = os.path.join(dirpath, name)
+            if os.path.isfile(full) and not os.path.islink(full):
+                with open(full, "rb") as fh:
+                    out[os.path.relpath(full, proj)] = fh.read()
+    return out
+
+
+def group_s(suite, wf, ws):
+    proj, cache = s_project(ws)
+    for cid, rel, overwrite in S_REFUSED:
+        before = snapshot(proj)
+        calls = []
+        with offline(wf, calls):
+            kind, got = call(lambda: wf.handle_fetch(
+                {"url": URL, "save_to": rel, "output": "html",
+                 "overwrite": overwrite}, proj, cache_root=cache))
+        text = got if kind != "ok" else text_of(got)
+        problems = []
+        if kind != "ok":
+            problems.append("raised instead of refusing: %s" % text[:200])
+        elif "error" not in got:
+            problems.append("save_to=%s was ACCEPTED" % rel)
+        elif "protected" not in text:
+            problems.append("refused, but not as a protected path: %s"
+                            % text[:200])
+        if calls:
+            problems.append("the refusal came after a fetch (%d)" % len(calls))
+        if snapshot(proj) != before:
+            problems.append("the project tree changed")
+        suite.record("S", "refused-%s" % cid, problems,
+                     detail=["save_to=%s overwrite=%s" % (rel, overwrite),
+                             "reply: %s" % text[:200]])
+
+    for cid, rel in S_ALLOWED:
+        calls = []
+        with offline(wf, calls):
+            kind, got = call(lambda: wf.handle_fetch(
+                {"url": URL, "save_to": rel, "output": "html",
+                 "cache_ttl": 0}, proj, cache_root=cache))
+        text = got if kind != "ok" else text_of(got)
+        full = os.path.join(proj, rel)
+        problems = []
+        if kind != "ok" or "error" in got:
+            problems.append("save_to=%s was refused: %s" % (rel, text[:200]))
+        if not os.path.isfile(full):
+            problems.append("%s was not written" % full)
+        if len(calls) != 1:
+            problems.append("expected one fetch, got %d" % len(calls))
+        suite.record("S", "allowed-%s" % cid, problems,
+                     detail=["save_to=%s" % rel, "reply: %s" % text[:160]])
+
+
+# ---------------------------------------------------------------------------
 # Group E -- hygiene
 # ---------------------------------------------------------------------------
 
@@ -681,6 +782,7 @@ def run(opts=None):
             group_d(suite, wf, ws)
             group_x(suite, wf, ws)
             group_l(suite, wf, ws)
+            group_s(suite, wf, ws)
 
     group_e(suite, wf, originals, real_default, existed, before, pyc_before)
     suite.print_summary()

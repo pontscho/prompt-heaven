@@ -620,7 +620,9 @@ SUITES = [
      "HOME and XDG_CACHE_HOME pinned and the real default dir asserted "
      "untouched, network stubbed; eviction least recently used -- a hit "
      "refreshes the entry's mtime and leaves its content and fetched_at "
-     "alone", 25),
+     "alone; save_to refusing .git/, .claude/hooks/, .claude/settings*.json "
+     "and the root .mcp.json case-folded and through a symlink, before any "
+     "fetch (R-0062)", 38),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

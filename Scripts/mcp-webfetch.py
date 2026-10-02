@@ -7515,9 +7515,39 @@ def _resolve_save_path(project_root: str, save_to: str) -> str:
 			f"Refusing: a URL-driven fetcher writing anywhere on the filesystem "
 			f"is the confused-deputy case. Pick a path inside the project."
 		)
+	protected = _protected_save_class(os.path.relpath(path, root))
+	if protected:
+		raise ValueError(
+			f"save_to {path} is a protected path ({protected}). Refusing: a "
+			f"fetched body written there runs as the developer on the next git "
+			f"command or Claude Code session. Pick another path."
+		)
 	if os.path.isdir(path):
 		raise ValueError(f"save_to {path} is a directory, not a file")
 	return path
+
+
+# Control files inside the tree that save_to must never write (R-0062): git's
+# config and hooks (core.hooksPath / fsmonitor / sshCommand run code on the next
+# git command), Claude Code's settings and hooks, and the root .mcp.json.
+# Matched case-folded, because the default macOS volume is case-insensitive and
+# `.GIT/config` IS `.git/config` there; the caller passes the realpath'd target,
+# so a symlink into `.git` is matched on where it lands.
+_PROTECTED_SAVE_DIRS = ((".git",), (".claude", "hooks"))
+
+
+def _protected_save_class(rel: str) -> Optional[str]:
+	"""The protected class `rel` (relative to the project root) falls in, or None."""
+	parts = tuple(p.casefold() for p in rel.split(os.sep))
+	for prefix in _PROTECTED_SAVE_DIRS:
+		if parts[:len(prefix)] == prefix:
+			return "/".join(prefix) + "/"
+	if (len(parts) == 2 and parts[0] == ".claude"
+			and parts[1].startswith("settings") and parts[1].endswith(".json")):
+		return ".claude/settings*.json"
+	if parts == (".mcp.json",):
+		return ".mcp.json"
+	return None
 
 
 def _save_body(view: dict, content: str, status: int, final_url: str) -> str:
@@ -8399,7 +8429,9 @@ WEBFETCH_CALL_TOOL = {
 		"paged window — byte-exact, with no trailing newline added. The path must "
 		"resolve INSIDE the project root (symlinks resolved; a fetcher writing "
 		"anywhere on disk is the confused-deputy case), missing parents are created, "
-		"and an existing file is refused unless `overwrite=true`. A non-2xx status "
+		"and an existing file is refused unless `overwrite=true`. Protected paths are "
+		"refused even with overwrite: anything under .git/ or .claude/hooks/, "
+		".claude/settings*.json and the root .mcp.json (case-insensitive). A non-2xx status "
 		"or an empty body is refused rather than saved.\n\n"
 		"Non-textual content-types (PDF, images, archives) are REFUSED rather than "
 		"converted, because decoding a binary body yields replacement-character "

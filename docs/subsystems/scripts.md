@@ -404,6 +404,20 @@ document was expected is worse than no file at all. `overwrite=true` is required
 replace an existing file, enforced by an exclusive `open(..., "x")` rather than an
 `exists()` check — the same guard without the window between looking and writing.
 
+Containment alone still let a fetched page reach code execution inside the tree:
+with `overwrite=true` and raw output the saved bytes are the server's, so a
+prompt-injected page could ask to be saved over `.git/config` (`core.hooksPath`,
+`core.fsmonitor` run on the next git command) or an existing executable hook.
+Since R-0062 the resolved target is also refused when, relative to the project
+root and case-folded, it lies under `.git/` or `.claude/hooks/`, is a
+`.claude/settings*.json`, or is the root `.mcp.json` — on creation as well as
+overwrite, because creating `.git/config` or `.mcp.json` is already enough
+`Scripts/mcp-webfetch.py:_protected_save_class`. Judging the resolved path makes a
+symlink into `.git` hit the same refusal; case-folding closes `.GIT/config` on
+macOS's case-insensitive default volume. A nested `sub/.mcp.json` is allowed:
+only the root one is Claude Code's configuration. Gated by
+`tests/test_webfetch_roots.py:group_s`.
+
 `--test` now exits **1** on a refusal, where it used to print the error and exit 0
 `Scripts/mcp-webfetch.py:main`. `save_to` is what made that load-bearing: a shell
 caller whose write was refused saw a success exit and went on to read a file that
@@ -420,8 +434,8 @@ flag-less default resolving per the XDG rule above (set, unset or empty, relativ
 `tests/test_webfetch_roots.py:group_x`, a relative `save_to` landing under the
 project root, and a `save_to` into the cache directory — absolute or `../` —
 refused as outside the project root, before any fetch
-`tests/test_webfetch_roots.py:group_b`. The symlink, overwrite and non-2xx rules
-above are gated by no suite.
+`tests/test_webfetch_roots.py:group_b`, plus the protected-path refusals above.
+The out-of-tree symlink, overwrite and non-2xx rules above are gated by no suite.
 
 ### What `purity_call`'s ignore filter will and will not hide
 
