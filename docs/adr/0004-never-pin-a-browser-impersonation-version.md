@@ -156,3 +156,15 @@ the profile actually took.
   `impersonate=`, so it was already inert. The measurement it appeared to support
   is unaffected and still stands — see [[spec-ddg]], which records why.
 - **Not changed:** `ROTATE_EVERY`, and the four `CURL_CFFI_PROFILES` names.
+
+## Addendum (2026-10-01): the impersonation branch is superseded by one pinned Chrome 153 profile (ADR 0026)
+
+The Decision above governed two libraries, primp and curl_cffi. Both left the tree under [[0026-speak-chrome-from-the-stdlib-verify-by-default]]: `Scripts/search_github.py`, `Scripts/search_duckduckgo.py` and `Scripts/mcp-webfetch.py` now speak Chrome from a stdlib client generated from `Scripts/_mcp_chrome.py`. The impersonation branch this page decided is therefore superseded as a whole: the primp alias whitelist, the per-platform engine ladder and the four curl_cffi profile names no longer exist, and no impersonation name is left to pin or to forbid. `ROTATE_EVERY` (4) survives in both search scripts with the same meaning. What carries over is the rule's reason: a failure mode must be visible to be tolerated.
+
+There is now exactly one profile, and it is a pin: Chrome 153.0 on macOS (Google Chrome 153.0.8010.37, macOS 14.2.1), held in one table, `Scripts/_mcp_chrome.py:_chrome_profile`, published as `CHROME_PROFILE` with `major` 153 and `pinned_on` "2026-09-30". It was measured from a real browser, not taken from a library: R-0017's loopback captures of 2026-09-29/30 ([[spec-ddg]] §2.9) and the committed capture set of 2026-09-30 under `tests/files/chrome/153/`, whose README records the environment and is the oracle the tests read instead of the module. This pin does not contradict the Decision. The Decision forbade a name that rots silently into a different browser; this pin is the measured bytes, so an old pin degrades into an old Chrome, never a different one. It can only age, and age is reported: the `mcp_chrome` suite's `profile-age` row counts days since `pinned_on` as INFO, never FAIL, because an age is a measurement and not a provable defect ([[0019-only-gate-on-what-you-can-prove]]).
+
+The pin is also not the default. By ADR 0026's decision D15 the default is a certificate-verifying stdlib transport that is not browser-shaped at the TLS layer; the Chrome profile is used only when webfetch is called with `profile="chrome"` and by the search scripts after a block observed on the endpoint's own host.
+
+Moving to a new Chrome major is a procedure, not an edit: [[chrome-profile-refresh]] captures on loopback, exports fixtures, edits `_chrome_profile` until `chrome_capture.py diff` exits 0, regenerates the hosts, re-gates, retires the old fixture directory, and records the new pin as a further addendum on this page.
+
+The Linux incoherence is accepted, not fixed. The single profile announces macOS on every host, so on Linux the User-Agent and `sec-ch-ua-platform` say macOS over a Linux TCP stack: the UA-vs-OS incoherence of [[spec-ddg]] §2.7 that the primp Linux branch and the Linux-only ladder above existed to avoid returns there. A second browser profile is out of scope for this round; the incoherence is declared here instead.

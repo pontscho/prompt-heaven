@@ -6,16 +6,19 @@ title: Generated regions — how the MCP fleet shares plumbing without importing
 description: The amalgamate generator, its canonical sources, the hand-declared hosts that are not servers, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
 sources:
   - Scripts/amalgamate.py
+  - Scripts/_mcp_brotli.py
+  - Scripts/_mcp_chrome.py
   - Scripts/_mcp_concurrency.py
   - Scripts/_mcp_json.py
   - Scripts/_mcp_logging.py
   - Scripts/_mcp_lsp.py
   - Scripts/_mcp_paging.py
   - Scripts/_mcp_websocket.py
+  - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: c9d2175
-  date: 2026-09-29
+  commit: 3fbe5bf
+  date: 2026-10-02
 links:
   - scripts
   - tests
@@ -26,6 +29,7 @@ links:
   - 0015-ambiguity-is-the-defect
   - 0023-the-websocket-client-is-a-sixth-domain
   - 0025-generate-do-not-import
+  - 0026-speak-chrome-from-the-stdlib-verify-by-default
 ---
 
 # Generated regions
@@ -37,9 +41,12 @@ between servers, no shared package, and no import that could carry a helper from
 one file to another.
 
 Not every host is a server. `Scripts/search_duckduckgo.py` takes the WebSocket
-client its `cdp` backend shares with `Scripts/mcp-gdc.py`, and it is a target
-because the generator **names it by hand** — see "A host outside the glob"
-below — not because anything about it matches the server glob.
+client its `cdp` backend shares with `Scripts/mcp-gdc.py`, and both search
+scripts, `Scripts/search_duckduckgo.py` and `Scripts/search_github.py`, take the
+stdlib HTTP client and its two content decoders they share with
+`Scripts/mcp-webfetch.py`. They are targets because the generator **names them
+by hand** — see "A host outside the glob" below — not because anything about
+them matches the server glob.
 
 **Scope note.** This page is about the *MCP fleet's* generated regions. The repo
 contains two other marker-delimited generation mechanisms and neither is this
@@ -118,13 +125,13 @@ scanner, which is the rule that lets a page document the marker it also carries
 
 <!-- BEGIN MEASURED: generated-region-census -->
 - MCP servers matching `Scripts/mcp-*.py`: 15, of which 15 carry at least one generated region
-- live generated regions in them: 116
-- block instances those regions emit: 171
-- distinct canonical blocks named on a marker: 40, out of the 44 defined by the 6 canonical sources
+- live generated regions in them: 119
+- block instances those regions emit: 352
+- distinct canonical blocks named on a marker: 221, out of the 225 defined by the 9 canonical sources
 
-Regions by how many blocks one marker names: 77 name 1 block; 38 name 2 blocks; 1 name 18 blocks.
+Regions by how many blocks one marker names: 77 name 1 block; 38 name 2 blocks; 1 name 18 blocks; 1 name 21 blocks; 1 name 25 blocks; 1 name 135 blocks.
 
-The 39 region(s) that name more than one block, by the list written on the marker:
+The 42 region(s) that name more than one block, by the list written on the marker:
 
 | Blocks named on one marker | Regions |
 |---|---|
@@ -134,11 +141,14 @@ The 39 region(s) that name more than one block, by the list written on the marke
 | `_abs_uri`, `_abs_path` | 4 |
 | `_request`, `_notify` | 4 |
 | `uri_to_path`, `path_to_uri` | 4 |
+| `BR_SONAMES_LINUX`, `BR_SONAMES_MACOS`, `BR_DIRS_LINUX`, `BR_DIRS_MACOS`, `BR_FILES_LINUX`, `BR_FILES_MACOS`, `BR_CHUNK_BYTES`, `_BR_RESULT_ERROR`, `_BR_RESULT_SUCCESS`, `_BR_RESULT_NEEDS_MORE_INPUT`, `_BR_RESULT_NEEDS_MORE_OUTPUT`, `_BR_SYMBOLS`, `_BR_STATE`, `_br_platform`, `_br_exists`, `_br_cdll`, `_br_find_library`, `_br_attempts`, `_br_configure`, `_br_load`, `_brotli_decompress` | 1 |
+| `ChromeClientError`, `ChromeTls12Error`, `ChromeBodyTooLarge`, `_chrome_profile`, `CHROME_PROFILE`, `CH_MAX_RECORD_BYTES`, `CH_MAX_HANDSHAKE_BYTES`, `CH_MAX_FRAME_BYTES`, `CH_MAX_HEADER_LIST_BYTES`, `CH_MAX_HEADER_BLOCK_BYTES`, `CH_HPACK_TABLE_BYTES`, `CH_MAX_HPACK_INT`, `CH_MAX_HPACK_INT_CONTINUATIONS`, `CH_MAX_H2_CONTROL_FRAMES`, `CH_MAX_H2_EMPTY_FRAMES`, `CH_MAX_H2_CONTINUATION_FRAMES`, `CH_MAX_H1_HEAD_BYTES`, `CH_MAX_H1_HEADERS`, `CH_MAX_H1_CHUNK_LINE_BYTES`, `CH_MAX_BODY_BYTES`, `CH_DEFAULT_DECODE_CAP`, `CH_MAX_CONTENT_CODINGS`, `CH_MAX_REDIRECTS`, `CH_MAX_COOKIES_PER_DOMAIN`, `CH_MAX_COOKIES`, `CH_MAX_COOKIE_BYTES`, `_CH_X25519_P`, `_CH_X25519_A24`, `_ch_x25519_cswap`, `_ch_x25519`, `_ch_x25519_keypair`, `_CH_P256_P`, `_CH_P256_B`, `_CH_P256_N`, `_CH_P256_GX`, `_CH_P256_GY`, `_ch_p256_double`, `_ch_p256_add`, `_ch_p256_mul`, `_ch_p256_keypair`, `_ch_p256_shared`, `_ChMlKem768`, `_ch_aes_tables`, `_CH_AES_TABLES`, `_ChAesGcm`, `_ChChaCha20Poly1305`, `_ch_hkdf_extract`, `_ch_hkdf_expand`, `_ch_hkdf_expand_label`, `_ch_derive_secret`, `CH_MAX_PLAINTEXT_BYTES`, `_ChReader`, `_ChRecordReader`, `_ChHandshakeReader`, `_ChRecordCipher`, `_CH_KEY_SHARE_BYTES`, `_ch_vec`, `_ch_draw`, `_ch_sni_name`, `_ch_grease`, `_ch_permutation`, `_ch_key_share_entry`, `_ch_hello_extensions`, `_ch_hello_wire`, `_ch_client_hello`, `_CH_ALERT_NAMES`, `_ch_alert_name`, `_CH_HRR_RANDOM`, `_CH_TLS13_SUITES`, `_CH_SERVER_SHARE_BYTES`, `_CH_EE_FORBIDDEN`, `_ch_parse_server_hello`, `_ch_key_share_new`, `_ch_key_share_secret`, `_ch_traffic_cipher`, `CH_MAX_KEY_UPDATES`, `_ChTls`, `_ChTlsStream`, `_ch_huffman_table`, `_CH_HUFFMAN`, `_ch_huffman_decode_table`, `_CH_HUFFMAN_DECODE`, `_ch_hpack_static`, `_CH_HPACK_STATIC`, `_ch_hpack_int`, `_ch_huffman_encode`, `_ch_huffman_size`, `_ch_hpack_string`, `_ch_cookie_crumbs`, `_ChHpackEncoder`, `_ch_hpack_decode_int`, `_ch_huffman_decode`, `_ch_hpack_decode_string`, `_ChHpackDecoder`, `_ch_split_url`, `_CH_TCHAR_SYMBOLS`, `_CH_FINGERPRINT_NAMES`, `_CH_FINGERPRINT_PREFIXES`, `_CH_FRAMING_NAMES`, `_CH_FRAMING_PREFIXES`, `_ch_header_pairs`, `_ch_check_caller_headers`, `_ch_origin_of`, `_ch_origin_text`, `_CH_PUBLIC_SUFFIXES`, `_ch_is_ip_host`, `_ch_is_public_suffix`, `_ch_site_of`, `_ch_sec_fetch_site`, `_ch_referer_for`, `_ch_profile_headers`, `_CH_H2_ERROR_NAMES`, `_ch_h2_frame`, `_ChH2Connection`, `_ChH1Connection`, `_ChHeaders`, `_ch_leading_digits`, `_ch_cookie_date`, `_ChCookieJar`, `_ChResponse`, `_ch_zlib_decode`, `_ch_decode_body`, `_CH_TRANSLATION_PREFIXES`, `_ch_embedded_ipv4`, `_ch_address_refused`, `_ch_public_only_policy`, `_ch_open_socket`, `_CH_REDIRECT_CODES`, `_CH_SITE_RANK`, `_ch_transport_error`, `_ch_unvetted_policy`, `_ChDeadlineSocket`, `_ChFallbackConnection`, `_ChSession`, `_ch_session_new` | 1 |
 | `WebSocketError`, `WS_MAX_HANDSHAKE_BYTES`, `WS_MAX_FRAME_BYTES`, `WS_MAX_MESSAGE_BYTES`, `_ws_parse_url`, `_ws_handshake_request`, `_ws_handshake_split`, `_ws_handshake_verify`, `_ws_mask`, `_ws_encode_frame`, `_ws_parse_frame`, `_ws_assemble`, `_ws_control_reply`, `_WsConnection`, `_ws_step`, `_ws_connect`, `_ws_recv`, `_ws_send` | 1 |
+| `ZSTD_SONAMES_LINUX`, `ZSTD_SONAMES_MACOS`, `ZSTD_DIRS_LINUX`, `ZSTD_DIRS_MACOS`, `ZSTD_FILES_LINUX`, `ZSTD_FILES_MACOS`, `ZSTD_WINDOW_LOG_MAX`, `ZSTD_MAX_CHUNK_BYTES`, `_ZSTD_D_WINDOW_LOG_MAX`, `_ZSTD_FRAME_MAGIC`, `_ZSTD_SKIPPABLE_TAIL`, `_ZSTD_SYMBOLS`, `_ZSTD_STATE`, `_ZstdInBuffer`, `_ZstdOutBuffer`, `_zstd_platform`, `_zstd_exists`, `_zstd_cdll`, `_zstd_find_library`, `_zstd_attempts`, `_zstd_configure`, `_zstd_load`, `_zstd_error`, `_zstd_check_magic`, `_zstd_decompress` | 1 |
 
 Generated into every one of the 15 servers: `_configure_logging`, `_json_error_window`.
 Generated into every server but `Scripts/mcp-webfetch.py`: `_error`, `_result`.
-<!-- END MEASURED: 7ef1200ac337 -->
+<!-- END MEASURED: 176dd3b38ff7 -->
 
 A single region may name several blocks, and that is the whole of the gap between
 the region count and the block-instance count.
@@ -149,7 +159,7 @@ left them in: the first two had read `70` and `84` since before the logging
 source existed, and the third read `11` against a table that summed to thirteen
 further down this same page.
 
-## Six canonical sources, and why six
+## Nine canonical sources, and why nine
 
 The registry is a hand-written tuple, not a glob `Scripts/amalgamate.py:CANONICAL_NAMES`,
 because a glob would let an unrelated file become a generation source by merely
@@ -186,12 +196,15 @@ decides when a sixth source is warranted are
 
 | Source | Domain |
 |---|---|
+| `Scripts/_mcp_brotli.py` | decoding one compression format, brotli, through the system shared library over `ctypes` |
+| `Scripts/_mcp_chrome.py` | how a client makes the bytes a server receives indistinguishable from what Chrome sends — the ClientHello, the h2 preface and HEADERS blocks, the HTTP/1.1 request head — and how it survives what a hostile server sends back |
 | `Scripts/_mcp_concurrency.py` | how many tool calls a server runs at once |
 | `Scripts/_mcp_json.py` | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
 | `Scripts/_mcp_logging.py` | how a server CONFIGURES logging — level, sink, file mode |
 | `Scripts/_mcp_lsp.py` | how the LSP wire is spoken — `Content-Length` framing for a message, the `file://` DocumentUri for a path, the client-side hops that put a message on that wire, and the two spellings of a resolved path |
 | `Scripts/_mcp_paging.py` | how much of a result a caller gets, and how it is told where the rest is |
 | `Scripts/_mcp_websocket.py` | how a client speaks the WebSocket wire — the upgrade, the frames, message assembly, the control frames it must answer, and the ceilings on what a peer can make it allocate |
+| `Scripts/_mcp_zstd.py` | decoding one compression format, zstd, through the system shared library over `ctypes` |
 
 `Scripts/_mcp_websocket.py` is the sixth, and the first source whose domain is a
 **protocol client** rather than a piece of server plumbing. It passed ADR 0014's
@@ -206,6 +219,24 @@ came with the lift, and what stays out of scope are
 [[0023-the-websocket-client-is-a-sixth-domain]]; the behaviour is gated by its
 own suite, `tests/test_mcp_websocket.py`, rather than by group E here.
 
+The last three arrived together, when the two third-party browser-impersonation
+packages left the tree (R-0044): `Scripts/_mcp_chrome.py`, a stdlib HTTP client
+whose Chrome path reproduces Chrome 153 on the wire and whose default transport
+is the verified stdlib one, and the two decoders it is **handed** rather than
+imports, `Scripts/_mcp_brotli.py` and `Scripts/_mcp_zstd.py`. Each passed ADR
+0014's test on its own: a decoder is a collaborator the client receives as
+`decoders=`, not a part of the wire it speaks, and the two formats are two
+libraries and two questions, duplicated on purpose rather than shelved together
+`Scripts/_mcp_brotli.py`. What is new is a rule about **how** they are taken.
+Their blocks call one another as one state machine, so a host takes each of the
+three **whole or not at all** `Scripts/amalgamate.py:WHOLE_SOURCES` — one marker
+naming every block in source order — and the generator does not enforce that:
+`whole-source-regions` does `tests/test_generated_region.py:group_gate`. The
+decision, the cert gap the Chrome path carries and the gates with their measured
+results are recorded in [[0026-speak-chrome-from-the-stdlib-verify-by-default]]; the suites that prove the behaviour are
+`tests/test_mcp_chrome.py` and `tests/test_mcp_decoders.py`, again rather than
+group E here.
+
 That column is the half no command can print: a domain is a decision about what a
 source is *for*. What each source actually **defines** is measured
 `Scripts/amalgamate.py:census_sources`, and the two tables are deliberately not
@@ -217,15 +248,18 @@ answer, and the one thing this page must not let a generator answer for them.
 <!-- BEGIN MEASURED: canonical-source-blocks -->
 | Canonical source | Blocks | Block names |
 |---|---|---|
+| `Scripts/_mcp_brotli.py` | 21 | `BR_CHUNK_BYTES`, `BR_DIRS_LINUX`, `BR_DIRS_MACOS`, `BR_FILES_LINUX`, `BR_FILES_MACOS`, `BR_SONAMES_LINUX`, `BR_SONAMES_MACOS`, `_BR_RESULT_ERROR`, `_BR_RESULT_NEEDS_MORE_INPUT`, `_BR_RESULT_NEEDS_MORE_OUTPUT`, `_BR_RESULT_SUCCESS`, `_BR_STATE`, `_BR_SYMBOLS`, `_br_attempts`, `_br_cdll`, `_br_configure`, `_br_exists`, `_br_find_library`, `_br_load`, `_br_platform`, `_brotli_decompress` |
+| `Scripts/_mcp_chrome.py` | 135 | `CHROME_PROFILE`, `CH_DEFAULT_DECODE_CAP`, `CH_HPACK_TABLE_BYTES`, `CH_MAX_BODY_BYTES`, `CH_MAX_CONTENT_CODINGS`, `CH_MAX_COOKIES`, `CH_MAX_COOKIES_PER_DOMAIN`, `CH_MAX_COOKIE_BYTES`, `CH_MAX_FRAME_BYTES`, `CH_MAX_H1_CHUNK_LINE_BYTES`, `CH_MAX_H1_HEADERS`, `CH_MAX_H1_HEAD_BYTES`, `CH_MAX_H2_CONTINUATION_FRAMES`, `CH_MAX_H2_CONTROL_FRAMES`, `CH_MAX_H2_EMPTY_FRAMES`, `CH_MAX_HANDSHAKE_BYTES`, `CH_MAX_HEADER_BLOCK_BYTES`, `CH_MAX_HEADER_LIST_BYTES`, `CH_MAX_HPACK_INT`, `CH_MAX_HPACK_INT_CONTINUATIONS`, `CH_MAX_KEY_UPDATES`, `CH_MAX_PLAINTEXT_BYTES`, `CH_MAX_RECORD_BYTES`, `CH_MAX_REDIRECTS`, `ChromeBodyTooLarge`, `ChromeClientError`, `ChromeTls12Error`, `_CH_AES_TABLES`, `_CH_ALERT_NAMES`, `_CH_EE_FORBIDDEN`, `_CH_FINGERPRINT_NAMES`, `_CH_FINGERPRINT_PREFIXES`, `_CH_FRAMING_NAMES`, `_CH_FRAMING_PREFIXES`, `_CH_H2_ERROR_NAMES`, `_CH_HPACK_STATIC`, `_CH_HRR_RANDOM`, `_CH_HUFFMAN`, `_CH_HUFFMAN_DECODE`, `_CH_KEY_SHARE_BYTES`, `_CH_P256_B`, `_CH_P256_GX`, `_CH_P256_GY`, `_CH_P256_N`, `_CH_P256_P`, `_CH_PUBLIC_SUFFIXES`, `_CH_REDIRECT_CODES`, `_CH_SERVER_SHARE_BYTES`, `_CH_SITE_RANK`, `_CH_TCHAR_SYMBOLS`, `_CH_TLS13_SUITES`, `_CH_TRANSLATION_PREFIXES`, `_CH_X25519_A24`, `_CH_X25519_P`, `_ChAesGcm`, `_ChChaCha20Poly1305`, `_ChCookieJar`, `_ChDeadlineSocket`, `_ChFallbackConnection`, `_ChH1Connection`, `_ChH2Connection`, `_ChHandshakeReader`, `_ChHeaders`, `_ChHpackDecoder`, `_ChHpackEncoder`, `_ChMlKem768`, `_ChReader`, `_ChRecordCipher`, `_ChRecordReader`, `_ChResponse`, `_ChSession`, `_ChTls`, `_ChTlsStream`, `_ch_address_refused`, `_ch_aes_tables`, `_ch_alert_name`, `_ch_check_caller_headers`, `_ch_client_hello`, `_ch_cookie_crumbs`, `_ch_cookie_date`, `_ch_decode_body`, `_ch_derive_secret`, `_ch_draw`, `_ch_embedded_ipv4`, `_ch_grease`, `_ch_h2_frame`, `_ch_header_pairs`, `_ch_hello_extensions`, `_ch_hello_wire`, `_ch_hkdf_expand`, `_ch_hkdf_expand_label`, `_ch_hkdf_extract`, `_ch_hpack_decode_int`, `_ch_hpack_decode_string`, `_ch_hpack_int`, `_ch_hpack_static`, `_ch_hpack_string`, `_ch_huffman_decode`, `_ch_huffman_decode_table`, `_ch_huffman_encode`, `_ch_huffman_size`, `_ch_huffman_table`, `_ch_is_ip_host`, `_ch_is_public_suffix`, `_ch_key_share_entry`, `_ch_key_share_new`, `_ch_key_share_secret`, `_ch_leading_digits`, `_ch_open_socket`, `_ch_origin_of`, `_ch_origin_text`, `_ch_p256_add`, `_ch_p256_double`, `_ch_p256_keypair`, `_ch_p256_mul`, `_ch_p256_shared`, `_ch_parse_server_hello`, `_ch_permutation`, `_ch_profile_headers`, `_ch_public_only_policy`, `_ch_referer_for`, `_ch_sec_fetch_site`, `_ch_session_new`, `_ch_site_of`, `_ch_sni_name`, `_ch_split_url`, `_ch_traffic_cipher`, `_ch_transport_error`, `_ch_unvetted_policy`, `_ch_vec`, `_ch_x25519`, `_ch_x25519_cswap`, `_ch_x25519_keypair`, `_ch_zlib_decode`, `_chrome_profile` |
 | `Scripts/_mcp_concurrency.py` | 1 | `MAX_INFLIGHT_REQUESTS` |
 | `Scripts/_mcp_json.py` | 6 | `_bool_param`, `_ensure_dict`, `_error`, `_int_param`, `_json_error_window`, `_result` |
 | `Scripts/_mcp_logging.py` | 1 | `_configure_logging` |
 | `Scripts/_mcp_lsp.py` | 7 | `_abs_path`, `_abs_uri`, `_notify`, `_request`, `encode_lsp_message`, `path_to_uri`, `uri_to_path` |
 | `Scripts/_mcp_paging.py` | 7 | `DEFAULT_MAX_ANSWER_CHARS`, `DEFAULT_MAX_CHARS`, `PAGE_LINE_RESERVE`, `_FENCE_LINE_RE`, `_max_answer_chars`, `_offset`, `_rows_note` |
 | `Scripts/_mcp_websocket.py` | 22 | `WS_MAX_FRAME_BYTES`, `WS_MAX_HANDSHAKE_BYTES`, `WS_MAX_MESSAGE_BYTES`, `WebSocketError`, `_WsConnection`, `_ws_assemble`, `_ws_connect`, `_ws_control_reply`, `_ws_encode_frame`, `_ws_handshake_request`, `_ws_handshake_split`, `_ws_handshake_verify`, `_ws_mask`, `_ws_parse_frame`, `_ws_parse_url`, `_ws_recv`, `_ws_send`, `_ws_step`, `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send` |
+| `Scripts/_mcp_zstd.py` | 25 | `ZSTD_DIRS_LINUX`, `ZSTD_DIRS_MACOS`, `ZSTD_FILES_LINUX`, `ZSTD_FILES_MACOS`, `ZSTD_MAX_CHUNK_BYTES`, `ZSTD_SONAMES_LINUX`, `ZSTD_SONAMES_MACOS`, `ZSTD_WINDOW_LOG_MAX`, `_ZSTD_D_WINDOW_LOG_MAX`, `_ZSTD_FRAME_MAGIC`, `_ZSTD_SKIPPABLE_TAIL`, `_ZSTD_STATE`, `_ZSTD_SYMBOLS`, `_ZstdInBuffer`, `_ZstdOutBuffer`, `_zstd_attempts`, `_zstd_cdll`, `_zstd_check_magic`, `_zstd_configure`, `_zstd_decompress`, `_zstd_error`, `_zstd_exists`, `_zstd_find_library`, `_zstd_load`, `_zstd_platform` |
 
-6 canonical sources define 44 blocks between them, and no name is defined by two of them.
-<!-- END MEASURED: a76ffffec29d -->
+9 canonical sources define 225 blocks between them, and no name is defined by two of them.
+<!-- END MEASURED: 08f8adeb5063 -->
 
 Its closing line is the disjointness the suite gates as a check rather than a
 count. The paging row read `5` until the edit that added the logging row: the
@@ -239,11 +273,18 @@ Which files each of those blocks actually reaches is the other half of the
 picture, and the generator counts that too `Scripts/amalgamate.py:census_hosts`:
 one row per canonical block, whether or not any host takes it. It counts the
 hand-declared non-server hosts as well, so it is the table to read for a single
-block's reach, while the fleet census above stays about the servers.
+block's reach, while the fleet census above stays about the servers. A whole
+source is the one exception to one-row-per-block: when every block of a
+`WHOLE_SOURCES` source reaches the same hosts, the census collapses it into ONE
+row reading `all <N> blocks (whole source)` `Scripts/amalgamate.py:census_hosts`,
+so a whole source shown here per block is a host that took it partially — a
+visible violation of the whole-or-nothing rule, not a presentation choice.
 
 <!-- BEGIN MEASURED: canonical-block-hosts -->
 | Canonical block | Source | Hosts | Generated into |
 |---|---|---|---|
+| `all 21 blocks (whole source)` | `Scripts/_mcp_brotli.py` | 3 | `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
+| `all 135 blocks (whole source)` | `Scripts/_mcp_chrome.py` | 3 | `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 | `MAX_INFLIGHT_REQUESTS` | `Scripts/_mcp_concurrency.py` | 9 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_bool_param` | `Scripts/_mcp_json.py` | 11 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-wiki.py` |
 | `_ensure_dict` | `Scripts/_mcp_json.py` | 7 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-webfetch.py` |
@@ -288,9 +329,10 @@ block's reach, while the fleet census above stays about the servers.
 | `_ws_sync_connect` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/search_duckduckgo.py` |
 | `_ws_sync_recv` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/search_duckduckgo.py` |
 | `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/search_duckduckgo.py` |
+| `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 3 | `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 
-16 hosts scanned; 44 canonical blocks, of which 44 are generated into at least one host; every block reaches a host.
-<!-- END MEASURED: bfd34a70b370 -->
+17 hosts scanned; 225 canonical blocks, of which 225 are generated into at least one host; every block reaches a host.
+<!-- END MEASURED: eeac90400454 -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
@@ -424,7 +466,10 @@ declared hosts `Scripts/amalgamate.py:DECLARED_HOSTS` are tab-indented too. A bl
 fails there. The websocket source is the rule's newest customer: its tab host is
 the search script, so every one of its blocks was written to one call per
 physical line from the start, the request built by appending rather than as one
-bracketed list. The refusal therefore bites in one place: `mcp-webfetch` is
+bracketed list. The Chrome client and its decoders were written under the same
+constraint for the same reason — every host they have is tab-indented — so
+their long byte tables are built by `+=` inside a function rather than as one
+bracketed literal `Scripts/_mcp_chrome.py`. The refusal therefore bites in one place: `mcp-webfetch` is
 the only tab host that carries `_rows_note` at all, and it keeps its own —
 excluded twice over, tab-unsafe *and* body-diverged, so clearing the tab hazard
 alone would not make it adoptable. Lifting the constants did not widen that
@@ -459,6 +504,14 @@ takes the default run and `--check` exactly as a server does, and
 `tests/test_generated_region.py` mirrors the tuple, asserts the two spellings
 agree in `target-glob`, and walks the declared hosts in `fleet-ok` beside the
 servers.
+
+`Scripts/search_github.py` is the second declared host, and it came with the
+Chrome client rather than the WebSocket one: it takes the three whole sources —
+the client and both decoders — and nothing else, because it has no `cdp`
+backend and so no use for the WebSocket client. Its sibling search script takes the same three
+plus the WebSocket client for its `cdp` backend. Both pass the same `--check`,
+are walked by the same `fleet-ok`, and are counted by the `canonical-block-hosts`
+table above rather than by the fleet census.
 
 It is **not** in the `--census fleet` count, deliberately: that census is about
 the server fleet and says so in its first line, so its measured block above
@@ -498,9 +551,9 @@ copy has gone:
 - `Scripts/mcp-webfetch.py`: `_result` -- declared: annotates result as dict where the canonical says Any -- a body difference no re-indenting removes
 - `Scripts/mcp-webfetch.py`: `_rows_note` -- declared: excluded twice over: it is not tab-safe (its else aligns under an open paren) and its body diverged -- (start, shown, total) against the canonical (start, shown, total, exact), with no lower-bound branch
 
-7 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 4 of the 16 hosts scanned; 7 carry a declared reason and 0 do not.
+7 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 4 of the 17 hosts scanned; 7 carry a declared reason and 0 do not.
 Declared reasons with no hand copy left to explain: none.
-<!-- END MEASURED: affe04647c8d -->
+<!-- END MEASURED: d6982d16b696 -->
 
 **Things that are not blocks at all** are documented in `Scripts/MCP_SKELETON.md`
 rather than censused, because the census cannot see them. `_tool_error` *cannot*
@@ -600,3 +653,10 @@ rename that orphaned every region already written into a server.
   `X += 1` is refused with "defines no top-level `X`"
   `Scripts/amalgamate.py:render`. That is true of the block map and misleading
   about the cause; the refusal cannot yet tell the two apart.
+- **`--check` proves a region's body, not what the host does with it.** It
+  proves every region body matches its canonical source; it does not prove a
+  host leaves the generated names alone outside the region. An attribute
+  assignment or a `setattr` that rebinds a generated name later in the file is
+  invisible to the census and to `--check` alike `Scripts/amalgamate.py`. The
+  committer is trusted here, as for every other line of the host (security
+  review 20261001-082224, F43).

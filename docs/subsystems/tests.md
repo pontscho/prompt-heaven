@@ -8,8 +8,8 @@ sources:
   - tests
   - project-forge.yaml
 verified:
-  commit: 2663d02
-  date: 2026-09-16
+  commit: 3fbe5bf
+  date: 2026-10-02
 links:
   - agents
   - scripts
@@ -24,6 +24,7 @@ links:
   - 0022-a-someday-maybe-is-a-roadmap-item
   - 0023-the-websocket-client-is-a-sixth-domain
   - 0024-pure-python-39-and-the-stdlib
+  - chrome-profile-refresh
 ---
 
 # Test Fleet
@@ -31,7 +32,8 @@ links:
 `tests/` is a stdlib-only, zero-dependency functional test fleet: one entry point
 (`tests/run.py`), one shared plumbing module (`tests/_harness.py`), the in-process
 suite modules its `SUITES` table registers plus a subprocess smoke check, and a
-committed C/Lua fixture tree under `tests/files`. Two organising ideas explain
+committed fixture tree under `tests/files` — C/Lua sources for the language
+servers, and recorded measurements for the HTTP client and its decoders. Two organising ideas explain
 nearly every design choice in the tree, and both exist because the repo already
 paid for the alternative.
 
@@ -230,7 +232,10 @@ is the registry, and the run is the only thing that knows the totals.
 | `checkpoint` | `checkpoint.py` as a **writer**: `Start`/`End` land on the block and nothing else, the numbers describe the file *after* the region was inserted, `prepend` lands the block and the table it describes in one `os.replace`, a stale or duplicate-id segment is refused on content, and every refusal exits 2 leaving the file alone — [[0009-the-first-reader-is-a-cold-model]]. It also pins the **shape** of a new segment: every session must be followed at once by its own `## ACTIVATION S<NNN>` block, in fresh and `--overwrite` mode too, and the order in which the refusals fire is fixed `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:check_segment_shape`. A `### ACTIVATION` quoted inside a fenced code block does not count as the old in-block form. A group of its own `tests/test_checkpoint.py:group_l` covers the activation block's `A<NNN>` row read back through `session`, `activate`'s de-quoting, `nexts`' order with nothing printed on a refusal, and the read-only fallback to the old subsection. An empty prompt is refused on write and on read alike, and a file that is not UTF-8 is refused through the exit-2 route rather than crashing `ClaudeCode/skills/checkpoint/scripts/checkpoint.py:read_lines` |
 | `roadmap` | `roadmap.py` as the single writer of the roadmap and its archive, run only inside a `mkdtemp` sandbox — the live roadmap is unreachable by construction, with the guards proven to bite before the script existed: round trip against a hand-written expected file, both wiki frontmatter parsers reading what it writes, the invariants and the WIP cap, the dependency graph and `ready`, the optimistic lock with its controls, `close`'s archive-first order and the archive-wins repair of a crash between its two writes, a golden export reproduced byte for byte, the section-7 refusals as one stderr line with the files byte-unchanged, and the CLI under an ASCII locale, a reader that closes early and an IO error on stdout; the security rules (stdlib only, one git spawn site with read-only subcommands, no shell, exact write-route callers) are gated on the source by AST — [[0022-a-someday-maybe-is-a-roadmap-item]] |
 | `roadmap_board` | `board.py`, the read-only kanban board, run as a child in a `mkdtemp` sandbox `tests/test_roadmap_board.py`: any schema but `roadmap-export/2` refused with one line, the markdown board byte for byte with its ADR 0016 cells decoded back and the reverse `blocks` edges, an HTML page whose embedded data cannot close its script block and which renders without `v-html`, and `--out` held to the `roadmap-board-*.html` name and refused through a symlink; the live roadmap is digested to prove it is never touched — [[0022-a-someday-maybe-is-a-roadmap-item]] |
-| `generated_region` | every live generated region still matches its canonical source, and the source named on a region's `BEGIN` line is the one its names resolve against — plus a behavioural group so a shared helper is unit-tested once rather than only drift-checked — [[generated-regions]] |
+| `generated_region` | every live generated region still matches its canonical source, and the source named on a region's `BEGIN` line is the one its names resolve against; a whole source (the Chrome client and its two decoders) taken by every host whole, in source order, on one marker, and every top-level statement of it a shape the generator can take — plus a behavioural group so a shared helper is unit-tested once rather than only drift-checked — [[generated-regions]] |
+| `mcp_chrome` | the stdlib HTTP client in `Scripts/_mcp_chrome.py` against oracles that are not the module: crypto known-answer vectors pasted from the RFCs and Wycheproof, ML-KEM cross-checked both ways with OpenSSL where it is new enough; the ClientHello, HPACK blocks, h2 first flight and HTTP/1.1 head judged by `Scripts/chrome_capture.py`'s independent parser against the committed Chrome 153 captures; real TLS stacks and scripted TLS 1.3, h2 and HTTP/1.1 peers written in the suite; every `CH_*` ceiling read off the module and probed at its bound; the per-hop SSRF policy one row per bypass form; the TLS 1.2 fallback and the default verified transport against a loopback server whose only trust anchor is the committed test CA, and the label a redirect chain across transports earns. A host without the needed `openssl` records INFO, never a missing row `tests/test_mcp_chrome.py` |
+| `mcp_decoders` | the `ctypes` brotli and zstd decoders: the per-platform load order under a stubbed platform (Linux never calls `find_library`; darwin hands `dlopen` only absolute paths, so a library planted in the working directory is never loaded), the committed fixtures byte-exact, decode bombs, corrupt input and an over-window zstd frame refused, a legacy or unknown zstd frame magic refused at the start and mid-stream, a missing library as one line, lying stub libraries refused, and two threads racing the first load. Rows that need the real library are INFO on a host without it `tests/test_mcp_decoders.py` |
+| `chrome_capture` | the capture harness checked as an oracle in its own right, against a ClientHello walker and JA4 written from the RFC and the FoxIO definition rather than from the module: one fixed fixture, the RFC 7541 HPACK vectors, `serve` on loopback for h2, h1 over TLS, plaintext h1 and a scripted HelloRetryRequest, owner-only records and control bytes escaped in the summary, `diff` and `export` with their refusals — a foreign cookie name or value, a credential header, an unscripted request body — an `export` that a planted `.tmp` symlink cannot redirect and whose fixture lands `0600`, and every non-loopback bind refused `tests/test_chrome_capture.py` |
 | `mcp_websocket` | the stdlib WebSocket client in `Scripts/_mcp_websocket.py` against an oracle written from RFC 6455 rather than from the module — the upgrade request with no `Origin`, the response checked by **exact** status line, `Upgrade`, `Connection` token and accept key (the RFC's own worked example pinned), every frame length form, the mask against a per-byte oracle, every refusal a frame header earns, fragments assembled around a ping, ping answered with its own payload, close echoed, the size caps and strict UTF-8 — then both hosts' generated copies, `mcp-gdc`'s `CdpSession` and the search script's `CDPSearcher`, driven against a loopback CDP peer; that host group was run red against the hand-written client first — [[0023-the-websocket-client-is-a-sixth-domain]] |
 | `read_loop` | every server's read loop carries the shape [[0008-a-serialized-read-loop-looks-like-a-dead-server]] decided: a single-thread reader executor no handler can take, and one task per message — with the pool/coroutine split declared per server rather than inferred |
 | `cancel` | every server honours `notifications/cancelled` on its read loop, by AST `tests/test_cancel.py`: an id-to-task registry filled after dispatch and emptied by a done-callback, the hook on the loop thread before the task factory, a `requestId` that is a str or a non-bool int, `initialize` never registered, nothing written in reply, and a dispatch target that lets the `CancelledError` through. What a cancel **reclaims** is declared per server as one class `tests/test_cancel.py:CLASSES`: `task` (the coroutine stops at its next await), `kill` (the request's child process group is signalled, with a declared exemption list `tests/test_cancel.py:KILL_EXEMPT` held to its word — an exempt spawn that adopts its child, or an entry naming no spawning function, fails), `lsp-cancel` (the generated `_request` drops its pending entry and sends `$/cancelRequest`), `pg-cancel` (a `CancelRequest` on a second socket stops the statement, checked by AST `tests/test_cancel.py:analyse_pg` and end to end against a loopback fake PostgreSQL `tests/test_cancel.py:group_behaviour`), and `reply-only` (the reply is suppressed and the work runs on). Every class but `reply-only` is measured before a row may claim it. Planted defects prove each problem code can fire, the suite was written red, and `Scripts/MCP_SKELETON.md`'s sample is lifted by script and analysed like a server. `_request`'s cancel arm is exercised behaviourally in `generated_region` `tests/test_generated_region.py:group_blocks` — [[0008-a-serialized-read-loop-looks-like-a-dead-server]] |
@@ -239,7 +244,7 @@ is the registry, and the run is the only thing that knows the totals.
 | `table_cells` | every table renderer either escapes its own delimiter and documents the scheme where the model reads it, or is whitespace-delimited and has none to escape — one declared row per renderer carrying the class and the reason, the real escapers imported and round-tripped rather than restated, and reversibility as a **separate** clause because an encoder that does not escape its own escape character still passes a column count — [[0016-a-cell-may-not-forge-a-boundary]] |
 | `protocol_version` | every server declares the handshake protocol version **once**, as the first member of `class McpServer`, and the `initialize` reply *reads* that member instead of restating the literal — the shape the live smoke handshake structurally cannot see, since a server inlining the **right** string is indistinguishable on the wire from one reading the constant, with the fleet's agreement asserted *between* the files so the suite never holds a copy of the number it polices |
 | `forge_dispatch` | `forge_call`'s own dispatcher, in-process: `status` answers exactly what the empty call answers on **every one** of its paths — missing config, parse error, validation errors, the ordinary reply — each with a control proving the fixture took that path, and the alias is named wherever the function list is — asserted as a parsed list item or exact spelling, because every one of those texts already said "status" before the alias existed |
-| `py_deps` | the fleet is pure Python 3.9 + stdlib: every import under `Scripts/`, `ClaudeCode/` and `tests/` whose top-level name is neither embedded 3.9 stdlib nor a repo module must be allowlisted and preceded by a literal `find_spec` guard, never `except ImportError`; no stdlib module removed since 3.9; every file parses with `feature_version=(3, 9)` — **syntax only**, 3.10+ API use is a declared blind spot; `mcp-webfetch.py` a per-name declared exception; and the stdlib Bing parser pinned to lxml's recorded fields on `tests/files/html/` — [[0024-pure-python-39-and-the-stdlib]] |
+| `py_deps` | the fleet is pure Python 3.9 + stdlib: every import under `Scripts/`, `ClaudeCode/` and `tests/` whose top-level name is neither embedded 3.9 stdlib nor a repo module must be allowlisted and preceded by a literal `find_spec` guard, never `except ImportError`; no stdlib module removed since 3.9; every file parses with `feature_version=(3, 9)` — **syntax only**; `mcp-webfetch.py` a per-name declared exception; every `ctypes`-loaded system library, a literal `CDLL` / `find_library` name or a `*SONAMES*` / `*FILES*` tuple element, registered with its reason `tests/test_py_deps.py:SYSTEM_LIBS`, a declared stem no file names failing as a stale licence; **no 3.10+ stdlib API** in the Chrome client, its two decoders and the capture tool, checked against a *list* of known APIs (`int.bit_count`, `zip(strict=)`, the 3.11 optional `to_bytes` / `from_bytes` arguments, `bisect` `key=`, `itertools.pairwise`, `X | Y` annotations, ...) with planted controls — 3.10+ API use outside those four files, and any API the list does not name, stay a declared blind spot; and the stdlib Bing parser pinned to lxml's recorded fields on `tests/files/html/` — [[0024-pure-python-39-and-the-stdlib]] |
 | `smoke` | JSON-RPC plumbing invariants across every server file, including the error-envelope contract ([[scripts]]) |
 
 There is **no auto-discovery**: adding a suite is three edits — the module, a
@@ -292,8 +297,11 @@ are what would say so.
 
 ## Fixtures
 
-`tests/files` holds committed C and Lua fixtures for `purity_lsp` only. They are
-fixtures, not code: nothing there is compiled, linked, shipped or imported.
+`tests/files` holds committed fixtures, not code: nothing there is compiled,
+linked, shipped or imported. Two kinds live side by side, and they follow
+different rules `tests/files/README.md`.
+
+The C and Lua sources under `c/` and `lua/` are for `purity_lsp`.
 
 The `tf` prefix on every symbol is an **invariant, not a style choice** — a
 repo-wide search for a real symbol must never match this directory.
@@ -307,6 +315,22 @@ No `compile_commands.json` is committed, and that omission is load-bearing twice
 over: it is why the language server emits no progress notifications against this
 repo, and why a cache-exception list can stay empty while its group asserts
 strictly.
+
+Everything else is a **recorded measurement**, and the rule for those is the
+opposite of "keep it working": never regenerate one from the code it judges,
+because a fixture rebuilt from the module would agree with whatever the module
+does. `html/` pins the stdlib Bing parser to what lxml returned (`py_deps`);
+`enc/` holds `br` / `zst` / `gz` bodies produced once by the `brotli`, `zstd`
+and `gzip` CLIs, with bombs, truncated input and an over-window zstd frame
+(`mcp_decoders`); `chrome_capture/` is ONE Chrome 153 ClientHello read by name,
+so its suite's case count cannot move when captures are added
+(`chrome_capture`); `chrome/153/` is the growing set — one reduced JSON fixture
+per connection, one subdirectory per capture set, exported from a real Chrome on
+loopback — which is the only place `mcp_chrome` learns what Chrome sends, and is
+refreshed from a browser as [[chrome-profile-refresh]] describes. `tls/` is not
+a measurement but test-only loopback material: a test CA whose private key is
+deliberately not committed and a localhost leaf signed by it, never to be added
+to a trust store `tests/files/tls/README.md`.
 
 ## Invariants a newcomer breaks
 

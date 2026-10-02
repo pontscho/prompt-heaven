@@ -6,14 +6,19 @@ title: DuckDuckGo Bot Detection Research
 description: Why DDG blocks Python HTTP clients, and the DDG-first/Bing-fallback strategy used by the search script.
 sources:
   - Scripts/search_duckduckgo.py
+  - Scripts/search_github.py
+  - Scripts/_mcp_chrome.py
 verified:
-  commit: 9cfa7e1
-  date: 2026-09-30
+  commit: 3fbe5bf
+  date: 2026-10-02
 links:
   - scripts
+  - generated-regions
+  - chrome-profile-refresh
   - 0023-the-websocket-client-is-a-sixth-domain
   - 0024-pure-python-39-and-the-stdlib
   - 0004-never-pin-a-browser-impersonation-version
+  - 0026-speak-chrome-from-the-stdlib-verify-by-default
 ---
 
 # DuckDuckGo Bot Detection — Technical Analysis & Bypass Research
@@ -22,7 +27,9 @@ links:
 
 DuckDuckGo employs multi-layered bot detection that effectively blocks all known Python HTTP clients (curl_cffi, primp, requests, httpx) from scraping search results, regardless of TLS impersonation quality. Even with virtually identical TLS/HTTP2 fingerprints to a real Chrome browser, DDG's server-side detection catches non-browser clients on the lite endpoint. The most popular DDG search library (deedy5/duckduckgo_search v8.1.1) has abandoned DDG entirely, switching to Bing as default backend. SearXNG (the leading open-source metasearch engine) reports intermittent DDG CAPTCHA failures that remain unresolved as of May 2025.
 
-Our script uses a **DDG-first with Bing auto-fallback** strategy, plus an optional CDP backend that routes searches through a real Chrome browser via DevTools Protocol.
+Our script uses a **DDG-first with Bing auto-fallback** strategy, plus an optional CDP backend that routes searches through a real Chrome browser via DevTools Protocol. Since R-0044 it carries no third-party HTTP client: every DDG and Bing session starts on a certificate-verified stdlib transport, and a Chrome-153-shaped transport is used only after an endpoint's own host blocked it (§7.1).
+
+The first paragraph is the research position as it stood before R-0044, and it is kept as written. Two later live runs (§2.9, 2026-09-30 and 2026-10-01) got DDG lite results unblocked over a Python TLS stack; two samples from one IP do not overturn it, but they do mean "blocked on the first query" is not a given.
 
 ---
 
@@ -178,6 +185,8 @@ The shim changed the window/scale combination but **did not match Chrome's exact
 Status: 202, len: 14235, CAPTCHA: True
 ```
 
+That 202 is still the only challenge answer this page has recorded, and it was judged by a body substring. The R-0044 live runs of 2026-09-30 and 2026-10-01 (§2.9) never received a challenge page on any transport, so the structural location of the challenge element — the thing a block predicate should match instead of a substring — is **unmeasured**; the predicate that shipped is the fallback described in §2.9.
+
 **DDG still returned the anomaly modal even with:**
 - Identical JA4 (`t13d1516h2_8daaf6152771_d8a2da3f94cd`)
 - Identical JA4_r (sorted cipher/extension/sigalg sets)
@@ -326,13 +335,13 @@ A real Chrome on macOS would have TCP TTL=64 (same as Linux) but different TCP o
 - TCP options order (different per OS)
 - Initial window size (we documented this is different)
 
-The mitigation is why the Linux branch exists at all: curl_cffi has no OS knob, so
-Linux switches to primp with `impersonate_os="linux"` `Scripts/search_duckduckgo.py:create_session`.
-That reasoning is unchanged — only the mechanism moved. As of 2026-08-04 that one
-argument is the *whole* mechanism: primp derives the `X11; Linux x86_64` UA and the
-matching `sec-ch-ua-platform` from it, and the script supplies no UA and no headers
-by hand. Previously the coherence was hand-built — a pinned Chrome major plus a
-matching Linux Chrome header dict — and both are gone (see §2.8).
+This mitigation was why the scripts had a Linux branch at all: curl_cffi had no OS
+knob, so Linux switched to primp with `impersonate_os="linux"`, which derived the
+`X11; Linux x86_64` UA and the matching `sec-ch-ua-platform` from that one argument
+(as of 2026-08-04; before that the coherence was hand-built — a pinned Chrome major
+plus a matching Linux Chrome header dict). **Since R-0044 there is no Linux branch**:
+the stdlib client sends one measured macOS Chrome 153 profile on every platform, so on
+Linux this tell is back, accepted as a declared cost (§7.2).
 
 ##### 🟢 Issue 4: sec-ch-ua brand string format
 
@@ -352,7 +361,7 @@ This is a **per-version GREASE pattern** that curl_cffi's chrome146 profile may 
 | 1  | `sec-fetch-mode: navigate` on POST (see §2.8) | 🔴 CRITICAL (the actual bot signature) | Easy: per-request XHR pattern override |
 | 1' | `Sec-Fetch-Site: none` with Referer set | 🟡 SECONDARY (coherence violation, subsumed by #1's fix) | Easy: per-request override |
 | 2  | GREASE-ECH vs real ECHConfig | 🟡 MEDIUM | Hard: requires DNS HTTPS query |
-| 3  | UA claims macOS, OS is Linux | 🟢 SOLVED (primp Linux mode) | Done in `create_session()` |
+| 3  | UA claims macOS, OS is Linux | 🟡 REOPENED on Linux since R-0044 (was solved by primp's Linux mode) | Accepted, §7.2 |
 | 4  | Stale GREASE brand strings | 🟢 LOW | Maintained by curl_cffi upstream |
 
 **The user's question answered**: curl_cffi DOES use HTTP/2 (`* using HTTP/2`). After the byte-equivalent TLS handshake, the divergence is in the HTTP/2 HEADERS frame — specifically the Sec-Fetch header coherence and OS/platform consistency with the underlying network stack.
@@ -361,8 +370,8 @@ This is a **per-version GREASE pattern** that curl_cffi's chrome146 profile may 
 
 1. **PRIMARY (done)**: Switch DDG POST headers to the Chrome XHR pattern — `cors` / `empty` / `*/*` / `u=1`. See §2.8.
 2. **Secondary (done)**: Override `Sec-Fetch-Site: same-origin` and Referer to a same-origin URL on the same POST (subsumed by #1).
-3. **Done**: On Linux hosts the Linux Chrome UA comes from primp's `impersonate_os="linux"`
-   — nothing is supplied by hand `Scripts/search_duckduckgo.py:create_session`.
+3. **Done, then undone**: on Linux hosts the Linux Chrome UA came from primp's
+   `impersonate_os="linux"`; since R-0044 one macOS profile is sent everywhere (§7.2).
 4. **Optional**: Add DNS HTTPS query for real ECHConfig (complex, may need patches to curl_cffi).
 
 ### 2.8 Breakthrough: `sec-fetch-mode: navigate` vs `cors` — The Real Discriminator
@@ -426,12 +435,22 @@ Two navigation-only headers ride along into the XHR POST, because a per-request 
 One staged value is rewritten in flight and it is **not ours to fix**: primp stages `accept-encoding: gzip, deflate, br, zstd` (character-identical to the old dict) and its transport then rewrites the outgoing value to `gzip, br`, matching what it can actually decode. No header we set changes that.
 
 **If DDG throughput ever regresses, suspect these two before suspecting a missing key**: that `accept-encoding` rewrite, and header **order** — order is itself a fingerprint, and an echo endpoint cannot reveal it, so "11 of 13 character-identical" says nothing about the sequence DDG sees them in.
+
+**Since R-0044 this subsection is history.** primp is gone, and with it both the
+`accept-encoding` rewrite and the unmeasurable order: the stdlib client sends the
+navigation and cors profiles in the order and values captured from Chrome 153
+(§2.9), `accept-encoding: gzip, deflate, br, zstd` included, because it now decodes
+all four. The navigation warm-up still carries `upgrade-insecure-requests` and
+`sec-fetch-user`, which the 2026-05-24 measurement found load-bearing; the cors POST
+no longer does, because Chrome's captured `fetch` does not send them, so the "leak"
+that subsection decided to keep no longer exists to be kept. Whether DDG's pass rate
+moved with it is not measured.
 ### 2.9 Loopback Fingerprint Measurement vs Chrome 153, and a Pure-Python PoC (R-0017)
 
 **Date**: 2026-09-29/30
 **Host**: macOS; python3 3.14 / OpenSSL 3.6.0, curl_cffi 0.15.0, primp 1.3.1, real Chrome 153.0
 
-§2.2–§2.5 compared hashes from `tls.peet.ws` and an off-host capture that cannot see inside TLS. This round put a TLS + h2 server on loopback that terminates the connection itself, so it sees the whole ClientHello **and** the decrypted h2 preface, SETTINGS, WINDOW_UPDATE and HEADERS (HPACK decoded). The dump server, the diff report and the PoC are throwaway artefacts under the git-ignored `.claude/tmp/` scratch directory (`clienthello_dump.py`, `chdump/diff_report.md`, `chdump/sni/sni_report.md`, `chpoc/chrome_poc.py`) — none of them is in the repo, and nothing below is wired into `Scripts/search_duckduckgo.py`.
+§2.2–§2.5 compared hashes from `tls.peet.ws` and an off-host capture that cannot see inside TLS. This round put a TLS + h2 server on loopback that terminates the connection itself, so it sees the whole ClientHello **and** the decrypted h2 preface, SETTINGS, WINDOW_UPDATE and HEADERS (HPACK decoded). The dump server, the diff report and the PoC began as throwaway artefacts under the git-ignored `.claude/tmp/` scratch directory (`clienthello_dump.py`, `chdump/diff_report.md`, `chdump/sni/sni_report.md`, `chpoc/chrome_poc.py`). Since R-0044 two of them are in the repo: the dump server became the capture harness `Scripts/chrome_capture.py`, and the PoC became the canonical source `Scripts/_mcp_chrome.py`, generated into `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` and `Scripts/mcp-webfetch.py` ([[generated-regions]]). The subsections down to "Live result — one sample" are the R-0017 measurement as it was taken; the ones after it are the R-0044 captures and live results.
 
 #### Method
 
@@ -468,10 +487,10 @@ These are properties of primp's impersonation itself, visible on every connectio
 - **ECH GREASE payload lengths are not bucketed.** Chrome only ever uses {144, 176, 208, 240}; primp's `chrome` group produced 16 distinct lengths in 20 connections, and 18 of those 20 connections used a length Chrome never sends.
 - **HPACK Huffman-codes every literal.** Chrome sends several values raw (e.g. `sec-ch-ua-mobile`, `sec-ch-ua-platform`, `upgrade-insecure-requests`, `sec-fetch-user`); primp Huffman-codes all of them.
 - **Header order is wrong for `chrome_148`** (`user-agent` at position 5, `sec-ch-ua` at 11, where Chrome has 8 and 4); the bare `chrome` / `edge` aliases hit that order on part of their connections.
-- **The `chrome` / `edge` aliases pick a random major per `Client`** (5 distinct UAs in 20 connections) — by design for `Scripts/search_duckduckgo.py:PRIMP_ALIASES`, but it means no two clients look alike.
+- **The `chrome` / `edge` aliases pick a random major per `Client`** (5 distinct UAs in 20 connections) — by design for the bare-alias whitelist the search script then kept, but it means no two clients look alike.
 - `verify=False` is ignored; reaching a self-signed loopback server needs `ca_cert_file`.
 
-This matters for the Linux branch of both impersonating scripts, which is primp by design `Scripts/search_duckduckgo.py:create_session` `Scripts/mcp-webfetch.py:_create_session`, and it adds a reason beyond silent version rot to [[0004-never-pin-a-browser-impersonation-version]]'s distrust of primp: its fingerprint carries tells a pin cannot fix.
+When this was measured it mattered for the Linux branch of both impersonating scripts, which was primp by design, and it added a reason beyond silent version rot to [[0004-never-pin-a-browser-impersonation-version]]'s distrust of primp: its fingerprint carries tells a pin cannot fix. Since R-0044 no script uses primp or curl_cffi; see §7.2.
 
 #### ECH GREASE length vs SNI length
 
@@ -501,6 +520,61 @@ A single stdlib-only Python file (Python 3.9 compatible, roughly 2200 lines on 2
 User-authorized, 3 requests in total. `lite.duckduckgo.com` negotiated X25519MLKEM768 + `TLS_AES_256_GCM_SHA384`, ALPS not negotiated. `GET /lite/?q=test` answered 302; following the redirect returned a brotli-encoded 200, "test at DuckDuckGo", with 10 result links and no anomaly / CAPTCHA markers.
 
 **This is a single sample.** It shows a Chrome-153-shaped ClientHello and h2 preface from pure Python *can* get a result page; it does not show that the fingerprint is what DDG gates on — §2.6 and §2.8 found request shape and IP history mattering more than TLS, and one GET from an unburnt session tests neither.
+
+#### The Chrome 153 capture set (R-0044, 2026-09-30)
+
+The R-0017 dump was one navigation set. Before the PoC became `Scripts/_mcp_chrome.py`, Google Chrome 153.0.8010.37 on macOS 14.2.1 was captured again on loopback with `Scripts/chrome_capture.py serve`, driven over CDP, in ten sets: typed navigation, reload, a navigation followed on the same connection by a same-origin form POST, a cors GET and a cors HEAD, HTTP/1.1 over TLS, plaintext `http://`, an IP-literal origin, navigations carrying a server-set cookie, and a ClientHello answered with a HelloRetryRequest. Every set is committed, one reduced fixture per connection, under `tests/files/chrome/153/`, whose README carries the full profile table. What the capture added to the R-0017 picture:
+
+- **The fresh JA4 did not move**: `t13d1517h2_8daaf6152771_cb7bf5808d99`, the R-0017 value, on every fresh ClientHello with an SNI. An IP-literal origin sends no `server_name` and fingerprints as `t13i1516h2_8daaf6152771_cb7bf5808d99`; the second ClientHello after a HelloRetryRequest is `t13d1518h2_8daaf6152771_6ba8dc3d6269`.
+- **Extension 51764's payload is byte-identical** on every TLS connection of every set and on every post-HRR ClientHello, so the client may send it as a constant.
+- **The HRR answer has a fixed shape**: a ChangeCipherSpec record before the second ClientHello, every time; ONE key share for the group the server asked for; the server's cookie echoed, inserted at a position that varies per connection; random, session id, ciphers, GREASE values and the ECH GREASE payload unchanged from the first ClientHello.
+- **A page's fetch is not stream 3.** On a navigate-then-fetch connection Chrome first opens stream 3 (`/.well-known/appspecific/com.chrome.devtools.json`) and stream 5 (`/favicon.ico`), so the page's `fetch` is stream 7, with priority weight 220 and **no `origin` header** on the same-origin POST.
+- **HTTP/1.1 carries no `priority` header**, keeps the `sec-ch-*` names lowercase and every other name in canonical case.
+- **No resumed handshake was ever completed** against the untrusted loopback certificate, so the capture contains no PSK connection — and the client implements no resumption.
+
+Refreshing the set when Chrome moves is [[chrome-profile-refresh]].
+
+#### Live results over both transports (R-0044 Gate G6, 2026-09-30)
+
+User-authorized, 18 live requests out of a budget of 24, run by a scratch driver whose record is `.claude/tmp/task038-live.txt` (git-ignored, like the R-0017 artefacts). Each request was sent three ways: over the Chrome path (`transport="chrome"`), over the session's default verified transport (`transport="verified"`, Python's own `ssl` ClientHello under Chrome 153's headers, HTTP/1.1, certificate checked), and over the curl_cffi `chrome146` backend the scripts still used that day, as a baseline. The verified rows are the (a′)–(c′) records the block signals were decided on.
+
+| Request | Chrome path | Verified transport | curl_cffi baseline |
+|---|---|---|---|
+| (a) DDG `GET /lite/` (warm-up) | 200, 0 results | (a′) 200, 0 results | 200, 0 results |
+| (a) DDG `POST /lite/` `q=test` | 200, **10 results** | (a′) 200, **10 results**, no challenge marker | 200, 10 results |
+| (b) Bing search `GET` | 200, 10 results | (b′) 200, **10 results** | 200, 10 results |
+| (c) grep.app API `GET` (cors) | 200 JSON, 10 hits | (c′) **429 `text/html`, not JSON**, 33944 bytes | 200 JSON, 10 hits |
+| grep.app `GET /` | not sent | (c′) **429 `text/html`**, 33944 bytes | 200 `text/html` |
+| (d) `GET https://www.cloudflare.com/` | 200 HTML | 200 HTML, `cert_verified=True` | 200 HTML |
+| (e) `GET https://www.google.com/` | 200 HTML, **ALPS negotiated** | not sent | not sent |
+
+- **Loopback**: against `chrome_capture serve` the client's JA4 was `t13d1517h2_8daaf6152771_cb7bf5808d99`, equal to Chrome's, as computed by the capture harness's own parser.
+- **Chrome path**: every connection negotiated X25519MLKEM768 and h2; DDG's GET and POST travelled on one pooled connection; only Google negotiated ALPS, and the client-side ALPS answer §2.9's PoC lacked completed.
+- **No DDG challenge page anywhere.** Neither `anomaly-modal` nor "Please complete" appeared in any DDG answer, on any of the three transports.
+- **grep.app is the one endpoint that told the transports apart**: the verified transport's first cold request got a 429 `text/html` page that is not JSON, while the Chrome path and the baseline got 200 JSON seconds apart. A rate limit would not discriminate by TLS stack, so this was read as a fingerprint block.
+
+What each search script now treats as a block was decided from those rows, and only an answer from the endpoint's own host is ever judged; a transport failure on the verified path never counts, so breaking the verified handshake cannot force the unverified path:
+
+- **grep.app** — measured: a 403, OR a 429 whose body is a non-JSON `text/html` page, OR a 200 whose body is not JSON, provided the body decoded; a 429 carrying JSON stays a rate limit `Scripts/search_github.py:_grep_app_blocked`.
+- **Bing** — not measured: Bing answered the verified transport with results, so the 403 rule is declared rather than observed, and a challenge served as a 200 that parses to nothing is not detected `Scripts/search_duckduckgo.py:_bing_blocked`.
+- **DDG** — not measured either, and this is the **fallback** predicate, not the structural match the plan wanted: since no challenge page was observed, the challenge *element* could not be located. What shipped requires the answer to come from `lite.duckduckgo.com`, to parse to **zero** results, and to contain a challenge marker the query does not itself contain — so neither a reflected query nor a marker inside a third-party snippet (a page with a snippet has a result) can trip it `Scripts/search_duckduckgo.py:_ddg_blocked`. Replacing the marker test with the element is open until a real challenge page is recorded.
+
+#### The fallback, live (R-0044, grep.app)
+
+One grep.app query run through `Scripts/search_github.py` as shipped (`.claude/tmp/task042-live.txt`): the verified client was blocked, the script said so on one stderr line, re-issued the query **once** over the Chrome path and printed 10 results under `**Transport**: chrome (certificate NOT verified)`.
+
+#### What the verified-first probe costs, live (R-0044, 2026-10-01)
+
+User-authorized, both legs of `Scripts/search_duckduckgo.py` as shipped, one query each, every request hop counted by a scratch driver (`.claude/tmp/task044-live.txt`):
+
+| Leg | Requests | Transport | Block | Results |
+|---|---|---|---|---|
+| DDG (default backend) | 2 (warm-up GET, POST) | verified | no | 10 |
+| Bing (`DDG_BACKEND=bing`) | 2 (warm-up GET, search GET) | verified | no | 10 |
+
+No Chrome-path request was made and no "certificate NOT verified" label was printed. That is the case the probe exists for: when an endpoint does not block, a run costs exactly the requests the Chrome-default design would have sent, and every one of them was authenticated. When DDG does block, the arithmetic is in §7.1: one extra round for the run, then the Chrome path for the rest of it.
+
+**An observation, not a finding.** The executive summary's claim that DDG blocks every Python client did not reproduce in these two runs: on 2026-09-30 and again on 2026-10-01 the verified transport — Python's TLS stack, not Chrome's — got lite results with no block. That is two samples from one IP on two days, and the history in §2.6–§2.8 says IP history and request volume decide more than any single request; it does not show that DDG has stopped blocking, only that a Python TLS stack is not blocked on sight.
 
 
 ---
@@ -717,29 +791,51 @@ Current: DDG works intermittently. Engine raises `SearxEngineCaptchaException` w
 
 ### 7.1 Script: `Scripts/search_duckduckgo.py`
 
-`DDG_BACKEND` picks one of three runs `Scripts/search_duckduckgo.py:main`; every one
-except `cdp` first checks that this platform's impersonation package is installed and
-exits 2 with one line if not `Scripts/search_duckduckgo.py:require_backend`.
+`DDG_BACKEND` picks one of three runs `Scripts/search_duckduckgo.py:main`. There is no
+package to check any more: the HTTP client is generated into the script from
+`Scripts/_mcp_chrome.py`.
 
-Default (unset or `ddg`) — DDG first, Bing on the first CAPTCHA
+Default (unset or `ddg`) — DDG first over the verified transport, ONE Chrome re-issue on
+a block, Bing for the rest of the run if the Chrome path is blocked too
 `Scripts/search_duckduckgo.py:_run_ddg_with_bing_fallback`:
 
 ```
-create_session()  primp "chrome"+linux on Linux | curl_cffi random CURL_CFFI_PROFILES elsewhere
+create_session(_transport_for("ddg"))   "verified" unless DDG already blocked us in THIS process
    │
-warmup GET lite.duckduckgo.com/lite/  (navigation headers from the impersonation profile)
+warmup GET lite.duckduckgo.com/lite/  (navigation profile)
    │
-   ▼  per query (new session + warmup every ROTATE_EVERY queries)
-DDG Lite POST /lite/ (XHR headers, §2.8) ── anomaly-modal / "Please complete" ──→ Bing GET /search
-   │ OK                                      (new session + Bing warmup;         non-200 → no results
-   ▼                                          this AND all remaining queries)
- parse_lite_results → results
+   ▼  per query (new session + warmup every ROTATE_EVERY queries, same sticky transport)
+DDG Lite POST /lite/ (cors profile, §2.8)
+   │
+   ├─ results ──────────────────────────────────────────────────────────→ parse_lite_results → results
+   │
+   ├─ error / undecodable body ── NOT a block ──→ no results for this query (no re-issue, no Bing)
+   │
+   └─ block = host is lite.duckduckgo.com AND zero parsed results
+              AND a challenge marker the query does not contain   (_ddg_blocked; fallback predicate, §2.9)
+                │
+                ├─ session was verified ──→ sticky switch: "ddg" → _CHROME_AFTER_BLOCK (per process, never persisted)
+                │                            ONE re-issue: new Chrome-path session + warmup + the same POST
+                │                              │ results → labelled "chrome (certificate NOT verified)"
+                │                              ▼ blocked again
+                └─ session was Chrome ─────────┴──→ Bing GET /search for this AND all remaining queries
+                                                     (new session on _transport_for("bing") + Bing warmup;
+                                                      a 403 from www.bing.com gets the same one re-issue + sticky switch)
 ```
 
-`DDG_BACKEND=bing` runs the Bing leg alone `Scripts/search_duckduckgo.py:_run_bing`.
-Bing is not checked for a CAPTCHA at all: a non-200 answer yields no results
-`Scripts/search_duckduckgo.py:search_bing`, so "always works" is an observation, not
-something the code guarantees.
+The sticky switch is what keeps the probe cheap when DDG does block: the run pays ONE
+extra round — verified warm-up and POST, then Chrome warm-up and POST, 4 requests where
+a Chrome-default design sent 2 — and every later query costs one Chrome POST. Without it
+every query would cost 3 (blocked verified POST, Chrome warm-up, Chrome POST), tripling
+the per-query volume from one IP, which §3.3 lists as a CAPTCHA trigger in itself. When
+DDG does not block, nothing changes at all: the live record in §2.9 is 2 verified
+requests per endpoint and no Chrome-path request.
+
+`DDG_BACKEND=bing` runs the Bing leg alone, with the same verified-first rule, one
+re-issue and sticky switch `Scripts/search_duckduckgo.py:_run_bing`. Bing's only block
+signal is a 403 from `www.bing.com` itself; any other non-200 answer yields no results
+`Scripts/search_duckduckgo.py:search_bing`, and a challenge served as a 200 is not
+detected, so "always works" is an observation, not something the code guarantees.
 
 **Optional CDP backend** (`DDG_BACKEND=cdp`) `Scripts/search_duckduckgo.py:_run_cdp`:
 ```
@@ -750,26 +846,38 @@ Chrome (real) over CDP WebSocket → Runtime.evaluate: fetch() POST to lite from
 
 ### 7.2 Impersonation Configuration (Minimal Headers)
 
-One factory picks the backend by platform `Scripts/search_duckduckgo.py:create_session`:
+Until R-0044 this section described two third-party backends picked by platform —
+curl_cffi with a pinned profile list off Linux, primp with a bare alias on Linux — and
+the asymmetric pin rule [[0004-never-pin-a-browser-impersonation-version]] froze for
+them. Both packages are gone. One factory now opens every session, on every platform,
+and the only thing it chooses is the **transport**
+`Scripts/search_duckduckgo.py:create_session`:
 
-- **non-Linux** — `curl_cffi.requests.Session(impersonate=...)` with a name drawn at
-  random from a four-entry pinned list (`chrome146`, `chrome145`, `chrome136`,
-  `safari260`) `Scripts/search_duckduckgo.py:CURL_CFFI_PROFILES`. That list is the
-  exact configuration the ~80% pass-through of §2.8 was measured with, which is why
-  it stays pinned. Only `Accept-Language` is set by hand — overriding anything else
-  breaks the fingerprint (§3.6) — and `Referer` goes per-request, never on the session.
-- **Linux** — `primp.Client(impersonate="chrome", impersonate_os="linux")` with a
-  *bare alias*, never a pinned major, validated against a whitelist
-  `Scripts/search_duckduckgo.py:PRIMP_ALIASES`. No headers are supplied at all (§2.8).
+- **`verified`** (the default) — the stdlib `ssl` / `http.client` path
+  `Scripts/_mcp_chrome.py:_ChFallbackConnection`: certificate and host name checked,
+  HTTP/1.1, never pooled. Its headers are Chrome 153's, but its TLS ClientHello is
+  Python's own, so this transport is **not** impersonated and says so
+  (`impersonated=False`, `cert_verified=True`).
+- **`chrome`** — the Chrome 153 TLS 1.3 ClientHello and h2 preface measured in §2.9,
+  with the certificate **not** verified. Used only after a block (§7.1), and every
+  result it produces carries the label.
 
-A pin is tolerable on curl_cffi and forbidden on primp, and the asymmetry is
-deliberate: curl_cffi raises `ImpersonateError` on an unknown name, whereas primp
-prints one line to stderr and silently substitutes a **random** browser — so a rotted
-pin there produces an arbitrary fingerprint rather than an error. Session rotation
-every few queries is unchanged `Scripts/search_duckduckgo.py:ROTATE_EVERY`.
+Both transports share ONE header profile, read from the committed captures rather than
+supplied by the caller `Scripts/_mcp_chrome.py:_chrome_profile`: the warm-up `GET` goes
+out with the navigation profile and the lite `POST` with the cors profile §2.8 found to
+be the discriminator, the script adding only `Accept: */*` and the warm-up page as
+`Referer` `Scripts/search_duckduckgo.py:search_ddg`. There is nothing left to pin, and a
+fingerprint-bearing header passed by a caller is refused rather than merged
+`Scripts/_mcp_chrome.py:_ch_check_caller_headers`. Session rotation every few queries is unchanged
+`Scripts/search_duckduckgo.py:ROTATE_EVERY`.
 
-The same two-branch shape, for the same reason, is used by
-`Scripts/mcp-webfetch.py:_create_session`.
+The profile is macOS Chrome 153 on every platform, so on Linux the user agent no longer
+matches the TCP stack — §2.7 Issue 3's tell, which primp's Linux mode used to avoid. It
+is accepted as a declared cost of having one measured profile rather than two; the
+decision and the follow-up are [[0026-speak-chrome-from-the-stdlib-verify-by-default]], and moving the profile to a newer Chrome is
+[[chrome-profile-refresh]]. `Scripts/mcp-webfetch.py:_create_session` uses the same two
+transports with one difference: the Chrome path is the caller's explicit
+`profile="chrome"` opt-in, never an automatic fallback.
 
 ### 7.3 CDP Backend Implementation
 
@@ -815,7 +923,7 @@ measured equal to the lxml version and pinned to its recorded output — see
 ### 8.2 Planned Investigation
 
 - **Packet capture via `mcp-tshark`**: the repo's capture server is `Scripts/mcp-tshark.py` (`tshark_call` — `start_capture` / `stop_capture` / `analyze` / `follow_stream`); there is no tcpdump MCP server. It can compare raw TCP/TLS packets between real Chrome and a Python client on the wire. For the ClientHello and h2 layers the loopback dump of §2.9 has since answered the question more directly than an off-host capture could (it sees the decrypted h2 frames); what a capture would still add is the TCP layer of §2.5/§3.5 against the real DDG endpoint.
-- **Custom TLS library**: *done as a throwaway PoC, see §2.9* — a pure-stdlib client whose ClientHello and h2 preface match Chrome 153 on loopback. Not wired into `Scripts/search_duckduckgo.py`; one live sample only.
+- **Custom TLS library**: *done, see §2.9* — first as a throwaway PoC, then (R-0044) as `Scripts/_mcp_chrome.py`, generated into both search scripts and webfetch as the Chrome path behind the verified default (§7.1, §7.2). Still open: certificate verification on that path, so that fingerprint and authenticity stop being a trade-off.
 - **Browser engine fingerprint replication**: Potentially use the `__sc__` DOM parsing fingerprint values for the main site endpoint
 
 ### 8.3 Assessed as Non-viable

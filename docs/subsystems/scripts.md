@@ -7,13 +7,15 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: db63229
-  date: 2026-09-16
+  commit: 3fbe5bf
+  date: 2026-10-02
 links:
   - overview
   - requirements-yaml
   - tests
   - generated-regions
+  - spec-ddg
+  - chrome-profile-refresh
   - 0001-purity-server-unification
   - 0004-never-pin-a-browser-impersonation-version
   - 0007-a-path-spelled-deny-protects-the-spelling
@@ -24,6 +26,7 @@ links:
   - 0018-the-totals-must-describe-the-scope
   - 0021-contain-by-the-admitted-root
   - 0024-pure-python-39-and-the-stdlib
+  - 0026-speak-chrome-from-the-stdlib-verify-by-default
 ---
 
 # Scripts & MCP Servers
@@ -47,8 +50,7 @@ from `~/.claude/scripts/`.
 
 **Every script here runs on a bare Python 3.9 interpreter with the standard
 library.** A third-party module is allowed only where the stdlib has no way to
-do the job, and only from an allowlist: `primp` and `curl_cffi` (browser TLS
-impersonation, which `ssl` cannot shape), `yaml` (no stdlib YAML parser), and
+do the job, and only from an allowlist: `yaml` (no stdlib YAML parser) and
 `tomli` (the 3.9/3.10 backport of `tomllib`, which is stdlib only from 3.11 and
 is guarded the same way). The decision, why each entry is unavoidable and the
 alternatives rejected are [[0024-pure-python-39-and-the-stdlib]].
@@ -58,11 +60,17 @@ import, never with `except ImportError` — `find_spec` does not import, so an
 installed-but-broken package still fails with its own traceback instead of being
 reported as missing. A required dependency that is absent produces one stderr
 line naming the package and a `pip install` for the running interpreter, and
-exit 2: `Scripts/search_duckduckgo.py:require_backend`,
-`Scripts/search_github.py:require_backend` (both at startup, for the backend
-this platform uses — not at the lazy import mid-run) and
-`Scripts/task-validator.py` for PyYAML. An optional one degrades as it always
-did: `Scripts/mcp-inspect.py:_v_yaml` / `_v_toml` answer LIMITED / SKIP.
+exit 2: `Scripts/task-validator.py` for PyYAML. An optional one degrades as it
+always did: `Scripts/mcp-inspect.py:_v_yaml` / `_v_toml` answer LIMITED / SKIP.
+The two search scripts no longer have a package to check: their HTTP client is
+generated into them (below).
+
+A **system shared library** loaded through `ctypes` is a separate dependency
+category, not an allowlist entry: `libbrotlidec` and `libzstd`, the only way to
+decode `br` and `zstd` bodies without a third-party package, registered by name
+with their reason in `tests/test_py_deps.py:SYSTEM_LIBS`. Absence is not an exit:
+the decoder raises `LookupError` on first use and the caller reports one decode
+error line `Scripts/_mcp_brotli.py`.
 
 `Scripts/mcp-webfetch.py` is the one **declared, temporary exception**: it keeps
 `beautifulsoup4` + `markdownify` and its `uv run --script` launch (below). No
@@ -123,7 +131,7 @@ loop became thirteen in the first place.
 | `Scripts/mcp-context7.py` | mcp-context7 | Context7 documentation lookup |
 | `Scripts/mcp-wiki.py` | mcp-wiki | Wiki freshness / reindex / search / page reads over `docs/` |
 | `Scripts/mcp-inspect.py` | mcp-inspect | Read-only host/process/network inspection, file digests, syntax validation |
-| `Scripts/mcp-webfetch.py` | mcp-webfetch | Browser-emulated URL fetching with HTML→Markdown extraction, disk cache |
+| `Scripts/mcp-webfetch.py` | mcp-webfetch | URL fetching (verified TLS by default, Chrome emulation opt-in) with HTML→Markdown extraction, disk cache |
 | `Scripts/mcp-jenkins.py` | mcp-jenkins | Jenkins CI: jobs, builds, console + stage logs, artifacts, queue, test reports |
 | `Scripts/mcp-postgres.py` | mcp-postgres | PostgreSQL over the native v3 wire protocol — stdlib only, no libpq |
 | `Scripts/mcp-gdc.py` | mcp-gdc | Chrome DevTools: navigation, DOM, network, screenshots, JS evaluation |
@@ -264,11 +272,18 @@ The recorded launch line is
 `uv run --script Scripts/mcp-webfetch.py --project-root ~/.claude`.
 
 The server was near-totally rewritten on 2026-08-04 and registered immediately
-after. It carries browser impersonation by bare alias only — never a pinned
-version, and the two backends are validated asymmetrically on purpose, frozen in
-[[0004-never-pin-a-browser-impersonation-version]] —
-`Scripts/mcp-webfetch.py:_create_session`, with a retry ladder that escalates by
-browser *engine* on 403/429/503, a content-type gate that refuses non-textual
+after. Its HTTP client is the stdlib one generated from `Scripts/_mcp_chrome.py`
+(see Search, below), and the transport is the caller's choice, never an
+escalation: the default is the **verified** transport (certificates and host
+names checked, Chrome 153's headers over Python's own TLS, HTTP/1.1), and
+`profile="chrome"` opts into the Chrome 153 fingerprint, whose certificate is
+NOT verified `Scripts/mcp-webfetch.py:_create_session`. A 403/429/503 is retried
+on a fresh session over the **same** transport `Scripts/mcp-webfetch.py:RETRY_STATUSES`;
+a likely bot block earns a one-line hint naming `profile=chrome` rather than a
+silent switch, and every answer's status line names its transport, fresh or
+cached `Scripts/mcp-webfetch.py:_transport_label`. The impersonation branch
+[[0004-never-pin-a-browser-impersonation-version]] governed is superseded by
+[[0026-speak-chrome-from-the-stdlib-verify-by-default]]. Alongside it: a content-type gate that refuses non-textual
 bodies instead of mojibaking them, main-content extraction
 (nav/header/footer/aside decomposed, `main`/`article`/`[role=main]` preferred,
 `markdown_full` to opt out) `Scripts/mcp-webfetch.py:_main_content`, line-based
@@ -723,20 +738,63 @@ graph beside the prose plan, is [[requirements-yaml]].
 ## Search
 
 `Scripts/search_duckduckgo.py` (DDG-first with Bing fallback) and
-`Scripts/search_github.py` (code search via grep.app). Both impersonate a browser,
-picking the backend by platform: primp with `impersonate_os="linux"` on Linux,
-curl_cffi elsewhere `Scripts/search_duckduckgo.py:create_session`. Since
-2026-08-04 the primp side accepts **only bare aliases**
-`Scripts/search_duckduckgo.py:PRIMP_ALIASES` — a pinned major rots silently there
-into a random browser — while the curl_cffi side keeps its pinned list
-`Scripts/search_duckduckgo.py:CURL_CFFI_PROFILES`, which rots loudly with an
-`ImpersonateError`. The DDG bot-detection research log is documented in
-[[spec-ddg]].
+`Scripts/search_github.py` (code search via grep.app). Neither imports an HTTP
+package any more: both carry the stdlib client generated from
+`Scripts/_mcp_chrome.py`, and both open every session on the **verified**
+transport first `Scripts/search_duckduckgo.py:create_session`
+`Scripts/search_github.py:create_session`. The Chrome path is a **block
+fallback**, not a default and not a platform choice:
 
-The platform's backend is checked with `find_spec` before any request
-`Scripts/search_duckduckgo.py:require_backend`: absent, the script prints one
-line naming the package and exits 2 instead of dying in `create_session` after
-the run has started. The Bing results are parsed by a stdlib `html.parser` tree
+- **One re-issue.** When an endpoint's own host answers with a block, the query
+  is re-issued ONCE over a fresh Chrome-path session, after one stderr line
+  saying so; a block from that session too is no results, never a third attempt
+  `Scripts/search_duckduckgo.py:_bing_query`.
+- **Sticky per host, per process.** The block adds the endpoint to a set that
+  makes every later session in the same run open on the Chrome path
+  `Scripts/search_duckduckgo.py:_transport_for`; nothing is persisted, so the
+  next run starts verified again.
+- **Every Chrome-path answer is labelled** `**Transport**: chrome (certificate
+  NOT verified)` `Scripts/search_duckduckgo.py:format_results`.
+- **What is a block is judged per endpoint, structurally, and only on that
+  endpoint's own host** — a transport failure on the verified path is never a
+  block, so breaking the verified handshake cannot force the downgrade to the
+  unverified transport. grep.app: a 403, a 429 whose body is a non-JSON
+  `text/html` page, or a 200 that is not JSON; a 429 carrying JSON stays a rate
+  limit `Scripts/search_github.py:_grep_app_blocked`. Bing: a 403
+  `Scripts/search_duckduckgo.py:_bing_blocked`. DDG: zero parsed results plus a
+  challenge marker the query does not itself contain, so neither a reflected
+  query nor a third-party snippet can trip it
+  `Scripts/search_duckduckgo.py:_ddg_blocked`.
+- **A search body is capped at 2 MiB**, not the client's 64 MiB ceiling: every
+  search session passes `SEARCH_MAX_BYTES` as `max_bytes`, and an oversized
+  answer is no results, never a block `Scripts/search_duckduckgo.py:SEARCH_MAX_BYTES`
+  `Scripts/search_github.py:SEARCH_MAX_BYTES`.
+
+Why the verified transport is the default although it does not look like Chrome,
+the measurements behind each block signal and the declared limits are
+[[0026-speak-chrome-from-the-stdlib-verify-by-default]];
+the live records are in [[spec-ddg]], which is also the DDG bot-detection
+research log.
+
+The client is three generated sources taken whole
+([[generated-regions]]): `Scripts/_mcp_chrome.py`, the TLS 1.3 / HTTP/2 /
+HTTP/1.1 client with its one profile table `Scripts/_mcp_chrome.py:_chrome_profile`
+and the verified stdlib transport `Scripts/_mcp_chrome.py:_ChFallbackConnection`,
+and the `ctypes` decoders `Scripts/_mcp_brotli.py` and `Scripts/_mcp_zstd.py` it
+is handed as `decoders=`. Its Chrome path verifies no certificate, and the module
+says so in its first line.
+
+`Scripts/chrome_capture.py` is the **independent oracle** that client is measured
+with, and deliberately shares no code with it: a loopback-only capture server
+that records what a real Chrome puts on the wire (ClientHello, the post-HRR
+second ClientHello, the h2 preface and HEADERS blocks, the HTTP/1.1 request
+head), a JA3/JA4 parser, an HPACK decoder, a `diff` between two capture sets and
+an `export` that refuses any non-loopback identifier before it writes a fixture
+`Scripts/chrome_capture.py:main`. The committed captures it exported are the
+Chrome 153 profile's only source of truth — see [[tests]] for the fixtures and
+[[chrome-profile-refresh]] for refreshing them when Chrome moves.
+
+The Bing results are parsed by a stdlib `html.parser` tree
 builder `Scripts/search_duckduckgo.py:parse_bing_results` that evaluates the four
 XPath expressions the old lxml parser used, including libxml2's implicit-close
 and end-tag-priority rules; it is pinned to lxml's recorded output on
