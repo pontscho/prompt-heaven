@@ -6882,7 +6882,8 @@ def lite_results(snippet="A tested snippet."):
 # page on either transport, so the challenge's real structure is unknown; this
 # page exercises the plan's FALLBACK predicate (plan:1536): zero results, a
 # marker in the page, the query not containing it. Status 202 as spec-ddg
-# recorded it; the predicate does not consult the status.
+# recorded it; since R-0052 that status alone is also a block (the
+# ddg-predicate-202-* rows isolate it), and the marker rows judge a 200.
 DDG_FALLBACK_CHALLENGE = (b"<html><body><form action=\"/lite/\" method=\"post\"><input name=\"q\" value=\"q\"></form>"
                           b"<div class=\"anomaly-modal\"><div class=\"anomaly-modal__title\">Please complete the following challenge to confirm this search was made by a human.</div></div></body></html>")
 DDG_OK = (200, HTML_TYPE, lite_page("q"))
@@ -7376,6 +7377,28 @@ def ddg_predicate_rows(suite, host):
                 + problem_if(judged("anomaly-modal", page) is not False, "_ddg_blocked judged it a block")
                 + problem_if(not old_ddg_substring(page.decode()), "the control")), ["a zero-result page whose only marker text is the reflected query -> NOT a block (the fallback predicate's last clause); today's substring test IS true on it"]
     run_row(suite, GM, "ddg-predicate-zero-results-marker-only-in-the-reflected-query-is-not-a-block", query_only, src)
+
+    # R-0052: HTTP 202 is the one measured challenge signal (spec-ddg recorded
+    # it; normal lite results answer 200). Own host + zero results + 202 is a
+    # block with NO marker; each other row drops exactly one of the three.
+    empty = lite_page("q", results=False)
+    status_rows = (
+        ("ddg-predicate-202-zero-results-no-marker-is-a-block", 202, empty, None, True,
+         "202 + zero results + no marker, own host -> a block (the status is the signal, not the marker)"),
+        ("ddg-predicate-202-with-results-is-not-a-block", 202, lite_page("q"), None, False,
+         "202 on a page that parses to one result -> NOT a block"),
+        ("ddg-predicate-202-zero-results-from-another-host-is-not-a-block", 202, empty, "https://elsewhere.test/lite/", False,
+         "202 + zero results answered by a redirect target (elsewhere.test) -> NOT a block (the host check comes first)"),
+        ("ddg-predicate-200-zero-results-no-marker-is-not-a-block", 200, empty, None, False,
+         "200 + zero results + no marker -> NOT a block (a genuine empty search)"),
+    )
+    for cid, status, page, url, want, what in status_rows:
+        def fn(status=status, page=page, url=url, want=want, what=what):
+            resp = ddg_resp(host, "verified", (status, HTML_TYPE, page, url), DDG_URL)
+            got = host._ddg_blocked(resp, "q")
+            return (problem_if(got is not want, "_ddg_blocked returned %r, want %r" % (got, want))
+                    + problem_if(old_ddg_substring(page.decode()), "the control: the page carries a challenge marker, so the row does not isolate the status")), [what]
+        run_row(suite, GM, cid, fn, src)
 
 
 def run_cdp_problems(text):

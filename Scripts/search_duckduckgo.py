@@ -7355,20 +7355,23 @@ def _ddg_blocked(resp, query, results=None):
 	All of: (0) the final URL's host is lite.duckduckgo.com (a redirect
 	target's answer is never a block); (a) the page parses to ZERO results, so
 	a snippet carrying a marker cannot trip it (a page with a snippet has a
-	result); (b) a challenge marker occurs in the page AND the query does not
-	contain that marker (case-insensitive), so the reflected query cannot trip
-	it. The status is not consulted (spec-ddg saw 202; nobody measured a rule
-	on it). An undecodable body is not judged here.
+	result); and then EITHER (s) the status is 202 (R-0052: the challenge
+	status spec-ddg recorded and the user has seen live; lite results answer
+	200), with no marker needed, OR (b) a challenge marker occurs in the page
+	AND the query does not contain that marker (case-insensitive), so the
+	reflected query cannot trip it. An undecodable body is not judged here:
+	zero results on it would mean nothing, so neither (s) nor (b) applies.
 
 	`results` is parse_lite_results(resp.text) when the caller already has it
 	(search_ddg parses each response ONCE, F32); None parses here.
 	"""
-	# UNVERIFIED: this is the plan's FALLBACK predicate for (b). task-038
+	# UNVERIFIED: (b) is the plan's FALLBACK predicate. task-038
 	# (.claude/tmp/task038-live.txt) saw DDG answer both transports with 200 and
-	# lite results; no anomaly page was observed, so the structural marker
+	# lite results; no anomaly page was recorded, so the structural marker
 	# element (an element whose class/id is anomaly-modal, outside the results
-	# container) is unmeasured. Replace (b) with that structural match once a
-	# live challenge page has been recorded.
+	# container) is still unmeasured. Replace (b) with that structural match
+	# once a live challenge page has been recorded. The 202 of (s) is the one
+	# measured signal (spec-ddg; R-0052).
 	if urllib.parse.urlsplit(resp.url or "").hostname != "lite.duckduckgo.com":
 		return False
 	if resp.decode_error is not None:
@@ -7378,6 +7381,8 @@ def _ddg_blocked(resp, query, results=None):
 		results = parse_lite_results(page)
 	if results:
 		return False
+	if resp.status_code == 202:
+		return True
 	lowered_query = (query or "").lower()
 	for marker in _DDG_CHALLENGE_MARKERS:
 		if marker in page and marker.lower() not in lowered_query:
