@@ -59,6 +59,15 @@ F  two rules the import gate cannot see, both read with `ast`:
        hashlib.file_digest; ssl.VERIFY_X509_PARTIAL_CHAIN; `X | Y` in an
        annotation.  A listed file that does not exist yet is INFO, not PASS.
    Its own planted controls and baits sit in the same group.
+G  Scripts/mcp-webfetch.py's PEP 723 block (R-0058, security finding F47):
+   every declared requirement carries a >= lower and a < upper bound, and
+   every BeautifulSoup() call names the "lxml" tree builder by literal with
+   lxml declared in the block -- a builder asked for by STRING is invisible to
+   the import gate, so an undeclared one would surface only as FeatureNotFound
+   at the first conversion.  lxml stays here by user decision (2026-10-02):
+   html.parser has no implied end tags, so an unclosed <li>/<td> nests and
+   the markdown loses list items and table cells.  Planted controls in the
+   same group.
 
 THE STDLIB SET IS EMBEDDED, NOT DERIVED -- AND WHY
 --------------------------------------------------
@@ -233,6 +242,7 @@ GC = "C. negative control"
 GD = "D. the lxml replacement, pinned to lxml's own output"
 GE = "E. hygiene"
 GF = "F. ctypes system libraries declared; no 3.10+ API in the new sources"
+GG = "G. webfetch PEP 723 block: bounded, the lxml builder declared"
 
 FIXTURE_BASE = H.repo_path(".claude", "tmp", "test_py_deps")
 WRITES = []
@@ -241,6 +251,7 @@ BING_HTML = H.repo_path("tests", "files", "html", "tf_bing_serp.html")
 BING_EXPECTED = H.repo_path("tests", "files", "html",
                             "tf_bing_serp.expected.json")
 SEARCH_DDG = H.repo_path("Scripts", "search_duckduckgo.py")
+WEBFETCH = H.repo_path("Scripts", "mcp-webfetch.py")
 
 # Blindness FLOORS, not counts -- far below the live numbers, which move up as
 # the tree grows and can never trip these; a scanner that stops resolving
@@ -1224,6 +1235,118 @@ def group_system_libs(suite, root):
                      + ["hit         : line %d %s" % h for h in hits])
 
 
+# PEP 723's reference regex for an inline metadata block.
+_PEP723_RE = re.compile(r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s"
+                        r"(?P<content>(^#(| .*)$\s)+)^# ///$")
+_DEPS_RE = re.compile(r"(?ms)^dependencies\s*=\s*\[(?P<body>.*?)\]")
+
+
+def pep723_deps(src):
+    """The `dependencies` strings of src's PEP 723 `script` block, or None.
+
+    No tomllib on the 3.9 floor, so the one array is read by regex: enough for
+    a list of quoted requirement strings, which is all the block holds."""
+    for match in _PEP723_RE.finditer(src):
+        if match.group("type") != "script":
+            continue
+        content = "".join(line[2:] if line.startswith("# ") else line[1:]
+                          for line in match.group("content")
+                          .splitlines(keepends=True))
+        deps = _DEPS_RE.search(content)
+        return re.findall(r"\"([^\"]*)\"", deps.group("body")) if deps else []
+    return None
+
+
+def dep_name(dep):
+    return re.split(r"[\s<>=!~;\[]", dep, 1)[0].lower()
+
+
+def dep_problems(deps):
+    """R-0058: every requirement bounded below (>=) and above (<)."""
+    if deps is None:
+        return ["no PEP 723 `script` block found"]
+    return ["%r has no >= lower AND < upper bound: every cold start resolves "
+            "whatever the index serves" % dep for dep in deps
+            if not (re.search(r">=\s*\d", dep) and re.search(r"<\s*\d", dep))]
+
+
+def tree_builder_problems(tree, deps):
+    """Every BeautifulSoup(...) call names the literal "lxml" builder, and lxml
+    is declared -- bs4 does not pull it in, so an undeclared builder dies with
+    FeatureNotFound at the first conversion, not at startup."""
+    problems = []
+    if "lxml" not in {dep_name(d) for d in deps or ()}:
+        problems.append("lxml is not declared in the PEP 723 block")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else \
+            func.attr if isinstance(func, ast.Attribute) else None
+        if name != "BeautifulSoup":
+            continue
+        feature = node.args[1] if len(node.args) > 1 else next(
+            (k.value for k in node.keywords if k.arg == "features"), None)
+        if not (isinstance(feature, ast.Constant) and feature.value == "lxml"):
+            problems.append("line %d: BeautifulSoup() without the literal "
+                            "tree builder 'lxml'" % node.lineno)
+    return problems
+
+
+def group_webfetch_deps(suite):
+    """G. webfetch's PEP 723 block is bounded and lxml-free (R-0058)."""
+    try:
+        with open(WEBFETCH, encoding="utf-8") as fh:
+            src = fh.read()
+        tree = ast.parse(src, filename=WEBFETCH)
+    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+        for cid in ("webfetch PEP 723 deps all bounded",
+                    "webfetch builds every soup with a declared lxml"):
+            suite.record(GG, cid, ["setup failed: %s: %s"
+                                   % (type(exc).__name__, exc)])
+        return
+    deps = pep723_deps(src)
+    suite.record(GG, "webfetch PEP 723 deps all bounded", dep_problems(deps),
+                 detail=["declared    : %r" % (deps,),
+                         "rule        : each requirement carries a >= lower "
+                         "and a < upper bound (R-0058, F47)"])
+    suite.record(GG, "webfetch builds every soup with a declared lxml",
+                 tree_builder_problems(tree, deps),
+                 detail=["rule        : the literal 'lxml' at every "
+                         "BeautifulSoup() call, and lxml in the PEP 723 "
+                         "block; the import gate cannot see a builder asked "
+                         "for by string"])
+
+    unbounded = ("# /// script\n# dependencies = [\n#     \"beautifulsoup4\",\n"
+                 "#     \"markdownify>=1.2,<2\",\n#     \"lxml\",\n"
+                 "# ]\n# ///\n")
+    got = dep_problems(pep723_deps(unbounded))
+    suite.record(GG, "control: unbounded dependencies are flagged",
+                 [] if len(got) == 2 else ["%d problem(s), 2 planted: %r"
+                                           % (len(got), got)],
+                 detail=["planted     : beautifulsoup4, lxml (no bound); "
+                         "markdownify>=1.2,<2 (clean)"]
+                 + ["hit         : %s" % g for g in got])
+    bounded = unbounded.replace("\"beautifulsoup4\"",
+                                "\"beautifulsoup4>=4.15,<5\"").replace(
+        "\"lxml\"", "\"lxml>=6.1,<7\"")
+    got = dep_problems(pep723_deps(bounded))
+    suite.record(GG, "control: a fully bounded block is clean",
+                 ["flagged %r" % got] if got else [],
+                 detail=["planted     : beautifulsoup4>=4.15,<5, "
+                         "markdownify>=1.2,<2, lxml>=6.1,<7"])
+    planted = ast.parse("BeautifulSoup(h, 'lxml')\nBeautifulSoup(h)\n"
+                        "bs4.BeautifulSoup(h, features='html.parser')\n")
+    got = tree_builder_problems(planted, ["beautifulsoup4>=4.15,<5"])
+    suite.record(GG, "control: a missing builder, a foreign builder and an "
+                     "undeclared lxml are flagged",
+                 [] if len(got) == 3 else ["%d problem(s), 3 expected: %r"
+                                           % (len(got), got)],
+                 detail=["planted     : 'lxml' (clean), no builder, "
+                         "features='html.parser', lxml not declared"]
+                 + ["hit         : %s" % g for g in got])
+
+
 def group_hygiene(suite, root, pyc_before, tree_before):
     """E. every write under .claude/tmp, no bytecode, no new repo paths."""
     stray = [p for p in WRITES if not os.path.abspath(p).startswith(
@@ -1271,6 +1394,7 @@ def run(opts=None):
         group_control(suite, root)
         group_bing(suite)
         group_system_libs(suite, root)
+        group_webfetch_deps(suite)
         group_hygiene(suite, root, pyc_before, tree_before)
     finally:
         if opts.keep:

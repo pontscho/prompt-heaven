@@ -603,8 +603,9 @@ SUITES = [
      "pure Python 3.9 + stdlib: every non-stdlib import allowlisted and "
      "find_spec-guarded (never except ImportError), no removed stdlib module, "
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
-     "lxml's fields, every ctypes system library declared, and no 3.10+ API "
-     "in the new sources", 52),
+     "lxml's fields, every ctypes system library declared, no 3.10+ API "
+     "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
+     "builder declared", 57),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

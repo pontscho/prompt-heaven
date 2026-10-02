@@ -2,9 +2,9 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "beautifulsoup4",
-#     "markdownify",
-#     "lxml",
+#     "beautifulsoup4>=4.15,<5",
+#     "markdownify>=1.2,<2",
+#     "lxml>=6.1,<7",
 # ]
 # ///
 """mcp-webfetch — MCP server for URL fetching (verified TLS by default, Chrome emulation opt-in) with HTML→Markdown extraction.
