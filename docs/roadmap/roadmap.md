@@ -16,6 +16,7 @@ WIP now: 0 of 3. Archive: 50 closed items (42 done, 8 dropped).
 | next  | R-0061 | idea  | sbx on Linux: pathname AF_UNIX sockets reach host daemons                                           | yes   |
 | next  | R-0056 | idea  | Normalise hosts with UTS-46 nontransitional processing instead of IDNA2003                          | yes   |
 | next  | R-0055 | idea  | Restrict destination ports in webfetch and the search scripts (a bad-port list like the Fetch spec) | yes   |
+| next  | R-0058 | idea  | Pin or bound mcp-webfetch's PEP 723 dependencies, or finish removing lxml                           | yes   |
 | later | R-0051 | idea  | Refresh the Chrome profile                                                                          | yes   |
 | later | R-0060 | idea  | DDG main endpoint: replicate the __sc__ DOM fingerprint                                             | yes   |
 | later | R-0048 | idea  | Answer a HelloRetryRequest that selects P-384 (FLAG-2)                                              | yes   |
@@ -23,7 +24,6 @@ WIP now: 0 of 3. Archive: 50 closed items (42 done, 8 dropped).
 | inbox | R-0052 | idea  | Measure the DDG challenge page's structural marker and replace the fallback block predicate         | yes   |
 | inbox | R-0054 | idea  | mcp-webfetch save_to and cache are rooted at ~/.claude, not the session's project                   | yes   |
 | inbox | R-0057 | idea  | Single-pass HTMLParser for DDG lite, Bing and grep.app result parsing                               | yes   |
-| inbox | R-0058 | idea  | Pin or bound mcp-webfetch's PEP 723 dependencies, or finish removing lxml                           | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -77,6 +77,22 @@ Security review 20261001-082224, finding F3 (LOW, verified, not a regression): t
 
 - 2026-10-01 new->unset: deferred by security review 20261001-082224
 - 2026-10-02 unset->next: User 2026-10-02: fix it.
+
+## R-0058 · Pin or bound mcp-webfetch's PEP 723 dependencies, or finish removing lxml
+
+state: idea
+horizon: next
+origin: user:2026-10-01:webfetch-pep723-pinning
+blocked_by: []
+severity: low
+tags: [security, webfetch]
+
+Security review 20261001-082224, finding F47 (LOW, pre-existing): the PEP 723 block declares beautifulsoup4, markdownify and lxml with no version bounds, so every uv cold start resolves whatever the index serves that day. Either add bounds (or uv's exclude-newer), or replace bs4's lxml tree builder with html.parser so lxml leaves the tree as ADR 0024 decided for the search script. Recorded in the ADR 0024 addendum of 2026-10-01.
+
+### Log
+
+- 2026-10-01 new->unset: deferred by security review 20261001-082224
+- 2026-10-02 unset->next: User 2026-10-02: approved -- bs4 on html.parser, lxml leaves, bound bs4/markdownify versions.
 
 # later
 
@@ -186,21 +202,6 @@ severity: low
 tags: [search, security]
 
 Security review 20261001-082224, finding F32 (LOW): the DDG lite and grep.app result parsers are regex findall passes that go super-linear on a hostile body, which the endpoint or a MITM on the unverified Chrome fallback controls. The fix pass capped search bodies at 2 MiB and made DDG parse once, which bounds the cost but keeps the shape. A single-pass html.parser walk (the Bing parser already is one) would make the parsing linear.
-
-### Log
-
-- 2026-10-01 new->unset: deferred by security review 20261001-082224
-
-## R-0058 · Pin or bound mcp-webfetch's PEP 723 dependencies, or finish removing lxml
-
-state: idea
-horizon: unset
-origin: user:2026-10-01:webfetch-pep723-pinning
-blocked_by: []
-severity: low
-tags: [security, webfetch]
-
-Security review 20261001-082224, finding F47 (LOW, pre-existing): the PEP 723 block declares beautifulsoup4, markdownify and lxml with no version bounds, so every uv cold start resolves whatever the index serves that day. Either add bounds (or uv's exclude-newer), or replace bs4's lxml tree builder with html.parser so lxml leaves the tree as ADR 0024 decided for the search script. Recorded in the ADR 0024 addendum of 2026-10-01.
 
 ### Log
 
