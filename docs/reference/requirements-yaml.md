@@ -8,8 +8,8 @@ sources:
   - requirements.yaml
   - Scripts/task-validator.py
 verified:
-  commit: c9d2175
-  date: 2026-09-29
+  commit: 07be197
+  date: 2026-10-02
 links:
   - scripts
   - skills
@@ -122,8 +122,8 @@ top-level allowlist `Scripts/task-validator.py:TOP_LEVEL_KEYS`, and an unrecogni
 top-level key draws an "unknown top-level key (typo?)" warning. Measured on
 2026-09-29 against the file at `771e142`: of its 21 top-level keys, 8 are in the allowlist and **13 are
 not** — every implementation-record and documentation-record field, plus the
-two-key `archived:` / `archived_note:` marker the file grew once its graph was
-finished `requirements.yaml`. Re-running the validator on a post-implementation
+two-key `archived:` / `archived_note:` marker that `d15ad9a` added to the
+sandbox-run graph once it was finished. Re-running the validator on a post-implementation
 file therefore emits thirteen warnings, and `--strict` turns them into a non-zero
 exit.
 
@@ -136,10 +136,12 @@ vocabulary.
 The wiki sync that closes `/p:implement` writes back what the documentation pass
 touched and what it left open `ClaudeCode/skills/_lib/handoff-contracts.md`, so the
 file is the input to the *next* wiki pass as well as the output of the last one.
-Those open items are real work rather than bookkeeping: the set recorded at this
-commit included a note that three pages carried a placeholder `verified.commit`
-predating the code they described `requirements.yaml` — exactly the false-freshness
-claim [[0002-index-claims-no-freshness]] exists to prevent. It has since been closed.
+Those open items are real work rather than bookkeeping: the set the sandbox-run graph
+recorded when it landed in `1446acb` included a note that three pages carried a
+placeholder `verified.commit` (`e242624`) predating the code they described —
+exactly the false-freshness claim [[0002-index-claims-no-freshness]] exists to
+prevent. It was already closed when `d15ad9a` archived the graph, and the graph that carried it was overwritten
+in `3fbe5bf`.
 
 ## Where the file is: one name, three resolutions
 
@@ -171,15 +173,22 @@ and it gets the same treatment: stated, not invented.
 `requirements.yaml` is a fixed output slot rather than a document with versions.
 `/p:task-plan` writes it at one well-known path and the next planning run overwrites
 it whole — no prompt, no backup, no second file, and nothing in the pipeline reads
-the previous contents first. The file now says so about itself `requirements.yaml`.
+the previous contents first. That holds only for a slot whose plan carries no live
+`roadmap_item`: one that does is checked first, and the run stops and asks before
+overwriting it (see the `roadmap_item` section below,
+`ClaudeCode/skills/task-plan/SKILL.md`). The file said so about itself for as long as the
+sandbox-run graph held the slot — an `archived_note:` added in `d15ad9a` stated
+that the next run would overwrite it "with no prompt and no backup" — and the
+R-0044 graph that replaced it in `3fbe5bf` carries no such statement.
 
-The cost is measured rather than hypothetical: this path has held three task graphs
-and consumed two of them. The Phase 0 clangd/cuda graph was replaced wholesale by
-the luals Phase 1 graph (`75d3d26`, 937 lines in and 1131 out), and that Phase 1
-graph — itself complete and inspector-verified — was replaced by the sandbox-run
-graph (`1446acb`, 1071 in and 953 out), which is what the file still carries at
-`771e142`. Each
-displaced graph survives only inside the commit that deleted it.
+The cost is measured rather than hypothetical: as of `3fbe5bf` this path had held
+four task graphs and consumed three of them. The Phase 0 clangd/cuda graph was
+replaced wholesale by the luals Phase 1 graph (`75d3d26`, 937 lines in and 1131
+out); that Phase 1 graph — itself complete and inspector-verified — was replaced by
+the sandbox-run graph (`1446acb`, 1071 in and 953 out); and the sandbox-run graph,
+shipped and marked archived, was replaced by the R-0044 stdlib Chrome client graph
+(`3fbe5bf`, 4504 in and 1076 out). Each displaced graph survives only inside the
+commit that deleted it.
 
 That is the plainest argument for this wiki that the repo makes on its own. Both
 displaced *features* still have readable designs here — [[spec-purity-unification]]

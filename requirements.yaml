@@ -66,7 +66,7 @@ implementation_notes:
   - "F1 implemented as cache key + stored allow_private flag instead of skip-save; ADR 0026."
   - "Live DDG acceptance (user criterion, 2026-10-01): 23 of 23 queries returned results (15 sequential + 1 accidental + a 7-query batch), 0 blocked, all on the verified transport; the Chrome fallback was never triggered. Raw output under .claude/tmp/ddg-live-20261001/ (not committed)."
 implementation_open_items:
-  - "NFR-5 host start-up budget (150 ms) unmeasured on an unloaded Python 3.9; ADR 0026 'What stayed unverified'."
+  - "NFR-5 host start-up budget (150 ms): closed 2026-10-02 by user acceptance, not by measurement; ADR 0026 addendum."
   - "DDG's structural challenge element never observed; _ddg_blocked stays UNVERIFIED. Concurrent multi-process bursts from one IP were not live-tested."
   - "search_duckduckgo.py has no option parsing: '--help' runs a real search for 'help'."
   - "Deferred to the roadmap: R-0055 (ports, F3), R-0056 (UTS-46, F5), R-0057 (single-pass HTMLParser, F32), R-0058 (PEP 723 pins / lxml, F47), R-0059 (mcp-inspect YAML tab false positive)."

@@ -742,3 +742,9 @@ on the verified transport; session resumption and 0-RTT; HTTP/3 and QUIC;
 proxies; multipart and JSON POST; streaming responses; HRR to P-384; a second
 browser profile; cancelling an in-flight webfetch; and the DDG script's `cdp`
 backend, which drives a real Chrome and has no transport to choose.
+
+## Addendum (2026-10-02): NFR-5 closed by acceptance, not by measurement
+
+The user closed NFR-5 (the 150 ms host start-up budget) on 2026-10-02 by accepting the cost rather than measuring it on an unloaded Python 3.9. The two readings above stand as the only data: 159 ms over baseline on Python 3.14 under concurrent load, and 91 ms on Python 3.9.21, best of three, load not recorded.
+
+The reasons for accepting it: only the search scripts pay it per call, because they start a fresh process per invocation; the webfetch MCP server pays it once per session. A DDG query in the 2026-10-01 acceptance run took 2-3 s and the batch mode waits 2.5-5 s between queries, so the start-up cost is a few percent of a call. The cost is structural: the generated regions live in a script run as `__main__`, which gets no cached bytecode, and the only fix -- an importable shared module -- is what [[0025-generate-do-not-import]] rejects. A later measurement above 150 ms therefore changes nothing in the code.
