@@ -7263,6 +7263,18 @@ def _cache_load(project_root: str, key: str) -> Optional[dict]:
 		return None
 
 
+def _cache_touch(cache_root: str, key: str) -> None:
+	"""Mark a served entry as just used: mtime is what _cache_evict ranks by.
+
+	Best effort -- a failed touch only makes eviction less fair. Freshness is
+	untouched: _cache_age reads the entry's own fetched_at, never the mtime.
+	"""
+	try:
+		os.utime(_cache_path(cache_root, key))
+	except OSError as exc:
+		log.debug("cache touch failed for %s: %s", key[:12], exc)
+
+
 def _cache_age(entry: dict) -> float:
 	return time.time() - entry.get("fetched_at", 0)
 
@@ -7301,7 +7313,7 @@ def _cache_save(project_root: str, key: str, entry: dict) -> None:
 
 
 def _cache_evict(project_root: str) -> None:
-	"""Drop the oldest entries until the tree fits CACHE_MAX_BYTES."""
+	"""Drop the least recently used entries (mtime is refreshed on every hit) until the tree fits CACHE_MAX_BYTES."""
 	cache_dir = _cache_dir(project_root)
 	try:
 		names = [n for n in os.listdir(cache_dir) if n.endswith(".json")]
@@ -8083,6 +8095,7 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 				f"cached body is {cached_size} bytes, over max_bytes={max_bytes}. "
 				f"Raise max_bytes to convert it anyway."
 			)}
+		_cache_touch(cache_root, key)
 		return _format_response(
 			entry.get("status", 0), entry.get("final_url", url),
 			entry.get("headers", {}), entry.get("body", ""),

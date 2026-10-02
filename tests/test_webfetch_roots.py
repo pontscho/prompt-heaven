@@ -29,13 +29,16 @@ Groups:
   C  the dispatcher, the status reply and the tool description
   D  the CLI: --cache-root default and ~ expansion, both entry points
   X  the default's XDG resolution: set, unset, relative
+  L  eviction is LRU: a hit refreshes the entry's mtime, never its content
   E  hygiene
 """
 
 import contextlib
 import io
+import json
 import os
 import sys
+import time
 import types
 
 sys.dont_write_bytecode = True
@@ -47,7 +50,7 @@ NAME = "webfetch_roots"
 SERVER = H.repo_path("Scripts", "mcp-webfetch.py")
 STUBBED = ("bs4", "markdownify")
 SWAPPED = ("_fetch_once", "_check_host_allowed", "handle_fetch", "McpServer",
-           "asyncio")
+           "asyncio", "CACHE_MAX_BYTES")
 URL = "https://example.test/doc"
 BODY = "<html><body><p>hello roots</p></body></html>"
 # The default's spelling relative to HOME, written here from the decision
@@ -513,6 +516,101 @@ def group_x(suite, wf, ws):
 
 
 # ---------------------------------------------------------------------------
+# Group L -- eviction is least recently USED: a hit refreshes the mtime
+# ---------------------------------------------------------------------------
+
+def entry_path(wf, cache, url):
+    """The on-disk path of `url`'s default-call entry (GET, no headers)."""
+    return wf._cache_path(cache, wf._cache_key(url, "GET", {}, False))
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def group_l(suite, wf, ws):
+    proj, cache = roots(ws, "l1")
+    with offline(wf):
+        call(lambda: wf.handle_fetch({"url": URL}, proj, cache_root=cache))
+    path = entry_path(wf, cache, URL)
+    old = time.time() - 100000
+    stored_before = read_json(path) if os.path.isfile(path) else None
+    if stored_before is not None:
+        os.utime(path, (old, old))
+    calls = []
+    with offline(wf, calls):
+        kind, got = call(lambda: wf.handle_fetch({"url": URL}, proj,
+                                                 cache_root=cache))
+    mtime = os.stat(path).st_mtime if os.path.isfile(path) else None
+    problems = []
+    if stored_before is None:
+        problems.append("the first fetch wrote no entry at %s" % path)
+    if kind != "ok" or "error" in got or "(cached)" not in text_of(got):
+        problems.append("the second call was not a cached answer: %s"
+                        % (got if kind != "ok" else text_of(got))[:200])
+    if calls:
+        problems.append("the hit fetched (%d) -- not a hit" % len(calls))
+    if mtime is None or mtime < time.time() - 60:
+        problems.append("the hit left the entry's mtime at %r (set to %r)"
+                        % (mtime, old))
+    suite.record("L", "fresh-hit-refreshes-entry-mtime", problems,
+                 detail=["mtime set 100000 s into the past, then one hit",
+                         "mtime after: %r, now %r" % (mtime, time.time())])
+
+    stored_after = read_json(path) if os.path.isfile(path) else None
+    problems = []
+    if stored_before is None or stored_after is None:
+        problems.append("no entry to compare")
+    elif stored_after != stored_before:
+        problems.append("the hit rewrote the entry: fetched_at %r -> %r"
+                        % (stored_before.get("fetched_at"),
+                           stored_after.get("fetched_at")))
+    suite.record("L", "hit-leaves-entry-content-and-fetched-at-unchanged",
+                 problems,
+                 detail=["freshness reads fetched_at, never the mtime",
+                         "fetched_at: %r" % ((stored_after or {})
+                                             .get("fetched_at"),)])
+
+    # LRU: a (oldest written, then hit), b (never hit), then c is written
+    # with the ceiling at two entries.  LRU drops b; FIFO would drop a.
+    proj, cache = roots(ws, "l2")
+    urls = dict((n, "https://example.test/lru-%s" % n) for n in "abc")
+    with offline(wf):
+        for name in "ab":
+            call(lambda: wf.handle_fetch({"url": urls[name]}, proj,
+                                         cache_root=cache))
+    paths = dict((n, entry_path(wf, cache, u)) for n, u in urls.items())
+    now = time.time()
+    for name, age in (("a", 300), ("b", 200)):
+        if os.path.isfile(paths[name]):
+            os.utime(paths[name], (now - age, now - age))
+    size = os.stat(paths["a"]).st_size if os.path.isfile(paths["a"]) else 0
+    with offline(wf):
+        call(lambda: wf.handle_fetch({"url": urls["a"]}, proj,
+                                     cache_root=cache))
+        with swapped(wf, CACHE_MAX_BYTES=2 * size):
+            call(lambda: wf.handle_fetch({"url": urls["c"]}, proj,
+                                         cache_root=cache))
+    alive = dict((n, os.path.isfile(p)) for n, p in paths.items())
+    problems = []
+    if not size:
+        problems.append("entry a was never written")
+    if not alive["a"]:
+        problems.append("the recently HIT entry a was evicted (FIFO by "
+                        "write time, not LRU)")
+    if alive["b"]:
+        problems.append("the never-hit entry b survived")
+    if not alive["c"]:
+        problems.append("the entry just written (c) is gone")
+    suite.record("L", "eviction-drops-least-recently-used-not-oldest-written",
+                 problems,
+                 detail=["a written first and hit, b written later never hit,"
+                         " c written with CACHE_MAX_BYTES = 2 entries",
+                         "alive: %s, entry size %d" % (alive, size)])
+
+
+# ---------------------------------------------------------------------------
 # Group E -- hygiene
 # ---------------------------------------------------------------------------
 
@@ -582,6 +680,7 @@ def run(opts=None):
             group_c(suite, wf, ws)
             group_d(suite, wf, ws)
             group_x(suite, wf, ws)
+            group_l(suite, wf, ws)
 
     group_e(suite, wf, originals, real_default, existed, before, pyc_before)
     suite.print_summary()

@@ -618,7 +618,9 @@ SUITES = [
      "refused before the fetch -- with the dispatcher, the status reply, the "
      "tool description and both CLI entry points (~ expanded) threading it, "
      "HOME and XDG_CACHE_HOME pinned and the real default dir asserted "
-     "untouched, network stubbed", 22),
+     "untouched, network stubbed; eviction least recently used -- a hit "
+     "refreshes the entry's mtime and leaves its content and fetched_at "
+     "alone", 25),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

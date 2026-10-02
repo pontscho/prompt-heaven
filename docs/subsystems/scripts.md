@@ -338,6 +338,16 @@ Two things about that launch line are deliberate, not incidental:
   under `~/.claude` behind its own flag; on 2026-10-02 the user moved it out to the
   XDG cache directory, and `--cache-root` stopped meaning a parent of
   `.cache/webfetch` and became the directory itself.
+- **Eviction is least recently used, and mtime means "last used".** Past
+  `CACHE_MAX_BYTES` the entries with the oldest mtime go first
+  `Scripts/mcp-webfetch.py:_cache_evict`, and every fresh hit refreshes its entry's
+  mtime `Scripts/mcp-webfetch.py:_cache_touch`. Before this a hit wrote nothing, so
+  eviction was FIFO by write time: the moved 180-entry cache sat at the 64 MiB cap
+  dropping entries in write order, a hit one included. Freshness does not read
+  mtime — an entry's age is its stored `fetched_at` `Scripts/mcp-webfetch.py:_cache_age`
+  — so the touch cannot make a stale entry look fresh. Filesystem atime was
+  rejected as the signal: `noatime`/`relatime` mounts drop or coarsen it, and
+  indexers and backups move it without a fetch.
 
 Other servers: `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`,
 `mcp-postgres.py`.
