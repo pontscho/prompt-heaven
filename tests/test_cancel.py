@@ -1912,6 +1912,62 @@ def _g_no_reexecute(pg):
         fake.close()
 
 
+PG_DRAIN_TIMEOUT = 0.5
+PG_DRAIN_BOUND = 3.0
+
+
+def _g_drip_drain_bounded(pg):
+    """A cancel socket that drips one byte every 0.2s never reaches EOF; the
+    drain must still end within one total timeout, or _cancel_lock is held
+    forever and exchange()'s finally can never hand the connection back."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    stop = threading.Event()
+
+    def drip():
+        try:
+            conn, _addr = srv.accept()
+        except OSError:
+            return
+        try:
+            conn.settimeout(PG_WAIT)
+            FakePg._recv(conn, 16)
+            while not stop.wait(0.2):
+                conn.sendall(b"x")
+        except (OSError, EOFError):
+            pass
+        finally:
+            conn.close()
+
+    threading.Thread(target=drip, daemon=True, name="fake-pg-drip").start()
+    try:
+        conn = pg.PgConnection("127.0.0.1", srv.getsockname()[1], "u", "", "d",
+                               "disable", PG_DRAIN_TIMEOUT)
+        conn.backend_pid, conn.backend_secret = PG_FAKE_PID, PG_FAKE_SECRET
+        owner = pg._Reclaim()
+        conn._exchange_owner = owner
+        box = {}
+        thread = threading.Thread(
+            target=lambda: box.setdefault("value", conn.send_cancel_request(owner)),
+            daemon=True, name="fake-pg-cancel")
+        started = time.monotonic()
+        thread.start()
+        thread.join(PG_DRAIN_BOUND)
+        if thread.is_alive():
+            return ["send_cancel_request still draining %.1fs after it started "
+                    "(timeout %.1fs) -- the drain is bounded per recv, not in "
+                    "total, so _cancel_lock is never released"
+                    % (time.monotonic() - started, PG_DRAIN_TIMEOUT)]
+        if box.get("value") is not True:
+            return ["send_cancel_request returned %r, not True -- the cancel "
+                    "was sent" % (box.get("value"),)]
+        return []
+    finally:
+        stop.set()
+        srv.close()
+
+
 def group_behaviour(suite):
     """G. the PostgreSQL cancel end to end, against FakePg."""
     cases = [
@@ -1930,6 +1986,9 @@ def group_behaviour(suite):
         ("a cancelled statement is never re-executed on a dropped connection",
          "_run's reconnect-once retry is for a failed socket, not a cancel: "
          "no second run AND no redial"),
+        ("a drip-feeding cancel socket cannot hold the drain open",
+         "the drain after a CancelRequest is bounded by ONE total timeout, "
+         "not one per recv, so _cancel_lock is always released"),
     ]
     try:
         pg = _load_postgres()
@@ -1950,7 +2009,7 @@ def group_behaviour(suite):
     except Exception as exc:                             # noqa: BLE001
         results += [["raised %s: %s" % (type(exc).__name__, exc)]] * 2
     for fn in (_g_cancel_after_exchange, _g_cancel_before_exchange,
-               _g_no_reexecute):
+               _g_no_reexecute, _g_drip_drain_bounded):
         try:
             results.append(fn(pg))
         except Exception as exc:                         # noqa: BLE001

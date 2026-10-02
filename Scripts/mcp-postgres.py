@@ -57,6 +57,7 @@ import ssl
 import struct
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
@@ -634,9 +635,17 @@ class PgConnection:
                     probe._negotiate_ssl()
                 probe._send_raw(struct.pack("!iiii", 16, CANCEL_REQUEST_CODE,
                                             self.backend_pid, self.backend_secret))
+                # ONE total deadline, not per recv: a peer dripping a byte at a
+                # time would otherwise hold _cancel_lock (and exchange()) forever.
+                deadline = time.monotonic() + self.timeout
                 try:
-                    while probe.sock.recv(1):
-                        pass
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        probe.sock.settimeout(remaining)
+                        if not probe.sock.recv(1):
+                            break
                 except OSError:
                     pass        # a reset or a TLS close without close_notify
                 log.debug("CancelRequest sent for backend %s", self.backend_pid)

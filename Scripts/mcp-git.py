@@ -592,8 +592,15 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
 
     The group id is the child's pid (start_new_session makes it the leader).
     No os.getpgid() round trip, on purpose: once the child is reaped
-    (returncode set) that pid may name somebody else's process, and while
-    returncode is None the worker's communicate() has not reaped it.
+    (returncode set) that pid may name somebody else's process.
+
+    The returncode check narrows that window; it does not close it. The
+    worker's communicate() can reap the child between the check and the
+    killpg, and nothing here holds Popen's (private) waitpid lock. Accepted
+    (R-0046): a wrong target needs the pid recycled inside that window AND
+    its new owner leading a group of that id. While any member of the old
+    group lives, the id cannot be recycled -- killpg then reaches exactly
+    the surviving helpers it was meant for.
     """
     if proc.returncode is not None:
         return
