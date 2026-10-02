@@ -1,0 +1,460 @@
+{
+  "format": "chrome_capture/fixture/v1",
+  "label": "navigate",
+  "meta": {
+    "chrome_version": "154.0.8037.58",
+    "captured_on": "2026-10-02",
+    "mode": "tls",
+    "source": "navigate-052.json",
+    "index": 52,
+    "exported_by": "chrome_capture.py export"
+  },
+  "client_hello_hex": "0100077c0303429e7fae65ab514aa77053252837df27853300b0e3e7755408b012942c5cdad320f8dd474bfd57623a4f312869f8d98869cc8ed6ebc7a07d77c70589d8a3efe0c60020eaea130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f0035010007134a4a0000fe0d00ba00000100010f0020584da879ada55ca528370192c530a08262d739f67149e3685fb390e70b67473c0090e8c8e2bbb1cfc6aff98457fa980f72d805931bc3bbd7f605f3b448d020bd43e8b2eef0a97696130a69a649b7fdec11a879dff734c906e766402352ca37130e698397910a1c3c232030050fdc2e988a24bee53e84c699ee6998ca893717be357a0701327e37d2fe8a5276cbad3dd57ad5215576f009ef194dc37f479784b65f289f8136fe4e9c78cafa2723caf5a47bfd0010000e000c02683208687474702f312e31000000160014000011636170747572652e6c6f63616c686f737400050005010000000000170000ca3400ba00b80582df1302010582df1302060582df13020d0582df13020e0582df13020f0582df1302120582df1302130582df13021408839a648c9b2d010708839a648c9b2d010808839a648c9b2d010908839a648c9b2d010a08839a648c9b2d010b08839a648c9b2d010c08839a648c9b2d010d08839a648c9b2d011208839a648c9b2d011304d679090104d679090404d679090504d679090604d679090704d679090804d679090a04d679090b04d679090c04d679090d04d679090f000d001a0018caca09040905090604030804040105030805050108060601002d00020101ff01000100003304ef04eddada00010011ec04c037586d84eb75e6f22525f123aeb094f6b84066c07e695a978308ae38bca72458bcca622c97f913ac316bd5446c0d78c0da83a4c0eb45475bbb45a848a16350b2e84b44c2cd3935565c036d66435f95322a3e9676996003615a2e625116ff9718ae05cc95228747acbf66b39404a10573c6b8cf177ffb321eea9a530ab39e2d8b650ce14017f584d3f55d56f6370b20788606a13ff4bb73926df31a37ac1c2188fa8862235c668c2b2cdb98c990c291b9916cf14f9d4ca7920ca7b6e89213329916e81f643b662f036dcac511b6a111b1c67c6fc9aa2aa84581617fe31610c196a10329413ac7121634aeb96c5af0cc57381823c7f3a6b056025385c9c16269c3e1b5540471888c8f42939e9f0400167a2b6b367c26dc06717c284fb507d27a6e762201a0fb648de421f6a482a2d25c76d171d3925a56701f7b487e9791af8966a2060c7e59b44e2ba69239085e66d535c2a10ce8c348696c58f4a6818fe90c200c5ac4d81f93713a56eb93f4c85aced216c1932ebc81c224995039b38f7f798b7e8368474b578d1c8e0471b6b15307d63258eb735350339a48249434aab57adc9136386ecc2205032a0e9ebbad594347f286cf4f888b085655f634b4a49bb5edc82b7cdb3ad2f79582dc354e312419e828135ac8030389d8a18f407a8f56931f72101fb5ac3b94ba1f05887caf8a9731f263d3877c22994c8f8bbd7ccc43bf02b37b32582fcb7b1c51ca75cb9fe3a82e8ceba698d971c84448599482def996f28076de574a41f8aecba628fa1b1eeb1c83d483281d347761386f9b3a7c72c1c53afc4f59b1a36a799808225a0d945a1f370eff00b0bbdaa403102c1e56230e89598206930af14720256bf78a4b15f4bd9aa63c3b2a13e7fb42743c94ae3a8037d1ca1f88234a19ccdf6b59a79858ee0730c4ea17296109a27cc5801932ea5c2c5c63356fe30013848bb1c10477140a9cd35135fc1880d8063b779bcadc50a156af8b7659ee5a573104b966d86b79a2b524d98a2d039e8c785cb7421e6943b1cdb559127748d2959c6919ad210202337143ddb765dc986563757a06413c4c471bac7b06edac64a1c238db731bae617406c95ccde70f26cc196bc4a7a5c4c4bae2ad37da07b8c47f6ca05e7cb00cba23292a2c7c06b60d43d08c0c143fa476c3a41a7c5071511d54c1b71176b1e6b9f38ab12ccb5dda698f0268944417590379a737f458bf351e338b40b461258b6b1ac8d62d96613d00199d296a620b8c77473b75a12253b9db36d4d55dd25b50aff2507cd053c24255222a8a445653be0c626ec2c8efac2c635607224439377aa3555b27211a97e14672c08296c4c45707097b59422be4e120e010a15cc68756964f8a4bc571808f0631c3c4267bded9a31ea40f7192448e0094e605be5f5bcc83262d5f663a6eb6c9b620a45c57177ff7004378572ffb049700cc6a735a326111980a9679807753791872825039a38d23567b17aa8d68a865d437296fc2906d9c86c3858a320b84d8347bc840656b5ac21d845e8e5869b072921f5208bffb23b50a8582047fd5c207a3b5261ac0279d38204747a6dd05190ca104c7531e7b66b5bd9459768b604c916c28640eaec962ca794f012babd77ebcd2a7b75c61827b826ff2a514c1328e1468925aaaa4000c945d05becdb23d94834e2fe75a189b685db2f981b8337c01e0062423c1fe4c6756bd47001d0020c71538b1c31fe7e12ef562248f66b92e16f4e8084f3b94149dd6d586401cb11700120000000b00020100002b0007060a0a03040303000a000c000adada11ec001d0017001800230000001b000302000244cd00050003026832caca000100",
+  "client_hello_record_lengths": [
+    1920
+  ],
+  "sni": "capture.localhost",
+  "ech_payload_len": 144,
+  "fingerprints": {
+    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,65037-16-0-5-23-51764-13-45-65281-51-18-11-43-10-35-27-17613,4588-29-23-24,0",
+    "ja3_md5": "b3e7f3753ca67dff74171291dec5f2d7",
+    "ja4": "t13d1517h2_8daaf6152771_cb7bf5808d99",
+    "ja4_r": "t13d1517h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,ca34,fe0d,ff01_0904,0905,0906,0403,0804,0401,0503,0805,0501,0806,0601",
+    "ja4_o": "t13d1517h2_acb858a92679_d7bd39ed0b56",
+    "ja4_ro": "t13d1517h2_1301,1302,1303,c02b,c02f,c02c,c030,cca9,cca8,c013,c014,009c,009d,002f,0035_fe0d,0010,0000,0005,0017,ca34,000d,002d,ff01,0033,0012,000b,002b,000a,0023,001b,44cd_0904,0905,0906,0403,0804,0401,0503,0805,0501,0806,0601"
+  },
+  "tls": {
+    "version": "TLSv1.3",
+    "alpn": "h2"
+  },
+  "h2": {
+    "preface_ok": true,
+    "preface_frames": [
+      {
+        "type": 4,
+        "name": "SETTINGS",
+        "flags": 0,
+        "stream_id": 0,
+        "length": 24,
+        "settings": [
+          {
+            "id": 1,
+            "name": "HEADER_TABLE_SIZE",
+            "value": 65536
+          },
+          {
+            "id": 2,
+            "name": "ENABLE_PUSH",
+            "value": 0
+          },
+          {
+            "id": 4,
+            "name": "INITIAL_WINDOW_SIZE",
+            "value": 6291456
+          },
+          {
+            "id": 6,
+            "name": "MAX_HEADER_LIST_SIZE",
+            "value": 262144
+          }
+        ]
+      },
+      {
+        "type": 8,
+        "name": "WINDOW_UPDATE",
+        "flags": 0,
+        "stream_id": 0,
+        "length": 4,
+        "increment": 15663105
+      }
+    ],
+    "frames": [
+      {
+        "type": 4,
+        "name": "SETTINGS",
+        "flags": 0,
+        "stream_id": 0,
+        "length": 24,
+        "settings": [
+          {
+            "id": 1,
+            "name": "HEADER_TABLE_SIZE",
+            "value": 65536
+          },
+          {
+            "id": 2,
+            "name": "ENABLE_PUSH",
+            "value": 0
+          },
+          {
+            "id": 4,
+            "name": "INITIAL_WINDOW_SIZE",
+            "value": 6291456
+          },
+          {
+            "id": 6,
+            "name": "MAX_HEADER_LIST_SIZE",
+            "value": 262144
+          }
+        ]
+      },
+      {
+        "type": 8,
+        "name": "WINDOW_UPDATE",
+        "flags": 0,
+        "stream_id": 0,
+        "length": 4,
+        "increment": 15663105
+      },
+      {
+        "type": 1,
+        "name": "HEADERS",
+        "flags": 37,
+        "stream_id": 1,
+        "length": 483,
+        "priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 256
+        }
+      },
+      {
+        "type": 4,
+        "name": "SETTINGS",
+        "flags": 1,
+        "stream_id": 0,
+        "length": 0,
+        "ack": true
+      },
+      {
+        "type": 1,
+        "name": "HEADERS",
+        "flags": 37,
+        "stream_id": 3,
+        "length": 135,
+        "priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 220
+        }
+      }
+    ],
+    "settings_acks": 1,
+    "akamai": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+    "goaway_received": null,
+    "end_reason": "timeout",
+    "streams": [
+      {
+        "stream_id": 1,
+        "headers_flags": 37,
+        "headers_priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 256
+        },
+        "pad_len": null,
+        "end_stream": true,
+        "rst_stream": null,
+        "body_len": 0,
+        "header_block_hex": "82419120eb4db6157a0e41d139d09b8d3cdb2dff87845887a47e561cc5801f40874148b1275ad1ffb8fe6f4f61e935b4ff3f7de0fe42db5fcfd29fce239e6a0aa5e9ec3d25fe7efbc1fc85b6bf9fa53f9d274a90ff576c1d527f3f7de0fe5f7ff9408b4148b1275ad1ad49e33505023f30408d4148b1275ad1ad5d034ca7b29f07226d61634f53224092b6b9ac1c8558d520a4b6c2ad617b5a54251f01317ad9d07f66a281b0dae053fad0321aa49d13fda992a49685340c8a6adca7e28104416e277fb521aeba0bc8b1e632586d975765c53facd8f7e8cff4a506ea5531149d4ffda97a7b0f49580b6d2e05c0b814dc394761986d975765cf53e5497ca589d34d1f43aeba0c41a4c7a98f33a69a3fdf9a68fa1d75d0620d263d4c79a68fbed00177fe8d48e62b03ee697e8d48e62b1e0b1d7f46a4731581d754df5f2c7cfdf6800bbdf43aeba0c41a4c7a9841a6a8b22c5f249c754c5fbef046cfdf6800bbbf408a4148b4a549275906497f83a8f517408a4148b4a549275a93c85f86a87dcd30d25f408a4148b4a549275ad416cf023f31408a4148b4a549275a42a13f8690e4b692d49f50929bd9abfa5242cb40d25fa523b3e94f684c9f51952d4b62bbf45a96e1bbefb4005dffa2d5f7da002ef74086aec31ec327d785b6007d286f",
+        "headers": [
+          {
+            "name": ":method",
+            "value": "GET",
+            "rep": "indexed",
+            "index": 2
+          },
+          {
+            "name": ":authority",
+            "value": "capture.localhost:48535",
+            "rep": "literal_incremental",
+            "name_index": 1,
+            "value_huffman": true
+          },
+          {
+            "name": ":scheme",
+            "value": "https",
+            "rep": "indexed",
+            "index": 7
+          },
+          {
+            "name": ":path",
+            "value": "/",
+            "rep": "indexed",
+            "index": 4
+          },
+          {
+            "name": "cache-control",
+            "value": "max-age=0",
+            "rep": "literal_incremental",
+            "name_index": 24,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-ch-ua",
+            "value": "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-ch-ua-mobile",
+            "value": "?0",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": false,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-ch-ua-platform",
+            "value": "\"macOS\"",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": false,
+            "name_huffman": true
+          },
+          {
+            "name": "upgrade-insecure-requests",
+            "value": "1",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": false,
+            "name_huffman": true
+          },
+          {
+            "name": "user-agent",
+            "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+            "rep": "literal_incremental",
+            "name_index": 58,
+            "value_huffman": true
+          },
+          {
+            "name": "accept",
+            "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "rep": "literal_incremental",
+            "name_index": 19,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-site",
+            "value": "none",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-fetch-mode",
+            "value": "navigate",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-fetch-user",
+            "value": "?1",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": false,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-fetch-dest",
+            "value": "document",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          },
+          {
+            "name": "accept-encoding",
+            "value": "gzip, deflate, br, zstd",
+            "rep": "literal_incremental",
+            "name_index": 16,
+            "value_huffman": true
+          },
+          {
+            "name": "accept-language",
+            "value": "en-GB,en-US;q=0.9,en;q=0.8",
+            "rep": "literal_incremental",
+            "name_index": 17,
+            "value_huffman": true
+          },
+          {
+            "name": "priority",
+            "value": "u=0, i",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          }
+        ],
+        "header_order": [
+          ":method",
+          ":authority",
+          ":scheme",
+          ":path",
+          "cache-control",
+          "sec-ch-ua",
+          "sec-ch-ua-mobile",
+          "sec-ch-ua-platform",
+          "upgrade-insecure-requests",
+          "user-agent",
+          "accept",
+          "sec-fetch-site",
+          "sec-fetch-mode",
+          "sec-fetch-user",
+          "sec-fetch-dest",
+          "accept-encoding",
+          "accept-language",
+          "priority"
+        ],
+        "data_frames": []
+      },
+      {
+        "stream_id": 3,
+        "headers_flags": 37,
+        "headers_priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 220
+        },
+        "pad_len": null,
+        "end_stream": true,
+        "rst_stream": null,
+        "body_len": 0,
+        "header_block_hex": "82cc8704896251f7310f52e621ffc8c6cac953b1352398ac0fb9a5fa352398ac782c75fd1a91cc56075d537d1a91cc5611de6ff7e69a3e8d48e62b1f3f5f2c7cfdf6800bbd7f068840e92ac7b0d31aaf7f0685a8eb10f6237f0584352398bf73979d29ad17186083ad36d855e8390744e7426e34f36cb6c7c5c47f0485b600fd286f",
+        "headers": [
+          {
+            "name": ":method",
+            "value": "GET",
+            "rep": "indexed",
+            "index": 2
+          },
+          {
+            "name": ":authority",
+            "value": "capture.localhost:48535",
+            "rep": "indexed",
+            "index": 76
+          },
+          {
+            "name": ":scheme",
+            "value": "https",
+            "rep": "indexed",
+            "index": 7
+          },
+          {
+            "name": ":path",
+            "value": "/favicon.ico",
+            "rep": "literal_without_indexing",
+            "name_index": 4,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-ch-ua-platform",
+            "value": "\"macOS\"",
+            "rep": "indexed",
+            "index": 72
+          },
+          {
+            "name": "user-agent",
+            "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+            "rep": "indexed",
+            "index": 70
+          },
+          {
+            "name": "sec-ch-ua",
+            "value": "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
+            "rep": "indexed",
+            "index": 74
+          },
+          {
+            "name": "sec-ch-ua-mobile",
+            "value": "?0",
+            "rep": "indexed",
+            "index": 73
+          },
+          {
+            "name": "accept",
+            "value": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "rep": "literal_incremental",
+            "name_index": 19,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-site",
+            "value": "same-origin",
+            "rep": "literal_incremental",
+            "name_index": 69,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-mode",
+            "value": "no-cors",
+            "rep": "literal_incremental",
+            "name_index": 69,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-dest",
+            "value": "image",
+            "rep": "literal_incremental",
+            "name_index": 68,
+            "value_huffman": true
+          },
+          {
+            "name": "referer",
+            "value": "https://capture.localhost:48535/",
+            "rep": "literal_incremental",
+            "name_index": 51,
+            "value_huffman": true
+          },
+          {
+            "name": "accept-encoding",
+            "value": "gzip, deflate, br, zstd",
+            "rep": "indexed",
+            "index": 69
+          },
+          {
+            "name": "accept-language",
+            "value": "en-GB,en-US;q=0.9,en;q=0.8",
+            "rep": "indexed",
+            "index": 68
+          },
+          {
+            "name": "priority",
+            "value": "u=1, i",
+            "rep": "literal_incremental",
+            "name_index": 67,
+            "value_huffman": true
+          }
+        ],
+        "header_order": [
+          ":method",
+          ":authority",
+          ":scheme",
+          ":path",
+          "sec-ch-ua-platform",
+          "user-agent",
+          "sec-ch-ua",
+          "sec-ch-ua-mobile",
+          "accept",
+          "sec-fetch-site",
+          "sec-fetch-mode",
+          "sec-fetch-dest",
+          "referer",
+          "accept-encoding",
+          "accept-language",
+          "priority"
+        ],
+        "data_frames": []
+      }
+    ]
+  },
+  "h1": null,
+  "hrr": null,
+  "server_set_cookie_names": [],
+  "capture_errors": []
+}

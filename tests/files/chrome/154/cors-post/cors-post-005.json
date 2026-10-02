@@ -1,0 +1,631 @@
+{
+  "format": "chrome_capture/fixture/v1",
+  "label": "cors-post",
+  "meta": {
+    "chrome_version": "154.0.8037.58",
+    "captured_on": "2026-10-02",
+    "mode": "tls",
+    "source": "cors-post-020.json",
+    "index": 20,
+    "exported_by": "chrome_capture.py export"
+  },
+  "client_hello_hex": "0100077c0303b2dca0d5b8e2fcdfc06c0eeb03eb83173d0ce22ede224d87dc87cab47daa2dd020be1ca23b7fa867800c778263e317943f5097dfeebda08c1c154f6d07c915476b0020caca130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f0035010007139a9a00000010000e000c02683208687474702f312e310012000044cd0005000302683200170000000b0002010000230000003304ef04ed8a8a00010011ec04c0dee05c03dcc193cc72dcc448845c64c79663ca49144f641ace270371e3be5305becd05b0b30681dafcc55a8ac407419efd6ab61b90b81b39934cd080577751e7503e9f08a94bb785aebc18e52c7a938a1031534e86cb07f3c2a4199bc9b697913d0255a8fa0fa44a284c054c7a6220f011a52c22393a30cfa55c24cb0a888a305897f3a5a44a46a8d380332c727c96706bea4bd4b80c49681eb0735595584947e2c0e1cb30f2001eaf33493b60592f1cb23a246bf0f1c63fd6ab2703298a87745915a424ca8e2954a6348185d19306408529aed4c5ae6925be870cb37749f7d026bbfa9328573103c8157e9c83ae2947d0682960e76e9e14656964ac5b57832d674654699fd57479d60ccad51878740544c8e58114105c2c70858b800a198853f954a28f459db8eab203c7adbca8c622d1b2ed73c9affb293ed1410843c015e36ace147cfc2854782788c0b07048a0ba6eb95ca878a36e8b5235e359d3e1a56df60e3bf7cf4828c60d38a2a6db0c32ab37b0176b5e6906f5e9349e7b5043f8a8bc517c7826383705927ea645f33c5f12319105aa473b8a7926ec6eb3254905754529467e81d881afb2a77845c5be83782335ac12f8bf8ee11c80272c10111e10c2718232682b98ce31e1b93d210ec3f7240e95102a719ce3a36436c9757c363917836593a787e626409e94133b323cc576b611117af9d0b7b3ea8d3ab6acb31b3ad7c91000d29b3b407640846eb9d82e8c13092767140d93911acbc60afb661a65b7fddc396f37499dc34dd21caf93992b557b3f0344c8f7e602cfc47853f49ad42b6f63c698d1d3ba58fa3eb6f56d6fa21b6489ceedba31d91509fb546e2301b0d58055e6145e5e976f54db4ab9b146d0629f02054ca966a13d904bc6a73a6023b17517216430c5314ca43bc5c44ba446da7bb5fd4845ca0297ffd6b79a970f5f23656046ba82c51fa90c77db00c84ab08b954542212198b71979053422af8badbb3aa224f8481a24071510122d17b30d24a341fc5915e724de9335863762bde85bc7033f98852236048d3382159ba07c5b4231ef568e57219d86528e8cd110e19a1239300d49e0c7c68742933bcbceb08d0d175f848785f79b2812c7090181a05af2bdda606ce6082eda6949c0200f72a5a476070f1b584907b42414f0ba6cb4437cec164f908774b06f690805bea07ed6185810ec6a284ba80066100e72b0f9f13b50d649fe095015bb79aa065929282105666d171b7963122df8c80cae855bb83a211c8b69792659bd646c4192c3e4d48240a96f7d19a542b3b0d1f868bb131d4cb29a11047e094a28f28cb12d7a8ff678640af7a29cc65a50d61976401884eb08c3391bcae1c0ca628fa09358a9e42e55851a4cf55d38b7c4fb6c6ff4034e33691e871290211597a3e7ccabf1a7c1b1c3177385b697965e8856f8d5c2d0480c6b3b9e232920bc3b81135c6316d81ad61b44561a6b0a482a7387379e2b6bc6b80d2af76c6e62141900a3bcbb4cef447899405140e824b33a2053343e03f4a10773c116d75a37c95ad1151500452c10c103ef109c60747dfb710721f8713fd5c34db540bdcb9cd7d12b0b9a010d8b57d2126b40368d44257f9ac3baed2a7234d8d33db849dc0d05ad6539e8c6002b5a06f90ab28d97a7aeb83b33db6ce304de31ed011e5b88bc4d008740bd6dedd766ef10c4bc471ebc4503a493069c1516001d00202d1e5f488bd2ee87a27e8fb5430ccaceaaf1baf0706a5b552b5968998302651c000000160014000011636170747572652e6c6f63616c686f7374002d00020101000500050100000000000d001a0018aaaa09040905090604030804040105030805050108060601ca3400ba00b80582df1302010582df1302060582df13020d0582df13020e0582df13020f0582df1302120582df1302130582df13021408839a648c9b2d010708839a648c9b2d010808839a648c9b2d010908839a648c9b2d010a08839a648c9b2d010b08839a648c9b2d010c08839a648c9b2d010d08839a648c9b2d011208839a648c9b2d011304d679090104d679090404d679090504d679090604d679090704d679090804d679090a04d679090b04d679090c04d679090d04d679090f000a000c000a8a8a11ec001d00170018001b0003020002ff01000100002b0007063a3a03040303fe0d00ba00000100012a0020f09828fc948204ec981bded3e2f775f77d4b9be753a15a3bbc4b3215695864120090bc305ecbf654e3cf5ec6ac414a8444d6986bcd20f3b9239d31fe8ba0a720c5a56396c24298c83449f118689b58d61e235a5d04e177440ce72b634abd4b787def9a51ce3f4c3118deb355502859cb5a84a3b503266c5a6ed6ec4d46d11e5b9bdbaad167b57ba1582fd60d138d47a4f26f636f9b8540fe57fc2471a27225a5698ecf5ecaacccf5e975ac36fb7859ad0eb47a7a000100",
+  "client_hello_record_lengths": [
+    1920
+  ],
+  "sni": "capture.localhost",
+  "ech_payload_len": 144,
+  "fingerprints": {
+    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,16-18-17613-23-11-35-51-0-45-5-13-51764-10-27-65281-43-65037,4588-29-23-24,0",
+    "ja3_md5": "3347bd13b54142275766070280db25c2",
+    "ja4": "t13d1517h2_8daaf6152771_cb7bf5808d99",
+    "ja4_r": "t13d1517h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,ca34,fe0d,ff01_0904,0905,0906,0403,0804,0401,0503,0805,0501,0806,0601",
+    "ja4_o": "t13d1517h2_acb858a92679_1f498d51922c",
+    "ja4_ro": "t13d1517h2_1301,1302,1303,c02b,c02f,c02c,c030,cca9,cca8,c013,c014,009c,009d,002f,0035_0010,0012,44cd,0017,000b,0023,0033,0000,002d,0005,000d,ca34,000a,001b,ff01,002b,fe0d_0904,0905,0906,0403,0804,0401,0503,0805,0501,0806,0601"
+  },
+  "tls": {
+    "version": "TLSv1.3",
+    "alpn": "h2"
+  },
+  "h2": {
+    "preface_ok": true,
+    "preface_frames": [
+      {
+        "type": 4,
+        "name": "SETTINGS",
+        "flags": 0,
+        "stream_id": 0,
+        "length": 24,
+        "settings": [
+          {
+            "id": 1,
+            "name": "HEADER_TABLE_SIZE",
+            "value": 65536
+          },
+          {
+            "id": 2,
+            "name": "ENABLE_PUSH",
+            "value": 0
+          },
+          {
+            "id": 4,
+            "name": "INITIAL_WINDOW_SIZE",
+            "value": 6291456
+          },
+          {
+            "id": 6,
+            "name": "MAX_HEADER_LIST_SIZE",
+            "value": 262144
+          }
+        ]
+      },
+      {
+        "type": 8,
+        "name": "WINDOW_UPDATE",
+        "flags": 0,
+        "stream_id": 0,
+        "length": 4,
+        "increment": 15663105
+      }
+    ],
+    "frames": [
+      {
+        "type": 4,
+        "name": "SETTINGS",
+        "flags": 0,
+        "stream_id": 0,
+        "length": 24,
+        "settings": [
+          {
+            "id": 1,
+            "name": "HEADER_TABLE_SIZE",
+            "value": 65536
+          },
+          {
+            "id": 2,
+            "name": "ENABLE_PUSH",
+            "value": 0
+          },
+          {
+            "id": 4,
+            "name": "INITIAL_WINDOW_SIZE",
+            "value": 6291456
+          },
+          {
+            "id": 6,
+            "name": "MAX_HEADER_LIST_SIZE",
+            "value": 262144
+          }
+        ]
+      },
+      {
+        "type": 8,
+        "name": "WINDOW_UPDATE",
+        "flags": 0,
+        "stream_id": 0,
+        "length": 4,
+        "increment": 15663105
+      },
+      {
+        "type": 1,
+        "name": "HEADERS",
+        "flags": 37,
+        "stream_id": 1,
+        "length": 480,
+        "priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 256
+        }
+      },
+      {
+        "type": 4,
+        "name": "SETTINGS",
+        "flags": 1,
+        "stream_id": 0,
+        "length": 0,
+        "ack": true
+      },
+      {
+        "type": 1,
+        "name": "HEADERS",
+        "flags": 37,
+        "stream_id": 3,
+        "length": 138,
+        "priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 220
+        }
+      },
+      {
+        "type": 1,
+        "name": "HEADERS",
+        "flags": 36,
+        "stream_id": 5,
+        "length": 83,
+        "priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 220
+        }
+      },
+      {
+        "type": 0,
+        "name": "DATA",
+        "flags": 1,
+        "stream_id": 5,
+        "length": 10
+      }
+    ],
+    "settings_acks": 1,
+    "akamai": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+    "goaway_received": null,
+    "end_reason": "timeout",
+    "streams": [
+      {
+        "stream_id": 1,
+        "headers_flags": 37,
+        "headers_priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 256
+        },
+        "pad_len": null,
+        "end_stream": true,
+        "rst_stream": null,
+        "body_len": 0,
+        "header_block_hex": "82419120eb4db6157a0e41d139d09b8d3cdb2eff870485628324ac7f40874148b1275ad1ffb8fe6f4f61e935b4ff3f7de0fe42db5fcfd29fce239e6a0aa5e9ec3d25fe7efbc1fc85b6bf9fa53f9d274a90ff576c1d527f3f7de0fe5f7ff9408b4148b1275ad1ad49e33505023f30408d4148b1275ad1ad5d034ca7b29f07226d61634f53224092b6b9ac1c8558d520a4b6c2ad617b5a54251f01317ad9d07f66a281b0dae053fad0321aa49d13fda992a49685340c8a6adca7e28104416e277fb521aeba0bc8b1e632586d975765c53facd8f7e8cff4a506ea5531149d4ffda97a7b0f49580b6d2e05c0b814dc394761986d975765cf53e5497ca589d34d1f43aeba0c41a4c7a98f33a69a3fdf9a68fa1d75d0620d263d4c79a68fbed00177fe8d48e62b03ee697e8d48e62b1e0b1d7f46a4731581d754df5f2c7cfdf6800bbdf43aeba0c41a4c7a9841a6a8b22c5f249c754c5fbef046cfdf6800bbbf408a4148b4a549275906497f83a8f517408a4148b4a549275a93c85f86a87dcd30d25f408a4148b4a549275ad416cf023f31408a4148b4a549275a42a13f8690e4b692d49f50929bd9abfa5242cb40d25fa523b3e94f684c9f51952d4b62bbf45a96e1bbefb4005dffa2d5f7da002ef74086aec31ec327d785b6007d286f",
+        "headers": [
+          {
+            "name": ":method",
+            "value": "GET",
+            "rep": "indexed",
+            "index": 2
+          },
+          {
+            "name": ":authority",
+            "value": "capture.localhost:48537",
+            "rep": "literal_incremental",
+            "name_index": 1,
+            "value_huffman": true
+          },
+          {
+            "name": ":scheme",
+            "value": "https",
+            "rep": "indexed",
+            "index": 7
+          },
+          {
+            "name": ":path",
+            "value": "/lite/",
+            "rep": "literal_without_indexing",
+            "name_index": 4,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-ch-ua",
+            "value": "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-ch-ua-mobile",
+            "value": "?0",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": false,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-ch-ua-platform",
+            "value": "\"macOS\"",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": false,
+            "name_huffman": true
+          },
+          {
+            "name": "upgrade-insecure-requests",
+            "value": "1",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": false,
+            "name_huffman": true
+          },
+          {
+            "name": "user-agent",
+            "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+            "rep": "literal_incremental",
+            "name_index": 58,
+            "value_huffman": true
+          },
+          {
+            "name": "accept",
+            "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "rep": "literal_incremental",
+            "name_index": 19,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-site",
+            "value": "none",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-fetch-mode",
+            "value": "navigate",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-fetch-user",
+            "value": "?1",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": false,
+            "name_huffman": true
+          },
+          {
+            "name": "sec-fetch-dest",
+            "value": "document",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          },
+          {
+            "name": "accept-encoding",
+            "value": "gzip, deflate, br, zstd",
+            "rep": "literal_incremental",
+            "name_index": 16,
+            "value_huffman": true
+          },
+          {
+            "name": "accept-language",
+            "value": "en-GB,en-US;q=0.9,en;q=0.8",
+            "rep": "literal_incremental",
+            "name_index": 17,
+            "value_huffman": true
+          },
+          {
+            "name": "priority",
+            "value": "u=0, i",
+            "rep": "literal_incremental",
+            "name_index": 0,
+            "value_huffman": true,
+            "name_huffman": true
+          }
+        ],
+        "header_order": [
+          ":method",
+          ":authority",
+          ":scheme",
+          ":path",
+          "sec-ch-ua",
+          "sec-ch-ua-mobile",
+          "sec-ch-ua-platform",
+          "upgrade-insecure-requests",
+          "user-agent",
+          "accept",
+          "sec-fetch-site",
+          "sec-fetch-mode",
+          "sec-fetch-user",
+          "sec-fetch-dest",
+          "accept-encoding",
+          "accept-language",
+          "priority"
+        ],
+        "data_frames": []
+      },
+      {
+        "stream_id": 3,
+        "headers_flags": 37,
+        "headers_priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 220
+        },
+        "pad_len": null,
+        "end_stream": true,
+        "rst_stream": null,
+        "body_len": 0,
+        "header_block_hex": "82cb8704896251f7310f52e621ffc8c6cac953b1352398ac0fb9a5fa352398ac782c75fd1a91cc56075d537d1a91cc5611de6ff7e69a3e8d48e62b1f3f5f2c7cfdf6800bbd7f068840e92ac7b0d31aaf7f0685a8eb10f6237f0584352398bf739a9d29ad17186083ad36d855e8390744e7426e34f36cbac5064958c5c47f0485b600fd286f",
+        "headers": [
+          {
+            "name": ":method",
+            "value": "GET",
+            "rep": "indexed",
+            "index": 2
+          },
+          {
+            "name": ":authority",
+            "value": "capture.localhost:48537",
+            "rep": "indexed",
+            "index": 75
+          },
+          {
+            "name": ":scheme",
+            "value": "https",
+            "rep": "indexed",
+            "index": 7
+          },
+          {
+            "name": ":path",
+            "value": "/favicon.ico",
+            "rep": "literal_without_indexing",
+            "name_index": 4,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-ch-ua-platform",
+            "value": "\"macOS\"",
+            "rep": "indexed",
+            "index": 72
+          },
+          {
+            "name": "user-agent",
+            "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+            "rep": "indexed",
+            "index": 70
+          },
+          {
+            "name": "sec-ch-ua",
+            "value": "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
+            "rep": "indexed",
+            "index": 74
+          },
+          {
+            "name": "sec-ch-ua-mobile",
+            "value": "?0",
+            "rep": "indexed",
+            "index": 73
+          },
+          {
+            "name": "accept",
+            "value": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "rep": "literal_incremental",
+            "name_index": 19,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-site",
+            "value": "same-origin",
+            "rep": "literal_incremental",
+            "name_index": 69,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-mode",
+            "value": "no-cors",
+            "rep": "literal_incremental",
+            "name_index": 69,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-dest",
+            "value": "image",
+            "rep": "literal_incremental",
+            "name_index": 68,
+            "value_huffman": true
+          },
+          {
+            "name": "referer",
+            "value": "https://capture.localhost:48537/lite/",
+            "rep": "literal_incremental",
+            "name_index": 51,
+            "value_huffman": true
+          },
+          {
+            "name": "accept-encoding",
+            "value": "gzip, deflate, br, zstd",
+            "rep": "indexed",
+            "index": 69
+          },
+          {
+            "name": "accept-language",
+            "value": "en-GB,en-US;q=0.9,en;q=0.8",
+            "rep": "indexed",
+            "index": 68
+          },
+          {
+            "name": "priority",
+            "value": "u=1, i",
+            "rep": "literal_incremental",
+            "name_index": 67,
+            "value_huffman": true
+          }
+        ],
+        "header_order": [
+          ":method",
+          ":authority",
+          ":scheme",
+          ":path",
+          "sec-ch-ua-platform",
+          "user-agent",
+          "sec-ch-ua",
+          "sec-ch-ua-mobile",
+          "accept",
+          "sec-fetch-site",
+          "sec-fetch-mode",
+          "sec-fetch-dest",
+          "referer",
+          "accept-encoding",
+          "accept-language",
+          "priority"
+        ],
+        "data_frames": []
+      },
+      {
+        "stream_id": 5,
+        "headers_flags": 36,
+        "headers_priority": {
+          "exclusive": true,
+          "dep": 0,
+          "weight": 220
+        },
+        "pad_len": null,
+        "end_stream": true,
+        "rst_stream": null,
+        "body_len": 10,
+        "header_block_hex": "83d1870485628324ac7f5c023130cfcd53032a2f2ad25fa31d75d0620d263d4c795bc78f0b4a7b295adb282d443c8593ec938ec4153070df8567bfd2c57f058321ec477f05842d35a7d7c4cbcac3",
+        "headers": [
+          {
+            "name": ":method",
+            "value": "POST",
+            "rep": "indexed",
+            "index": 3
+          },
+          {
+            "name": ":authority",
+            "value": "capture.localhost:48537",
+            "rep": "indexed",
+            "index": 81
+          },
+          {
+            "name": ":scheme",
+            "value": "https",
+            "rep": "indexed",
+            "index": 7
+          },
+          {
+            "name": ":path",
+            "value": "/lite/",
+            "rep": "literal_without_indexing",
+            "name_index": 4,
+            "value_huffman": true
+          },
+          {
+            "name": "content-length",
+            "value": "10",
+            "rep": "literal_incremental",
+            "name_index": 28,
+            "value_huffman": false
+          },
+          {
+            "name": "sec-ch-ua-platform",
+            "value": "\"macOS\"",
+            "rep": "indexed",
+            "index": 79
+          },
+          {
+            "name": "user-agent",
+            "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+            "rep": "indexed",
+            "index": 77
+          },
+          {
+            "name": "accept",
+            "value": "*/*",
+            "rep": "literal_incremental",
+            "name_index": 19,
+            "value_huffman": false
+          },
+          {
+            "name": "sec-ch-ua",
+            "value": "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
+            "rep": "indexed",
+            "index": 82
+          },
+          {
+            "name": "content-type",
+            "value": "application/x-www-form-urlencoded;charset=UTF-8",
+            "rep": "literal_incremental",
+            "name_index": 31,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-ch-ua-mobile",
+            "value": "?0",
+            "rep": "indexed",
+            "index": 82
+          },
+          {
+            "name": "sec-fetch-site",
+            "value": "same-origin",
+            "rep": "indexed",
+            "index": 69
+          },
+          {
+            "name": "sec-fetch-mode",
+            "value": "cors",
+            "rep": "literal_incremental",
+            "name_index": 68,
+            "value_huffman": true
+          },
+          {
+            "name": "sec-fetch-dest",
+            "value": "empty",
+            "rep": "literal_incremental",
+            "name_index": 68,
+            "value_huffman": true
+          },
+          {
+            "name": "referer",
+            "value": "https://capture.localhost:48537/lite/",
+            "rep": "indexed",
+            "index": 68
+          },
+          {
+            "name": "accept-encoding",
+            "value": "gzip, deflate, br, zstd",
+            "rep": "indexed",
+            "index": 75
+          },
+          {
+            "name": "accept-language",
+            "value": "en-GB,en-US;q=0.9,en;q=0.8",
+            "rep": "indexed",
+            "index": 74
+          },
+          {
+            "name": "priority",
+            "value": "u=1, i",
+            "rep": "indexed",
+            "index": 67
+          }
+        ],
+        "header_order": [
+          ":method",
+          ":authority",
+          ":scheme",
+          ":path",
+          "content-length",
+          "sec-ch-ua-platform",
+          "user-agent",
+          "accept",
+          "sec-ch-ua",
+          "content-type",
+          "sec-ch-ua-mobile",
+          "sec-fetch-site",
+          "sec-fetch-mode",
+          "sec-fetch-dest",
+          "referer",
+          "accept-encoding",
+          "accept-language",
+          "priority"
+        ],
+        "data_frames": [
+          {
+            "length": 10,
+            "flags": 1,
+            "payload_len": 10,
+            "payload_hex": "713d74657374266b6c3d",
+            "payload_truncated": false
+          }
+        ]
+      }
+    ]
+  },
+  "h1": null,
+  "hrr": null,
+  "server_set_cookie_names": [],
+  "capture_errors": []
+}

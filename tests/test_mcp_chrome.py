@@ -22,7 +22,7 @@ FIPS 203's implicit-rejection rule written here as `SHAKE256(z || c, 32)`.
 
 The TLS groups keep the same rule. Group B judges the ClientHello with the
 INDEPENDENT parser of `Scripts/chrome_capture.py` (loaded by path) against the
-committed Chrome 153 captures and the numbers their README states; the module
+committed Chrome 154 captures and the numbers their README states; the module
 never grades its own builder. Group C replays the RFC 8448 section 3 records
 pasted below, runs real TLS stacks (Python ssl over MemoryBIO and a loopback
 socket, `openssl s_server`), and a scripted TLS 1.3 peer written here: its key
@@ -33,7 +33,7 @@ partial self-agreement, cross-checked by the independent stacks. Group H drives
 the HelloRetryRequest path through the same peer and the set 9 captures. Group
 D holds RFC 7541 Appendix B and the Appendix C.2-C.6 vectors as copied out of
 the RFC text by script, and replays every HEADERS block committed under
-tests/files/chrome/153/ (decoded and cross-checked against chrome_capture's
+tests/files/chrome/154/ (decoded and cross-checked against chrome_capture's
 HpackDecoder, re-encoded byte for byte). Group E drives _ChH2Connection
 against H2Responder, an h2 server side written here from RFC 9113: its frames
 are h2f(), its response heads plain RFC 7541 literals, and the client's own
@@ -290,14 +290,14 @@ SOURCE = H.repo_path("Scripts", "_mcp_chrome.py")
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
 MLKEM_VECTORS = H.repo_path("tests", "files", "mlkem")
 CAPTURE_TOOL = H.repo_path("Scripts", "chrome_capture.py")
-FIXTURES = H.repo_path("tests", "files", "chrome", "153")
+FIXTURES = H.repo_path("tests", "files", "chrome", "154")
 FIXTURE_README = os.path.join(FIXTURES, "README.md")
 TLS_CERT = H.repo_path("tests", "files", "tls", "localhost-cert.pem")
 TLS_KEY = H.repo_path("tests", "files", "tls", "localhost-key.pem")
 TLS_CA = H.repo_path("tests", "files", "tls", "test-ca.pem")
 
 GA = "A. CRYPTO KATs: published vectors, each cited"
-GB = "B. CLIENTHELLO: 20 seeds vs the Chrome 153 captures, judged by chrome_capture's parser"
+GB = "B. CLIENTHELLO: 20 seeds vs the Chrome 154 captures, judged by chrome_capture's parser"
 GC = "C. TLS 1.3: MemoryBIO + loopback ssl servers, the RFC 8448 trace, a scripted peer, openssl s_server"
 GH = "H. HELLORETRYREQUEST: P-256 completion, CH2 vs set 9, every refusal"
 GD = "D. HPACK + HEADER PROFILES: RFC 7541 vectors, every committed HEADERS block, caller-header rules"
@@ -685,7 +685,7 @@ CLIENT_ALPS_EE = "08 000006 0004 44cd 0000"
 # 9113 section 6.5, HEADER_TABLE_SIZE = 4096), as a Google front end sends one.
 SERVER_ALPS = "000006 04 00 00000000 0001 00001000"
 
-# The chrome_capture origin of sets 1-5, 8 and 9 (tests/files/chrome/153/README.md).
+# The chrome_capture origin of sets 1-5, 8 and 9 (tests/files/chrome/154/README.md).
 CAPTURE_HOST = "capture.localhost"
 
 # Group B: the h2/h1 TLS sets and the ALPN each one's server negotiated
@@ -1339,10 +1339,10 @@ def suite_tag(s):
     return TLS13_SUITES[s][3]
 
 
-# --- B. ClientHello vs the Chrome 153 captures -------------------------------------
+# --- B. ClientHello vs the Chrome 154 captures -------------------------------------
 
 def readme_facts():
-    """What tests/files/chrome/153/README.md states: JA4 values, extension list, ECH buckets, length formulas."""
+    """What tests/files/chrome/154/README.md states: JA4 values, extension list, ECH buckets, length formulas."""
     with open(FIXTURE_README, encoding="utf-8") as fh:
         text = fh.read()
     facts = {}
@@ -1448,7 +1448,7 @@ def grease_problems(cc, ch):
 
 def group_client_hello(suite, mod, cc, facts, ws):
     """Group B: the builder's first ClientHello, judged by the INDEPENDENT chrome_capture parser [G-d]."""
-    src = "tests/files/chrome/153/README.md"
+    src = "tests/files/chrome/154/README.md"
     built, problems = build_many(mod, cc, CAPTURE_HOST)
     again = outcome(lambda: build_hello(mod, CAPTURE_HOST, 0))
     problems += problem_if(again[0] != "value" or not built or again[1][1] != built[0][1], "seed 0 does not rebuild byte-identically")
@@ -1509,7 +1509,7 @@ def group_client_hello(suite, mod, cc, facts, ws):
         records = [{"client_hello_hex": b[0].hex(), "tls": {"alpn": alpn}} for b in source]
         cand = write_candidates(ws, name, records)
         run_row(suite, GB, "diff-vs-%s" % name, lambda: diff_problems(cc, os.path.join(FIXTURES, name), cand),
-                "chrome_capture diff tests/files/chrome/153/%s/ vs %d built ClientHellos (host %s, ALPN %s): no FIXED difference, no unmatched group" % (name, len(source), host, alpn))
+                "chrome_capture diff tests/files/chrome/154/%s/ vs %d built ClientHellos (host %s, ALPN %s): no FIXED difference, no unmatched group" % (name, len(source), host, alpn))
 
     profile = dict(mod.CHROME_PROFILE)
     removed = profile["sigalgs"][-1]
@@ -2077,7 +2077,7 @@ def group_hrr(suite, mod, cc, facts, ws):
         problems += problem_if([(t, b) for t, b in exts2 if t not in (44, 51)] != [(t, b) for t, b in exts1 if t != 51], "an extension other than key_share / cookie changed")
         delta = facts["ch2_delta"]
         problems += problem_if(delta is None or len(ch2) != len(ch1) - delta[0] + delta[1] + len(cookie), "CH2 is %d bytes; README: CH1 (%d) - %r + %r + cookie (%d)" % (len(ch2), len(ch1), delta and delta[0], delta and delta[1], len(cookie)))
-        return problems, ["tests/files/chrome/153/README.md set 9: CCS first, same random/session id/ciphers/GREASE/order, one 65-byte P-256 share, cookie echoed; length rule %r" % (delta,)]
+        return problems, ["tests/files/chrome/154/README.md set 9: CCS first, same random/session id/ciphers/GREASE/order, one 65-byte P-256 share, cookie echoed; length rule %r" % (delta,)]
     run_row(suite, GH, "hrr-ch2-on-the-wire", wire, src)
 
     def against_set_9():
@@ -2097,7 +2097,7 @@ def group_hrr(suite, mod, cc, facts, ws):
         problems, detail = diff_problems(cc, ref, write_candidates(ws, "hrr", records))
         problems += problem_if(sorted(ja4s) != [facts["ja4_ch2"]], "CH2 JA4 %r, the README says %r" % (sorted(ja4s), facts["ja4_ch2"]))
         return problems, detail + ["CH2 JA4 %r; %d fixture cookies reused" % (sorted(ja4s), len(cookies))]
-    run_row(suite, GH, "hrr-ch2-diff-vs-set-9", against_set_9, "chrome_capture diff tests/files/chrome/153/hrr/ (CH1 and CH2 features) vs 20 built CH1/CH2 pairs")
+    run_row(suite, GH, "hrr-ch2-diff-vs-set-9", against_set_9, "chrome_capture diff tests/files/chrome/154/hrr/ (CH1 and CH2 features) vs 20 built CH1/CH2 pairs")
 
     def refused(group, message, extra=None):
         def fn():
@@ -2167,16 +2167,18 @@ def group_hrr(suite, mod, cc, facts, ws):
 
 # --- D. HPACK, header profiles, caller-header rules ---------------------------------------
 
-# The seven h2 capture sets (tests/files/chrome/153/README.md "Layout"). Every
+# The seven h2 capture sets (tests/files/chrome/154/README.md "Layout"). Every
 # connection in them has an h2 layer; its HEADERS blocks are group D's oracle
 # and its client frames group E's.
 H2_SETS = ("navigate", "navigate-reload", "cors-post", "cors-get", "cors-head", "ip-literal", "cookie")
 
 # The cors sets and whether the page's fetch() set an Accept (cors-head/ did
-# not, so Chrome's default "*/*" rides in cors_order_default_accept). Stream 7
-# is that fetch; stream 1 is every set's navigation; streams 3 and 5 are
-# no-cors subresources (/.well-known/appspecific/..., /favicon.ico) the profile
-# never generates, so only their bytes are re-encoded.
+# not, so Chrome's default "*/*" rides in cors_order_default_accept). The fetch
+# is the ONE stream whose captured sec-fetch-mode is "cors" (fixture_cors_stream;
+# stream 5 in Chrome 154, stream 7 in 153, which also requested
+# /.well-known/appspecific/com.chrome.devtools.json); stream 1 is every set's
+# navigation; the other streams are no-cors subresources (/favicon.ico) the
+# profile never generates, so only their bytes are re-encoded.
 CORS_SETS = {"cors-get": True, "cors-post": True, "cors-head": False}
 
 # RFC 7541 Appendix B, "code as hex aligned to LSB" / "len in bits" for the
@@ -2348,7 +2350,7 @@ def hp_huffman_value(bits):
 
 
 def h2_fixtures(label):
-    """[(file name, h2 record)] of every committed capture in tests/files/chrome/153/<label>/ with an h2 layer."""
+    """[(file name, h2 record)] of every committed capture in tests/files/chrome/154/<label>/ with an h2 layer."""
     ref = os.path.join(FIXTURES, label)
     out = []
     for name in sorted(n for n in os.listdir(ref) if n.endswith(".json")):
@@ -2366,6 +2368,11 @@ def fixture_streams(h2):
 
 def fixture_pairs(stream):
     return [(x["name"], x["value"]) for x in stream["headers"]]
+
+
+def is_cors_stream(stream):
+    """True for the page's fetch(): the stream whose captured sec-fetch-mode is "cors" (read from the fixture, never a typed stream id)."""
+    return dict(fixture_pairs(stream)).get("sec-fetch-mode") == "cors"
 
 
 def cc_pairs(decoder, block):
@@ -2389,7 +2396,7 @@ def profile_for(mod, label, stream):
         if "cache-control" in d:
             extra.append(("Cache-Control", d["cache-control"]))
         return mod._ch_profile_headers("navigate", d[":method"], d[":authority"], d[":path"], cookie=d.get("cookie"), extra=extra)
-    if sid == 7 and label in CORS_SETS:
+    if label in CORS_SETS and is_cors_stream(stream):
         if CORS_SETS[label]:
             extra.append(("Accept", d["accept"]))
         length = int(d["content-length"]) if "content-length" in d else None
@@ -2402,6 +2409,9 @@ def profile_problems(mod, label):
     problems, n = [], 0
     for name, h2 in h2_fixtures(label):
         enc = mod._ChHpackEncoder()
+        if label in CORS_SETS and sum(1 for st in h2["streams"] if is_cors_stream(st)) != 1:
+            problems.append("%s: %d stream(s) with sec-fetch-mode cors, a cors set has exactly one" % (name, sum(1 for st in h2["streams"] if is_cors_stream(st))))
+            break
         for st in fixture_streams(h2):
             want = fixture_pairs(st)
             built = outcome(lambda: profile_for(mod, label, st))
@@ -2484,7 +2494,7 @@ def group_hpack(suite, mod, cc):
                         break
                     n += 1
             return problems[:3] + problem_if(not n, "no h2 blocks under %s/" % label), ["%d HEADERS block(s) decoded equal to the fixture list and to chrome_capture.HpackDecoder" % n]
-        run_row(suite, GD, "hpack-decode-every-%s-block" % label, decode_row, "tests/files/chrome/153/%s/*.json h2.streams[].header_block_hex, one decoder per connection" % label)
+        run_row(suite, GD, "hpack-decode-every-%s-block" % label, decode_row, "tests/files/chrome/154/%s/*.json h2.streams[].header_block_hex, one decoder per connection" % label)
 
         def encode_row(label=label):
             problems, n, blocks, conns = [], 0, 0, 0
@@ -2503,18 +2513,18 @@ def group_hpack(suite, mod, cc):
             totals["encoded"] += n
             totals["connections"] += conns
             return problems[:3] + problem_if(not n, "no h2 blocks under %s/" % label), ["%d of %d HEADERS block(s) of %d connection(s) re-encoded byte-identical (one encoder per connection, streams in id order)" % (n, blocks, conns)]
-        run_row(suite, GD, "hpack-reencode-every-%s-block" % label, encode_row, "_ChHpackEncoder vs tests/files/chrome/153/%s/*.json header_block_hex" % label)
+        run_row(suite, GD, "hpack-reencode-every-%s-block" % label, encode_row, "_ChHpackEncoder vs tests/files/chrome/154/%s/*.json header_block_hex" % label)
 
     run_row(suite, GD, "hpack-reencode-every-committed-h2-block",
             lambda: (problem_if(totals["encoded"] != totals["blocks"] or not totals["blocks"], "%d of %d blocks byte-identical" % (totals["encoded"], totals["blocks"])),
                      ["%d of %d committed HEADERS blocks over %d h2 connection(s) reproduced byte-identical (counted from the directory, never typed)" % (totals["encoded"], totals["blocks"], totals["connections"])]),
-            "reads ONLY tests/files/chrome/153/ (R2-L8)")
+            "reads ONLY tests/files/chrome/154/ (R2-L8)")
 
     for label in H2_SETS:
         def prof_row(label=label):
             problems, n = profile_problems(mod, label)
             return problems + problem_if(not n and not problems, "no generated stream under %s/" % label), ["%d _ch_profile_headers list(s) equal the fixture's decoded list and re-encode byte-identical in place" % n]
-        run_row(suite, GD, "profile-headers-vs-%s" % label, prof_row, "stream 1 = navigate%s; streams 3/5 are no-cors subresources, re-encoded only" % ("; stream 7 = cors" if label in CORS_SETS else ""))
+        run_row(suite, GD, "profile-headers-vs-%s" % label, prof_row, "stream 1 = navigate%s; the no-cors subresources are re-encoded only" % ("; the sec-fetch-mode cors stream = the fetch" if label in CORS_SETS else ""))
 
     T = mod.CH_HPACK_TABLE_BYTES
     cap = mod.CH_MAX_HPACK_INT
@@ -2601,7 +2611,7 @@ def group_hpack(suite, mod, cc):
 
 # --- E. HTTP/2 against a test-side RFC 9113 responder --------------------------------------
 
-# Chrome 153's Akamai HTTP/2 fingerprint (docs/concepts/spec-ddg.md:448):
+# Chrome 154's Akamai HTTP/2 fingerprint (docs/concepts/spec-ddg.md:448; unchanged in tests/files/chrome/154/README.md):
 # SETTINGS id:value in order | connection WINDOW_UPDATE | PRIORITY frames | pseudo-header order.
 AKAMAI_CHROME = "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
 
@@ -2846,7 +2856,7 @@ def group_h2(suite, mod, cc):
                 else:
                     same += 1
             return problems[:3] + problem_if(not n, "no h2 connections under %s/" % label), ["%d of %d connection(s): the client's whole byte stream (magic, SETTINGS, WINDOW_UPDATE, every HEADERS and DATA, the SETTINGS ACK) byte-identical" % (same, n)]
-        run_row(suite, GE, "first-flight-vs-%s" % label, flight_row, "tests/files/chrome/153/%s/*.json h2.frames rebuilt; no-cors streams take the capture's PRIORITY, navigate/cors the profile's" % label)
+        run_row(suite, GE, "first-flight-vs-%s" % label, flight_row, "tests/files/chrome/154/%s/*.json h2.frames rebuilt; no-cors streams take the capture's PRIORITY, navigate/cors the profile's" % label)
 
     def akamai_row():
         r = H2Responder(mod)
@@ -3234,7 +3244,7 @@ def loopback_h2(mod, cc):
 
 # --- F. HTTP/1.1 ----------------------------------------------------------------------
 
-# The two HTTP/1.1 capture sets (tests/files/chrome/153/README.md "Layout"):
+# The two HTTP/1.1 capture sets (tests/files/chrome/154/README.md "Layout"):
 # set 5 over TLS with ALPN http/1.1, set 6 cleartext.
 H1_SETS = (("h1-tls", "set 5"), ("h1-plain", "set 6"))
 
@@ -3277,7 +3287,7 @@ H1_CRLF = "h1: header contains CR, LF or NUL"
 
 
 def h1_fixtures(label):
-    """(file name, first request) of every committed capture in tests/files/chrome/153/<label>/."""
+    """(file name, first request) of every committed capture in tests/files/chrome/154/<label>/."""
     ref = os.path.join(FIXTURES, label)
     out = []
     for name in sorted(n for n in os.listdir(ref) if n.endswith(".json")):
@@ -3750,7 +3760,7 @@ def h1_truncation_rows(suite, mod):
 
 def group_h1(suite, mod):
     """Group F: HTTP/1.1 over TLS (ALPN http/1.1) and cleartext; request heads vs sets 5/6; the guards."""
-    src = "_ch_split_url; tests/files/chrome/153/README.md (http:// is port 80, https:// 443)"
+    src = "_ch_split_url; tests/files/chrome/154/README.md (http:// is port 80, https:// 443)"
     for cid, url, want in SPLIT_VALUES:
         run_row(suite, GF, "split-url-%s" % cid, lambda url=url, want=want: (expect_value(outcome(lambda: mod._ch_split_url(url)), want), ["%r" % (want,)]), src)
     for cid, url, message in SPLIT_REFUSALS:
@@ -3767,7 +3777,7 @@ def group_h1(suite, mod):
                 if problems:
                     return ["%s/%s: %s" % (label, name, problems[0])], []
             return problem_if(not fixtures, "no %s fixtures" % label), ["%d of %d first requests byte-identical (%s)" % (len(fixtures), len(fixtures), set_name)]
-        run_row(suite, GF, "request-head-vs-%s-%s" % (set_name.replace(" ", "-"), label), heads, "tests/files/chrome/153/%s/*.json h1.requests[0].request_head, byte for byte" % label)
+        run_row(suite, GF, "request-head-vs-%s-%s" % (set_name.replace(" ", "-"), label), heads, "tests/files/chrome/154/%s/*.json h1.requests[0].request_head, byte for byte" % label)
 
     def post_head():
         hdrs = mod._ch_profile_headers("cors", "POST", "a.com", "/lite/", referer="https://a.com/lite/", extra=[("Accept", "*/*")], content_length=10)
@@ -4343,7 +4353,7 @@ def session_cookie_rows(suite, mod, s2, s1t, s1p):
         got, _conns = s2.since(mark)
         a, b = got[0], got[1]
         return (problem_if(crumbs(a), "hop 1 already carries %r" % crumbs(a)) + problem_if(crumbs(b) != ["s=2"], "hop 2 cookie %r" % crumbs(b))
-                + problem_if(slot is None, "no cookie in the cookie/ capture") + problem_if(slot is not None and slot_of(b) != slot, "slot %r, captured %r" % (slot_of(b), slot))), ["Set-Cookie on the 302 sent on hop 2 between %r and %r as in tests/files/chrome/153/cookie/" % (slot or (None, None))]
+                + problem_if(slot is None, "no cookie in the cookie/ capture") + problem_if(slot is not None and slot_of(b) != slot, "slot %r, captured %r" % (slot_of(b), slot))), ["Set-Cookie on the 302 sent on hop 2 between %r and %r as in tests/files/chrome/154/cookie/" % (slot or (None, None))]
     run_row(suite, GG, "cookie-set-on-hop-1-sent-on-hop-2-in-the-captured-slot", lambda: with_session(mod, hop_cookie), src)
 
     def ip_literal(s, _calls):
@@ -6061,7 +6071,7 @@ def transport_parity_rows(suite, mod, vp, vp2, s1p):
     def post(s, _calls):
         want, accept = post_capture_names()
         if want is None:
-            return ["no POST stream in tests/files/chrome/153/cors-post/"], []
+            return ["no POST stream in tests/files/chrome/154/cors-post/"], []
         mark = vp.mark()
         r = s.post(vurl + "/echo", data={"q": "test"}, headers={"Accept": accept}, referer=vurl + "/lite/")
         seen, _conns = vp.since(mark)
@@ -6074,7 +6084,7 @@ def transport_parity_rows(suite, mod, vp, vp2, s1p):
         problems += problem_if([n for n in low[2:] if n != "content-length"] != [n for n in want if n != "content-length"], "fields %r, the capture has %r" % (low[2:], want))
         problems += problem_if(values(seen[0], "content-length") != ["6"], "Content-Length %r" % values(seen[0], "content-length"))
         return problems, ["the POST's h1 head vs cors-post's POST stream (pseudo-headers and priority dropped): %s" % ", ".join(names)]
-    run_row(suite, GP, "verified-cors-post-body-and-the-captured-header-list-in-h1-spelling", lambda: with_session(mod, post, **trusted), src + "; tests/files/chrome/153/cors-post/")
+    run_row(suite, GP, "verified-cors-post-body-and-the-captured-header-list-in-h1-spelling", lambda: with_session(mod, post, **trusted), src + "; tests/files/chrome/154/cors-post/")
 
     def late(s, _calls):
         seen = []
@@ -6469,10 +6479,10 @@ def gh_profile_exchange(host, s2):
 
 
 def cors_get_oracle(referer):
-    """The cors-get capture's fetch (stream 7) without pseudo-headers, grep.app's Accept and `referer` in their captured slots."""
+    """The cors-get capture's fetch (its sec-fetch-mode cors stream) without pseudo-headers, grep.app's Accept and `referer` in their captured slots."""
     for _name, h2 in h2_fixtures("cors-get"):
         for st in fixture_streams(h2):
-            if st["stream_id"] == 7:
+            if is_cors_stream(st):
                 out = []
                 for n, v in fixture_pairs(st):
                     if n.startswith(":"):
@@ -6500,7 +6510,7 @@ def gh_profile_rows(suite, host, s2):
         got = [(k, v) for k, v in api["headers"]]
         problems = problem_if(got != want, "field %d: emitted %r, the capture has %r" % (first_difference(got, want), got[first_difference(got, want)] if first_difference(got, want) < len(got) else None, want[first_difference(got, want)] if first_difference(got, want) < len(want) else None))
         problems += problem_if((api["method"], api["authority"], api["path"]) != ("GET", "grep.app", "/api/search?q=x"), "pseudo %r" % ((api["method"], api["authority"], api["path"]),))
-        return problems, ["%d fields in the captured cors-get order (tests/files/chrome/153/cors-get stream 7), accept %r, decoded by chrome_capture's HpackDecoder" % (len(got), GH_ACCEPT)]
+        return problems, ["%d fields in the captured cors-get order (tests/files/chrome/154/cors-get, the sec-fetch-mode cors stream), accept %r, decoded by chrome_capture's HpackDecoder" % (len(got), GH_ACCEPT)]
     run_row(suite, GM, "github-chrome-cors-get-headers-equal-the-captured-profile-with-grep-app-accept", headers_row, src)
 
     def referer_row():
@@ -7036,7 +7046,7 @@ class HeadsPeer(SessionPeer):
 
 
 def cors_post_oracle(referer):
-    """(pairs, DATA payload, HEADERS END_STREAM) of the cors-post capture's POST (stream 7), pseudo-headers dropped, `referer` in its slot."""
+    """(pairs, DATA payload, HEADERS END_STREAM) of the cors-post capture's POST (its :method POST stream), pseudo-headers dropped, `referer` in its slot."""
     for _name, h2 in h2_fixtures("cors-post"):
         for st in fixture_streams(h2):
             if dict(fixture_pairs(st)).get(":method") == "POST":
@@ -7098,7 +7108,7 @@ def ddg_profile_rows(suite, host, peer):
         i = first_difference(got, want)
         problems = problem_if(got != want, "field %d: emitted %r, the capture has %r" % (i, got[i] if i < len(got) else None, want[i] if i < len(want) else None))
         problems += problem_if((post["method"], post["authority"], post["path"]) != ("POST", "lite.duckduckgo.com", DDG_PATH), "pseudo %r" % ((post["method"], post["authority"], post["path"]),))
-        return problems, ["%d fields in the captured cors-post order (tests/files/chrome/153/cors-post stream 7), referer the warm-up URL, decoded by chrome_capture's HpackDecoder" % len(got)]
+        return problems, ["%d fields in the captured cors-post order (tests/files/chrome/154/cors-post, the POST stream), referer the warm-up URL, decoded by chrome_capture's HpackDecoder" % len(got)]
     run_row(suite, GM, "ddg-chrome-cors-post-headers-equal-the-captured-profile", post_headers, src)
 
     def post_body():
@@ -7108,7 +7118,7 @@ def ddg_profile_rows(suite, host, peer):
         head = [hd for hd in x["heads"] if (hd[0], hd[1]) == (post["conn"], post["sid"])]
         return (problem_if(post["body"] != payload, "POST body %r, the capture's DATA %r" % (post["body"], payload))
                 + problem_if(head != [(post["conn"], post["sid"], end)], "HEADERS END_STREAM %r, the capture's %r" % (head, end))), ["HEADERS without END_STREAM, then the body %r -- the capture's DATA payload byte for byte (query 'test')" % payload]
-    run_row(suite, GM, "ddg-chrome-post-headers-then-data-equal-the-captured-body", post_body, src + "; tests/files/chrome/153/cors-post stream 7 data_frames")
+    run_row(suite, GM, "ddg-chrome-post-headers-then-data-equal-the-captured-body", post_body, src + "; tests/files/chrome/154/cors-post POST stream data_frames")
 
     def referer_row():
         x = need(ddg)
@@ -7147,7 +7157,7 @@ def ddg_profile_rows(suite, host, peer):
         got_seq = [(q["method"], q["path"], q["sid"]) for q in x["seen"]]
         return (problem_if(got != want, "field %d: emitted %r, the capture has %r" % (i, got[i] if i < len(got) else None, want[i] if i < len(want) else None))
                 + problem_if(got_seq != [("GET", "/", 1), ("GET", "/search?q=x", 3)] or x["conns"] != 1 or search["authority"] != "www.bing.com", "requests %r over %d connection(s), authority %r" % (got_seq, x["conns"], search["authority"]))), ["the Bing search GET: %d fields equal to the navigate capture's stream 1; warm-up / and the search on streams 1, 3 of one connection" % len(got)]
-    run_row(suite, GM, "bing-chrome-search-get-headers-equal-the-captured-navigate-profile", bing_headers, src + "; tests/files/chrome/153/navigate stream 1")
+    run_row(suite, GM, "bing-chrome-search-get-headers-equal-the-captured-navigate-profile", bing_headers, src + "; tests/files/chrome/154/navigate stream 1")
 
     def bing_parsed():
         x = need(bing)
@@ -7252,7 +7262,7 @@ def ddg_verified_row(suite, host, vp):
         problems += problem_if(err.getvalue(), "stderr %r" % err.getvalue()[:200])
         return problems, ["create_session() -> transport 'verified', policy _ch_public_only_policy, no factory passed (the row injects a localhost-name test-CA context)",
                           "warm-up GET + POST over 2 verified connections, peer ALPN %r; POST body q=test&kl=, h1 head %s; the section has no transport label" % (alpns, ", ".join(names))]
-    run_row(suite, GM, "ddg-verified-end-to-end-warmup-and-post-parse-and-carry-no-label", verified, src + "; tests/files/chrome/153/cors-post/")
+    run_row(suite, GM, "ddg-verified-end-to-end-warmup-and-post-parse-and-carry-no-label", verified, src + "; tests/files/chrome/154/cors-post/")
 
 
 def ddg_ladder_rows(suite, host):
@@ -7728,8 +7738,8 @@ WF_SWAPPED = ("_ch_session_new", "_vet_host", "_ch_address_refused", "_ch_open_s
 # _vet_host's way out, appended to an address-class refusal (Scripts/mcp-webfetch.py _vet_host).
 WF_CONFUSED = ". Refusing: a URL-driven fetcher reaching the local network is the confused-deputy case. Pass allow_private=true if this is deliberate."
 
-WF_FIREFOX = "profile: only 'chrome' (Chrome 153 fingerprint, certificate NOT verified) is available; omit profile for the verified default"
-WF_HINT = "hint: this may be a bot block of the non-browser TLS client; profile=chrome retries with the Chrome 153 fingerprint (certificate NOT verified)"
+WF_FIREFOX = "profile: only 'chrome' (Chrome 154 fingerprint, certificate NOT verified) is available; omit profile for the verified default"
+WF_HINT = "hint: this may be a bot block of the non-browser TLS client; profile=chrome retries with the Chrome 154 fingerprint (certificate NOT verified)"
 WF_VERIFIED = "via verified (cert verified)"
 WF_CHROME = "via chrome (cert NOT verified)"
 WF_T12 = "via tls12-fallback (cert verified)"

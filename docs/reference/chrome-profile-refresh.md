@@ -12,7 +12,9 @@ sources:
   - Scripts/amalgamate.py:DECLARED_HOSTS
   - tests/test_mcp_chrome.py:FIXTURES
   - tests/test_chrome_capture.py
-  - tests/files/chrome/153/README.md
+  - tests/test_mcp_chrome.py:is_cors_stream
+  - tests/test_mcp_chrome.py:profile_problems
+  - tests/files/chrome/154/README.md
 verified:
   commit: 3fbe5bf
   date: 2026-10-02
@@ -59,7 +61,7 @@ The fixtures under `tests/files/chrome/<major>/` are recorded measurements, and
 the tool that reads them, `Scripts/chrome_capture.py`, is the independent oracle:
 it shares no code with `_mcp_chrome.py` and must never import it. Never
 regenerate a fixture from the current client — that would make the client its own
-judge. The fixture README (`tests/files/chrome/153/README.md` for the current
+judge. The fixture README (`tests/files/chrome/154/README.md` for the current
 pin) holds the environment, the JA4 table, the layout of the sets and the
 per-set server flags; the suite reads its numbers from there, so the README is
 part of the fixture, not commentary on it.
@@ -91,14 +93,17 @@ Run every command from the repo root. Scratch output goes under `.claude/tmp/`.
    the next navigation opens a new one.
 
 3. **Drive Chrome over gdc** (CDP, user-authorized, loopback only). Navigate to
-   the set's origin, pass the certificate interstitial once (`#details-button`,
-   then `#proceed-link`), then navigate / reload / evaluate the set's JavaScript
+   the set's origin, pass the certificate interstitial once **if one is shown**
+   (`#details-button`, then `#proceed-link`) — the 154 run showed none, and
+   Chrome still rejected the untrusted leaf at the TLS layer on its failed
+   attempts — then navigate / reload / evaluate the set's JavaScript
    once per connection with a pause longer than `--idle` between them. The exact
    JavaScript per set is in the README's *Exact JavaScript evaluated* section.
    Keep only the records without `handshake_error` and with a non-empty request
-   list — the README's *three-record phenomenon* section explains why an
+   list — the README's *four-record phenomenon* section explains why an
    untrusted certificate yields failed attempts next to each successful
-   connection.
+   connection. Select by those two properties, never by position: how many
+   failed attempts precede a kept record is itself version-dependent (below).
 
 4. **Export the fixtures**, one subdirectory per set:
 
@@ -190,16 +195,45 @@ directory, and nothing else" (`Scripts/_mcp_chrome.py`). Measured against the
 tree that is a floor, not the whole set:
 
 - the fixture path in `tests/test_mcp_chrome.py:FIXTURES` (step 5), and the
-  suite's other `tests/files/chrome/153/...` mentions, which are row *source*
-  strings rather than paths it opens;
-- the docstring of `_chrome_profile` itself, which names its source of record;
-- hand-written "Chrome 153" prose **outside** the generated regions — the
+  suite's other `tests/files/chrome/<old major>/...` mentions, which are row
+  *source* strings rather than paths it opens;
+- the docstring of `_chrome_profile` itself, which names its source of record,
+  and the h2 stream numbers its comments cite for the cors values — those move
+  when Chrome's stream layout moves (below);
+- hand-written "Chrome <old major>" prose **outside** the generated regions — the
   module docstrings of the three hosts, webfetch's `profile` refusal text and
   bot-block hint, and the test rows that compare those strings verbatim. Only
   `handle_webfetch_call`'s status text reads the major from `CHROME_PROFILE`.
 
 None of these is caught by `amalgamate.py --check`, which judges regions only.
 A search of the tree for the old major after step 8 is the check.
+
+## What the 153 → 154 refresh corrected (R-0051)
+
+The first run of this procedure (Chrome 153.0.8010.37 → 154.0.8037.58, captured
+2026-10-02) found three assumptions the 153 capture had baked in. They are
+recorded in `tests/files/chrome/154/README.md`; the rules they leave are these.
+
+- **An h2 stream id is a measurement, not a constant.** Under 153 every
+  navigate-then-fetch connection also requested
+  `/.well-known/appspecific/com.chrome.devtools.json`, so the page's `fetch`
+  was stream 7; 154 sent no such request, so the fetch is stream 5 (whether
+  that is Chrome or the driven tab's DevTools state was not determined). The
+  suite's helper had matched `sid == 7`, and under 154 that comparison would
+  have been **skipped silently** — the rows still passed on the navigation and
+  subresource streams. The suite now finds the fetch by its fixture's
+  `sec-fetch-mode: cors` `tests/test_mcp_chrome.py:is_cors_stream`, and fails a
+  cors-set connection that does not carry exactly one such stream
+  `tests/test_mcp_chrome.py:profile_problems`. A test locates a captured stream
+  by its content, never by a typed id. Note also that `chrome_capture.py diff`
+  judges stream 1 only, so `diff` exiting 0 (step 6) says nothing about the cors
+  stream; the `mcp_chrome` profile-header rows are what cover it.
+- **The failed-attempt count per connection moves.** Against the untrusted
+  loopback leaf 153 left three records per kept connection, 154 four (one more
+  failed full handshake). Step 3 therefore selects by `handshake_error` and the
+  request list, not by position.
+- **The interstitial may not appear.** None was shown in the 154 run; step 3
+  passes it only if it is there.
 
 ## The profile-age row is INFO forever
 

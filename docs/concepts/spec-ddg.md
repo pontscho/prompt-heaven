@@ -28,7 +28,7 @@ links:
 
 DuckDuckGo employs multi-layered bot detection that effectively blocks all known Python HTTP clients (curl_cffi, primp, requests, httpx) from scraping search results, regardless of TLS impersonation quality. Even with virtually identical TLS/HTTP2 fingerprints to a real Chrome browser, DDG's server-side detection catches non-browser clients on the lite endpoint. The most popular DDG search library (deedy5/duckduckgo_search v8.1.1) has abandoned DDG entirely, switching to Bing as default backend. SearXNG (the leading open-source metasearch engine) reports intermittent DDG CAPTCHA failures that remain unresolved as of May 2025.
 
-Our script uses a **DDG-first with Bing auto-fallback** strategy, plus an optional CDP backend that routes searches through a real Chrome browser via DevTools Protocol. Since R-0044 it carries no third-party HTTP client: every DDG and Bing session starts on a certificate-verified stdlib transport, and a Chrome-153-shaped transport is used only after an endpoint's own host blocked it (§7.1).
+Our script uses a **DDG-first with Bing auto-fallback** strategy, plus an optional CDP backend that routes searches through a real Chrome browser via DevTools Protocol. Since R-0044 it carries no third-party HTTP client: every DDG and Bing session starts on a certificate-verified stdlib transport, and a Chrome-154-shaped transport (the pinned profile; Chrome 153 until R-0051) is used only after an endpoint's own host blocked it (§7.1).
 
 The first paragraph is the research position as it stood before R-0044, and it is kept as written. Two later live runs (§2.9, 2026-09-30 and 2026-10-01) got DDG lite results unblocked over a Python TLS stack; two samples from one IP do not overturn it, but they do mean "blocked on the first query" is not a given.
 
@@ -341,7 +341,7 @@ knob, so Linux switched to primp with `impersonate_os="linux"`, which derived th
 `X11; Linux x86_64` UA and the matching `sec-ch-ua-platform` from that one argument
 (as of 2026-08-04; before that the coherence was hand-built — a pinned Chrome major
 plus a matching Linux Chrome header dict). **Since R-0044 there is no Linux branch**:
-the stdlib client sends one measured macOS Chrome 153 profile on every platform, so on
+the stdlib client sends one measured macOS Chrome profile (154 since R-0051) on every platform, so on
 Linux this tell is back, accepted as a declared cost (§7.2).
 
 ##### 🟢 Issue 4: sec-ch-ua brand string format
@@ -439,8 +439,8 @@ One staged value is rewritten in flight and it is **not ours to fix**: primp sta
 
 **Since R-0044 this subsection is history.** primp is gone, and with it both the
 `accept-encoding` rewrite and the unmeasurable order: the stdlib client sends the
-navigation and cors profiles in the order and values captured from Chrome 153
-(§2.9), `accept-encoding: gzip, deflate, br, zstd` included, because it now decodes
+navigation and cors profiles in the order and values captured from the pinned
+Chrome (153 at R-0044, 154 since R-0051; §2.9), `accept-encoding: gzip, deflate, br, zstd` included, because it now decodes
 all four. The navigation warm-up still carries `upgrade-insecure-requests` and
 `sec-fetch-user`, which the 2026-05-24 measurement found load-bearing; the cors POST
 no longer does, because Chrome's captured `fetch` does not send them, so the "leak"
@@ -524,14 +524,24 @@ User-authorized, 3 requests in total. `lite.duckduckgo.com` negotiated X25519MLK
 
 #### The Chrome 153 capture set (R-0044, 2026-09-30)
 
-The R-0017 dump was one navigation set. Before the PoC became `Scripts/_mcp_chrome.py`, Google Chrome 153.0.8010.37 on macOS 14.2.1 was captured again on loopback with `Scripts/chrome_capture.py serve`, driven over CDP, in ten sets: typed navigation, reload, a navigation followed on the same connection by a same-origin form POST, a cors GET and a cors HEAD, HTTP/1.1 over TLS, plaintext `http://`, an IP-literal origin, navigations carrying a server-set cookie, and a ClientHello answered with a HelloRetryRequest. Every set is committed, one reduced fixture per connection, under `tests/files/chrome/153/`, whose README carries the full profile table. What the capture added to the R-0017 picture:
+The R-0017 dump was one navigation set. Before the PoC became `Scripts/_mcp_chrome.py`, Google Chrome 153.0.8010.37 on macOS 14.2.1 was captured again on loopback with `Scripts/chrome_capture.py serve`, driven over CDP, in ten sets: typed navigation, reload, a navigation followed on the same connection by a same-origin form POST, a cors GET and a cors HEAD, HTTP/1.1 over TLS, plaintext `http://`, an IP-literal origin, navigations carrying a server-set cookie, and a ClientHello answered with a HelloRetryRequest. Every set was committed, one reduced fixture per connection, under `tests/files/chrome/` as its `153/` subdirectory, whose README carried the full profile table; R-0051 retired that directory when the Chrome 154 set below replaced it. What the capture added to the R-0017 picture:
 
 - **The fresh JA4 did not move**: `t13d1517h2_8daaf6152771_cb7bf5808d99`, the R-0017 value, on every fresh ClientHello with an SNI. An IP-literal origin sends no `server_name` and fingerprints as `t13i1516h2_8daaf6152771_cb7bf5808d99`; the second ClientHello after a HelloRetryRequest is `t13d1518h2_8daaf6152771_6ba8dc3d6269`.
 - **Extension 51764's payload is byte-identical** on every TLS connection of every set and on every post-HRR ClientHello, so the client may send it as a constant.
 - **The HRR answer has a fixed shape**: a ChangeCipherSpec record before the second ClientHello, every time; ONE key share for the group the server asked for; the server's cookie echoed, inserted at a position that varies per connection; random, session id, ciphers, GREASE values and the ECH GREASE payload unchanged from the first ClientHello.
-- **A page's fetch is not stream 3.** On a navigate-then-fetch connection Chrome first opens stream 3 (`/.well-known/appspecific/com.chrome.devtools.json`) and stream 5 (`/favicon.ico`), so the page's `fetch` is stream 7, with priority weight 220 and **no `origin` header** on the same-origin POST.
+- **A page's fetch is not stream 3.** On a navigate-then-fetch connection Chrome first opens stream 3 (`/.well-known/appspecific/com.chrome.devtools.json`) and stream 5 (`/favicon.ico`), so the page's `fetch` was stream 7 in 153, with priority weight 220 and **no `origin` header** on the same-origin POST. (Under 154 the devtools.json request is gone and the fetch is stream 5; see below.)
 - **HTTP/1.1 carries no `priority` header**, keeps the `sec-ch-*` names lowercase and every other name in canonical case.
 - **No resumed handshake was ever completed** against the untrusted loopback certificate, so the capture contains no PSK connection — and the client implements no resumption.
+
+#### The Chrome 154 capture set (R-0051, 2026-10-02)
+
+The current pin. Google Chrome 154.0.8037.58 on macOS 14.2.1 (x86) was captured on loopback over gdc/CDP in the same ten sets, and the set is committed under `tests/files/chrome/154/`, whose README carries the profile table and every comparison against 153. Against the 153 sets `chrome_capture.py diff` reports exactly three fixed differences, the same in every set:
+
+- `user-agent`: `Chrome/154.0.0.0`;
+- `sec-ch-ua`: `"Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99"` — the brand order and the GREASE brand changed, not only the version;
+- extension 51764 (Trust Anchor Identifiers): the same 186-byte length, a different payload, again byte-identical on every TLS connection and every post-HRR ClientHello.
+
+The JA4 values did not move: `t13d1517h2_8daaf6152771_cb7bf5808d99` fresh with an SNI, `t13i1516h2_8daaf6152771_cb7bf5808d99` for the IP literal, `t13d1518h2_8daaf6152771_6ba8dc3d6269` for the CH2 after an HRR. The h2 SETTINGS, WINDOW_UPDATE, priority, header orders, cipher list, extension set and ClientHello lengths are unchanged. Two capture-side changes: no 154 connection requested `/.well-known/appspecific/com.chrome.devtools.json`, so the page's `fetch` moved from stream 7 to stream 5 (whether that is Chrome or the driven tab's DevTools state was not determined); and each kept connection was preceded by three failed attempts instead of two. Both are in [[chrome-profile-refresh]], with the test bug the moved stream exposed.
 
 Refreshing the set when Chrome moves is [[chrome-profile-refresh]].
 
@@ -865,10 +875,10 @@ and the only thing it chooses is the **transport**
 
 - **`verified`** (the default) — the stdlib `ssl` / `http.client` path
   `Scripts/_mcp_chrome.py:_ChFallbackConnection`: certificate and host name checked,
-  HTTP/1.1, never pooled. Its headers are Chrome 153's, but its TLS ClientHello is
+  HTTP/1.1, never pooled. Its headers are Chrome 154's, but its TLS ClientHello is
   Python's own, so this transport is **not** impersonated and says so
   (`impersonated=False`, `cert_verified=True`).
-- **`chrome`** — the Chrome 153 TLS 1.3 ClientHello and h2 preface measured in §2.9,
+- **`chrome`** — the Chrome 154 TLS 1.3 ClientHello and h2 preface measured in §2.9,
   with the certificate **not** verified. Used only after a block (§7.1), and every
   result it produces carries the label.
 
@@ -881,7 +891,7 @@ fingerprint-bearing header passed by a caller is refused rather than merged
 `Scripts/_mcp_chrome.py:_ch_check_caller_headers`. Session rotation every few queries is unchanged
 `Scripts/search_duckduckgo.py:ROTATE_EVERY`.
 
-The profile is macOS Chrome 153 on every platform, so on Linux the user agent no longer
+The profile is macOS Chrome 154 on every platform, so on Linux the user agent no longer
 matches the TCP stack — §2.7 Issue 3's tell, which primp's Linux mode used to avoid. It
 is accepted as a declared cost of having one measured profile rather than two; the
 decision and the follow-up are [[0026-speak-chrome-from-the-stdlib-verify-by-default]], and moving the profile to a newer Chrome is

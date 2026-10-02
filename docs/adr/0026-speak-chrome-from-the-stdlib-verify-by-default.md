@@ -19,7 +19,7 @@ sources:
   - tests/test_mcp_chrome.py
   - tests/test_mcp_decoders.py
   - tests/test_chrome_capture.py
-  - tests/files/chrome/153/README.md
+  - tests/files/chrome/154/README.md
 verified:
   commit: 3fbe5bf
   date: 2026-10-02

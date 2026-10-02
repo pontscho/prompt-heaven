@@ -221,7 +221,8 @@ own suite, `tests/test_mcp_websocket.py`, rather than by group E here.
 
 The last three arrived together, when the two third-party browser-impersonation
 packages left the tree (R-0044): `Scripts/_mcp_chrome.py`, a stdlib HTTP client
-whose Chrome path reproduces Chrome 153 on the wire and whose default transport
+whose Chrome path reproduces the pinned Chrome on the wire (153 then, 154 since
+R-0051) and whose default transport
 is the verified stdlib one, and the two decoders it is **handed** rather than
 imports, `Scripts/_mcp_brotli.py` and `Scripts/_mcp_zstd.py`. Each passed ADR
 0014's test on its own: a decoder is a collaborator the client receives as

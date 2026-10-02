@@ -280,8 +280,8 @@ The server was near-totally rewritten on 2026-08-04 and registered immediately
 after. Its HTTP client is the stdlib one generated from `Scripts/_mcp_chrome.py`
 (see Search, below), and the transport is the caller's choice, never an
 escalation: the default is the **verified** transport (certificates and host
-names checked, Chrome 153's headers over Python's own TLS, HTTP/1.1), and
-`profile="chrome"` opts into the Chrome 153 fingerprint, whose certificate is
+names checked, Chrome 154's headers over Python's own TLS, HTTP/1.1), and
+`profile="chrome"` opts into the Chrome 154 fingerprint, whose certificate is
 NOT verified `Scripts/mcp-webfetch.py:_create_session`. A 403/429/503 is retried
 on a fresh session over the **same** transport `Scripts/mcp-webfetch.py:RETRY_STATUSES`;
 a likely bot block earns a one-line hint naming `profile=chrome` rather than a
@@ -848,7 +848,7 @@ second ClientHello, the h2 preface and HEADERS blocks, the HTTP/1.1 request
 head), a JA3/JA4 parser, an HPACK decoder, a `diff` between two capture sets and
 an `export` that refuses any non-loopback identifier before it writes a fixture
 `Scripts/chrome_capture.py:main`. The committed captures it exported are the
-Chrome 153 profile's only source of truth — see [[tests]] for the fixtures and
+Chrome 154 profile's only source of truth — see [[tests]] for the fixtures and
 [[chrome-profile-refresh]] for refreshing them when Chrome moves.
 
 The Bing results are parsed by a stdlib `html.parser` tree

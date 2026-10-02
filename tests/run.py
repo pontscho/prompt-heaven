@@ -489,7 +489,7 @@ SUITES = [
      "ChaCha20-Poly1305 (RFC 8439), HKDF (RFC 5869) and the RFC 8448 key "
      "schedule as pasted vectors, ML-KEM-768 cross-checked with OpenSSL both "
      "ways; the ClientHello judged by chrome_capture's parser and diff against "
-     "the Chrome 153 captures; TLS 1.3 against MemoryBIO, loopback and "
+     "the Chrome 154 captures; TLS 1.3 against MemoryBIO, loopback and "
      "openssl s_server peers, the RFC 8448 trace and a scripted peer (ALPS, "
      "ceilings, KeyUpdate, every refusal), and the HelloRetryRequest path; "
      "HPACK against RFC 7541 and every committed HEADERS block, the header "

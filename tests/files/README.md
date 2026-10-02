@@ -103,30 +103,31 @@ case count cannot move. The capture set that grows over time lives in
 `tests/files/chrome/<major>/`. Loopback identifiers only (SNI `localhost`);
 `export` refuses anything else.
 
-## chrome/153/ — not an LSP fixture
+## chrome/154/ — not an LSP fixture
 
 ```
-chrome/153/ README.md          environment, exact JS, JA4 values, profile table, refresh steps
+chrome/154/ README.md          environment, exact JS, JA4 values, profile table, refresh steps
             navigate/          set 1a: typed navigations (20 connections)
             navigate-reload/   set 1b: reloads, cache-control: max-age=0 (20)
             cors-post/         set 2: navigate /lite/ + same-origin form POST (20)
             cors-get/          set 3: navigate / + cors GET (20)
             cors-head/         set 4: navigate / + cors HEAD (20)
             h1-tls/            set 5: HTTP/1.1 over TLS (20)
-            h1-plain/          set 6: plaintext http:// (16)
+            h1-plain/          set 6: plaintext http:// (20)
             ip-literal/        set 7: https://127.0.0.1, no SNI (20)
             cookie/            set 8: navigations carrying a server-set cookie (20)
             hrr/               set 9: CH1 + HelloRetryRequest + CCS + CH2 (20)
 ```
 
-Chrome 153.0.8010.37 on macOS, captured 2026-09-30 on loopback (R-0044, Gate
-G1) and reduced by `Scripts/chrome_capture.py export`: one JSON fixture per
+Chrome 154.0.8037.58 on macOS, captured 2026-10-02 on loopback (R-0051; the
+Chrome 153 set of R-0044 Gate G1 it replaced is retired) and reduced by
+`Scripts/chrome_capture.py export`: one JSON fixture per
 connection, `<label>-NNN.json`. The oracle for `_chrome_profile()` in
 `Scripts/_mcp_chrome.py`: tests read these files, never the client, to learn
 what Chrome sends. They are **recorded measurements**: never regenerate them
-from the client; refresh a whole set from a real browser as `chrome/153/README.md`
+from the client; refresh a whole set from a real browser as `chrome/154/README.md`
 describes. One subdirectory per set so `diff` can be scoped to one set
-(`--reference tests/files/chrome/153/navigate-reload`). Loopback identifiers
+(`--reference tests/files/chrome/154/navigate-reload`). Loopback identifiers
 only; `export` refuses anything else.
 
 ## Notes on the toolchain

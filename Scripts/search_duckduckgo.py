@@ -21,7 +21,7 @@ is imported, on every platform.
 
 Transport (D15). Every session starts on the VERIFIED transport: the stdlib
 ssl stack, certificate and host name checked, HTTP/1.1 under the captured
-Chrome 153 header list -- authenticated, but not a Chrome TLS fingerprint.
+Chrome 154 header list -- authenticated, but not a Chrome TLS fingerprint.
 Each endpoint has its own block signal, judged on the endpoint's own host only
 (the final URL's host; an answer from a redirect target is never a block):
   - DDG (lite.duckduckgo.com): the lite page parses to ZERO results AND carries
@@ -959,7 +959,7 @@ def _zstd_decompress(data, max_output):
 # END GENERATED: 82d671a4fb14
 
 # The HTTP client, generated from Scripts/_mcp_chrome.py: TLS 1.3, HTTP/2 and
-# HTTP/1.1 with the captured Chrome 153 ClientHello and header profiles, plus
+# HTTP/1.1 with the captured Chrome 154 ClientHello and header profiles, plus
 # the VERIFIED stdlib transport this script starts on. It replaced the two
 # third-party impersonation packages. Taken whole, like the regions above.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region.
@@ -1002,8 +1002,8 @@ class ChromeBodyTooLarge(ChromeClientError):
 def _chrome_profile():
 	"""Every Chrome-version-bearing value, one key per line, each citing its capture.
 
-	Source of record: tests/files/chrome/153/ (Chrome 153.0.8010.37, macOS
-	14.2.1, captured 2026-09-30 against the loopback server of
+	Source of record: tests/files/chrome/154/ (Chrome 154.0.8037.58, macOS
+	14.2.1, captured 2026-10-02 against the loopback server of
 	Scripts/chrome_capture.py; its README.md holds the profile table). A
 	citation `<dir>/` names that fixture subdirectory. R-0017
 	(docs/concepts/spec-ddg.md section 2.9) is the historical origin where most
@@ -1011,14 +1011,14 @@ def _chrome_profile():
 	or slot marked UNVERIFIED is not in any fixture and says why.
 	"""
 	p = {}
-	# navigate/ (every set): Chrome/153.0.0.0 in user-agent and sec-ch-ua.
-	p["major"] = 153
-	# Capture date of tests/files/chrome/153/ (meta.captured_on, UTC); the profile-age INFO row counts from it.
-	p["pinned_on"] = "2026-09-30"
+	# navigate/ (every set): Chrome/154.0.0.0 in user-agent and v="154" in sec-ch-ua.
+	p["major"] = 154
+	# Capture date of tests/files/chrome/154/ (meta.captured_on, UTC); the profile-age INFO row counts from it.
+	p["pinned_on"] = "2026-10-02"
 	# navigate/, HEADERS user-agent (macOS Chrome freezes the OS token at 10_15_7).
-	p["user_agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
-	# navigate/, HEADERS sec-ch-ua (the GREASE brand is part of the version's fingerprint).
-	p["sec_ch_ua"] = "\"Google Chrome\";v=\"153\", \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"153\""
+	p["user_agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+	# navigate/, HEADERS sec-ch-ua (the GREASE brand and the brand order are part of the version's fingerprint).
+	p["sec_ch_ua"] = "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\""
 	# navigate/, HEADERS sec-ch-ua-mobile.
 	p["sec_ch_ua_mobile"] = "?0"
 	# navigate/, HEADERS sec-ch-ua-platform.
@@ -1054,9 +1054,9 @@ def _chrome_profile():
 	p["ech_cipher_suite"] = (0x0001, 0x0001)
 	# ECH GREASE payload lengths, one drawn per connection; every fixture set draws from exactly these four.
 	p["ech_payload_buckets"] = (144, 176, 208, 240)
-	# Extension 51764 payload, byte-identical on all 180 TLS connections of tests/files/chrome/153/ and on
-	# every hrr/ CH2.
-	p["tai_payload_hex"] = "00b808839a648c9b2d01070582df13020604d67909060582df1302130582df13021204d679090c08839a648c9b2d010b04d67909050582df13020f0582df13021404d679090a04d679090104d67909040582df1302010582df13020e08839a648c9b2d011204d679090f08839a648c9b2d011304d679090808839a648c9b2d01080582df13020d04d679090708839a648c9b2d010d04d679090d08839a648c9b2d010c08839a648c9b2d010904d679090b08839a648c9b2d010a"
+	# Extension 51764 payload, byte-identical on all 180 TLS connections of tests/files/chrome/154/ and on
+	# every hrr/ CH2 (same 186-byte length as 153, different payload).
+	p["tai_payload_hex"] = "00b80582df1302010582df1302060582df13020d0582df13020e0582df13020f0582df1302120582df1302130582df13021408839a648c9b2d010708839a648c9b2d010808839a648c9b2d010908839a648c9b2d010a08839a648c9b2d010b08839a648c9b2d010c08839a648c9b2d010d08839a648c9b2d011208839a648c9b2d011304d679090104d679090404d679090504d679090604d679090704d679090804d679090a04d679090b04d679090c04d679090d04d679090f"
 	# The client's raw ALPS value for h2 (the key keeps its historical name; it holds no SETTINGS): the WHOLE
 	# extension 17613 body of the client EncryptedExtensions, copied verbatim -- EMPTY (zero length) for h2.
 	# VERIFIED from source, not from a capture (the client EE is encrypted): Chromium main
@@ -1080,12 +1080,12 @@ def _chrome_profile():
 	# has set it) puts it after accept-language, before priority. referer: UNVERIFIED on navigate (no navigation
 	# fixture carries one); placed as on cors (cors-get/, cors-post/), after sec-fetch-dest.
 	p["navigate_order"] = (":method", ":authority", ":scheme", ":path", "cache-control", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "upgrade-insecure-requests", "user-agent", "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest", "referer", "accept-encoding", "accept-language", "cookie", "priority")
-	# A same-origin fetch()'s h2 order with a CALLER-SET Accept (stream 7; a name not carried is skipped).
+	# A same-origin fetch()'s h2 order with a CALLER-SET Accept (stream 5; a name not carried is skipped).
 	# cors-post/ (20/20) is exactly this list without origin and cookie; cors-get/ (20/20) is it without
 	# content-length, content-type, origin and cookie. content-length/content-type only with a body.
-	# origin: NOT sent on a same-origin fetch -- re-decoded from the raw HEADERS blocks of all 22 POST, 22 GET
-	# and 22 HEAD connections (every recorded block re-decodes equal, frame length = block + 5): no origin
-	# on any stream. The slot is kept for a CROSS-origin fetch only, UNVERIFIED (no cross-origin capture).
+	# origin: NOT sent on a same-origin fetch -- no h2 stream of any tests/files/chrome/154/ set carries one
+	# (Chrome 153's 22 POST, 22 GET and 22 HEAD raw connections, re-decoded from their HEADERS blocks, carried
+	# none either). The slot is kept for a CROSS-origin fetch only, UNVERIFIED (no cross-origin capture).
 	# cookie: UNVERIFIED on cors (no cors fixture carries one); placed as on navigate (cookie/).
 	p["cors_order"] = (":method", ":authority", ":scheme", ":path", "content-length", "sec-ch-ua-platform", "user-agent", "accept", "sec-ch-ua", "content-type", "sec-ch-ua-mobile", "origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer", "accept-encoding", "accept-language", "cookie", "priority")
 	# The same fetch when the CALLER SET NO Accept: Chrome's default accept sits after sec-ch-ua-mobile, not
@@ -1095,11 +1095,11 @@ def _chrome_profile():
 	p["cors_order_default_accept"] = (":method", ":authority", ":scheme", ":path", "content-length", "sec-ch-ua-platform", "user-agent", "sec-ch-ua", "content-type", "sec-ch-ua-mobile", "accept", "origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer", "accept-encoding", "accept-language", "cookie", "priority")
 	# cors-head/, Chrome's default fetch() Accept (not set by the page).
 	p["cors_accept"] = "*/*"
-	# cors-post/ cors-get/ cors-head/ stream 7, HEADERS priority field as nav_priority: weight 220 is wire
+	# cors-post/ cors-get/ cors-head/ stream 5, HEADERS priority field as nav_priority: weight 220 is wire
 	# byte 219. Flags 0x25 on GET/HEAD; on POST 0x24 (no END_STREAM) and the body follows as ONE DATA frame
 	# with END_STREAM (cors-post/: length 10, q=test&kl=).
 	p["cors_priority"] = (True, 0, 220)
-	# cors-post/ cors-get/ cors-head/ stream 7, HEADERS priority (RFC 9218 header on a fetch).
+	# cors-post/ cors-get/ cors-head/ stream 5, HEADERS priority (RFC 9218 header on a fetch).
 	p["cors_priority_header"] = "u=1, i"
 	# cors-post/, the URLSearchParams body's content-type exactly as Chrome spells it.
 	p["cors_post_content_type"] = "application/x-www-form-urlencoded;charset=UTF-8"
@@ -2615,7 +2615,7 @@ def _ch_sni_name(host):
 
 	An IP literal (IPv4, IPv6, with or without the URL brackets) gets no
 	server_name extension at all: RFC 6066 section 3 forbids a literal there,
-	and Chrome omits it (tests/files/chrome/153/ip-literal/, 16 non-GREASE
+	and Chrome omits it (tests/files/chrome/154/ip-literal/, 16 non-GREASE
 	extensions). Any other host is encoded with the stdlib `idna` codec, so a
 	non-ASCII name goes out as its punycode A-label (the R-0017 PoC sent
 	latin-1, D13), then lowercased as Chrome's URL canonicaliser does, with
@@ -2679,7 +2679,7 @@ def _ch_permutation(types, rand):
 	(44), which only a second ClientHello carries -- and each ClientHello
 	emits the permuted types it has a body for. That is why the cookie lands at
 	a position that varies per connection while the other 17 keep CH1's order
-	(tests/files/chrome/153/hrr/, 20 of 20).
+	(tests/files/chrome/154/hrr/, 20 of 20).
 	"""
 	perm = list(types)
 	n = len(perm)
@@ -2711,7 +2711,7 @@ def _ch_hello_extensions(sni, shares, profile, grease, rand):
 	"""The non-GREASE extension bodies of a first ClientHello: (type -> body, ECH payload length).
 
 	Every list comes from `profile`; the fixed-shape bodies are the RFC's own
-	encodings, each identical on every capture in tests/files/chrome/153/:
+	encodings, each identical on every capture in tests/files/chrome/154/:
 	status_request (5) 0100000000 (OCSP, empty responder and extension
 	lists), ec_point_formats (11) 0100 (uncompressed), psk_key_exchange_modes
 	(45) 0101 (psk_dhe_ke), renegotiation_info (65281) 00, and the empty
@@ -2824,7 +2824,7 @@ def _ch_client_hello(host, shares, profile, rand, hrr=None):
 	"ext_bodies".
 
 	`hrr={"group": g, "cookie": <bytes or None>, "ch1_meta": <first meta>}`
-	builds the second ClientHello in the shape of tests/files/chrome/153/hrr/
+	builds the second ClientHello in the shape of tests/files/chrome/154/hrr/
 	(20 of 20): the first one's random, session id, cipher list, GREASE values
 	and extension order; every extension byte-identical except key_share,
 	which holds ONE entry for g (no GREASE share); the ECH GREASE unchanged;
@@ -4801,7 +4801,7 @@ class _ChH2Connection:
 	a path or a body byte. The session owns the socket and the deadline (D11):
 	it writes what the methods return and feeds what it reads.
 
-	**Chrome's first flight** (every h2 set of tests/files/chrome/153/, Akamai
+	**Chrome's first flight** (every h2 set of tests/files/chrome/154/, Akamai
 	`1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`): `preface()` is the
 	client magic, ONE SETTINGS frame with CHROME_PROFILE["h2_settings"] in
 	that order, and ONE connection WINDOW_UPDATE of
@@ -7368,7 +7368,7 @@ def _ch_session_new(decoders=None, connect_policy=None, timeout=30, max_bytes=0,
 		verified). Anything else is ChromeClientError("transport: ...").
 	"""
 	return _ChSession(decoders, connect_policy, timeout, max_bytes, log, tls12_fallback, allow_downgrade, rand, ssl_context_factory, transport)
-# END GENERATED: c70f44c20a37
+# END GENERATED: 9a0d4980bb96
 
 _DECODERS = {"br": _brotli_decompress, "zstd": _zstd_decompress}
 
@@ -8135,7 +8135,7 @@ def _run_ddg_with_bing_fallback(queries):
 
 	Cost, stated (D15): spec-ddg measured that DDG blocks every known Python
 	HTTP client regardless of TLS quality (docs/concepts/spec-ddg.md:23), and
-	the verified transport is Python's ssl ClientHello under Chrome 153's
+	the verified transport is Python's ssl ClientHello under Chrome 154's
 	headers, over HTTP/1.1. The DDG re-issue will therefore fire on the FIRST
 	query of almost every run. With the sticky switch a run pays ONE extra
 	round (verified warm-up + POST, then Chrome warm-up + POST: 4 requests
