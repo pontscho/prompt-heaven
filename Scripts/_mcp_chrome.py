@@ -1896,6 +1896,20 @@ def _ch_draw(rand, n):
     return out
 
 
+def _ch_idna_encode(name):
+    """`name.encode("idna")`, refusing the four UTS-46 deviation characters first (R-0056, CWE-176).
+
+    The stdlib codec is IDNA2003 (transitional): it maps U+00DF to "ss" and
+    U+03C2, U+200D, U+200C to sigma or nothing, while Chrome (UTS-46
+    nontransitional) keeps them -- so the encoded name would be a different
+    host than the one Chrome reaches. A name carrying one raises UnicodeError,
+    the codec's own refusal, so every caller keeps its existing failure path.
+    """
+    if any(ord(c) in (0x00DF, 0x03C2, 0x200D, 0x200C) for c in name):
+        raise UnicodeError("IDNA deviation character")
+    return name.encode("idna")
+
+
 def _ch_sni_name(host):
     """The server_name host_name bytes for `host`, or None when Chrome sends no SNI.
 
@@ -1926,7 +1940,7 @@ def _ch_sni_name(host):
     if not name:
         raise ChromeClientError("tls: empty host name")
     try:
-        encoded = name.encode("idna")
+        encoded = _ch_idna_encode(name)
     except UnicodeError:
         raise ChromeClientError("tls: host name cannot be IDNA-encoded") from None
     return encoded.lower()
@@ -3632,6 +3646,10 @@ class _ChHpackDecoder:
             self._size -= 32 + len(name) + len(value)
 
 
+# The Fetch standard's bad ports (https://fetch.spec.whatwg.org/#port-blocking, R-0055): _ch_split_url refuses them.
+_CH_BAD_PORTS = frozenset((0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080))
+
+
 def _ch_split_url(url):
     """The ONE URL normaliser: `url` -> (scheme, host, port, target), or ChromeClientError("url: ...").
 
@@ -3644,13 +3662,14 @@ def _ch_split_url(url):
     - userinfo (`user:pass@`, even an empty `@`) is refused
         (`url: userinfo not supported`).
     - `host`: lowercased; a non-ASCII name is IDNA-encoded
-        (`str.encode("idna")`); a trailing dot is KEPT (a distinct name, and
+        (`_ch_idna_encode`); a trailing dot is KEPT (a distinct name, and
         Chrome keeps it); a bracketed IPv6 literal is unwrapped and written
         in its compressed form (a zone id is refused). A host of anything
         but letters, digits, `-`, `.` and `_`, or with an empty label, is
         refused, so no CR, LF, space or `%` can reach a header or the SNI.
     - `port`: the URL's, else 80 for http and 443 for https (the PoC's
-        443-for-every-scheme is fixed here); 0 or out of range is refused.
+        443-for-every-scheme is fixed here); 0 or out of range is refused,
+        and so is a Fetch bad port in _CH_BAD_PORTS (`url: port <n> refused`).
     - `target`: the path (or "/") plus "?" and the query when there is one;
         the fragment is dropped. A space, a control character, DEL or a
         non-ASCII character is percent-encoded as UTF-8, so the target is
@@ -3685,7 +3704,7 @@ def _ch_split_url(url):
     else:
         if not host.isascii():
             try:
-                host = host.encode("idna").decode("ascii").lower()
+                host = _ch_idna_encode(host).decode("ascii").lower()
             except UnicodeError:
                 raise ChromeClientError("url: host is not a valid IDNA name") from None
         if not all((c.isascii() and c.isalnum()) or c in "-._" for c in host):
@@ -3696,6 +3715,8 @@ def _ch_split_url(url):
         port = 443 if scheme == "https" else 80
     if port < 1 or port > 65535:
         raise ChromeClientError("url: invalid port")
+    if port in _CH_BAD_PORTS:
+        raise ChromeClientError("url: port %d refused" % port)
     raw = parts.path or "/"
     if parts.query:
         raw += "?" + parts.query
@@ -3830,7 +3851,7 @@ def _ch_origin_of(url):
             return None
     elif not host.isascii():
         try:
-            host = host.encode("idna").decode("ascii").lower()
+            host = _ch_idna_encode(host).decode("ascii").lower()
         except UnicodeError:
             return None
     if port is None:
@@ -5429,7 +5450,7 @@ class _ChCookieJar:
                     val = (val[1:] if val.startswith(".") else val).lower()
                     if not val.isascii():
                         try:
-                            val = val.encode("idna").decode("ascii").lower()
+                            val = _ch_idna_encode(val).decode("ascii").lower()
                         except UnicodeError:
                             return False
                     domain = val

@@ -3225,6 +3225,11 @@ SPLIT_REFUSALS = (
     ("no-host", "https:///x", "url: no host"),
     ("port-0", "https://a.com:0/", "url: invalid port"),
     ("port-70000", "https://a.com:70000/", "url: malformed authority"),
+    ("port-25-fetch-bad-port", "http://a.com:25/", "url: port 25 refused"),
+    ("idna-deviation-sharp-s", "https://stra" + chr(0x00DF) + "e.test/", "url: host is not a valid IDNA name"),
+    ("idna-deviation-final-sigma", "https://" + chr(0x03BF) + chr(0x03C2) + ".test/", "url: host is not a valid IDNA name"),
+    ("idna-deviation-zwj", "https://a" + chr(0x200D) + "b.test/", "url: host is not a valid IDNA name"),
+    ("idna-deviation-zwnj", "https://a" + chr(0x200C) + "b.test/", "url: host is not a valid IDNA name"),
     ("ipv6-zone-id", "https://[fe80::1%25en0]/", "url: IPv6 zone id not supported"),
     ("ipv6-invalid", "https://[v1.fe]/", "url: invalid IPv6 literal"),
     ("host-percent-cr", "https://a%0d.com/", "url: invalid host"),
@@ -3237,6 +3242,7 @@ SPLIT_VALUES = (
     ("https-default-443-fragment-dropped", "HTTPS://Example.COM/a?b=1#frag", ("https", "example.com", 443, "/a?b=1")),
     ("http-default-80-empty-path", "http://example.com", ("http", "example.com", 80, "/")),
     ("explicit-port", "http://example.com:8080/x", ("http", "example.com", 8080, "/x")),
+    ("explicit-port-443-not-a-bad-port", "http://example.com:443/x", ("http", "example.com", 443, "/x")),
     ("trailing-dot-kept", "https://example.com./", ("https", "example.com.", 443, "/")),
     ("bracketed-ipv6-compressed", "https://[2001:DB8:0:0::1]:8443/p", ("https", "2001:db8::1", 8443, "/p")),
     ("idna", "https://Bücher.de/", ("https", "xn--bcher-kva.de", 443, "/")),
@@ -5277,6 +5283,14 @@ def url_rows(suite, mod, s2):
             return (expect_refusal(got, CE, "redirect: scheme %s refused" % label)
                     + problem_if(calls != [("a.test", s2.port)], "policy calls %r" % calls)), ["Location %s under a permit-everything policy: refused before any policy call for the hop" % location]
         run_row(suite, GI, "redirect-to-%s-refused-under-a-permit-all-policy" % label, lambda scheme=scheme: with_session(mod, scheme), "Fetch: only http(s) is followed; _ChSession class docstring")
+
+    s2.plan["/to-bad-port"] = (302, [("location", "https://a.test:25/x")], b"")
+
+    def bad_port(s, calls):
+        got = outcome(lambda: s.get(u2 + "/to-bad-port"))
+        return (expect_refusal(got, CE, "url: port 25 refused")
+                + problem_if(calls != [("a.test", s2.port)], "policy calls %r" % calls)), ["Location https://a.test:25/x under a permit-everything policy: refused before any policy call for the hop"]
+    run_row(suite, GI, "redirect-to-a-fetch-bad-port-refused-under-a-permit-all-policy", lambda: with_session(mod, bad_port), "Fetch standard port blocking; _ch_split_url vets every hop")
 
     src = "_ch_split_url docstring: the ONE normaliser; its host is what the policy vets, the SNI and :authority"
 

@@ -759,7 +759,7 @@ def _zstd_decompress(data, max_output):
 # replaced the two third-party impersonation packages. Taken whole, like the
 # regions above.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region.
-# BEGIN GENERATED: _mcp_chrome.py :: ChromeClientError, ChromeTls12Error, ChromeBodyTooLarge, _chrome_profile, CHROME_PROFILE, CH_MAX_RECORD_BYTES, CH_MAX_HANDSHAKE_BYTES, CH_MAX_FRAME_BYTES, CH_MAX_HEADER_LIST_BYTES, CH_MAX_HEADER_BLOCK_BYTES, CH_HPACK_TABLE_BYTES, CH_MAX_HPACK_INT, CH_MAX_HPACK_INT_CONTINUATIONS, CH_MAX_H2_CONTROL_FRAMES, CH_MAX_H2_EMPTY_FRAMES, CH_MAX_H2_CONTINUATION_FRAMES, CH_MAX_H1_HEAD_BYTES, CH_MAX_H1_HEADERS, CH_MAX_H1_CHUNK_LINE_BYTES, CH_MAX_BODY_BYTES, CH_DEFAULT_DECODE_CAP, CH_MAX_CONTENT_CODINGS, CH_MAX_REDIRECTS, CH_MAX_COOKIES_PER_DOMAIN, CH_MAX_COOKIES, CH_MAX_COOKIE_BYTES, _CH_X25519_P, _CH_X25519_A24, _ch_x25519_cswap, _ch_x25519, _ch_x25519_keypair, _CH_P256_P, _CH_P256_B, _CH_P256_N, _CH_P256_GX, _CH_P256_GY, _ch_p256_double, _ch_p256_add, _ch_p256_mul, _ch_p256_keypair, _ch_p256_shared, _ChMlKem768, _ch_aes_tables, _CH_AES_TABLES, _ChAesGcm, _ChChaCha20Poly1305, _ch_hkdf_extract, _ch_hkdf_expand, _ch_hkdf_expand_label, _ch_derive_secret, CH_MAX_PLAINTEXT_BYTES, _ChReader, _ChRecordReader, _ChHandshakeReader, _ChRecordCipher, _CH_KEY_SHARE_BYTES, _ch_vec, _ch_draw, _ch_sni_name, _ch_grease, _ch_permutation, _ch_key_share_entry, _ch_hello_extensions, _ch_hello_wire, _ch_client_hello, _CH_ALERT_NAMES, _ch_alert_name, _CH_HRR_RANDOM, _CH_TLS13_SUITES, _CH_SERVER_SHARE_BYTES, _CH_EE_FORBIDDEN, _ch_parse_server_hello, _ch_key_share_new, _ch_key_share_secret, _ch_traffic_cipher, CH_MAX_KEY_UPDATES, _ChTls, _ChTlsStream, _ch_huffman_table, _CH_HUFFMAN, _ch_huffman_decode_table, _CH_HUFFMAN_DECODE, _ch_hpack_static, _CH_HPACK_STATIC, _ch_hpack_int, _ch_huffman_encode, _ch_huffman_size, _ch_hpack_string, _ch_cookie_crumbs, _ChHpackEncoder, _ch_hpack_decode_int, _ch_huffman_decode, _ch_hpack_decode_string, _ChHpackDecoder, _ch_split_url, _CH_TCHAR_SYMBOLS, _CH_FINGERPRINT_NAMES, _CH_FINGERPRINT_PREFIXES, _CH_FRAMING_NAMES, _CH_FRAMING_PREFIXES, _ch_header_pairs, _ch_check_caller_headers, _ch_origin_of, _ch_origin_text, _CH_PUBLIC_SUFFIXES, _ch_is_ip_host, _ch_is_public_suffix, _ch_site_of, _ch_sec_fetch_site, _ch_referer_for, _ch_profile_headers, _CH_H2_ERROR_NAMES, _ch_h2_frame, _ChH2Connection, _ChH1Connection, _ChHeaders, _ch_leading_digits, _ch_cookie_date, _ChCookieJar, _ChResponse, _ch_zlib_decode, _ch_decode_body, _CH_TRANSLATION_PREFIXES, _ch_embedded_ipv4, _ch_address_refused, _ch_public_only_policy, _ch_open_socket, _CH_REDIRECT_CODES, _CH_SITE_RANK, _ch_transport_error, _ch_unvetted_policy, _ChDeadlineSocket, _ChFallbackConnection, _ChSession, _ch_session_new
+# BEGIN GENERATED: _mcp_chrome.py :: ChromeClientError, ChromeTls12Error, ChromeBodyTooLarge, _chrome_profile, CHROME_PROFILE, CH_MAX_RECORD_BYTES, CH_MAX_HANDSHAKE_BYTES, CH_MAX_FRAME_BYTES, CH_MAX_HEADER_LIST_BYTES, CH_MAX_HEADER_BLOCK_BYTES, CH_HPACK_TABLE_BYTES, CH_MAX_HPACK_INT, CH_MAX_HPACK_INT_CONTINUATIONS, CH_MAX_H2_CONTROL_FRAMES, CH_MAX_H2_EMPTY_FRAMES, CH_MAX_H2_CONTINUATION_FRAMES, CH_MAX_H1_HEAD_BYTES, CH_MAX_H1_HEADERS, CH_MAX_H1_CHUNK_LINE_BYTES, CH_MAX_BODY_BYTES, CH_DEFAULT_DECODE_CAP, CH_MAX_CONTENT_CODINGS, CH_MAX_REDIRECTS, CH_MAX_COOKIES_PER_DOMAIN, CH_MAX_COOKIES, CH_MAX_COOKIE_BYTES, _CH_X25519_P, _CH_X25519_A24, _ch_x25519_cswap, _ch_x25519, _ch_x25519_keypair, _CH_P256_P, _CH_P256_B, _CH_P256_N, _CH_P256_GX, _CH_P256_GY, _ch_p256_double, _ch_p256_add, _ch_p256_mul, _ch_p256_keypair, _ch_p256_shared, _ChMlKem768, _ch_aes_tables, _CH_AES_TABLES, _ChAesGcm, _ChChaCha20Poly1305, _ch_hkdf_extract, _ch_hkdf_expand, _ch_hkdf_expand_label, _ch_derive_secret, CH_MAX_PLAINTEXT_BYTES, _ChReader, _ChRecordReader, _ChHandshakeReader, _ChRecordCipher, _CH_KEY_SHARE_BYTES, _ch_vec, _ch_draw, _ch_idna_encode, _ch_sni_name, _ch_grease, _ch_permutation, _ch_key_share_entry, _ch_hello_extensions, _ch_hello_wire, _ch_client_hello, _CH_ALERT_NAMES, _ch_alert_name, _CH_HRR_RANDOM, _CH_TLS13_SUITES, _CH_SERVER_SHARE_BYTES, _CH_EE_FORBIDDEN, _ch_parse_server_hello, _ch_key_share_new, _ch_key_share_secret, _ch_traffic_cipher, CH_MAX_KEY_UPDATES, _ChTls, _ChTlsStream, _ch_huffman_table, _CH_HUFFMAN, _ch_huffman_decode_table, _CH_HUFFMAN_DECODE, _ch_hpack_static, _CH_HPACK_STATIC, _ch_hpack_int, _ch_huffman_encode, _ch_huffman_size, _ch_hpack_string, _ch_cookie_crumbs, _ChHpackEncoder, _ch_hpack_decode_int, _ch_huffman_decode, _ch_hpack_decode_string, _ChHpackDecoder, _CH_BAD_PORTS, _ch_split_url, _CH_TCHAR_SYMBOLS, _CH_FINGERPRINT_NAMES, _CH_FINGERPRINT_PREFIXES, _CH_FRAMING_NAMES, _CH_FRAMING_PREFIXES, _ch_header_pairs, _ch_check_caller_headers, _ch_origin_of, _ch_origin_text, _CH_PUBLIC_SUFFIXES, _ch_is_ip_host, _ch_is_public_suffix, _ch_site_of, _ch_sec_fetch_site, _ch_referer_for, _ch_profile_headers, _CH_H2_ERROR_NAMES, _ch_h2_frame, _ChH2Connection, _ChH1Connection, _ChHeaders, _ch_leading_digits, _ch_cookie_date, _ChCookieJar, _ChResponse, _ch_zlib_decode, _ch_decode_body, _CH_TRANSLATION_PREFIXES, _ch_embedded_ipv4, _ch_address_refused, _ch_public_only_policy, _ch_open_socket, _CH_REDIRECT_CODES, _CH_SITE_RANK, _ch_transport_error, _ch_unvetted_policy, _ChDeadlineSocket, _ChFallbackConnection, _ChSession, _ch_session_new
 class ChromeClientError(ConnectionError):
 	"""A refused or failed exchange on the Chrome client path.
 
@@ -2392,6 +2392,20 @@ def _ch_draw(rand, n):
 	return out
 
 
+def _ch_idna_encode(name):
+	"""`name.encode("idna")`, refusing the four UTS-46 deviation characters first (R-0056, CWE-176).
+
+	The stdlib codec is IDNA2003 (transitional): it maps U+00DF to "ss" and
+	U+03C2, U+200D, U+200C to sigma or nothing, while Chrome (UTS-46
+	nontransitional) keeps them -- so the encoded name would be a different
+	host than the one Chrome reaches. A name carrying one raises UnicodeError,
+	the codec's own refusal, so every caller keeps its existing failure path.
+	"""
+	if any(ord(c) in (0x00DF, 0x03C2, 0x200D, 0x200C) for c in name):
+		raise UnicodeError("IDNA deviation character")
+	return name.encode("idna")
+
+
 def _ch_sni_name(host):
 	"""The server_name host_name bytes for `host`, or None when Chrome sends no SNI.
 
@@ -2422,7 +2436,7 @@ def _ch_sni_name(host):
 	if not name:
 		raise ChromeClientError("tls: empty host name")
 	try:
-		encoded = name.encode("idna")
+		encoded = _ch_idna_encode(name)
 	except UnicodeError:
 		raise ChromeClientError("tls: host name cannot be IDNA-encoded") from None
 	return encoded.lower()
@@ -4098,6 +4112,9 @@ class _ChHpackDecoder:
 			self._size -= 32 + len(name) + len(value)
 
 
+_CH_BAD_PORTS = frozenset((0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080))
+
+
 def _ch_split_url(url):
 	"""The ONE URL normaliser: `url` -> (scheme, host, port, target), or ChromeClientError("url: ...").
 
@@ -4110,13 +4127,14 @@ def _ch_split_url(url):
 	- userinfo (`user:pass@`, even an empty `@`) is refused
 		(`url: userinfo not supported`).
 	- `host`: lowercased; a non-ASCII name is IDNA-encoded
-		(`str.encode("idna")`); a trailing dot is KEPT (a distinct name, and
+		(`_ch_idna_encode`); a trailing dot is KEPT (a distinct name, and
 		Chrome keeps it); a bracketed IPv6 literal is unwrapped and written
 		in its compressed form (a zone id is refused). A host of anything
 		but letters, digits, `-`, `.` and `_`, or with an empty label, is
 		refused, so no CR, LF, space or `%` can reach a header or the SNI.
 	- `port`: the URL's, else 80 for http and 443 for https (the PoC's
-		443-for-every-scheme is fixed here); 0 or out of range is refused.
+		443-for-every-scheme is fixed here); 0 or out of range is refused,
+		and so is a Fetch bad port in _CH_BAD_PORTS (`url: port <n> refused`).
 	- `target`: the path (or "/") plus "?" and the query when there is one;
 		the fragment is dropped. A space, a control character, DEL or a
 		non-ASCII character is percent-encoded as UTF-8, so the target is
@@ -4151,7 +4169,7 @@ def _ch_split_url(url):
 	else:
 		if not host.isascii():
 			try:
-				host = host.encode("idna").decode("ascii").lower()
+				host = _ch_idna_encode(host).decode("ascii").lower()
 			except UnicodeError:
 				raise ChromeClientError("url: host is not a valid IDNA name") from None
 		if not all((c.isascii() and c.isalnum()) or c in "-._" for c in host):
@@ -4162,6 +4180,8 @@ def _ch_split_url(url):
 		port = 443 if scheme == "https" else 80
 	if port < 1 or port > 65535:
 		raise ChromeClientError("url: invalid port")
+	if port in _CH_BAD_PORTS:
+		raise ChromeClientError("url: port %d refused" % port)
 	raw = parts.path or "/"
 	if parts.query:
 		raw += "?" + parts.query
@@ -4298,7 +4318,7 @@ def _ch_origin_of(url):
 			return None
 	elif not host.isascii():
 		try:
-			host = host.encode("idna").decode("ascii").lower()
+			host = _ch_idna_encode(host).decode("ascii").lower()
 		except UnicodeError:
 			return None
 	if port is None:
@@ -5888,7 +5908,7 @@ class _ChCookieJar:
 					val = (val[1:] if val.startswith(".") else val).lower()
 					if not val.isascii():
 						try:
-							val = val.encode("idna").decode("ascii").lower()
+							val = _ch_idna_encode(val).decode("ascii").lower()
 						except UnicodeError:
 							return False
 					domain = val
@@ -7142,7 +7162,7 @@ def _ch_session_new(decoders=None, connect_policy=None, timeout=30, max_bytes=0,
 		verified). Anything else is ChromeClientError("transport: ...").
 	"""
 	return _ChSession(decoders, connect_policy, timeout, max_bytes, log, tls12_fallback, allow_downgrade, rand, ssl_context_factory, transport)
-# END GENERATED: 370cb24cf6a7
+# END GENERATED: e8ffc37bd03b
 
 _DECODERS = {"br": _brotli_decompress, "zstd": _zstd_decompress}
 
