@@ -714,6 +714,29 @@ def run(opts=None):
                 problems.append("UNEXPECTED %r" % not_want)
             suite.record("I", cid, problems, text=t, showable=True)
 
+        # B, no-PyYAML YAML fallback (R-0059): a tab is refused only as
+        # INDENTATION, never as block scalar content.  The fallback is forced
+        # in-process (this host may have PyYAML) in the server, and called
+        # directly in the p:verify skill's copy -- the two must agree.
+        smod = H.load_module_from_path("verify_validate_yaml_b", SKILL)
+        real_find_spec = vmod.importlib.util.find_spec
+        for cid, text, want_line in [
+                ("tab-in-block-scalar-content-ok",
+                 "a: |\n  x\ty\n  \tz\nb: &anc |\n  \tw\nc: 1\n", None),
+                ("tab-indent-after-block-scalar",
+                 "a: |\n  x\nb:\n\tc: 3\n", 4)]:
+            vmod.importlib.util.find_spec = (
+                lambda n, *a: None if n == "yaml" else real_find_spec(n, *a))
+            try:
+                got = {"inspect": vmod._v_yaml(text.encode(), "t.yaml")[2]}
+            finally:
+                vmod.importlib.util.find_spec = real_find_spec
+            got["verify"] = smod._yaml_precheck(text).line
+            for who, line in sorted(got.items()):
+                suite.record("B", "yaml-fallback-%s-%s" % (who, cid),
+                             [] if line == want_line else
+                             ["line %r, expected %r" % (line, want_line)])
+
         # ================= J: batch =================
         t = case(suite, cli, "J", "batch-mixed", "validate",
                  {"paths": [f("valid.json"), f("bad.json"), f("plain.txt")]},

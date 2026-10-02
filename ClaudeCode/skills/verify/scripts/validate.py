@@ -424,12 +424,26 @@ def _flow_balance(text: str):
 
 def _yaml_precheck(text: str) -> Result:
 	lines = text.splitlines()
+	# Inside a | or > block scalar only the leading SPACES are indentation;
+	# a tab past the content indent is text (R-0059).
+	block = None  # (header indent, content indent or None)
 	for i, ln in enumerate(lines, 1):
 		stripped = ln.lstrip(" \t")
+		spaces = len(ln) - len(ln.lstrip(" "))
+		if block is not None:
+			if not stripped:
+				continue
+			if block[1] is None and spaces > block[0]:
+				block = (block[0], spaces)
+			if block[1] is not None and spaces >= block[1]:
+				continue
+			block = None
 		indent = ln[:len(ln) - len(stripped)]
 		if "\t" in indent:
 			return limited("tab character in indentation (YAML forbids tabs for "
 				"indentation) [stdlib pre-check; no PyYAML]", line=i)
+		if _line_has_block_scalar(ln):
+			block = (spaces, None)
 	checks = ["UTF-8 decodes", "no tab indentation"]
 	has_block_scalar = any(_line_has_block_scalar(ln) for ln in lines)
 	if not has_block_scalar:

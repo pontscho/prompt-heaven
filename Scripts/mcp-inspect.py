@@ -1742,12 +1742,27 @@ def _v_yaml(data: bytes, name: str) -> _VResult:
         # balances flow collections; that heuristic is deliberately not
         # duplicated here — a LIMITED verdict already tells the caller the file
         # was never parsed, so the extra 90 lines buy very little.)
+        # Inside a | or > block scalar only the leading SPACES are indentation;
+        # a tab past the content indent is text (R-0059).
+        block = None  # (header indent, content indent or None)
         for i, ln in enumerate(text.splitlines(), 1):
             stripped = ln.lstrip(" \t")
+            spaces = len(ln) - len(ln.lstrip(" "))
+            if block is not None:
+                if not stripped:
+                    continue
+                if block[1] is None and spaces > block[0]:
+                    block = (block[0], spaces)
+                if block[1] is not None and spaces >= block[1]:
+                    continue
+                block = None
             if "\t" in ln[:len(ln) - len(stripped)]:
                 return _v_limited("tab character in indentation (YAML forbids "
                                   "tabs for indentation) [stdlib pre-check; "
                                   "no PyYAML]", i)
+            if re.search(r"(?:^|[:-]\s)\s*(?:[&!]\S*\s+)*[|>][-+0-9]*\s*"
+                         r"(?:#.*)?$", ln):
+                block = (spaces, None)
         return _v_limited("structural pre-check passed (UTF-8 decodes, no tab "
                           "indentation) — NOT a full parse; install PyYAML for "
                           "real YAML validation")
