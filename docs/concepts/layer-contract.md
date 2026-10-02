@@ -7,8 +7,8 @@ description: Why skills, agents and fragments are three non-overlapping layers, 
 sources:
   - ClaudeCode/ARCHITECTURE.md
 verified:
-  commit: c9d2175
-  date: 2026-09-29
+  commit: f691801
+  date: 2026-10-02
 links:
   - agents
   - skills
@@ -74,7 +74,10 @@ child must be a leaf, so the chain is `main/skill → executor → leaf → (sto
   must not list `Agent` in its `tools:`.
 - **An executor may not spawn another executor.** So `p:minion-mason` cannot hand
   a failing task to `p:minion-bug-hunter`; only a skill or the main context can
-  reach an executor.
+  reach an executor. `/p:implement` is that skill: when a mason FAILURE's Watson
+  finding blames pre-existing code the task exposed, the skill hands the bug to
+  Quint once and re-launches the mason on `FIXED`
+  `ClaudeCode/skills/implement/SKILL.md`.
 
 And being an executor is **not** a licence to orchestrate. It carries one unit
 and offloads sub-tasks *within* it; the moment a job spans several units, needs

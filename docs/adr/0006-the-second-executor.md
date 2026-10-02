@@ -193,3 +193,13 @@ cheap to prevent and expensive to unwind.
 - **The symptomless hunt gained nothing.** It remains `/p:code-review <dir>` with
   the eight lenses. Option 2 is recorded here so the idea is not re-derived from
   scratch next time it looks attractive.
+
+## Addendum (2026-10-02): The implement-to-Quint bridge is built
+
+The bridge the Consequences section left "deliberately not built yet" now exists, in the skill and nowhere else: `/p:implement` section 3.b `ClaudeCode/skills/implement/SKILL.md` (roadmap item R-0004).
+
+- **Trigger.** A `p:minion-mason` FAILURE whose Watson finding places the root cause in **pre-existing code** the task merely exposed, not in the task's own new code. The skill hands that bug to `p:minion-bug-hunter` (Quint) once, with the mason's failing log and Watson's finding as the symptom, under Quint's usual rules: red-to-green, contained fix only, never commit.
+- **On `FIXED`.** The mason is re-launched with Quint's summary appended to its brief.
+- **On `STOPPED — DIAGNOSIS ONLY`** (the fix is not contained). The skill escalates to the user per section 3.c, carrying Quint's diagnosis.
+
+The executor-may-not-spawn-an-executor rule is unchanged: the mason still cannot call Quint, and the skill's minion table names `p:minion-bug-hunter` as reachable only from 3.b. A task failure whose root cause is in the task's own new code still gets only Watson's finding, as before.
