@@ -224,6 +224,10 @@ RuntimeError clauses"),
     "mcp-postgres.py": (W_HANDLE, D_PRESENT,
                         "layer D sits after a narrow PgError clause that keeps \
 server-reported errors on their own channel"),
+    "mcp-proxy.py":    (W_HANDLE, D_NONE_OWN,
+                        "the relay has no module-level handle_*_call; layer W in \
+_handle_tool_call is the only broad guard, and a child's own failure arrives as its \
+reply, not as an exception"),
     "mcp-purity.py":   (W_HANDLE, D_PRESENT,
                         "the canonical form both layers are gated against"),
     "mcp-tshark.py":   (W_HANDLE, D_PRESENT,
@@ -238,7 +242,7 @@ message rather than an f-string"),
 
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_W = 15
+DECLARED_W = 16
 DECLARED_D = 9
 
 # ---------------------------------------------------------------------------

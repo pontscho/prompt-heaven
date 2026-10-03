@@ -210,6 +210,10 @@ FLEET = {
                         "one lock; unregistered (purity_call)"),
     "mcp-postgres.py": ("pg-stdin",       "pool",      "pg-call",        "arg",
                         "per-connection lock across the whole exchange"),
+    "mcp-proxy.py":    ("proxy-stdin",    "coroutine", None,             None,
+                        "child clients keep ids/_pending/routes on the loop thread and the "
+                        "cancel arm needs the CancelledError to land in the await; a worker "
+                        "pool would be a regression; unregistered (ai-soul's endpoint)"),
     "mcp-purity.py":   ("purity-stdin",   "coroutine", None,             None,
                         "coroutine handlers; sync file ops park on the DEFAULT "
                         "pool on purpose (:5810) -- safe now the reader is not there"),
@@ -225,7 +229,7 @@ FLEET = {
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
 DECLARED_POOL = 8
-DECLARED_COROUTINE = 7
+DECLARED_COROUTINE = 8
 
 # Both spellings create a task.  Gating one would fail a correct refactor.
 TASK_FACTORIES = {"create_task", "ensure_future"}

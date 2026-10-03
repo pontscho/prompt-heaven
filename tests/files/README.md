@@ -130,6 +130,19 @@ describes. One subdirectory per set so `diff` can be scoped to one set
 (`--reference tests/files/chrome/154/navigate-reload`). Loopback identifiers
 only; `export` refuses anything else.
 
+## mcp_proxy/ — not an LSP fixture
+
+```
+mcp_proxy/ tf_stub_child.py   the adversarial stub MCP child for tests/test_mcp_proxy.py
+```
+
+A stdlib-only, newline-JSON-RPC MCP server that crashes, stalls, floods,
+pollutes its stdout, paginates, emits progress and asks the proxy for sampling
+on command. It is run as `__main__` by `tests/test_mcp_proxy.py` and by the
+smoke row of `Scripts/mcp-proxy.py`; nothing imports it. The `tf` prefix is
+kept (tool `tf_stub_call`, functions `tf_*`), and its flags and functions are
+documented in its own docstring.
+
 ## Notes on the toolchain
 
 - No `compile_commands.json` is committed. It is inherently machine-specific and

@@ -315,7 +315,7 @@ reaches the message-level catch-all.
 
 ## 5. run() loop — one task per message, and a reader thread nothing can take
 
-`tests/test_read_loop.py` gates four properties across all fifteen servers; the
+`tests/test_read_loop.py` gates four properties across all sixteen servers; the
 WHY is `docs/adr/0008-a-serialized-read-loop-looks-like-a-dead-server.md`.
 
 1. **`sys.stdin.readline` on a dedicated `max_workers=1` executor** — never
@@ -350,9 +350,10 @@ WHY is `docs/adr/0008-a-serialized-read-loop-looks-like-a-dead-server.md`.
 
 **The transport is uniform; the dispatch decision is not.** Two groups, spelled
 as the gate's `FLEET` table spells them — **`pool`** (8: forge, git, inspect,
-jenkins, postgres, tshark, webfetch, wiki) and **`coroutine`** (7: clangd,
-context7, cuda, gdc, lldb, lua-lsp, purity). Audit this server's own state to
-pick; §5b is not a reduced §5a — for those seven a worker pool is a regression.
+jenkins, postgres, tshark, webfetch, wiki) and **`coroutine`** (8: clangd,
+context7, cuda, gdc, lldb, lua-lsp, proxy, purity). Audit this server's own
+state to pick; §5b is not a reduced §5a — for those eight a worker pool is a
+regression.
 
 ### 5a. `pool` — blocking sync handlers in a worker `ThreadPoolExecutor`
 

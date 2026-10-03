@@ -59,6 +59,15 @@ import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# mcp-proxy.py needs a child to relay.  realpath, not abspath: ~/.claude/scripts
+# symlinks to Scripts/, and the stub lives under the repo's tests/ tree.  The
+# config carries no root, so --project-root supplies it (and the footprint /
+# name_existence probes that rewrite --project-root still reach it).
+_REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+_PROXY_STUB = os.path.join(_REPO_DIR, "tests", "files", "mcp_proxy", "tf_stub_child.py")
+_PROXY_SMOKE_CONFIG = json.dumps({"children": [
+    {"name": "stub", "command": sys.executable, "args": ["-B", _PROXY_STUB]}]})
+
 # Per-server launch config: minimal args so argparse succeeds and the
 # initialize/ping/unknown path runs WITHOUT spawning heavy subprocess work.
 #
@@ -100,6 +109,13 @@ SERVERS = [
     {"file": "mcp-postgres.py", "tool": "postgres_call", "args": ["--host", "127.0.0.1:1", "--dbname", "x"], "registered": True},
     {"file": "mcp-wiki.py",     "tool": "wiki_call",     "args": ["--project-root", "/tmp"], "registered": True},
     {"file": "mcp-inspect.py",  "tool": "inspect_call",  "args": [], "registered": True},
+    # One stub child keeps the fleet's one-tool invariant; tf_stub_call is never
+    # a real fleet tool name (name_existence maps tool -> file last-wins).  This
+    # row makes Scripts/ depend on tests/files/mcp_proxy/tf_stub_child.py at
+    # runtime through the repo layout: without tests/ the stub fails to start,
+    # the proxy exits 1 before initialize, and the harness reports SKIP, not FAIL.
+    {"file": "mcp-proxy.py",    "tool": "tf_stub_call",
+     "args": ["--project-root", "/tmp", "--config-json", _PROXY_SMOKE_CONFIG], "registered": False},
 ]
 
 READ_TIMEOUT = 8.0  # seconds to wait for a single response line

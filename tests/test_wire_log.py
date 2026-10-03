@@ -276,6 +276,10 @@ WIRE = {
                         "they need to be declared"),
     "mcp-postgres.py": (OUT, FULL,
                         "pg_call dispatcher; replies carry query rows"),
+    "mcp-proxy.py":    (OUT, FULL,
+                        "aggregating relay; replies carry every child's payloads verbatim; "
+                        "child-side and HTTP sites are outside this gate and covered by "
+                        "tests/test_mcp_proxy.py K3/J26/J27"),
     "mcp-purity.py":   (OUT, FULL,
                         "the canonical form both sites are gated against "
                         "(:6009-6021 inbound, :6059-6063 outbound)"),
@@ -290,7 +294,7 @@ WIRE = {
 
 # Declared totals, so a silent re-classification of one row trips a case rather
 # than sliding through as "the table matches the table".
-DECLARED_FULL = 12
+DECLARED_FULL = 13
 DECLARED_MINIMAL = 1
 DECLARED_SILENT = 2
 

@@ -160,7 +160,8 @@ SYSTEM_LIBS = {
 # API check is cheap and exact.  A listed file that does not exist yet is an
 # INFO row, never a vacuous PASS.
 NEW_39_SCOPE = ("Scripts/_mcp_chrome.py", "Scripts/_mcp_brotli.py",
-                "Scripts/_mcp_zstd.py", "Scripts/chrome_capture.py")
+                "Scripts/_mcp_zstd.py", "Scripts/chrome_capture.py",
+                "Scripts/mcp-proxy.py")
 
 # stdlib on a newer interpreter, ABSENT on the 3.9 floor -- so it needs the
 # same guard as a third-party module.  module -> first version that has it.

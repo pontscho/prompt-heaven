@@ -224,6 +224,11 @@ FLEET = {
     "mcp-postgres.py": (PG_CANCEL,  "a CancelRequest on a second socket stops "
                                     "the statement; the worker drains its "
                                     "error under the connection lock"),
+    "mcp-proxy.py":    (TASK,       "coroutine handlers: the awaited child call is "
+                                    "cancelled, and ChildClient.rpc's CancelledError arm "
+                                    "sends notifications/cancelled with the child's own "
+                                    "request id before re-raising (proven end to end in "
+                                    "tests/test_mcp_proxy.py D1)"),
     "mcp-purity.py":   (LSP_CANCEL, "semantic calls: $/cancelRequest to "
                                     "clangd/luals; file ops on the default "
                                     "pool stay reply-only"),
@@ -237,7 +242,7 @@ FLEET = {
                                     "vendored git() is exempt (KILL_EXEMPT)"),
 }
 
-DECLARED_TASK = 2
+DECLARED_TASK = 3
 DECLARED_KILL = 5
 DECLARED_LSP_CANCEL = 4
 DECLARED_PG_CANCEL = 1

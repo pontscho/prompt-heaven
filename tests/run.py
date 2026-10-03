@@ -206,6 +206,10 @@ def run_webfetch_roots(opts):
     return run_python_suite("test_webfetch_roots", opts)
 
 
+def run_mcp_proxy(opts):
+    return run_python_suite("test_mcp_proxy", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -537,7 +541,7 @@ SUITES = [
     ("read_loop", run_read_loop,
      "every MCP server's read loop carries ADR 0008's shape: a single-thread "
      "reader executor no handler can take, and one task per message -- with "
-     "the pool/coroutine split declared per server rather than inferred", 47),
+     "the pool/coroutine split declared per server rather than inferred", 49),
     # TYPED for read_loop's reason: a server that appears without a declared
     # reclaim class is the defect, so a moved count is the alarm working.  The
     # two per-server groups make it 2N + a fixed tail.
@@ -548,7 +552,7 @@ SUITES = [
      "never cancellable, a dispatch target that lets the CancelledError "
      "through, and what a cancel reclaims declared per server and MEASURED "
      "for the kill, lsp-cancel and pg-cancel classes -- the PostgreSQL "
-     "CancelRequest and its drain driven against a loopback fake server", 84),
+     "CancelRequest and its drain driven against a loopback fake server", 86),
     # TYPED for read_loop's reason above, not mcp_footprint's: a server that
     # appears without a declared row is the defect, so a moved count is the
     # alarm working.  The two per-server groups make it 2N + a fixed tail.
@@ -557,17 +561,17 @@ SUITES = [
      "and argument KEYS, never a payload body or value (F12/CWE-532), with "
      "the shape each site may log declared per server rather than inferred, "
      "and MCP_SKELETON.md's own sample lifted by script and gated the same way",
-     53),
-    # TYPED for the same reason as the two above.  The count is 24 declared
-    # sites + 15 servers + 4 roster + 11 control + 4 hygiene: the site total is
-    # 15 layer-W plus 9 layer-D, so a server that gains or loses a catch-all
+     55),
+    # TYPED for the same reason as the two above.  The count is 25 declared
+    # sites + 16 servers + 4 roster + 11 control + 4 hygiene: the site total is
+    # 16 layer-W plus 9 layer-D, so a server that gains or loses a catch-all
     # moves it, which is the alarm working.
     ("handler_crash", run_handler_crash,
      "every MCP server's tool-handler catch-all leaves a traceback at a level "
      "the default WARNING configuration emits -- at BOTH site layers, the "
      "McpServer wrap and the module-level dispatcher, each declared per server "
      "rather than inferred, with the format string required to be a literal so "
-     "a payload cannot be interpolated into a log that IS written", 58),
+     "a payload cannot be interpolated into a log that IS written", 60),
     # TYPED for the same reason again.  The count is 6 escapers + 6 rendered
     # rows + 1 coupling + 3 unpadded + 2 documented + 2 structure + 1 jenkins
     # two-space + 1 jenkins newline + 4 roster + 12 control + 4 hygiene (the
@@ -588,7 +592,7 @@ SUITES = [
      "declared unpadded charges no row for another row's width, a jenkins "
      "two-space cell is measured not to forge against the aligned reader, "
      "and a CR/LF in a jenkins cell is escaped so it cannot end its row", 42),
-    # TYPED for the same reason again.  The count is 3 clauses x 15 servers +
+    # TYPED for the same reason again.  The count is 3 clauses x 16 servers +
     # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
     # being analysed IS the defect here, so a count that moves when the fleet
     # moves is the alarm working.  The control group is the large one on
@@ -602,7 +606,7 @@ SUITES = [
      "handshake structurally cannot see, since a server inlining the RIGHT "
      "string is indistinguishable on the wire from one reading the constant, "
      "with the fleet's agreement asserted BETWEEN the files so the suite "
-     "never holds a copy of the number it polices", 71),
+     "never holds a copy of the number it polices", 74),
     ("forge_dispatch", run_forge_dispatch,
      "forge_call dispatch: `status` answers exactly what the empty call "
      "answers on all four of its paths, each with a control proving the "
@@ -613,7 +617,7 @@ SUITES = [
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
-     "builder declared", 57),
+     "builder declared", 58),
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
      "(R-0057, F32): the fields the regex parsers produced, pinned as "
@@ -632,6 +636,20 @@ SUITES = [
      "alone; save_to refusing .git/, .claude/hooks/, .claude/settings*.json "
      "and the root .mcp.json case-folded and through a symlink, before any "
      "fetch (R-0062)", 38),
+    # TYPED: the suite is a fixed case table (groups A-I, K, L = 57 in
+    # Phase 1, plus group J's 33 HTTP cases = 90; the round-1 review added
+    # A13, G6 and J34-J38 = 97; the round-2 review added J39 and J40 = 99;
+    # the round-3 review added G7, J41, J42 and L4 = 103), so a count that
+    # moves is the alarm, not noise.
+    ("mcp_proxy", run_mcp_proxy,
+     "mcp-proxy, the aggregating relay: config refusals, eager start and "
+     "duplicate-tool refusal, id/progress remapping, cancel forwarded with "
+     "the child's own id, restart with backoff/budget/disable, framing, "
+     "timeout, orphan-free shutdown, static AST rules, sandbox hygiene; "
+     "Streamable HTTP: bearer, Origin/Host, session lifecycle, every "
+     "tools/call as SSE with keepalive, caps, shutdown with live traffic, "
+     "total header deadline, strict headers, deep nesting, malformed "
+     "header lines, id-less initialize, request id shape", 103),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]
