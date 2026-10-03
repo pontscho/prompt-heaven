@@ -91,6 +91,10 @@ not see 3.10+ stdlib API use; see [[tests]].
 Each server exposes its capability to Claude Code via a single dispatcher tool
 routing to internal handlers by a `function` parameter — the pattern is best
 seen in `Scripts/mcp-purity.py`. All use asyncio + JSON-RPC 2.0 over stdio.
+`Scripts/mcp-proxy.py` (below) is the exception to both: it has no dispatcher
+tool of its own but relays its children's tools under their own names
+`Scripts/mcp-proxy.py:_handle_tool_call`, and with `--http` it serves Streamable
+HTTP instead of stdio `Scripts/mcp-proxy.py:serve_http`.
 The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 `purity_call` entry point is recorded in [[0001-purity-server-unification]].
 
@@ -109,7 +113,9 @@ pre-existing bugs the conversion exposed are in
 **Every server also honours `notifications/cancelled`.** The read loop keeps an
 id-to-task registry and cancels the named task before dispatching anything else,
 and the cancelled request is never answered. What the cancel *reclaims* depends
-on the server's class. For gdc and lldb (`task`), the coroutine stops. For forge,
+on the server's class. For gdc, lldb and proxy (`task`), the coroutine stops;
+the proxy's child client also forwards `notifications/cancelled` with the child's
+own request id, from the cancel arm of `ChildClient.rpc` `Scripts/mcp-proxy.py:rpc`. For forge,
 tshark, git, inspect and wiki (`kill`), the request's child process group is
 signalled `Scripts/mcp-forge.py:_Reclaim`, except for declared exemptions such as
 wiki's vendored `Scripts/mcp-wiki.py:git` and mcp-git's mutating stash
@@ -141,6 +147,63 @@ loop became thirteen in the first place.
 | `Scripts/mcp-postgres.py` | mcp-postgres | PostgreSQL over the native v3 wire protocol — stdlib only, no libpq |
 | `Scripts/mcp-gdc.py` | mcp-gdc | Chrome DevTools: navigation, DOM, network, screenshots, JS evaluation |
 | `Scripts/mcp-tshark.py` | mcp-tshark | Packet capture and PCAP analysis via tshark |
+
+One more live server sits outside that table on purpose. `Scripts/mcp-proxy.py`
+is not registered by design: it is the one endpoint ai-soul connects to, one
+instance per project root, aggregating fleet children under their own tool
+names. Its handlers are coroutines on the read loop's event loop, because each
+child client keeps its ids, pending futures and progress routes on the loop
+thread `Scripts/mcp-proxy.py:ChildClient`; the smoke check runs it as an
+unregistered server against a stub child `Scripts/_mcp_smoke_test.py`.
+
+| Script | Server | Domain |
+|--------|--------|--------|
+| `Scripts/mcp-proxy.py` | mcp-proxy | Not registered by design — the one endpoint ai-soul connects to, one instance per project root, aggregating fleet children under their own tool names |
+
+With `--http` the same core serves Streamable HTTP instead of stdio, on ONE
+endpoint (`/mcp` unless `--http-path` says otherwise), with ONE protocol version
+on both transports. The listener is an IPv4 literal, loopback by default
+(`127.0.0.1`); any other address needs `--allow-remote`, and it is bound before
+any child is spawned. A bearer token is required, from `--token-file` (owned by
+you, mode 0600, at least 32 printable characters) or `MCP_PROXY_TOKEN`, which is
+removed from the environment before anything is spawned, so no child inherits
+it, and is never logged. HTTP mode refuses `--config-json` (argv is visible in
+`ps`) `Scripts/mcp-proxy.py:_http_cli_defaults`. On a loopback bind the `Host`
+header is checked; a request carrying an `Origin` not named by
+`--allowed-origin` gets 403, and one without `Origin` is accepted. On every
+request the request line and headers must arrive within 10 s in total
+`Scripts/mcp-proxy.py:_HTTP_HEADER_TIMEOUT_S`, and the per-recv timeout stays
+that short until the bearer check passes. `Content-Type` must be exactly
+`application/json` (a `;` parameter aside), and a repeated `Mcp-Session-Id`,
+`MCP-Protocol-Version` or `Content-Type` header, or a malformed header line, is
+refused; an id that is not a string or integer is refused -32600 (with id
+null, before any session is touched; stdio refuses it the same way). Connections,
+sessions and in-flight requests are capped (`--max-connections`,
+`--max-sessions`, `--max-inflight`; idle sessions evicted after
+`--session-idle`). Every `tools/call` is answered as `text/event-stream`: the
+headers go out at once, a `: keepalive` comment follows every 15 s while the
+call waits `Scripts/mcp-proxy.py:_HTTP_KEEPALIVE_S`, then progress events and
+the response; no SSE event carries an `id:` line, so the SDK never treats a
+stream as resumable. Every other request is answered as JSON. A client that
+disconnects does NOT cancel its call; `notifications/cancelled` and DELETE do.
+A cancelled `tools/call` closes its stream with no response; `202` with no body
+is kept only for a cancelled non-`tools/call` request.
+
+Running it for ai-soul: start
+`python3 Scripts/mcp-proxy.py --http --config <config.json> --project-root <root>
+--token-file <token> --port <N>` (`--port 0`, the default, picks an ephemeral
+port; `--ready-file` reports it), then point the SDK's
+`StreamableHTTPClientTransport` at `http://127.0.0.1:<N>/mcp` with
+`Authorization: Bearer <token>` in `requestInit.headers`. Two client-side
+timeouts bound a long call. The SDK's own request timeout is 60 s by default,
+and the proxy cannot lift it: `: keepalive` comments are not progress
+notifications and do not reset it, so long forge or jenkins calls need
+`timeout` and/or `resetTimeoutOnProgress` on the ai-soul side (progress
+notifications are forwarded, so reset-on-progress is effective). Node's `fetch`
+(undici) is ASSUMED, not verified, to default to a 300 s `headersTimeout` and
+`bodyTimeout`; the immediate SSE headers and the 15 s keepalive comments keep
+both from firing however long the call runs. The proxy's own per-child call
+timeout is independent of both.
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
 which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`

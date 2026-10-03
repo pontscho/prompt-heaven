@@ -16,6 +16,13 @@ WIP now: 0 of 3. Archive: 59 closed items (50 done, 9 dropped).
 | later | R-0048 | idea  | Answer a HelloRetryRequest that selects P-384 (FLAG-2)                                              | yes   |
 | later | R-0052 | idea  | Measure the DDG challenge page's structural marker and replace the fallback block predicate         | yes   |
 | later | R-0047 | idea  | implement certificate verification in _ChTls so fingerprint and authenticity stop being a trade-off | yes   |
+| inbox | R-0063 | idea  | Harden --log-file open in the generated logging block (O_NOFOLLOW, owner check)                     | yes   |
+| inbox | R-0064 | idea  | mcp-proxy: per-session share of the global max-inflight budget                                      | yes   |
+| inbox | R-0065 | idea  | mcp-proxy: session table exhaustion holds slots for a full idle period                              | yes   |
+| inbox | R-0066 | idea  | mcp-proxy: --config-json puts the child config on the argv in stdio mode                            | yes   |
+| inbox | R-0067 | idea  | mcp-proxy: NaN and Infinity literals are accepted and re-emitted                                    | yes   |
+| inbox | R-0068 | idea  | mcp-proxy: guard huge integer literals on Python before 3.9.14                                      | yes   |
+| inbox | R-0069 | idea  | mcp-proxy: pre-auth stdlib error pages                                                              | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -78,3 +85,108 @@ Closing the gap is what would let the Chrome path become the default again. That
 - 2026-10-02 unset->later: Triage 2026-10-02: real gap but narrow exposure (Chrome path is opt-in in webfetch, once-per-host after a block in search); large stdlib X.509 work.
 
 # inbox
+
+## R-0063 · Harden --log-file open in the generated logging block (O_NOFOLLOW, owner check)
+
+state: idea
+horizon: unset
+origin: user:2026-10-03:log-file-symlink-hardening
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Security review 20261003-170500 of mcp-proxy, finding F33 (verified LOW, CWE-59): the generated logging block opens the --log-file path with O_CREAT|O_APPEND|O_WRONLY and no O_NOFOLLOW, then fchmods it to 0600 without an fstat owner or regular-file check. A symlink pre-planted in a directory another user can write is followed: DEBUG lines are appended to the target and its mode is changed; a foreign-owned target makes fchmod raise EPERM and the server exits with a traceback. The source is the operator's own CLI flag, so exploitation needs a misconfigured log directory. The defect lives in the canonical source Scripts/_mcp_logging.py and is copied into every MCP server, so the fix is fleet-wide: add O_NOFOLLOW, an fstat S_ISREG plus st_uid check before fchmod (or handle EPERM as a one-line error), regenerate all hosts, and gate it. The user chose to defer it out of the mcp-proxy feature on 2026-10-03.
+
+### Log
+
+- 2026-10-03 new->unset: proposed by p:security-review
+
+## R-0064 · mcp-proxy: per-session share of the global max-inflight budget
+
+state: idea
+horizon: unset
+origin: user:2026-10-03:mcp-proxy-inflight-per-session
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Security review round 1, finding F9 (verified LOW, CWE-770). The --max-inflight cap of Scripts/mcp-proxy.py is global across HTTP sessions, so one session issuing long tools/call requests can starve every other session. With a single bearer principal this is self-inflicted, which is why it was left unfixed; a per-session sub-cap would matter once more than one client shares the proxy.
+
+### Log
+
+- 2026-10-03 new->unset: proposed by p:security-review
+
+## R-0065 · mcp-proxy: session table exhaustion holds slots for a full idle period
+
+state: idea
+horizon: unset
+origin: user:2026-10-03:mcp-proxy-session-exhaustion
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Security review round 1, finding F10 (verified LOW, CWE-770); re-surfaced in round 3. Any token holder can fill --max-sessions with initialize calls it never uses, and the slots stay taken until --session-idle evicts them (default 86400 s). Options: a much shorter default idle for never-used sessions, or evicting the oldest unused session instead of refusing with 503.
+
+### Log
+
+- 2026-10-03 new->unset: proposed by p:security-review
+
+## R-0066 · mcp-proxy: --config-json puts the child config on the argv in stdio mode
+
+state: idea
+horizon: unset
+origin: user:2026-10-03:mcp-proxy-config-json-argv
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Security review round 1, finding F15 (verified LOW, CWE-214). In stdio mode the inline config is visible to every local user through the process list; HTTP mode already refuses the flag. Either refuse it in stdio mode too or document that a config file is the only safe carrier for env values.
+
+### Log
+
+- 2026-10-03 new->unset: proposed by p:security-review
+
+## R-0067 · mcp-proxy: NaN and Infinity literals are accepted and re-emitted
+
+state: idea
+horizon: unset
+origin: user:2026-10-03:mcp-proxy-allow-nan
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Security review round 1, finding F19 (verified LOW, CWE-20). The stdlib json module accepts NaN, Infinity and -Infinity by default and emits them again, which is not valid JSON for a strict peer. Left unfixed because allow_nan=False changes behaviour fleet-wide; a fix should decide whether it belongs in the shared _mcp_json canonical source rather than in the proxy alone.
+
+### Log
+
+- 2026-10-03 new->unset: proposed by p:security-review
+
+## R-0068 · mcp-proxy: guard huge integer literals on Python before 3.9.14
+
+state: idea
+horizon: unset
+origin: user:2026-10-03:mcp-proxy-int-digit-guard
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Security review round 1, finding F20 (verified LOW, CWE-400), and round 2 F5. The CVE-2020-10735 int-digit limit exists only from Python 3.9.14; the macOS system 3.9.6 parses a multi-megabyte digit run at quadratic cost. Today this is a declared limit in the module docstring (HTTP body bounded by --max-body-bytes, stdin is the trusted parent). A pre-parse digit-run cap would lift it for every fleet server, so it may belong in a shared canonical source.
+
+### Log
+
+- 2026-10-03 new->unset: proposed by p:security-review
+
+## R-0069 · mcp-proxy: pre-auth stdlib error pages
+
+state: idea
+horizon: unset
+origin: user:2026-10-03:mcp-proxy-stdlib-error-pages
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Security review round 1, finding F42 (verified LOW), plus a round-3 candidate on the same surface. Errors the stdlib http.server answers before any proxy check (400 bad request line, 414, 431, 501 unknown method) use its default HTML error page: no nosniff or no-store headers, and the offending request-line token is reflected (escaped) into the reason phrase and body. Overriding send_error with a fixed, body-less refusal would close both.
+
+### Log
+
+- 2026-10-03 new->unset: proposed by p:security-review
