@@ -23,6 +23,8 @@ WIP now: 0 of 3. Archive: 59 closed items (50 done, 9 dropped).
 | inbox | R-0067 | idea  | mcp-proxy: NaN and Infinity literals are accepted and re-emitted                                    | yes   |
 | inbox | R-0068 | idea  | mcp-proxy: guard huge integer literals on Python before 3.9.14                                      | yes   |
 | inbox | R-0069 | idea  | mcp-proxy: pre-auth stdlib error pages                                                              | yes   |
+| inbox | R-0070 | idea  | Lift _log_value into shared plumbing so no server logs raw method, id or name                       | yes   |
+| inbox | R-0071 | idea  | mcp-search: revisit the declared Unicode limits if the threat model grows                           | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -73,16 +75,19 @@ blocked_by: []
 severity: high
 tags: [scripts, search, security, tls]
 
-On the Chrome path (the _ChTls client in Scripts/_mcp_chrome.py) neither the certificate chain nor CertificateVerify is checked, so every Chrome-path answer carries cert_verified=False and the label "chrome (certificate NOT verified)". A party on the path can answer as any server and receives the session's cookie jar and every POST body, which for the DDG search script are the queries.
+On the Chrome path (the _ChTls client in Scripts/_mcp_chrome.py) neither the certificate chain nor CertificateVerify is checked, so every Chrome-path answer carries cert_verified=False. A party on the path can answer as any server and receives the session's cookie jar and every POST body.
 
-D15 of ADR 0026 (docs/adr/0026-speak-chrome-from-the-stdlib-verify-by-default.md, section "D15 - the verified transport is the default") made the certificate-verifying stdlib transport the default BECAUSE of this gap; the Chrome path is today only an explicit opt-in (webfetch profile=chrome) and a one-shot fallback after a block observed on the endpoint's own host in the search scripts.
+D15 of ADR 0026 (section "D15 - the verified transport is the default") made the certificate-verifying stdlib transport the default BECAUSE of this gap. Webfetch still treats the Chrome path as an explicit opt-in (profile=chrome).
 
-Closing the gap is what would let the Chrome path become the default again. That is a decision this item must re-take on its own merits once verification lands (the per-host block evidence, the cost of the verified-first probe, the fingerprint value), not assume: verification removes D15's reason, it does not by itself reverse D15.
+Update 2026-10-05 (commit 8dde3a6, ADR 0026 addendum of the same date): D15 is reversed for search. The two search CLIs and the new mcp-search server ALWAYS use the Chrome transport for DDG, Bing and grep.app, with no verified-first probe, no once-per-host fallback and no transport label. The exposure is therefore no longer narrow for search: every search query and cookie jar travels over an unauthenticated TLS session. The 2026-10-02 triage reason (opt-in in webfetch, once-per-host in search) holds only for webfetch now.
+
+Closing the gap is what would let the Chrome path become the default again in webfetch. That is a decision this item must re-take on its own merits once verification lands, not assume: verification removes D15's reason, it does not by itself reverse D15.
 
 ### Log
 
 - 2026-10-01 new->unset: follow-up of R-0044 (task-056, D15)
 - 2026-10-02 unset->later: Triage 2026-10-02: real gap but narrow exposure (Chrome path is opt-in in webfetch, once-per-host after a block in search); large stdlib X.509 work.
+- 2026-10-05 later->later: edited why: premise drift after 8dde3a6: search is Chrome-only now
 
 # inbox
 
@@ -190,3 +195,33 @@ Security review round 1, finding F42 (verified LOW), plus a round-3 candidate on
 ### Log
 
 - 2026-10-03 new->unset: proposed by p:security-review
+
+## R-0070 · Lift _log_value into shared plumbing so no server logs raw method, id or name
+
+state: idea
+horizon: unset
+origin: user:2026-10-05:fleet-log-value
+blocked_by: []
+severity: low
+tags: [logging, scripts, security]
+
+Security review 2026-10-05 of mcp-search, finding F19 (CWE-117): the fleet-canonical debug log lines write the JSON-RPC method, id and tool name raw, so a caller can forge log lines. mcp-proxy.py and, since 8dde3a6, mcp-search.py each carry a hand-written _log_value sanitizer; the other servers and the MCP_SKELETON template do not. Lift it into a canonical source (or the skeleton) and use it at every log site, with the wire_log gate extended to check it.
+
+### Log
+
+- 2026-10-05 new->unset: proposed by security review 2026-10-05
+
+## R-0071 · mcp-search: revisit the declared Unicode limits if the threat model grows
+
+state: idea
+horizon: unset
+origin: user:2026-10-05:mcp-search-unicode-limits
+blocked_by: []
+severity: low
+tags: [search, security, unicode]
+
+The 2026-10-05 Unicode hardening of the search output (commit 8dde3a6) drops control, format, surrogate, variation-selector and tag characters and renders non-ASCII hosts as punycode. Declared as not handled: look-alike letters in titles and snippets, ASCII look-alike domains, userinfo deception in rendered URLs (a user@host prefix is kept, percent-encoded), stacked combining marks, private-use and unassigned code points, and no NFKC normalisation. Each is a deliberate limit today; revisit if search output starts feeding an automated decision rather than a model reading results.
+
+### Log
+
+- 2026-10-05 new->unset: proposed by security review 2026-10-05

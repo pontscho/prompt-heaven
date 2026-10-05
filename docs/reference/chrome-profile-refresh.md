@@ -3,7 +3,7 @@ name: chrome-profile-refresh
 type: reference
 status: active
 title: Chrome profile refresh — re-measuring the stdlib client against a new Chrome
-description: The end-to-end procedure that moves the stdlib Chrome client to a new Chrome major — capture on loopback, export fixtures, edit the one profile table until diff exits 0, regenerate the three hosts, re-gate, retire the old fixtures, record the pin — and why the profile-age row is INFO forever.
+description: The end-to-end procedure that moves the stdlib Chrome client to a new Chrome major — capture on loopback, export fixtures, edit the one profile table until diff exits 0, regenerate the hosts, re-gate, retire the old fixtures, record the pin — and why the profile-age row is INFO forever.
 sources:
   - Scripts/_mcp_chrome.py:_chrome_profile
   - Scripts/_mcp_chrome.py:CHROME_PROFILE
@@ -163,8 +163,8 @@ Run every command from the repo root. Scratch output goes under `.claude/tmp/`.
 7. **Regenerate the hosts:** `python3 Scripts/amalgamate.py`. `_mcp_chrome.py` is
    a whole source (`Scripts/amalgamate.py:WHOLE_SOURCES`) and no host imports it
    ([[0025-generate-do-not-import]]); its blocks live as generated regions in
-   `Scripts/mcp-webfetch.py` and in the two declared non-server hosts
-   `Scripts/search_duckduckgo.py` and `Scripts/search_github.py`
+   `Scripts/mcp-webfetch.py`, in `Scripts/mcp-search.py`, and in the two declared
+   non-server hosts `Scripts/search_duckduckgo.py` and `Scripts/search_github.py`
    (`Scripts/amalgamate.py:DECLARED_HOSTS`). See [[generated-regions]].
 
 8. **Re-gate:** `forge_call test {targets: [mcp_chrome, generated_region, amalgamate_check]}`
@@ -201,7 +201,7 @@ tree that is a floor, not the whole set:
   and the h2 stream numbers its comments cite for the cors values — those move
   when Chrome's stream layout moves (below);
 - hand-written "Chrome <old major>" prose **outside** the generated regions — the
-  module docstrings of the three hosts, webfetch's `profile` refusal text and
+  module docstrings of the hosts, webfetch's `profile` refusal text and
   bot-block hint, and the test rows that compare those strings verbatim. Only
   `handle_webfetch_call`'s status text reads the major from `CHROME_PROFILE`.
 

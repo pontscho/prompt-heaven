@@ -772,3 +772,30 @@ The reasons for accepting it: only the search scripts pay it per call, because t
 **Measured red first.** On the old parsers an unterminated-`<tr>` DDG body took 6.4 s at 64 KiB (about quadratic), and a grep.app body of rows with an unclosed `<pre>` took 18 s at 16 KiB (about cubic). The new parsers take 0.5-1.3 s on the same shapes at the 2 MiB body cap. The gate is the new suite `search_parsers` (`tests/test_search_parsers.py`): it pins the fields the regex parsers produced as literals, then parses four hostile bodies shaped from the old patterns' worst case, each just under the module's own `SEARCH_MAX_BYTES`, in a child process with a 10 s bound. The regex parsers ran past the 60 s child timeout on all four. The 2 MiB cap stays; it now bounds memory and time, not a quadratic scan.
 
 **Output equivalence, and the declared limit.** Beyond the pinned literals, 900 of 900 fuzzed pages parsed to identical output on Python 3.9. One divergence is declared rather than fixed: CPython 3.14's html.parser treats an unclosed `<title>` (and by the same rule `<textarea>`, `<script>`, `<style>`) as raw text to the end of the page, as a browser does, so a page with a dropped `</title>` yields no results where the regex still found some. Python 3.9's html.parser treats only `<script>` and `<style>` that way. A case-folded tag (`<TR>`) or a `<pre>` hidden in a comment is likewise read as a browser reads it, not as the regex did. This closes the F32 item under *What stayed unverified, or open*.
+
+## Addendum (2026-10-05): D15 reversed for the search scripts: the Chrome transport always, no verified-first ladder (8dde3a6)
+
+**What changed (`8dde3a6`).** The search code moved out of the two CLIs into two canonical sources, `Scripts/_mcp_websearch.py` (DDG lite and Bing) and `Scripts/_mcp_codesearch.py` (grep.app). Both are generated whole into their CLI and into the new MCP server `Scripts/mcp-search.py`. With that move the user reversed D15 for search: every search session now opens on the Chrome path. `Scripts/search_duckduckgo.py:create_session`, `Scripts/search_github.py:create_session` and `Scripts/mcp-search.py:_create_session` each pass `transport="chrome"`, with `_ch_public_only_policy`, `max_bytes=SEARCH_MAX_BYTES` and no downgrade. `_ch_session_new` keeps `transport="verified"` as its default. webfetch keeps D15 unchanged: its Chrome path is still the explicit `profile="chrome"` opt-in.
+
+### What no longer holds for the search scripts
+
+- **Decision item 4 and D15's "the search scripts fall back once".** The verified-first ladder is gone. So are the re-issue over a second transport and the sticky per-process switch. `_transport_for`, `_CHROME_AFTER_BLOCK` and the verified-first probe in `_run_github` were deleted. The DDG script's `cdp` backend and its `DDG_BACKEND` switch were deleted too.
+- **The label rule.** D15 said the label stays wherever the Chrome path is used. That no longer holds for search: the per-result `**Transport**: chrome (certificate NOT verified)` line is gone, because every search answer now comes over the same unverified transport. `format_web_results` and `format_code_results` take no transport argument. The gap is stated once instead: in the server's tool description `Scripts/mcp-search.py:SEARCH_CALL_TOOL` and module docstring, and in each CLI's `create_session` docstring. webfetch's labels are unchanged.
+- **What a D16 / D17 block now triggers.** The block predicates were lifted verbatim. Each is still judged only on the endpoint's own host, and a transport failure is still never a block (`Scripts/_mcp_websearch.py:_ddg_blocked`, `Scripts/_mcp_websearch.py:_bing_blocked`, `Scripts/_mcp_codesearch.py:_grep_app_blocked`). What changed is what a block leads to:
+  - A DDG block moves this query and every remaining query of the run to Bing `Scripts/_mcp_websearch.py:run_web`.
+  - A Bing block or a grep.app block ends that query's ladder. The CLI prints one stderr line (`[Blocked by Bing on: ...]` or `[Blocked by grep.app on: ...]`), still prints the other queries' results, and exits 1 `Scripts/search_duckduckgo.py:main` `Scripts/search_github.py:main`. The server makes the call `isError` and keeps every other query's results in the text `Scripts/mcp-search.py:handle_web` `Scripts/mcp-search.py:handle_code`.
+  - S2 and M2 lose their downgrade rationale, since there is no second transport left to downgrade to. Their rules stay as written: a redirect target's 403, or a broken handshake, still must not count as a block.
+- **Alternative 13** (persisting the sticky switch) is moot, because there is no switch. Alternatives 10 and 12 are no longer the live trade-off for search. They stand as written for webfetch.
+
+### The cost, accepted
+
+This gives back, for the search endpoints, the authenticated channel D15 bought. The live records above showed DDG and Bing answering the verified transport without a block, so those queries could have travelled authenticated. Now a party on the path can answer as DDG, Bing or grep.app, and it receives every query and the session's cookie jar. Two defences remain:
+
+- The classification-only connect policy is kept, so a MITM's redirect into private or metadata space is still refused.
+- Rendered results are sanitised as third-party text: control and invisible code points are dropped, and URLs are reduced to http(s) with an IDNA host `Scripts/_mcp_websearch.py:_web_clean` `Scripts/_mcp_websearch.py:_web_url`. That bounds what a forged answer can render. It does not authenticate the answer.
+
+What the trade buys: one transport, one request pattern per endpoint, and no second-attempt traffic from one IP.
+
+### Follow-up
+
+The roadmap follow-up is certificate verification on the Chrome path for the search endpoints. The existing item is R-0047 (implement certificate verification in `_ChTls`). Its description still names the search scripts' one-shot fallback, which no longer exists; the search endpoints, which now have no verified path at all, are now its strongest case.

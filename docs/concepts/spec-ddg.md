@@ -8,9 +8,11 @@ sources:
   - Scripts/search_duckduckgo.py
   - Scripts/search_github.py
   - Scripts/_mcp_chrome.py
+  - Scripts/_mcp_websearch.py
+  - Scripts/mcp-search.py
 verified:
-  commit: bdbf852
-  date: 2026-10-02
+  commit: 8dde3a6
+  date: 2026-10-05
 links:
   - scripts
   - tests
@@ -28,7 +30,7 @@ links:
 
 DuckDuckGo employs multi-layered bot detection that effectively blocks all known Python HTTP clients (curl_cffi, primp, requests, httpx) from scraping search results, regardless of TLS impersonation quality. Even with virtually identical TLS/HTTP2 fingerprints to a real Chrome browser, DDG's server-side detection catches non-browser clients on the lite endpoint. The most popular DDG search library (deedy5/duckduckgo_search v8.1.1) has abandoned DDG entirely, switching to Bing as default backend. SearXNG (the leading open-source metasearch engine) reports intermittent DDG CAPTCHA failures that remain unresolved as of May 2025.
 
-Our script uses a **DDG-first with Bing auto-fallback** strategy, plus an optional CDP backend that routes searches through a real Chrome browser via DevTools Protocol. Since R-0044 it carries no third-party HTTP client: every DDG and Bing session starts on a certificate-verified stdlib transport, and a Chrome-154-shaped transport (the pinned profile; Chrome 153 until R-0051) is used only after an endpoint's own host blocked it (§7.1).
+Our script, and the `web` function of the `mcp-search` MCP server that carries the same generated code, use a **DDG-first with Bing auto-fallback** strategy (§7.1). Since R-0044 neither carries a third-party HTTP client, and since `8dde3a6` every DDG and Bing session opens on the Chrome-154-shaped transport (the pinned profile; Chrome 153 until R-0051), whose certificate is not verified. The certificate-verified stdlib transport the search sessions started on from R-0044, and the optional CDP backend that drove a real Chrome over the DevTools Protocol, were both removed then (§7.2, §7.3).
 
 The first paragraph is the research position as it stood before R-0044, and it is kept as written. Two later live runs (§2.9, 2026-09-30 and 2026-10-01) got DDG lite results unblocked over a Python TLS stack; two samples from one IP do not overturn it, but they do mean "blocked on the first query" is not a given.
 
@@ -583,7 +585,7 @@ User-authorized, both legs of `Scripts/search_duckduckgo.py` as shipped, one que
 | DDG (default backend) | 2 (warm-up GET, POST) | verified | no | 10 |
 | Bing (`DDG_BACKEND=bing`) | 2 (warm-up GET, search GET) | verified | no | 10 |
 
-No Chrome-path request was made and no "certificate NOT verified" label was printed. That is the case the probe exists for: when an endpoint does not block, a run costs exactly the requests the Chrome-default design would have sent, and every one of them was authenticated. When DDG does block, the arithmetic is in §7.1: one extra round for the run, then the Chrome path for the rest of it.
+No Chrome-path request was made and no "certificate NOT verified" label was printed. That is the case the probe exists for: when an endpoint does not block, a run costs exactly the requests the Chrome-default design would have sent, and every one of them was authenticated. When DDG did block, the arithmetic was one extra round for the run, then the Chrome path for the rest of it. That probe no longer exists: since `8dde3a6` every search session is on the Chrome path from the start (§7.1).
 
 **An observation, not a finding.** The executive summary's claim that DDG blocks every Python client did not reproduce in these two runs: on 2026-09-30 and again on 2026-10-01 the verified transport — Python's TLS stack, not Chrome's — got lite results with no block. That is two samples from one IP on two days, and the history in §2.6–§2.8 says IP history and request volume decide more than any single request; it does not show that DDG has stopped blocking, only that a Python TLS stack is not blocked on sight.
 
@@ -802,111 +804,118 @@ Current: DDG works intermittently. Engine raises `SearxEngineCaptchaException` w
 
 ### 7.1 Script: `Scripts/search_duckduckgo.py`
 
-`DDG_BACKEND` picks one of three runs `Scripts/search_duckduckgo.py:main`. There is no
-package to check any more: the HTTP client is generated into the script from
-`Scripts/_mcp_chrome.py`.
+One run, no backend switch: every argument is one query, and the script reads no
+environment variable `Scripts/search_duckduckgo.py:main`. The search itself is not
+written in the script. It is generated from the web-search canonical source
+`Scripts/_mcp_websearch.py`, the same blocks the MCP server `Scripts/mcp-search.py`
+carries, and the HTTP client is generated from `Scripts/_mcp_chrome.py`
+([[generated-regions]]). The script keeps by hand only its session factory, its
+per-query session hook and its stderr notes.
 
-Default (unset or `ddg`) — DDG first over the verified transport, ONE Chrome re-issue on
-a block, Bing for the rest of the run if the Chrome path is blocked too
-`Scripts/search_duckduckgo.py:_run_ddg_with_bing_fallback`:
+DDG lite first, Bing for the rest of the run after a DDG block, every session on the
+Chrome path `Scripts/_mcp_websearch.py:run_web`:
 
 ```
-create_session(_transport_for("ddg"))   "verified" unless DDG already blocked us in THIS process
+create_session()   Chrome path, public-only connect policy, 2 MiB body cap
    │
 warmup GET lite.duckduckgo.com/lite/  (navigation profile)
    │
-   ▼  per query (new session + warmup every ROTATE_EVERY queries, same sticky transport)
+   ▼  per query (2.5-5 s pacing; new session + warmup every ROTATE_EVERY queries)
 DDG Lite POST /lite/ (cors profile, §2.8)
    │
-   ├─ results ──────────────────────────────────────────────────────────→ parse_lite_results → results
+   ├─ results ──→ parse_lite_results → results
    │
-   ├─ error / undecodable body ── NOT a block ──→ no results for this query (no re-issue, no Bing)
+   ├─ error / undecodable body ── NOT a block ──→ no results for this query (no Bing);
+   │                                              a transport error drops the session
    │
    └─ block = host is lite.duckduckgo.com AND zero parsed results
               AND (status 202 OR a challenge marker the query does not contain)
                                           (_ddg_blocked; 202 since R-0052, marker = fallback predicate, §2.9)
                 │
-                ├─ session was verified ──→ sticky switch: "ddg" → _CHROME_AFTER_BLOCK (per process, never persisted)
-                │                            ONE re-issue: new Chrome-path session + warmup + the same POST
-                │                              │ results → labelled "chrome (certificate NOT verified)"
-                │                              ▼ blocked again
-                └─ session was Chrome ─────────┴──→ Bing GET /search for this AND all remaining queries
-                                                     (new session on _transport_for("bing") + Bing warmup;
-                                                      a 403 from www.bing.com gets the same one re-issue + sticky switch)
+                └─→ Bing GET /search for this AND all remaining queries
+                     (new session + Bing warmup, no extra pacing for the switched query)
+                       │
+                       └─ a 403 from www.bing.com = blocked: one stderr line, the query has
+                          no results, the run goes on, and the script exits 1
 ```
 
-The sticky switch is what keeps the probe cheap when DDG does block: the run pays ONE
-extra round — verified warm-up and POST, then Chrome warm-up and POST, 4 requests where
-a Chrome-default design sent 2 — and every later query costs one Chrome POST. Without it
-every query would cost 3 (blocked verified POST, Chrome warm-up, Chrome POST), tripling
-the per-query volume from one IP, which §3.3 lists as a CAPTCHA trigger in itself. When
-DDG does not block, nothing changes at all: the live record in §2.9 is 2 verified
-requests per endpoint and no Chrome-path request.
-
-`DDG_BACKEND=bing` runs the Bing leg alone, with the same verified-first rule, one
-re-issue and sticky switch `Scripts/search_duckduckgo.py:_run_bing`. Bing's only block
+There is no second attempt anywhere: no verified-first probe, no re-issue on another
+transport and no sticky switch, so a DDG block costs exactly one Bing warm-up and the
+Bing requests that replace the remaining DDG ones. A block, the switch and every other
+event are reported by the generated search functions through a `note` callable that
+the script renders as its historical stderr lines
+`Scripts/search_duckduckgo.py:_cli_note`. A query Bing blocks prints
+`[Blocked by Bing on: <query>]`, and `main` exits 1 after printing every other query's
+results `Scripts/search_duckduckgo.py:_run_ddg_with_bing_fallback`. Bing's only block
 signal is a 403 from `www.bing.com` itself; any other non-200 answer yields no results
-`Scripts/search_duckduckgo.py:search_bing`, and a challenge served as a 200 is not
+`Scripts/_mcp_websearch.py:search_bing`, and a challenge served as a 200 is not
 detected, so "always works" is an observation, not something the code guarantees.
+
+The same loop answers the MCP server's `web` function, with the server's own session
+hook around it: one session per endpoint under a lock, and a Bing block making the call
+`isError` while the other queries' results stay in the text
+`Scripts/mcp-search.py:with_session` `Scripts/mcp-search.py:handle_web`; see
+[[scripts]].
 
 The lite answer is parsed by one `html.parser` pass keyed on the `result-link`
 anchor and the `result-snippet` cell, never on an implied end tag
-`Scripts/search_duckduckgo.py:_LiteParser`. Until R-0057 it was a regex `findall`
+`Scripts/_mcp_websearch.py:_LiteParser`. Until R-0057 it was a regex `findall`
 over `<tr>` rows that went super-linear on a hostile body (F32); the new pass
 returns the same fields and is gated in [[tests]] (`search_parsers`). Its result
 count is one input of the DDG block predicate ("zero parsed results" above), so a
-parser change is a block-rule change `Scripts/search_duckduckgo.py:parse_lite_results`.
+parser change is a block-rule change `Scripts/_mcp_websearch.py:parse_lite_results`.
 
-**Optional CDP backend** (`DDG_BACKEND=cdp`) `Scripts/search_duckduckgo.py:_run_cdp`:
-```
-_discover_chrome() ── none found ──→ exit 1
-   │
-Chrome (real) over CDP WebSocket → Runtime.evaluate: fetch() POST to lite from an open page
-```
+The `cdp` backend that used to be a third run is gone (§7.3).
 
 ### 7.2 Impersonation Configuration (Minimal Headers)
 
 Until R-0044 this section described two third-party backends picked by platform —
 curl_cffi with a pinned profile list off Linux, primp with a bare alias on Linux — and
 the asymmetric pin rule [[0004-never-pin-a-browser-impersonation-version]] froze for
-them. Both packages are gone. One factory now opens every session, on every platform,
-and the only thing it chooses is the **transport**
-`Scripts/search_duckduckgo.py:create_session`:
+them. Both packages are gone. From R-0044 until `8dde3a6` the factory chose between
+two transports, a certificate-verified stdlib one by default and the Chrome path after
+a block. That choice is gone too: every search session, in both CLIs and in the MCP
+server, opens on the **Chrome path** — the Chrome 154 TLS 1.3 ClientHello and h2
+preface measured in §2.9, with the certificate **not** verified
+`Scripts/search_duckduckgo.py:create_session` `Scripts/search_github.py:create_session`
+`Scripts/mcp-search.py:_create_session`. Each passes the classification-only connect
+policy `Scripts/_mcp_chrome.py:_ch_public_only_policy`, so a redirect into private or
+metadata space is still refused, and `SEARCH_MAX_BYTES` as the body cap. No result
+carries a transport label any more, because there is only one transport; the gap is
+stated in the session factories' docstrings and the server's tool description
+`Scripts/mcp-search.py:SEARCH_CALL_TOOL`. Why D15's verified default was reversed for
+search, and what that costs, is the `8dde3a6` addendum to
+[[0026-speak-chrome-from-the-stdlib-verify-by-default]].
 
-- **`verified`** (the default) — the stdlib `ssl` / `http.client` path
-  `Scripts/_mcp_chrome.py:_ChFallbackConnection`: certificate and host name checked,
-  HTTP/1.1, never pooled. Its headers are Chrome 154's, but its TLS ClientHello is
-  Python's own, so this transport is **not** impersonated and says so
-  (`impersonated=False`, `cert_verified=True`).
-- **`chrome`** — the Chrome 154 TLS 1.3 ClientHello and h2 preface measured in §2.9,
-  with the certificate **not** verified. Used only after a block (§7.1), and every
-  result it produces carries the label.
-
-Both transports share ONE header profile, read from the committed captures rather than
-supplied by the caller `Scripts/_mcp_chrome.py:_chrome_profile`: the warm-up `GET` goes
-out with the navigation profile and the lite `POST` with the cors profile §2.8 found to
-be the discriminator, the script adding only `Accept: */*` and the warm-up page as
-`Referer` `Scripts/search_duckduckgo.py:search_ddg`. There is nothing left to pin, and a
+The one header profile is read from the committed captures rather than supplied by
+the caller `Scripts/_mcp_chrome.py:_chrome_profile`: the warm-up `GET` goes out with
+the navigation profile and the lite `POST` with the cors profile §2.8 found to be the
+discriminator, the search adding only `Accept: */*` and the warm-up page as `Referer`
+`Scripts/_mcp_websearch.py:search_ddg`. There is nothing left to pin, and a
 fingerprint-bearing header passed by a caller is refused rather than merged
-`Scripts/_mcp_chrome.py:_ch_check_caller_headers`. Session rotation every few queries is unchanged
-`Scripts/search_duckduckgo.py:ROTATE_EVERY`.
+`Scripts/_mcp_chrome.py:_ch_check_caller_headers`. Session rotation every few queries
+is unchanged `Scripts/search_duckduckgo.py:ROTATE_EVERY`.
 
 The profile is macOS Chrome 154 on every platform, so on Linux the user agent no longer
 matches the TCP stack — §2.7 Issue 3's tell, which primp's Linux mode used to avoid. It
 is accepted as a declared cost of having one measured profile rather than two; the
 decision and the follow-up are [[0026-speak-chrome-from-the-stdlib-verify-by-default]], and moving the profile to a newer Chrome is
-[[chrome-profile-refresh]]. `Scripts/mcp-webfetch.py:_create_session` uses the same two
-transports with one difference: the Chrome path is the caller's explicit
-`profile="chrome"` opt-in, never an automatic fallback.
+[[chrome-profile-refresh]]. `Scripts/mcp-webfetch.py:_create_session` still has both
+transports: there the verified one is the default and the Chrome path is the caller's
+explicit `profile="chrome"` opt-in, never an automatic fallback.
 
-### 7.3 CDP Backend Implementation
+### 7.3 CDP Backend (removed)
 
-Key details:
-- Connects via the stdlib WebSocket client generated from `Scripts/_mcp_websocket.py`, which sends no `Origin` header — what `websocket-client`'s `suppress_origin=True` used to buy, and still required for Chrome's CORS ([[0023-the-websocket-client-is-a-sixth-domain]])
-- Must filter out `devtools://` and `chrome://` page targets
-- Must NOT use `Page.navigate` — it resets session state and triggers CAPTCHA
-- Uses `Runtime.evaluate` with `fetch()` from existing page context
-- Chrome must have an existing page open (any URL works as fetch origin)
+The opt-in `cdp` backend (`DDG_BACKEND=cdp`), which ran the lite `POST` as a `fetch()`
+from a page of a real Chrome over the DevTools WebSocket, was removed in `8dde3a6`
+together with `CDPSearcher`, `_run_cdp` and `_discover_chrome`. The script no longer
+takes the WebSocket client generated from `Scripts/_mcp_websocket.py`; `Scripts/mcp-gdc.py`
+is that source's only host now ([[0023-the-websocket-client-is-a-sixth-domain]] and its
+addendum). The lessons it recorded — no `Origin` header on the DevTools socket, filter
+out `devtools://` and `chrome://` targets, never `Page.navigate` (it resets session
+state and triggers CAPTCHA), `Runtime.evaluate` with `fetch()` from an already open
+page — still describe how to drive DDG through a real browser, which `mcp-gdc` can do
+by hand.
 
 ### 7.4 Bing Result Parsing
 
@@ -925,10 +934,11 @@ measured equal to the lxml version and pinned to its recorded output — see
 
 ### 7.5 Environment Variables
 
-| Variable | Values | Default |
-|----------|--------|---------|
-| `DDG_BACKEND` | `cdp`, `bing`, `ddg` | `ddg` (with bing fallback) |
-| `CHROME_CDP_URL` | e.g. `http://192.168.2.2:9222` | Auto-discover |
+None. `DDG_BACKEND` (`ddg` / `bing` / `cdp`) and `CHROME_CDP_URL` were removed with
+the `cdp` backend in `8dde3a6`. The script reads no environment variable, the HTTP
+client reads none for networking either (no `*_PROXY`), and every command-line
+argument is one query `Scripts/search_duckduckgo.py:main`. The MCP server takes its
+queries as parameters instead `Scripts/mcp-search.py:handle_web`.
 
 ---
 
@@ -943,7 +953,7 @@ measured equal to the lxml version and pinned to its recorded output — see
 ### 8.2 Planned Investigation
 
 - **Packet capture via `mcp-tshark`**: the repo's capture server is `Scripts/mcp-tshark.py` (`tshark_call` — `start_capture` / `stop_capture` / `analyze` / `follow_stream`); there is no tcpdump MCP server. It can compare raw TCP/TLS packets between real Chrome and a Python client on the wire. For the ClientHello and h2 layers the loopback dump of §2.9 has since answered the question more directly than an off-host capture could (it sees the decrypted h2 frames); what a capture would still add is the TCP layer of §2.5/§3.5 against the real DDG endpoint.
-- **Custom TLS library**: *done, see §2.9* — first as a throwaway PoC, then (R-0044) as `Scripts/_mcp_chrome.py`, generated into both search scripts and webfetch as the Chrome path behind the verified default (§7.1, §7.2). Still open: certificate verification on that path, so that fingerprint and authenticity stop being a trade-off.
+- **Custom TLS library**: *done, see §2.9* — first as a throwaway PoC, then (R-0044) as `Scripts/_mcp_chrome.py`, generated into both search scripts, `Scripts/mcp-search.py` and webfetch. Since `8dde3a6` it is the only transport of the three search hosts and remains webfetch's explicit opt-in (§7.1, §7.2). Still open: certificate verification on that path, so that fingerprint and authenticity stop being a trade-off — and the search endpoints, which no longer have a verified path at all, need it most (roadmap R-0047).
 - **Browser engine fingerprint replication**: Potentially use the `__sc__` DOM parsing fingerprint values for the main site endpoint
 
 ### 8.3 Assessed as Non-viable

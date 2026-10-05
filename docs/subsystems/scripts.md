@@ -7,11 +7,13 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 3bedc59
-  date: 2026-10-03
+  commit: 8dde3a6
+  date: 2026-10-05
 links:
   - overview
   - mcp-proxy
+  - 0011-a-truncated-payload-carries-the-first-cookie
+  - 0023-the-websocket-client-is-a-sixth-domain
   - 0027-the-proxy-relays-it-never-composes
   - requirements-yaml
   - tests
@@ -127,8 +129,9 @@ has its reply suppressed. For the LSP servers (`lsp-cancel`), the generated
 (`pg-cancel`), a `CancelRequest` carrying the captured `BackendKeyData` goes out
 on a second socket and the worker drains the error through `ReadyForQuery`
 before releasing the connection `Scripts/mcp-postgres.py:send_cancel_request`.
-For context7, jenkins and webfetch (`reply-only`), the reply is suppressed and
-the worker thread runs to its own timeout. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
+For context7, jenkins, webfetch and search (`reply-only`), the reply is suppressed
+and the worker thread runs to its own timeout — for search, a call waiting on or
+holding an endpoint lock runs to its end. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
 records the decision, and `tests/test_cancel.py` gates it ([[tests]]).
 
 The unregistered servers below were converted too, even though they never
@@ -163,6 +166,13 @@ framing ceiling, the restart budget, the forwarded cancel — the HTTP front's
 access rules, how to run it for ai-soul, how it is tested and its declared
 limits are [[mcp-proxy]]; why it relays and never composes is
 [[0027-the-proxy-relays-it-never-composes]].
+
+`Scripts/mcp-search.py` (`search_call`: web search over DDG lite and Bing, code
+search over grep.app) is the other live server outside the table: it is **not
+registered in a client config yet**, and the smoke check runs it as unregistered
+`Scripts/_mcp_smoke_test.py`. It is the two search CLIs as one server, with a
+worker pool and one locked session per endpoint; see "mcp-search" under Search
+below.
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
 which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`
@@ -815,53 +825,67 @@ graph beside the prose plan, is [[requirements-yaml]].
 
 ## Search
 
-`Scripts/search_duckduckgo.py` (DDG-first with Bing fallback) and
-`Scripts/search_github.py` (code search via grep.app). Neither imports an HTTP
-package any more: both carry the stdlib client generated from
-`Scripts/_mcp_chrome.py`, and both open every session on the **verified**
-transport first `Scripts/search_duckduckgo.py:create_session`
-`Scripts/search_github.py:create_session`. The Chrome path is a **block
-fallback**, not a default and not a platform choice:
+Two CLIs and one MCP server answer search, and all three carry the same generated
+search code rather than copies of it ([[generated-regions]]).
+`Scripts/search_duckduckgo.py` (web search: DDG lite first, Bing after a DDG block)
+takes `Scripts/_mcp_websearch.py`; `Scripts/search_github.py` (code search via
+grep.app) takes `Scripts/_mcp_codesearch.py`; `Scripts/mcp-search.py` takes both
+(below). None imports an HTTP package: each carries the stdlib client generated
+from `Scripts/_mcp_chrome.py`, and since `8dde3a6` every search session opens on
+its **Chrome path**, with no verified transport and no fallback ladder
+`Scripts/search_duckduckgo.py:create_session` `Scripts/search_github.py:create_session`:
 
-- **One re-issue.** When an endpoint's own host answers with a block, the query
-  is re-issued ONCE over a fresh Chrome-path session, after one stderr line
-  saying so; a block from that session too is no results, never a third attempt
-  `Scripts/search_duckduckgo.py:_bing_query`.
-- **Sticky per host, per process.** The block adds the endpoint to a set that
-  makes every later session in the same run open on the Chrome path
-  `Scripts/search_duckduckgo.py:_transport_for`; nothing is persisted, so the
-  next run starts verified again.
-- **Every Chrome-path answer is labelled** `**Transport**: chrome (certificate
-  NOT verified)` `Scripts/search_duckduckgo.py:format_results`.
+- **One transport, one attempt.** There is no verified-first probe, no re-issue over
+  a second transport and no sticky switch, and the DDG script's `cdp` backend and its
+  `DDG_BACKEND` switch are gone; every argument is one query
+  `Scripts/search_duckduckgo.py:main`. Each session passes the public-only connect
+  policy `Scripts/_mcp_chrome.py:_ch_public_only_policy`, so a redirect into private
+  or metadata space is refused although the certificate is not checked.
+- **No transport label.** A result carries no `**Transport**` line, because every
+  answer comes over the same transport; the certificate gap is stated in each
+  session factory's docstring and in the server's tool description.
 - **What is a block is judged per endpoint, structurally, and only on that
-  endpoint's own host** — a transport failure on the verified path is never a
-  block, so breaking the verified handshake cannot force the downgrade to the
-  unverified transport. grep.app: a 403, a 429 whose body is a non-JSON
-  `text/html` page, or a 200 that is not JSON; a 429 carrying JSON stays a rate
-  limit `Scripts/search_github.py:_grep_app_blocked`. Bing: a 403
-  `Scripts/search_duckduckgo.py:_bing_blocked`. DDG: zero parsed results plus
-  either an HTTP 202 (the one challenge status recorded) or a challenge marker
+  endpoint's own host**, and a transport failure is never a block. grep.app: a
+  403, a 429 whose body is a non-JSON `text/html` page, or a 200 that is not JSON;
+  a 429 carrying JSON stays a rate limit `Scripts/_mcp_codesearch.py:_grep_app_blocked`.
+  Bing: a 403 `Scripts/_mcp_websearch.py:_bing_blocked`. DDG: zero parsed results
+  plus either an HTTP 202 (the one challenge status recorded) or a challenge marker
   the query does not itself contain, so neither a reflected query nor a
-  third-party snippet can trip it
-  `Scripts/search_duckduckgo.py:_ddg_blocked`.
+  third-party snippet can trip it `Scripts/_mcp_websearch.py:_ddg_blocked`.
+- **What a block does.** A DDG block moves that query and the rest of the run to
+  Bing `Scripts/_mcp_websearch.py:run_web`. A Bing or grep.app block ends that
+  query: the CLI prints one stderr line, `[Blocked by Bing on: <query>]` or
+  `[Blocked by grep.app on: <query>]`, still prints every other query's results,
+  and exits 1 `Scripts/search_duckduckgo.py:main` `Scripts/search_github.py:main`.
+  Every other event the search functions report — an undecodable body, a non-block
+  HTTP status, a rate limit, a grep.app answer in the wrong shape, a transport
+  error, the DDG-to-Bing switch — is one stderr line rendered from a `note`
+  callback, with the query and the detail passed through the render sanitizer first
+  `Scripts/search_duckduckgo.py:_cli_note` `Scripts/search_github.py:_cli_note`.
+- **Pacing and rotation are per query.** A random sleep before every query but the
+  first, a fresh session every `ROTATE_EVERY` queries, and a session dropped after a
+  transport error so the next query opens a new one
+  `Scripts/search_duckduckgo.py:with_session` `Scripts/search_github.py:with_session`.
+  The DDG-to-Bing switch replaces the session for the same query, with no extra
+  sleep and no extra rotation count.
 - **A search body is capped at 2 MiB**, not the client's 64 MiB ceiling: every
   search session passes `SEARCH_MAX_BYTES` as `max_bytes`, and an oversized
   answer is no results, never a block `Scripts/search_duckduckgo.py:SEARCH_MAX_BYTES`
-  `Scripts/search_github.py:SEARCH_MAX_BYTES`.
+  `Scripts/search_github.py:SEARCH_MAX_BYTES` `Scripts/mcp-search.py:SEARCH_MAX_BYTES`.
 
-Why the verified transport is the default although it does not look like Chrome,
-the measurements behind each block signal and the declared limits are
-[[0026-speak-chrome-from-the-stdlib-verify-by-default]];
-the live records are in [[spec-ddg]], which is also the DDG bot-detection
-research log.
+Why the search sessions moved to the Chrome path although it verifies no
+certificate, what that costs, the measurements behind each block signal and the
+declared limits are [[0026-speak-chrome-from-the-stdlib-verify-by-default]] and its
+`8dde3a6` addendum; the live records are in [[spec-ddg]], which is also the DDG
+bot-detection research log.
 
 The client is three generated sources taken whole
 ([[generated-regions]]): `Scripts/_mcp_chrome.py`, the TLS 1.3 / HTTP/2 /
 HTTP/1.1 client with its one profile table `Scripts/_mcp_chrome.py:_chrome_profile`
-and the verified stdlib transport `Scripts/_mcp_chrome.py:_ChFallbackConnection`,
-and the `ctypes` decoders `Scripts/_mcp_brotli.py` and `Scripts/_mcp_zstd.py` it
-is handed as `decoders=`. Its Chrome path verifies no certificate, and the module
-says so in its first line.
+and the verified stdlib transport `Scripts/_mcp_chrome.py:_ChFallbackConnection`
+that webfetch still uses by default, and the `ctypes` decoders
+`Scripts/_mcp_brotli.py` and `Scripts/_mcp_zstd.py` it is handed as `decoders=`.
+Its Chrome path verifies no certificate, and the module says so in its first line.
 
 `Scripts/chrome_capture.py` is the **independent oracle** that client is measured
 with, and deliberately shares no code with it: a loopback-only capture server
@@ -874,7 +898,7 @@ Chrome 154 profile's only source of truth — see [[tests]] for the fixtures and
 [[chrome-profile-refresh]] for refreshing them when Chrome moves.
 
 The Bing results are parsed by a stdlib `html.parser` tree
-builder `Scripts/search_duckduckgo.py:parse_bing_results` that evaluates the four
+builder `Scripts/_mcp_websearch.py:parse_bing_results` that evaluates the four
 XPath expressions the old lxml parser used, including libxml2's implicit-close
 and end-tag-priority rules; it is pinned to lxml's recorded output on
 `tests/files/html/tf_bing_serp.html` [[0024-pure-python-39-and-the-stdlib]].
@@ -882,13 +906,13 @@ and end-tag-priority rules; it is pinned to lxml's recorded output on
 The DDG lite results and the grep.app snippets are parsed the same way since
 R-0057: each is one `html.parser` pass keyed on start tags and attributes, never
 on an implied end tag (`html.parser` has none)
-`Scripts/search_duckduckgo.py:_LiteParser` `Scripts/search_github.py:_SnippetParser`.
+`Scripts/_mcp_websearch.py:_LiteParser` `Scripts/_mcp_codesearch.py:_SnippetParser`.
 They replaced regex `findall` / `finditer` scans whose lazy DOTALL patterns
 rescanned to the end of the input for every unterminated opener — super-linear
 on a hostile body, which the endpoint or a MITM on the unverified Chrome path
 controls (security finding F32). The body cap above therefore bounds memory and
 time, no longer a quadratic scan. The lite parser reads a result link's href off
-the raw start tag `Scripts/search_duckduckgo.py:_raw_href`, because `html.parser`
+the raw start tag `Scripts/_mcp_websearch.py:_raw_href`, because `html.parser`
 decodes attribute values and the regex kept a direct link's `&amp;` as written.
 Both parsers return exactly the fields the regex parsers produced, pinned as
 literals, and a hostile body just under the cap is gated in wall time by the
@@ -897,3 +921,131 @@ on Python 3.14 `html.parser` treats an unclosed `<title>` as raw text to the end
 of the page, so a page that drops its `</title>` parses to no results
 `tests/test_search_parsers.py`. The record of the change is the R-0057 addendum
 to [[0026-speak-chrome-from-the-stdlib-verify-by-default]].
+
+### mcp-search — the same search as one MCP server
+
+`Scripts/mcp-search.py` serves the two CLIs' search over stdio behind one
+dispatcher tool, `search_call` `Scripts/mcp-search.py:SEARCH_CALL_TOOL`. Its answers
+are the markdown the CLIs print, because the blocks that render them are the same
+generated regions. It is **not registered in any client config yet**: the smoke
+check runs it as an unregistered server `Scripts/_mcp_smoke_test.py`, and nothing
+installs it — it is live under `~/.claude/scripts` only through the symlink described
+at the top of this page.
+
+**Functions and params** `Scripts/mcp-search.py:handle_search_call`:
+
+- `web` — `queries` (a string or a list of strings; aliases `query` and `q`),
+  `limit`, `max_answer_chars` `Scripts/mcp-search.py:ACCEPTED_WEB_PARAMS`.
+- `code` — the same plus the grep.app filters `lang`, `repo` and `path`
+  `Scripts/mcp-search.py:ACCEPTED_CODE_PARAMS`.
+- No `function` answers the status text: the function list and the searches each
+  endpoint has served, with no transport line `Scripts/mcp-search.py:_status_text`.
+  An unknown function answers the one-line `Unknown function: X. Available: code, web`
+  that `name_existence` parses. Unknown params are refused, and so is an alias
+  set beside its canonical name `Scripts/mcp-search.py:_resolve_aliases`
+  ([[0015-ambiguity-is-the-defect]]).
+
+**Caps, checked before any lock is taken**, each answered with a fixed message:
+how many queries a call may carry and how long each may be
+`Scripts/mcp-search.py:MAX_QUERIES` `Scripts/mcp-search.py:MAX_QUERY_CHARS`, the
+`limit` range `Scripts/mcp-search.py:MAX_LIMIT`, and each filter's length
+`Scripts/mcp-search.py:MAX_FILTER_CHARS` plus its shape — `lang` and `repo` by a
+regex, `path` by the refused-character rule below `Scripts/mcp-search.py:_filter_param`.
+`max_answer_chars` is read by the generated fleet reader, so a value that is not
+an integer falls back to the COMPOSED default `Scripts/mcp-search.py:_max_answer_chars`;
+this server then maps a value of zero or below — the fleet's "no cut" — and any value
+above `MAX_ANSWER_CHARS_CEILING` to that ceiling, so it never returns an unbounded
+answer `Scripts/mcp-search.py:_answer_cap`. A JSON-RPC `params` that is not an object
+is refused `-32602` before any handler runs `Scripts/mcp-search.py:McpServer`.
+
+**One session per endpoint, used only under its lock** `Scripts/mcp-search.py:with_session`.
+A `_ChSession` is not thread-safe and the pool runs several calls at once, so each
+endpoint — ddg, bing and grep.app — owns one session `Scripts/mcp-search.py:_Endpoint`,
+and the lock is also what makes the pacing process-wide. Under the lock, in order:
+rotate every `ROTATE_EVERY` searches, sleep what is left of the pacing gap, create and
+warm up a session if there is none, run the search, and close and drop the session
+if the search reported a transport failure. The pacing comes **before** the
+warm-up, so the warm-up GET is paced like a search. `run_web` makes one hook call per
+endpoint per query, so the DDG and Bing locks are never held together
+`Scripts/_mcp_websearch.py:run_web`. Every session comes from the same Chrome-path
+factory as the CLIs', with no downgrade `Scripts/mcp-search.py:_create_session`.
+
+**Two time bounds.** A lock not acquired within `ENDPOINT_LOCK_TIMEOUT` answers
+`endpoint busy, retry later` `Scripts/mcp-search.py:ENDPOINT_LOCK_TIMEOUT`. The whole
+call has `CALL_DEADLINE`, checked before every lock wait (which it cuts to what is
+left) and before every pacing sleep `Scripts/mcp-search.py:CALL_DEADLINE`. A search
+already running is not interrupted, so a call can end past its deadline by **at most
+one in-flight search plus a warm-up** — a declared overrun, not a defect. The
+residual the pool cannot avoid, every worker parked on one endpoint's lock, is
+bounded by those two constants and accepted.
+
+**The reply contract** `Scripts/mcp-search.py:_reply`:
+
+- A query blocked at the end of its ladder — Bing for `web`, grep.app for `code` —
+  makes the call `isError`, and the text still carries every other query's results
+  beside a fixed `blocked by Bing` / `blocked by grep.app` notice
+  `Scripts/mcp-search.py:handle_web` `Scripts/mcp-search.py:handle_code`.
+- A busy endpoint or the call deadline stops the call with the results gathered so
+  far and a fixed stop notice, also as `isError` `Scripts/mcp-search.py:_stop_notice`.
+- No results is a success. A transport failure is the fixed notice `transport error`
+  and stays a success.
+- Only the body is capped, and never left inside an open code fence
+  `Scripts/mcp-search.py:_cap`. A block notice the cut removed, and the stop notice,
+  are appended **after** the cap note, outside the cap, so truncation never hides
+  why a call failed.
+- Every per-query notice is a fixed string; no exception text, path or traceback
+  reaches the reply. A handler crash answers its exception's class name only.
+
+**Logging is structure only.** A search note is logged as the endpoint, the fixed
+event token, the query index and either a status code or an exception class name —
+never the query text, a body or an exception message `Scripts/mcp-search.py:note_for`.
+Wire values in the debug log are bounded and escaped `Scripts/mcp-search.py:_log_value`
+([[0011-a-truncated-payload-carries-the-first-cookie]]). A grep.app answer that is
+JSON but not in grep.app's shape is a parse failure — a `grep_schema` note and no
+results, with the session kept — not a transport error
+`Scripts/_mcp_codesearch.py:_grep_hits`. The Bing tree builder is bounded on a
+hostile page by a nesting depth past which it stops pushing elements and a
+per-document scan budget for end tags `Scripts/_mcp_websearch.py:_TreeBuilder`.
+
+**The Unicode policy, rendering side.** Every third-party field that is rendered —
+title, snippet, URL, repo, path, branch and the code itself — passes through the
+render sanitizer `Scripts/_mcp_websearch.py:_web_clean`
+`Scripts/_mcp_codesearch.py:_code_clean`. It drops every `Cc` control except the tab
+and line breaks a field explicitly keeps; every `Cf` format character, which takes
+the bidi controls, the zero-width characters, the BOM and the tag characters with
+it; lone surrogates (`Cs`); the variation selectors U+FE00–FE0F; and the whole
+U+E0000–E01EF block. U+2028, U+2029 and U+0085 become a line break, which a
+single-line field then collapses to a space `Scripts/_mcp_websearch.py:_web_line`.
+A URL is rendered only as an absolute http(s) link with a host. A non-ASCII host is
+rendered in its IDNA (punycode) form, and the link is dropped when it has none
+`Scripts/_mcp_websearch.py:_web_url`. A snippet's fence is one backtick longer than
+the longest backtick run inside it `Scripts/_mcp_codesearch.py:_code_fence`. Why the
+rule lives twice, once per search source, is [[generated-regions]].
+
+**The Unicode policy, input side.** A query or filter is the caller's own text, sent
+to the endpoint and echoed in the reply, so it is **refused** with a fixed message
+rather than rewritten when it carries a C0 or C1 control or DEL (tab and newline
+included), a bidi control, a tag character, or U+2028 / U+2029
+`Scripts/mcp-search.py:_refused_char`. ZWNJ, ZWJ and the variation selectors are
+accepted: ZWNJ is Persian orthography and ZWJ / VS16 are emoji. The endpoint receives
+them as written; the echo drops them.
+
+**Declared limits, not gated.** Rendered as they arrive: homoglyph letters in titles
+and snippets, an ASCII look-alike domain (punycode only exposes a non-ASCII one),
+userinfo that makes a URL read as another host, stacked combining marks (Zalgo),
+private-use and unassigned code points; there is no NFKC normalisation. Some
+refusals echo caller text — an unknown function's name, the alias pair, the JSON
+error window. Results are third-party content entering the model's context
+unmarked, over a transport whose certificate is not verified
+([[0026-speak-chrome-from-the-stdlib-verify-by-default]], `8dde3a6` addendum).
+
+**Concurrency, cancel and the fleet gates.** Handlers run on a worker pool beside a
+reader thread no handler can take ([[0008-a-serialized-read-loop-looks-like-a-dead-server]]).
+A cancel is `reply-only`: a search waiting on or holding an endpoint lock runs to its
+end, and only its reply is suppressed; shutdown drains every call in flight
+`Scripts/mcp-search.py:McpServer`. The smoke check handshakes the server and drives
+its alias-collision probe. Its forced-exception probe is declared to answer `-32602`,
+because a non-object `params` is now refused before any handler runs and so can no
+longer reach the `run()` catch-all `Scripts/_mcp_smoke_test.py`; the catch-all's
+`-32603` is proven live by the `run-catch-all-live-32603` row of the server's own
+suite `tests/test_mcp_search.py:group_g`, `mcp_search` in [[tests]].

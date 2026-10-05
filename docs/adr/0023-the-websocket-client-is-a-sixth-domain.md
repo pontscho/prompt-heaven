@@ -241,3 +241,14 @@ single-file copy.
 - **The census.** `--census fleet` counts only the server glob. A block
   generated only into the declared host shows there as defined but not named on
   a server marker.
+
+## Addendum (2026-10-05): The DDG search script no longer hosts the WebSocket client; mcp-gdc is the only host (8dde3a6)
+
+**The DDG script's `cdp` backend was removed (`8dde3a6`).** It went when the web-search code moved into its own canonical source, `Scripts/_mcp_websearch.py`, and every search moved to the Chrome transport (the ADR 0026 addendum of the same date). The `DDG_BACKEND` switch, `CDPSearcher`, `_run_cdp` and `_discover_chrome` went with it. The search script's websocket region went too: `Scripts/search_duckduckgo.py` now takes no block of `Scripts/_mcp_websocket.py`, and `Scripts/mcp-gdc.py` is the source's only host.
+
+What that changes here:
+
+- **Decision item 2.** The blocking-socket wrapper (`_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`, `_ws_sync_close`) stays in the source, but no host takes it any more. It was kept rather than deleted. The generator's host census `Scripts/amalgamate.py:census_hosts` lists those four blocks with no host; that is reported, not gated. The source's docstring now says so `Scripts/_mcp_websocket.py`.
+- **Decision item 3.** `search_duckduckgo.py` is still in `Scripts/amalgamate.py:DECLARED_HOSTS`, but no longer for this source. It is a declared host now for the Chrome client, its two decoders and the web-search source. The reason the hand-declared list exists is unchanged: some hosts are not servers.
+- **Decision item 4.** `websocket-client` stays gone. No script in the tree speaks the WebSocket wire synchronously any more.
+- **Red first.** The `search-cdp-backend` host group of `tests/test_mcp_websocket.py` was deleted. The suite now drives only mcp-gdc's generated copy against its loopback CDP peer, and still exercises both wrappers from the canonical source.
