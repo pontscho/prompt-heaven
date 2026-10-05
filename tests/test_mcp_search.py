@@ -20,7 +20,8 @@ Groups:
      isError; the code markdown equals the CLI's; `limit` trims; two threads on
      one endpoint never overlap inside its session; a transport error drops the
      endpoint session (the next query opens a new one) and shows the fixed
-     `transport error`; the truncation note and the max_answer_chars clamp
+     `transport error`; the truncation note and the max_answer_chars mapping
+     (<= 0 and above the ceiling -> the 100000 ceiling)
   D  caps (FR-10), every one answered with its fixed message while every
      endpoint lock is HELD -- a cap checked after a lock would answer
      `endpoint busy` instead, so this group also proves the caps come first
@@ -356,9 +357,37 @@ def group_c(suite, mod):
     note = "[output capped at 50 chars; use fewer queries or a lower limit]"
     suite.record("C", "truncation-note", flag(err, False) + expect(text.startswith(full[:50]) and text.endswith(note) and len(text) < len(full), "got %r" % text[:200]), text=text)
 
-    install(mod, World(ddg=ddg_ok()))
-    err, text = call(mod, {"function": "web", "params": {"queries": "x", "max_answer_chars": 0}})
-    suite.record("C", "max-answer-chars-clamped-to-1", flag(err, False) + expect(text.startswith(full[:1]) and text.endswith("[output capped at 1 chars; use fewer queries or a lower limit]"), "got %r" % text[:200]), text=text)
+    # <= 0 is the fleet's "no cut"; this server answers it with its ceiling, so
+    # an answer far shorter than 100000 comes back whole, with no capped note.
+    problems = []
+    for value in (0, -1):
+        install(mod, World(ddg=ddg_ok()))
+        err, text = call(mod, {"function": "web", "params": {"queries": "x", "max_answer_chars": value}})
+        problems += flag(err, False)
+        problems += expect(text == full and "[output capped" not in text, "max_answer_chars=%d: got %r" % (value, text[:200]))
+    suite.record("C", "max-answer-chars-nonpositive-is-ceiling", problems, text=text)
+
+    # The mapping itself, off the wire: the default, the fallback for a value
+    # the fleet reader cannot coerce, and every route to the ceiling.
+    ceiling = mod.MAX_ANSWER_CHARS_CEILING
+    rows = [
+        ({}, mod.DEFAULT_MAX_ANSWER_CHARS),
+        ({"max_answer_chars": 50}, 50),
+        ({"max_answer_chars": ceiling}, ceiling),
+        ({"max_answer_chars": ceiling + 1}, ceiling),
+        ({"max_answer_chars": 10 ** 9}, ceiling),
+        ({"max_answer_chars": 0}, ceiling),
+        ({"max_answer_chars": -5}, ceiling),
+        ({"max_answer_chars": "junk"}, mod.DEFAULT_MAX_ANSWER_CHARS),
+        ({"max_answer_chars": None}, mod.DEFAULT_MAX_ANSWER_CHARS),
+        ({"max_answer_chars": float("inf")}, mod.DEFAULT_MAX_ANSWER_CHARS),
+    ]
+    problems = []
+    for params, want in rows:
+        got = mod._answer_cap(params)
+        problems += expect(got == want, "%r -> %r, want %r" % (params, got, want))
+    problems += expect(ceiling == 100000, "MAX_ANSWER_CHARS_CEILING is %r, want 100000" % ceiling)
+    suite.record("C", "answer-cap-mapping", problems)
 
 
 # ---------------------------------------------------------------------------

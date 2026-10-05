@@ -634,7 +634,7 @@ SUITES = [
      "type-checked, and five bodies shaped from the old worst cases (four "
      "regexes and the Bing tree builder's end-tag scan) one KiB under "
      "SEARCH_MAX_BYTES parsed within a wall-time bound in a child", 22),
-    # TYPED: a fixed case table (A 4, B 9, C 10, D 19, E 7, F 15, G 14, H 2).
+    # TYPED: a fixed case table (A 4, B 9, C 11, D 19, E 7, F 15, G 14, H 2).
     ("mcp_search", run_mcp_search,
      "mcp-search in-process with stub sessions and no network: the dispatcher "
      "and its exact unknown-function line, params, aliases and the collision "
@@ -651,7 +651,7 @@ SUITES = [
      "with block and stop notices outside the cap, -32602 params, the "
      "grep.app schema check, pacing before the warm-up, the call deadline, "
      "a busy endpoint keeping results, _log_value at the log sites and the "
-     "run() catch-all answering -32603 live", 80),
+     "run() catch-all answering -32603 live", 81),
     ("webfetch_roots", run_webfetch_roots,
      "mcp-webfetch's two roots (R-0054): --cache-root names the cache "
      "directory itself, default $XDG_CACHE_HOME/web-fetch (absolute only) "

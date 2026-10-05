@@ -8210,11 +8210,20 @@ def note_for(i: int) -> Callable[[str, str, Any], None]:
 # ---------------------------------------------------------------------------
 
 # The composed-answer ceiling (the COMPOSED payload class): the default of
-# max_answer_chars.
+# max_answer_chars, and its fleet reader. The reader's "<= 0 disables it" is
+# mapped to MAX_ANSWER_CHARS_CEILING by _answer_cap below, never to "no cut".
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS
+# BEGIN GENERATED: _mcp_paging.py :: DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars
 DEFAULT_MAX_ANSWER_CHARS = 24000
-# END GENERATED: 25da79526dcc
+
+
+def _max_answer_chars(args: dict) -> int:
+    """The per-call ceiling. <= 0 disables it — an explicit "give me all of it"."""
+    try:
+        return int(args.get("max_answer_chars", DEFAULT_MAX_ANSWER_CHARS))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MAX_ANSWER_CHARS
+# END GENERATED: 6c119e9d0245
 
 ACCEPTED_WEB_PARAMS = frozenset({"queries", "limit", "max_answer_chars"})
 ACCEPTED_CODE_PARAMS = frozenset({"queries", "lang", "repo", "path", "limit", "max_answer_chars"})
@@ -8352,8 +8361,14 @@ def _filter_param(params: dict, name: str) -> Tuple[Optional[str], Optional[str]
     return raw, None
 
 
-def _max_answer_chars(params: dict) -> int:
-    return min(MAX_ANSWER_CHARS_CEILING, max(1, _int_param(params.get("max_answer_chars"), DEFAULT_MAX_ANSWER_CHARS)))
+def _answer_cap(params: dict) -> int:
+    """The per-call ceiling this server applies: the fleet reader's value, with
+    its "<= 0 is no cut" and anything above MAX_ANSWER_CHARS_CEILING both
+    answered by the ceiling -- this server never returns an unbounded answer."""
+    n = _max_answer_chars(params)
+    if n <= 0 or n > MAX_ANSWER_CHARS_CEILING:
+        return MAX_ANSWER_CHARS_CEILING
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -8460,7 +8475,7 @@ def handle_web(params: dict) -> dict:
     limit, refusal = _limit_param(params)
     if refusal:
         return {"error": refusal}
-    max_answer_chars = _max_answer_chars(params)
+    max_answer_chars = _answer_cap(params)
 
     # run_web appends to `outcomes` as it goes, so a busy endpoint or the call
     # deadline mid-run still leaves every query gathered before it (Marple 4).
@@ -8503,7 +8518,7 @@ def handle_code(params: dict) -> dict:
         filters[name], refusal = _filter_param(params, name)
         if refusal:
             return {"error": refusal}
-    max_answer_chars = _max_answer_chars(params)
+    max_answer_chars = _answer_cap(params)
 
     deadline = time.monotonic() + CALL_DEADLINE
     multi = len(queries) > 1
@@ -8656,7 +8671,8 @@ SEARCH_CALL_TOOL = {
         "chars; aliases query, q), limit (1-50, default 10)\n"
         "  code   params: queries (as web), lang (e.g. Python), repo "
         "(owner/repo), path (path prefix), limit (1-50, default 10)\n\n"
-        "Both take max_answer_chars (default 24000, at most 100000); a longer "
+        "Both take max_answer_chars (default 24000; <= 0 means the 100000 "
+        "ceiling, and a value above it is clamped to it); a longer "
         "answer is cut with a note. Returns server status when called without "
         "`function`.\n\n"
         "A DDG block moves that and every remaining query of the call to Bing. "
@@ -8977,13 +8993,16 @@ class McpServer:
             "isError": is_error,
         })
 
+    # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+    # BEGIN GENERATED: _mcp_json.py :: _result, _error
     @staticmethod
-    def _result(msg_id: Any, result: dict) -> dict:
+    def _result(msg_id: Any, result: Any) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
     @staticmethod
     def _error(msg_id: Any, code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+    # END GENERATED: 0a5c31c9ccd8
 
     @classmethod
     def _tool_error(cls, msg_id: Any, message: str) -> dict:
