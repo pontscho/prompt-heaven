@@ -16,8 +16,8 @@ Layout: one file, seven units, in file order (each has one reason to change)
 -----------------------------------------------------------------------------
   1. ConfigError, ChildStartError, ChildUnavailable -- the error classes.
   2. ChildSpec, ProxyConfig, load_config(), build_child_argv(),
-     build_child_env() -- config parsing and validation, `{root}`
-     substitution, argv assembly. Never touches processes or asyncio.
+     build_child_env() -- config parsing and validation, `{root}` and
+     `{scripts}` substitution, argv assembly. Never touches processes or asyncio.
   3. ChildClient -- one OS-process incarnation of a child: spawn (records the
      process-group id), rpc / notify_child, the stdout reader, an idempotent
      death, and a serialized, resumable stop ladder plus group sweep.
@@ -366,7 +366,7 @@ class ProxyConfig(NamedTuple):
     max_frame: int
 
 
-_TOP_KEYS = frozenset({"root", "children", "frame_limit"})
+_TOP_KEYS = frozenset({"root", "scripts", "children", "frame_limit"})
 _CHILD_KEYS = frozenset({"name", "command", "args", "env", "wrapper", "call_timeout", "startup_timeout"})
 
 
@@ -449,7 +449,28 @@ def _cfg_root(config_root: Any, cli_root: Optional[str]) -> str:
     return root
 
 
-def _cfg_child(entry: Any, index: int, root: str) -> ChildSpec:
+def _cfg_scripts(value: Any) -> Optional[str]:
+    """Resolve the config's optional "scripts" directory (realpath; must exist)."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ConfigError("scripts: must be a non-empty string")
+    scripts = os.path.realpath(os.path.expanduser(value))
+    if not os.path.isdir(scripts):
+        raise ConfigError("scripts: not an existing directory")
+    return scripts
+
+
+def _cfg_subst_scripts(arg: str, scripts: Optional[str], where: str) -> str:
+    """Replace "{scripts}" (whole arg) or a leading "{scripts}/" prefix with the scripts dir."""
+    if arg != "{scripts}" and not arg.startswith("{scripts}/"):
+        return arg
+    if scripts is None:
+        raise ConfigError(f"{where}: uses {{scripts}} but the config has no scripts key")
+    return scripts + arg[len("{scripts}"):]
+
+
+def _cfg_child(entry: Any, index: int, root: str, scripts: Optional[str] = None) -> ChildSpec:
     """Validate one children[] entry and build its ChildSpec."""
     where = f"children[{index}]"
     if not isinstance(entry, dict):
@@ -461,9 +482,13 @@ def _cfg_child(entry: Any, index: int, root: str) -> ChildSpec:
     if not isinstance(name, str) or not _CHILD_NAME_RE.match(name):
         raise ConfigError(f"{where}.name: must match {_CHILD_NAME_RE.pattern}")
     where = f"child {name!r}"
-    command = _cfg_executable(entry.get("command"), f"{where}: command")
+    command = entry.get("command")
+    if isinstance(command, str):
+        command = _cfg_subst_scripts(command, scripts, f"{where}: command")
+    command = _cfg_executable(command, f"{where}: command")
     args = _cfg_str_list(entry.get("args"), f"{where}: args")
-    wrapper = _cfg_str_list(entry.get("wrapper"), f"{where}: wrapper")
+    wrapper = [_cfg_subst_scripts(item, scripts, f"{where}: wrapper")
+               for item in _cfg_str_list(entry.get("wrapper"), f"{where}: wrapper")]
     if wrapper:
         wrapper[0] = _cfg_executable(wrapper[0], f"{where}: wrapper[0]")
     env = entry.get("env")
@@ -476,7 +501,7 @@ def _cfg_child(entry: Any, index: int, root: str) -> ChildSpec:
     call_timeout = _cfg_timeout(entry.get("call_timeout"), _DEFAULT_CALL_TIMEOUT_S, f"{where}: call_timeout")
     startup_timeout = _cfg_timeout(entry.get("startup_timeout"), _DEFAULT_STARTUP_TIMEOUT_S,
                                    f"{where}: startup_timeout")
-    args = [root if arg == "{root}" else arg for arg in args]
+    args = [root if arg == "{root}" else _cfg_subst_scripts(arg, scripts, f"{where}: args") for arg in args]
     return ChildSpec(
         name=name,
         argv=build_child_argv(wrapper, command, args),
@@ -511,6 +536,7 @@ def load_config(path: Optional[str], inline: Optional[str], cli_root: Optional[s
         raise ConfigError(f"config: unknown key(s): {', '.join(unknown)}")
 
     root = _cfg_root(data.get("root"), cli_root)
+    scripts = _cfg_scripts(data.get("scripts"))
 
     frame_limit = data.get("frame_limit", _MAX_FRAME)
     if (isinstance(frame_limit, bool) or not isinstance(frame_limit, int)
@@ -523,7 +549,7 @@ def load_config(path: Optional[str], inline: Optional[str], cli_root: Optional[s
     specs: List[ChildSpec] = []
     seen: Set[str] = set()
     for index, entry in enumerate(children):
-        spec = _cfg_child(entry, index, root)
+        spec = _cfg_child(entry, index, root, scripts)
         if spec.name in seen:
             raise ConfigError(f"children[{index}]: duplicate name {spec.name!r}")
         seen.add(spec.name)
