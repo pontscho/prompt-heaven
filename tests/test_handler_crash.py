@@ -132,7 +132,7 @@ Usage:
 Exit code 0 iff every non-informational case passes.
 
 Groups:
-  A  GATE     -- one case per declared catch-all site (15 W + 9 D)
+  A  GATE     -- one case per declared catch-all site (17 W + 9 D)
   B  DECLARED -- measured layers vs the FLEET table, one case per server
   C  ROSTER   -- the table covers the tree, totals hold, no row may declare a
                  site away
@@ -230,6 +230,9 @@ _handle_tool_call is the only broad guard, and a child's own failure arrives as 
 reply, not as an exception"),
     "mcp-purity.py":   (W_HANDLE, D_PRESENT,
                         "the canonical form both layers are gated against"),
+    "mcp-search.py":   (W_HANDLE, D_NONE_OWN,
+                        "handle_search_call owns only narrow ValueError and \
+_EndpointBusy clauses; layer W logs the class name only (FR-6)"),
     "mcp-tshark.py":   (W_HANDLE, D_PRESENT,
                         "layer D after a narrow clause; canonical wording"),
     "mcp-webfetch.py": (W_HANDLE, D_PRESENT,
@@ -242,7 +245,7 @@ message rather than an f-string"),
 
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_W = 16
+DECLARED_W = 17
 DECLARED_D = 9
 
 # ---------------------------------------------------------------------------

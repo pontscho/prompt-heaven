@@ -219,6 +219,9 @@ FLEET = {
                         "pool on purpose (:5810) -- safe now the reader is not there"),
     "mcp-tshark.py":   ("tshark-stdin",   "pool",      "tshark-call",    "arg",
                         "registry + config locks"),
+    "mcp-search.py":   ("search-stdin",   "pool",      "search-call",    "arg",
+                        "blocking stdlib Chrome searches need a thread; every "
+                        "endpoint session is touched only under its own lock"),
     "mcp-webfetch.py": ("webfetch-stdin", "pool",      "webfetch-call",  "arg",
                         "converted here; blocking stdlib Chrome fetch needs a "
                         "thread, and its timeout is caller-supplied and unclamped"),
@@ -228,7 +231,7 @@ FLEET = {
 
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_POOL = 8
+DECLARED_POOL = 9
 DECLARED_COROUTINE = 8
 
 # Both spellings create a task.  Gating one would fail a correct refactor.

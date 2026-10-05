@@ -1,54 +1,37 @@
 #!/usr/bin/env python3
 """
-Web search script with multi-backend support:
-  1. DDG Lite  — DuckDuckGo lite endpoint (default, may CAPTCHA)
-  2. Bing      — auto-fallback when DDG CAPTCHAs
-  3. CDP       — opt-in, uses real Chrome browser via DevTools Protocol
+Web search script: DuckDuckGo lite first, Bing when DDG blocks.
 
 Usage:
   python3 search_duckduckgo.py "search phrase"
   python3 search_duckduckgo.py "query1" "query2" "query3"  # batch mode
 
-Environment:
-  DDG_BACKEND     — force backend: "bing", "cdp", or "ddg" (default: ddg with bing fallback)
-  CHROME_CDP_URL  — Chrome debug endpoint for CDP backend (default: http://localhost:9222)
-
-The HTTP client of the DDG and Bing backends is generated into this file from
-Scripts/_mcp_chrome.py (plus the brotli and zstd decoders from
-Scripts/_mcp_brotli.py and _mcp_zstd.py); the cdp backend's WebSocket client is
-generated from Scripts/_mcp_websocket.py. Nothing outside the standard library
+The search (parsers, block signals, search_ddg / search_bing and the run loop)
+is generated into this file from Scripts/_mcp_websearch.py, the HTTP client
+from Scripts/_mcp_chrome.py (plus the brotli and zstd decoders from
+Scripts/_mcp_brotli.py and _mcp_zstd.py). Nothing outside the standard library
 is imported, on every platform.
 
-Transport (D15). Every session starts on the VERIFIED transport: the stdlib
-ssl stack, certificate and host name checked, HTTP/1.1 under the captured
-Chrome 154 header list -- authenticated, but not a Chrome TLS fingerprint.
-Each endpoint has its own block signal, judged on the endpoint's own host only
-(the final URL's host; an answer from a redirect target is never a block):
-  - DDG (lite.duckduckgo.com): the lite page parses to ZERO results AND carries
-    the challenge marker AND the query does not contain that marker -- never a
+Every session uses the Chrome path: the captured Chrome 154 TLS ClientHello
+and header profiles. Each endpoint has its own block signal, judged on the
+endpoint's own host only (the final URL's host; an answer from a redirect
+target is never a block):
+  - DDG (lite.duckduckgo.com): the lite page parses to ZERO results AND answers
+    202 or carries the challenge marker the query does not contain -- never a
     plain body substring test, which reflected text (the query, a snippet)
     could trip (_ddg_blocked);
   - Bing (www.bing.com): HTTP 403. A 429 is a volume verdict and a 5xx a server
     fault; neither is a block.
-On a block the query is re-issued ONCE over the Chrome path, and the endpoint
-key ("ddg" or "bing") goes into a per-process sticky switch: every later
-session for that endpoint (rotation included) opens on the Chrome path, so the
-verified probe is paid once per run, not per query. A block by one endpoint
-says nothing about the other. A transport failure (certificate, TLS alert,
-reset, timeout) is an error line and no results: it never opens the Chrome
-path, so breaking the verified handshake cannot force the downgrade. When DDG
-blocks the Chrome client too, the run switches to Bing as before.
+A DDG block moves this and every remaining query to Bing; a query Bing blocks
+too is one stderr line and exit status 1. A transport failure (TLS alert,
+reset, timeout) is an error line and no results, never a block; the session is
+dropped and the next query opens a new one.
 
-The Chrome path does NOT verify certificates. Every result it produced
-carries the line `**Transport**: chrome (certificate NOT verified)`; a
-verified answer carries no label. What an active MITM gains on that path
-(the query text and the session's cookies) is stated in ADR 0026. Both paths
+The Chrome path does NOT verify certificates. What an active MITM gains on it
+(the query text and the session's cookies) is stated in ADR 0026. Sessions
 refuse to connect to private, loopback or metadata addresses
 (_ch_public_only_policy), no proxy is used, and the HTTP client reads no
-environment variable for networking itself. The stdlib still does, on the
-verified transport only (ADR 0026 S4): ssl.create_default_context() honours
-SSL_CERT_FILE / SSL_CERT_DIR (the trust store) and SSLKEYLOGFILE. The Chrome
-path reads none of them.
+environment variable for networking.
 
 Every search session caps a response body at SEARCH_MAX_BYTES (wire and
 decoded); a larger body is a transport failure (an error line, no results),
@@ -56,21 +39,21 @@ never a block.
 """
 import sys
 import re
-import json
 import random
 import time
 import os
 import base64
 import codecs  # the generated Chrome client
 import ctypes.util  # the generated brotli/zstd decoders
-import hashlib  # the generated WebSocket client (cdp backend) and the generated Chrome client
+import hashlib  # the generated Chrome client
 import hmac  # the generated Chrome client
 import http.client  # the generated Chrome client
 import ipaddress  # the generated Chrome client
 import logging  # the generated Chrome client
-import socket  # the generated WebSocket client (cdp backend) and the generated Chrome client
+import socket  # the generated Chrome client
 import ssl  # the generated Chrome client
 import struct  # the generated Chrome client
+import unicodedata  # the generated render sanitizer (_web_clean)
 import urllib.parse  # the generated Chrome client (and the block signals' host check)
 import zlib  # the generated Chrome client
 from html.parser import HTMLParser
@@ -92,16 +75,87 @@ SEARCH_MAX_BYTES = 2 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers
+# Web search (DDG lite, Bing on a DDG block)
 # ---------------------------------------------------------------------------
 
+# The search itself, generated from Scripts/_mcp_websearch.py: the DDG lite and
+# Bing parsers, the two block signals, search_ddg / search_bing and the run_web
+# loop, shared with mcp-search.py. Taken whole (every block, in source order).
+# The session is never created inside the region: create_session, the
+# with_session hook and the _cli_note stderr renderer below are this file's own.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region.
+# BEGIN GENERATED: _mcp_websearch.py :: _normalize, _WEB_LINE_SEPARATORS, _web_clean, _web_line, _WEB_URL_SAFE, _web_url, decode_duckduckgo_url, _raw_href, _has_class, _LiteParser, parse_lite_results, _decode_bing_url, _VOID_TAGS, _H, _LISTING, _FONTSTYLE, _start_close, _START_CLOSE, _end_priority, _END_PRIORITY, _END_PRIORITY_DEFAULT, _Node, _TREE_MAX_DEPTH, _TREE_SCAN_BUDGET, _TreeBuilder, _child_elements, _descendant_text, _iter_elements, parse_bing_results, warmup_session, _DDG_CHALLENGE_MARKERS, _ddg_blocked, search_ddg, _bing_blocked, search_bing, run_web, format_web_results
 def _normalize(text):
 	return re.sub(r'\s+', ' ', text).strip() if text else ""
 
 
-# ---------------------------------------------------------------------------
-# DDG Lite parsing
-# ---------------------------------------------------------------------------
+_WEB_LINE_SEPARATORS = "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}\x85"
+
+
+def _web_clean(text, keep):
+	"""*text* with every invisible or display-steering code point dropped.
+
+	A character in *keep* (e.g. "\\t\\n") survives; U+2028 U+2029 U+0085 become
+	"\\n". Printable ASCII is the fast path; the rest is judged by category.
+	"""
+	out = []
+	for ch in text:
+		code = ord(ch)
+		if 0x20 <= code < 0x7f or ch in keep:
+			out.append(ch)
+		elif ch in _WEB_LINE_SEPARATORS:
+			out.append("\n")
+		elif 0xfe00 <= code <= 0xfe0f or 0xe0000 <= code <= 0xe01ef:
+			continue
+		elif unicodedata.category(ch) in ("Cc", "Cf", "Cs"):
+			continue
+		else:
+			out.append(ch)
+	return "".join(out)
+
+
+def _web_line(text):
+	"""A single-line field: _web_clean, then every whitespace run one space (F2)."""
+	if text is None:
+		return ""
+	return " ".join(_web_clean(str(text), "\t\n\r").split())
+
+
+_WEB_URL_SAFE = "!#$%&'()*+,-./:;=?@[]^_{|}~"
+
+
+def _web_url(url):
+	"""A result URL safe to render, or None when it must not be a link (F3).
+
+	Controls and invisibles are dropped first; then only an absolute http(s)
+	URL with a host survives. A non-ASCII host is rendered in its IDNA
+	(punycode) form so a homoglyph cannot pose as another site -- None when it
+	has none -- and a non-ASCII path, query or fragment is percent-encoded.
+	"""
+	if not isinstance(url, str):
+		return None
+	url = _web_clean(url, " ").replace("\n", "").strip()
+	try:
+		parts = urllib.parse.urlsplit(url)
+		host = parts.hostname
+		port = parts.port
+	except ValueError:
+		return None
+	if parts.scheme.lower() not in ("http", "https") or not host:
+		return None
+	head = len(parts.scheme) + 3
+	if url[len(parts.scheme):head] != "://" or url[head:head + len(parts.netloc)] != parts.netloc:
+		return None
+	netloc = parts.netloc
+	if not netloc.isascii():
+		try:
+			host = host.encode("idna").decode("ascii")
+		except UnicodeError:
+			return None
+		userinfo = netloc.rpartition("@")[0]
+		netloc = (urllib.parse.quote(userinfo, safe=_WEB_URL_SAFE) + "@" if "@" in parts.netloc else "") + host + ("" if port is None else ":%d" % port)
+	return parts.scheme + "://" + urllib.parse.quote(netloc, safe=_WEB_URL_SAFE) + urllib.parse.quote(url[head + len(parts.netloc):], safe=_WEB_URL_SAFE)
+
 
 def decode_duckduckgo_url(ddg_url):
 	match = re.search(r'uddg=([^&]+)', ddg_url)
@@ -121,20 +175,49 @@ def _raw_href(start_tag):
 	The regex parser this replaced captured `href=['"]([^'"]+)['"]` from the raw
 	markup, so a direct (non-uddg) link kept its `&amp;`; html.parser decodes
 	attribute values, so the raw tag is read instead. One left-to-right pass.
+
+	It reads the ATTRIBUTE named href (F14), never the first "href=" substring:
+	a `data-href=` or an `href=` inside another attribute's quoted value is
+	skipped. The first href attribute decides; a quoted non-empty value is
+	returned, an unquoted or empty one is None, as the regex had it.
 	"""
-	pos = start_tag.find("href=")
-	while pos >= 0:
-		quote_at = pos + 5
-		if quote_at < len(start_tag) and start_tag[quote_at] in "'\"":
-			end = quote_at + 1
-			while end < len(start_tag) and start_tag[end] not in "'\"":
-				end += 1
-			if end < len(start_tag) and end > quote_at + 1:
-				return start_tag[quote_at + 1:end]
-			pos = end
-		else:
-			pos = quote_at
-		pos = start_tag.find("href=", pos)
+	space = " \t\n\r\f"
+	n = len(start_tag)
+	i = 1
+	while i < n and start_tag[i] not in space + "/>":
+		i += 1  # the tag name
+	while i < n:
+		while i < n and start_tag[i] in space + "/":
+			i += 1
+		start = i
+		while i < n and start_tag[i] not in space + "/>=":
+			i += 1
+		name = start_tag[start:i].lower()
+		if not name:
+			if i < n and start_tag[i] == "=":
+				i += 1
+				continue
+			return None
+		value = None
+		j = i
+		while j < n and start_tag[j] in space:
+			j += 1
+		if j < n and start_tag[j] == "=":
+			j += 1
+			while j < n and start_tag[j] in space:
+				j += 1
+			if j < n and start_tag[j] in "'\"":
+				end = start_tag.find(start_tag[j], j + 1)
+				if end < 0:
+					return None
+				value = start_tag[j + 1:end]
+				j = end + 1
+			else:
+				while j < n and start_tag[j] not in space + ">":
+					j += 1
+		i = j
+		if name == "href":
+			return value or None
 	return None
 
 
@@ -142,16 +225,6 @@ def _has_class(attrs, value):
 	return any(name == "class" and val == value for name, val in attrs)
 
 
-# The lite page used to be cut into rows with re.findall(r'<tr[^>]*>(.*?)</tr>')
-# and each row searched for a result-link anchor and a result-snippet cell. On
-# a hostile body (the endpoint, or a MITM on the unverified Chrome path) those
-# lazy DOTALL scans rescan to the end of the input for every unterminated
-# opener: quadratic in the body (F32, R-0057). This is one html.parser pass with
-# the same rules, keyed on start tags and attributes and never on an implied end
-# tag (html.parser has none): a row is a <tr> up to the first </tr>, an
-# unterminated row is dropped, a row's first result-link anchor wins over any
-# result-snippet cell in it, and a title or snippet is the text up to the first
-# </a> or </td>, tags dropped and entities decoded.
 class _LiteParser(HTMLParser):
 
 	def __init__(self):
@@ -183,11 +256,7 @@ class _LiteParser(HTMLParser):
 		if tag == "tr":
 			link = self._link if self._link and self._link[2] else None
 			snippet = self._snippet if self._snippet and self._snippet[1] else None
-			self.rows.append((
-				link[0] if link else None,
-				"".join(link[1]) if link else None,
-				"".join(snippet[0]) if snippet else None,
-			))
+			self.rows.append((link[0] if link else None, "".join(link[1]) if link else None, "".join(snippet[0]) if snippet else None))
 			self._in_row = False
 			self._link = None
 			self._snippet = None
@@ -221,10 +290,7 @@ def parse_lite_results(html_content):
 				if 'snippet' not in current:
 					current['snippet'] = 'No snippet available'
 				results.append(current)
-			current = {
-				'url': decode_duckduckgo_url(link_url),
-				'title': link_title.strip(),
-			}
+			current = {'url': decode_duckduckgo_url(link_url), 'title': link_title.strip()}
 			continue
 
 		if snippet is not None and current.get('title'):
@@ -240,10 +306,6 @@ def parse_lite_results(html_content):
 	return results
 
 
-# ---------------------------------------------------------------------------
-# Bing parsing
-# ---------------------------------------------------------------------------
-
 def _decode_bing_url(href):
 	"""Decode Bing's base64-wrapped redirect URLs."""
 	if not href or not href.startswith("https://www.bing.com/ck/a"):
@@ -258,86 +320,95 @@ def _decode_bing_url(href):
 	return href
 
 
-# This parser used to be lxml XPath (the deedy5/ddgs approach):
-#   results  //li[contains(@class, 'b_algo')]
-#   href     ./h2/a/@href | ./div[contains(@class, 'header')]/a/@href   (first)
-#   title    ./h2/a//text() | ./div[contains(@class, 'header')]/a/h2//text()
-#   snippet  .//p//text()
-# It is now a stdlib html.parser tree builder that evaluates those same four
-# expressions by hand, so the script needs no third-party parser. Equivalence was
-# measured against the lxml version on tests/files/html/tf_bing_serp.html, whose
-# expected fields are the lxml output; tests/test_py_deps.py pins them.
+_VOID_TAGS = frozenset(("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"))
 
-# Elements with no content: never pushed on the open-element stack.
-_VOID_TAGS = frozenset({
-	"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
-	"meta", "param", "source", "track", "wbr",
-})
 
-# new start tag -> the open elements it implicitly closes while one of them is on
-# TOP of the stack. Transcribed from libxml2's htmlStartClose table, which is
-# what lxml applied: e.g. a snippet <p> left unclosed before a <div> must not
-# swallow the div, and a result whose </h2> and </li> are both missing must not
-# swallow the next result. libxml2's `head` entries are left out on purpose:
-# nothing under <head> is ever a result, so they cannot change a field.
 _H = ("h1", "h2", "h3", "h4", "h5", "h6")
-_LISTING = ("address", "pre", "listing", "xmp")
-_FONTSTYLE = ("tt", "i", "b", "u", "s", "strike", "big", "small")
-_START_CLOSE = {tag: frozenset(closed) for tag, closed in {
-	"form": ("form", "p", "hr") + _H + ("dl", "ul", "ol", "menu", "dir") + _LISTING,
-	"title": ("p",),
-	"body": ("style", "script", "title"),
-	"frameset": ("style", "script", "title"),
-	"li": ("p",) + _H + ("dl",) + _LISTING + ("li",),
-	"hr": ("p",),
-	"h1": ("p", "h2", "h3", "h4", "h5", "h6"),
-	"h2": ("p", "h1", "h3", "h4", "h5", "h6"),
-	"h3": ("p", "h1", "h2", "h4", "h5", "h6"),
-	"h4": ("p", "h1", "h2", "h3", "h5", "h6"),
-	"h5": ("p", "h1", "h2", "h3", "h4", "h6"),
-	"h6": ("p", "h1", "h2", "h3", "h4", "h5"),
-	"dir": ("p",),
-	"address": ("p", "ul"),
-	"pre": ("p", "ul"),
-	"listing": ("p",),
-	"xmp": ("p",),
-	"blockquote": ("p",),
-	"dl": ("p", "dt", "menu", "dir") + _LISTING,
-	"dt": ("p", "menu", "dir") + _LISTING + ("dd",),
-	"dd": ("p", "menu", "dir") + _LISTING + ("dt",),
-	"ul": ("p", "ol", "menu", "dir") + _LISTING,
-	"ol": ("p", "ul"),
-	"menu": ("p", "ul"),
-	"p": ("p",) + _H + _FONTSTYLE,
-	"div": ("p",),
-	"noscript": ("script",),
-	"center": ("font", "b", "i", "p"),
-	"a": ("a",),
-	"caption": ("p",),
-	"colgroup": ("caption", "colgroup", "col", "p"),
-	"col": ("caption", "col", "p"),
-	"table": ("p",) + _H + ("pre", "listing", "xmp", "a"),
-	"th": ("th", "td", "p", "span", "font", "a", "b", "i", "u"),
-	"td": ("th", "td", "p", "span", "font", "a", "b", "i", "u"),
-	"tr": ("th", "td", "tr", "caption", "col", "colgroup", "p"),
-	"thead": ("caption", "col", "colgroup"),
-	"tfoot": ("th", "td", "tr", "caption", "col", "colgroup", "thead", "tbody", "p"),
-	"tbody": ("th", "td", "tr", "caption", "col", "colgroup", "thead", "tfoot",
-		"tbody", "p"),
-	"optgroup": ("option",),
-	"option": ("option",),
-	"fieldset": ("legend", "p") + _H + ("pre", "listing", "xmp", "a"),
-}.items()}
 
-# libxml2's end-tag priorities: an end tag may only close the open elements
-# above its match if none of them outranks it, otherwise it is IGNORED. So with
-# a stray <div> left open inside a result, `</li>` does not end the result and
-# the next <li class="b_algo"> nests inside it. Measured: without this rule a
-# single dropped </div> made 17 of the fixture's 26 variants disagree with lxml.
-_END_PRIORITY = {
-	"div": 150, "td": 160, "th": 160, "tr": 170, "thead": 180, "tbody": 180,
-	"tfoot": 180, "table": 190, "head": 200, "body": 200, "html": 220,
-}
+
+_LISTING = ("address", "pre", "listing", "xmp")
+
+
+_FONTSTYLE = ("tt", "i", "b", "u", "s", "strike", "big", "small")
+
+
+def _start_close():
+	"""The htmlStartClose table, one row per line (a builder: tab-safe, and a
+	module-level subscript row would be dropped by the generator)."""
+	t = {}
+	t["form"] = frozenset(("form", "p", "hr") + _H + ("dl", "ul", "ol", "menu", "dir") + _LISTING)
+	t["title"] = frozenset(("p",))
+	t["body"] = frozenset(("style", "script", "title"))
+	t["frameset"] = frozenset(("style", "script", "title"))
+	t["li"] = frozenset(("p",) + _H + ("dl",) + _LISTING + ("li",))
+	t["hr"] = frozenset(("p",))
+	t["h1"] = frozenset(("p", "h2", "h3", "h4", "h5", "h6"))
+	t["h2"] = frozenset(("p", "h1", "h3", "h4", "h5", "h6"))
+	t["h3"] = frozenset(("p", "h1", "h2", "h4", "h5", "h6"))
+	t["h4"] = frozenset(("p", "h1", "h2", "h3", "h5", "h6"))
+	t["h5"] = frozenset(("p", "h1", "h2", "h3", "h4", "h6"))
+	t["h6"] = frozenset(("p", "h1", "h2", "h3", "h4", "h5"))
+	t["dir"] = frozenset(("p",))
+	t["address"] = frozenset(("p", "ul"))
+	t["pre"] = frozenset(("p", "ul"))
+	t["listing"] = frozenset(("p",))
+	t["xmp"] = frozenset(("p",))
+	t["blockquote"] = frozenset(("p",))
+	t["dl"] = frozenset(("p", "dt", "menu", "dir") + _LISTING)
+	t["dt"] = frozenset(("p", "menu", "dir") + _LISTING + ("dd",))
+	t["dd"] = frozenset(("p", "menu", "dir") + _LISTING + ("dt",))
+	t["ul"] = frozenset(("p", "ol", "menu", "dir") + _LISTING)
+	t["ol"] = frozenset(("p", "ul"))
+	t["menu"] = frozenset(("p", "ul"))
+	t["p"] = frozenset(("p",) + _H + _FONTSTYLE)
+	t["div"] = frozenset(("p",))
+	t["noscript"] = frozenset(("script",))
+	t["center"] = frozenset(("font", "b", "i", "p"))
+	t["a"] = frozenset(("a",))
+	t["caption"] = frozenset(("p",))
+	t["colgroup"] = frozenset(("caption", "colgroup", "col", "p"))
+	t["col"] = frozenset(("caption", "col", "p"))
+	t["table"] = frozenset(("p",) + _H + ("pre", "listing", "xmp", "a"))
+	t["th"] = frozenset(("th", "td", "p", "span", "font", "a", "b", "i", "u"))
+	t["td"] = frozenset(("th", "td", "p", "span", "font", "a", "b", "i", "u"))
+	t["tr"] = frozenset(("th", "td", "tr", "caption", "col", "colgroup", "p"))
+	t["thead"] = frozenset(("caption", "col", "colgroup"))
+	t["tfoot"] = frozenset(("th", "td", "tr", "caption", "col", "colgroup", "thead", "tbody", "p"))
+	t["tbody"] = frozenset(("th", "td", "tr", "caption", "col", "colgroup", "thead", "tfoot", "tbody", "p"))
+	t["optgroup"] = frozenset(("option",))
+	t["option"] = frozenset(("option",))
+	t["fieldset"] = frozenset(("legend", "p") + _H + ("pre", "listing", "xmp", "a"))
+	return t
+
+
+_START_CLOSE = _start_close()
+
+
+def _end_priority():
+	"""libxml2's end-tag priorities: an end tag may only close the open elements
+	above its match if none of them outranks it, otherwise it is IGNORED. So with
+	a stray <div> left open inside a result, `</li>` does not end the result and
+	the next <li class="b_algo"> nests inside it. Measured: without this rule a
+	single dropped </div> made 17 of the fixture's 26 variants disagree with lxml.
+	"""
+	t = {}
+	t["div"] = 150
+	t["td"] = 160
+	t["th"] = 160
+	t["tr"] = 170
+	t["thead"] = 180
+	t["tbody"] = 180
+	t["tfoot"] = 180
+	t["table"] = 190
+	t["head"] = 200
+	t["body"] = 200
+	t["html"] = 220
+	return t
+
+
+_END_PRIORITY = _end_priority()
+
+
 _END_PRIORITY_DEFAULT = 100
 
 
@@ -350,6 +421,12 @@ class _Node:
 		self.children = []  # _Node or str (a text node), in document order
 
 
+_TREE_MAX_DEPTH = 512
+
+
+_TREE_SCAN_BUDGET = 1000000
+
+
 class _TreeBuilder(HTMLParser):
 	"""A minimal element tree: enough structure to answer the four XPaths."""
 
@@ -357,27 +434,40 @@ class _TreeBuilder(HTMLParser):
 		super().__init__(convert_charrefs=True)
 		self.root = _Node("#document", {})
 		self._stack = [self.root]
+		self._open = {}  # tag -> how many of the stack's elements carry it
+		self._budget = _TREE_SCAN_BUDGET
+
+	def _close_from(self, i):
+		for gone in self._stack[i:]:
+			self._open[gone.tag] -= 1
+		del self._stack[i:]
 
 	def handle_starttag(self, tag, attrs):
 		closes = _START_CLOSE.get(tag, ())
 		while len(self._stack) > 1 and self._stack[-1].tag in closes:
-			self._stack.pop()
+			self._close_from(len(self._stack) - 1)
 		node_attrs = {}
 		for name, value in attrs:
 			# first occurrence wins, and a bare attribute is the empty string
 			node_attrs.setdefault(name, "" if value is None else value)
 		node = _Node(tag, node_attrs)
 		self._stack[-1].children.append(node)
-		if tag not in _VOID_TAGS:
+		if tag not in _VOID_TAGS and len(self._stack) <= _TREE_MAX_DEPTH:
 			self._stack.append(node)
+			self._open[tag] = self._open.get(tag, 0) + 1
 
 	def handle_endtag(self, tag):
 		# close the nearest open element of this name, unless an element above it
 		# outranks the end tag (_END_PRIORITY); a stray end tag is ignored
+		if not self._open.get(tag):
+			return
 		priority = _END_PRIORITY.get(tag, _END_PRIORITY_DEFAULT)
 		for i in range(len(self._stack) - 1, 0, -1):
+			if self._budget <= 0:
+				return
+			self._budget -= 1
 			if self._stack[i].tag == tag:
-				del self._stack[i:]
+				self._close_from(i)
 				return
 			if _END_PRIORITY.get(self._stack[i].tag, _END_PRIORITY_DEFAULT) > priority:
 				return
@@ -455,13 +545,206 @@ def parse_bing_results(html_text):
 		body = _descendant_text(e, [], only_under="p")
 		snippet = _normalize("".join(body)).replace("\xa0", " ")
 
-		results.append({
-			'url': href,
-			'title': title,
-			'snippet': snippet or 'No snippet available',
-		})
+		results.append({'url': href, 'title': title, 'snippet': snippet or 'No snippet available'})
 
 	return results
+
+
+def warmup_session(session, endpoint="ddg"):
+	try:
+		if endpoint == "bing":
+			session.get("https://www.bing.com/", timeout=10)
+		else:
+			session.get("https://lite.duckduckgo.com/lite/", timeout=10)
+	except Exception:
+		pass
+	time.sleep(random.uniform(0.8, 1.5))
+
+
+_DDG_CHALLENGE_MARKERS = ("anomaly-modal", "Please complete the following")
+
+
+def _ddg_blocked(resp, query, results=None):
+	"""DDG's bot-block signal (D15, D16 S1/S2): True only for a block.
+
+	All of: (0) the final URL's host is lite.duckduckgo.com (a redirect
+	target's answer is never a block); (a) the page parses to ZERO results, so
+	a snippet carrying a marker cannot trip it (a page with a snippet has a
+	result); and then EITHER (s) the status is 202 (R-0052: the challenge
+	status spec-ddg recorded and the user has seen live; lite results answer
+	200), with no marker needed, OR (b) a challenge marker occurs in the page
+	AND the query does not contain that marker (case-insensitive), so the
+	reflected query cannot trip it. An undecodable body is not judged here:
+	zero results on it would mean nothing, so neither (s) nor (b) applies.
+
+	`results` is parse_lite_results(resp.text) when the caller already has it
+	(search_ddg parses each response ONCE, F32); None parses here.
+	"""
+	# UNVERIFIED: (b) is the plan's FALLBACK predicate. task-038
+	# (.claude/tmp/task038-live.txt) saw DDG answer both transports with 200 and
+	# lite results; no anomaly page was recorded, so the structural marker
+	# element (an element whose class/id is anomaly-modal, outside the results
+	# container) is still unmeasured. Replace (b) with that structural match
+	# once a live challenge page has been recorded. The 202 of (s) is the one
+	# measured signal (spec-ddg; R-0052).
+	if urllib.parse.urlsplit(resp.url or "").hostname != "lite.duckduckgo.com":
+		return False
+	if resp.decode_error is not None:
+		return False
+	page = resp.text
+	if results is None:
+		results = parse_lite_results(page)
+	if results:
+		return False
+	if resp.status_code == 202:
+		return True
+	lowered_query = (query or "").lower()
+	for marker in _DDG_CHALLENGE_MARKERS:
+		if marker in page and marker.lower() not in lowered_query:
+			return True
+	return False
+
+
+def search_ddg(query, session, note=lambda event, query, detail: None, on_transport_error=lambda exc: None):
+	"""Lite results for *query*; [] on no results or an error; None on a block (_ddg_blocked).
+
+	`note(event, query, detail)` receives `ddg_undecodable` (detail: the decode
+	error) and `ddg_error` (detail: the exception); `on_transport_error(exc)` is
+	called in the except arm before the [] is returned.
+	"""
+	# The fetch is modelled as coming from the page the warm-up loaded (L8);
+	# the warm-up URL itself stands in only when the warm-up failed. The cors
+	# POST profile supplies Sec-Fetch-*, the form Content-Type and (h2 only)
+	# Priority;
+	# no Origin goes out, because the referer is same-origin with the target
+	# (Chrome's captured same-origin fetches carry none) -- the client adds one
+	# only for a cross-origin initiator, i.e. after a redirect off this origin.
+	page = session.last_navigation_url or "https://lite.duckduckgo.com/lite/"
+	try:
+		resp = session.post("https://lite.duckduckgo.com/lite/", data={"q": query, "kl": ""}, headers={"Accept": "*/*"}, referer=page, timeout=15)
+		if resp.decode_error is not None:
+			# Never None: an undecodable body is not taken for a CAPTCHA.
+			note("ddg_undecodable", query, resp.decode_error)
+			return []
+		# Parsed ONCE (F32): the block signal reuses these results.
+		results = parse_lite_results(resp.text)
+		if _ddg_blocked(resp, query, results):
+			return None
+		return results
+	except Exception as e:
+		# A transport failure is never a block (D16 M2): a note and [], so
+		# breaking the handshake cannot force a block verdict, and the run
+		# does not switch to Bing either.
+		note("ddg_error", query, e)
+		on_transport_error(e)
+		return []
+
+
+def _bing_blocked(resp):
+	"""Bing's bot-block signal (D15, D16 M3/S2): a 403 from www.bing.com itself.
+
+	429 (a volume verdict), 5xx (a server fault) and every other status are
+	never a block, nor is any answer from another host. DEFERRED, declared
+	(R25): a challenge served as a 200 that parses to [] is not detected.
+	"""
+	# UNVERIFIED: Bing's block shape against a non-browser TLS fingerprint was
+	# never observed; task-038 saw the verified transport answered 200 with results.
+	return resp.status_code == 403 and urllib.parse.urlsplit(resp.url or "").hostname == "www.bing.com"
+
+
+def search_bing(query, session, note=lambda event, query, detail: None, on_transport_error=lambda exc: None):
+	"""Bing results for *query*; [] on no results or an error; None on a block (_bing_blocked).
+
+	`note(event, query, detail)` receives `bing_http` (detail: the status code
+	of a non-200 answer that is NOT a block -- a block is reported by its None
+	alone, so the CLI prints one line for it, FR-9), `bing_undecodable`
+	(detail: the decode error) and `bing_error` (detail: the exception);
+	`on_transport_error(exc)` is called in the except arm before the [] is
+	returned.
+	"""
+	try:
+		resp = session.get("https://www.bing.com/search", params={"q": query}, timeout=15)
+		if resp.status_code != 200:
+			if _bing_blocked(resp):
+				return None
+			note("bing_http", query, resp.status_code)
+			return []
+		if resp.decode_error is not None:
+			note("bing_undecodable", query, resp.decode_error)
+			return []
+		return parse_bing_results(resp.text)
+	except Exception as e:
+		# A transport failure is never a block (D16 M2).
+		note("bing_error", query, e)
+		on_transport_error(e)
+		return []
+
+
+def run_web(queries, with_session, note_for, out=None):
+	"""Search every query, DDG first; a DDG block moves this and every later
+	query to Bing. Returns [(query, results_or_None, transport_failed), ...].
+
+	The outcomes are appended to *out* (a fresh list when None) as each query
+	finishes, so a host whose hook raises mid-run -- a busy endpoint, a call
+	deadline -- still holds every outcome gathered before the raise.
+
+	`with_session(endpoint, fn)` is the host's hook: `endpoint` is "ddg" or
+	"bing", and the host calls `fn(session, bad)` with a ready session and its
+	own transport-failure callable, returning what `fn` returns. Each query is
+	one `with_session` call per endpoint it touches, so a host that locks per
+	endpoint never holds the DDG lock while taking the Bing one. `fn` wraps
+	`bad` so the failure is recorded here as well before the host sees it --
+	without the wrap only the host would know, and `transport_failed` could not
+	be computed. `note_for(i)` returns the note callable for query index i; at
+	the DDG -> Bing switch it receives `ddg_captcha` (detail None). A result of
+	None means Bing blocked that query too.
+	"""
+	def call(search, query, note, failed):
+		def fn(session, bad):
+			def on_err(exc):
+				failed.append(exc)
+				bad(exc)
+			return search(query, session, note, on_err)
+		return fn
+
+	out = [] if out is None else out
+	using_bing = False
+	for i, query in enumerate(queries):
+		note = note_for(i)
+		failed = []
+		results = None
+		if not using_bing:
+			results = with_session("ddg", call(search_ddg, query, note, failed))
+			if results is None:
+				# CAPTCHA -- switch to Bing for this and all remaining queries
+				note("ddg_captcha", query, None)
+				using_bing = True
+				failed = []
+		if using_bing:
+			results = with_session("bing", call(search_bing, query, note, failed))
+		out.append((query, results, bool(failed)))
+	return out
+
+
+def format_web_results(results, query=None):
+	"""The results as markdown. Every third-party field is rendered through
+	_web_line (one line, no invisible or display-steering code point: F2, the
+	Unicode classes) and the URL through _web_url ("No URL" when it is not a
+	safe http(s) link: F3); the query echo goes through _web_line as well."""
+	output = []
+	if query:
+		output.append(f"## Query: {_web_line(query)}")
+		output.append("")
+	for i, result in enumerate(results, 1):
+		title = _web_line(result.get('title', 'No title'))
+		url = _web_url(result.get('url')) or 'No URL'
+		snippet = _web_line(result.get('snippet', 'No snippet available'))
+		output.append(f"### Result {i}: {title}")
+		output.append(f"**URL**: {url}")
+		output.append(f"**Snippet**: {snippet}")
+		output.append("")
+	return '\n'.join(output)
+# END GENERATED: 942ef16683fc
 
 
 # ---------------------------------------------------------------------------
@@ -7372,835 +7655,127 @@ def _ch_session_new(decoders=None, connect_policy=None, timeout=30, max_bytes=0,
 
 _DECODERS = {"br": _brotli_decompress, "zstd": _zstd_decompress}
 
-# Endpoint keys ("ddg", "bing") whose host blocked the VERIFIED transport in
-# this process (D15). From then on this process reaches that endpoint over the
-# Chrome path (certificate NOT verified). Per process, never persisted: the
-# Chrome path is taken only after a block was observed in THIS run. The two
-# keys are independent: a block by one host says nothing about the other.
-_CHROME_AFTER_BLOCK = set()
 
+def create_session():
+	"""A new session on the Chrome path (certificate NOT verified).
 
-def create_session(transport="verified"):
-	"""A new session and its transport name ("verified" unless told otherwise).
-
-	connect_policy is _ch_public_only_policy on both transports: the Chrome
-	path verifies no certificate, so a MITM could answer it with a redirect
-	into private or metadata space, which the policy refuses (on the verified
-	transport it is defence in depth). tls12_fallback and allow_downgrade stay
-	False, and no rand= is ever passed. max_bytes is SEARCH_MAX_BYTES (F32).
+	connect_policy is _ch_public_only_policy: the Chrome path verifies no
+	certificate, so a MITM could answer it with a redirect into private or
+	metadata space, which the policy refuses. tls12_fallback and allow_downgrade
+	stay False, and no rand= is ever passed. max_bytes is SEARCH_MAX_BYTES (F32).
 	"""
-	return _ch_session_new(decoders=_DECODERS, connect_policy=_ch_public_only_policy, timeout=20, max_bytes=SEARCH_MAX_BYTES, transport=transport), transport
-
-
-def _transport_for(host_key):
-	return "chrome" if host_key in _CHROME_AFTER_BLOCK else "verified"
-
-
-def warmup_session(session, endpoint="ddg"):
-	try:
-		if endpoint == "bing":
-			session.get("https://www.bing.com/", timeout=10)
-		else:
-			session.get("https://lite.duckduckgo.com/lite/", timeout=10)
-	except Exception:
-		pass
-	time.sleep(random.uniform(0.8, 1.5))
+	return _ch_session_new(decoders=_DECODERS, connect_policy=_ch_public_only_policy, timeout=20, max_bytes=SEARCH_MAX_BYTES, transport="chrome")
 
 
 # ---------------------------------------------------------------------------
-# DDG search
+# The CLI's session hook and stderr notes
 # ---------------------------------------------------------------------------
 
-# The challenge markers of DDG's anomaly (CAPTCHA) page. They are judged by
-# _ddg_blocked, never as a bare substring test of the body: the lite page
-# reflects the query and third-party snippets.
-_DDG_CHALLENGE_MARKERS = ("anomaly-modal", "Please complete the following")
+# One run's session state: the open session, the endpoint it serves ("ddg" or
+# "bing") and how many queries the run has started. _cli_close() ends a run.
+_CLI_STATE = {"session": None, "endpoint": None, "queries": 0}
 
 
-def _ddg_blocked(resp, query, results=None):
-	"""DDG's bot-block signal (D15, D16 S1/S2): True only for a block.
+def _cli_close():
+	"""Close the run's session, if any, and reset the state for the next run."""
+	session = _CLI_STATE["session"]
+	_CLI_STATE.update(session=None, endpoint=None, queries=0)
+	if session is not None:
+		session.close()
 
-	All of: (0) the final URL's host is lite.duckduckgo.com (a redirect
-	target's answer is never a block); (a) the page parses to ZERO results, so
-	a snippet carrying a marker cannot trip it (a page with a snippet has a
-	result); and then EITHER (s) the status is 202 (R-0052: the challenge
-	status spec-ddg recorded and the user has seen live; lite results answer
-	200), with no marker needed, OR (b) a challenge marker occurs in the page
-	AND the query does not contain that marker (case-insensitive), so the
-	reflected query cannot trip it. An undecodable body is not judged here:
-	zero results on it would mean nothing, so neither (s) nor (b) applies.
 
-	`results` is parse_lite_results(resp.text) when the caller already has it
-	(search_ddg parses each response ONCE, F32); None parses here.
+def with_session(endpoint, fn):
+	"""run_web's hook: fn(session, bad) on a warmed-up session for *endpoint*.
+
+	Pacing and rotation are per QUERY: before every query but the first a
+	random 2.5-5.0 s (DDG) or 1.5-3.0 s (Bing) sleep, and every ROTATE_EVERY-th
+	query a fresh session (closed, recreated, warmed up). A call for another
+	endpoint than the last one is the DDG -> Bing switch of the SAME query: the
+	session is replaced and warmed up for the new endpoint, with no sleep and no
+	rotation count. When fn's search reports a transport failure (bad), the
+	session is closed and dropped, so the next query opens a new one.
 	"""
-	# UNVERIFIED: (b) is the plan's FALLBACK predicate. task-038
-	# (.claude/tmp/task038-live.txt) saw DDG answer both transports with 200 and
-	# lite results; no anomaly page was recorded, so the structural marker
-	# element (an element whose class/id is anomaly-modal, outside the results
-	# container) is still unmeasured. Replace (b) with that structural match
-	# once a live challenge page has been recorded. The 202 of (s) is the one
-	# measured signal (spec-ddg; R-0052).
-	if urllib.parse.urlsplit(resp.url or "").hostname != "lite.duckduckgo.com":
-		return False
-	if resp.decode_error is not None:
-		return False
-	page = resp.text
-	if results is None:
-		results = parse_lite_results(page)
-	if results:
-		return False
-	if resp.status_code == 202:
-		return True
-	lowered_query = (query or "").lower()
-	for marker in _DDG_CHALLENGE_MARKERS:
-		if marker in page and marker.lower() not in lowered_query:
-			return True
-	return False
-
-
-def search_ddg(query, session):
-	"""Lite results for *query*; [] on no results or an error; None on a block (_ddg_blocked)."""
-	# The fetch is modelled as coming from the page the warm-up loaded (L8);
-	# the warm-up URL itself stands in only when the warm-up failed. The cors
-	# POST profile supplies Sec-Fetch-*, the form Content-Type and (h2 only)
-	# Priority;
-	# no Origin goes out, because the referer is same-origin with the target
-	# (Chrome's captured same-origin fetches carry none) -- the client adds one
-	# only for a cross-origin initiator, i.e. after a redirect off this origin.
-	page = session.last_navigation_url or "https://lite.duckduckgo.com/lite/"
-	try:
-		resp = session.post(
-			"https://lite.duckduckgo.com/lite/",
-			data={"q": query, "kl": ""},
-			headers={"Accept": "*/*"},
-			referer=page,
-			timeout=15,
-		)
-		if resp.decode_error is not None:
-			# Never None: an undecodable body is not taken for a CAPTCHA.
-			print(f"  [DDG body undecodable: {resp.decode_error}]", file=sys.stderr)
-			return []
-		# Parsed ONCE (F32): the block signal reuses these results.
-		results = parse_lite_results(resp.text)
-		if _ddg_blocked(resp, query, results):
-			return None
-		return results
-	except Exception as e:
-		# A transport failure is never a block (D16 M2): an error line and [],
-		# so breaking the verified handshake cannot force the Chrome path, and
-		# the run does not switch to Bing either.
-		print(f"  [DDG error: {e}]", file=sys.stderr)
-		return []
-
-
-# ---------------------------------------------------------------------------
-# Bing search
-# ---------------------------------------------------------------------------
-
-def _bing_blocked(resp):
-	"""Bing's bot-block signal (D15, D16 M3/S2): a 403 from www.bing.com itself.
-
-	429 (a volume verdict), 5xx (a server fault) and every other status are
-	never a block, nor is any answer from another host. DEFERRED, declared
-	(R25): a challenge served as a 200 that parses to [] is not detected.
-	"""
-	# UNVERIFIED: Bing's block shape against a non-browser TLS fingerprint was
-	# never observed; task-038 saw the verified transport answered 200 with results.
-	return resp.status_code == 403 and urllib.parse.urlsplit(resp.url or "").hostname == "www.bing.com"
-
-
-def search_bing(query, session):
-	"""Bing results for *query*; [] on no results or an error; None on a block (_bing_blocked)."""
-	try:
-		resp = session.get(
-			"https://www.bing.com/search",
-			params={"q": query},
-			timeout=15,
-		)
-		if resp.status_code != 200:
-			print(f"  [Bing HTTP {resp.status_code} for: {query}]", file=sys.stderr)
-			if _bing_blocked(resp):
-				return None
-			return []
-		if resp.decode_error is not None:
-			print(f"  [Bing body undecodable: {resp.decode_error}]", file=sys.stderr)
-			return []
-		return parse_bing_results(resp.text)
-	except Exception as e:
-		# A transport failure is never a block (D16 M2).
-		print(f"  [Bing error: {e}]", file=sys.stderr)
-		return []
-
-
-# ---------------------------------------------------------------------------
-# CDP backend (opt-in via DDG_BACKEND=cdp)
-# ---------------------------------------------------------------------------
-
-def _discover_chrome():
-	import urllib.request
-	import urllib.error
-	candidates = [os.environ.get("CHROME_CDP_URL", "")]
-	candidates += [
-		"http://192.168.2.2:9222",
-		"http://localhost:9222",
-		"http://127.0.0.1:9222",
-		"http://localhost:9229",
-	]
-	for base in candidates:
-		base = base.rstrip("/")
-		if not base:
-			continue
-		try:
-			resp = urllib.request.urlopen(f"{base}/json", timeout=2)
-			targets = json.loads(resp.read())
-			for t in targets:
-				if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
-					url = t.get("url", "")
-					if url.startswith("devtools://") or url.startswith("chrome://"):
-						continue
-					return base, t["webSocketDebuggerUrl"]
-		except Exception:
-			continue
-	return None
-
-
-# The WebSocket client, generated from Scripts/_mcp_websocket.py -- the same
-# RFC 6455 core mcp-gdc.py carries, with the blocking-socket wrapper instead of
-# the asyncio one. It replaced the third-party `websocket-client` package, so
-# the cdp backend needs nothing outside the stdlib. This file is not an MCP
-# server; it takes generated blocks because amalgamate.py names it in
-# DECLARED_HOSTS. No Origin header is sent, which is what `suppress_origin=True`
-# used to buy: Chrome refuses a DevTools socket whose Origin is not allow-listed.
-# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region.
-# BEGIN GENERATED: _mcp_websocket.py :: WebSocketError, WS_MAX_HANDSHAKE_BYTES, WS_MAX_FRAME_BYTES, WS_MAX_MESSAGE_BYTES, _ws_parse_url, _ws_handshake_request, _ws_handshake_split, _ws_handshake_verify, _ws_mask, _ws_encode_frame, _ws_parse_frame, _ws_assemble, _ws_control_reply, _WsConnection, _ws_step, _ws_sync_connect, _ws_sync_recv, _ws_sync_send, _ws_sync_close
-class WebSocketError(ConnectionError):
-	"""A WebSocket protocol violation or a failed handshake.
-
-	A `ConnectionError` on purpose: to every caller that already treats a dead
-	link as an `OSError`, a peer that broke the protocol is the same event.
-	"""
-
-
-WS_MAX_HANDSHAKE_BYTES = 64 * 1024
-
-
-WS_MAX_FRAME_BYTES = 256 * 1024 * 1024
-
-
-WS_MAX_MESSAGE_BYTES = 256 * 1024 * 1024
-
-
-def _ws_parse_url(url: str) -> tuple:
-	"""Split a ``ws://host[:port]/path`` URL into ``(host, port, path)``.
-
-	``wss://`` is refused by name rather than dialled in clear text on port 80,
-	which is what the hand parser this replaced did with it. A bracketed IPv6
-	literal loses its brackets here and regains them in the ``Host`` header. The
-	query string stays on the path, where the request line needs it; a fragment
-	is dropped, since it never goes on the wire.
-	"""
-	if not url.startswith("ws://"):
-		scheme = url.split("://", 1)[0] if "://" in url else url[:16]
-		raise WebSocketError("only ws:// URLs are supported, not %r" % scheme)
-	rest = url[5:].split("#", 1)[0]
-	cut = len(rest)
-	for mark in "/?":
-		at = rest.find(mark)
-		if 0 <= at < cut:
-			cut = at
-	authority, path = rest[:cut], rest[cut:]
-	if not path.startswith("/"):
-		path = "/" + path
-	if "@" in authority:
-		raise WebSocketError("a ws:// URL with user information is refused")
-	port = ""
-	if authority.startswith("["):
-		close = authority.find("]")
-		if close < 0:
-			raise WebSocketError("unterminated IPv6 literal in %r" % authority)
-		host, tail = authority[1:close], authority[close + 1:]
-		if tail:
-			if not tail.startswith(":"):
-				raise WebSocketError("junk after the IPv6 literal in %r" % authority)
-			port = tail[1:]
-	elif ":" in authority:
-		host, port = authority.rsplit(":", 1)
+	state = _CLI_STATE
+	if state["endpoint"] is not None and state["endpoint"] != endpoint:
+		if state["session"] is not None:
+			state["session"].close()
+			state["session"] = None
 	else:
-		host = authority
-	if not host:
-		raise WebSocketError("a ws:// URL needs a host")
-	if not port:
-		return host, 80, path
-	if not port.isdigit() or not 0 < int(port) < 65536:
-		raise WebSocketError("invalid port %r" % port)
-	return host, int(port), path
+		if state["queries"] > 0:
+			time.sleep(random.uniform(2.5, 5.0) if endpoint == "ddg" else random.uniform(1.5, 3.0))
+			if state["queries"] % ROTATE_EVERY == 0 and state["session"] is not None:
+				state["session"].close()
+				state["session"] = None
+		state["queries"] += 1
+	state["endpoint"] = endpoint
+	if state["session"] is None:
+		state["session"] = create_session()
+		warmup_session(state["session"], endpoint)
+	broken = []
+	try:
+		return fn(state["session"], broken.append)
+	finally:
+		if broken and state["session"] is not None:
+			state["session"].close()
+			state["session"] = None
 
 
-def _ws_handshake_request(host: str, port: int, path: str) -> tuple:
-	"""The HTTP upgrade request and the random key it carries: ``(bytes, str)``.
+def _cli_note(event, query, detail):
+	"""One stderr line per search note, the text the search functions printed before the lift.
 
-	No ``Origin`` header is sent. Chrome refuses a DevTools WebSocket whose
-	Origin is not on its ``--remote-allow-origins`` list, and a client that
-	sends none is not a browser page -- which is what ``websocket-client``'s
-	``suppress_origin=True`` bought the search script, and why this never
-	grew an option to send one.
-
-	A host, or a path, carrying whitespace or a control character is refused:
-	either would let a URL write its own header lines into the request.
+	The query and the detail (an exception's text can carry third-party bytes)
+	go through the generated _web_line first: one line, no control or
+	invisible character reaches the terminal (F18).
 	"""
-	for part in (host, path):
-		if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in part):
-			raise WebSocketError("refusing a host or path with whitespace or control characters")
-	key = base64.b64encode(os.urandom(16)).decode("ascii")
-	authority = "[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)
-	lines = ["GET %s HTTP/1.1" % path]
-	lines.append("Host: %s" % authority)
-	lines.append("Upgrade: websocket")
-	lines.append("Connection: Upgrade")
-	lines.append("Sec-WebSocket-Key: %s" % key)
-	lines.append("Sec-WebSocket-Version: 13")
-	return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii"), key
-
-
-def _ws_handshake_split(buf) -> int:
-	"""Where the upgrade response's header block ends in *buf*, or -1 for "read more".
-
-	The returned offset is one past the blank line, so ``buf[:end]`` is the
-	header block and ``buf[end:]`` is the first frame bytes if the server sent
-	any in the same segment -- which the client this replaced read into its
-	header buffer and threw away.
-	"""
-	end = bytes(buf[:WS_MAX_HANDSHAKE_BYTES + 4]).find(b"\r\n\r\n")
-	if 0 <= end and end + 4 <= WS_MAX_HANDSHAKE_BYTES:
-		return end + 4
-	if end < 0 and len(buf) <= WS_MAX_HANDSHAKE_BYTES:
-		return -1
-	raise WebSocketError("WebSocket handshake failed: the header block exceeds %d bytes" % WS_MAX_HANDSHAKE_BYTES)
-
-
-def _ws_handshake_verify(head: bytes, key: str) -> dict:
-	"""Check the upgrade response against RFC 6455 4.1; return its headers.
-
-	Header names are folded to lower case and a repeated header is joined with
-	``", "``, so every check below reads ONE value and compares it EXACTLY --
-	the client this replaced looked for ``101`` anywhere in the status line and
-	for the accept key anywhere in the response.
-	"""
-	lines = head.decode("latin-1").split("\r\n")
-	status = lines[0].split(" ", 2)
-	if len(status) < 2 or status[0] != "HTTP/1.1" or status[1] != "101":
-		raise WebSocketError("WebSocket handshake rejected: %r" % lines[0][:200])
-	headers = {}
-	for line in lines[1:]:
-		if not line:
-			continue
-		name, sep, value = line.partition(":")
-		if not sep or not name or name != name.strip() or line[0] in " \t":
-			raise WebSocketError("WebSocket handshake failed: malformed header line %r" % line[:200])
-		name = name.lower()
-		value = value.strip(" \t")
-		headers[name] = headers[name] + ", " + value if name in headers else value
-	if headers.get("upgrade", "").lower() != "websocket":
-		raise WebSocketError("WebSocket handshake failed: Upgrade is not websocket")
-	if "upgrade" not in [token.strip().lower() for token in headers.get("connection", "").split(",")]:
-		raise WebSocketError("WebSocket handshake failed: Connection carries no upgrade token")
-	digest = hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
-	if headers.get("sec-websocket-accept") != base64.b64encode(digest).decode("ascii"):
-		raise WebSocketError("WebSocket handshake failed: invalid accept key")
-	if "sec-websocket-extensions" in headers or "sec-websocket-protocol" in headers:
-		raise WebSocketError("WebSocket handshake failed: the server negotiated an extension or subprotocol nobody offered")
-	return headers
-
-
-def _ws_mask(key: bytes, data: bytes) -> bytes:
-	"""XOR *data* with the 4-byte *key* repeated -- masking and unmasking alike.
-
-	One big-integer XOR over the whole payload instead of a Python-level loop
-	over its bytes: the loop this replaced cost a generator step per byte, which
-	on a multi-megabyte frame is the whole of the send time.
-	"""
-	size = len(data)
-	if not size:
-		return b""
-	pad = (bytes(key) * (size // 4 + 1))[:size]
-	return (int.from_bytes(data, "big") ^ int.from_bytes(pad, "big")).to_bytes(size, "big")
-
-
-def _ws_encode_frame(opcode: int, payload: bytes, fin: bool = True) -> bytes:
-	"""One client frame: FIN/opcode, the shortest length form, a fresh mask key.
-
-	Always masked -- RFC 6455 5.1 requires it of every client frame, and a
-	server is obliged to drop the connection on an unmasked one.
-	"""
-	if opcode not in (0x0, 0x1, 0x2, 0x8, 0x9, 0xA):
-		raise WebSocketError("unknown opcode 0x%X" % opcode)
-	size = len(payload)
-	if opcode >= 0x8 and (size > 125 or not fin):
-		raise WebSocketError("a control frame must be FIN and at most 125 bytes")
-	head = bytearray([(0x80 if fin else 0x00) | opcode])
-	if size < 126:
-		head.append(0x80 | size)
-	elif size < 65536:
-		head.append(0x80 | 126)
-		head += size.to_bytes(2, "big")
+	query = _web_line(query)
+	detail = _web_line(detail)
+	if event == "ddg_undecodable":
+		line = f"  [DDG body undecodable: {detail}]"
+	elif event == "ddg_error":
+		line = f"  [DDG error: {detail}]"
+	elif event == "ddg_captcha":
+		line = f"  [DDG CAPTCHA on: {query} — switching to Bing fallback]"
+	elif event == "bing_http":
+		line = f"  [Bing HTTP {detail} for: {query}]"
+	elif event == "bing_undecodable":
+		line = f"  [Bing body undecodable: {detail}]"
+	elif event == "bing_error":
+		line = f"  [Bing error: {detail}]"
 	else:
-		head.append(0x80 | 127)
-		head += size.to_bytes(8, "big")
-	key = os.urandom(4)
-	return bytes(head) + key + _ws_mask(key, payload)
-
-
-def _ws_parse_frame(buf):
-	"""The first complete server frame in *buf*: ``(fin, opcode, payload, used)``.
-
-	Returns None while *buf* does not yet hold the whole frame; *used* is how
-	many bytes of *buf* the frame took. Every refusal that can be made from
-	the header is made from the header, before the payload arrives, so an
-	announced 2**63-byte frame costs ten bytes of reading and not an attempt.
-	"""
-	if len(buf) < 2:
-		return None
-	first, second = buf[0], buf[1]
-	if first & 0x70:
-		raise WebSocketError("reserved bits set on a frame, and no extension was negotiated")
-	opcode = first & 0x0F
-	if opcode not in (0x0, 0x1, 0x2, 0x8, 0x9, 0xA):
-		raise WebSocketError("unknown opcode 0x%X" % opcode)
-	fin = bool(first & 0x80)
-	if second & 0x80:
-		raise WebSocketError("the server sent a masked frame")
-	size = second & 0x7F
-	offset = 2
-	if size == 126:
-		if len(buf) < 4:
-			return None
-		size, offset = int.from_bytes(bytes(buf[2:4]), "big"), 4
-	elif size == 127:
-		if len(buf) < 10:
-			return None
-		size, offset = int.from_bytes(bytes(buf[2:10]), "big"), 10
-		if size >> 63:
-			raise WebSocketError("the most significant bit of a 64-bit frame length is set")
-	if opcode >= 0x8 and (size > 125 or not fin):
-		raise WebSocketError("a control frame must be FIN and at most 125 bytes")
-	if size > WS_MAX_FRAME_BYTES:
-		raise WebSocketError("a %d-byte frame exceeds the %d-byte cap" % (size, WS_MAX_FRAME_BYTES))
-	end = offset + size
-	if len(buf) < end:
-		return None
-	return fin, opcode, bytes(buf[offset:end]), end
-
-
-def _ws_assemble(pending: list, fin: bool, opcode: int, payload: bytes):
-	"""Fold one frame into *pending*; return ``(opcode, value)`` or None.
-
-	*pending* is the caller's per-connection list: empty between messages, and
-	``[opcode, bytearray]`` while a fragmented one is open. A control frame is
-	returned at once as ``(opcode, payload)`` -- RFC 6455 lets it arrive
-	between two fragments, and it does not disturb the message. A data message
-	is returned once its FIN fragment lands: text as ``str`` (strict UTF-8),
-	binary as ``bytes``. None means "a fragment was absorbed, keep reading" --
-	the client this replaced returned None for a continuation frame, which its
-	caller read as the connection closing.
-	"""
-	if opcode >= 0x8:
-		return opcode, payload
-	if opcode == 0x0:
-		if not pending:
-			raise WebSocketError("a continuation frame arrived with no message open")
-	elif pending:
-		raise WebSocketError("a new data frame arrived inside a fragmented message")
-	else:
-		pending[:] = [opcode, bytearray()]
-	if len(pending[1]) + len(payload) > WS_MAX_MESSAGE_BYTES:
-		raise WebSocketError("a message exceeds the %d-byte cap" % WS_MAX_MESSAGE_BYTES)
-	pending[1] += payload
-	if not fin:
-		return None
-	kind, data = pending[0], bytes(pending[1])
-	del pending[:]
-	if kind == 0x2:
-		return kind, data
-	try:
-		return kind, data.decode("utf-8")
-	except UnicodeDecodeError:
-		raise WebSocketError("a text message is not valid UTF-8") from None
-
-
-def _ws_control_reply(opcode: int, payload: bytes):
-	"""The frame a control frame obliges the client to send back, or None.
-
-	A ping is answered with a pong carrying the SAME payload (RFC 6455 5.5.2);
-	the client this replaced read the ping and answered nothing. A close is
-	answered with a close echoing its status code, after the payload is
-	checked: one byte is not a status code, the codes an endpoint must never
-	send are refused, and so is a reason that is not UTF-8. A pong needs no
-	answer.
-	"""
-	if opcode == 0x9:
-		return _ws_encode_frame(0xA, payload)
-	if opcode != 0x8:
-		return None
-	if len(payload) == 1:
-		raise WebSocketError("a close frame carried a one-byte payload")
-	if not payload:
-		return _ws_encode_frame(0x8, b"")
-	code = int.from_bytes(payload[:2], "big")
-	if code < 1000 or code in (1004, 1005, 1006, 1015):
-		raise WebSocketError("a close frame carried the reserved status code %d" % code)
-	try:
-		payload[2:].decode("utf-8")
-	except UnicodeDecodeError:
-		raise WebSocketError("a close frame's reason is not valid UTF-8") from None
-	return _ws_encode_frame(0x8, payload[:2])
-
-
-class _WsConnection:
-	"""One open client connection: its transport and the parser state between reads.
-
-	The asyncio wrapper sets *reader* and *writer*, the socket wrapper sets
-	*sock*; the core never touches any of the three. *buf* holds bytes read
-	but not yet parsed -- including any the server sent in the same segment as
-	its handshake -- and *pending* is `_ws_assemble`'s open message.
-	"""
-
-	def __init__(self, reader, writer, sock, timeout: float):
-		self.reader = reader
-		self.writer = writer
-		self.sock = sock
-		self.timeout = timeout
-		self.buf = bytearray()
-		self.pending = []
-
-
-def _ws_step(conn):
-	"""Advance *conn* over what is buffered: ``(reply, message, closed)`` or None.
-
-	None means the buffer holds no complete frame and the wrapper must read.
-	Otherwise *reply* is a frame the wrapper must send first (or None),
-	*message* is the next data message as ``str`` (or None), and *closed*
-	says the peer sent a close. A binary message is decoded with replacement
-	rather than refused, which is what the client this replaced returned for
-	one -- CDP never sends binary, so this is compatibility, not a feature.
-
-	A loop, not a recursion: the client this replaced called itself once per
-	ping or pong, so a peer streaming control frames grew its stack.
-	"""
-	while True:
-		frame = _ws_parse_frame(conn.buf)
-		if frame is None:
-			return None
-		fin, opcode, payload, used = frame
-		del conn.buf[:used]
-		event = _ws_assemble(conn.pending, fin, opcode, payload)
-		if event is None:
-			continue
-		kind, value = event
-		if kind == 0x1:
-			return None, value, False
-		if kind == 0x2:
-			return None, value.decode("utf-8", "replace"), False
-		reply = _ws_control_reply(kind, value)
-		if reply is not None or kind == 0x8:
-			return reply, None, kind == 0x8
-
-
-def _ws_sync_connect(url: str, timeout: float = 30.0):
-	"""Open a WebSocket to a ``ws://`` URL over a blocking socket.
-
-	*timeout* is the socket's own, so it bounds the connect and every later
-	read and write separately -- the semantics of ``websocket-client``'s
-	``create_connection(timeout=...)``, which this replaced.
-	"""
-	host, port, path = _ws_parse_url(url)
-	sock = socket.create_connection((host, port), timeout=timeout)
-	try:
-		request, key = _ws_handshake_request(host, port, path)
-		conn = _WsConnection(None, None, sock, timeout)
-		sock.sendall(request)
-		end = -1
-		while end < 0:
-			chunk = sock.recv(65536)
-			if not chunk:
-				raise WebSocketError("WebSocket handshake failed: connection closed")
-			conn.buf += chunk
-			end = _ws_handshake_split(conn.buf)
-		_ws_handshake_verify(bytes(conn.buf[:end]), key)
-		del conn.buf[:end]
-	except BaseException:
-		sock.close()
-		raise
-	return conn
-
-
-def _ws_sync_recv(conn):
-	"""The next data message as text; None once the peer has closed."""
-	while True:
-		step = _ws_step(conn)
-		if step is None:
-			chunk = conn.sock.recv(65536)
-			if not chunk:
-				raise WebSocketError("the connection ended without a close frame")
-			conn.buf += chunk
-			continue
-		reply, message, closed = step
-		if reply is not None:
-			conn.sock.sendall(reply)
-		if closed:
-			return None
-		if message is not None:
-			return message
-
-
-def _ws_sync_send(conn, text: str) -> None:
-	"""Send *text* as one masked text frame."""
-	conn.sock.sendall(_ws_encode_frame(0x1, text.encode("utf-8")))
-
-
-def _ws_sync_close(conn) -> None:
-	"""Send a normal-closure frame, best effort, and close the socket.
-
-	The peer's answering close is not waited for: the caller is done with the
-	connection, and a peer that never answers must not keep it open.
-	"""
-	try:
-		conn.sock.sendall(_ws_encode_frame(0x8, (1000).to_bytes(2, "big")))
-	except OSError:
-		pass
-	conn.sock.close()
-# END GENERATED: 6d2dd7da88c7
-
-
-class CDPSearcher:
-	def __init__(self, ws_url):
-		self.ws = _ws_sync_connect(ws_url, timeout=30)
-		self._id = 1
-		self._warm = False
-
-	def _send(self, method, params=None):
-		msg = {"id": self._id, "method": method, "params": params or {}}
-		_ws_sync_send(self.ws, json.dumps(msg))
-		while True:
-			text = _ws_sync_recv(self.ws)
-			if text is None:
-				raise WebSocketError("Chrome closed the CDP connection")
-			result = json.loads(text)
-			if result.get("id") == self._id:
-				self._id += 1
-				return result
-
-	def search(self, query):
-		js = """
-		(async () => {
-			const fd = new URLSearchParams();
-			fd.append('q', %s);
-			fd.append('kl', '');
-			const r = await fetch('https://lite.duckduckgo.com/lite/', {
-				method: 'POST',
-				body: fd,
-				headers: {'Content-Type': 'application/x-www-form-urlencoded'}
-			});
-			return await r.text();
-		})()
-		""" % json.dumps(query)
-
-		result = self._send("Runtime.evaluate", {
-			"expression": js,
-			"awaitPromise": True,
-			"returnByValue": True,
-		})
-		value = result.get("result", {}).get("result", {}).get("value", "")
-		if result.get("result", {}).get("exceptionDetails"):
-			print(f"  [CDP JS error for: {query}]", file=sys.stderr)
-			return []
-		if "anomaly" in value or "Please complete" in value:
-			print(f"  [CAPTCHA via CDP for: {query}]", file=sys.stderr)
-			return []
-		return parse_lite_results(value)
-
-	def close(self):
-		try:
-			_ws_sync_close(self.ws)
-		except Exception:
-			pass
-
-
-# ---------------------------------------------------------------------------
-# Output formatting
-# ---------------------------------------------------------------------------
-
-def format_results(results, query=None, transport=None):
-	output = []
-	if query:
-		output.append(f"## Query: {query}")
-		output.append("")
-	if transport == "chrome":
-		output.append("**Transport**: chrome (certificate NOT verified)")
-		output.append("")
-	for i, result in enumerate(results, 1):
-		title = result.get('title', 'No title')
-		url = result.get('url', 'No URL')
-		snippet = result.get('snippet', 'No snippet available')
-		output.append(f"### Result {i}: {title}")
-		output.append(f"**URL**: {url}")
-		output.append(f"**Snippet**: {snippet}")
-		output.append("")
-	return '\n'.join(output)
+		return
+	print(line, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def _run_cdp(queries):
-	chrome = _discover_chrome()
-	if not chrome:
-		print("  [CDP requested but no Chrome found, aborting]", file=sys.stderr)
-		sys.exit(1)
-	_, ws_url = chrome
-	cdp = CDPSearcher(ws_url)
-	print("  [Using CDP/Chrome backend]", file=sys.stderr)
+def _run_ddg_with_bing_fallback(queries, blocked=None):
+	"""Try DDG lite first; on a DDG block switch to Bing for the remaining queries.
+
+	Returns (output_sections, has_results). A query Bing blocked too gets one
+	stderr line and is treated as no results; its query text is appended to
+	*blocked* when the caller passes a list (main exits 1 on it).
+	"""
+	try:
+		outcomes = run_web(queries, with_session, lambda i: _cli_note)
+	finally:
+		_cli_close()
 
 	output_sections = []
 	has_results = False
-	for i, query in enumerate(queries):
-		if i > 0:
-			time.sleep(random.uniform(0.8, 1.5))
-		results = cdp.search(query)
+	for query, results, _transport_failed in outcomes:
+		if results is None:
+			print(f"  [Blocked by Bing on: {_web_line(query)}]", file=sys.stderr)
+			if blocked is not None:
+				blocked.append(query)
+			results = []
 		if results:
 			has_results = True
-			section = format_results(results, query=query) if len(queries) > 1 else format_results(results)
+			section = format_web_results(results, query=query) if len(queries) > 1 else format_web_results(results)
 			output_sections.append(section)
 		elif len(queries) > 1:
-			output_sections.append(f"## Query: {query}\n\nNo results found.\n")
-	cdp.close()
-	return output_sections, has_results
-
-
-def _bing_query(query, session, transport):
-	"""One Bing query with the one-Chrome-re-issue rule; returns (results, session, transport).
-
-	On a block (search_bing -> None) over a VERIFIED session: one stderr line,
-	"bing" into the sticky switch, the session closed and replaced by ONE
-	Chrome session, warmed up and asked once. A block from the Chrome session
-	(or one already on Chrome) is [] with one line; there is no third attempt.
-	The returned session is the one that produced the results (its transport
-	labels them) and the caller owns it.
-	"""
-	results = search_bing(query, session)
-	if results is None and transport == "verified":
-		print(f"  [Bing blocked the verified client on: {query} -- retrying once via chrome (certificate NOT verified)]", file=sys.stderr)
-		_CHROME_AFTER_BLOCK.add("bing")
-		session.close()
-		session, transport = create_session("chrome")
-		warmup_session(session, "bing")
-		results = search_bing(query, session)
-	if results is None:
-		print(f"  [Bing blocked the chrome client too on: {query}]", file=sys.stderr)
-		results = []
-	return results, session, transport
-
-
-def _run_bing(queries):
-	"""Pure Bing backend. Owns its sessions (D16 M4): opens, warms up, rotates,
-	re-issues once on a block and closes them itself, so the re-issue and the
-	sticky switch can replace the session mid-loop."""
-	session, transport = create_session(_transport_for("bing"))
-	warmup_session(session, "bing")
-	output_sections = []
-	has_results = False
-	try:
-		for i, query in enumerate(queries):
-			if i > 0:
-				time.sleep(random.uniform(1.5, 3.0))
-			if i > 0 and i % ROTATE_EVERY == 0:
-				session.close()
-				session, transport = create_session(_transport_for("bing"))
-				warmup_session(session, "bing")
-			results, session, transport = _bing_query(query, session, transport)
-			if results:
-				has_results = True
-				section = format_results(results, query=query, transport=transport) if len(queries) > 1 else format_results(results, transport=transport)
-				output_sections.append(section)
-			elif len(queries) > 1:
-				# No transport label here (D16 L2): there is no content to attribute.
-				output_sections.append(f"## Query: {query}\n\nNo results found.\n")
-	finally:
-		session.close()
-	return output_sections, has_results
-
-
-def _run_ddg_with_bing_fallback(queries):
-	"""Try DDG lite first; on CAPTCHA switch to Bing for remaining queries.
-
-	Cost, stated (D15): spec-ddg measured that DDG blocks every known Python
-	HTTP client regardless of TLS quality (docs/concepts/spec-ddg.md:23), and
-	the verified transport is Python's ssl ClientHello under Chrome 154's
-	headers, over HTTP/1.1. The DDG re-issue will therefore fire on the FIRST
-	query of almost every run. With the sticky switch a run pays ONE extra
-	round (verified warm-up + POST, then Chrome warm-up + POST: 4 requests
-	where the Chrome-default design sent 2) and every later query costs 1
-	Chrome POST. Without it every query would cost 3 (blocked verified POST,
-	Chrome warm-up, Chrome POST), tripling the per-query volume from one IP,
-	which spec-ddg lists as a CAPTCHA trigger in itself. What the probe buys:
-	on a run where DDG does not block, the queries travel over an
-	authenticated channel and no Chrome-path request is made at all.
-	"""
-	session, transport = create_session(_transport_for("ddg"))
-	warmup_session(session, "ddg")
-
-	output_sections = []
-	has_results = False
-	using_bing = False
-
-	try:
-		for i, query in enumerate(queries):
-			if i > 0:
-				delay = random.uniform(1.5, 3.0) if using_bing else random.uniform(2.5, 5.0)
-				time.sleep(delay)
-
-			if i > 0 and i % ROTATE_EVERY == 0:
-				session.close()
-				# The rotated session serves the current endpoint, so it takes
-				# that endpoint's sticky state (D16 L1).
-				if using_bing:
-					session, transport = create_session(_transport_for("bing"))
-					warmup_session(session, "bing")
-				else:
-					session, transport = create_session(_transport_for("ddg"))
-					warmup_session(session, "ddg")
-
-			if using_bing:
-				results, session, transport = _bing_query(query, session, transport)
-			else:
-				results = search_ddg(query, session)
-				if results is None and transport == "verified":
-					# ONE Chrome re-issue, and the sticky switch for the rest of the run (D15).
-					print(f"  [DDG blocked the verified client on: {query} -- retrying once via chrome (certificate NOT verified)]", file=sys.stderr)
-					_CHROME_AFTER_BLOCK.add("ddg")
-					session.close()
-					session, transport = create_session("chrome")
-					warmup_session(session, "ddg")
-					results = search_ddg(query, session)
-				if results is None:
-					# CAPTCHA — switch to Bing for this and all remaining queries
-					print(f"  [DDG CAPTCHA on: {query} — switching to Bing fallback]", file=sys.stderr)
-					using_bing = True
-					session.close()
-					session, transport = create_session(_transport_for("bing"))
-					warmup_session(session, "bing")
-					results, session, transport = _bing_query(query, session, transport)
-
-			if results:
-				has_results = True
-				section = format_results(results, query=query, transport=transport) if len(queries) > 1 else format_results(results, transport=transport)
-				output_sections.append(section)
-			elif len(queries) > 1:
-				# No transport label here (D16 L2): there is no content to attribute.
-				output_sections.append(f"## Query: {query}\n\nNo results found.\n")
-	finally:
-		session.close()
-
+			output_sections.append(f"## Query: {_web_line(query)}\n\nNo results found.\n")
 	return output_sections, has_results
 
 
@@ -8216,9 +7791,8 @@ Options:
 An argument starting with '-' is never searched: any other option is refused
 (exit 2), so a query cannot start with '-'.
 
-Environment:
-  DDG_BACKEND     force backend: "bing", "cdp", or "ddg" (default: ddg with bing fallback)
-  CHROME_CDP_URL  Chrome debug endpoint for the cdp backend (default: http://localhost:9222)"""
+Exit status: 0 with results; 1 when no query found anything, or when Bing
+blocked a query (the results of the other queries are still printed)."""
 
 
 def main():
@@ -8236,18 +7810,13 @@ def main():
 		print(f"search_duckduckgo.py: unknown option {options[0]!r} (every argument is one query; see --help)", file=sys.stderr)
 		sys.exit(2)
 
-	forced = os.environ.get("DDG_BACKEND", "").lower()
-
-	if forced == "cdp":
-		output_sections, has_results = _run_cdp(queries)
-	elif forced == "bing":
-		print("  [Using Bing backend]", file=sys.stderr)
-		output_sections, has_results = _run_bing(queries)
-	else:
-		output_sections, has_results = _run_ddg_with_bing_fallback(queries)
+	blocked = []
+	output_sections, has_results = _run_ddg_with_bing_fallback(queries, blocked)
 
 	if not has_results:
-		print("No results found for any query.", file=sys.stderr)
+		# A block already printed its one line; "no results" is the other exit 1.
+		if not blocked:
+			print("No results found for any query.", file=sys.stderr)
 		sys.exit(1)
 
 	if len(queries) > 1:
@@ -8255,6 +7824,9 @@ def main():
 		print('\n---\n\n'.join(output_sections))
 	else:
 		print(output_sections[0] if output_sections else "")
+
+	if blocked:
+		sys.exit(1)
 
 
 if __name__ == '__main__':

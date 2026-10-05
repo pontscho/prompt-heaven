@@ -229,7 +229,8 @@ R3  QUOTED `function="<n>"` / `function: "<n>"` / `function:"<n>"` anywhere.
     the check to that server; otherwise the whole inventory is accepted.
 R4  Backticked namespaced identifiers -- `` `luals_document_symbols` `` -- but
     ONLY for prefixes the live inventory actually uses (computed, not
-    hardcoded: today clangd_ cuda_ luals_ lldb_ gdc_ context7_).  purity, git,
+    hardcoded: today clangd_ cuda_ luals_ lldb_ gdc_ context7_).  A prefix
+    `X` counts only if the server owning `X_call` itself has `X_` functions.  purity, git,
     inspect, forge, wiki, tshark, jenkins, postgres and compile expose
     UNPREFIXED functions, so `` `compile_commands` `` / `` `wiki_root` `` /
     `` `git_dir` `` can never be mistaken for prescriptions.
@@ -1144,12 +1145,15 @@ class Checker:
                 self.owners.setdefault(fn, set()).add(inv.file)
         self.tools = {inv.tool: inv.file for inv in self.all_inventories}
         self.by_file = {inv.file: inv for inv in self.all_inventories}
-        # R4 namespaces: only prefixes the LIVE inventory actually uses.
+        # R4 namespaces: only prefixes the LIVE inventory actually uses -- and
+        # used by the server that OWNS `X_call`, not by any server in the
+        # fleet (purity's `search_for_pattern` does not make `search_` a
+        # namespace of mcp-search's `search_call`).
         self.namespaces = sorted({
-            tool[:-len("_call")] for tool in self.tools
-            if tool.endswith("_call")
-            and any(fn.startswith(tool[:-len("_call")] + "_")
-                    for fn in self.functions)
+            inv.tool[:-len("_call")] for inv in self.inventories
+            if inv.tool.endswith("_call")
+            and any(fn.startswith(inv.tool[:-len("_call")] + "_")
+                    for fn in inv.functions)
         })
         self.unknown_servers = {inv.file for inv in self.all_inventories
                                 if not inv.ok}

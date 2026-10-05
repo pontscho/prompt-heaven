@@ -285,6 +285,9 @@ WIRE = {
                         "(:6009-6021 inbound, :6059-6063 outbound)"),
     "mcp-tshark.py":   (OUT, FULL,
                         "tshark_call dispatcher; replies carry packet bytes"),
+    "mcp-search.py":   (OUT, FULL,
+                        "search_call dispatcher; requests carry the caller's "
+                        "search text, replies carry third-party results"),
     "mcp-webfetch.py": (OUT, FULL,
                         "webfetch_call dispatcher; replies carry whatever the "
                         "fetched page served"),
@@ -294,7 +297,7 @@ WIRE = {
 
 # Declared totals, so a silent re-classification of one row trips a case rather
 # than sliding through as "the table matches the table".
-DECLARED_FULL = 13
+DECLARED_FULL = 14
 DECLARED_MINIMAL = 1
 DECLARED_SILENT = 2
 

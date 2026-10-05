@@ -3,11 +3,11 @@
 
 Both sources are canonical generation sources REGISTERED in `Scripts/amalgamate.py`
 (`CANONICAL_NAMES`, and `WHOLE_SOURCES`: a host takes each whole or not at all).
-`mcp-webfetch.py`, `search_duckduckgo.py` and `search_github.py` carry them between
-generated markers and inject them into the Chrome client as `_DECODERS`; the drift
-gate (`amalgamate.py --check`, the generated_region suite) proves those copies
-equal the source, and THIS suite proves the source right. It loads each file by
-path with `H.load_module_from_path` and drives it.
+`mcp-webfetch.py`, `mcp-search.py`, `search_duckduckgo.py` and `search_github.py`
+carry them between generated markers and inject them into the Chrome client as
+`_DECODERS`; the drift gate (`amalgamate.py --check`, the generated_region suite)
+proves those copies equal the source, and THIS suite proves the source right. It
+loads each file by path with `H.load_module_from_path` and drives it.
 
 THE ORACLE IS NOT THE MODULE. The expected load orders are typed here from the
 module docstrings' written contract (the per-platform list), the expected

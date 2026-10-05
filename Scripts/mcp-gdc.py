@@ -213,8 +213,8 @@ def _ws_handshake_request(host: str, port: int, path: str) -> tuple:
     No ``Origin`` header is sent. Chrome refuses a DevTools WebSocket whose
     Origin is not on its ``--remote-allow-origins`` list, and a client that
     sends none is not a browser page -- which is what ``websocket-client``'s
-    ``suppress_origin=True`` bought the search script, and why this never
-    grew an option to send one.
+    ``suppress_origin=True`` used to buy, and why this never grew an option to
+    send one.
 
     A host, or a path, carrying whitespace or a control character is refused:
     either would let a URL write its own header lines into the request.
@@ -544,7 +544,7 @@ async def _ws_send(conn, text: str) -> None:
     """
     conn.writer.write(_ws_encode_frame(0x1, text.encode("utf-8")))
     await conn.writer.drain()
-# END GENERATED: 607d21bcd055
+# END GENERATED: c70fbace4699
 
 
 # ============================================================

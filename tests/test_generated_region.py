@@ -2,8 +2,9 @@
 """Generated-region drift gate -- groups A-G.
 
 `Scripts/_mcp_brotli.py`, `Scripts/_mcp_chrome.py`,
-`Scripts/_mcp_concurrency.py`, `Scripts/_mcp_json.py`,
-`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`, `Scripts/_mcp_paging.py`,
+`Scripts/_mcp_codesearch.py`, `Scripts/_mcp_concurrency.py`,
+`Scripts/_mcp_json.py`, `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`,
+`Scripts/_mcp_paging.py`, `Scripts/_mcp_websearch.py`,
 `Scripts/_mcp_websocket.py` and `Scripts/_mcp_zstd.py` are the canonical
 sources for the helpers the MCP servers share, and
 `Scripts/amalgamate.py` inlines their named blocks into each server between
@@ -157,6 +158,8 @@ WEBSOCKET_CANONICAL_NAME = "_mcp_websocket.py"
 BROTLI_CANONICAL_NAME = "_mcp_brotli.py"
 CHROME_CANONICAL_NAME = "_mcp_chrome.py"
 ZSTD_CANONICAL_NAME = "_mcp_zstd.py"
+WEBSEARCH_CANONICAL_NAME = "_mcp_websearch.py"
+CODESEARCH_CANONICAL_NAME = "_mcp_codesearch.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
@@ -165,9 +168,11 @@ ZSTD_CANONICAL_NAME = "_mcp_zstd.py"
 # edit: a fifth source added to the generator and not to this tuple fails
 # `sources-registered` by name instead of being adopted silently.
 CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
+                   CODESEARCH_CANONICAL_NAME,
                    CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
                    LOGGING_CANONICAL_NAME,
                    LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME,
+                   WEBSEARCH_CANONICAL_NAME,
                    WEBSOCKET_CANONICAL_NAME, ZSTD_CANONICAL_NAME)
 
 # The hosts OUTSIDE `TARGET_GLOB`, mirrored for the reason the source registry
@@ -186,6 +191,7 @@ DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py")
 # back off the generator would agree with a source quietly dropped from it.
 # `sources-registered` asserts the two spellings agree.
 WHOLE_SOURCES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
+                 CODESEARCH_CANONICAL_NAME, WEBSEARCH_CANONICAL_NAME,
                  ZSTD_CANONICAL_NAME)
 
 # The one row `--census hosts` renders for a whole source whose blocks all share
@@ -335,6 +341,10 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
     `ctypes`, `hmac`, `http`, `ipaddress`, `ssl`, `struct`, `time`, `urllib`
     and `zlib` -- and the first time for sources a host takes WHOLE, so the
     fixture is driven with one marker per source rather than one per block.
+
+    The two search sources paid it a sixth time, for `random`, `parse_qs`,
+    `urlencode` and `HTMLParser` -- both taken whole, like the Chrome client --
+    and then a seventh, for `unicodedata`, when both took a render sanitizer.
     """
     return (
         '"""A tab-indented target."""\n'
@@ -350,16 +360,19 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "import logging\n"
         "import os\n"
         "import pathlib\n"
+        "import random\n"
         "import re\n"
         "import socket\n"
         "import ssl\n"
         "import struct\n"
         "import sys\n"
         "import time\n"
+        "import unicodedata\n"
         "import urllib.parse\n"
         "import zlib\n"
+        "from html.parser import HTMLParser\n"
         "from typing import Any\n"
-        "from urllib.parse import urlparse\n"
+        "from urllib.parse import parse_qs, urlencode, urlparse\n"
         "from urllib.request import url2pathname\n"
         "\n\n"
         "def _existing():\n"

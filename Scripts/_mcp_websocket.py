@@ -14,13 +14,11 @@ an existing one because none of the five can hold it without becoming a shelf:
 JSON-RPC envelopes, and a WebSocket frame is neither. The rule that decided it
 is ADR 0014's, and the decision itself is ADR 0023.
 
-**Two hosts, and one of them is not an MCP server.** `Scripts/mcp-gdc.py` drives
-Chrome's DevTools Protocol from an asyncio loop; `Scripts/search_duckduckgo.py`
-drives the same protocol from a synchronous script for its opt-in `cdp` backend,
-where it used to need the third-party `websocket-client` package. The second host
-is named in `Scripts/amalgamate.py:DECLARED_HOSTS`, by hand, for the reason the
-source registry is written by hand: a file must not become a generation target
-by merely existing.
+**One host.** `Scripts/mcp-gdc.py` drives Chrome's DevTools Protocol from an
+asyncio loop. `Scripts/search_duckduckgo.py` used to drive the same protocol
+from a synchronous script for an opt-in `cdp` backend; that backend was removed,
+so the blocking-socket wrapper below currently has no host and is kept as part
+of the source.
 
 **Sans-IO core, two thin wrappers.** Everything that decides anything is a pure
 function over bytes: `_ws_handshake_request` / `_ws_handshake_split` /
@@ -65,7 +63,7 @@ server that negotiates one is refused), subprotocols, a client-initiated ping,
 and the minimal-length-encoding rule for the 16- and 64-bit length forms (a
 peer that uses a longer form than it needs is accepted).
 
-**Tab safety is a constraint on how this file is WRITTEN.** One host indents
+**Tab safety is a constraint on how this file is WRITTEN.** A host may indent
 with tabs, and `Scripts/amalgamate.py:block_is_tab_safe` refuses a block that
 joins a line inside an open bracket or indents by anything but whole 4-space
 levels. So every call and literal here fits one physical line, and the request
@@ -78,7 +76,7 @@ so no host has to import one for a block's sake.
 
 **No server imports this module**, for the reasons `_mcp_json.py` gives. The test
 fleet does: `tests/test_mcp_websocket.py` loads it and exercises the core, and
-drives both hosts' generated copies against a loopback peer.
+drives the host's generated copy against a loopback peer.
 """
 
 import asyncio
@@ -107,7 +105,7 @@ WS_MAX_HANDSHAKE_BYTES = 64 * 1024
 # of its payload is read -- a 64-bit length field can announce 2**63 bytes, and
 # the client this replaced would have tried to read them.
 #
-# The number is argued from the one peer both hosts talk to. CDP answers are
+# The number is argued from the one peer the client talks to. CDP answers are
 # single unfragmented text frames, and the largest ones are base64 screenshots
 # and captured response bodies: a full-page capture of a long page at a high
 # device-pixel ratio is tens of megabytes of PNG, a third more once base64'd.
@@ -179,8 +177,8 @@ def _ws_handshake_request(host: str, port: int, path: str) -> tuple:
     No ``Origin`` header is sent. Chrome refuses a DevTools WebSocket whose
     Origin is not on its ``--remote-allow-origins`` list, and a client that
     sends none is not a browser page -- which is what ``websocket-client``'s
-    ``suppress_origin=True`` bought the search script, and why this never
-    grew an option to send one.
+    ``suppress_origin=True`` used to buy, and why this never grew an option to
+    send one.
 
     A host, or a path, carrying whitespace or a control character is refused:
     either would let a URL write its own header lines into the request.

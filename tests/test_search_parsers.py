@@ -15,15 +15,19 @@ Groups:
   A  DDG lite: every page parses to the fields the regex parser produced --
      recorded from it before it was deleted and pinned here as literals: the
      uddg redirect unwrapped, a direct href kept as written (`&amp;` and all),
-     the default snippet, the row a link wins, the unterminated row dropped
+     the default snippet, the row a link wins, the unterminated row dropped,
+     and the href ATTRIBUTE read rather than the first "href=" substring (F14)
   B  grep.app: the same for the snippet parser and parse_grep_results (limit,
-     defaults, the GitHub URL anchored at the first line)
+     defaults, the GitHub URL anchored at the first line), a line number over
+     nine digits refused (F13), and every JSON level type-checked (F8)
   C  linearity: a body shaped from the old patterns' worst case, sized one KiB
      under the module's own SEARCH_MAX_BYTES, parsed in a child process and
      bounded in wall time.  Measured red against the regex parsers: they
      exceeded the child timeout on every row (quadratic or cubic; at 64 KiB the
      unterminated-<tr> body already took 6.4 s, the unclosed-<pre> body 18 s
-     at 16 KiB), while the html.parser passes take about a second at 2 MiB
+     at 16 KiB), while the html.parser passes take about a second at 2 MiB.
+     A fifth row drives the Bing tree builder's end-tag scan (F7): deep open
+     <span>s, each followed by a </b> that walks them all and closes nothing
   E  hygiene
 
 html.parser has no implied end tags, so neither parser depends on one: state
@@ -206,9 +210,21 @@ DDG_LITE_PAGE = (
 DDG_NO_RESULTS = ("<html><body><form action=\"/lite/\" method=\"post\"><input name=\"q\" value=\"q\"></form>"
                   "<table border=\"0\"><tr><td>No results.</td></tr></table></body></html>")
 
+# F14: the href ATTRIBUTE wins, not the first "href=" substring -- a data-href
+# before it, and an href= inside another attribute's quoted value, are skipped.
+DDG_HREF_ATTR = (
+    "<html><body><table>"
+    "<tr><td><a data-href=\"https://evil.example/\" title=\"x href='https://evil.example/2'\" href=\""
+    + UDDG.format("good.example%2F") + "\" class='result-link'>Good</a></td></tr>"
+    "<tr><td class='result-snippet'>kept</td></tr>"
+    "</table></body></html>"
+)
+
 DDG_CASES = [
     ("lite-page-one-result", DDG_LITE_PAGE,
      [{'url': 'https://example.org/doc', 'title': 'Example Doc', 'snippet': 'A tested snippet.'}]),
+    ("href-attribute-not-first-substring", DDG_HREF_ATTR,
+     [{'url': 'https://good.example/', 'title': 'Good', 'snippet': 'kept'}]),
     ("measured-shape-eight-rows", DDG_FULL, DDG_FULL_WANT),
     ("edges-stray-same-row-direct-unterminated", DDG_EDGES, DDG_EDGES_WANT),
     ("no-results-page", DDG_NO_RESULTS, []),
@@ -257,8 +273,13 @@ GH_EDGES_WANT = [(3, 'four'), (5, 'five'), (8, 'a nested inner')]
 # tests/test_mcp_chrome.py:GH_CANNED's snippet.
 GH_CANNED_SNIPPET = '<table><tr data-line="7"><td><pre>use<mark>Effect</mark>(fn)</pre></td></tr></table>'
 
+# F13: a line number is at most nine digits; int() of a longer one is never run.
+GH_DIGITS = ('<table><tr data-line="1234567890"><td><pre>ten digits</pre></td></tr>'
+             '<tr data-line="123456789"><td><pre>nine digits</pre></td></tr></table>')
+
 GH_CASES = [
     ("canned-one-line", GH_CANNED_SNIPPET, [(7, 'useEffect(fn)')]),
+    ("line-number-over-nine-digits-refused", GH_DIGITS, [(123456789, 'nine digits')]),
     ("highlight-table-seven-rows", GH_TABLE, GH_TABLE_WANT),
     ("edges-crossed-row-attrs-nested-unterminated", GH_EDGES, GH_EDGES_WANT),
     ("no-rows", "<table></table>", []),
@@ -288,6 +309,24 @@ GH_DATA_WANT = [
      'code_lines': [(7, 'useEffect(fn)')], 'url': 'https://github.com/over/limit/blob/main/a.go#L7'},
 ]
 
+# F8: every level type-checked -- a non-object hit skipped, a non-string field
+# its default, a content or snippet of the wrong type no snippet; a top level
+# not in grep.app's shape is no results (search_github notes it grep_schema).
+GH_HOSTILE_TYPES = {"hits": {"hits": [
+    5, None, ["x"],
+    {"repo": 7, "path": ["p"], "branch": None, "content": "not an object"},
+    {"repo": "o/r", "path": "a b#.py", "branch": "feat/x", "content": {"snippet": 3}},
+]}}
+
+GH_HOSTILE_TYPES_WANT = [
+    {'repo': 'Unknown', 'file_path': 'Unknown', 'branch': 'main', 'language': 'Unknown', 'code_lines': [],
+     'url': 'https://github.com/Unknown/blob/main/Unknown'},
+    {'repo': 'o/r', 'file_path': 'a b#.py', 'branch': 'feat/x', 'language': 'Python', 'code_lines': [],
+     'url': 'https://github.com/o/r/blob/feat/x/a%20b%23.py'},
+]
+
+GH_BAD_SHAPES = ([], "x", 5, None, {"hits": []}, {"hits": {"hits": {}}}, {"hits": "x"})
+
 
 # ---------------------------------------------------------------------------
 # Group C -- hostile bodies, shaped from the old patterns' worst case
@@ -303,6 +342,11 @@ HOSTILE = [
      "<tr data-line=..>.*?<pre> rescans to EOF from every row"),
     ("gh-rows-with-unclosed-pre", "gh", "extract_code_from_snippet", "", '<tr data-line="1"><pre>', "",
      "<pre>(.*?)</pre> nested in .*?<pre>: a rescan per row per <pre>"),
+    # F7: not a regex -- the Bing tree builder's end-tag scan. Every </b> walks
+    # the ever-deeper <span> stack down to the <div> that outranks it and closes
+    # nothing; the depth cap and the scan budget make it linear.
+    ("bing-deep-stack-repeated-blocked-endtag", "ddg", "parse_bing_results", "<b><div>", "<span></b>", "",
+     "_TreeBuilder.handle_endtag scans the whole open-element stack per end tag"),
 ]
 
 CHILD = r'''
@@ -385,6 +429,17 @@ def group_b(suite, gh):
         got = gh.parse_grep_results(GH_DATA, limit)
         suite.record("B", "parse-grep-results-limit-%d" % limit, _diff(got, want),
                      detail=["results     : %d got, %d want" % (len(got), len(want))])
+    problems = []
+    try:
+        got = gh.parse_grep_results(GH_HOSTILE_TYPES, 10)
+        problems += _diff(got, GH_HOSTILE_TYPES_WANT)
+        for data in GH_BAD_SHAPES:
+            if gh.parse_grep_results(data, 10) != []:
+                problems.append("shape %r did not parse to []" % (data,))
+    except Exception as exc:  # noqa: BLE001 -- the defect is the raise
+        problems.append("raised %s: %s" % (type(exc).__name__, exc))
+    suite.record("B", "parse-grep-results-hostile-types", problems,
+                 detail=["bad shapes  : %d" % len(GH_BAD_SHAPES)])
 
 
 def group_e(suite, before, pyc_before):

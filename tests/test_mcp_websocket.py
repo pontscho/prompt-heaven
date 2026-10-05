@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""The stdlib WebSocket client -- `Scripts/_mcp_websocket.py` and its two hosts.
+"""The stdlib WebSocket client -- `Scripts/_mcp_websocket.py` and its host.
 
 `Scripts/_mcp_websocket.py` is the canonical source for the RFC 6455 client that
-`Scripts/amalgamate.py` generates into `Scripts/mcp-gdc.py` (asyncio) and
-`Scripts/search_duckduckgo.py` (blocking socket, the `cdp` backend). The drift
-gate in `tests/test_generated_region.py` proves the copies MATCH the source;
-this suite proves the source is RIGHT, and then drives both hosts' generated
-copies end to end, because a correct core wired into a host the wrong way is
-still a broken host.
+`Scripts/amalgamate.py` generates into `Scripts/mcp-gdc.py` (asyncio). The
+blocking-socket wrapper has no host since `Scripts/search_duckduckgo.py` dropped
+its `cdp` backend; group D drives it directly. The drift gate in
+`tests/test_generated_region.py` proves the copy MATCHES the source; this suite
+proves the source is RIGHT, and then drives the host's generated copy end to
+end, because a correct core wired into a host the wrong way is still a broken
+host.
 
 THE ORACLE IS WRITTEN FROM THE RFC, NOT FROM THE MODULE. The server-side frame
 encoder, the client-frame decoder, the naive per-byte mask and the accept-key
@@ -36,8 +37,7 @@ Groups:
                 message cap and strict UTF-8
   D. WRAPPERS:  the asyncio and socket wrappers over in-memory and loopback
                 transports, handshake failure and timeout included
-  E. HOSTS:     gdc's CdpSession and the search script's CDPSearcher, driven
-                against a loopback CDP peer
+  E. HOSTS:     gdc's CdpSession, driven against a loopback CDP peer
   F. HYGIENE:   no bytecode written
 
 Usage:
@@ -69,13 +69,12 @@ NAME = "mcp_websocket"
 
 SOURCE = H.repo_path("Scripts", "_mcp_websocket.py")
 GDC = H.repo_path("Scripts", "mcp-gdc.py")
-DDG = H.repo_path("Scripts", "search_duckduckgo.py")
 
 GA = "A. HANDSHAKE: request, exact-match response check, URL, header cap"
 GB = "B. FRAMES: every length form, the mask, header-level refusals"
 GC = "C. MESSAGES: fragments, ping/pong, close, message cap, strict UTF-8"
 GD = "D. WRAPPERS: asyncio and socket wrappers, in memory and on loopback"
-GE = "E. HOSTS: gdc CdpSession and search CDPSearcher against a loopback peer"
+GE = "E. HOSTS: gdc CdpSession against a loopback peer"
 GF = "F. HYGIENE: no bytecode"
 
 # RFC 6455 section 1.3 -- the GUID and the worked example, typed from the RFC.
@@ -874,35 +873,6 @@ def group_hosts(suite):
     gdc_case("gdc-masked-server-frame-refused", cdp_scenario("masked"), masked_refused,
              ["the peer masks every answer, which RFC 6455 forbids a server"])
 
-    try:
-        ddg = H.load_module_from_path("search_ddg_under_ws_test", DDG)
-    except Exception as exc:
-        suite.record(GE, "search-cdp-backend", ["search_duckduckgo.py did not load: %r" % exc])
-        return
-    peer = Peer(cdp_scenario("fragmented", ping=b"hello"))
-    try:
-        searcher = ddg.CDPSearcher(peer.url())
-        try:
-            result = searcher._send("Runtime.evaluate", {"expression": "1"})
-        finally:
-            searcher.close()
-        exc = None
-    except Exception as err:
-        exc, result = err, None
-    peer.join()
-    problems = problem_if(exc is not None, "the CDP backend failed: %r" % (exc,))
-    problems += problem_if((result or {}).get("result") != {"echo": "Runtime.evaluate"},
-                           "Runtime.evaluate answered %r" % (result,))
-    problems += problem_if(peer.header("origin") is not None,
-                           "an Origin header was sent: %r" % peer.header("origin"))
-    problems += problem_if(b"hello" not in peer.pongs, "the ping was not answered")
-    problems += problem_if(not any(f[1] == 0x8 for f in peer.frames),
-                           "close() sent no close frame")
-    suite.record(GE, "search-cdp-backend", problems,
-                 detail=["CDPSearcher over loopback: no Origin, a ping in the 101's "
-                         "segment, a fragmented answer, a close on the way out",
-                         "error: %r" % (exc,), "peer error: %s" % peer.error])
-
 
 def group_hygiene(suite, pyc_before):
     pyc_after = H.pycache_snapshot()
@@ -914,7 +884,7 @@ def group_hygiene(suite, pyc_before):
 
 def run(opts=None):
     opts = opts or H.Options()
-    suite = H.Suite(NAME, title="the stdlib WebSocket client and its two hosts",
+    suite = H.Suite(NAME, title="the stdlib WebSocket client and its host",
                     opts=opts, mode="grouped")
     pyc_before = H.pycache_snapshot()
     mod = H.load_module_from_path("mcp_websocket_under_test", SOURCE)

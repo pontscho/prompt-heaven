@@ -100,6 +100,14 @@ SERVERS = [
     {"file": "mcp-tshark.py",   "tool": "tshark_call",   "args": ["--project-root", "/tmp"], "registered": True},
     {"file": "mcp-webfetch.py", "tool": "webfetch_call", "args": [], "registered": True,
      "launcher": ["uv", "run", "--script"]},
+    # `forced_exc_code` (optional, default -32603) declares what the forced-exc
+    # probe's non-object `params` answers. mcp-search refuses it as -32602
+    # Invalid params BEFORE any handler runs (security review F11), so the probe
+    # can no longer reach its run() catch-all; what the probe still proves --
+    # a response arrives, the server neither hangs nor dies -- is unchanged, and
+    # the catch-all itself stays gated statically by tests/test_handler_crash.py.
+    {"file": "mcp-search.py",   "tool": "search_call",   "args": [], "registered": False,
+     "forced_exc_code": -32602},
     {"file": "mcp-context7.py", "tool": "context7_call", "args": [], "registered": True},
     {"file": "mcp-lldb.py",     "tool": "lldb_call",     "args": [], "registered": True},
     {"file": "mcp-gdc.py",      "tool": "gdc_call",      "args": [], "registered": True},
@@ -352,8 +360,8 @@ COLLISION_TOKEN = "Ambiguous parameters"
 #
 # Every one of these reaches its server's resolver with NO environment: no
 # database, no browser, no language server, no network.  That is a property of
-# the resolver's POSITION, and it now holds on all ten: parameter normalization
-# happens before the handler lookup on every host.
+# the resolver's POSITION, and it now holds on all eleven: parameter
+# normalization happens before the handler lookup on every host.
 ALIAS_COLLISION = {
     "mcp-clangd.py":   ("clangd_find_definition", "file",     "path"),
     "mcp-cuda.py":     ("cuda_find_definition",  "file",      "path"),
@@ -364,6 +372,7 @@ ALIAS_COLLISION = {
     "mcp-wiki.py":     ("search",                "q",         "query"),
     "mcp-purity.py":   ("read_file",             "path",      "relative_path"),
     "mcp-webfetch.py": ("fetch",                 "max_chars", "max_answer_chars"),
+    "mcp-search.py":   ("web",                   "query",     "queries"),
     "mcp-forge.py":    ("build",                 "t",         "targets"),
 }
 
@@ -402,7 +411,7 @@ def alias_collision_checks(srv, cfg, checks):
         day of being written in this repo once already.
 
     Scope, stated because an unstated one is the same defect as a false
-    invariant: this gate proves the resolver REFUSES, never that the ten alias
+    invariant: this gate proves the resolver REFUSES, never that the eleven alias
     TABLES are free of collisions a caller could not have caused, and never the
     envelope-level `function`/`f` and `params`/`p` or-chains, which are a
     different mechanism at a different layer and remain first-wins.
@@ -511,7 +520,7 @@ def purity_semantic_checks(srv, checks):
     #     replies must be the SAME message.
     #
     #     It is purity-specific on purpose even though alias_collision_checks
-    #     already drives all ten: that gate proves the refusal HAPPENS, this one
+    #     already drives all eleven: that gate proves the refusal HAPPENS, this one
     #     proves the reply is ACTIONABLE -- it names both spellings the caller
     #     wrote and the canonical name they collide on, which is the difference
     #     between an error a model can fix and one it can only retry.
@@ -1174,18 +1183,22 @@ def run_server(cfg):
         # 6. forced handler exception -> -32603 AND a response arrives (FIX-1 gate)
         #    non-dict params makes the dispatcher's params.get(...) raise before
         #    any tool-internal try/except, so it bubbles to the run() catch-all.
+        #    A server that validates params first declares the code it answers
+        #    instead (`forced_exc_code` in SERVERS); the response must still arrive.
         srv.send({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": "force-error"})
         exc = srv.read()
+        want_code = cfg.get("forced_exc_code", -32603)
+        label = "forced-exc %d" % want_code + ("" if want_code == -32603 else " (declared)")
         if exc is None:
             if srv.alive():
-                checks.append(check("forced-exc -32603", False,
+                checks.append(check(label, False,
                                     "NO RESPONSE (hang) -- silent-swallow bug"))
             else:
-                checks.append(check("forced-exc -32603", False,
+                checks.append(check(label, False,
                                     "process CRASHED -- bare-loop bug"))
         else:
-            checks.append(check("forced-exc -32603",
-                                exc.get("error", {}).get("code") == -32603,
+            checks.append(check(label,
+                                exc.get("error", {}).get("code") == want_code,
                                 repr(exc.get("error", {}).get("code"))))
 
         # 7. tool-level error envelope: the isError flag on a FAILING call, and

@@ -235,6 +235,9 @@ FLEET = {
     "mcp-tshark.py":   (KILL,       "each request's tshark run is adopted and "
                                     "its process group killed on cancel; the "
                                     "capture child is a session (KILL_EXEMPT)"),
+    "mcp-search.py":   (REPLY_ONLY, "the search runs to completion in its "
+                                    "worker thread, possibly holding an endpoint "
+                                    "lock (the drain-on-shutdown reason)"),
     "mcp-webfetch.py": (REPLY_ONLY, "the fetch runs to completion in its worker "
                                     "thread (the drain-on-shutdown reason)"),
     "mcp-wiki.py":     (KILL,       "_measure_run's child is adopted and its "
@@ -246,7 +249,7 @@ DECLARED_TASK = 3
 DECLARED_KILL = 5
 DECLARED_LSP_CANCEL = 4
 DECLARED_PG_CANCEL = 1
-DECLARED_REPLY_ONLY = 3
+DECLARED_REPLY_ONLY = 4
 
 # A `kill` server's spawn sites a cancel does NOT reach, by (file, enclosing
 # function), each with the reason it may outlive the request that spawned it.

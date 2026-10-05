@@ -202,6 +202,10 @@ def run_search_parsers(opts):
     return run_python_suite("test_search_parsers", opts)
 
 
+def run_mcp_search(opts):
+    return run_python_suite("test_mcp_search", opts)
+
+
 def run_webfetch_roots(opts):
     return run_python_suite("test_webfetch_roots", opts)
 
@@ -442,8 +446,9 @@ SUITES = [
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
-     "the size caps and strict UTF-8 -- then both hosts' generated copies "
-     "driven against a loopback CDP peer", 42),
+     "the size caps and strict UTF-8, the asyncio and blocking-socket "
+     "wrappers -- then mcp-gdc's generated copy driven against a loopback "
+     "CDP peer", 41),
     # TYPED: a fixed case table.  Every row that needs the host's libbrotlidec
     # or libzstd is recorded as INFO when the library is absent rather than
     # omitted, so the count is the same on every host.
@@ -511,19 +516,21 @@ SUITES = [
      "verified: refusals, parity, the weakest-hop chain label, the decoded "
      "cap, the call-site AST rule with a planted control); "
      "search_github's generated copy driven over loopback (the captured cors "
-     "GET and referer, create_session()'s policy, a redirect into metadata "
-     "space refused, the verified default end to end, the verified-first "
-     "block ladder over stub sessions, the sticky switch, AST rows with "
-     "planted controls, the NFR-5 startup delta as INFO); "
+     "GET and referer, create_session()'s policy on its one Chrome transport, "
+     "a redirect into metadata space refused, the block handling over stub "
+     "sessions with no second attempt, rotation and a dropped failed session, "
+     "the F32 cap, AST rows with planted controls, the NFR-5 startup delta as "
+     "INFO); "
      "search_duckduckgo's generated copy the same way (the warm-up then the "
      "cors POST on one connection vs the cors-post capture, the Bing GET vs "
-     "the navigate capture, the policy rows, the verified default end to end, "
-     "the DDG and Bing ladders, the reflected-text predicate rows with their "
-     "substring controls, sticky per endpoint, the Bing leg's rotation, AST "
-     "rows); "
-     "both hosts' main() under a network guard (-h / --help print usage and "
-     "exit 0, an unknown option exits 2, no network entry point reached, a "
-     "control that the guard stops a real query); "
+     "the navigate capture, the policy rows, a DDG block switching the run to "
+     "Bing and a Bing 403 blocking the query, the reflected-text predicate "
+     "rows with their substring controls, rotation counting queries, the F32 "
+     "cap and the single parse, AST rows); "
+     "both hosts' main() exiting 1 on a block with one blocked line, and "
+     "under a network guard (-h / --help print usage and exit 0, an unknown "
+     "option exits 2, no network entry point reached, a control that the "
+     "guard stops a real query); "
      "mcp-webfetch's handle_fetch over loopback with stub bs4/markdownify "
      "(the verified default with the test-CA factory injected, the "
      "profile=chrome opt-in and its impersonate alias, 403 x3 with the hint, "
@@ -533,7 +540,7 @@ SUITES = [
      "fix rows (cache keyed on allow_private, 0700/0600 modes, printable URL "
      "and header echoes), one uv stdio row); "
      "every refusal and the hmac.compare_digest tag gate, the generator block "
-     "contract, and the AES-256-GCM decrypt floor", 855),
+     "contract, and the AES-256-GCM decrypt floor", 846),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That
@@ -541,7 +548,7 @@ SUITES = [
     ("read_loop", run_read_loop,
      "every MCP server's read loop carries ADR 0008's shape: a single-thread "
      "reader executor no handler can take, and one task per message -- with "
-     "the pool/coroutine split declared per server rather than inferred", 49),
+     "the pool/coroutine split declared per server rather than inferred", 51),
     # TYPED for read_loop's reason: a server that appears without a declared
     # reclaim class is the defect, so a moved count is the alarm working.  The
     # two per-server groups make it 2N + a fixed tail.
@@ -552,7 +559,7 @@ SUITES = [
      "never cancellable, a dispatch target that lets the CancelledError "
      "through, and what a cancel reclaims declared per server and MEASURED "
      "for the kill, lsp-cancel and pg-cancel classes -- the PostgreSQL "
-     "CancelRequest and its drain driven against a loopback fake server", 86),
+     "CancelRequest and its drain driven against a loopback fake server", 88),
     # TYPED for read_loop's reason above, not mcp_footprint's: a server that
     # appears without a declared row is the defect, so a moved count is the
     # alarm working.  The two per-server groups make it 2N + a fixed tail.
@@ -561,17 +568,17 @@ SUITES = [
      "and argument KEYS, never a payload body or value (F12/CWE-532), with "
      "the shape each site may log declared per server rather than inferred, "
      "and MCP_SKELETON.md's own sample lifted by script and gated the same way",
-     55),
-    # TYPED for the same reason as the two above.  The count is 25 declared
-    # sites + 16 servers + 4 roster + 11 control + 4 hygiene: the site total is
-    # 16 layer-W plus 9 layer-D, so a server that gains or loses a catch-all
+     57),
+    # TYPED for the same reason as the two above.  The count is 26 declared
+    # sites + 17 servers + 4 roster + 11 control + 4 hygiene: the site total is
+    # 17 layer-W plus 9 layer-D, so a server that gains or loses a catch-all
     # moves it, which is the alarm working.
     ("handler_crash", run_handler_crash,
      "every MCP server's tool-handler catch-all leaves a traceback at a level "
      "the default WARNING configuration emits -- at BOTH site layers, the "
      "McpServer wrap and the module-level dispatcher, each declared per server "
      "rather than inferred, with the format string required to be a literal so "
-     "a payload cannot be interpolated into a log that IS written", 60),
+     "a payload cannot be interpolated into a log that IS written", 62),
     # TYPED for the same reason again.  The count is 6 escapers + 6 rendered
     # rows + 1 coupling + 3 unpadded + 2 documented + 2 structure + 1 jenkins
     # two-space + 1 jenkins newline + 4 roster + 12 control + 4 hygiene (the
@@ -592,7 +599,7 @@ SUITES = [
      "declared unpadded charges no row for another row's width, a jenkins "
      "two-space cell is measured not to forge against the aligned reader, "
      "and a CR/LF in a jenkins cell is escaped so it cannot end its row", 42),
-    # TYPED for the same reason again.  The count is 3 clauses x 16 servers +
+    # TYPED for the same reason again.  The count is 3 clauses x 17 servers +
     # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
     # being analysed IS the defect here, so a count that moves when the fleet
     # moves is the alarm working.  The control group is the large one on
@@ -606,7 +613,7 @@ SUITES = [
      "handshake structurally cannot see, since a server inlining the RIGHT "
      "string is indistinguishable on the wire from one reading the constant, "
      "with the fleet's agreement asserted BETWEEN the files so the suite "
-     "never holds a copy of the number it polices", 74),
+     "never holds a copy of the number it polices", 77),
     ("forge_dispatch", run_forge_dispatch,
      "forge_call dispatch: `status` answers exactly what the empty call "
      "answers on all four of its paths, each with a control proving the "
@@ -618,11 +625,33 @@ SUITES = [
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
      "builder declared", 58),
+    # TYPED: a fixed case table (A 6, B 9, C 5, E 2).
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
      "(R-0057, F32): the fields the regex parsers produced, pinned as "
-     "literals, and a body shaped from the regexes' worst case one KiB under "
-     "SEARCH_MAX_BYTES parsed within a wall-time bound in a child", 18),
+     "literals, the href attribute rather than the first href= substring, a "
+     "line number over nine digits refused, every grep.app JSON level "
+     "type-checked, and five bodies shaped from the old worst cases (four "
+     "regexes and the Bing tree builder's end-tag scan) one KiB under "
+     "SEARCH_MAX_BYTES parsed within a wall-time bound in a child", 22),
+    # TYPED: a fixed case table (A 4, B 9, C 10, D 19, E 7, F 15, G 14, H 2).
+    ("mcp_search", run_mcp_search,
+     "mcp-search in-process with stub sessions and no network: the dispatcher "
+     "and its exact unknown-function line, params, aliases and the collision "
+     "refusal, the CLI's markdown, a Bing or grep.app block making the call "
+     "isError with the other queries' results kept, the DDG -> Bing switch, "
+     "no results as success, two threads never inside one endpoint's session "
+     "at once, a transport error dropping the session behind a fixed notice, "
+     "the ceiling and its note, every cap (filters and refused Unicode "
+     "included) answered before any lock, the busy endpoint, a fence the "
+     "snippet cannot close, notes logged as structure only, the session "
+     "kwargs of the first, rotated and post-error sessions, the render "
+     "sanitizer (one-line fields, http(s)-only IDNA URLs, every invisible "
+     "Unicode class dropped, both copies agreeing), a cut closing its fence "
+     "with block and stop notices outside the cap, -32602 params, the "
+     "grep.app schema check, pacing before the warm-up, the call deadline, "
+     "a busy endpoint keeping results, _log_value at the log sites and the "
+     "run() catch-all answering -32603 live", 80),
     ("webfetch_roots", run_webfetch_roots,
      "mcp-webfetch's two roots (R-0054): --cache-root names the cache "
      "directory itself, default $XDG_CACHE_HOME/web-fetch (absolute only) "

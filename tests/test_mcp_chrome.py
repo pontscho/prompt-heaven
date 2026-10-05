@@ -3,10 +3,11 @@
 
 `Scripts/_mcp_chrome.py` is a canonical generation source (roadmap R-0044),
 registered in `Scripts/amalgamate.py` CANONICAL_NAMES and WHOLE_SOURCES and
-carried whole by three hosts (mcp-webfetch.py, search_duckduckgo.py,
-search_github.py). The generated_region drift gate proves each copy equals the
-source; this suite proves the source right. It loads the file by path with
-`H.load_module_from_path` and drives it; groups M and O load the hosts' copies.
+carried whole by four hosts (mcp-webfetch.py, mcp-search.py,
+search_duckduckgo.py, search_github.py). The generated_region drift gate proves
+each copy equals the source; this suite proves the source right. It loads the
+file by path with `H.load_module_from_path` and drives it; groups M and O load
+three hosts' copies (mcp-search.py's is driven by tests/test_mcp_search.py).
 
 THE ORACLE IS NOT THE MODULE. Every expected value in group A is a published
 vector pasted here as hex, each citing where it was copied from: RFC 7748
@@ -183,33 +184,35 @@ Groups:
                    host's _ch_open_socket (restored, `is` identity): the
                    Chrome-path cors GET vs the cors-get capture with grep.app's
                    Accept, the referer from the warm-up's final URL, the canned
-                   JSON parsed; create_session()'s policy identity and verified
-                   default; a redirect into metadata space refused by the
-                   policy; the verified default end to end (no label); the
-                   block ladder over stub sessions (403, html 200 and html 429
-                   are blocks; JSON 429, 5xx, a decode error, another host's
-                   403 and every transport failure are not), the chrome-too
-                   line, no label on "No results found.", the sticky switch;
-                   AST rows (the one create_session("chrome") site, R14, no
-                   rand=) with planted controls; the NFR-5 startup delta (INFO).
-                   Then Scripts/search_duckduckgo.py's copy the same way: the
-                   warm-up navigation on stream 1 and the cors POST on stream 3
-                   of one connection vs the cors-post capture (headers, body,
-                   referer), the Bing GET vs the navigate capture and the
-                   tf_bing_serp fixture parsed; the policy rows (a 302 GET and a
-                   307 POST into metadata space); the verified default end to
-                   end; the DDG and Bing ladders over stub sessions (_run_bing
-                   owning its sessions, 429/5xx, transport failures, another
-                   host's answer), the structural DDG predicate with reflected
-                   query / snippet rows whose control is today's substring test
-                   (the positive row is the plan's FALLBACK predicate: no live
-                   challenge page was ever observed), sticky per endpoint and
-                   the Bing leg's rotation; AST rows (two block-branch Chrome
-                   sites, _run_cdp opens no session, R14, no rand=). For both
-                   hosts, main() under a guard on every network entry point:
-                   -h / --help print usage and exit 0, an unknown option
-                   (alone or after a query) exits 2, none reaching the network
-                   -- with a control that the guard stops a real query
+                   JSON parsed; create_session()'s policy identity (one
+                   session, Chrome only); a redirect into metadata space
+                   refused by the policy; the block handling over stub
+                   sessions (403, html 200 and html 429 are blocks, final with
+                   no second attempt; JSON 429, 5xx, a decode error, another
+                   host's 403 and every transport failure are not), no label
+                   on "No results found.", rotation every ROTATE_EVERY queries
+                   and a failed session dropped; the F32 cap; AST rows (R14,
+                   no rand=) with planted controls; the NFR-5 startup delta
+                   (INFO). Then Scripts/search_duckduckgo.py's copy the same
+                   way: the warm-up navigation on stream 1 and the cors POST on
+                   stream 3 of one connection vs the cors-post capture
+                   (headers, body, referer), the Bing GET vs the navigate
+                   capture and the tf_bing_serp fixture parsed; the policy rows
+                   (a 302 GET and a 307 POST into metadata space); a DDG block
+                   switching this and every later query to Bing on a fresh
+                   session, a Bing 403 blocking the query (429/5xx, transport
+                   failures, another host's answer are not blocks), the
+                   structural DDG predicate with reflected query / snippet rows
+                   whose control is today's substring test (the positive row is
+                   the plan's FALLBACK predicate: no live challenge page was
+                   ever observed), rotation counting queries not endpoints; the
+                   F32 cap and the single parse; AST rows (R14, no rand=). For
+                   both hosts, main() exits 1 on a block with one blocked line
+                   (another query's results still printed), and under a guard
+                   on every network entry point: -h / --help print usage and
+                   exit 0, an unknown option (alone or after a query) exits 2,
+                   none reaching the network -- with a control that the guard
+                   stops a real query
   O. WEBFETCH:     Scripts/mcp-webfetch.py loaded by path with stub bs4 /
                    markdownify, handle_fetch driven over loopback: rows not
                    about the Chrome path run on the DEFAULT verified transport
@@ -277,6 +280,7 @@ import sys
 import threading
 import time
 import types
+import urllib.parse
 import zlib
 
 sys.dont_write_bytecode = True
@@ -307,7 +311,7 @@ GG = "G. SESSION: loopback h2 / h1-over-TLS / cleartext h1 peers; redirects, dow
 GI = "I. LIMITS + CONNECT POLICY: body and decode budgets, on_headers, one row per SSRF form, resolver, opener, per-hop vetting"
 GJ = "J. TLS 1.2 FALLBACK + ENVIRONMENT: the test-CA-verified stdlib path, *_PROXY ignored, AST rows, late binding"
 GP = "P. TRANSPORT: the verified default vs transport=\"chrome\", the chain label, verified: refusals, parity, the call-site rule"
-GM = "M. HOSTS: search_github's and search_duckduckgo's generated copies -- the captured cors GET / POST, their policy, the verified-first ladders, the AST rules"
+GM = "M. HOSTS: search_github's and search_duckduckgo's generated copies -- the captured cors GET / POST, their policy, the Chrome-only block handling and exit codes, the AST rules"
 GO = "O. WEBFETCH HOST: handle_fetch over loopback -- the verified default, the profile=chrome opt-in, labels, cache admission, the policy split"
 GN = "N. NEGATIVE CONTROL: refusals and the tag-compare gate"
 GK = "K. STRUCTURE: block shapes, prefixes, tab safety, no assert"
@@ -6283,7 +6287,9 @@ GH_WARMUP_URL = "https://grep.app/"
 GH_API_PATH = "/api/search"
 GH_API_URL = "https://grep.app/api/search?q=q"
 GH_ACCEPT = "application/json, text/plain, */*"
-CHROME_LABEL = "**Transport**: chrome (certificate NOT verified)"
+# The transport label the CLIs printed before the search sources were lifted; no section may carry it now.
+LABEL_MARK = "**Transport**"
+GH_BLOCKED = "  [Blocked by grep.app on: %s]"
 
 # A grep.app answer written here from the API's shape (hits.hits[].repo/path/
 # branch/content.snippet), and what parse_grep_results must make of it: the
@@ -6295,8 +6301,8 @@ GH_CANNED_RESULTS = [{"repo": "octo/demo", "file_path": "src/app.py", "branch": 
                       "code_lines": [(7, "useEffect(fn)")], "url": "https://github.com/octo/demo/blob/main/src/app.py#L7"}]
 GH_EMPTY = b'{"hits": {"hits": []}}'
 
-# The verified end-to-end row runs create_session()'s REAL public-only policy:
-# socket.getaddrinfo answers this public address for grep.app, and only the
+# The F32 oversized rows run create_session()'s REAL public-only policy:
+# socket.getaddrinfo answers this public address for the endpoint, and only the
 # _ch_open_socket wrapper maps it to 127.0.0.1 -- nothing ever connects to it.
 GH_SENTINEL_ADDR = "93.184.216.34"
 
@@ -6312,9 +6318,6 @@ GH_END_RX = re.compile(r"^# END GENERATED: ")
 
 PLANTED_R14 = "# BEGIN GENERATED: _mcp_chrome.py :: _ch_open_socket\ndef _ch_open_socket():\n    pass\n# END GENERATED: 000000000000\n\n\ndef _ch_open_socket():\n    pass\n"
 PLANTED_RAND = "# BEGIN GENERATED: _mcp_chrome.py :: _CH_X\n_CH_X = g(rand=1)\n# END GENERATED: 000000000000\n\n\ndef f():\n    return g(rand=2)\n"
-PLANTED_CHROME_SITES = ("def a():\n    s = create_session('chrome')\n\n\n"
-                        "def b(results, transport):\n    if results is None and transport == 'verified':\n        s = create_session('chrome')\n"
-                        "    t = create_session(transport='verified')\n    u = create_session(_transport_for('x'))\n    v = create_session()\n")
 
 
 class NoWait:
@@ -6329,8 +6332,8 @@ class PortMap:
     """The host's _ch_open_socket for one row: records (addresses, port), forwards with 443 mapped to the peer's port.
 
     The address list passes through unchanged unless `addr_map` names an
-    address (the verified end-to-end row, whose policy is the real
-    public-only one); the connect policy still sees the URL host and 443.
+    address (the F32 oversized rows, whose policy is the real public-only
+    one); the connect policy still sees the URL host and 443.
     """
 
     def __init__(self, host, port, addr_map=None):
@@ -6355,11 +6358,14 @@ def gh_resp(host, transport, spec):
 
 
 class StubSession:
-    """A session the ladder rows hand the host: the warm-up answers 200 html, every API call answers `spec` (or raises it)."""
+    """A session the ladder rows hand the host: the warm-up answers 200 html, every API call answers `spec` (or raises it).
 
-    def __init__(self, host, transport, spec, warmup_exc=None):
+    `spec` may be a callable of the query (a per-query script).
+    """
+
+    def __init__(self, host, spec, warmup_exc=None):
         self.host = host
-        self.transport = transport
+        self.transport = "chrome"
         self.spec = spec
         self.warmup_exc = warmup_exc
         self.last_navigation_url = None
@@ -6373,9 +6379,12 @@ class StubSession:
                 raise self.warmup_exc
             self.last_navigation_url = url
             return gh_resp(self.host, self.transport, (200, "text/html; charset=utf-8", b"<html>grep</html>", url))
-        if isinstance(self.spec, Exception):
-            raise self.spec
-        return gh_resp(self.host, self.transport, self.spec)
+        spec = self.spec
+        if callable(spec):
+            spec = spec(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("q", [None])[0])
+        if isinstance(spec, Exception):
+            raise spec
+        return gh_resp(self.host, self.transport, spec)
 
     def api_calls(self):
         return [c for c in self.calls if c[0] != GH_WARMUP_URL]
@@ -6385,80 +6394,79 @@ class StubSession:
 
 
 class SessionRecorder:
-    """The host's create_session for one row: records each requested transport and returns a StubSession for it."""
+    """The host's create_session for one row: called with no argument (Chrome-only), returns a fresh StubSession each time."""
 
-    def __init__(self, host, verified, chrome, warmup_exc=None):
+    def __init__(self, host, spec, warmup_exc=None):
         self.host = host
-        self.specs = {"verified": verified, "chrome": chrome}
+        self.spec = spec
         self.warmup_exc = warmup_exc
         self.sessions = []
+        self.args = []
 
-    def __call__(self, transport="verified"):
-        s = StubSession(self.host, transport, self.specs.get(transport), self.warmup_exc)
+    def __call__(self, *args, **kw):
+        self.args.append((args, kw))
+        s = StubSession(self.host, self.spec, self.warmup_exc)
         self.sessions.append(s)
-        return s, transport
+        return s
 
 
-def gh_drive(host, verified, chrome=(200, "application/json", None), queries=("q",), rotate=None, preset=None, warmup_exc=None):
-    """_run_github(queries) over a SessionRecorder; (sessions, sections, has_results, stderr lines, _CHROME_AFTER_BLOCK after).
+def gh_canned(spec):
+    """A (status, type, None) spec gets GH_CANNED as its body."""
+    if isinstance(spec, tuple) and len(spec) == 3 and spec[2] is None:
+        return (spec[0], spec[1], json.dumps(GH_CANNED).encode())
+    return spec
 
-    _CHROME_AFTER_BLOCK is cleared in finally, so a row never leaks the switch into the next one.
-    """
-    if chrome is not None and len(chrome) == 3 and chrome[2] is None:
-        chrome = (chrome[0], chrome[1], json.dumps(GH_CANNED).encode())
-    rec = SessionRecorder(host, verified, chrome, warmup_exc)
+
+def gh_drive(host, spec, queries=("q",), rotate=None, warmup_exc=None):
+    """_run_github(queries, blocked=[]) over a SessionRecorder; (sessions, sections, has_results, stderr lines, blocked, create_session args)."""
+    rec = SessionRecorder(host, gh_canned(spec), warmup_exc)
     err = io.StringIO()
     swaps = [(host, "create_session", rec), (host, "random", NoWait), (sys, "stderr", err)]
     if rotate is not None:
         swaps.append((host, "ROTATE_EVERY", rotate))
-    try:
-        host._CHROME_AFTER_BLOCK.update(preset or ())
-        with Swapped(*swaps):
-            sections, has = host._run_github(list(queries))
-        after = set(host._CHROME_AFTER_BLOCK)
-    finally:
-        host._CHROME_AFTER_BLOCK.clear()
-    return rec.sessions, sections, has, err.getvalue().splitlines(), after
+    blocked = []
+    with Swapped(*swaps):
+        sections, has = host._run_github(list(queries), blocked=blocked)
+    return rec.sessions, sections, has, err.getvalue().splitlines(), blocked, rec.args
 
 
-def retry_lines(lines, query="q"):
-    return [ln for ln in lines if ln == "  [grep.app blocked the verified client on: %s -- retrying once via chrome (certificate NOT verified)]" % query]
+def gh_one_session_problems(run):
+    """One session, created with no argument, warmed up once and asked once (cors, referer = its warm-up URL), closed; no section carries a label."""
+    sessions, sections, _has, _lines, _blocked, args = run
+    api = [len(s.api_calls()) for s in sessions]
+    warm = [len(s.calls) - len(s.api_calls()) for s in sessions]
+    problems = problem_if(api != [1] or warm != [1], "API calls per session %r, warm-ups %r, wanted one session asked once" % (api, warm))
+    problems += problem_if(args != [((), {})], "create_session called with %r, wanted once with no argument" % args)
+    problems += problem_if(any(s.closed < 1 for s in sessions), "closed counts %r" % [s.closed for s in sessions])
+    problems += problem_if(any(LABEL_MARK in sec for sec in sections), "a section carries a transport label")
+    if len(sessions) == 1 and sessions[0].api_calls():
+        _url, mode, referer = sessions[0].api_calls()[0]
+        problems += problem_if(mode != "cors" or referer != GH_WARMUP_URL, "the search went out mode=%r referer=%r" % (mode, referer))
+    return problems
 
 
 def gh_block_problems(run):
-    """A block on the verified session: exactly ONE Chrome session, warmed up and asked once, labelled, one retry line, the switch set."""
-    sessions, sections, has, lines, after = run
-    transports = [s.transport for s in sessions]
-    api = [len(s.api_calls()) for s in sessions]
-    warm = [len(s.calls) - len(s.api_calls()) for s in sessions]
-    problems = problem_if(transports != ["verified", "chrome"], "sessions opened %r, wanted ['verified', 'chrome']" % transports)
-    problems += problem_if(api != [1, 1] or warm != [1, 1], "API calls per session %r, warm-ups %r, wanted [1, 1] each" % (api, warm))
-    problems += problem_if(not has or len(sections) != 1 or not sections[0].startswith(CHROME_LABEL), "results not labelled: has=%r first line %r" % (has, sections[0].splitlines()[0] if sections else None))
-    problems += problem_if(len(retry_lines(lines)) != 1, "stderr %r: wanted exactly one retry line" % lines)
-    problems += problem_if(after != {"grep.app"}, "_CHROME_AFTER_BLOCK %r" % after)
-    problems += problem_if(any(s.closed < 1 for s in sessions), "closed counts %r" % [s.closed for s in sessions])
-    if len(sessions) == 2 and sessions[1].api_calls():
-        url, mode, referer = sessions[1].api_calls()[0]
-        problems += problem_if(mode != "cors" or referer != GH_WARMUP_URL, "the re-issue went out mode=%r referer=%r" % (mode, referer))
+    """A block: one session asked once (no second attempt), exactly the one blocked line on stderr, the query in `blocked`, no results."""
+    _sessions, sections, has, lines, blocked, _args = run
+    problems = gh_one_session_problems(run)
+    problems += problem_if(lines != [GH_BLOCKED % "q"], "stderr %r, wanted exactly %r" % (lines, GH_BLOCKED % "q"))
+    problems += problem_if(blocked != ["q"], "blocked %r" % blocked)
+    problems += problem_if(has or sections, "results %r" % sections[:1])
     return problems
 
 
 def gh_not_block_problems(run, needle):
-    """Not a block: the verified session only, its one API call, the today's line `needle`, no retry, the switch unset."""
-    sessions, sections, has, lines, after = run
-    transports = [s.transport for s in sessions]
-    api = [len(s.api_calls()) for s in sessions]
-    problems = problem_if(transports != ["verified"], "sessions opened %r, wanted ['verified'] (no Chrome session)" % transports)
-    problems += problem_if(api != [1], "API calls %r" % api)
+    """Not a block: one session asked once, today's line `needle`, no blocked line, nothing in `blocked`, no results."""
+    _sessions, sections, has, lines, blocked, _args = run
+    problems = gh_one_session_problems(run)
     problems += problem_if(not any(ln.startswith(needle) for ln in lines), "no stderr line starting %r in %r" % (needle, lines))
-    problems += problem_if(retry_lines(lines) or any("chrome" in ln for ln in lines), "a Chrome retry was announced: %r" % lines)
-    problems += problem_if(after, "_CHROME_AFTER_BLOCK %r" % after)
+    problems += problem_if(any("Blocked" in ln for ln in lines) or blocked, "a block was reported: stderr %r blocked %r" % (lines, blocked))
     problems += problem_if(has or sections, "results %r" % sections[:1])
     return problems
 
 
 def gh_profile_exchange(host, s2):
-    """The Chrome-path happy path: warmup_session then search_github on a session of the host's own _ch_session_new, over the h2 peer."""
+    """The Chrome-path happy path: warmup_code_session then search_github on a session of the host's own _ch_session_new, over the h2 peer."""
     s2.plan["/"] = (302, [("location", "/home")], b"")
     s2.plan["/home"] = (200, [("content-type", "text/html; charset=utf-8")], b"<html>grep</html>")
     s2.plan[GH_API_PATH] = (200, [("content-type", "application/json")], json.dumps(GH_CANNED).encode())
@@ -6469,7 +6477,7 @@ def gh_profile_exchange(host, s2):
     with Swapped((host, "_ch_open_socket", pm), (host, "random", NoWait), (sys, "stderr", err)):
         s = host._ch_session_new(decoders=host._DECODERS, connect_policy=counting_policy(calls), timeout=SESSION_TIMEOUT, transport="chrome")
         try:
-            host.warmup_session(s)
+            host.warmup_code_session(s)
             nav = s.last_navigation_url
             results = host.search_github("x", s)
         finally:
@@ -6540,23 +6548,27 @@ def gh_profile_rows(suite, host, s2):
     run_row(suite, GM, "github-port-443-wrapper-policy-sees-grep-app-443", port_row, src)
 
 
+def create_session_identity_problems(host):
+    """(problems, detail): create_session() returns ONE session on the Chrome path, public-only policy, no downgrade, no TLS 1.2 fallback."""
+    s = host.create_session()
+    try:
+        problems = problem_if(isinstance(s, tuple), "create_session() returned a tuple %r, wanted the session alone" % (s,))
+        s = s[0] if isinstance(s, tuple) else s
+        problems += problem_if(s.transport != "chrome", "session transport %r, wanted 'chrome'" % s.transport)
+        problems += problem_if(s.connect_policy is not host._ch_public_only_policy, "policy %r" % s.connect_policy)
+        problems += problem_if(s.allow_downgrade is not False or s.tls12_fallback is not False, "allow_downgrade=%r tls12_fallback=%r" % (s.allow_downgrade, s.tls12_fallback))
+        detail = ["create_session(): one session, transport %r, policy IS _ch_public_only_policy, allow_downgrade=%r, tls12_fallback=%r" % (s.transport, s.allow_downgrade, s.tls12_fallback)]
+    finally:
+        (s[0] if isinstance(s, tuple) else s).close()
+    return problems, detail
+
+
 def gh_policy_rows(suite, host, s2):
-    src = "R2-N2 / D15: create_session() in Scripts/search_github.py"
+    src = "R2-N2: create_session() in Scripts/search_github.py (Chrome-only)"
 
     def identity():
-        problems, seen = [], []
-        for arg in ((), ("chrome",)):
-            s, t = host.create_session(*arg)
-            try:
-                want = arg[0] if arg else "verified"
-                seen.append((t, s.transport))
-                problems += problem_if(s.connect_policy is not host._ch_public_only_policy, "create_session%r: policy %r" % (arg, s.connect_policy))
-                problems += problem_if(s.allow_downgrade is not False or s.tls12_fallback is not False, "create_session%r: allow_downgrade=%r tls12_fallback=%r" % (arg, s.allow_downgrade, s.tls12_fallback))
-                problems += problem_if(t != want or s.transport != want, "create_session%r: returned %r, session transport %r" % (arg, t, s.transport))
-            finally:
-                s.close()
-        return problems, ["create_session() and create_session('chrome'): policy IS _ch_public_only_policy, allow_downgrade=False, tls12_fallback=False, (name, session.transport) %r" % seen]
-    run_row(suite, GM, "github-create-session-policy-is-public-only-and-transport-verified", identity, src)
+        return create_session_identity_problems(host)
+    run_row(suite, GM, "github-create-session-policy-is-public-only-and-transport-chrome", identity, src)
 
     def metadata():
         s2.plan[GH_API_PATH] = (302, [("location", "https://metadata.test/")], b"")
@@ -6573,7 +6585,7 @@ def gh_policy_rows(suite, host, s2):
         with Swapped((host, "_ch_open_socket", pm), (socket, "getaddrinfo", answering_resolver(gai, ["169.254.169.254"])), (sys, "stderr", err)):
             s = host._ch_session_new(decoders=host._DECODERS, connect_policy=policy, timeout=SESSION_TIMEOUT, transport="chrome")
             try:
-                got = host.search_github("q", s)
+                got = host.search_github("q", s, note=host._cli_note)
             finally:
                 s.close()
         seen, _conns = s2.since(mark)
@@ -6587,129 +6599,78 @@ def gh_policy_rows(suite, host, s2):
     run_row(suite, GM, "github-redirect-into-metadata-is-a-policy-refusal-with-no-connect", metadata, src + "; _ch_public_only_policy delegated, getaddrinfo patched")
 
 
-class LocalhostNameContext(ssl.SSLContext):
-    """A verifying context (CERT_REQUIRED + check_hostname) whose wrap_socket checks the name `localhost`, whatever the URL host.
-
-    The tests/files/tls leaf names localhost, not grep.app, and the CA key is
-    not committed; this keeps verification ON (so _ChFallbackConnection
-    accepts it) and only substitutes the name checked. Verification itself is
-    proven by group P on a real localhost URL; this row proves the host glue.
-    """
-
-    def wrap_socket(self, sock, *args, **kw):
-        kw["server_hostname"] = "localhost"
-        return ssl.SSLContext.wrap_socket(self, sock, *args, **kw)
-
-
-def localhost_name_context():
-    ctx = LocalhostNameContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.load_verify_locations(TLS_CA)
-    return ctx
-
-
-def gh_verified_row(suite, host, vp):
-    src = "D15: the verified default, end to end through create_session() -> warmup_session -> search_github -> format_results"
-
-    def verified():
-        vp.plan["/"] = (200, [("content-type", "text/html; charset=utf-8")], b"<html>grep</html>")
-        vp.plan[GH_API_PATH] = (200, [("content-type", "application/json")], json.dumps(GH_CANNED).encode())
-        original_new = host._ch_session_new
-        news, gai = [], []
-
-        def session_new(*args, **kw):
-            news.append((kw.get("transport"), kw.get("connect_policy"), kw.get("ssl_context_factory")))
-            kw["ssl_context_factory"] = localhost_name_context
-            return original_new(*args, **kw)
-        pm = PortMap(host, vp.port, addr_map={GH_SENTINEL_ADDR: "127.0.0.1"})
-        err = io.StringIO()
-        mark, a0 = vp.mark(), len(vp.alpns)
-        with Swapped((host, "_ch_session_new", session_new), (host, "_ch_open_socket", pm), (host, "random", NoWait),
-                     (socket, "getaddrinfo", answering_resolver(gai, [GH_SENTINEL_ADDR])), (sys, "stderr", err)):
-            sections, has = host._run_github(["x"])
-        seen, conns = vp.since(mark)
-        alpns = vp.alpns[a0:]
-        problems = problem_if(not has or len(sections) != 1 or "### Result 1: octo/demo - src/app.py" not in sections[0], "results %r" % (sections[:1],))
-        problems += problem_if(any(CHROME_LABEL in sec or "**Transport**" in sec for sec in sections), "a verified answer carries a transport label")
-        problems += problem_if(len(news) != 1 or news[0][0] != "verified" or news[0][1] is not host._ch_public_only_policy or news[0][2] is not None,
-                               "_ch_session_new calls (transport, policy, factory) %r" % news)
-        problems += problem_if([(q["method"], q["path"]) for q in seen] != [("GET", "/"), ("GET", "/api/search?q=x")] or conns != 2, "the peer saw %r over %d connection(s)" % ([(q["method"], q["path"]) for q in seen], conns))
-        problems += problem_if(alpns != [None, None], "ALPN per handshake %r: the Chrome engine was used" % alpns)
-        problems += problem_if(pm.calls != [([GH_SENTINEL_ADDR], 443)] * 2 or set((g[0], g[1]) for g in gai) != {("grep.app", 443)}, "opens %r resolver %r" % (pm.calls, gai))
-        problems += problem_if(len(seen) == 2 and one(seen[1], "referer") != GH_WARMUP_URL, "referer %r" % (one(seen[1], "referer") if len(seen) == 2 else None))
-        problems += problem_if(err.getvalue(), "stderr %r" % err.getvalue()[:200])
-        return problems, ["create_session() -> transport 'verified', policy _ch_public_only_policy, no factory passed (the row injects a localhost-name test-CA context)",
-                          "warm-up + search over 2 verified connections (never pooled), peer ALPN %r; the section has no transport label" % alpns]
-    run_row(suite, GM, "github-verified-end-to-end-parses-and-carries-no-label", verified, src)
-
-
 def gh_ladder_rows(suite, host):
-    src = "D15 / D16 / D17: _grep_app_blocked and _run_github in Scripts/search_github.py"
+    src = "D16 / D17: _grep_app_blocked, search_github and _run_github in Scripts/search_github.py (Chrome-only: a block is final)"
     CE = host.ChromeClientError
     html = b"<html><body>Access denied</body></html>"
     blocks = (
-        ("github-ladder-verified-403-is-one-chrome-reissue-labelled", (403, "text/html; charset=utf-8", html), "403 from grep.app"),
-        ("github-ladder-verified-200-text-html-is-one-chrome-reissue-labelled", (200, "text/html; charset=utf-8", b"<html>challenge</html>"), "200 with a non-JSON text/html body"),
-        ("github-ladder-verified-429-html-non-json-is-a-block-d17", (429, "text/html; charset=utf-8", b"<html>Too Many Requests</html>"), "429 with a non-JSON text/html body (D17, measured in task-038)"),
+        ("github-block-403-is-blocked-with-no-second-attempt", (403, "text/html; charset=utf-8", html), "403 from grep.app"),
+        ("github-block-200-text-html-is-blocked-with-no-second-attempt", (200, "text/html; charset=utf-8", b"<html>challenge</html>"), "200 with a non-JSON text/html body"),
+        ("github-block-429-html-non-json-is-blocked-d17", (429, "text/html; charset=utf-8", b"<html>Too Many Requests</html>"), "429 with a non-JSON text/html body (D17, measured in task-038)"),
     )
     for cid, spec, what in blocks:
         def block(spec=spec, what=what):
-            return gh_block_problems(gh_drive(host, spec)), ["verified %s -> exactly one Chrome session, warmed up and asked once (cors, referer = its warm-up URL), the label, one retry line, the switch set" % what]
+            return gh_block_problems(gh_drive(host, spec)), ["%s -> blocked: one session asked once (cors, referer = its warm-up URL), no second attempt, exactly %r on stderr, the query in blocked" % (what, GH_BLOCKED % "q")]
         run_row(suite, GM, cid, block, src)
 
     not_blocks = (
-        ("github-ladder-verified-429-json-is-a-rate-limit-not-a-block", (429, "application/json", b'{"error": "rate limited"}'), "  [Rate limited for: q]", "429 with a JSON body"),
-        ("github-ladder-verified-500-is-not-a-block", (500, "text/html", html), "  [HTTP 500 for: q]", "500 (D16 M3)"),
-        ("github-ladder-verified-503-is-not-a-block", (503, "text/html", html), "  [HTTP 503 for: q]", "503 (D16 M3)"),
-        ("github-ladder-verified-403-with-decode-error-is-not-a-block-d17", (403, "text/html", b"", None, "br: corrupt input"), "  [grep.app body undecodable: br: corrupt input]", "403 whose body could not be decoded (D17)"),
-        ("github-ladder-verified-403-from-another-host-is-not-a-block-s2", (403, "text/html", html, "https://elsewhere.test/api/search?q=q"), "  [HTTP 403 for: q]", "403 whose final URL is https://elsewhere.test/ (D16 S2)"),
-        ("github-ladder-verified-transport-failure-is-never-a-block-m2", CE("verified: certificate verify failed: unable to get local issuer certificate"), "  [grep.app error: verified: certificate verify failed: ", "get raises verified: certificate verify failed (D16 M2)"),
+        ("github-429-json-is-a-rate-limit-not-a-block", (429, "application/json", b'{"error": "rate limited"}'), "  [Rate limited for: q]", "429 with a JSON body"),
+        ("github-500-is-not-a-block", (500, "text/html", html), "  [HTTP 500 for: q]", "500 (D16 M3)"),
+        ("github-503-is-not-a-block", (503, "text/html", html), "  [HTTP 503 for: q]", "503 (D16 M3)"),
+        ("github-403-with-decode-error-is-not-a-block-d17", (403, "text/html", b"", None, "br: corrupt input"), "  [grep.app body undecodable: br: corrupt input]", "403 whose body could not be decoded (D17)"),
+        ("github-403-from-another-host-is-not-a-block-s2", (403, "text/html", html, "https://elsewhere.test/api/search?q=q"), "  [HTTP 403 for: q]", "403 whose final URL is https://elsewhere.test/ (D16 S2)"),
+        ("github-transport-failure-is-never-a-block-m2", CE("connect: connection refused"), "  [grep.app error: connect: connection refused", "get raises connect: connection refused (D16 M2)"),
     )
     for cid, spec, needle, what in not_blocks:
         def not_block(spec=spec, needle=needle, what=what):
-            return gh_not_block_problems(gh_drive(host, spec), needle), ["verified %s -> no Chrome session, %r, switch unset" % (what, needle.strip())]
+            return gh_not_block_problems(gh_drive(host, spec), needle), ["%s -> not a block: %r, nothing in blocked, no results" % (what, needle.strip())]
         run_row(suite, GM, cid, not_block, src)
 
     def warmup_fails():
-        exc = CE("verified: certificate verify failed: unable to get local issuer certificate")
+        exc = CE("connect: connection refused")
         run = gh_drive(host, exc, warmup_exc=exc)
-        return gh_not_block_problems(run, "  [grep.app error: verified: certificate verify failed: ") + problem_if(run[0] and len(run[0][0].calls) != 2, "calls %r" % (run[0][0].calls if run[0] else None)), ["the verified warm-up AND the search raise verified: certificate verify failed -> [] with the error line, no Chrome session, switch unset (D16 M2)"]
-    run_row(suite, GM, "github-ladder-verified-warmup-failure-is-never-a-block-m2", warmup_fails, src)
+        return gh_not_block_problems(run, "  [grep.app error: connect: connection refused") + problem_if(run[0] and len(run[0][0].calls) != 2, "calls %r" % (run[0][0].calls if run[0] else None)), ["the warm-up AND the search raise connect: connection refused -> [] with the error line, not a block (D16 M2)"]
+    run_row(suite, GM, "github-warmup-failure-is-never-a-block-m2", warmup_fails, src)
 
-    def verified_ok():
-        sessions, sections, has, lines, after = gh_drive(host, (200, "application/json", json.dumps(GH_CANNED).encode()))
-        return (problem_if([s.transport for s in sessions] != ["verified"] or not has or len(sections) != 1, "sessions %r has=%r" % ([s.transport for s in sessions], has))
-                + problem_if(any("**Transport**" in sec for sec in sections) or lines or after, "label/stderr/switch: %r %r %r" % (sections[:1], lines, after))), ["verified 200 JSON -> parsed on the verified session, no label, nothing on stderr (the ladder's control)"]
-    run_row(suite, GM, "github-ladder-verified-200-json-is-verified-and-unlabelled", verified_ok, src)
-
-    def chrome_too():
-        sessions, sections, has, lines, after = gh_drive(host, (403, "text/html", html), chrome=(403, "text/html", html))
-        too = [ln for ln in lines if ln == "  [grep.app blocked the chrome client too on: q]"]
-        return (problem_if([s.transport for s in sessions] != ["verified", "chrome"], "sessions %r: a third attempt or none" % [s.transport for s in sessions])
-                + problem_if([len(s.api_calls()) for s in sessions] != [1, 1], "API calls %r" % [len(s.api_calls()) for s in sessions])
-                + problem_if(has or sections or len(too) != 1 or len(retry_lines(lines)) != 1, "has=%r sections=%r stderr %r" % (has, sections[:1], lines))), ["verified 403 then Chrome 403 -> [] with the 'blocked the chrome client too' line, exactly two sessions, no third attempt"]
-    run_row(suite, GM, "github-ladder-chrome-also-403-is-empty-with-no-third-attempt", chrome_too, src)
+    def parsed_ok():
+        run = gh_drive(host, (200, "application/json", json.dumps(GH_CANNED).encode()))
+        _sessions, sections, has, lines, blocked, _args = run
+        return (gh_one_session_problems(run)
+                + problem_if(not has or len(sections) != 1 or "### Result 1: octo/demo - src/app.py" not in sections[0], "has=%r sections %r" % (has, sections[:1]))
+                + problem_if(lines or blocked, "stderr %r blocked %r" % (lines, blocked))), ["200 JSON -> parsed, no label, nothing on stderr (the ladder's control)"]
+    run_row(suite, GM, "github-200-json-is-parsed-and-unlabelled", parsed_ok, src)
 
     def no_label_empty():
-        sessions, sections, has, lines, after = gh_drive(host, None, chrome=(200, "application/json", GH_EMPTY), queries=("q1", "q2"), preset=("grep.app",))
-        bare = host.format_results([], transport="chrome")
-        headed = host.format_results([], query="q1", transport="chrome")
+        sessions, sections, has, lines, blocked, _args = gh_drive(host, (200, "application/json", GH_EMPTY), queries=("q1", "q2"))
+        bare = host.format_code_results([])
+        headed = host.format_code_results([], query="q1")
         want = ["## Query: q1\n\nNo results found.\n", "## Query: q2\n\nNo results found.\n"]
-        return (problem_if([s.transport for s in sessions] != ["chrome"], "sessions %r" % [s.transport for s in sessions])
+        return (problem_if([len(s.api_calls()) for s in sessions] != [2], "API calls per session %r" % [len(s.api_calls()) for s in sessions])
                 + problem_if(sections != want or has, "sections %r" % sections)
-                + problem_if(bare != "No results found." or headed != "No results found.", "format_results([]) %r / %r" % (bare, headed))
-                + problem_if(lines or after != {"grep.app"}, "stderr %r switch %r" % (lines, after))), ["a Chrome-path answer that parses to [] -> the unlabelled 'No results found.' text, in the runner and in format_results (D16 L2)"]
-    run_row(suite, GM, "github-chrome-path-no-results-carries-no-label-l2", no_label_empty, src)
+                + problem_if(bare != "No results found." or headed != "No results found.", "format_code_results([]) %r / %r" % (bare, headed))
+                + problem_if(lines or blocked, "stderr %r blocked %r" % (lines, blocked))), ["an answer that parses to [] -> the unlabelled 'No results found.' text, in the runner and in format_code_results (D16 L2)"]
+    run_row(suite, GM, "github-no-results-carries-no-label-l2", no_label_empty, src)
 
-    def sticky():
+    def rotation():
         before = host.ROTATE_EVERY
-        sessions, sections, has, lines, after = gh_drive(host, (403, "text/html", html), queries=("q1", "q2", "q3"), rotate=2)
-        transports = [s.transport for s in sessions]
+        sessions, sections, has, lines, blocked, args = gh_drive(host, (200, "application/json", None), queries=("q1", "q2", "q3"), rotate=2)
         api = [len(s.api_calls()) for s in sessions]
-        return (problem_if(transports != ["verified", "chrome", "chrome"] or api != [1, 2, 1], "sessions %r API calls %r" % (transports, api))
-                + problem_if(len(sections) != 3 or not all(CHROME_LABEL in sec for sec in sections), "sections not all labelled: %r" % [sec.splitlines()[:3] for sec in sections])
-                + problem_if(len(retry_lines(lines, "q1")) != 1 or len(lines) != 1, "stderr %r" % lines)
-                + problem_if(after != {"grep.app"} or host._CHROME_AFTER_BLOCK or host.ROTATE_EVERY != before, "switch during %r after %r ROTATE_EVERY %r" % (after, host._CHROME_AFTER_BLOCK, host.ROTATE_EVERY))), ["three queries, ROTATE_EVERY=2 for the run: a block on q1 -> sessions %r, one verified API request in total; the switch cleared in finally" % transports]
-    run_row(suite, GM, "github-sticky-switch-every-later-session-is-chrome", sticky, src)
+        warm = [len(s.calls) - len(s.api_calls()) for s in sessions]
+        return (problem_if(api != [2, 1] or warm != [1, 1] or args != [((), {})] * 2, "API calls %r warm-ups %r create_session args %r" % (api, warm, args))
+                + problem_if(len(sections) != 3 or not has or any(LABEL_MARK in sec for sec in sections), "sections %r" % [sec.splitlines()[:1] for sec in sections])
+                + problem_if(lines or blocked or any(s.closed < 1 for s in sessions), "stderr %r blocked %r closed %r" % (lines, blocked, [s.closed for s in sessions]))
+                + problem_if(host.ROTATE_EVERY != before, "ROTATE_EVERY %r after the row" % host.ROTATE_EVERY)), ["three queries, ROTATE_EVERY=2 for the run: API calls per session %r, each session warmed up once and closed" % api]
+    run_row(suite, GM, "github-rotation-opens-a-fresh-session-every-rotate-every-queries", rotation, src)
+
+    def dropped():
+        def spec(query):
+            return CE("connect: connection refused") if query == "q1" else (200, "application/json", json.dumps(GH_CANNED).encode())
+        sessions, sections, has, lines, blocked, _args = gh_drive(host, spec, queries=("q1", "q2"))
+        api = [len(s.api_calls()) for s in sessions]
+        return (problem_if(api != [1, 1] or any(s.closed != 1 for s in sessions), "API calls %r closed %r: the failed session was not dropped" % (api, [s.closed for s in sessions]))
+                + problem_if(len(lines) != 1 or not lines[0].startswith("  [grep.app error: connect: connection refused") or blocked, "stderr %r blocked %r" % (lines, blocked))
+                + problem_if(not has or len(sections) != 2 or sections[0] != "## Query: q1\n\nNo results found.\n", "sections %r" % [sec.splitlines()[:1] for sec in sections])), ["q1's search raises -> that session is closed and dropped; q2 opens a fresh one and parses: API calls per session %r" % api]
+    run_row(suite, GM, "github-transport-failure-drops-the-session-the-next-query-opens-a-fresh-one", dropped, src)
 
 
 def host_regions(text):
@@ -6757,56 +6718,8 @@ def rand_problems(text):
     return out
 
 
-def create_session_sites(text):
-    """[(call, [enclosing if tests whose BODY holds the call])] for every create_session(...) call in hand-written code."""
-    sites = []
-
-    def walk(node, ifs):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "create_session":
-            sites.append((node, list(ifs)))
-        for field, value in ast.iter_fields(node):
-            for item in (value if isinstance(value, list) else [value]):
-                if isinstance(item, ast.AST):
-                    walk(item, ifs + [node.test] if isinstance(node, ast.If) and field == "body" else ifs)
-    for node in hand_written(ast.parse(text), host_regions(text)):
-        walk(node, [])
-    return sites
-
-
-def chrome_site_problems(text, want=1):
-    """(problems, counts): `want` create_session("chrome") calls, each inside a block branch; every other call passes _transport_for(...) or nothing."""
-    problems, chrome, other = [], 0, 0
-    for call, ifs in create_session_sites(text):
-        arg = call.args[0] if call.args else next((k.value for k in call.keywords if k.arg == "transport"), None)
-        if isinstance(arg, ast.Constant) and arg.value == "chrome":
-            chrome += 1
-            tests = [ast.unparse(t) for t in ifs]
-            if not any("results is None" in t and "transport == 'verified'" in t for t in tests):
-                problems.append("line %d: create_session('chrome') outside the block branch (enclosing tests %r)" % (call.lineno, tests))
-            continue
-        other += 1
-        ok = arg is None or (isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name) and arg.func.id == "_transport_for")
-        if not ok:
-            problems.append("line %d: create_session(%s) is neither _transport_for(...) nor nothing" % (call.lineno, ast.unparse(arg)))
-    if chrome != want:
-        problems.append("%d create_session('chrome') call site(s), wanted exactly %d" % (chrome, want))
-    return problems, (chrome, other)
-
-
 def gh_ast_rows(suite, text):
     src = "Scripts/search_github.py hand-written code (outside every # BEGIN/END GENERATED region)"
-
-    def chrome_sites():
-        problems, (chrome, other) = chrome_site_problems(text)
-        return problems, ["%d create_session('chrome') site inside `if results is None and transport == \"verified\"`, %d other site(s) all _transport_for(...) or bare" % (chrome, other)]
-    run_row(suite, GM, "github-ast-the-only-create-session-chrome-is-in-the-block-branch", chrome_sites, src + "; D15")
-
-    def chrome_control():
-        problems, _counts = chrome_site_problems(PLANTED_CHROME_SITES)
-        lines = sorted(int(p.split(":")[0].split()[1]) for p in problems if p.startswith("line "))
-        count = [p for p in problems if "call site(s), wanted exactly 1" in p]
-        return problem_if(lines != [2, 8] or len(count) != 1 or len(problems) != 3, "the checker reported %r" % problems), ["planted: a chrome call outside the branch (line 2) and a literal 'verified' (line 8) caught, 2 chrome sites counted; the in-branch, _transport_for and bare calls accepted"]
-    run_row(suite, GM, "control-chrome-site-checker-catches-planted-calls", chrome_control, "negative control")
 
     def r14():
         problems, (nreg, nnames, nbound) = r14_problems(text)
@@ -6900,12 +6813,8 @@ DDG_OK = (200, HTML_TYPE, lite_page("q"))
 DDG_CHALLENGE = (202, HTML_TYPE, DDG_FALLBACK_CHALLENGE)
 BING_403 = (403, HTML_TYPE, b"<html><body>Forbidden</body></html>")
 
-DDG_RETRY = "  [DDG blocked the verified client on: %s -- retrying once via chrome (certificate NOT verified)]"
-BING_RETRY = "  [Bing blocked the verified client on: %s -- retrying once via chrome (certificate NOT verified)]"
-BING_TOO = "  [Bing blocked the chrome client too on: %s]"
 DDG_CAPTCHA = "  [DDG CAPTCHA on: %s "
-
-PLANTED_CDP = "def _run_cdp(queries):\n    s, t = create_session()\n    return s\n\n\ndef other():\n    return create_session()\n"
+BING_BLOCKED = "  [Blocked by Bing on: %s]"
 
 
 def bing_serp():
@@ -6975,60 +6884,55 @@ class DdgStub:
 
 
 class DdgRecorder:
-    """The host's create_session for one row: records each requested transport and returns a DdgStub for it."""
+    """The host's create_session for one row: called with no argument (Chrome-only), returns a fresh DdgStub each time."""
 
     def __init__(self, host, specs, warmup_exc=None):
         self.host = host
         self.specs = specs
         self.warmup_exc = warmup_exc
         self.sessions = []
+        self.args = []
 
-    def __call__(self, transport="verified"):
-        s = DdgStub(self.host, transport, self.specs.get(transport) or {}, self.warmup_exc)
+    def __call__(self, *args, **kw):
+        self.args.append((args, kw))
+        s = DdgStub(self.host, "chrome", self.specs, self.warmup_exc)
         self.sessions.append(s)
-        return s, transport
+        return s
 
 
-def ddg_drive(host, runner, verified, chrome=None, queries=("q",), rotate=None, preset=None, warmup_exc=None):
-    """_run_ddg_with_bing_fallback (runner "ddg") or _run_bing (runner "bing") over a DdgRecorder.
+def ddg_drive(host, specs, queries=("q",), rotate=None, warmup_exc=None):
+    """_run_ddg_with_bing_fallback(queries, blocked=[]) over a DdgRecorder.
 
-    Returns (sessions, sections, has_results, stderr lines, _CHROME_AFTER_BLOCK
-    after); the switch is cleared in finally, so a row never leaks it.
+    Returns (sessions, sections, has_results, stderr lines, blocked, create_session args).
     """
-    rec = DdgRecorder(host, {"verified": verified, "chrome": chrome}, warmup_exc)
+    rec = DdgRecorder(host, specs, warmup_exc)
     err = io.StringIO()
     swaps = [(host, "create_session", rec), (host, "random", NoWait), (sys, "stderr", err)]
     if rotate is not None:
         swaps.append((host, "ROTATE_EVERY", rotate))
-    fn = host._run_bing if runner == "bing" else host._run_ddg_with_bing_fallback
-    try:
-        host._CHROME_AFTER_BLOCK.update(preset or ())
-        with Swapped(*swaps):
-            sections, has = fn(list(queries))
-        after = set(host._CHROME_AFTER_BLOCK)
-    finally:
-        host._CHROME_AFTER_BLOCK.clear()
-    return rec.sessions, sections, has, err.getvalue().splitlines(), after
+    blocked = []
+    with Swapped(*swaps):
+        sections, has = host._run_ddg_with_bing_fallback(list(queries), blocked=blocked)
+    return rec.sessions, sections, has, err.getvalue().splitlines(), blocked, rec.args
 
 
-def ddg_expect(run, transports, searches, warmups, lines, after, labels):
+def ddg_expect(run, searches, warmups, lines, blocked, nsections):
     """Problems of one ladder run against its expected shape.
 
     searches: [(method, ...)] per session; warmups: warm-up URLs per session;
-    lines: stderr line PREFIXES in order; labels: per section, does it carry
-    the Chrome label. Every session must have been closed.
+    lines: stderr line PREFIXES in order; blocked: the queries reported
+    blocked; nsections: the number of output sections. Every session must
+    have been created with no argument and closed; no section carries a label.
     """
-    sessions, sections, _has, got_lines, got_after = run
-    got_t = [s.transport for s in sessions]
+    sessions, sections, _has, got_lines, got_blocked, args = run
     got_s = [[c[0] for c in s.calls] for s in sessions]
     got_w = [s.warmups for s in sessions]
-    got_l = [CHROME_LABEL in sec for sec in sections]
-    problems = problem_if(got_t != transports, "sessions opened %r, wanted %r" % (got_t, transports))
-    problems += problem_if(got_s != searches, "search calls per session %r, wanted %r" % (got_s, searches))
+    problems = problem_if(got_s != searches, "search calls per session %r, wanted %r" % (got_s, searches))
     problems += problem_if(got_w != warmups, "warm-ups per session %r, wanted %r" % (got_w, warmups))
+    problems += problem_if(args != [((), {})] * len(sessions), "create_session called with %r, wanted no argument each time" % args)
     problems += problem_if(len(got_lines) != len(lines) or any(not g.startswith(w) for g, w in zip(got_lines, lines)), "stderr %r, wanted lines starting %r" % (got_lines, lines))
-    problems += problem_if(got_after != set(after), "_CHROME_AFTER_BLOCK %r, wanted %r" % (got_after, set(after)))
-    problems += problem_if(got_l != labels, "Chrome label per section %r, wanted %r" % (got_l, labels))
+    problems += problem_if(got_blocked != list(blocked), "blocked %r, wanted %r" % (got_blocked, list(blocked)))
+    problems += problem_if(len(sections) != nsections or any(LABEL_MARK in sec for sec in sections), "sections %r, wanted %d unlabelled" % ([sec.splitlines()[:1] for sec in sections], nsections))
     problems += problem_if(any(s.closed < 1 for s in sessions), "closed counts %r" % [s.closed for s in sessions])
     return problems
 
@@ -7168,22 +7072,11 @@ def ddg_profile_rows(suite, host, peer):
 
 
 def ddg_policy_rows(suite, host, peer):
-    src = "R2-N2 / D15: create_session() in Scripts/search_duckduckgo.py"
+    src = "R2-N2: create_session() in Scripts/search_duckduckgo.py (Chrome-only)"
 
     def identity():
-        problems, seen = [], []
-        for arg in ((), ("chrome",)):
-            s, t = host.create_session(*arg)
-            try:
-                want = arg[0] if arg else "verified"
-                seen.append((t, s.transport))
-                problems += problem_if(s.connect_policy is not host._ch_public_only_policy, "create_session%r: policy %r" % (arg, s.connect_policy))
-                problems += problem_if(s.allow_downgrade is not False or s.tls12_fallback is not False, "create_session%r: allow_downgrade=%r tls12_fallback=%r" % (arg, s.allow_downgrade, s.tls12_fallback))
-                problems += problem_if(t != want or s.transport != want, "create_session%r: returned %r, session transport %r" % (arg, t, s.transport))
-            finally:
-                s.close()
-        return problems, ["create_session() and create_session('chrome'): policy IS _ch_public_only_policy, allow_downgrade=False, tls12_fallback=False, (name, session.transport) %r" % seen]
-    run_row(suite, GM, "ddg-create-session-policy-is-public-only-and-transport-verified", identity, src)
+        return create_session_identity_problems(host)
+    run_row(suite, GM, "ddg-create-session-policy-is-public-only-and-transport-chrome", identity, src)
 
     def metadata(endpoint, status):
         path = DDG_PATH if endpoint == "ddg" else BING_PATH
@@ -7202,7 +7095,7 @@ def ddg_policy_rows(suite, host, peer):
         with Swapped((host, "_ch_open_socket", pm), (socket, "getaddrinfo", answering_resolver(gai, ["169.254.169.254"])), (sys, "stderr", err)):
             s = host._ch_session_new(decoders=host._DECODERS, connect_policy=policy, timeout=SESSION_TIMEOUT, transport="chrome")
             try:
-                got = host.search_ddg("q", s) if endpoint == "ddg" else host.search_bing("q", s)
+                got = host.search_ddg("q", s, note=host._cli_note) if endpoint == "ddg" else host.search_bing("q", s, note=host._cli_note)
             finally:
                 s.close()
         seen, conns = peer.since(mark)
@@ -7220,140 +7113,73 @@ def ddg_policy_rows(suite, host, peer):
     run_row(suite, GM, "ddg-post-307-into-metadata-is-a-policy-refusal-the-body-sent-nowhere-else", lambda: metadata("ddg", 307), src + "; a 307 keeps the POST body, so the refusal must come before any connect")
 
 
-def ddg_verified_row(suite, host, vp):
-    src = "D15: the verified default, end to end through _run_ddg_with_bing_fallback -> create_session() -> warmup_session -> search_ddg -> format_results"
-
-    def verified():
-        vp.plan[DDG_PATH] = (200, [("content-type", HTML_TYPE)], lite_page("test"))
-        original_new = host._ch_session_new
-        news, gai = [], []
-
-        def session_new(*args, **kw):
-            news.append((kw.get("transport"), kw.get("connect_policy"), kw.get("ssl_context_factory")))
-            kw["ssl_context_factory"] = localhost_name_context
-            return original_new(*args, **kw)
-        pm = PortMap(host, vp.port, addr_map={GH_SENTINEL_ADDR: "127.0.0.1"})
-        err = io.StringIO()
-        mark, a0 = vp.mark(), len(vp.alpns)
-        with Swapped((host, "_ch_session_new", session_new), (host, "_ch_open_socket", pm), (host, "random", NoWait),
-                     (socket, "getaddrinfo", answering_resolver(gai, [GH_SENTINEL_ADDR])), (sys, "stderr", err)):
-            sections, has = host._run_ddg_with_bing_fallback(["test"])
-        seen, conns = vp.since(mark)
-        alpns = vp.alpns[a0:]
-        want, accept = post_capture_names()
-        problems = problem_if(not has or len(sections) != 1 or "### Result 1: Example Doc" not in sections[0], "results %r" % (sections[:1],))
-        problems += problem_if(any("**Transport**" in sec for sec in sections), "a verified answer carries a transport label")
-        problems += problem_if(len(news) != 1 or news[0][0] != "verified" or news[0][1] is not host._ch_public_only_policy or news[0][2] is not None,
-                               "_ch_session_new calls (transport, policy, factory) %r" % news)
-        problems += problem_if([(q["method"], q["path"]) for q in seen] != [("GET", DDG_PATH), ("POST", DDG_PATH)] or conns != 2, "the peer saw %r over %d connection(s)" % ([(q["method"], q["path"]) for q in seen], conns))
-        problems += problem_if(alpns != [None, None], "ALPN per handshake %r: the Chrome engine was used" % alpns)
-        problems += problem_if(pm.calls != [([GH_SENTINEL_ADDR], 443)] * 2 or set((g[0], g[1]) for g in gai) != {("lite.duckduckgo.com", 443)}, "opens %r resolver %r" % (pm.calls, gai))
-        names = []
-        if len(seen) == 2 and want is not None:
-            post = seen[1]
-            names = [k for k, _v in post["headers"]]
-            low = [k.lower() for k in names]
-            problems += problem_if(post["body"] != b"q=test&kl=", "POST body %r" % post["body"])
-            problems += problem_if(low[:2] != ["host", "connection"] or "priority" in low, "h1 head starts %r (Host and Connection first, no Priority)" % names[:3])
-            problems += problem_if([n for n in low[2:] if n != "content-length"] != [n for n in want if n != "content-length"], "fields %r, the capture has %r" % (low[2:], want))
-            problems += problem_if(values(post, "content-length") != ["10"] or one(post, "accept") != accept or one(post, "referer") != DDG_URL, "content-length %r accept %r referer %r" % (values(post, "content-length"), one(post, "accept"), one(post, "referer")))
-        else:
-            problems.append("no POST to compare (%d request(s)) or no cors-post capture" % len(seen))
-        problems += problem_if(err.getvalue(), "stderr %r" % err.getvalue()[:200])
-        return problems, ["create_session() -> transport 'verified', policy _ch_public_only_policy, no factory passed (the row injects a localhost-name test-CA context)",
-                          "warm-up GET + POST over 2 verified connections, peer ALPN %r; POST body q=test&kl=, h1 head %s; the section has no transport label" % (alpns, ", ".join(names))]
-    run_row(suite, GM, "ddg-verified-end-to-end-warmup-and-post-parse-and-carry-no-label", verified, src + "; tests/files/chrome/154/cors-post/")
-
-
 def ddg_ladder_rows(suite, host):
-    src = "D15 / D16: _ddg_blocked, _bing_blocked, _bing_query, _run_bing and _run_ddg_with_bing_fallback in Scripts/search_duckduckgo.py"
+    src = "D16: _ddg_blocked, _bing_blocked, run_web and _run_ddg_with_bing_fallback in Scripts/search_duckduckgo.py (Chrome-only: a Bing block is final)"
     CE = host.ChromeClientError
-    cert = CE("verified: certificate verify failed: unable to get local issuer certificate")
+    refused = CE("connect: connection refused")
     bing_ok = (200, HTML_TYPE, bing_serp())
     D, B = [DDG_URL], [BING_WARMUP_URL]
 
-    def row(cid, what, runner, verified, chrome, shape, **kw):
+    def row(cid, what, specs, shape, **kw):
         def fn():
-            return ddg_expect(ddg_drive(host, runner, verified, chrome, **kw), *shape), [what]
+            return ddg_expect(ddg_drive(host, specs, **kw), *shape), [what]
         run_row(suite, GM, cid, fn, src)
 
-    # The control, then the DDG ladder.
-    row("ddg-ladder-verified-results-are-verified-and-unlabelled", "verified 200 lite results -> parsed on the verified session, no label, nothing on stderr (the ladder's control)",
-        "ddg", {"ddg": DDG_OK}, None, (["verified"], [["POST"]], [D], [], (), [False]))
-    row("ddg-ladder-verified-challenge-is-one-chrome-reissue-labelled-fallback-predicate",
-        "verified answer _ddg_blocked judges a block (the FALLBACK predicate: zero results + a marker, query without it) -> ONE Chrome session, warmed up for ddg and asked once, labelled, one retry line, 'ddg' set",
-        "ddg", {"ddg": DDG_CHALLENGE}, {"ddg": DDG_OK}, (["verified", "chrome"], [["POST"], ["POST"]], [D, D], [DDG_RETRY % "q"], ("ddg",), [True]))
+    # The control, then the DDG -> Bing switch.
+    row("ddg-ladder-results-are-parsed-and-unlabelled", "200 lite results -> parsed on the one DDG session, no label, nothing on stderr (the ladder's control)",
+        {"ddg": DDG_OK}, ([["POST"]], [D], [], [], 1))
+    row("ddg-ladder-challenge-switches-to-bing-on-a-fresh-chrome-session",
+        "a DDG answer _ddg_blocked judges a block -> the [DDG CAPTCHA ...] line; the DDG session is closed and a NEW session (create_session(), Chrome) is warmed up for bing and asked once; results, no label",
+        {"ddg": DDG_CHALLENGE, "bing": bing_ok}, ([["POST"], ["GET"]], [D, B], [DDG_CAPTCHA % "q"], [], 1))
+    row("bing-403-after-the-ddg-switch-is-blocked-with-no-second-attempt",
+        "DDG challenged, then a Bing 403 from www.bing.com -> ONE blocked line (FR-9: no [Bing HTTP 403] line before it), the query in blocked, no second attempt, no section",
+        {"ddg": DDG_CHALLENGE, "bing": BING_403}, ([["POST"], ["GET"]], [D, B], [DDG_CAPTCHA % "q", BING_BLOCKED % "q"], ["q"], 0))
 
-    def reissue_referer():
-        run = ddg_drive(host, "ddg", {"ddg": DDG_CHALLENGE}, {"ddg": DDG_OK})
-        sessions = run[0]
-        calls = sessions[1].calls if len(sessions) == 2 else []
-        return problem_if([c[2:4] for c in calls] != [("cors", DDG_URL)], "the re-issue went out as %r" % calls), ["the Chrome re-issue is a cors POST whose referer is its own warm-up's URL %r (L8)" % DDG_URL]
-    run_row(suite, GM, "ddg-ladder-reissue-referer-is-the-chrome-warmup-url", reissue_referer, src + "; L8")
-
-    row("ddg-ladder-chrome-also-challenge-switches-to-bing-which-opens-verified",
-        "verified and Chrome both challenged -> the [DDG CAPTCHA ...] line and today's Bing switch; the Bing session opens VERIFIED (a DDG block does not set 'bing'), unlabelled",
-        "ddg", {"ddg": DDG_CHALLENGE, "bing": bing_ok}, {"ddg": DDG_CHALLENGE}, (["verified", "chrome", "verified"], [["POST"], ["POST"], ["GET"]], [D, D, B], [DDG_RETRY % "q", DDG_CAPTCHA % "q"], ("ddg",), [False]))
-    # The Bing ladder: after the DDG switch, and under DDG_BACKEND=bing (_run_bing owns its sessions, D16 M4).
-    row("bing-ladder-after-the-ddg-switch-verified-403-is-one-chrome-reissue-labelled",
-        "DDG challenged on both transports, then a verified Bing 403 -> the [Bing HTTP 403] line, ONE Chrome Bing session warmed up for bing, labelled; both keys set",
-        "ddg", {"ddg": DDG_CHALLENGE, "bing": BING_403}, {"ddg": DDG_CHALLENGE, "bing": bing_ok},
-        (["verified", "chrome", "verified", "chrome"], [["POST"], ["POST"], ["GET"], ["GET"]], [D, D, B, B], [DDG_RETRY % "q", DDG_CAPTCHA % "q", "  [Bing HTTP 403 for: q]", BING_RETRY % "q"], ("ddg", "bing"), [True]))
-    row("bing-ladder-run-bing-verified-403-is-one-chrome-reissue-labelled",
-        "_run_bing(queries) opens its first session itself, VERIFIED; a 403 from www.bing.com -> one Chrome session, warmed up and asked once, labelled; 'bing' set",
-        "bing", {"bing": BING_403}, {"bing": bing_ok}, (["verified", "chrome"], [["GET"], ["GET"]], [B, B], ["  [Bing HTTP 403 for: q]", BING_RETRY % "q"], ("bing",), [True]))
-    row("bing-ladder-run-bing-chrome-also-403-is-empty-with-no-third-attempt",
-        "verified 403 then Chrome 403 -> [] with the 'blocked the chrome client too' line, exactly two sessions",
-        "bing", {"bing": BING_403}, {"bing": BING_403}, (["verified", "chrome"], [["GET"], ["GET"]], [B, B], ["  [Bing HTTP 403 for: q]", BING_RETRY % "q", "  [Bing HTTP 403 for: q]", BING_TOO % "q"], ("bing",), []))
+    def bing_partial(query):
+        return BING_403 if query == "q1" else bing_ok
+    row("bing-block-of-one-query-keeps-the-other-querys-results",
+        "two queries, DDG challenged on q1, Bing blocks q1 only -> q1 blocked (one blocked line, its 'No results found.' section), q2 parsed on the same Bing session",
+        {"ddg": DDG_CHALLENGE, "bing": bing_partial}, ([["POST"], ["GET", "GET"]], [D, B], [DDG_CAPTCHA % "q1", BING_BLOCKED % "q1"], ["q1"], 2), queries=("q1", "q2"))
     for status in (429, 500, 503):
-        row("bing-ladder-run-bing-verified-%d-is-not-a-block-m3" % status, "verified %d -> today's [Bing HTTP %d] line, no Chrome session, switch unset (D16 M3)" % (status, status),
-            "bing", {"bing": (status, HTML_TYPE, b"<html>busy</html>")}, None, (["verified"], [["GET"]], [B], ["  [Bing HTTP %d for: q]" % status], (), []))
+        row("bing-%d-is-not-a-block-m3" % status, "DDG challenged, then Bing %d -> today's [Bing HTTP %d] line, nothing blocked (D16 M3)" % (status, status),
+            {"ddg": DDG_CHALLENGE, "bing": (status, HTML_TYPE, b"<html>busy</html>")}, ([["POST"], ["GET"]], [D, B], [DDG_CAPTCHA % "q", "  [Bing HTTP %d for: q]" % status], [], 0))
 
     # D16 M2: a transport failure is never a block.
     row("ddg-transport-failure-is-never-a-block-m2",
-        "the verified POST raises verified: certificate verify failed -> [] with the [DDG error: ...] line, NO Chrome session, switch unset, no switch to Bing",
-        "ddg", {"ddg": cert}, None, (["verified"], [["POST"]], [D], ["  [DDG error: verified: certificate verify failed: "], (), []))
+        "the POST raises connect: connection refused -> [] with the [DDG error: ...] line, no switch to Bing, nothing blocked",
+        {"ddg": refused}, ([["POST"]], [D], ["  [DDG error: connect: connection refused"], [], 0))
     row("ddg-warmup-and-post-transport-failure-is-never-a-block-m2",
-        "the verified warm-up AND the POST raise verified: certificate verify failed -> the warm-up is only swallowed, one [DDG error: ...] line, no Chrome session, no Bing",
-        "ddg", {"ddg": cert}, None, (["verified"], [["POST"]], [D], ["  [DDG error: verified: certificate verify failed: "], (), []), warmup_exc=cert)
+        "the warm-up AND the POST raise connect: connection refused -> the warm-up is only swallowed, one [DDG error: ...] line, no Bing, nothing blocked",
+        {"ddg": refused}, ([["POST"]], [D], ["  [DDG error: connect: connection refused"], [], 0), warmup_exc=refused)
     row("bing-transport-failure-is-never-a-block-m2",
-        "_run_bing: the verified GET raises verified: certificate verify failed -> [] with the [Bing error: ...] line, NO Chrome session, switch unset",
-        "bing", {"bing": cert}, None, (["verified"], [["GET"]], [B], ["  [Bing error: verified: certificate verify failed: "], (), []))
+        "DDG challenged, then the Bing GET raises connect: connection refused -> [] with the [Bing error: ...] line, nothing blocked",
+        {"ddg": DDG_CHALLENGE, "bing": refused}, ([["POST"], ["GET"]], [D, B], [DDG_CAPTCHA % "q", "  [Bing error: connect: connection refused"], [], 0))
     # D16 S2: the endpoint's own host only.
     row("ddg-challenge-from-another-host-is-not-a-block-s2",
-        "a zero-result challenge page whose final URL is https://elsewhere.test/lite/ -> not a block: no Chrome session, no Bing switch, switch unset",
-        "ddg", {"ddg": DDG_CHALLENGE + ("https://elsewhere.test/lite/",)}, None, (["verified"], [["POST"]], [D], [], (), []))
+        "a zero-result challenge page whose final URL is https://elsewhere.test/lite/ -> not a block: no Bing switch, nothing blocked",
+        {"ddg": DDG_CHALLENGE + ("https://elsewhere.test/lite/",)}, ([["POST"]], [D], [], [], 0))
     row("bing-403-from-another-host-is-not-a-block-s2",
-        "a Bing 403 whose final URL is https://elsewhere.test/search -> the [Bing HTTP 403] line only, no Chrome session, switch unset",
-        "bing", {"bing": BING_403 + ("https://elsewhere.test/search?q=q",)}, None, (["verified"], [["GET"]], [B], ["  [Bing HTTP 403 for: q]"], (), []))
+        "DDG challenged, then a Bing 403 whose final URL is https://elsewhere.test/search -> the [Bing HTTP 403] line only, nothing blocked",
+        {"ddg": DDG_CHALLENGE, "bing": BING_403 + ("https://elsewhere.test/search?q=q",)}, ([["POST"], ["GET"]], [D, B], [DDG_CAPTCHA % "q", "  [Bing HTTP 403 for: q]"], [], 0))
     row("ddg-undecodable-body-is-not-a-block",
         "a DDG answer whose body could not be decoded -> the [DDG body undecodable: ...] line and [], never taken for a CAPTCHA",
-        "ddg", {"ddg": (200, HTML_TYPE, b"", None, "br: corrupt input")}, None, (["verified"], [["POST"]], [D], ["  [DDG body undecodable: br: corrupt input]"], (), []))
-    # D16 L2: a Chrome-path answer with no results carries no label.
-    row("ddg-chrome-path-no-results-carries-no-label-l2",
-        "'ddg' already set, the Chrome answers parse to [] -> the unlabelled per-query 'No results found.' sections (D16 L2)",
-        "ddg", None, {"ddg": (200, HTML_TYPE, lite_page("q", results=False))}, (["chrome"], [["POST", "POST"]], [D], [], ("ddg",), [False, False]), queries=("q1", "q2"), preset=("ddg",))
+        {"ddg": (200, HTML_TYPE, b"", None, "br: corrupt input")}, ([["POST"]], [D], ["  [DDG body undecodable: br: corrupt input]"], [], 0))
+    # D16 L2: an answer with no results carries no label.
+    row("ddg-no-results-carries-no-label-l2",
+        "two queries whose answers parse to [] -> the unlabelled per-query 'No results found.' sections on one session (D16 L2)",
+        {"ddg": (200, HTML_TYPE, lite_page("q", results=False))}, ([["POST", "POST"]], [D], [], [], 2), queries=("q1", "q2"))
 
-    # Sticky per endpoint, the Bing leg's rotation (D16 L1).
-    def chrome_ddg(query):
-        return DDG_CHALLENGE if query == "q4" else DDG_OK
-    row("ddg-sticky-later-ddg-sessions-are-chrome-and-a-later-bing-leg-starts-verified",
-        "five queries, ROTATE_EVERY=2: a block on q1 -> every later DDG session (the rotation at i=2 included) is Chrome, ONE verified DDG POST in total; a Chrome challenge on q4 switches to Bing, whose session and its rotation at i=4 open VERIFIED (only 'ddg' is set) and warm up for bing",
-        "ddg", {"ddg": DDG_CHALLENGE, "bing": bing_ok}, {"ddg": chrome_ddg},
-        (["verified", "chrome", "chrome", "verified", "verified"], [["POST"], ["POST", "POST"], ["POST", "POST"], ["GET"], ["GET"]], [D, D, D, B, B],
-         [DDG_RETRY % "q1", DDG_CAPTCHA % "q4"], ("ddg",), [True, True, True, False, False]), queries=("q1", "q2", "q3", "q4", "q5"), rotate=2)
-    row("bing-leg-rotation-opens-transport-for-bing-chrome-once-bing-is-set-l1",
-        "three queries, ROTATE_EVERY=2: DDG blocked on both transports, a verified Bing 403 sets 'bing' -> the rotation at i=2 serves Bing, so it opens _transport_for('bing') = chrome and warms up for bing, never _transport_for('ddg')",
-        "ddg", {"ddg": DDG_CHALLENGE, "bing": BING_403}, {"ddg": DDG_CHALLENGE, "bing": bing_ok},
-        (["verified", "chrome", "verified", "chrome", "chrome"], [["POST"], ["POST"], ["GET"], ["GET", "GET"], ["GET"]], [D, D, B, B, B],
-         [DDG_RETRY % "q1", DDG_CAPTCHA % "q1", "  [Bing HTTP 403 for: q1]", BING_RETRY % "q1"], ("ddg", "bing"), [True, True, True]), queries=("q1", "q2", "q3"), rotate=2)
+    # The switch holds for the rest of the run; pacing and rotation count queries, not endpoints (D16 L1).
+    row("ddg-switch-moves-every-later-query-to-bing-and-rotation-counts-queries-l1",
+        "three queries, ROTATE_EVERY=2: a challenge on q1 -> q1's switch opens the Bing session with no rotation count; q2 stays on it, never on DDG; the rotation before q3 opens a fresh Bing session warmed up for bing",
+        {"ddg": DDG_CHALLENGE, "bing": bing_ok}, ([["POST"], ["GET", "GET"], ["GET"]], [D, B, B], [DDG_CAPTCHA % "q1"], [], 3), queries=("q1", "q2", "q3"), rotate=2)
 
 
 def ddg_predicate_rows(suite, host):
     src = "D16 S1: _ddg_blocked in Scripts/search_duckduckgo.py (the plan's FALLBACK predicate, plan:1536; the structural marker is unmeasured)"
 
     def judged(query, page):
-        resp = ddg_resp(host, "verified", (200, HTML_TYPE, page), DDG_URL)
+        resp = ddg_resp(host, "chrome", (200, HTML_TYPE, page), DDG_URL)
         return host._ddg_blocked(resp, query)
 
     reflected = (
@@ -7364,13 +7190,13 @@ def ddg_predicate_rows(suite, host):
     )
     for cid, query, page, want, what in reflected:
         def fn(query=query, page=page, want=want, what=what):
-            sessions, sections, has, lines, after = run = ddg_drive(host, "ddg", {"ddg": (200, HTML_TYPE, page)}, None, queries=(query,))
-            problems = ddg_expect(run, ["verified"], [["POST"]], [[DDG_URL]], [], (), [False])
+            sessions, sections, has, lines, blocked, _args = run = ddg_drive(host, {"ddg": (200, HTML_TYPE, page)}, queries=(query,))
+            problems = ddg_expect(run, [["POST"]], [[DDG_URL]], [], [], 1)
             problems += problem_if(not has or "### Result 1: Example Doc" not in sections[0], "results %r" % sections[:1])
             problems += problem_if(host.parse_lite_results(page.decode()) != want, "the page parses to %r" % host.parse_lite_results(page.decode()))
             problems += problem_if(judged(query, page) is not False, "_ddg_blocked judged it a block")
             problems += problem_if(not old_ddg_substring(page.decode()), "negative control: today's substring test is NOT true on this page, so the row proves nothing")
-            return problems, ["%s on a NORMAL lite page (one result): not a block, results returned on the verified session; today's substring test IS true on the same page (the control)" % what]
+            return problems, ["%s on a NORMAL lite page (one result): not a block, results returned on the DDG session; today's substring test IS true on the same page (the control)" % what]
         run_row(suite, GM, cid, fn, src)
 
     def positive():
@@ -7382,8 +7208,8 @@ def ddg_predicate_rows(suite, host):
 
     def query_only():
         page = lite_page("anomaly-modal", results=False)
-        run = ddg_drive(host, "ddg", {"ddg": (200, HTML_TYPE, page)}, None, queries=("anomaly-modal",))
-        return (ddg_expect(run, ["verified"], [["POST"]], [[DDG_URL]], [], (), [])
+        run = ddg_drive(host, {"ddg": (200, HTML_TYPE, page)}, queries=("anomaly-modal",))
+        return (ddg_expect(run, [["POST"]], [[DDG_URL]], [], [], 0)
                 + problem_if(judged("anomaly-modal", page) is not False, "_ddg_blocked judged it a block")
                 + problem_if(not old_ddg_substring(page.decode()), "the control")), ["a zero-result page whose only marker text is the reflected query -> NOT a block (the fallback predicate's last clause); today's substring test IS true on it"]
     run_row(suite, GM, "ddg-predicate-zero-results-marker-only-in-the-reflected-query-is-not-a-block", query_only, src)
@@ -7404,43 +7230,15 @@ def ddg_predicate_rows(suite, host):
     )
     for cid, status, page, url, want, what in status_rows:
         def fn(status=status, page=page, url=url, want=want, what=what):
-            resp = ddg_resp(host, "verified", (status, HTML_TYPE, page, url), DDG_URL)
+            resp = ddg_resp(host, "chrome", (status, HTML_TYPE, page, url), DDG_URL)
             got = host._ddg_blocked(resp, "q")
             return (problem_if(got is not want, "_ddg_blocked returned %r, want %r" % (got, want))
                     + problem_if(old_ddg_substring(page.decode()), "the control: the page carries a challenge marker, so the row does not isolate the status")), [what]
         run_row(suite, GM, cid, fn, src)
 
 
-def run_cdp_problems(text):
-    """The cdp path never opens an HTTP session: no create_session / _ch_session_new call inside _run_cdp."""
-    funcs = [n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == "_run_cdp"]
-    if len(funcs) != 1:
-        return ["%d top-level _run_cdp definition(s)" % len(funcs)]
-    out = []
-    for sub in ast.walk(funcs[0]):
-        if isinstance(sub, ast.Call):
-            name = sub.func.attr if isinstance(sub.func, ast.Attribute) else (sub.func.id if isinstance(sub.func, ast.Name) else None)
-            if name in ("create_session", "_ch_session_new"):
-                out.append("line %d: _run_cdp calls %s" % (sub.lineno, name))
-    return out
-
-
 def ddg_ast_rows(suite, text):
     src = "Scripts/search_duckduckgo.py hand-written code (outside every # BEGIN/END GENERATED region)"
-
-    def chrome_sites():
-        problems, (chrome, other) = chrome_site_problems(text, want=2)
-        return problems, ["%d create_session('chrome') sites (_bing_query, _run_ddg_with_bing_fallback), each inside `if results is None and transport == \"verified\"`; %d other site(s) all _transport_for(...) or bare" % (chrome, other)]
-    run_row(suite, GM, "ddg-ast-the-only-create-session-chrome-sites-are-in-block-branches", chrome_sites, src + "; D15")
-
-    def cdp():
-        return run_cdp_problems(text), ["_run_cdp makes no create_session / _ch_session_new call: the cdp backend and the websocket region are untouched"]
-    run_row(suite, GM, "ddg-ast-run-cdp-never-calls-create-session", cdp, src)
-
-    def cdp_control():
-        problems = run_cdp_problems(PLANTED_CDP)
-        return problem_if(problems != ["line 2: _run_cdp calls create_session"], "the checker reported %r" % problems), ["planted: create_session inside _run_cdp (caught) and in another function (ignored)"]
-    run_row(suite, GM, "control-run-cdp-checker-catches-a-planted-call", cdp_control, "negative control")
 
     def r14():
         problems, (nreg, nnames, nbound) = r14_problems(text)
@@ -7472,64 +7270,59 @@ class CallCounter:
 
 
 def cap_identity_problems(host):
-    """(problems, detail): create_session() on both transports carries max_bytes == SEARCH_MAX_BYTES == 2 MiB, and that is the session's wire limit."""
+    """(problems, detail): create_session() carries max_bytes == SEARCH_MAX_BYTES == 2 MiB on its one (Chrome) transport, and that is the session's wire limit."""
     declared = getattr(host, "SEARCH_MAX_BYTES", None)
-    problems, seen = problem_if(declared != F32_CAP, "SEARCH_MAX_BYTES %r, wanted %d" % (declared, F32_CAP)), []
-    for arg in ((), ("chrome",)):
-        s, _t = host.create_session(*arg)
-        try:
-            seen.append((s.transport, s.max_bytes, s._wire_limit()))
-            problems += problem_if(s.max_bytes != F32_CAP or s._wire_limit() != F32_CAP, "create_session%r: max_bytes %r, wire limit %r" % (arg, s.max_bytes, s._wire_limit()))
-        finally:
-            s.close()
-    return problems, ["create_session() and create_session('chrome'): (transport, max_bytes, wire limit) %r -- never the 64 MiB fallback" % seen]
+    problems = problem_if(declared != F32_CAP, "SEARCH_MAX_BYTES %r, wanted %d" % (declared, F32_CAP))
+    s = host.create_session()
+    try:
+        seen = (s.transport, s.max_bytes, s._wire_limit())
+        problems += problem_if(s.transport != "chrome", "session transport %r, wanted 'chrome'" % s.transport)
+        problems += problem_if(s.max_bytes != declared or s._wire_limit() != declared, "max_bytes %r, wire limit %r, SEARCH_MAX_BYTES %r" % (s.max_bytes, s._wire_limit(), declared))
+    finally:
+        s.close()
+    return problems, ["create_session(): (transport, max_bytes, wire limit) %r == SEARCH_MAX_BYTES -- never the 64 MiB fallback" % (seen,)]
 
 
-def oversized_run(host, vp, warmup, path, ctype, runner):
-    """runner() over the verified peer, `path` answering F32_CAP + 1 bytes: (_ch_session_new calls, stderr lines, peer requests, runner's value, switch after).
+def oversized_run(host, peer, warmup, path, ctype, runner):
+    """runner() over the h2 peer, `path` answering F32_CAP + 1 bytes: (_ch_session_new calls, stderr lines, peer requests, runner's value).
 
-    create_session() runs for real; the row only injects the localhost-name
-    test-CA context and maps the sentinel address to the peer, as the
-    verified end-to-end rows do.
+    create_session() runs for real (Chrome path, the public-only policy); the
+    row only maps the sentinel address to the peer.
     """
     if warmup is not None:
-        vp.plan[warmup] = (200, [("content-type", HTML_TYPE)], b"<html>home</html>")
-    vp.plan[path] = (200, [("content-type", ctype)], b"x" * (F32_CAP + 1))
+        peer.plan[warmup] = (200, [("content-type", HTML_TYPE)], b"<html>home</html>")
+    peer.plan[path] = (200, [("content-type", ctype)], b"x" * (F32_CAP + 1))
     original_new = host._ch_session_new
     news, gai = [], []
 
     def session_new(*args, **kw):
         news.append((kw.get("transport"), kw.get("max_bytes")))
-        kw["ssl_context_factory"] = localhost_name_context
         return original_new(*args, **kw)
-    pm = PortMap(host, vp.port, addr_map={GH_SENTINEL_ADDR: "127.0.0.1"})
+    pm = PortMap(host, peer.port, addr_map={GH_SENTINEL_ADDR: "127.0.0.1"})
     err = io.StringIO()
-    mark = vp.mark()
+    mark = peer.mark()
     try:
         with Swapped((host, "_ch_session_new", session_new), (host, "_ch_open_socket", pm), (host, "random", NoWait),
                      (socket, "getaddrinfo", answering_resolver(gai, [GH_SENTINEL_ADDR])), (sys, "stderr", err)):
             got = runner()
-        after = set(host._CHROME_AFTER_BLOCK)
     finally:
-        host._CHROME_AFTER_BLOCK.clear()
-        vp.plan.pop(path, None)
-    seen, _conns = vp.since(mark)
-    return news, err.getvalue().splitlines(), seen, got, after
+        peer.plan.pop(path, None)
+    seen, _conns = peer.since(mark)
+    return news, err.getvalue().splitlines(), seen, got
 
 
-def oversized_problems(run, prefix, requests):
-    """Not a block: one verified session with the cap, one error line naming the cap, no results, no label, the switch unset."""
-    news, lines, seen, (sections, has), after = run
-    want_line = "body: exceeds %d bytes" % F32_CAP
+def oversized_problems(host, run, prefix, requests):
+    """Not a block: one Chrome session with max_bytes == SEARCH_MAX_BYTES, one error line naming the cap, no results, no label."""
+    news, lines, seen, (sections, has) = run
+    want_line = "body: exceeds %d bytes" % host.SEARCH_MAX_BYTES
     got_requests = [(q["method"], q["path"]) for q in seen]
-    return (problem_if(news != [("verified", F32_CAP)], "_ch_session_new calls (transport, max_bytes) %r, wanted one verified session with the cap (a second one is a Chrome re-issue or a Bing switch)" % news)
+    return (problem_if(news != [("chrome", host.SEARCH_MAX_BYTES)], "_ch_session_new calls (transport, max_bytes) %r, wanted one chrome session with max_bytes == SEARCH_MAX_BYTES (%d); a second one is a re-issue or a Bing switch" % (news, host.SEARCH_MAX_BYTES))
             + problem_if(len(lines) != 1 or not lines[0].startswith(prefix) or want_line not in lines[0], "stderr %r, wanted one line starting %r naming %r" % (lines, prefix, want_line))
-            + problem_if(has or any(CHROME_LABEL in sec for sec in sections), "results %r" % (sections[:1],))
-            + problem_if(after, "_CHROME_AFTER_BLOCK %r" % after)
+            + problem_if(has or any(LABEL_MARK in sec for sec in sections), "results %r" % (sections[:1],))
             + problem_if(got_requests != requests, "the peer saw %r, wanted %r" % (got_requests, requests)))
 
 
-def gh_cap_rows(suite, host, vp):
+def gh_cap_rows(suite, host, peer):
     src = "F32: create_session() and search_github in Scripts/search_github.py; SEARCH_MAX_BYTES"
 
     def identity():
@@ -7537,12 +7330,12 @@ def gh_cap_rows(suite, host, vp):
     run_row(suite, GM, "github-create-session-caps-the-body-at-2-mib-f32", identity, src)
 
     def oversized():
-        run = oversized_run(host, vp, "/", GH_API_PATH, "application/json", lambda: host._run_github(["x"]))
-        return oversized_problems(run, "  [grep.app error: ", [("GET", "/"), ("GET", "/api/search?q=x")]), ["a verified grep.app answer of %d bytes (cap + 1) -> ChromeBodyTooLarge reported as %r, [] and no Chrome re-issue: a too-large body is a transport failure, never a block (D16 M2)" % (F32_CAP + 1, (run[1] or [None])[0])]
+        run = oversized_run(host, peer, "/", GH_API_PATH, "application/json", lambda: host._run_github(["x"]))
+        return oversized_problems(host, run, "  [grep.app error: ", [("GET", "/"), ("GET", "/api/search?q=x")]), ["a grep.app answer of %d bytes (cap + 1) -> ChromeBodyTooLarge reported as %r, [] and no second attempt: a too-large body is a transport failure, never a block (D16 M2)" % (F32_CAP + 1, (run[1] or [None])[0])]
     run_row(suite, GM, "github-oversized-body-is-a-transport-failure-not-a-block-f32", oversized, src + "; D16 M2")
 
 
-def ddg_cap_rows(suite, host, vp):
+def ddg_cap_rows(suite, host, peer):
     src = "F32: create_session(), search_ddg and _ddg_blocked in Scripts/search_duckduckgo.py; SEARCH_MAX_BYTES"
 
     def identity():
@@ -7551,20 +7344,19 @@ def ddg_cap_rows(suite, host, vp):
 
     def oversized():
         # The warm-up GET shares /lite/ with the POST, so it is oversized too and only swallowed.
-        run = oversized_run(host, vp, None, DDG_PATH, HTML_TYPE, lambda: host._run_ddg_with_bing_fallback(["test"]))
-        return oversized_problems(run, "  [DDG error: ", [("GET", DDG_PATH), ("POST", DDG_PATH)]), ["a verified DDG answer of %d bytes (cap + 1) -> %r, [], no Chrome re-issue and no switch to Bing: a too-large body is a transport failure, never a block (D16 M2)" % (F32_CAP + 1, (run[1] or [None])[0])]
+        run = oversized_run(host, peer, None, DDG_PATH, HTML_TYPE, lambda: host._run_ddg_with_bing_fallback(["test"]))
+        return oversized_problems(host, run, "  [DDG error: ", [("GET", DDG_PATH), ("POST", DDG_PATH)]), ["a DDG answer of %d bytes (cap + 1) -> %r, [], no second attempt and no switch to Bing: a too-large body is a transport failure, never a block (D16 M2)" % (F32_CAP + 1, (run[1] or [None])[0])]
     run_row(suite, GM, "ddg-oversized-body-is-a-transport-failure-not-a-block-f32", oversized, src + "; D16 M2")
 
     def once():
         problems, detail = [], []
         bing_ok = (200, HTML_TYPE, bing_serp())
-        cases = (("verified results", {"ddg": DDG_OK}, None, 1),
-                 ("verified challenge, Chrome results", {"ddg": DDG_CHALLENGE}, {"ddg": DDG_OK}, 2),
-                 ("challenge on both transports, then Bing", {"ddg": DDG_CHALLENGE, "bing": bing_ok}, {"ddg": DDG_CHALLENGE}, 2))
-        for label, verified, chrome, responses in cases:
+        cases = (("results", {"ddg": DDG_OK}, 1),
+                 ("challenge, then Bing", {"ddg": DDG_CHALLENGE, "bing": bing_ok}, 1))
+        for label, specs, responses in cases:
             counter = CallCounter(host.parse_lite_results)
             with Swapped((host, "parse_lite_results", counter)):
-                sessions = ddg_drive(host, "ddg", verified, chrome)[0]
+                sessions = ddg_drive(host, specs)[0]
             posts = sum(1 for s in sessions for c in s.calls if c[0] == "POST")
             problems += problem_if(posts != responses or counter.n != responses, "%s: %d DDG response(s), parse_lite_results ran %d time(s)" % (label, posts, counter.n))
             detail.append("%s: %d DDG response(s), parse_lite_results ran %d time(s)" % (label, posts, counter.n))
@@ -7572,8 +7364,8 @@ def ddg_cap_rows(suite, host, vp):
     run_row(suite, GM, "ddg-each-response-is-parsed-once-f32", once, src)
 
     def reuse():
-        challenge = ddg_resp(host, "verified", DDG_CHALLENGE, DDG_URL)
-        ok = ddg_resp(host, "verified", DDG_OK, DDG_URL)
+        challenge = ddg_resp(host, "chrome", DDG_CHALLENGE, DDG_URL)
+        ok = ddg_resp(host, "chrome", DDG_OK, DDG_URL)
         counter = CallCounter(host.parse_lite_results)
         with Swapped((host, "parse_lite_results", counter)):
             given_empty = host._ddg_blocked(challenge, "q", [])
@@ -7593,9 +7385,6 @@ def host_hygiene_rows(suite, host, originals, tag):
     suite.record(GM, "hygiene-%s-host-ch-open-socket-is-the-original-after-the-group" % tag,
                  problem_if(host._ch_open_socket is not originals["_ch_open_socket"], "_ch_open_socket is %r" % host._ch_open_socket) + problem_if(moved, "not restored: %r" % moved),
                  detail=["`is` identity with the objects captured before any swap: %s" % ", ".join(GH_SWAPPED)])
-    suite.record(GM, "hygiene-%s-chrome-after-block-is-empty-after-the-group" % tag,
-                 problem_if(host._CHROME_AFTER_BLOCK, "_CHROME_AFTER_BLOCK %r" % host._CHROME_AFTER_BLOCK),
-                 detail=["every ladder row clears the per-process switch in finally"])
 
 
 # --- M. hosts: the command line answers -h / --help / an option before any network ---
@@ -7610,8 +7399,8 @@ def cli_run(host, script, argv):
     create_session, _ch_session_new, socket.socket, socket.create_connection
     and socket.getaddrinfo each record their name and raise NetworkRefused, so
     a search attempt is stopped at its first step and no socket is ever
-    opened. DDG_BACKEND is unset for the call. Returns (exit code, stdout,
-    stderr, guarded calls); NetworkRefused escaping main is exit code None.
+    opened. Returns (exit code, stdout, stderr, guarded calls);
+    NetworkRefused escaping main is exit code None.
     """
     calls = []
 
@@ -7621,23 +7410,18 @@ def cli_run(host, script, argv):
             raise NetworkRefused(name)
         return refuse
     out, err = io.StringIO(), io.StringIO()
-    backend = os.environ.pop("DDG_BACKEND", None)
     rc = None
-    try:
-        with Swapped((host, "create_session", guard("create_session")), (host, "_ch_session_new", guard("_ch_session_new")),
-                     (socket, "socket", guard("socket.socket")), (socket, "create_connection", guard("socket.create_connection")),
-                     (socket, "getaddrinfo", guard("socket.getaddrinfo")),
-                     (sys, "argv", [script] + list(argv)), (sys, "stdout", out), (sys, "stderr", err)):
-            try:
-                host.main()
-                rc = 0
-            except SystemExit as exc:
-                rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
-            except NetworkRefused:
-                rc = None
-    finally:
-        if backend is not None:
-            os.environ["DDG_BACKEND"] = backend
+    with Swapped((host, "create_session", guard("create_session")), (host, "_ch_session_new", guard("_ch_session_new")),
+                 (socket, "socket", guard("socket.socket")), (socket, "create_connection", guard("socket.create_connection")),
+                 (socket, "getaddrinfo", guard("socket.getaddrinfo")),
+                 (sys, "argv", [script] + list(argv)), (sys, "stdout", out), (sys, "stderr", err)):
+        try:
+            host.main()
+            rc = 0
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        except NetworkRefused:
+            rc = None
     return rc, out.getvalue(), err.getvalue(), calls
 
 
@@ -7674,25 +7458,63 @@ def cli_rows(suite, host, script, tag):
     run_row(suite, GM, "control-%s-cli-guard-catches-a-real-search" % tag, control, "negative control")
 
 
+def cli_block_run(host, script, argv, recorder):
+    """host.main() with sys.argv = [script] + argv, create_session swapped for `recorder`: (exit code, stdout, stderr lines)."""
+    out, err = io.StringIO(), io.StringIO()
+    with Swapped((host, "create_session", recorder), (host, "random", NoWait),
+                 (sys, "argv", [script] + list(argv)), (sys, "stdout", out), (sys, "stderr", err)):
+        try:
+            host.main()
+            rc = 0
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    return rc, out.getvalue(), err.getvalue().splitlines()
+
+
+def cli_block_rows(suite, host, script, tag, blocked_line, banner, result_mark, all_blocked, one_blocked):
+    """FR-9: a query that ends blocked -> exit 1 and one blocked line; the other queries' results are still printed.
+
+    all_blocked / one_blocked build the row's create_session stand-in: every
+    query blocked, and q1 blocked while q2 answers.
+    """
+    src = "Scripts/%s main(): the exit code of a block (Chrome-only, no second attempt)" % script
+
+    def single():
+        rc, out, lines = cli_block_run(host, script, ["q"], all_blocked())
+        return (problem_if(rc != 1, "exit code %r, wanted 1" % rc)
+                + problem_if(out, "stdout %r" % out[:200])
+                + problem_if([ln for ln in lines if ln.startswith("  [Blocked by ")] != [blocked_line % "q"] or (lines[-1:] != [blocked_line % "q"]), "stderr %r, wanted it to end in exactly one %r" % (lines, blocked_line % "q"))
+                + problem_if("No results found for any query." in lines, "the no-results line was printed for a block: %r" % lines)), ["one query, blocked -> exit 1, nothing on stdout, stderr %r" % lines]
+    run_row(suite, GM, "%s-cli-block-exits-1-with-one-blocked-line" % tag, single, src)
+
+    def partial():
+        rc, out, lines = cli_block_run(host, script, ["q1", "q2"], one_blocked())
+        return (problem_if(rc != 1, "exit code %r, wanted 1" % rc)
+                + problem_if(not out.startswith(banner) or result_mark not in out or LABEL_MARK in out, "stdout starts %r, wanted %r and %r, no label" % (out[:80], banner, result_mark))
+                + problem_if([ln for ln in lines if ln.startswith("  [Blocked by ")] != [blocked_line % "q1"], "stderr %r, wanted exactly one %r" % (lines, blocked_line % "q1"))), ["q1 blocked, q2 answered -> q2's results on stdout under %r, exit 1, one blocked line for q1" % banner]
+    run_row(suite, GM, "%s-cli-one-blocked-query-prints-the-others-results-and-exits-1" % tag, partial, src)
+
+
 def group_hosts(suite, cc):
-    """Group M: the GENERATED copies in search_github.py and search_duckduckgo.py driven over loopback, their policy, the verified-first ladders, the AST rules."""
+    """Group M: the GENERATED copies in search_github.py and search_duckduckgo.py driven over loopback, their policy, the Chrome-only block handling, the AST rules."""
     host = H.load_module_from_path("search_github_under_test", GH_HOST)
     with open(GH_HOST, encoding="utf-8") as fh:
         text = fh.read()
     originals = dict((name, getattr(host, name)) for name in GH_SWAPPED)
     s2 = SessionPeer("h2", cc)
-    vp = VerifiedPeer(cc)
     try:
         gh_profile_rows(suite, host, s2)
         gh_policy_rows(suite, host, s2)
-        gh_verified_row(suite, host, vp)
         gh_ladder_rows(suite, host)
-        gh_cap_rows(suite, host, vp)
+        gh_cap_rows(suite, host, s2)
         gh_ast_rows(suite, text)
         gh_startup_row(suite)
     finally:
-        for srv in (s2, vp):
-            srv.close()
+        s2.close()
+    gh_403 = (403, "text/html; charset=utf-8", b"<html><body>Access denied</body></html>")
+    gh_ok = (200, "application/json", json.dumps(GH_CANNED).encode())
+    cli_block_rows(suite, host, "search_github.py", "github", GH_BLOCKED, "# GitHub Search Results", "### Result 1: octo/demo - src/app.py",
+                   lambda: SessionRecorder(host, gh_403), lambda: SessionRecorder(host, lambda q: gh_403 if q == "q1" else gh_ok))
     host_hygiene_rows(suite, host, originals, "github")
     cli_rows(suite, host, "search_github.py", "github")
 
@@ -7701,18 +7523,19 @@ def group_hosts(suite, cc):
         ddg_text = fh.read()
     ddg_originals = dict((name, getattr(ddg, name)) for name in GH_SWAPPED)
     hp = HeadsPeer(cc)
-    dvp = VerifiedPeer(cc)
     try:
         ddg_profile_rows(suite, ddg, hp)
         ddg_policy_rows(suite, ddg, hp)
-        ddg_verified_row(suite, ddg, dvp)
         ddg_ladder_rows(suite, ddg)
         ddg_predicate_rows(suite, ddg)
-        ddg_cap_rows(suite, ddg, dvp)
+        ddg_cap_rows(suite, ddg, hp)
         ddg_ast_rows(suite, ddg_text)
     finally:
-        for srv in (hp, dvp):
-            srv.close()
+        hp.close()
+    bing_ok = (200, HTML_TYPE, bing_serp())
+    cli_block_rows(suite, ddg, "search_duckduckgo.py", "ddg", BING_BLOCKED, "# DuckDuckGo Search Results", "### Result 1: ",
+                   lambda: DdgRecorder(ddg, {"ddg": DDG_CHALLENGE, "bing": BING_403}),
+                   lambda: DdgRecorder(ddg, {"ddg": DDG_CHALLENGE, "bing": lambda q: BING_403 if q == "q1" else bing_ok}))
     host_hygiene_rows(suite, ddg, ddg_originals, "ddg")
     cli_rows(suite, ddg, "search_duckduckgo.py", "ddg")
 

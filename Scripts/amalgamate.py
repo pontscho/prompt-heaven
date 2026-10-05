@@ -74,9 +74,10 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 # over `_mcp_*.py` would silently promote the next helper file somebody drops
 # into Scripts/ to a generation source, and a region naming it would read as
 # legitimate as any other. Adding a source is a deliberate edit here.
-CANONICAL_NAMES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_concurrency.py",
-                   "_mcp_json.py", "_mcp_logging.py", "_mcp_lsp.py",
-                   "_mcp_paging.py", "_mcp_websocket.py", "_mcp_zstd.py")
+CANONICAL_NAMES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_codesearch.py",
+                   "_mcp_concurrency.py", "_mcp_json.py", "_mcp_logging.py",
+                   "_mcp_lsp.py", "_mcp_paging.py", "_mcp_websearch.py",
+                   "_mcp_websocket.py", "_mcp_zstd.py")
 CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 
 # Hosts OUTSIDE `TARGET_GLOB` that take generated blocks, each named by hand for
@@ -94,12 +95,16 @@ DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py")
 # Canonical sources a host takes WHOLE or not at all (G-c): the Chrome client
 # and its two decoders are one state machine whose blocks call each other, so a
 # host carrying some of their blocks and not others is a violation, never a
-# choice. The generator does not enforce it -- the generated_region suite does,
+# choice. The two search sources (web and code) are whole for the same reason:
+# their parsers, block signals and search functions call one another, so a
+# region that took a search function without its parser would be refused. The
+# generator does not enforce it -- the generated_region suite does,
 # and the `--census hosts` page collapses such a source to one row only while
 # every one of its blocks has the same host set, so a partial host shows up as
 # per-block rows. tests/test_generated_region.py mirrors this tuple the way it
 # mirrors `CANONICAL_NAMES`.
-WHOLE_SOURCES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_zstd.py")
+WHOLE_SOURCES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_codesearch.py",
+                 "_mcp_websearch.py", "_mcp_zstd.py")
 
 # The repo root, derived the same way `SCRIPTS_DIR` is and for the same reason:
 # `Scripts/` is a directory of this repository, so its parent is the root that

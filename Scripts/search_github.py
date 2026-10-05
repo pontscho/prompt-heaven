@@ -13,33 +13,26 @@ Options:
   --path   Path filter for directory-specific searches
   --limit  Maximum results per query (default: 10)
 
-The HTTP client is generated into this file from Scripts/_mcp_chrome.py (plus
-the brotli and zstd decoders from Scripts/_mcp_brotli.py and _mcp_zstd.py);
-nothing outside the standard library is imported, on every platform.
+The search (parsers, block signal, search_github and the markdown renderer) is
+generated into this file from Scripts/_mcp_codesearch.py, the HTTP client from
+Scripts/_mcp_chrome.py (plus the brotli and zstd decoders from
+Scripts/_mcp_brotli.py and _mcp_zstd.py); nothing outside the standard library
+is imported, on every platform.
 
-Transport (D15). Every session starts on the VERIFIED transport: the stdlib
-ssl stack, certificate and host name checked, HTTP/1.1 under the captured
-Chrome 154 header list -- authenticated, but not a Chrome TLS fingerprint.
-When grep.app itself (the final URL's host is grep.app) answers a search with
-a block -- 403, a 429 whose body is a non-JSON text/html page, or a 200 whose
-body is not JSON -- the query is re-issued ONCE over the Chrome path, and
-"grep.app" goes into a per-process sticky switch: every later session of this
-run (rotation included) opens on the Chrome path, so the verified probe is
-paid once per run, not per query. A 429 with a JSON body is a rate limit, a
-5xx a server fault, and a transport failure (certificate, TLS alert, reset,
-timeout) an error line and no results: none of them ever opens the Chrome
-path, so breaking the verified handshake cannot force the downgrade.
+Every session uses the Chrome path: the captured Chrome 154 TLS ClientHello
+and header profiles. When grep.app itself (the final URL's host is grep.app)
+answers a search with a block -- 403, a 429 whose body is a non-JSON text/html
+page, or a 200 whose body is not JSON -- the query is one stderr line and the
+exit status is 1. A 429 with a JSON body is a rate limit, a 5xx a server
+fault, and a transport failure (TLS alert, reset, timeout) an error line and
+no results; after a transport failure the session is dropped and the next
+query opens a new one.
 
-The Chrome path does NOT verify certificates. Every result it produced
-carries the line `**Transport**: chrome (certificate NOT verified)`; a
-verified answer carries no label. What an active MITM gains on that path
-(the query text and the session's cookies) is stated in ADR 0026. Both paths
+The Chrome path does NOT verify certificates. What an active MITM gains on it
+(the query text and the session's cookies) is stated in ADR 0026. Sessions
 refuse to connect to private, loopback or metadata addresses
 (_ch_public_only_policy), no proxy is used, and the HTTP client reads no
-environment variable for networking itself. The stdlib still does, on the
-verified transport only (ADR 0026 S4): ssl.create_default_context() honours
-SSL_CERT_FILE / SSL_CERT_DIR (the trust store) and SSLKEYLOGFILE. The Chrome
-path reads none of them.
+environment variable for networking.
 
 Every search session caps a response body at SEARCH_MAX_BYTES (wire and
 decoded); a larger body is a transport failure (an error line, no results),
@@ -63,6 +56,7 @@ import logging  # the generated Chrome client
 import socket  # the generated Chrome client
 import ssl  # the generated Chrome client
 import struct  # the generated Chrome client
+import unicodedata  # the generated render sanitizer (_code_clean)
 import urllib.parse  # the generated Chrome client (and grep.app's block signal)
 import zlib  # the generated Chrome client
 
@@ -81,21 +75,96 @@ SEARCH_MAX_BYTES = 2 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
-# grep.app response parsing
+# Code search (grep.app)
 # ---------------------------------------------------------------------------
 
-EXT_TO_LANG = {
-	'.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript',
-	'.tsx': 'TypeScript', '.jsx': 'JavaScript', '.java': 'Java',
-	'.cpp': 'C++', '.cc': 'C++', '.c': 'C', '.h': 'C/C++',
-	'.hpp': 'C++', '.cs': 'C#', '.go': 'Go', '.rs': 'Rust',
-	'.rb': 'Ruby', '.php': 'PHP', '.swift': 'Swift', '.kt': 'Kotlin',
-	'.scala': 'Scala', '.sh': 'Shell', '.bash': 'Bash',
-	'.html': 'HTML', '.css': 'CSS', '.scss': 'SCSS',
-	'.json': 'JSON', '.xml': 'XML', '.yaml': 'YAML', '.yml': 'YAML',
-	'.md': 'Markdown', '.sql': 'SQL', '.r': 'R',
-	'.m': 'Objective-C', '.vim': 'Vim Script', '.lua': 'Lua', '.pl': 'Perl',
-}
+# The search itself, generated from Scripts/_mcp_codesearch.py: the grep.app
+# response and snippet parsers, the block signal, search_github and the
+# markdown renderer, shared with mcp-search.py. Taken whole (every block, in
+# source order). The session is never created inside the region:
+# create_session, the with_session hook and the _cli_note stderr renderer below
+# are this file's own.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region.
+# BEGIN GENERATED: _mcp_codesearch.py :: _CODE_LINE_SEPARATORS, _code_clean, _code_line, _code_field, _ext_to_lang, EXT_TO_LANG, detect_language, _SnippetParser, extract_code_from_snippet, build_github_url, _grep_hits, _grep_str, parse_grep_results, warmup_code_session, _body_is_json, _grep_app_blocked, search_github, _code_fence, format_code_results
+_CODE_LINE_SEPARATORS = "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}\x85"
+
+
+def _code_clean(text, keep):
+	"""*text* with every invisible or display-steering code point dropped.
+
+	A character in *keep* survives; U+2028 U+2029 U+0085 become a newline.
+	Printable ASCII is the fast path; the rest is judged by category.
+	"""
+	out = []
+	for ch in text:
+		code = ord(ch)
+		if 0x20 <= code < 0x7f or ch in keep:
+			out.append(ch)
+		elif ch in _CODE_LINE_SEPARATORS:
+			out.append("\n")
+		elif 0xfe00 <= code <= 0xfe0f or 0xe0000 <= code <= 0xe01ef:
+			continue
+		elif unicodedata.category(ch) in ("Cc", "Cf", "Cs"):
+			continue
+		else:
+			out.append(ch)
+	return "".join(out)
+
+
+def _code_line(text):
+	"""A single-line field: _code_clean, then every whitespace run one space."""
+	if text is None:
+		return ""
+	return " ".join(_code_clean(str(text), "\t\n\r").split())
+
+
+def _code_field(text):
+	"""A header field (repo, path, branch): one line and no backtick (F4)."""
+	return _code_line(str(text).replace("`", ""))
+
+
+def _ext_to_lang():
+	"""File extension -> language name, one row per line (a builder: tab-safe)."""
+	t = {}
+	t['.py'] = 'Python'
+	t['.js'] = 'JavaScript'
+	t['.ts'] = 'TypeScript'
+	t['.tsx'] = 'TypeScript'
+	t['.jsx'] = 'JavaScript'
+	t['.java'] = 'Java'
+	t['.cpp'] = 'C++'
+	t['.cc'] = 'C++'
+	t['.c'] = 'C'
+	t['.h'] = 'C/C++'
+	t['.hpp'] = 'C++'
+	t['.cs'] = 'C#'
+	t['.go'] = 'Go'
+	t['.rs'] = 'Rust'
+	t['.rb'] = 'Ruby'
+	t['.php'] = 'PHP'
+	t['.swift'] = 'Swift'
+	t['.kt'] = 'Kotlin'
+	t['.scala'] = 'Scala'
+	t['.sh'] = 'Shell'
+	t['.bash'] = 'Bash'
+	t['.html'] = 'HTML'
+	t['.css'] = 'CSS'
+	t['.scss'] = 'SCSS'
+	t['.json'] = 'JSON'
+	t['.xml'] = 'XML'
+	t['.yaml'] = 'YAML'
+	t['.yml'] = 'YAML'
+	t['.md'] = 'Markdown'
+	t['.sql'] = 'SQL'
+	t['.r'] = 'R'
+	t['.m'] = 'Objective-C'
+	t['.vim'] = 'Vim Script'
+	t['.lua'] = 'Lua'
+	t['.pl'] = 'Perl'
+	return t
+
+
+EXT_TO_LANG = _ext_to_lang()
 
 
 def detect_language(file_path):
@@ -103,14 +172,6 @@ def detect_language(file_path):
 	return EXT_TO_LANG.get(ext)
 
 
-# The snippet used to be scanned with re.finditer(r'<tr data-line="(\d+)">.*?'
-# r'<pre>(.*?)</pre>', DOTALL), which rescans to the end of the input for every
-# unterminated opener -- quadratic or worse on a hostile body (F32, R-0057).
-# This is one html.parser pass with the same rules, keyed on the raw start tags
-# and never on an implied end tag (html.parser has none): a line starts at an
-# exact `<tr data-line="N">`, takes the first exact `<pre>` after it and ends at
-# the first </pre>; any `<tr data-line>` before that `<pre>` is skipped, the
-# text has its tags dropped and entities decoded, and an empty line is skipped.
 class _SnippetParser(HTMLParser):
 
 	_TR_OPEN = '<tr data-line="'
@@ -127,8 +188,9 @@ class _SnippetParser(HTMLParser):
 		raw = self.get_starttag_text() or ""
 		if tag == "tr" and self._line_no is None:
 			digits = raw[len(self._TR_OPEN):-2]
-			if (raw.startswith(self._TR_OPEN) and raw.endswith('">')
-					and digits and digits.isdecimal()):
+			# at most 9 digits (F13): int() of a huge decimal string is
+			# quadratic on CPython before 3.9.14, and no file has 10^9 lines
+			if raw.startswith(self._TR_OPEN) and raw.endswith('">') and digits and len(digits) <= 9 and digits.isdecimal():
 				self._line_no = int(digits)
 		elif tag == "pre" and self._line_no is not None and raw == "<pre>":
 			self._parts = []
@@ -157,35 +219,200 @@ def extract_code_from_snippet(html_snippet):
 
 
 def build_github_url(repo, path, branch, line_number=None):
-	base = f"https://github.com/{repo}/blob/{branch}/{path}"
+	"""The blob URL; repo, branch and path are percent-encoded with "/" kept (F4),
+	so a path carrying a space, "#", "?", a newline or non-ASCII stays one URL."""
+	base = "https://github.com/%s/blob/%s/%s" % (urllib.parse.quote(repo, safe="/"), urllib.parse.quote(branch, safe="/"), urllib.parse.quote(path, safe="/"))
 	if line_number:
 		return f"{base}#L{line_number}"
 	return base
 
 
-def parse_grep_results(data, limit):
-	results = []
-	for hit in data.get('hits', {}).get('hits', [])[:limit]:
-		file_path = hit.get('path', 'Unknown')
-		result = {
-			'repo': hit.get('repo', 'Unknown'),
-			'file_path': file_path,
-			'branch': hit.get('branch', 'main'),
-			'language': detect_language(file_path) or 'Unknown',
-			'code_lines': [],
-		}
+def _grep_hits(data):
+	"""data["hits"]["hits"] when the answer has grep.app's shape, else None (F8).
 
-		snippet_html = hit.get('content', {}).get('snippet', '')
+	A shape mismatch is a parse failure, not a transport error: search_github
+	notes it as `grep_schema` and keeps the session."""
+	hits = data.get('hits', {}) if isinstance(data, dict) else None
+	hits = hits.get('hits', []) if isinstance(hits, dict) else None
+	return hits if isinstance(hits, list) else None
+
+
+def _grep_str(hit, key, default):
+	value = hit.get(key, default)
+	return value if isinstance(value, str) else default
+
+
+def parse_grep_results(data, limit):
+	"""The results of a grep.app answer. Every level is type-checked (F8): a hit
+	that is not an object is skipped, a repo / path / branch that is not a string
+	takes its default, and a content or snippet of the wrong type is no snippet."""
+	results = []
+	for hit in (_grep_hits(data) or [])[:limit]:
+		if not isinstance(hit, dict):
+			continue
+		file_path = _grep_str(hit, 'path', 'Unknown')
+		result = {'repo': _grep_str(hit, 'repo', 'Unknown'), 'file_path': file_path, 'branch': _grep_str(hit, 'branch', 'main'), 'language': detect_language(file_path) or 'Unknown', 'code_lines': []}
+
+		content = hit.get('content', {})
+		snippet_html = _grep_str(content, 'snippet', '') if isinstance(content, dict) else ''
 		if snippet_html:
 			result['code_lines'] = extract_code_from_snippet(snippet_html)
 
 		first_line = result['code_lines'][0][0] if result['code_lines'] else None
-		result['url'] = build_github_url(
-			result['repo'], result['file_path'], result['branch'], first_line
-		)
+		result['url'] = build_github_url(result['repo'], result['file_path'], result['branch'], first_line)
 		results.append(result)
 
 	return results
+
+
+def warmup_code_session(session):
+	try:
+		session.get("https://grep.app/", timeout=10)
+	except Exception:
+		pass
+	time.sleep(random.uniform(0.8, 1.5))
+
+
+def _body_is_json(resp):
+	"""True when the (decoded) body parses as JSON; False otherwise, never raises.
+
+	ConnectionError is the base of the Chrome client's ChromeClientError, which
+	reading `resp.text` may raise; the base is caught because the subclass is a
+	name of another canonical source.
+	"""
+	try:
+		json.loads(resp.text)
+	except (ValueError, ConnectionError):
+		return False
+	return True
+
+
+def _grep_app_blocked(resp):
+	"""grep.app's bot-block signal (D15, D16 S2/M3, D17): True only for a block.
+
+	Judged on grep.app's own host only (a redirect target's answer is never a
+	block), then: 403; a 429 whose body is a non-JSON text/html page; a 200
+	whose body is not JSON. A 429 with a JSON body is a rate limit and 5xx a
+	server fault -- never a block. An undecodable body is not judged here.
+	"""
+	# task-038 measured (.claude/tmp/task038-live.txt): the verified transport got 429 text/html non-JSON on both / and /api/search while the Chrome path got 200 JSON seconds apart -- a fingerprint block, not a rate limit.
+	if urllib.parse.urlsplit(resp.url or "").hostname != "grep.app":
+		return False
+	if resp.decode_error is not None:
+		return False
+	if resp.status_code == 403:
+		return True
+	if resp.status_code == 429:
+		content_type = (resp.headers.get("content-type") or "").lower()
+		return "text/html" in content_type and not _body_is_json(resp)
+	if resp.status_code == 200:
+		return not _body_is_json(resp)
+	return False
+
+
+def search_github(query, session, lang=None, repo=None, path=None, limit=10, note=lambda event, query, detail: None, on_transport_error=lambda exc: None):
+	"""Results for *query*; [] on no results or an error; None on a block (_grep_app_blocked).
+
+	`note(event, query, detail)` receives `grep_undecodable` (detail: the
+	decode error), `grep_rate_limited` (detail: 429), `grep_http` (detail: the
+	status code), `grep_schema` (detail None: a JSON answer not in grep.app's
+	shape) and `grep_error` (detail: the exception);
+	`on_transport_error(exc)` is called in the except arm before the [] is
+	returned.
+	"""
+	params = {'q': query}
+	if lang:
+		params['f.lang'] = lang
+	if repo:
+		params['f.repo'] = repo
+	if path:
+		params['f.path'] = path
+
+	url = f"https://grep.app/api/search?{urlencode(params)}"
+	# The fetch is modelled as coming from the page the warm-up loaded; the
+	# warm-up URL itself stands in only when the warm-up failed (R2-L4).
+	page = session.last_navigation_url or "https://grep.app/"
+
+	try:
+		resp = session.get(url, headers={"Accept": "application/json, text/plain, */*"}, mode="cors", referer=page, timeout=15)
+		if resp.decode_error is not None:
+			note("grep_undecodable", query, resp.decode_error)
+			return []
+		if _grep_app_blocked(resp):
+			return None
+		if resp.status_code == 429:
+			note("grep_rate_limited", query, resp.status_code)
+			return []
+		if resp.status_code != 200:
+			note("grep_http", query, resp.status_code)
+			return []
+		data = json.loads(resp.text)
+		if _grep_hits(data) is None:
+			# Not grep.app's shape (F8): a parse failure, not a transport
+			# error -- noted, [] returned, and the session kept.
+			note("grep_schema", query, None)
+			return []
+		return parse_grep_results(data, limit)
+	except Exception as e:
+		# A transport failure is never a block (D16 M2): a note and [].
+		note("grep_error", query, e)
+		on_transport_error(e)
+		return []
+
+
+def _code_fence(lines):
+	"""A backtick fence no line of *lines* can close: one backtick longer than
+	the longest backtick run in them, and never shorter than three."""
+	longest = 0
+	for line in lines:
+		run = 0
+		for ch in line:
+			if ch == "`":
+				run += 1
+				if run > longest:
+					longest = run
+			else:
+				run = 0
+	return "`" * max(3, longest + 1)
+
+
+def format_code_results(results, query=None):
+	"""The results as markdown. The header fields go through _code_field (one
+	line, no backtick, no invisible or display-steering code point: F4 and the
+	Unicode classes), the URL and the query echo through _code_line, and the
+	code through _code_clean keeping tab and newline, before the fence is
+	measured over exactly the text it encloses."""
+	if not results:
+		return "No results found."
+
+	output = []
+	if query:
+		output.append(f"## Query: {_code_line(query)}")
+		output.append("")
+
+	for i, result in enumerate(results, 1):
+		output.append(f"### Result {i}: {_code_field(result['repo'])} - {_code_field(result['file_path'])}")
+		output.append(f"**URL**: {_code_line(result['url'])}")
+		output.append(f"**Branch**: {_code_field(result['branch'])}")
+		output.append(f"**Language**: {result['language']}")
+
+		if result['code_lines']:
+			first_line = result['code_lines'][0][0]
+			last_line = result['code_lines'][-1][0]
+			output.append(f"**Line {first_line}-{last_line}:**")
+			codes = [_code_clean(code, "\t\n") for _num, code in result['code_lines']]
+			fence = _code_fence(codes)
+			output.append(fence)
+			for code in codes:
+				output.append(code)
+			output.append(fence)
+		else:
+			output.append("No code snippet available")
+
+		output.append("")
+
+	return '\n'.join(output)
+# END GENERATED: 28c5c7523735
 
 
 # ---------------------------------------------------------------------------
@@ -7096,200 +7323,121 @@ def _ch_session_new(decoders=None, connect_policy=None, timeout=30, max_bytes=0,
 
 _DECODERS = {"br": _brotli_decompress, "zstd": _zstd_decompress}
 
-# Hosts that blocked the VERIFIED transport in this process (D15). From then on
-# this process reaches them over the Chrome path (certificate NOT verified).
-# Per process, never persisted: the Chrome path is taken only after a block was
-# observed in THIS run.
-_CHROME_AFTER_BLOCK = set()
 
+def create_session():
+	"""A new session on the Chrome path (certificate NOT verified).
 
-def create_session(transport="verified"):
-	"""A new session and its transport name ("verified" unless told otherwise).
-
-	connect_policy is _ch_public_only_policy on both transports: the Chrome
-	path verifies no certificate, so a MITM could answer it with a redirect
-	into private or metadata space, which the policy refuses (on the verified
-	transport it is defence in depth). tls12_fallback and allow_downgrade stay
-	False, and no rand= is ever passed. max_bytes is SEARCH_MAX_BYTES (F32).
+	connect_policy is _ch_public_only_policy: the Chrome path verifies no
+	certificate, so a MITM could answer it with a redirect into private or
+	metadata space, which the policy refuses. tls12_fallback and allow_downgrade
+	stay False, and no rand= is ever passed. max_bytes is SEARCH_MAX_BYTES (F32).
 	"""
-	return _ch_session_new(decoders=_DECODERS, connect_policy=_ch_public_only_policy, timeout=20, max_bytes=SEARCH_MAX_BYTES, transport=transport), transport
-
-
-def _transport_for(host_key):
-	return "chrome" if host_key in _CHROME_AFTER_BLOCK else "verified"
-
-
-def warmup_session(session):
-	try:
-		session.get("https://grep.app/", timeout=10)
-	except Exception:
-		pass
-	time.sleep(random.uniform(0.8, 1.5))
+	return _ch_session_new(decoders=_DECODERS, connect_policy=_ch_public_only_policy, timeout=20, max_bytes=SEARCH_MAX_BYTES, transport="chrome")
 
 
 # ---------------------------------------------------------------------------
-# GitHub search via grep.app
+# The CLI's session hook and stderr notes
 # ---------------------------------------------------------------------------
 
-def _body_is_json(resp):
-	"""True when the (decoded) body parses as JSON; False otherwise, never raises."""
-	try:
-		json.loads(resp.text)
-	except (ValueError, ChromeClientError):
-		return False
-	return True
+# One run's session state: the open session and how many queries the run has
+# started. _cli_close() ends a run.
+_CLI_STATE = {"session": None, "queries": 0}
 
 
-def _grep_app_blocked(resp):
-	"""grep.app's bot-block signal (D15, D16 S2/M3, D17): True only for a block.
+def _cli_close():
+	"""Close the run's session, if any, and reset the state for the next run."""
+	session = _CLI_STATE["session"]
+	_CLI_STATE.update(session=None, queries=0)
+	if session is not None:
+		session.close()
 
-	Judged on grep.app's own host only (a redirect target's answer is never a
-	block), then: 403; a 429 whose body is a non-JSON text/html page; a 200
-	whose body is not JSON. A 429 with a JSON body is a rate limit and 5xx a
-	server fault -- never a block. An undecodable body is not judged here.
+
+def with_session(endpoint, fn):
+	"""fn(session, bad) on a warmed-up grep.app session (*endpoint* is "grep.app").
+
+	Pacing and rotation are per QUERY: before every query but the first a
+	random 1.5-3.0 s sleep, and every ROTATE_EVERY-th query a fresh session
+	(closed, recreated, warmed up). When fn's search reports a transport
+	failure (bad), the session is closed and dropped, so the next query opens a
+	new one.
 	"""
-	# task-038 measured (.claude/tmp/task038-live.txt): the verified transport got 429 text/html non-JSON on both / and /api/search while the Chrome path got 200 JSON seconds apart -- a fingerprint block, not a rate limit.
-	if urllib.parse.urlsplit(resp.url or "").hostname != "grep.app":
-		return False
-	if resp.decode_error is not None:
-		return False
-	if resp.status_code == 403:
-		return True
-	if resp.status_code == 429:
-		content_type = (resp.headers.get("content-type") or "").lower()
-		return "text/html" in content_type and not _body_is_json(resp)
-	if resp.status_code == 200:
-		return not _body_is_json(resp)
-	return False
-
-
-def search_github(query, session, lang=None, repo=None, path=None, limit=10):
-	"""Results for *query*; [] on no results or an error; None on a block (_grep_app_blocked)."""
-	params = {'q': query}
-	if lang:
-		params['f.lang'] = lang
-	if repo:
-		params['f.repo'] = repo
-	if path:
-		params['f.path'] = path
-
-	url = f"https://grep.app/api/search?{urlencode(params)}"
-	# The fetch is modelled as coming from the page the warm-up loaded; the
-	# warm-up URL itself stands in only when the warm-up failed (R2-L4).
-	page = session.last_navigation_url or "https://grep.app/"
-
+	state = _CLI_STATE
+	if state["queries"] > 0:
+		time.sleep(random.uniform(1.5, 3.0))
+		if state["queries"] % ROTATE_EVERY == 0 and state["session"] is not None:
+			state["session"].close()
+			state["session"] = None
+	state["queries"] += 1
+	if state["session"] is None:
+		state["session"] = create_session()
+		warmup_code_session(state["session"])
+	broken = []
 	try:
-		resp = session.get(
-			url,
-			headers={"Accept": "application/json, text/plain, */*"},
-			mode="cors",
-			referer=page,
-			timeout=15,
-		)
-		if resp.decode_error is not None:
-			print(f"  [grep.app body undecodable: {resp.decode_error}]", file=sys.stderr)
-			return []
-		if _grep_app_blocked(resp):
-			return None
-		if resp.status_code == 429:
-			print(f"  [Rate limited for: {query}]", file=sys.stderr)
-			return []
-		if resp.status_code != 200:
-			print(f"  [HTTP {resp.status_code} for: {query}]", file=sys.stderr)
-			return []
-		data = json.loads(resp.text)
-		return parse_grep_results(data, limit)
-	except Exception as e:
-		# A transport failure is never a block (D16 M2): an error line and [],
-		# so breaking the verified handshake cannot force the Chrome path.
-		print(f"  [grep.app error: {e}]", file=sys.stderr)
-		return []
+		return fn(state["session"], broken.append)
+	finally:
+		if broken and state["session"] is not None:
+			state["session"].close()
+			state["session"] = None
 
 
-# ---------------------------------------------------------------------------
-# Output formatting
-# ---------------------------------------------------------------------------
+def _cli_note(event, query, detail):
+	"""One stderr line per search note, the text search_github printed before the lift.
 
-def format_results(results, query=None, transport=None):
-	# No transport label here (D16 L2): there is no content to attribute.
-	if not results:
-		return "No results found."
-
-	output = []
-	if query:
-		output.append(f"## Query: {query}")
-		output.append("")
-
-	if transport == "chrome":
-		output.append("**Transport**: chrome (certificate NOT verified)")
-		output.append("")
-
-	for i, result in enumerate(results, 1):
-		output.append(f"### Result {i}: {result['repo']} - {result['file_path']}")
-		output.append(f"**URL**: {result['url']}")
-		output.append(f"**Branch**: {result['branch']}")
-		output.append(f"**Language**: {result['language']}")
-
-		if result['code_lines']:
-			first_line = result['code_lines'][0][0]
-			last_line = result['code_lines'][-1][0]
-			output.append(f"**Line {first_line}-{last_line}:**")
-			output.append("```")
-			for _num, code in result['code_lines']:
-				output.append(code)
-			output.append("```")
-		else:
-			output.append("No code snippet available")
-
-		output.append("")
-
-	return '\n'.join(output)
+	The query and the detail (an exception's text can carry third-party bytes)
+	go through the generated _code_line first: one line, no control or
+	invisible character reaches the terminal (F18).
+	"""
+	query = _code_line(query)
+	detail = _code_line(detail)
+	if event == "grep_undecodable":
+		line = f"  [grep.app body undecodable: {detail}]"
+	elif event == "grep_rate_limited":
+		line = f"  [Rate limited for: {query}]"
+	elif event == "grep_http":
+		line = f"  [HTTP {detail} for: {query}]"
+	elif event == "grep_schema":
+		line = f"  [grep.app answer not in the expected shape for: {query}]"
+	elif event == "grep_error":
+		line = f"  [grep.app error: {detail}]"
+	else:
+		return
+	print(line, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def _run_github(queries, lang=None, repo=None, path=None, limit=10):
-	session, transport = create_session(_transport_for("grep.app"))
-	warmup_session(session)
+def _run_github(queries, lang=None, repo=None, path=None, limit=10, blocked=None):
+	"""Search every query on grep.app; returns (output_sections, has_results).
 
+	A query grep.app blocks gets one stderr line and is treated as no results;
+	its query text is appended to *blocked* when the caller passes a list (main
+	exits 1 on it).
+	"""
 	output_sections = []
 	has_results = False
 
 	try:
-		for i, query in enumerate(queries):
-			if i > 0:
-				time.sleep(random.uniform(1.5, 3.0))
-
-			if i > 0 and i % ROTATE_EVERY == 0:
-				session.close()
-				session, transport = create_session(_transport_for("grep.app"))
-				warmup_session(session)
-
-			results = search_github(query, session, lang=lang, repo=repo, path=path, limit=limit)
-
-			if results is None and transport == "verified":
-				# ONE Chrome re-issue, and the sticky switch for the rest of the run (D15).
-				print(f"  [grep.app blocked the verified client on: {query} -- retrying once via chrome (certificate NOT verified)]", file=sys.stderr)
-				_CHROME_AFTER_BLOCK.add("grep.app")
-				session.close()
-				session, transport = create_session("chrome")
-				warmup_session(session)
-				results = search_github(query, session, lang=lang, repo=repo, path=path, limit=limit)
+		for query in queries:
+			def fn(session, bad, query=query):
+				return search_github(query, session, lang=lang, repo=repo, path=path, limit=limit, note=_cli_note, on_transport_error=bad)
+			results = with_session("grep.app", fn)
 
 			if results is None:
-				print(f"  [grep.app blocked the chrome client too on: {query}]", file=sys.stderr)
+				print(f"  [Blocked by grep.app on: {_code_line(query)}]", file=sys.stderr)
+				if blocked is not None:
+					blocked.append(query)
 				results = []
 
 			if results:
 				has_results = True
-				section = format_results(results, query=query, transport=transport) if len(queries) > 1 else format_results(results, transport=transport)
+				section = format_code_results(results, query=query) if len(queries) > 1 else format_code_results(results)
 				output_sections.append(section)
 			elif len(queries) > 1:
-				output_sections.append(f"## Query: {query}\n\nNo results found.\n")
+				output_sections.append(f"## Query: {_code_line(query)}\n\nNo results found.\n")
 	finally:
-		session.close()
+		_cli_close()
 
 	return output_sections, has_results
 
@@ -7314,12 +7462,15 @@ Examples:
 	parser.add_argument('--limit', type=int, default=10, help='Max results per query (default: 10)')
 	args = parser.parse_args()
 
+	blocked = []
 	output_sections, has_results = _run_github(
-		args.query, lang=args.lang, repo=args.repo, path=args.path, limit=args.limit
+		args.query, lang=args.lang, repo=args.repo, path=args.path, limit=args.limit, blocked=blocked
 	)
 
 	if not has_results:
-		print("No results found for any query.", file=sys.stderr)
+		# A block already printed its one line; "no results" is the other exit 1.
+		if not blocked:
+			print("No results found for any query.", file=sys.stderr)
 		sys.exit(1)
 
 	if len(args.query) > 1:
@@ -7327,6 +7478,9 @@ Examples:
 		print('\n---\n\n'.join(output_sections))
 	else:
 		print(output_sections[0] if output_sections else "")
+
+	if blocked:
+		sys.exit(1)
 
 
 if __name__ == '__main__':
