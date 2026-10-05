@@ -8,8 +8,8 @@ sources:
   - requirements.yaml
   - Scripts/task-validator.py
 verified:
-  commit: 07be197
-  date: 2026-10-02
+  commit: 3bedc59
+  date: 2026-10-03
 links:
   - scripts
   - skills
@@ -188,7 +188,9 @@ out); that Phase 1 graph — itself complete and inspector-verified — was repl
 the sandbox-run graph (`1446acb`, 1071 in and 953 out); and the sandbox-run graph,
 shipped and marked archived, was replaced by the R-0044 stdlib Chrome client graph
 (`3fbe5bf`, 4504 in and 1076 out). Each displaced graph survives only inside the
-commit that deleted it.
+commit that deleted it. The R-0044 graph went the same way in `330dd26`, replaced
+by the mcp-proxy graph (3250 in and 4157 out), whose header states that it is not
+a roadmap item and carries no `roadmap_item` key on purpose `requirements.yaml`.
 
 That is the plainest argument for this wiki that the repo makes on its own. Both
 displaced *features* still have readable designs here — [[spec-purity-unification]]
