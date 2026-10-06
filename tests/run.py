@@ -214,6 +214,10 @@ def run_mcp_proxy(opts):
     return run_python_suite("test_mcp_proxy", opts)
 
 
+def run_llm_router(opts):
+    return run_python_suite("test_llm_router", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -624,7 +628,7 @@ SUITES = [
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
-     "builder declared", 58),
+     "builder declared", 59),
     # TYPED: a fixed case table (A 6, B 9, C 5, E 2).
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
@@ -679,6 +683,15 @@ SUITES = [
      "tools/call as SSE with keepalive, caps, shutdown with live traffic, "
      "total header deadline, strict headers, deep nesting, malformed "
      "header lines, id-less initialize, request id shape", 103),
+    # TYPED: a fixed case table (A 26, B 24, C 14, D 14, E 13, F 16, G 17,
+    # H 6 x 3 kinds + H7 + H8-H9 = 21, I 7, J 22 = 174), so a count that
+    # moves is the alarm, not noise.
+    ("llm_router", run_llm_router,
+     "llm-router, the Anthropic Messages router: config refusals (0600, "
+     "duplicate keys), bearer/Host/Origin/misplaced token, SSRF policy and "
+     "verified TLS, passthrough relay, llama.cpp quirk registry, Mistral "
+     "translation and stream state machine, timeouts and disconnects per "
+     "kind, secret leaks, static rules, hygiene", 174),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

@@ -1,0 +1,12 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_tfll0123456789abcdef4567","type":"message","role":"assistant","content":[],"model":"tf-llamacpp-model.gguf","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":42,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Partial answer"}}
+
+event: error
+data: {"code":503,"message":"tf: the slot was released, the server is shutting down","type":"unavailable_error"}
+

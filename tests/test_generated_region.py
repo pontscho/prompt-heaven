@@ -181,7 +181,7 @@ CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
 # any edit to it. `target-glob` asserts the two spellings agree, and
 # `fleet-ok` gates these alongside the servers -- a declared host the gate did
 # not walk would be a target whose drift nothing reports.
-DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py")
+DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py", "llm-router.py")
 
 # The sources a host takes WHOLE or not at all (G-c): the Chrome client and its
 # two decoders are one state machine whose blocks call one another, so a host
@@ -1933,14 +1933,17 @@ def group_tabs(suite, mod):
         mod.host_indent(tab_host("_offset")) != "tab",
         "a column-0 marker in a tab file was not detected as a tab host",
     )
-    # The declared hosts are outside the glob above, and both search scripts
-    # are tabs throughout -- the fleet's tab hosts that are not servers.
+    # The declared hosts are outside the glob above. The two search scripts are
+    # tabs throughout -- the fleet's tab hosts that are not servers -- and
+    # llm-router.py is a space host.
     declared_styles = {name: mod.host_indent(Path(SCRIPTS, name).read_text(encoding="utf-8"))
                        for name in DECLARED_HOSTS}
     problems += problem_if(
         declared_styles != {"search_duckduckgo.py": "tab",
-                            "search_github.py": "tab"},
-        "expected both search scripts to be tab hosts, got %s" % declared_styles,
+                            "search_github.py": "tab",
+                            "llm-router.py": "space"},
+        "expected both search scripts to be tab hosts and the router a space host, got %s"
+        % declared_styles,
     )
     suite.record(GF, "host-indent-from-tokens", problems,
                  detail=["tab: %s" % ", ".join(tabbed),

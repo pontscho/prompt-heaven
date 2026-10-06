@@ -143,6 +143,27 @@ smoke row of `Scripts/mcp-proxy.py`; nothing imports it. The `tf` prefix is
 kept (tool `tf_stub_call`, functions `tf_*`), and its flags and functions are
 documented in its own docstring.
 
+## llm_router/ — not an LSP fixture
+
+```
+llm_router/ README.md                           provenance table, the no-key rule, sweeps
+            tf_llamacpp_stream_tool.sse         llama.cpp streamed tool call
+            tf_llamacpp_error.json              llama.cpp error body
+            tf_llamacpp_stream_error.sse        llama.cpp error mid-stream
+            tf_mistral_stream_text.sse          Mistral chat-completions plain text stream
+            tf_mistral_stream_tool.sse          Mistral one tool call
+            tf_mistral_stream_parallel.sse      Mistral two parallel tool calls
+            tf_mistral_error_extra_inputs.json  Mistral 422 "Extra inputs are not permitted"
+```
+
+Backend wire shapes a scripted loopback peer replays to `Scripts/llm-router.py`;
+read by `tests/test_llm_router.py` groups E (llama.cpp quirks), F (Anthropic ->
+chat-completions translation) and G (chat-completions SSE -> Anthropic SSE);
+nothing imports them. Whether each file is a reduced capture (M4/M5) or
+synthetic is recorded per file in `llm_router/README.md`, not here. **No
+fixture holds a key** in any form; case J5 sweeps the directory on every run.
+The `tf` prefix is kept on every file name.
+
 ## Notes on the toolchain
 
 - No `compile_commands.json` is committed. It is inherently machine-specific and

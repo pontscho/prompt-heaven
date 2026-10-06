@@ -89,8 +89,10 @@ CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 # search, and a copy of the one file taken alone would stop at an ImportError.
 # Each takes the default run and `--check` exactly as a server does; the
 # `--census fleet` count stays the MCP glob's, because that census is ABOUT the
-# server fleet and says so in its first line.
-DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py")
+# server fleet and says so in its first line. llm-router.py is a stdlib HTTP
+# server run by path, not an MCP server; it takes `_configure_logging` only.
+DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py",
+                  "llm-router.py")
 
 # Canonical sources a host takes WHOLE or not at all (G-c): the Chrome client
 # and its two decoders are one state machine whose blocks call each other, so a
@@ -143,6 +145,15 @@ CENSUS_KINDS = ("fleet", "sources", "hosts", "hand-copies")
 # first; split that marker and it stops being an exclusion, while `_result` stays
 # one for a reason no granularity can touch.
 HAND_COPY_REASONS: Dict[Tuple[str, str], str] = {
+    ("llm-router.py", "_CH_TRANSLATION_PREFIXES"):
+        "_mcp_chrome.py is a WHOLE source (G-c); the router needs its address "
+        "classifier and none of the client",
+    ("llm-router.py", "_ch_address_refused"):
+        "_mcp_chrome.py is a WHOLE source (G-c); the router needs its address "
+        "classifier and none of the client",
+    ("llm-router.py", "_ch_embedded_ipv4"):
+        "_mcp_chrome.py is a WHOLE source (G-c); the router needs its address "
+        "classifier and none of the client",
     ("mcp-git.py", "_max_answer_chars"):
         "excluded twice over: it defaults to its own DEFAULT_MAX_CHARS rather "
         "than to the value the canonical block renders its reader with, and its "

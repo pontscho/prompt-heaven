@@ -1,0 +1,10 @@
+data: {"id":"tfcmpl-g-tool","object":"chat.completion.chunk","created":1759622400,"model":"tf-mistral-upstream","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"tfcmpl-g-tool","object":"chat.completion.chunk","created":1759622400,"model":"tf-mistral-upstream","choices":[{"index":0,"delta":{"tool_calls":[{"id":"tfToolR01","type":"function","function":{"name":"Read","arguments":"{\"file_path\": "},"index":0}]},"finish_reason":null}]}
+
+data: {"id":"tfcmpl-g-tool","object":"chat.completion.chunk","created":1759622400,"model":"tf-mistral-upstream","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"/tf/g15.txt\"}"},"index":0}]},"finish_reason":null}]}
+
+data: {"id":"tfcmpl-g-tool","object":"chat.completion.chunk","created":1759622400,"model":"tf-mistral-upstream","choices":[{"index":0,"delta":{"content":""},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":40,"total_tokens":58,"completion_tokens":18}}
+
+data: [DONE]
+
