@@ -16,6 +16,7 @@ WIP now: 0 of 3. Archive: 59 closed items (50 done, 9 dropped).
 | later | R-0048 | idea  | Answer a HelloRetryRequest that selects P-384 (FLAG-2)                                              | yes   |
 | later | R-0052 | idea  | Measure the DDG challenge page's structural marker and replace the fallback block predicate         | yes   |
 | later | R-0047 | idea  | implement certificate verification in _ChTls so fingerprint and authenticity stop being a trade-off | yes   |
+| later | R-0072 | idea  | Lift the stdlib HTTP front (mcp-proxy, llm-router) into a canonical source                          | yes   |
 | inbox | R-0063 | idea  | Harden --log-file open in the generated logging block (O_NOFOLLOW, owner check)                     | yes   |
 | inbox | R-0064 | idea  | mcp-proxy: per-session share of the global max-inflight budget                                      | yes   |
 | inbox | R-0065 | idea  | mcp-proxy: session table exhaustion holds slots for a full idle period                              | yes   |
@@ -25,6 +26,10 @@ WIP now: 0 of 3. Archive: 59 closed items (50 done, 9 dropped).
 | inbox | R-0069 | idea  | mcp-proxy: pre-auth stdlib error pages                                                              | yes   |
 | inbox | R-0070 | idea  | Lift _log_value into shared plumbing so no server logs raw method, id or name                       | yes   |
 | inbox | R-0071 | idea  | mcp-search: revisit the declared Unicode limits if the threat model grows                           | yes   |
+| inbox | R-0073 | idea  | llm-router: anthropic backend kind (ToS-gated)                                                      | yes   |
+| inbox | R-0074 | idea  | Refuse 192.0.0.0/24 under the public address policy in the canonical Chrome client                  | yes   |
+| inbox | R-0075 | idea  | Remove mcp-proxy's ready file on an ordered shutdown                                                | yes   |
+| inbox | R-0076 | idea  | Send mcp-proxy's 100 Continue only after authentication                                             | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -88,6 +93,22 @@ Closing the gap is what would let the Chrome path become the default again in we
 - 2026-10-01 new->unset: follow-up of R-0044 (task-056, D15)
 - 2026-10-02 unset->later: Triage 2026-10-02: real gap but narrow exposure (Chrome path is opt-in in webfetch, once-per-host after a block in search); large stdlib X.509 work.
 - 2026-10-05 later->later: edited why: premise drift after 8dde3a6: search is Chrome-only now
+
+## R-0072 · Lift the stdlib HTTP front (mcp-proxy, llm-router) into a canonical source
+
+state: idea
+horizon: later
+origin: docs/adr/0028-route-by-model-translate-at-the-edge.md#the-http-front-is-a-copy
+blocked_by: []
+tags: [llm-router, mcp-proxy, shared-code]
+
+The stdlib HTTP front (plan pieces P5 and P7-P17: the threading server, the header-deadline reader, the structure-only log line, the refusal, the single-header read, the precheck, the bounded body framing, the SSE relay, the value logger, the ready file and the token value) is now carried by two hosts, mcp-proxy and llm-router, as declared copies. ADR 0014 and ADR 0025 make a second carrier the revisit trigger for a canonical source, and ADR 0028 records the lift as deferred, not done.
+
+The work is first a decision, then a move: what the domain of a canonical stdlib HTTP front is, and which of the divergences are parameters (mcp-proxy bridges into an asyncio core and answers empty-bodied refusals; the router is synchronous and answers Anthropic error envelopes). Until then the copy's drift risk is held by ADR 0028's copy table, by static case J1, and by this item. The verbatim copies kept their mcp-proxy names so the lift is a move without renames.
+
+### Log
+
+- 2026-10-05 new->later: recorded by ADR 0028
 
 # inbox
 
@@ -225,3 +246,71 @@ The 2026-10-05 Unicode hardening of the search output (commit 8dde3a6) drops con
 ### Log
 
 - 2026-10-05 new->unset: proposed by security review 2026-10-05
+
+## R-0073 · llm-router: anthropic backend kind (ToS-gated)
+
+state: idea
+horizon: unset
+origin: docs/adr/0028-route-by-model-translate-at-the-edge.md#the-reserved-anthropic-kind
+blocked_by: []
+tags: [llm-router]
+
+A fourth backend kind, real Anthropic emulating Claude Code's own client identity, is reserved in llm-router but not built: the config loader refuses it. Its full design is a separate future plan, and no code is written until the user answers the ToS gate explicitly.
+
+Open questions that plan must answer:
+
+- ToS gate (the gating question): is emulating Claude Code's client identity (beta headers, user agent, system-prompt preamble) permitted under the Anthropic ToS/AUP for this account?
+- Credential and OAuth refresh: API key or OAuth subscription token; if OAuth, where the refresh token lives, who refreshes it, and how two in-flight requests avoid a refresh race.
+- Beta union: is anthropic-beta forwarded verbatim, filtered, or sent as the union of the client's values and the ones the identity requires?
+- Session-id source: the client's own header, or one minted per Claude Code process.
+- Fingerprint: which identity headers (user-agent, x-app, anthropic-dangerous-direct-browser-access) are forwarded, re-synthesised or dropped.
+- Prompt caching (cache_control and usage.cache_* relayed), rate-limit headers relayed, whether count_tokens is forwarded, and whether this kind may share a process with LAN backends.
+
+### Log
+
+- 2026-10-05 new->unset: recorded by ADR 0028, gated on ToS
+
+## R-0074 · Refuse 192.0.0.0/24 under the public address policy in the canonical Chrome client
+
+state: idea
+horizon: unset
+origin: user:2026-10-06:chrome-client-192-0-0-0-24
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+llm-router security review 20261005-212328, finding V11 (verified LOW, CWE-918). On Python 3.9 ipaddress classifies only parts of 192.0.0.0/24 as non-global, so an address such as 192.0.0.192 passes the public-policy address refusal. The function lives in the canonical source Scripts/_mcp_chrome.py and is hand-copied verbatim into llm-router.py (held equal by its J20 rule), so the fix is: refuse the range except the .9 and .10 anycast addresses in the canonical source, regenerate or resync every carrier, and gate it. TLS verification blocks practical exploitation. Recorded in ADR 0028 under Out of scope, deliberately.
+
+### Log
+
+- 2026-10-06 new->unset: proposed by llm-router validation round 1
+
+## R-0075 · Remove mcp-proxy's ready file on an ordered shutdown
+
+state: idea
+horizon: unset
+origin: user:2026-10-06:mcp-proxy-ready-file-removal
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Counterpart of llm-router finding V24 (verified LOW, CWE-459), fixed in the router as ADR 0028 deviation 29. mcp-proxy writes its ready file but never removes it, so a stale file with a dead pid and port outlives the process. Port the router's approach: on ordered shutdown open the file without following a symlink, and unlink it only if it still holds our own pid; declare the read-then-unlink race and the SIGKILL case.
+
+### Log
+
+- 2026-10-06 new->unset: proposed by llm-router validation round 1
+
+## R-0076 · Send mcp-proxy's 100 Continue only after authentication
+
+state: idea
+horizon: unset
+origin: user:2026-10-06:mcp-proxy-expect-100-after-auth
+blocked_by: []
+severity: low
+tags: [scripts, security]
+
+Counterpart of llm-router finding V37 (verified LOW, CWE-696), fixed in the router as ADR 0028 deviation 18. mcp-proxy's HTTP front runs HTTP/1.1 and does not override handle_expect_100, so the stdlib answers Expect: 100-continue inside parse_request, before the bearer check. The body is still never read before auth, so the impact is negligible. Port the router's fix: handle_expect_100 sends nothing, and the POST path sends 100 Continue only after auth and the framing checks pass; test it red first.
+
+### Log
+
+- 2026-10-06 new->unset: proposed by llm-router validation round 1

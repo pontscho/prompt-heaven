@@ -1,7 +1,7 @@
 ---
 name: generated-regions
 type: component
-status: active
+status: draft
 title: Generated regions — how the MCP fleet shares plumbing without importing it
 description: The amalgamate generator, its canonical sources, the hand-declared hosts that are not servers, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
 sources:
@@ -46,9 +46,11 @@ Not every host is a server. Both search scripts, `Scripts/search_duckduckgo.py`
 and `Scripts/search_github.py`, take the stdlib HTTP client and its two content
 decoders they share with `Scripts/mcp-webfetch.py` and `Scripts/mcp-search.py`,
 and each takes the search domain it shares with `Scripts/mcp-search.py` — web
-search for the DDG script, code search for the grep.app one. They are targets because the generator **names them
-by hand** — see "A host outside the glob" below — not because anything about
-them matches the server glob.
+search for the DDG script, code search for the grep.app one. The LLM router
+`Scripts/llm-router.py`, an HTTP server that is not an MCP server, takes the
+logging block only. They are targets because the generator **names them
+by hand** `Scripts/amalgamate.py:DECLARED_HOSTS` — see "A host outside the glob"
+below — not because anything about them matches the server glob.
 
 **Scope note.** This page is about the *MCP fleet's* generated regions. The repo
 contains two other marker-delimited generation mechanisms and neither is this
@@ -342,7 +344,7 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_int_param` | `Scripts/_mcp_json.py` | 5 | `Scripts/mcp-jenkins.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py` |
 | `_json_error_window` | `Scripts/_mcp_json.py` | 16 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_result` | `Scripts/_mcp_json.py` | 16 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-wiki.py` |
-| `_configure_logging` | `Scripts/_mcp_logging.py` | 17 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_configure_logging` | `Scripts/_mcp_logging.py` | 18 | `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_abs_path` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
 | `_abs_uri` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
 | `_notify` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
@@ -382,8 +384,8 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 0 | no host |
 | `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 4 | `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 
-19 hosts scanned; 283 canonical blocks, of which 279 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
-<!-- END MEASURED: 1c964463cf3f -->
+20 hosts scanned; 283 canonical blocks, of which 279 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
+<!-- END MEASURED: 55ce55e92db3 -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
@@ -513,7 +515,8 @@ measures both on every run: `tab-safety-real-blocks` asserts the unsafe set is
 exactly `_rows_note` over the real canonical text, and `host-indent-from-tokens`
 that the tab-indented servers are exactly `mcp-forge.py` and `mcp-webfetch.py`
 `tests/test_generated_region.py:group_tabs`, and — in the same case — that the
-declared hosts `Scripts/amalgamate.py:DECLARED_HOSTS` are tab-indented too. A block added to a source moves that set or
+two search scripts among the declared hosts `Scripts/amalgamate.py:DECLARED_HOSTS`
+are tab-indented, and `llm-router.py` is a space host. A block added to a source moves that set or
 fails there. The websocket source was written for the rule from the start: its tab
 host was the DDG search script, so every one of its blocks fits one call per
 physical line, the request built by appending rather than as one bracketed list,
@@ -574,6 +577,15 @@ blocking-socket wrapper, was removed. Both pass the same `--check`, are walked b
 the same `fleet-ok`, and are counted by the `canonical-block-hosts` table above
 rather than by the fleet census.
 
+`Scripts/llm-router.py` is the third declared host, and the first that shares no
+domain with the other two: a stdlib HTTP server run by path, not an MCP server,
+and space-indented. It takes `_configure_logging` only. The `_mcp_chrome.py`
+address classifier it needs for its upstream connections is kept as declared
+hand copies rather than generated — the router takes a few of that source's
+blocks, and the Chrome client is a source a host takes whole or not at all — so
+the hand-copy census reports those copies with their declared reason instead of
+as `[UNDECLARED]`.
+
 They are **not** in the `--census fleet` count, deliberately: that census is
 about the server fleet and says so in its first line, so its measured block above
 counts the servers only. A block generated only into a declared host, or into no
@@ -607,6 +619,9 @@ together, marking any copy with no reason UNDECLARED and naming any reason whose
 copy has gone:
 
 <!-- BEGIN MEASURED: hand-copy-census -->
+- `Scripts/llm-router.py`: `_CH_TRANSLATION_PREFIXES` -- declared: _mcp_chrome.py is a WHOLE source (G-c); the router needs its address classifier and none of the client
+- `Scripts/llm-router.py`: `_ch_address_refused` -- declared: _mcp_chrome.py is a WHOLE source (G-c); the router needs its address classifier and none of the client
+- `Scripts/llm-router.py`: `_ch_embedded_ipv4` -- declared: _mcp_chrome.py is a WHOLE source (G-c); the router needs its address classifier and none of the client
 - `Scripts/mcp-git.py`: `_max_answer_chars` -- declared: excluded twice over: it defaults to its own DEFAULT_MAX_CHARS rather than to the value the canonical block renders its reader with, and its body carries a camelCase fallback loop the canonical has no trace of
 - `Scripts/mcp-inspect.py`: `_int_param` -- declared: takes a parameter NAME and raises, where the canonical takes a default and falls back to it
 - `Scripts/mcp-tshark.py`: `_bool_param` -- declared: keeps the older (params, key, default) signature
@@ -615,9 +630,9 @@ copy has gone:
 - `Scripts/mcp-webfetch.py`: `_result` -- declared: annotates result as dict where the canonical says Any -- a body difference no re-indenting removes
 - `Scripts/mcp-webfetch.py`: `_rows_note` -- declared: excluded twice over: it is not tab-safe (its else aligns under an open paren) and its body diverged -- (start, shown, total) against the canonical (start, shown, total, exact), with no lower-bound branch
 
-7 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 4 of the 19 hosts scanned; 7 carry a declared reason and 0 do not.
+10 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 5 of the 20 hosts scanned; 10 carry a declared reason and 0 do not.
 Declared reasons with no hand copy left to explain: none.
-<!-- END MEASURED: 6aac33cd5c3e -->
+<!-- END MEASURED: 32ab7de33187 -->
 
 **Things that are not blocks at all** are documented in `Scripts/MCP_SKELETON.md`
 rather than censused, because the census cannot see them. `_tool_error` *cannot*

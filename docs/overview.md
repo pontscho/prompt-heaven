@@ -1,7 +1,7 @@
 ---
 name: overview
 type: overview
-status: active
+status: draft
 title: prompt-heaven Overview
 description: What prompt-heaven is and a map to the documentation wiki.
 sources:
@@ -52,7 +52,7 @@ each command was migrated into a skill under `ClaudeCode/skills/` — see [[skil
 ## Entry points for a newcomer
 
 - `README.md` — the one-line project purpose.
-- `ClaudeCode/CLAUDE.md` — the minion delegation table and coding mandates that
+- `ClaudeCode/CLAUDE.md` — the minion delegation rules and coding mandates that
   govern every Claude Code session using this repo.
 - `ClaudeCode/README.md` — the full plan -> task -> implement workflow.
 - `ClaudeCode/ARCHITECTURE.md` — the canonical rulebook for the three layers and

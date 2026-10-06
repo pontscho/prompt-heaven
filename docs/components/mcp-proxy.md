@@ -18,6 +18,8 @@ links:
   - tests
   - generated-regions
   - 0010-a-handler-failure-must-reach-iserror
+  - llm-router
+  - 0028-route-by-model-translate-at-the-edge
   - 0013-the-ceiling-is-a-payload-class
   - 0015-ambiguity-is-the-defect
 ---
@@ -148,6 +150,11 @@ the children, and the HTTP layer only validates the client's
 `ThreadingHTTPServer` `Scripts/mcp-proxy.py:_ProxyHttpServer`; handler threads
 own only their socket and a queue and reach loop state through a bridge whose
 every wait is bounded `Scripts/mcp-proxy.py:_bridge`.
+
+This front has a second carrier: `Scripts/llm-router.py` holds a declared,
+adapted copy of it rather than importing it, and no gate holds the two equal,
+so a fix here has to be carried there by hand
+([[llm-router]], [[0028-route-by-model-translate-at-the-edge]]).
 
 **Access.** The bind is an IPv4 literal, loopback by default (`127.0.0.1`); any
 other address needs `--allow-remote`, and IPv6 and host names are refused

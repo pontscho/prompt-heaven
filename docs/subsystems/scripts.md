@@ -1,7 +1,7 @@
 ---
 name: scripts
 type: subsystem
-status: active
+status: draft
 title: Scripts & MCP Servers
 description: Standalone Python scripts -- MCP servers and requirements.yaml task utilities.
 sources:
@@ -15,6 +15,8 @@ links:
   - 0011-a-truncated-payload-carries-the-first-cookie
   - 0023-the-websocket-client-is-a-sixth-domain
   - 0027-the-proxy-relays-it-never-composes
+  - llm-router
+  - 0028-route-by-model-translate-at-the-edge
   - requirements-yaml
   - tests
   - generated-regions
@@ -37,7 +39,8 @@ links:
 
 `Scripts/` holds standalone Python 3.9+ scripts: the MCP servers, the canonical
 sources their shared helpers are generated from `Scripts/amalgamate.py`, the
-`requirements.yaml` task utilities, and the search tools. The servers share that
+`requirements.yaml` task utilities, the search tools, and one HTTP server that is
+not an MCP server, the LLM router ("LLM router" below). The servers share that
 plumbing by generation rather than import; the canonical sources, the
 rules deciding what may be a shared block, and the copies deliberately left in
 place are [[generated-regions]].
@@ -165,7 +168,9 @@ check runs it as an unregistered server against a stub child
 framing ceiling, the restart budget, the forwarded cancel — the HTTP front's
 access rules, how to run it for ai-soul, how it is tested and its declared
 limits are [[mcp-proxy]]; why it relays and never composes is
-[[0027-the-proxy-relays-it-never-composes]].
+[[0027-the-proxy-relays-it-never-composes]]. Its HTTP front has one adapted copy
+outside the fleet, the LLM router's `Scripts/llm-router.py:_RouterHttpServer`
+(see "LLM router" below).
 
 `Scripts/mcp-search.py` (`search_call`: web search over DDG lite and Bing, code
 search over grep.app) is the other live server outside the table: it is **not
@@ -1049,3 +1054,25 @@ because a non-object `params` is now refused before any handler runs and so can 
 longer reach the `run()` catch-all `Scripts/_mcp_smoke_test.py`; the catch-all's
 `-32603` is proven live by the `run-catch-all-live-32603` row of the server's own
 suite `tests/test_mcp_search.py:group_g`, `mcp_search` in [[tests]].
+
+## LLM router
+
+`Scripts/llm-router.py` is **not an MCP server**: it is a stdlib-only HTTP server
+that Claude Code talks to instead of Anthropic, run by path with
+`--config <file>` and reached by pointing `ANTHROPIC_BASE_URL` at its loopback
+port `Scripts/llm-router.py:_rt_parser`. It accepts the Anthropic Messages API,
+routes each request by its exact `model` string, then the config's `default`
+`Scripts/llm-router.py:_rt_route`, and hands it to one of three backend kinds
+`Scripts/llm-router.py:KIND_CLASSES`: `passthrough` (an Anthropic-compatible
+upstream, relayed as-is), `llamacpp` (llama-server's own `/v1/messages`, its
+deviations repaired by named quirk rows) and `mistral` (translated to and from
+chat completions). Routing and secrets live in one JSON config that must be a
+regular file owned by the user with mode `0600`, opened without following a
+symlink `Scripts/llm-router.py:_rt_read_config_file`; network settings are flags,
+and there is no inline-config flag because argv is visible in `ps`. Its HTTP
+front is an adapted copy of [[mcp-proxy]]'s rather than a canonical source, and
+its one generated region is the logging block ([[generated-regions]]). The
+command line, the config schema, the per-kind header allow-lists, the security
+rules, the `llm_router` suite and the declared limits are [[llm-router]]; why it
+routes by model and translates at the edge is
+[[0028-route-by-model-translate-at-the-edge]].
