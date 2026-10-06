@@ -8,8 +8,8 @@ sources:
   - requirements.yaml
   - Scripts/task-validator.py
 verified:
-  commit: 3bedc59
-  date: 2026-10-03
+  commit: 575d201
+  date: 2026-10-06
 links:
   - scripts
   - skills
@@ -191,6 +191,9 @@ shipped and marked archived, was replaced by the R-0044 stdlib Chrome client gra
 commit that deleted it. The R-0044 graph went the same way in `330dd26`, replaced
 by the mcp-proxy graph (3250 in and 4157 out), whose header states that it is not
 a roadmap item and carries no `roadmap_item` key on purpose `requirements.yaml`.
+The mcp-proxy graph went the same way in `130f392`, replaced by the llm-router
+graph (3538 in and 3243 out), whose header likewise says it is not a roadmap item
+`requirements.yaml`.
 
 That is the plainest argument for this wiki that the repo makes on its own. Both
 displaced *features* still have readable designs here — [[spec-purity-unification]]

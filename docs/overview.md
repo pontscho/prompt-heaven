@@ -1,15 +1,15 @@
 ---
 name: overview
 type: overview
-status: draft
+status: active
 title: prompt-heaven Overview
 description: What prompt-heaven is and a map to the documentation wiki.
 sources:
   - README.md
   - ClaudeCode/CLAUDE.md
 verified:
-  commit: 9eeb66c
-  date: 2026-08-10
+  commit: 575d201
+  date: 2026-10-06
 links:
   - skills
   - agents

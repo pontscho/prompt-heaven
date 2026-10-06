@@ -1,7 +1,7 @@
 ---
 name: generated-regions
 type: component
-status: draft
+status: active
 title: Generated regions — how the MCP fleet shares plumbing without importing it
 description: The amalgamate generator, its canonical sources, the hand-declared hosts that are not servers, the four rules that decide what may be a shared block, and the two registers of deliberate exclusion.
 sources:
@@ -19,8 +19,8 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: 8dde3a6
-  date: 2026-10-05
+  commit: 575d201
+  date: 2026-10-06
 links:
   - scripts
   - tests

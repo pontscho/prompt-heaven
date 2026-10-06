@@ -1,13 +1,16 @@
 ---
 name: llm-router
 type: component
-status: draft
+status: active
 title: llm-router — an Anthropic Messages router for Claude Code
 description: The stdlib-only HTTP server between Claude Code and three kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp or Mistral adapter; its command line, its 0600 JSON config, the per-kind header allow-list and llama.cpp quirk rows, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/llm-router.py
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
+verified:
+  commit: 575d201
+  date: 2026-10-06
 links:
   - 0028-route-by-model-translate-at-the-edge
   - mcp-proxy

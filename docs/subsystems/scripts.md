@@ -1,14 +1,14 @@
 ---
 name: scripts
 type: subsystem
-status: draft
+status: active
 title: Scripts & MCP Servers
 description: Standalone Python scripts -- MCP servers and requirements.yaml task utilities.
 sources:
   - Scripts
 verified:
-  commit: 8dde3a6
-  date: 2026-10-05
+  commit: 575d201
+  date: 2026-10-06
 links:
   - overview
   - mcp-proxy

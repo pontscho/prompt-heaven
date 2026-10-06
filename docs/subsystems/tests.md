@@ -1,15 +1,15 @@
 ---
 name: tests
 type: subsystem
-status: draft
+status: active
 title: Test Fleet
 description: The stdlib-only functional test fleet — one explicit entry point, a two-layer harness, case counts written down once and machine-checked, and a severity model where FAIL is reserved for rules that cannot flap.
 sources:
   - tests
   - project-forge.yaml
 verified:
-  commit: 8dde3a6
-  date: 2026-10-05
+  commit: 575d201
+  date: 2026-10-06
 links:
   - agents
   - scripts

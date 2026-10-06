@@ -9,8 +9,8 @@ sources:
   - tests/test_mcp_proxy.py
   - tests/files/mcp_proxy/tf_stub_child.py
 verified:
-  commit: 3bedc59
-  date: 2026-10-03
+  commit: 575d201
+  date: 2026-10-06
 links:
   - 0027-the-proxy-relays-it-never-composes
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
