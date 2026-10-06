@@ -924,3 +924,17 @@ real Claude Code session that reads a file, runs `ls` and edits a scratch file,
 then a resumed turn that resends the tool history (the live proof of KD-6 on
 Mistral), with the log checked for keys and Ctrl-C checked for orphaned upstream
 connections — is user-gated, and its outcome will be recorded here.
+
+## Addendum (2026-10-06): GET /v1/models after all: the route keys as the Anthropic model list
+
+The plan left `/v1/models` out of scope. On 2026-10-06 the operator asked for it, and the router now answers `GET /v1/models` and `GET /v1/models/{id}` from the config alone -- no body is read and no backend is ever contacted.
+
+**Shape.** `GET /v1/models` is 200 with the Anthropic list shape: `data`, `has_more`, `first_id`, `last_id`. `data` holds one `{"type": "model", "id", "display_name", "created_at"}` per route key, in config order. The `default` route has no name and is never listed. With no routes, `data` is `[]` and `first_id` / `last_id` are null (`Scripts/llm-router.py:_rt_models_list`). `GET /v1/models/{id}` is 200 with the single entry when the percent-decoded segment (UTF-8, strict, exactly one segment) equals a route key. Otherwise it is a 404 `not_found_error` that never echoes the id (`Scripts/llm-router.py:_get_models`).
+
+**Front rules.** Both paths pass the POST precheck unchanged: header defects, Host, Origin, the constant-time bearer, the misplaced token and the pre-auth deadline. The query policy differs by path. On the models paths, `limit`, `before_id`, `after_id` and `beta` are accepted with any value; any other key is a 400 (`Scripts/llm-router.py:_RT_MODELS_QUERY_KEYS`). The messages paths keep `_RT_ALLOWED_QUERIES` and its 404. A GET with `Content-Length` above 0 is a 400, `Transfer-Encoding` is the POST framing 411, and a two-word HTTP/0.9 GET is a 400. These are the rules that matter for the models paths. POST on a models path, and HEAD or OPTIONS on one, is a 405 with `Allow: GET`. GET on a messages path stays a 405 with `Allow: POST`. The access line logs `/v1/models/{id}` as the literal `/v1/models/<id>`. As before, only a POST gets the `req` summary line.
+
+**display_name.** This is a new optional route key: a string of 1-256 characters (`_RT_DISPLAY_NAME_LIMIT`) with no control character. It is validated in `_rt_cfg_route`, and a refusal names the key, never the value. It is allowed on `default`, where it is unused. When it is absent, the list shows the route key.
+
+**Declared limit.** There is no pagination. The pagination keys are ignored, the whole list is always returned with `has_more` false, and every `created_at` is the router's start time (UTC, second precision) rather than a per-model date.
+
+**Cases.** The `llm_router` suite goes from 174 to 180 cases. A27 covers the display_name refusals and defaults. B25-B29 cover the list shape and order, the single-entry hit and the non-echoing 404, auth, Host and Origin, the query keys and the method matrix, and the empty route table, each asserting that the scripted peer was never contacted. All six ran red first, before the router changed, and then green.

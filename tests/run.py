@@ -683,15 +683,15 @@ SUITES = [
      "tools/call as SSE with keepalive, caps, shutdown with live traffic, "
      "total header deadline, strict headers, deep nesting, malformed "
      "header lines, id-less initialize, request id shape", 103),
-    # TYPED: a fixed case table (A 26, B 24, C 14, D 14, E 13, F 16, G 17,
-    # H 6 x 3 kinds + H7 + H8-H9 = 21, I 7, J 22 = 174), so a count that
+    # TYPED: a fixed case table (A 27, B 29, C 14, D 14, E 13, F 16, G 17,
+    # H 6 x 3 kinds + H7 + H8-H9 = 21, I 7, J 22 = 180), so a count that
     # moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
-     "duplicate keys), bearer/Host/Origin/misplaced token, SSRF policy and "
-     "verified TLS, passthrough relay, llama.cpp quirk registry, Mistral "
-     "translation and stream state machine, timeouts and disconnects per "
-     "kind, secret leaks, static rules, hygiene", 174),
+     "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
+     "SSRF policy and verified TLS, passthrough relay, llama.cpp quirk "
+     "registry, Mistral translation and stream state machine, timeouts and "
+     "disconnects per kind, secret leaks, static rules, hygiene", 180),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

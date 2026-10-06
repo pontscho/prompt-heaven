@@ -9,10 +9,12 @@ One router instance serves Claude Code. It accepts Anthropic Messages requests
 (/v1/messages, /v1/messages/count_tokens), looks the request's `model` up in
 its JSON config, and forwards the call to the backend that route names --
 relayed as-is (passthrough), with llama.cpp quirks repaired (llamacpp), or
-translated to and from the Mistral chat API (mistral). Every answer the client
-sees is Anthropic-shaped: a JSON body, an SSE stream that always closes its
-envelope, or the {"type":"error","error":{...}} envelope. Requires only Python
-3.9+ stdlib modules.
+translated to and from the Mistral chat API (mistral). GET /v1/models and
+GET /v1/models/{id} list the config's route keys (with an optional route
+display_name) in the Anthropic model-list shape, never contacting a backend.
+Every answer the client sees is Anthropic-shaped: a JSON body, an SSE stream
+that always closes its envelope, or the {"type":"error","error":{...}}
+envelope. Requires only Python 3.9+ stdlib modules.
 
 Layout: one file, eight units, in file order (each has one reason to change)
 -----------------------------------------------------------------------------
@@ -21,7 +23,8 @@ Layout: one file, eight units, in file order (each has one reason to change)
      (verbatim mcp-proxy copies), _rt_dumps(), _rt_loads() and _rt_make_scrubber() (KD-9).
   2. BackendSpec, RouteSpec, RouterConfig, load_config() -- the config schema. Pure: reads one file,
      never opens a socket.
-  3. InboundRequest, _rt_parse_inbound(), _rt_route() -- validate the Anthropic request once; route lookup.
+  3. InboundRequest, _rt_parse_inbound(), _rt_route() -- validate the Anthropic request once; route lookup;
+     _rt_models_list() / _rt_model_entry() -- the GET /v1/models answer shapes.
   4. The SSE toolkit -- _rt_sse_events() (a line parser) and AnthropicSseEncoder (a pure state machine
      that always closes its envelope).
   5. Adapters -- Adapter (the interface), PassthroughAdapter, LlamacppAdapter (+ its quirk registry),
@@ -78,6 +81,9 @@ Declared limits (not fixed; ADR 0028 carries the full list)
     its daemon thread lives until the OS resolver gives up.
   * The ready file is removed on a clean shutdown only, and only while it
     holds this pid (a replace between the check and the unlink is not seen).
+  * GET /v1/models does not paginate: limit, before_id and after_id are
+    accepted and ignored, the whole list is returned with has_more false, and
+    every entry's created_at is the router's start time.
 """
 
 import argparse
@@ -430,6 +436,7 @@ class RouteSpec(NamedTuple):
     backend: str
     model: str                  # upstream model id
     options: Dict[str, Any]     # validated by the kind's option validators
+    display_name: Optional[str] = None   # GET /v1/models's display_name; None -> the route key
 
 
 class _RouterConfigBase(NamedTuple):    # from --config (routing + secrets)
@@ -691,12 +698,13 @@ _RT_TOP_KEYS = frozenset({"auth_token", "backends", "routes", "default"})
 _RT_BACKEND_KEYS = frozenset({"kind", "base_url", "allow_private", "allow_loopback", "ca_file",
                               "api_key", "auth_header", "forward_headers", "connect_timeout",
                               "idle_timeout", "allow_cleartext_api_key"})
-_RT_ROUTE_KEYS = frozenset({"backend", "model", "options"})
+_RT_ROUTE_KEYS = frozenset({"backend", "model", "options", "display_name"})
 _RT_BACKEND_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")    # the _CHILD_NAME_RE shape
 _RT_AUTH_HEADERS = ("authorization", "x-api-key", "none")
 _RT_HOST_RE = re.compile(r"[A-Za-z0-9._-]{1,253}")
 _RT_URL_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~-]{1,128}")
 _RT_MODEL_LIMIT = 256                     # a route key and an upstream model id, in characters
+_RT_DISPLAY_NAME_LIMIT = 256              # a route's optional display_name, in characters
 _RT_DEFAULT_PORTS = {"https": 443, "http": 80}
 
 
@@ -871,8 +879,11 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     """Validate one route (a routes.<name> entry, or the top-level default) into a RouteSpec.
 
     The backend must exist; model is a non-empty str of at most _RT_MODEL_LIMIT
-    characters with no control character; options are checked by the backend
-    kind's validators and an unknown option is refused by name.
+    characters with no control character; display_name, when present, is a
+    non-empty str of at most _RT_DISPLAY_NAME_LIMIT characters with no control
+    character (GET /v1/models only; harmless on the default); options are
+    checked by the backend kind's validators and an unknown option is refused
+    by name.
     """
     if where is None:
         where = f"routes.{_rt_seg(name)}"
@@ -887,12 +898,19 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
             or _rt_has_control(model):
         raise ConfigError(f"{where}.model: must be a non-empty string of at most "
                           f"{_RT_MODEL_LIMIT} characters with no control character")
+    display_name = entry.get("display_name")
+    if "display_name" in entry and (not isinstance(display_name, str) or not display_name
+                                    or len(display_name) > _RT_DISPLAY_NAME_LIMIT
+                                    or _rt_has_control(display_name)):
+        raise ConfigError(f"{where}.display_name: must be a non-empty string of at most "
+                          f"{_RT_DISPLAY_NAME_LIMIT} characters with no control character")
     raw = entry.get("options", {})
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}.options: must be an object")
     kind = backends[backend].kind
     options = KIND_CLASSES[kind].validate_options(raw, f"{where}.options")
-    return RouteSpec(name=name, backend=backend, model=model, options=options)
+    return RouteSpec(name=name, backend=backend, model=model, options=options,
+                     display_name=display_name)
 
 
 _RT_TOKEN_HINT = "generate one with secrets.token_urlsafe(32)"
@@ -1013,6 +1031,23 @@ def _rt_route(cfg: RouterConfig, model: str) -> RouteSpec:
     if route is None:
         raise ApiError(404, "not_found_error", "model %s is not routed" % _log_value(model))
     return route
+
+
+def _rt_model_entry(route: RouteSpec, created_at: str) -> dict:
+    """One Anthropic model object for a named route: the route key is the id,
+    display_name falls back to it. *created_at* is the router's start time
+    (the front owns the clock; this unit never reads one)."""
+    return {"type": "model", "id": route.name, "display_name": route.display_name or route.name,
+            "created_at": created_at}
+
+
+def _rt_models_list(cfg: RouterConfig, created_at: str) -> dict:
+    """GET /v1/models: one entry per route key in config order, never the default
+    (it has no name). No pagination: always the whole list, has_more false."""
+    data = [_rt_model_entry(route, created_at) for route in cfg.routes.values()]
+    return {"data": data, "has_more": False,
+            "first_id": data[0]["id"] if data else None,
+            "last_id": data[-1]["id"] if data else None}
 
 
 def _rt_parse_inbound(endpoint: str, body: Any, headers: Any, cfg: RouterConfig) -> InboundRequest:
@@ -3159,6 +3194,8 @@ class _RouterHttpServer(ThreadingHTTPServer):
         # Running handler threads, for the shutdown drain.
         self.active = 0
         self.active_cond = threading.Condition()
+        # GET /v1/models's created_at for every entry: the start time, second precision, UTC.
+        self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         super().__init__(addr, _RouterHandler)
 
     def server_bind(self) -> None:
@@ -3244,12 +3281,46 @@ _RT_STDLIB_REFUSAL = {
     505: "HTTP version not supported",
 }
 
-# The two paths the router answers -> the endpoint name the hub dispatches on.
-_ENDPOINTS = {"/v1/messages": "messages", "/v1/messages/count_tokens": "count_tokens"}
+# The fixed paths the router answers -> the endpoint name the hub dispatches on.
+# /v1/models/{id} is the one variable path: _rt_front_endpoint names it "model".
+_ENDPOINTS = {"/v1/messages": "messages", "/v1/messages/count_tokens": "count_tokens",
+              "/v1/models": "models"}
+_RT_MODELS_PREFIX = "/v1/models/"
+_RT_GET_ENDPOINTS = frozenset({"models", "model"})     # GET only; every other endpoint is POST only
 
 # G-M1 DEFAULT: the query strings a client may send. Replace with exactly the set
 # M1 records once it is measured; anything else is a 404.
 _RT_ALLOWED_QUERIES = frozenset({"", "beta=true"})
+
+# The query keys GET /v1/models[/{id}] accepts (values ignored: no pagination);
+# any other key is a 400.
+_RT_MODELS_QUERY_KEYS = frozenset({"limit", "before_id", "after_id", "beta"})
+
+
+def _rt_front_endpoint(path: str) -> Tuple[Optional[str], Optional[str]]:
+    """(endpoint, raw model id) of a request path without its query: a fixed
+    path of _ENDPOINTS, or ("model", <segment>) for /v1/models/<exactly one
+    non-empty segment>, still percent-encoded; (None, None) otherwise."""
+    endpoint = _ENDPOINTS.get(path)
+    if endpoint is not None:
+        return endpoint, None
+    if path.startswith(_RT_MODELS_PREFIX):
+        segment = path[len(_RT_MODELS_PREFIX):]
+        if segment and "/" not in segment:
+            return "model", segment
+    return None, None
+
+
+def _rt_models_query_ok(query: str) -> bool:
+    """True when every key of *query* is in _RT_MODELS_QUERY_KEYS; a query that
+    does not parse as key=value pairs is refused too."""
+    if not query:
+        return True
+    try:
+        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return False
+    return all(key in _RT_MODELS_QUERY_KEYS for key, _value in pairs)
 
 _RT_MISPLACED_TOKEN = "the router token must appear only in the Authorization header"
 
@@ -3313,9 +3384,15 @@ class _RouterHandler(BaseHTTPRequestHandler):
         # Called before command/path exist on a timeout or a malformed line.
         # Only a routed path and a method with a do_* handler are logged: any
         # other is the client's text, unauthenticated, and may carry a token (V21).
+        # A /v1/models/{id} path is the literal /v1/models/<id>: the id is client text too.
         if log.isEnabledFor(logging.DEBUG):
             path_only = (getattr(self, "path", "") or "").split("?", 1)[0]
-            shown = _log_value(path_only) if path_only in _ENDPOINTS else "<unrouted>"
+            if path_only in _ENDPOINTS:
+                shown = _log_value(path_only)
+            elif _rt_front_endpoint(path_only)[0] == "model":
+                shown = _RT_MODELS_PREFIX + "<id>"
+            else:
+                shown = "<unrouted>"
             command = getattr(self, "command", None) or "-"
             if command != "-" and not hasattr(self, "do_" + command):
                 command = "<other>"
@@ -3427,14 +3504,17 @@ class _RouterHandler(BaseHTTPRequestHandler):
                   _log_value(up_ms), _log_value(rec["end"]), extra)
 
     def _precheck(self) -> Optional[str]:
-        """The endpoint ("messages" | "count_tokens"), or None after refusing.
+        """The endpoint ("messages" | "count_tokens" | "models" | "model"), or
+        None after refusing; for "model" the still-encoded id is _rt_model_id.
 
         Looks at the request line and the headers ONLY -- never the body, so an
         unauthenticated client cannot make the router read or wait for its
         declared body (B22). Order: 0 header defects, 1 the path without its
         query, 2 Host, 3 Origin, 4 bearer, 4b the misplaced token (path incl.
         query, and every header but the one Authorization), then the query: a
-        token in the query is the misplaced-token 400, never a 404 (FR-9).
+        token in the query is the misplaced-token 400, never a 404 (FR-9). On
+        the two models paths the query is checked by key (_RT_MODELS_QUERY_KEYS,
+        an unknown key a 400); on the messages paths by _RT_ALLOWED_QUERIES (404).
         """
         settings = self.server.settings
         if self.headers.defects:
@@ -3442,7 +3522,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
             return None
         raw_path = self.path or ""
         path, _sep, query = raw_path.partition("?")
-        endpoint = _ENDPOINTS.get(path)
+        endpoint, self._rt_model_id = _rt_front_endpoint(path)
         if endpoint is None:
             self._refuse(404, message="not found")
             return None
@@ -3479,7 +3559,11 @@ class _RouterHandler(BaseHTTPRequestHandler):
         if misplaced:
             self._refuse(400, message=_RT_MISPLACED_TOKEN)
             return None
-        if query not in _RT_ALLOWED_QUERIES:
+        if endpoint in _RT_GET_ENDPOINTS:
+            if not _rt_models_query_ok(query):
+                self._refuse(400, message="query: only limit, before_id, after_id and beta are accepted")
+                return None
+        elif query not in _RT_ALLOWED_QUERIES:
             self._refuse(404, message="not found")
             return None
         self._rt_authed = True
@@ -3508,6 +3592,9 @@ class _RouterHandler(BaseHTTPRequestHandler):
         route -> backend -> adapter, and the ONE _rt_send call site (J4a)."""
         endpoint = self._precheck()
         if endpoint is None:
+            return
+        if endpoint in _RT_GET_ENDPOINTS:
+            self._refuse(405, message="method not allowed", extra_headers=[("Allow", "GET")])
             return
         srv = self.server
         if srv.closing.is_set():
@@ -3805,16 +3892,66 @@ class _RouterHandler(BaseHTTPRequestHandler):
             return True
 
     def _refuse_405(self) -> None:
-        """Every method but POST: the full precheck, then 405 with Allow: POST.
-        OPTIONS too -- there is no CORS preflight answer."""
+        """Every method a path does not take: the full precheck, then 405 with
+        Allow: GET on the models paths, Allow: POST on the messages paths.
+        OPTIONS and HEAD too -- there is no CORS preflight answer."""
         try:
-            if self._precheck():
-                self._refuse(405, message="method not allowed", extra_headers=[("Allow", "POST")])
+            endpoint = self._precheck()
+            if endpoint:
+                allow = "GET" if endpoint in _RT_GET_ENDPOINTS else "POST"
+                self._refuse(405, message="method not allowed", extra_headers=[("Allow", allow)])
         except OSError:
             self._disconnected()
 
+    def _get_models(self, endpoint: str) -> None:
+        """GET /v1/models and /v1/models/{id}, answered from the config alone --
+        no body is read and no backend is ever contacted. A Transfer-Encoding or
+        a malformed Content-Length is the POST framing 411; a body (Content-Length
+        above 0) is a 400. An id that is not exactly a route key after
+        percent-decoding (UTF-8, strict) is a 404 that never echoes it. A
+        two-word HTTP/0.9 `GET` is a 400: _send_json would write no head for it
+        (the M1 guard of _refuse)."""
+        if self.request_version == "HTTP/0.9":
+            self._refuse(400, message="HTTP/0.9 is not supported")
+            return
+        if "Transfer-Encoding" in self.headers:
+            self._refuse(411, message="Content-Length is required; Transfer-Encoding is not supported")
+            return
+        lengths = self.headers.get_all("Content-Length") or []
+        if lengths:
+            if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,19}", lengths[0].strip()):
+                self._refuse(411, message="exactly one decimal Content-Length is required")
+                return
+            if int(lengths[0].strip()):
+                self._refuse(400, message="a GET request must not carry a body")
+                return
+        cfg = self.server.cfg
+        if endpoint == "models":
+            self._send_json(200, _rt_models_list(cfg, self.server.started_at))
+            return
+        try:
+            model_id = urllib.parse.unquote(self._rt_model_id or "", errors="strict")
+        except UnicodeDecodeError:
+            model_id = ""
+        route = cfg.routes.get(model_id)
+        if route is None:
+            self._send_json(404, _rt_error_body("not_found_error", "model not found"))
+            return
+        self._send_json(200, _rt_model_entry(route, self.server.started_at))
+
     def do_GET(self) -> None:  # noqa: N802 -- stdlib name
-        self._refuse_405()
+        # No `req` summary line: only a POST gets one (deviation 8).
+        self._rt_rec = None
+        try:
+            endpoint = self._precheck()
+            if not endpoint:
+                return
+            if endpoint not in _RT_GET_ENDPOINTS:
+                self._refuse(405, message="method not allowed", extra_headers=[("Allow", "POST")])
+                return
+            self._get_models(endpoint)
+        except OSError:
+            self._disconnected()
 
     def do_PUT(self) -> None:  # noqa: N802 -- stdlib name
         self._refuse_405()

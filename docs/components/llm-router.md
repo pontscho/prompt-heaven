@@ -26,7 +26,8 @@ links:
 # llm-router
 
 `Scripts/llm-router.py` is one HTTP server that Claude Code talks to instead of
-Anthropic. It accepts the Anthropic Messages API on two paths, looks the
+Anthropic. It accepts the Anthropic Messages API on two paths, lists its routes
+on `GET /v1/models`, looks the
 request's `model` up in its JSON config, and forwards the call to the backend
 that route names — relayed as-is (`passthrough`), with llama.cpp's deviations
 repaired (`llamacpp`), or translated to and from Mistral's chat-completions API
@@ -62,12 +63,33 @@ clock or thread name, so every translator is sans-IO — `begin` / `feed(line)` 
 `finish` / `fail` / `ping` each return bytes `Scripts/llm-router.py:Adapter` —
 and the translators are tested in-process with literal input and output.
 
-**Two endpoints, POST only.** `/v1/messages` and `/v1/messages/count_tokens`
-are the only paths `Scripts/llm-router.py:_ENDPOINTS`; the only query strings
-accepted are none and `beta=true` `Scripts/llm-router.py:_RT_ALLOWED_QUERIES`,
-anything else is a 404. Every other method — `OPTIONS` included, since there is
-no CORS — passes the same precheck and is then a 405 with `Allow: POST`
-`Scripts/llm-router.py:_refuse_405`. The body must carry one `Content-Type`
+**Three endpoints: two POST, one GET.** `/v1/messages` and
+`/v1/messages/count_tokens` take POST, `/v1/models` and `/v1/models/{id}` take
+GET; there are no other paths `Scripts/llm-router.py:_ENDPOINTS`
+`Scripts/llm-router.py:_rt_front_endpoint`. On the messages paths the only
+query strings accepted are none and `beta=true`
+`Scripts/llm-router.py:_RT_ALLOWED_QUERIES`, anything else is a 404; on the
+models paths the query keys `limit`, `before_id`, `after_id` and `beta` are
+accepted with any value and ignored, any other key is a 400
+`Scripts/llm-router.py:_RT_MODELS_QUERY_KEYS`. Every other method — `OPTIONS`
+and `HEAD` included, since there is no CORS — passes the same precheck and is
+then a 405 with `Allow: POST` on a messages path and `Allow: GET` on a models
+path `Scripts/llm-router.py:_refuse_405`.
+
+**The model list is the config.** `GET /v1/models` answers 200 with the
+Anthropic list shape — `data`, `has_more` (always `false`), `first_id`,
+`last_id` (`null` when there is no route) — holding one
+`{"type": "model", "id", "display_name", "created_at"}` per route key in config
+order; `display_name` is the route's own or else the key, and `created_at` is
+the router's start time in UTC to the second. The `default` route has no name
+and is never listed `Scripts/llm-router.py:_rt_models_list`.
+`GET /v1/models/{id}` answers the one entry whose route key equals the
+percent-decoded single path segment exactly, else a 404 `not_found_error` that
+does not echo the id `Scripts/llm-router.py:_get_models`. Both pass the same
+precheck as a POST, read no body — a `Content-Length` above 0 is a 400,
+`Transfer-Encoding` the POST framing 411 — and never contact a backend.
+
+**The messages paths' body.** The body must carry one `Content-Type`
 whose media type is `application/json` (parameters such as `charset` are
 ignored; the body is always decoded as UTF-8), framed by exactly one decimal
 `Content-Length` no larger than `--body-limit`; `Transfer-Encoding` is a 411
@@ -232,10 +254,17 @@ other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 | `connect_timeout` | `Scripts/llm-router.py:_CONNECT_TIMEOUT_S` (10 s) | resolve, connect and TLS handshake under one deadline (the resolver runs on a daemon thread joined with what remains of it; a late answer is a 504 and the thread is abandoned); `0 < x <= 3600` |
 | `idle_timeout` | `Scripts/llm-router.py:_IDLE_TIMEOUT_S` (300 s) | per upstream read; `0 < x <= 3600` |
 
-**A route** — exactly `backend` (a configured backend), `model` (the upstream
-model id, 1-256 characters, no control character) and `options`, validated by
-the backend kind's `ROUTE_OPTIONS`; an unknown option is refused by name
-`Scripts/llm-router.py:_rt_cfg_route`.
+**A route** — `backend` (a configured backend), `model` (the upstream
+model id, 1-256 characters, no control character), `options`, validated by
+the backend kind's `ROUTE_OPTIONS`, and the optional `display_name`; an unknown
+key or option is refused by name `Scripts/llm-router.py:_rt_cfg_route`.
+
+| Key | Default | Rule |
+|---|---|---|
+| `backend` | required | names a configured backend |
+| `model` | required | the upstream model id; a string of 1-256 characters with no control character |
+| `options` | `{}` | an object, checked by the kind's validators (table below) |
+| `display_name` | the route key | a string of 1-`Scripts/llm-router.py:_RT_DISPLAY_NAME_LIMIT` (256) characters with no control character; shown by `GET /v1/models` only. Allowed on `default` too, where it is unused |
 
 | Kind | Option | Rule |
 |---|---|---|
@@ -395,9 +424,10 @@ scrubbed text goes to the client only and is never logged.
 
 **Logging is structure only** ([[0011-a-truncated-payload-carries-the-first-cookie]]).
 Every wire-derived value goes through `Scripts/llm-router.py:_log_value`; the
-access line has the method and the path without its query — a path that is not
-one of the two endpoints as `<unrouted>`, a method with no handler as
-`<other>`, since either is unauthenticated client text
+access line has the method and the path without its query — `/v1/models/{id}`
+as the literal `/v1/models/<id>`, a path that is not one of the endpoints as
+`<unrouted>`, a method with no handler as `<other>`, since each is
+unauthenticated client text
 `Scripts/llm-router.py:log_message`; a POST gets one DEBUG `req` summary line —
 endpoint, route, kind, stream, status, upstream status, bytes in and out,
 timings and how the stream ended `Scripts/llm-router.py:_rt_log_summary`; an
@@ -484,7 +514,11 @@ read before relying on one of them. In brief:
   whole at the end of the turn, never streamed.
 - **Passthrough request bodies are equal after parsing, not byte for byte**
   (the body is re-serialized after the model rewrite).
-- **No metrics endpoint;** the DEBUG `req` line is the only per-request record.
+- **No metrics endpoint;** the DEBUG `req` line is the only per-request record,
+  and only a POST gets one.
+- **`GET /v1/models` does not paginate.** `limit`, `before_id` and `after_id`
+  are accepted and ignored: the whole list comes back with `has_more` false,
+  and every entry's `created_at` is the router's start time, not a model's.
 - **The shutdown drain does not cover a non-stream relay** in flight at SIGTERM.
 - **The llama.cpp quirk references are unverified;** the issue numbers came
   from the feature brief.

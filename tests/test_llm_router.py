@@ -39,7 +39,7 @@ Exit code 0 iff every non-informational case passes.
 
 Groups:
   A  config               -- load_config refusals and defaults, in-process and CLI
-  B  front                -- bind, auth, Host/Origin, framing refusals, caps
+  B  front                -- bind, auth, Host/Origin, framing refusals, caps, GET /v1/models
   C  outbound             -- address policy, TLS verification, upstream refusals
   D  passthrough          -- an Anthropic-compatible backend, relayed
   E  llamacpp             -- request and event quirks against a llama.cpp peer
@@ -52,6 +52,7 @@ Groups:
 
 import ast
 import base64
+import calendar
 import hashlib
 import http.client
 import ipaddress
@@ -794,6 +795,7 @@ GA_CASES = (
     "loose/symlinked ca_file refused",   # A24
     "short api_key refused",             # A25
     "cleartext api_key refused",         # A26
+    "route display_name validated",      # A27
 )
 
 # (label, text, is_config_error) of every exception group A provoked and every
@@ -1425,6 +1427,49 @@ def group_a(suite, fixture_root):
                           "the opt-in as a string",
                           "accepted    : the opt-in true; %s with no opt-in" % ", ".join(GA_LOOPBACK_HTTP)]
 
+    def a27():
+        problems = []
+        limit = ga_module_value(mod, "_RT_DISPLAY_NAME_LIMIT", problems)
+        if not isinstance(limit, int):
+            return problems, []
+        long_value = ("tf-dn-long-" + "d" * limit)[:limit + 1]
+        bad = (("a number", 123), ("null", None), ("empty", ""),
+               ("a control character", "tf-dn-bell\x07"), ("%d characters" % (limit + 1), long_value))
+        places = (("routes.claude-sonnet-4-5", lambda cfg: cfg["routes"]["claude-sonnet-4-5"]),
+                  ("default", lambda cfg: cfg["default"]))
+        n = 0
+        for where, place in places:
+            for label, value in bad:
+                n += 1
+                path = cfg_with("display-name-%d.json" % n,
+                                lambda cfg, p=place, v=value: p(cfg).__setitem__("display_name", v))
+                absent = (value,) if isinstance(value, str) and value else ()
+                problems += ga_refused(mod, path, [where + ".display_name"],
+                                       "%s.display_name %s" % (where, label), absent=absent)
+        good_route = "TF Sonnet ✓"
+        good_default = ("tf-dn-max-" + "e" * limit)[:limit]
+
+        def good(cfg):
+            cfg["routes"]["claude-sonnet-4-5"]["display_name"] = good_route
+            cfg["default"]["display_name"] = good_default
+        cfg, ctl = ga_accepted(mod, cfg_with("display-name-good.json", good),
+                               "control: display_name on a route and (%d chars) on the default" % limit)
+        problems += ctl
+        if cfg is not None:
+            for label, spec, want in (("routes.claude-sonnet-4-5", cfg.routes.get("claude-sonnet-4-5"),
+                                       good_route),
+                                      ("default", cfg.default, good_default),
+                                      ("routes.claude-haiku-4-5 (unset)", cfg.routes.get("claude-haiku-4-5"),
+                                       None)):
+                got = getattr(spec, "display_name", "<no display_name field>")
+                if got != want:
+                    problems.append("%s: RouteSpec.display_name %r, expected %r"
+                                    % (label, ga_redact(str(got))[:80], want))
+        return problems, ["refused     : a number, null, empty, a control character, %d characters "
+                          "-- on a route and on the default, by key name" % (limit + 1),
+                          "accepted    : a non-ASCII name; exactly %d characters "
+                          "(_RT_DISPLAY_NAME_LIMIT); unset -> None" % limit]
+
     def a12():
         problems = []
 
@@ -1455,7 +1500,8 @@ def group_a(suite, fixture_root):
         GA_CASES[14]: a15, GA_CASES[15]: a16, GA_CASES[16]: a17, GA_CASES[17]: a18,
         GA_CASES[18]: a19, GA_CASES[19]: a20, GA_CASES[20]: a21, GA_CASES[21]: a22,
         GA_CASES[22]: a23, GA_CASES[23]: a24, GA_CASES[24]: a25, GA_CASES[25]: a26,
-        GA_CASES[11]: a12,       # last: it sweeps every message the others provoked
+        GA_CASES[26]: a27,
+        GA_CASES[11]: a12,      # last: it sweeps every message the others provoked
     }
     results = {}
     for cid, fn in cases.items():
@@ -1500,6 +1546,11 @@ GB_CASES = (
     "body read only after auth",         # B22
     "body trickle cut at deadline",      # B23
     "NaN/Infinity, max_tokens -> 400",   # B24
+    "GET /v1/models list shape",         # B25
+    "GET /v1/models/{id} hit, 404",      # B26
+    "models: auth, Host, Origin",        # B27
+    "models: query keys, methods",       # B28
+    "models: no routes -> data []",      # B29
 )
 
 # "Accepted" in a B case means "not a front refusal" (plan section 8): the status
@@ -1566,6 +1617,124 @@ def gb_config(peer_url):
         "routes": {"claude-sonnet-4-5": {"backend": "tfpeer", "model": "tf-model"}},
         "default": {"backend": "tfpeer", "model": "tf-model"},
     }
+
+
+# B25-B29: GET /v1/models and /v1/models/{id}, answered from the config, never upstream.
+GB_MODELS_PATH = "/v1/models"
+# (route key, display_name or None) in config order; B25 expects exactly these ids, in this order.
+GB_MODEL_ROUTES = (("claude-sonnet-4-5", None), ("tf-b-second", "TF Second Model"), ("tf b/third", None))
+GB_DEFAULT_DISPLAY = "TF Default Display Name"     # set on the default route; never listed
+GB_MODELS_QUERY = "limit=20&after_id=tf-a&before_id=tf-b&beta=true"   # every allowed key, values ignored
+GB_LIST_KEYS = frozenset({"data", "has_more", "first_id", "last_id"})
+GB_ENTRY_KEYS = frozenset({"type", "id", "display_name", "created_at"})
+GB_CREATED_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+GB_CREATED_SLACK_S = 2.0       # created_at (second precision) must lie in [launch - this, now + this]
+
+
+def gb_models_config(peer_url, routes=GB_MODEL_ROUTES):
+    """gb_config with *routes* (each display_name set when given) and a named default."""
+    cfg = gb_config(peer_url)
+    cfg["routes"] = {}
+    for key, display in routes:
+        entry = {"backend": "tfpeer", "model": "tf-model"}
+        if display is not None:
+            entry["display_name"] = display
+        cfg["routes"][key] = entry
+    cfg["default"] = {"backend": "tfpeer", "model": "tf-model", "display_name": GB_DEFAULT_DISPLAY}
+    return cfg
+
+
+def gb_get(client, path, pairs=None, **kw):
+    """(status, headers, body) of one GET on a raw socket: by default the valid
+    bearer and Connection: close, no Content-Length (*kw* goes to gb_request)."""
+    if pairs is None:
+        pairs = [("Authorization", "Bearer " + client.token), ("Connection", "close")]
+    kw.setdefault("length", None)
+    status, hdrs, body, _first, _closed = gb_raw(client, gb_request(client, method="GET", path=path,
+                                                                    pairs=pairs, **kw))
+    return status, hdrs, body
+
+
+def gb_json_200(label, status, hdrs, body):
+    """(object, problems): a 200 application/json answer, parsed."""
+    if status != 200:
+        _t, msg, _why = gb_envelope(body) if status is not None else (None, None, None)
+        return None, ["%s: status %r%s, expected 200"
+                      % (label, status, (" (%s)" % ga_redact(msg)[:120]) if msg else "")]
+    problems = []
+    if (hdrs.get("content-type") or "").split(";")[0].strip() != "application/json":
+        problems.append("%s: Content-Type %r, expected application/json" % (label, hdrs.get("content-type")))
+    try:
+        return json.loads(body.decode("utf-8")), problems
+    except (UnicodeDecodeError, ValueError):
+        return None, problems + ["%s: the body is not JSON: %r" % (label, ga_redact(gb_text(body))[:80])]
+
+
+def gb_check_entry(label, entry, want_id, want_display, launched):
+    """Problems unless *entry* is exactly {type: model, id, display_name, created_at}
+    with a second-precision RFC 3339 UTC created_at between the router's launch and now."""
+    if not isinstance(entry, dict) or set(entry) != GB_ENTRY_KEYS:
+        return ["%s: entry %r, expected exactly the keys %s"
+                % (label, ga_redact(str(entry))[:160], sorted(GB_ENTRY_KEYS))]
+    problems = []
+    for key, want in (("type", "model"), ("id", want_id), ("display_name", want_display)):
+        if entry[key] != want:
+            problems.append("%s: %s %r, expected %r" % (label, key, entry[key], want))
+    created = entry["created_at"]
+    if not isinstance(created, str) or not GB_CREATED_RE.match(created):
+        problems.append("%s: created_at %r is not YYYY-MM-DDTHH:MM:SSZ" % (label, created))
+    else:
+        stamp = calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ"))
+        if not launched - GB_CREATED_SLACK_S <= stamp <= time.time() + GB_CREATED_SLACK_S:
+            problems.append("%s: created_at %s is not the router's start time (launched %.0f)"
+                            % (label, created, launched))
+    return problems
+
+
+def gb_check_list(label, obj, routes, launched):
+    """Problems unless *obj* is the Anthropic model list of *routes*: one entry per
+    route key in config order (display_name falling back to the key), has_more
+    false, first_id / last_id the ends (null when empty), one shared created_at."""
+    if not isinstance(obj, dict) or set(obj) != GB_LIST_KEYS:
+        return ["%s: answer %r, expected exactly the keys %s"
+                % (label, ga_redact(str(obj))[:160], sorted(GB_LIST_KEYS))]
+    data = obj["data"]
+    if not isinstance(data, list):
+        return ["%s: data is %s, expected a list" % (label, type(data).__name__)]
+    problems = []
+    want_ids = [key for key, _d in routes]
+    ids = [entry.get("id") if isinstance(entry, dict) else None for entry in data]
+    if ids != want_ids:
+        problems.append("%s: ids %r, expected %r (config order, the default never listed)"
+                        % (label, ids, want_ids))
+    if obj["has_more"] is not False:
+        problems.append("%s: has_more %r, expected false" % (label, obj["has_more"]))
+    for key, want in (("first_id", want_ids[0] if want_ids else None),
+                      ("last_id", want_ids[-1] if want_ids else None)):
+        if obj[key] != want:
+            problems.append("%s: %s %r, expected %r" % (label, key, obj[key], want))
+    for entry, (key, display) in zip(data, routes):
+        problems += gb_check_entry("%s [%s]" % (label, key), entry, key, display or key, launched)
+    stamps = {entry.get("created_at") for entry in data if isinstance(entry, dict)}
+    if len(stamps) > 1:
+        problems.append("%s: %d different created_at values, expected one" % (label, len(stamps)))
+    return problems
+
+
+def gb_not_found(label, status, body, absent):
+    """Problems unless the answer is a 404 not_found_error envelope that does not echo *absent*."""
+    if status != 404:
+        return ["%s: status %r, expected 404" % (label, status)]
+    GB_ERROR_BODIES.append((label, status, body))
+    etype, _msg, why = gb_envelope(body)
+    if why:
+        return ["%s: %s" % (label, why)]
+    problems = []
+    if etype != "not_found_error":
+        problems.append("%s: error.type %r, expected 'not_found_error'" % (label, etype))
+    if absent and absent in gb_text(body):
+        problems.append("%s: the answer echoes the requested id" % label)
+    return problems
 
 
 def gb_not_ready(proc):
@@ -1750,8 +1919,11 @@ def group_b(suite, fixture_root):
     refusals, the stdlib's own refusals, the ready file, bind-first and the cap.
 
     One live router (--allowed-origin, --body-limit 16 MiB) in front of one
-    loopback passthrough peer serves every case but B16 (a busy port) and B20
-    (its own router with --max-connections 1).  Every front refusal must be an
+    loopback passthrough peer serves every case but B16 (a busy port), B20
+    (its own router with --max-connections 1), B25-B28 (a second router on the
+    same peer whose routes carry display_name) and B29 (a router with no
+    routes).  The models cases also assert that the peer is never contacted.
+    Every front refusal must be an
     Anthropic envelope of KD-14's type with Connection: close; "accepted" means
     "not a front refusal" and never pins the status behind the front.  A router
     that never becomes ready fails every case (red), never skips it.
@@ -1767,6 +1939,7 @@ def group_b(suite, fixture_root):
     sandbox = new_sandbox(fixture_root, "front")
     peer = ScriptedPeer(script=[("respond_json", 200, GB_PEER_ANSWER)])
     proc = None
+    models_proc = None
     results = {}
     try:
         cfgpath = write_config(sandbox, gb_config(peer.url()))
@@ -1776,6 +1949,13 @@ def group_b(suite, fixture_root):
         port = proc.wait_ready()
         client = proc.client() if port is not None else None
         why = gb_not_ready(proc) if port is None else None
+        # B25-B28: a second router on the same peer whose routes carry display_name.
+        models_box = new_sandbox(fixture_root, "models")
+        launched = time.time()
+        models_proc = RouterProc(models_box, write_config(models_box, gb_models_config(peer.url())),
+                                 label="models", extra_argv=("--allowed-origin", GB_OK_ORIGIN))
+        mclient = models_proc.client() if models_proc.wait_ready() is not None else None
+        mwhy = gb_not_ready(models_proc) if mclient is None else None
         # B23 runs on its own thread from here, so its deadline overlaps the other cases.
         body_bound = getattr(mod, "_HTTP_BODY_TIMEOUT_S", None) if mod is not None else None
         trickle, trickle_thread = {}, None
@@ -1790,6 +1970,20 @@ def group_b(suite, fixture_root):
                     return [why], []
                 return fn()
             return case
+
+        def live_models(fn):
+            def case():
+                if mclient is None:
+                    return [mwhy], []
+                return fn()
+            return case
+
+        def peer_untouched(before, label):
+            time.sleep(0.2)
+            if len(peer.requests) != before:
+                return ["%s: the peer was contacted (%d request(s))"
+                        % (label, len(peer.requests) - before)]
+            return []
 
         def b23():
             if mod is None:
@@ -2395,6 +2589,159 @@ def group_b(suite, fixture_root):
                     problems += gb_accepted("Expect, valid bearer, body after the 100", status, body)
             return problems
 
+        def b25():
+            problems = []
+            before = len(peer.requests)
+            for path in (GB_MODELS_PATH, "%s?%s" % (GB_MODELS_PATH, GB_MODELS_QUERY), GB_MODELS_PATH + "?"):
+                status, hdrs, body = gb_get(mclient, path)
+                obj, bad = gb_json_200("GET " + path, status, hdrs, body)
+                problems += bad
+                if obj is not None:
+                    problems += gb_check_list("GET " + path, obj, GB_MODEL_ROUTES, launched)
+                if GB_DEFAULT_DISPLAY in gb_text(body):
+                    problems.append("GET %s: the default route's display_name is listed" % path)
+            status, hdrs, body = gb_get(mclient, GB_MODELS_PATH, length=0)
+            problems += gb_json_200("GET with Content-Length: 0", status, hdrs, body)[1]
+            problems += peer_untouched(before, "GET /v1/models")
+            return problems, ["list        : %s in config order; display_name or the key; has_more "
+                              "false; first_id / last_id; one created_at"
+                              % ", ".join(repr(k) for k, _d in GB_MODEL_ROUTES),
+                              "default     : never listed (its display_name %r absent)" % GB_DEFAULT_DISPLAY,
+                              "query       : %s accepted and ignored" % GB_MODELS_QUERY,
+                              "peer        : never contacted"]
+
+        def b26():
+            problems = []
+            before = len(peer.requests)
+            for label, path, want_id, want_display in (
+                    ("plain id", "/v1/models/claude-sonnet-4-5", "claude-sonnet-4-5", "claude-sonnet-4-5"),
+                    ("display_name", "/v1/models/tf-b-second", "tf-b-second", "TF Second Model"),
+                    ("percent-encoded space and slash", "/v1/models/tf%20b%2Fthird", "tf b/third",
+                     "tf b/third"),
+                    ("percent-encoded plain chars", "/v1/models/claude%2Dsonnet%2D4%2D5",
+                     "claude-sonnet-4-5", "claude-sonnet-4-5"),
+                    ("an allowed query", "/v1/models/tf-b-second?beta=true", "tf-b-second",
+                     "TF Second Model")):
+                status, hdrs, body = gb_get(mclient, path)
+                obj, bad = gb_json_200(label, status, hdrs, body)
+                problems += bad
+                if obj is not None:
+                    problems += gb_check_entry(label, obj, want_id, want_display, launched)
+            unknown = "tf-unknown-model-" + secrets.token_hex(6)
+            for label, path, absent in (
+                    ("unknown id", "/v1/models/" + unknown, unknown),
+                    ("the default's name", "/v1/models/%28default%29", "(default)"),
+                    ("a key in another case", "/v1/models/CLAUDE-SONNET-4-5", "CLAUDE-SONNET-4-5"),
+                    ("an invalid UTF-8 escape", "/v1/models/tf%FFx", "%FF"),
+                    ("an empty id", "/v1/models/", None),
+                    ("two segments", "/v1/models/claude-sonnet-4-5/x", "claude-sonnet-4-5")):
+                status, _h, body = gb_get(mclient, path)
+                problems += gb_not_found(label, status, body, absent)
+            problems += peer_untouched(before, "GET /v1/models/{id}")
+            return problems, ["hit         : a plain id, display_name, %20 and %2F decoded, %2D decoded, "
+                              "?beta=true",
+                              "404         : an unknown id, (default), another case, %FF, an empty id, "
+                              "two segments -- not_found_error, the id never echoed",
+                              "peer        : never contacted"]
+
+        def b27():
+            problems = []
+            before = len(peer.requests)
+            close = ("Connection", "close")
+            bearer = ("Authorization", "Bearer " + mclient.token)
+            for path in (GB_MODELS_PATH, "/v1/models/claude-sonnet-4-5",
+                         "/v1/models/tf-unknown-" + secrets.token_hex(4)):
+                for label, pairs in (("no Authorization", [close]),
+                                     ("wrong token", [("Authorization", "Bearer tf-wrong-token-"
+                                                       + secrets.token_hex(16)), close]),
+                                     ("x-api-key = the token", [("x-api-key", TF_ROUTER_TOKEN), close])):
+                    status, hdrs, body = gb_get(mclient, path, pairs=pairs)
+                    problems += gb_refused("GET %s, %s" % (path, label), status, hdrs, body, 401,
+                                           extra_headers=(("WWW-Authenticate", "Bearer"),))
+                    if b'"data"' in body or b"claude-sonnet-4-5" in body:
+                        problems.append("GET %s, %s: the 401 carries model data" % (path, label))
+            status, hdrs, body = gb_get(mclient, GB_MODELS_PATH, host=False,
+                                        pairs=[("Host", "evil:%d" % mclient.port), bearer, close])
+            problems += gb_refused("GET /v1/models, Host evil", status, hdrs, body, 403)
+            status, hdrs, body = gb_get(mclient, GB_MODELS_PATH,
+                                        pairs=[bearer, ("Origin", GB_EVIL_ORIGIN), close])
+            problems += gb_refused("GET /v1/models, Origin %s" % GB_EVIL_ORIGIN, status, hdrs, body, 403)
+            status, hdrs, body = gb_get(mclient, GB_MODELS_PATH,
+                                        pairs=[bearer, ("Origin", GB_OK_ORIGIN), close])
+            problems += gb_json_200("control: Origin %s" % GB_OK_ORIGIN, status, hdrs, body)[1]
+            status, hdrs, body = gb_get(mclient, "%s?after_id=%s" % (GB_MODELS_PATH, TF_ROUTER_TOKEN))
+            problems += gb_refused("GET /v1/models, the token in the query", status, hdrs, body, 400,
+                                   needle=GB_MISPLACED)
+            problems += peer_untouched(before, "models auth")
+            return problems, ["refused 401 : no Authorization, a wrong token, x-api-key -- on the list, "
+                              "a known id and an unknown id (no model data)",
+                              "refused 403 : Host evil:port, Origin %s" % GB_EVIL_ORIGIN,
+                              "refused 400 : the token as after_id (misplaced token)"]
+
+        def b28():
+            problems = []
+            before = len(peer.requests)
+            for path in ("%s?tf_other=1" % GB_MODELS_PATH, "%s?limit=1&tf_other=1" % GB_MODELS_PATH,
+                         "/v1/models/tf-b-second?tf_other=1"):
+                status, hdrs, body = gb_get(mclient, path)
+                problems += gb_refused("GET %s" % path, status, hdrs, body, 400)
+            for path in (GB_MODELS_PATH, "/v1/models/claude-sonnet-4-5"):
+                status, hdrs, body = mclient.post(path=path, obj=gb_body())
+                problems += gb_refused("POST %s" % path, status, hdrs, body, 405,
+                                       extra_headers=(("Allow", "GET"),))
+            for path in (MESSAGES_PATH, MESSAGES_PATH + "/count_tokens"):
+                status, hdrs, body = gb_get(mclient, path)
+                problems += gb_refused("GET %s" % path, status, hdrs, body, 405,
+                                       extra_headers=(("Allow", "POST"),))
+            bearer = [("Authorization", "Bearer " + mclient.token), ("Connection", "close")]
+            status, hdrs, body = gb_get(mclient, GB_MODELS_PATH, body=b'{"tf": 1}', length=True)
+            problems += gb_refused("GET /v1/models with a body", status, hdrs, body, 400)
+            status, hdrs, body = gb_get(mclient, GB_MODELS_PATH, length=None,
+                                        pairs=bearer + [("Transfer-Encoding", "chunked")], body=b"0\r\n\r\n")
+            problems += gb_refused("GET /v1/models, Transfer-Encoding", status, hdrs, body, 411)
+            status, hdrs, body, _first, _closed = gb_raw(mclient, gb_request(
+                mclient, method="HEAD", path=GB_MODELS_PATH, pairs=bearer, length=None))
+            if status != 405 or hdrs.get("allow") != "GET" or body:
+                problems.append("HEAD /v1/models: status %r, Allow %r, %d body byte(s); expected 405, "
+                                "Allow: GET, none" % (status, hdrs.get("allow"), len(body)))
+            # A two-word (HTTP/0.9) GET reaches do_GET; it must get an HTTP/1.1 head, never a bare body.
+            head09 = ("GET %s\r\nHost: %s:%d\r\nAuthorization: Bearer %s\r\n\r\n"
+                      % (GB_MODELS_PATH, mclient.host, mclient.port, mclient.token)).encode("latin-1")
+            status, hdrs, body, first, _closed = gb_raw(mclient, head09)
+            if not first.startswith("HTTP/1.1 400"):
+                problems.append("HTTP/0.9 GET /v1/models: status line %r, expected 'HTTP/1.1 400 ...'"
+                                % first[:60])
+            problems += peer_untouched(before, "models methods")
+            return problems, ["refused 400 : ?tf_other=1, alone and beside limit, on the list and an id",
+                              "refused 405 : POST on both models paths (Allow: GET); GET on both "
+                              "messages paths (Allow: POST); HEAD /v1/models (Allow: GET)",
+                              "framing     : a GET body 400, Transfer-Encoding 411, HTTP/0.9 400"]
+
+        def b29():
+            box = new_sandbox(fixture_root, "models-empty")
+            empty = RouterProc(box, write_config(box, gb_models_config(peer.url(), routes=())),
+                               label="models-empty")
+            try:
+                if empty.wait_ready() is None:
+                    return [gb_not_ready(empty)], []
+                ec = empty.client()
+                before = len(peer.requests)
+                status, hdrs, body = gb_get(ec, GB_MODELS_PATH)
+                obj, problems = gb_json_200("GET /v1/models, no routes", status, hdrs, body)
+                want = {"data": [], "has_more": False, "first_id": None, "last_id": None}
+                if obj is not None and obj != want:
+                    problems.append("GET /v1/models, no routes: %r, expected %r"
+                                    % (ga_redact(str(obj))[:160], want))
+                status, _h, body = gb_get(ec, "/v1/models/claude-sonnet-4-5")
+                problems += gb_not_found("GET /v1/models/claude-sonnet-4-5, no routes", status, body,
+                                         "claude-sonnet-4-5")
+                problems += peer_untouched(before, "no routes")
+                problems += gb_control(ec, "control: a POST still takes the default route")
+                return problems, ["config      : routes {}, a default with display_name",
+                                  "list        : data [], has_more false, first_id / last_id null"]
+            finally:
+                empty.close()
+
         cases = [(GB_CASES[0], live(b1)), (GB_CASES[1], live(b2)), (GB_CASES[2], live(b3)),
                  (GB_CASES[3], live(b4)), (GB_CASES[4], live(b5)), (GB_CASES[5], live(b6)),
                  (GB_CASES[6], live(b7)), (GB_CASES[7], live(b8)), (GB_CASES[8], live(b9)),
@@ -2403,7 +2750,10 @@ def group_b(suite, fixture_root):
                  (GB_CASES[15], b16), (GB_CASES[17], live(b18)), (GB_CASES[18], live(b19)),
                  (GB_CASES[19], b20), (GB_CASES[20], live(b21)), (GB_CASES[21], live(b22)),
                  (GB_CASES[23], live(b24)), (GB_CASES[22], live(b23)),
-                 (GB_CASES[16], live(b17))]    # last: it sweeps every error body the others provoked
+                 (GB_CASES[24], live_models(b25)), (GB_CASES[25], live_models(b26)),
+                 (GB_CASES[26], live_models(b27)), (GB_CASES[27], live_models(b28)),
+                 (GB_CASES[28], b29),
+                 (GB_CASES[16], live(b17))]   # last: it sweeps every error body the others provoked
         for cid, fn in cases:
             try:
                 results[cid] = fn()
@@ -2417,6 +2767,8 @@ def group_b(suite, fixture_root):
     finally:
         if proc is not None:
             proc.close()
+        if models_proc is not None:
+            models_proc.close()
         peer.close()
     for cid in GB_CASES:
         problems, detail = results.get(cid, ([setup], []))
