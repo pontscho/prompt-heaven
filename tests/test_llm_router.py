@@ -971,6 +971,7 @@ GA_CASES = (
     "mistral reasoning_effort option",   # A46
     "reasoning_effort_map accepted",     # A47
     "reasoning_effort_map refused",      # A48
+    "cleartext oauth bearer refused",    # A49
 )
 
 # (label, text, is_config_error) of every exception group A provoked and every
@@ -2213,6 +2214,30 @@ def group_a(suite, fixture_root):
         return problems, ["refused     : " + ", ".join(label for label, _v, _a in table)
                           + " -- naming the path, the choice list and the 7-entry cap, never the value"]
 
+    def a49():
+        # F12: an OAuth profile sends its access token as a bearer to base_url, so a
+        # non-loopback http:// base_url needs the api_key path's opt-in (A26), the same
+        # option allow_cleartext_api_key; a loopback http:// one does not.
+        problems = []
+        public = "http://192.168.1.20:8080"
+        for name, kind, where in ((GA_CODEX, "codex", cx_where), (GA_OPENAI, "openai", oa_where)):
+            entry = {"kind": kind, "oauth": {}, "base_url": public, "allow_private": True}
+            path = cfg_with("oauth-cleartext-%s.json" % kind, ga_add_backend(name, entry))
+            problems += ga_refused(mod, path, [where + ".oauth", "http://", "allow_cleartext_api_key"],
+                                   "%s oauth on %s without the opt-in" % (kind, public))
+            entry = dict(entry, allow_cleartext_api_key=True)
+            _cfg, ctl = ga_accepted(mod, cfg_with("oauth-cleartext-optin-%s.json" % kind, ga_add_backend(name, entry)),
+                                    "control: %s oauth on %s with the opt-in" % (kind, public))
+            problems += ctl
+            entry = {"kind": kind, "oauth": {}, "base_url": GA_LOOPBACK_HTTP[0], "allow_private": True,
+                     "allow_loopback": True}
+            _cfg, ctl = ga_accepted(mod, cfg_with("oauth-loopback-%s.json" % kind, ga_add_backend(name, entry)),
+                                    "control: %s oauth on %s, no opt-in" % (kind, GA_LOOPBACK_HTTP[0]))
+            problems += ctl
+        return problems, ["refused     : codex and openai oauth on %s, no opt-in" % public,
+                          "accepted    : the same with allow_cleartext_api_key true; %s with no opt-in"
+                          % GA_LOOPBACK_HTTP[0]]
+
     def a12():
         problems = []
 
@@ -2248,7 +2273,7 @@ def group_a(suite, fixture_root):
         GA_CASES[34]: a35, GA_CASES[35]: a36, GA_CASES[36]: a37, GA_CASES[37]: a38,
         GA_CASES[38]: a39, GA_CASES[39]: a40, GA_CASES[40]: a41, GA_CASES[41]: a42,
         GA_CASES[42]: a43, GA_CASES[43]: a44, GA_CASES[44]: a45, GA_CASES[45]: a46,
-        GA_CASES[46]: a47, GA_CASES[47]: a48,
+        GA_CASES[46]: a47, GA_CASES[47]: a48, GA_CASES[48]: a49,
         GA_CASES[11]: a12,    # last: it sweeps every message the others provoked
     }
     results = {}
@@ -11548,9 +11573,11 @@ GM_CASES = (
     "collector == folded stream",        # M19
     "json_response non-2xx shapes",      # M20
     "namespaced call -> plain tool_use",  # M21
+    "unoffered tool name -> error",      # M22
+    "oauth 403: fixed text, status kept",  # M23
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -11579,6 +11606,14 @@ GM_THINK_START = {"type": "thinking", "thinking": "", "signature": ""}
 # The plan says nothing on a foreign namespace: it is stripped and rendered like our own.
 GM_NS_OURS = "claude_code"
 GM_NS_FOREIGN = "tf_foreign_ns"
+# M22 (F26): the tools gm_inbound offers -- every name the M fixtures and inline events call --
+# and one it never offers.
+GM_OFFERED = ("Read", "Bash", "Write")
+GM_UNOFFERED = "tf_unoffered_m22"
+# M23 (F30): an OAuth profile's upstream 403 is answered with the router's fixed text, never the
+# upstream's message; the status (and type) each 403 got before is kept.
+GM_403_TEXT = "tf m23 upstream text"
+GM_403_FIXED = "refused this login (upstream 403)"
 
 
 def gm_need(mod, names):
@@ -11793,9 +11828,11 @@ def gm_fx_usage(lines):
 
 def gm_inbound(mod, profile="codex", stream=True):
     """A Responses InboundRequest for *profile*, scrubbing with the router's own KD-9 scrubber
-    over the suite's sentinels (M18 and M20 assert error texts are scrubbed)."""
+    over the suite's sentinels (M18 and M20 assert error texts are scrubbed).  It offers the
+    GM_OFFERED tools, as a request that gets a tool call does (M22, F26)."""
     body = {"model": GM_ROUTE, "max_tokens": 256, "stream": stream,
-            "messages": [{"role": "user", "content": "tf m"}]}
+            "messages": [{"role": "user", "content": "tf m"}],
+            "tools": [{"name": n, "input_schema": {"type": "object"}} for n in GM_OFFERED]}
     scrub, _why = ge_scrubber(mod)
     return mod.InboundRequest(endpoint="messages", requested_model=GM_ROUTE, body=body, stream=stream,
                               route=mod.RouteSpec(name=GM_ROUTE, backend=GM_BACKEND, model=GM_MODEL, options={}),
@@ -12638,6 +12675,60 @@ def group_m(suite, fixture_root):
             shown.append("non-stream -> %s" % [c.get("name") or c.get("type") for c in obj.get("content") or []])
         return problems, ["namespaced  : " + s for s in shown] + [GM_DEFENSIVE]
 
+    def m22():
+        # F26: a function_call naming a tool the request did not offer (gm_inbound offers
+        # GM_OFFERED) is the backend's protocol violation, answered as the other tool-call
+        # refusals are: one error event on the stream, 502 api_error on the non-stream path;
+        # no tool_use block, and the name is not echoed.
+        events = [gm_created(), gm_msg_added(0), gm_text("tf m22"), gm_msg_done("tf m22", 0)]
+        events += gm_tool_events([(1, "call_tfNope22", GM_UNOFFERED, '{"x":1}')])
+        events.append(gm_completed(gm_usage(4, 4)))
+        lines = gm_lines(*events)
+        problems, shown = [], []
+        run = drive(lines)
+        problems += gg_wellformed("unoffered tool", run, requested=GM_ROUTE) + gg_failed("unoffered tool", run)
+        if any(b["type"] == "tool_use" for b in gg_blocks(run["events"])):
+            problems.append("stream: a tool_use block was emitted for the unoffered tool")
+        etype, msg = gm_error(run["events"])
+        if etype != "api_error" or not (isinstance(msg, str) and "not offered" in msg):
+            problems.append("stream: error %r %r, expected api_error saying 'not offered'" % (etype, gi_redact(str(msg))[:120]))
+        if GM_UNOFFERED.encode("ascii") in run["out"]:
+            problems.append("stream: the unoffered name reached the client")
+        shown.append("stream     -> %s" % ev_shape(run["events"]))
+        adapter = (getattr(mod, "ADAPTERS", None) or {}).get("codex") or getattr(mod, "CodexAdapter")()
+        answer = adapter.json_response(gm_inbound(mod, "codex", stream=False), 200,
+                                       ("\n".join(lines) + "\n").encode("utf-8"))
+        problems += gm_envelope("non-stream", answer, 502, "api_error", "not offered")
+        shown.append("non-stream -> %r" % (answer[0] if isinstance(answer, tuple) and answer else answer,))
+        # Control: the same stream calling an offered tool completes with its tool_use.
+        ok = gm_lines(*(events[:4] + gm_tool_events([(1, "call_tfRead22", "Read", '{"x":1}')])
+                        + [gm_completed(gm_usage(4, 4))]))
+        run = drive(ok)
+        problems += gg_wellformed("control: offered tool", run, requested=GM_ROUTE) + \
+            gg_complete("control: offered tool", run, "tool_use")
+        shown.append("control    -> %s" % ev_shape(run["events"]))
+        return problems, ["unoffered   : " + s for s in shown] + [GM_DEFENSIVE]
+
+    def m23():
+        # F30: on an OAuth profile the 403 is about the login (plan, region, account), so the
+        # client gets the router's fixed text, as a 401 gets the re-login hint; the status the
+        # mapping gave is kept.  An api-key profile's 403 keeps P11's fixed 502 (M20).
+        problems, shown = [], []
+        for label, profile, body, want_status, want_type in (
+                ("no code", "codex", {"error": {"message": GM_403_TEXT}}, 502, "api_error"),
+                ("no code", "openai-oauth", {"detail": GM_403_TEXT}, 502, "api_error"),
+                ("mapped code", "openai-oauth", {"error": {"code": "subscription_sharing_route_not_supported",
+                                                           "message": GM_403_TEXT}}, 403, "permission_error")):
+            kind = GK_KIND[profile]
+            adapter = (getattr(mod, "ADAPTERS", None) or {}).get(kind) or getattr(mod, GK_ADAPTER[kind])()
+            got = adapter.json_response(gm_inbound(mod, profile, stream=False), 403, json.dumps(body).encode("utf-8"))
+            case = "%s (%s)" % (label, profile)
+            problems += gm_envelope(case, got, want_status, want_type, GM_403_FIXED)
+            if GM_403_TEXT in json.dumps(got[1] if isinstance(got, tuple) and len(got) == 2 else got):
+                problems.append("%s: the upstream 403 text reached the client" % case)
+            shown.append("%s -> %r" % (case, got[0] if isinstance(got, tuple) and got else got))
+        return problems, ["403         : " + s for s in shown]
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -12650,7 +12741,8 @@ def group_m(suite, fixture_root):
            needs(m6, tr), needs(m7, tr), needs(m8, tr), needs(m9, tr), needs(m10, tr),
            needs(m11, tr), needs(m12, tr), needs(m13, tr), needs(m14, tr), needs(m15, tr), needs(m16, tr),
            needs(m17, tr), needs(m18, tr), needs(m19, tr, col), needs(m20, "ResponsesAdapter"),
-           needs(m21, tr, "OpenaiAdapter"))
+           needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
+           needs(m23, "ResponsesAdapter"))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
@@ -12715,10 +12807,11 @@ GN_CASES = (
     "error exits leave no _pending",     # N37
     "refresh-failure kind escaped",      # N38
     "over-cap 400 body: relayed, no learn",  # N39
+    "adopted disk token: load checks",   # N40
 )
 GN_IDS = ("N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12", "N13",
           "N14", "N15", "N16", "N17", "N18", "N19", "N20", "N21", "N22", "N23", "N24", "N25", "N26", "N27", "N28",
-          "N29", "N30", "N31", "N32", "N33", "N34", "N35", "N36", "N37", "N38", "N39")
+          "N29", "N30", "N31", "N32", "N33", "N34", "N35", "N36", "N37", "N38", "N39", "N40")
 
 GN_BACKEND = "tf-codex-n"                   # the OAuth backend every N case routes to
 GN_BACKEND_2 = "tf-codex-n2"                # N9, N10: a second OAuth backend on the same peers
@@ -14883,6 +14976,42 @@ def gn_n38(fixture_root, ctx):
     return problems, ["logged      : %r" % line[:160] for line in lines]
 
 
+def gn_n40(fixture_root, ctx):
+    """N40 (F37): a disk login the store would adopt passes the same checks load_config's
+    _rt_cfg_oauth applies -- a refresh token shorter than _API_KEY_MIN_LEN, or equal to the
+    router's auth_token, is NOT adopted: 401 "needs a login", no refresh POST.  A valid one
+    is the control: adopted and refreshed."""
+    del ctx
+    mod, cfg, path, problems = gn_inproc(fixture_root, "n40", {GN_BACKEND: {}})
+    if problems:
+        return problems, []
+    need = getattr(mod, "_API_KEY_MIN_LEN", None)
+    if not isinstance(need, int):
+        return ["the module defines no int _API_KEY_MIN_LEN"], []
+    shown = []
+    for label, token, adopt in (("%d characters" % (need - 1), ("tf-n40-short-" + "s" * need)[:need - 1], False),
+                                ("equal to auth_token", TF_ROUTER_TOKEN, False),
+                                ("control: valid", gn_mint_refresh("n40"), True)):
+        obj = json.loads(gl_bytes(path).decode("utf-8"))
+        obj["backends"][GN_BACKEND]["oauth"] = {"refresh_token": token}
+        write_file(path, json.dumps(obj, indent=2), 0o600)
+        post = GnPost(lambda _i: (200, gn_token_body(gn_mint_access())))
+        store = mod._RtTokenStore(path, cfg, post=post)
+        got = gn_call(lambda: store.credential(cfg.backends[GN_BACKEND]))
+        if adopt:
+            if got[0] != "ok":
+                problems.append("%s: credential() raised %s, expected the adopted login refreshed"
+                                % (label, type(got[1]).__name__))
+            if post.calls != 1:
+                problems.append("%s: %d refresh POST(s), expected 1" % (label, post.calls))
+        else:
+            problems += gn_raised(label, got, mod, "ApiError", 401, "authentication_error", GN_HINT % GN_BACKEND)
+            if post.calls:
+                problems.append("%s: the disk token was adopted and POSTed (%d post(s))" % (label, post.calls))
+        shown.append("%s -> %s, %d post(s)" % (label, got[0], post.calls))
+    return problems, ["disk token  : " + s for s in shown]
+
+
 def gn_padded_400(total):
     """GN_SAMPLING_UNSUPPORTED as *total* bytes of JSON: the same error object plus a tf_pad field."""
     head = json.dumps(GN_SAMPLING_UNSUPPORTED)[:-1] + ', "tf_pad": "'
@@ -14929,7 +15058,7 @@ def gn_n39(fixture_root, ctx):
 
 GN_FNS = (gn_n1, gn_n2, gn_n3, gn_n4, gn_n5, gn_n6, gn_n7, gn_n8, gn_n9, gn_n10, gn_n11, gn_n12, gn_n13,
           gn_n14, gn_n15, gn_n16, gn_n17, gn_n18, gn_n19, gn_n20, gn_n21, gn_n22, gn_n23, gn_n24, gn_n25, gn_n26, gn_n27, gn_n28,
-          gn_n29, gn_n30, gn_n31, gn_n32, gn_n33, gn_n34, gn_n35, gn_n36, gn_n37, gn_n38, gn_n39)
+          gn_n29, gn_n30, gn_n31, gn_n32, gn_n33, gn_n34, gn_n35, gn_n36, gn_n37, gn_n38, gn_n39, gn_n40)
 
 
 def group_n(suite, fixture_root):
@@ -15007,9 +15136,13 @@ GO_CASES = (
     "two logins back to back",           # O15
     "device --debug: no secret out",     # O16
     "device: warning beside the code",   # O17
+    "no api.connectors scope granted",   # O18
 )
 GO_IDS = ("O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13", "O14", "O15", "O16",
-          "O17")
+          "O17", "O18")
+# O18 (F33): the codex row asks for api.connectors.read/invoke; a grant without them (only the
+# OIDC scopes) must still log in -- the router needs none of the connector scopes.
+GO_SCOPE_NO_CONNECTORS = "openid profile email offline_access"
 # O17 (F52): a device code is a phishing vector -- whoever started the flow gets the grant
 # the user approves -- so the login says, on the code's line or the next, to enter it only
 # for a login the user started.  Matched case-insensitively; typed here, never read.
@@ -15353,6 +15486,7 @@ class GoAuth:
         self.exchanges = 0
         self.polls = 0
         self.poll_times = []
+        self.scope = None           # O18: the token answer's `scope`, when a case sets one
         self.peer = ScriptedPeer(script=self.script, tls=True)
 
     def script(self, _index, request):
@@ -15361,9 +15495,11 @@ class GoAuth:
             if path == GO_TOKEN_PATH:
                 access, refresh = self.tokens[min(self.exchanges, len(self.tokens) - 1)]
                 self.exchanges += 1
-                return [("respond_json", 200, {"access_token": access, "refresh_token": refresh,
-                                               "id_token": TF_ID_TOKEN, "token_type": "Bearer",
-                                               "expires_in": GN_EXPIRES_IN})]
+                answer = {"access_token": access, "refresh_token": refresh, "id_token": TF_ID_TOKEN,
+                          "token_type": "Bearer", "expires_in": GN_EXPIRES_IN}
+                if self.scope is not None:
+                    answer["scope"] = self.scope
+                return [("respond_json", 200, answer)]
             if self.device is not None and path == GO_USERCODE_PATH:
                 return [("respond_json", 200, {"device_auth_id": self.device["device_auth_id"],
                                                "user_code": self.device["user_code"],
@@ -15928,6 +16064,15 @@ def go_o17(fixture_root, ctx):
     return go_run(fixture_root, "o17", body, port=False, device=go_mint_device("o17"))
 
 
+def go_o18(fixture_root, ctx):
+    """O18 (F33): the O1 browser flow with a token answer whose `scope` is GO_SCOPE_NO_CONNECTORS
+    (no api.connectors.*): exit 0, the token persisted, as in O1."""
+    def body(rig):
+        rig.auth.scope = GO_SCOPE_NO_CONNECTORS
+        return go_browser_ok(rig, rig.login()), ["granted     : scope %r" % GO_SCOPE_NO_CONNECTORS]
+    return go_run(fixture_root, "o18", body)
+
+
 # -- O2, O3, O10: the openai (SIWC) browser login ---------------------------
 
 class GoSiwcAuth:
@@ -16194,7 +16339,7 @@ def go_o10(fixture_root, ctx):
 
 
 GO_FNS = (go_o1, go_o2, go_o3, go_o4, go_o5, go_o6, go_o7, go_o8, go_o9, go_o10, go_o11, go_o12, go_o13, go_o14,
-          go_o15, go_o16, go_o17)
+          go_o15, go_o16, go_o17, go_o18)
 
 
 def group_o(suite, fixture_root):

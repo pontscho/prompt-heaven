@@ -537,7 +537,7 @@ def _oauth_error_refusal(status, body):
     raise OAuthError("invalid_response", code)
 
 
-def _oauth_parse_token_response(status, body, now, previous_refresh, require_refresh=False):
+def _oauth_parse_token_response(status, body, now, previous_refresh, require_refresh=False, previous_scope=None):
     """Judge one token-endpoint answer (RFC 6749 5.1/5.2).
 
     The status is classified first (429, 5xx), then a non-200 is mapped by its
@@ -547,8 +547,9 @@ def _oauth_parse_token_response(status, body, now, previous_refresh, require_ref
     missing refresh_token keeps *previous_refresh* (6: the server may keep the
     old one), unless *require_refresh*, as for a code exchange, where it is a
     refusal. `expires_at` is now + expires_in, or None when the answer has no
-    expires_in (it is OPTIONAL); `id_token` and `scope` are None when absent.
-    `earliest_refresh_at` is *now* + OAUTH_MIN_REFRESH_INTERVAL_S: no provider
+    expires_in (it is OPTIONAL); `id_token` is None when absent. A missing
+    `scope` is *previous_scope* (6: an omitted scope is the one granted before;
+    F35), None when the caller knows none. `earliest_refresh_at` is *now* + OAUTH_MIN_REFRESH_INTERVAL_S: no provider
     this module serves sends a refresh-not-before hint, so the floor is the
     issue time plus one interval -- a tiny `expires_in` cannot make every
     request a refresh POST (F2).
@@ -571,7 +572,9 @@ def _oauth_parse_token_response(status, body, now, previous_refresh, require_ref
     if id_token is not None and not _oauth_token_ok(id_token):
         raise OAuthError("invalid_response")
     scope = obj.get("scope")
-    if scope is not None and not isinstance(scope, str):
+    if scope is None:
+        scope = previous_scope
+    elif not isinstance(scope, str):
         raise OAuthError("invalid_response")
     expires_in = obj.get("expires_in")
     if expires_in is None:
@@ -672,8 +675,10 @@ def _oauth_check_id_token(claims, provider, client_id, nonce, now):
 
     In order: `iss` equals the row's issuer (skipped when the row's issuer is
     ""), `aud` is *client_id* or a list holding it, `exp` is an int later than
-    *now*, and `nonce` equals *nonce* when one was sent. The code names the
-    first claim that failed and nothing else.
+    *now*, and `nonce` equals *nonce* when one was sent. An `aud` list of more
+    than one audience needs an `azp`, and an `azp`, when present, must be
+    *client_id* (OIDC Core 3.1.3.7 items 4-5; F35). The code names the first
+    claim that failed and nothing else.
     """
     if not isinstance(claims, dict):
         raise OAuthError("invalid_response")
@@ -686,6 +691,9 @@ def _oauth_check_id_token(claims, provider, client_id, nonce, now):
         aud_ok = bool(client_id) and aud == client_id
     if not aud_ok:
         raise OAuthError("invalid_response", "aud")
+    azp = claims.get("azp")
+    if (isinstance(aud, list) and len(aud) > 1 and azp is None) or (azp is not None and azp != client_id):
+        raise OAuthError("invalid_response", "azp")
     exp = claims.get("exp")
     if isinstance(exp, bool) or not isinstance(exp, int) or exp <= now:
         raise OAuthError("invalid_response", "exp")
@@ -893,9 +901,10 @@ def _oauth_sync_accept_callback(listeners, path, state, allowed_hosts, deadline,
     time) and the same bound on the whole head by *clock*; a head that never
     completes is dropped and the wait continues. A head over
     OAUTH_CALLBACK_HEAD_LIMIT gets 431, the rest is judged by
-    _oauth_callback_verdict (405, 400, 404, 400). Every refusal -- and a
-    non-empty head that never completed -- counts against
-    OAUTH_CALLBACK_BAD_LIMIT; spending it raises OAuthError callback_abuse.
+    _oauth_callback_verdict (405, 400, 404, 400). Every connection that does not
+    end the wait -- a refusal, a head that never completed, and one that sent
+    no byte at all (F6) -- counts against OAUTH_CALLBACK_BAD_LIMIT; spending it
+    raises OAuthError callback_abuse.
 
     A valid callback gets _oauth_callback_page(True, 200); a matching-state
     `error=` gets _oauth_callback_page(False, 200) and the `denied` OAuthError
@@ -956,8 +965,9 @@ def _oauth_sync_accept_callback(listeners, path, state, allowed_hosts, deadline,
                         return parsed
                 finally:
                     conn.close()
-                if status is not None or head:
-                    bad += 1
+                # F6: every connection that did not end the wait counts -- a refusal, a head
+                # that never completed, and one that sent nothing at all before closing.
+                bad += 1
                 if bad >= OAUTH_CALLBACK_BAD_LIMIT:
                     raise OAuthError("callback_abuse")
     finally:

@@ -1212,6 +1212,11 @@ def _rt_cfg_backend(name: str, entry: Any, token: str) -> BackendSpec:
         if "auth_header" in entry:
             raise ConfigError(f"{where}.auth_header: not allowed for profile {profile} "
                               f"(the credential comes from oauth)")
+        # F12: the access token is a bearer to base_url, as readable on an http:// path as an
+        # api_key (V14) -- the same rule and the same opt-in.
+        if scheme == "http" and not allow_cleartext and not _rt_is_loopback_host(host):
+            raise ConfigError(f"{where}.oauth: refusing to send its access token over a non-loopback "
+                              f"http:// base_url (use https, or set allow_cleartext_api_key: true)")
         auth_header = "none"
     elif kind == "mistral" or row is not None:
         owner = f"profile {profile}" if profile else f"kind {kind}"
@@ -4249,6 +4254,11 @@ class ResponsesStreamTranslator:
         self.summary_streamed = False   # a summary delta of the current reasoning item was rendered
         self.ignored_events = 0         # unknown event types (debug only)
         self.error_status: Optional[int] = None   # an upstream error code's mapped status (json_response)
+        # F26: the tool names this request offered; a function_call naming any other is refused.
+        tools = inbound.body.get("tools") if isinstance(inbound.body, dict) else None
+        self.offered: FrozenSet[str] = frozenset(
+            tool["name"] for tool in (tools if isinstance(tools, list) else ())
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str))
 
     @property
     def started(self) -> bool:
@@ -4404,6 +4414,8 @@ class ResponsesStreamTranslator:
         name, call_id = item.get("name"), item.get("call_id")
         if not isinstance(name, str) or not name:
             return self.fail("api_error", "backend returned a tool call without a name")
+        if name not in self.offered:     # F26; the name is not echoed
+            return self.fail("api_error", "backend returned a call to a tool that was not offered")
         if not isinstance(call_id, str) or not call_id:
             return self.fail("api_error", "backend returned a tool call without an id")
         return self.sink.tool_block(_rt_rs_anthropic_id(call_id), name, args_json)
@@ -4604,6 +4616,10 @@ class ResponsesAdapter(Adapter):
                 message = obj["detail"]
         if not isinstance(message, str) or not message:
             message = "backend %s answered %d" % (name, status)
+        if status == 403 and row.oauth_provider:
+            # F30: an OAuth profile's 403 is about the login (plan, account, region); the
+            # client gets a fixed text, as a 401 gets the re-login hint. The status stays.
+            message = "backend %s refused this login (upstream 403)" % name
         if mapped is not None:
             return mapped[0], _rt_error_body(mapped[1], inbound.scrub(message))
         if status == 401 and row.oauth_provider:
@@ -5086,7 +5102,7 @@ def _oauth_error_refusal(status, body):
     raise OAuthError("invalid_response", code)
 
 
-def _oauth_parse_token_response(status, body, now, previous_refresh, require_refresh=False):
+def _oauth_parse_token_response(status, body, now, previous_refresh, require_refresh=False, previous_scope=None):
     """Judge one token-endpoint answer (RFC 6749 5.1/5.2).
 
     The status is classified first (429, 5xx), then a non-200 is mapped by its
@@ -5096,8 +5112,9 @@ def _oauth_parse_token_response(status, body, now, previous_refresh, require_ref
     missing refresh_token keeps *previous_refresh* (6: the server may keep the
     old one), unless *require_refresh*, as for a code exchange, where it is a
     refusal. `expires_at` is now + expires_in, or None when the answer has no
-    expires_in (it is OPTIONAL); `id_token` and `scope` are None when absent.
-    `earliest_refresh_at` is *now* + OAUTH_MIN_REFRESH_INTERVAL_S: no provider
+    expires_in (it is OPTIONAL); `id_token` is None when absent. A missing
+    `scope` is *previous_scope* (6: an omitted scope is the one granted before;
+    F35), None when the caller knows none. `earliest_refresh_at` is *now* + OAUTH_MIN_REFRESH_INTERVAL_S: no provider
     this module serves sends a refresh-not-before hint, so the floor is the
     issue time plus one interval -- a tiny `expires_in` cannot make every
     request a refresh POST (F2).
@@ -5120,7 +5137,9 @@ def _oauth_parse_token_response(status, body, now, previous_refresh, require_ref
     if id_token is not None and not _oauth_token_ok(id_token):
         raise OAuthError("invalid_response")
     scope = obj.get("scope")
-    if scope is not None and not isinstance(scope, str):
+    if scope is None:
+        scope = previous_scope
+    elif not isinstance(scope, str):
         raise OAuthError("invalid_response")
     expires_in = obj.get("expires_in")
     if expires_in is None:
@@ -5221,8 +5240,10 @@ def _oauth_check_id_token(claims, provider, client_id, nonce, now):
 
     In order: `iss` equals the row's issuer (skipped when the row's issuer is
     ""), `aud` is *client_id* or a list holding it, `exp` is an int later than
-    *now*, and `nonce` equals *nonce* when one was sent. The code names the
-    first claim that failed and nothing else.
+    *now*, and `nonce` equals *nonce* when one was sent. An `aud` list of more
+    than one audience needs an `azp`, and an `azp`, when present, must be
+    *client_id* (OIDC Core 3.1.3.7 items 4-5; F35). The code names the first
+    claim that failed and nothing else.
     """
     if not isinstance(claims, dict):
         raise OAuthError("invalid_response")
@@ -5235,6 +5256,9 @@ def _oauth_check_id_token(claims, provider, client_id, nonce, now):
         aud_ok = bool(client_id) and aud == client_id
     if not aud_ok:
         raise OAuthError("invalid_response", "aud")
+    azp = claims.get("azp")
+    if (isinstance(aud, list) and len(aud) > 1 and azp is None) or (azp is not None and azp != client_id):
+        raise OAuthError("invalid_response", "azp")
     exp = claims.get("exp")
     if isinstance(exp, bool) or not isinstance(exp, int) or exp <= now:
         raise OAuthError("invalid_response", "exp")
@@ -5442,9 +5466,10 @@ def _oauth_sync_accept_callback(listeners, path, state, allowed_hosts, deadline,
     time) and the same bound on the whole head by *clock*; a head that never
     completes is dropped and the wait continues. A head over
     OAUTH_CALLBACK_HEAD_LIMIT gets 431, the rest is judged by
-    _oauth_callback_verdict (405, 400, 404, 400). Every refusal -- and a
-    non-empty head that never completed -- counts against
-    OAUTH_CALLBACK_BAD_LIMIT; spending it raises OAuthError callback_abuse.
+    _oauth_callback_verdict (405, 400, 404, 400). Every connection that does not
+    end the wait -- a refusal, a head that never completed, and one that sent
+    no byte at all (F6) -- counts against OAUTH_CALLBACK_BAD_LIMIT; spending it
+    raises OAuthError callback_abuse.
 
     A valid callback gets _oauth_callback_page(True, 200); a matching-state
     `error=` gets _oauth_callback_page(False, 200) and the `denied` OAuthError
@@ -5505,14 +5530,15 @@ def _oauth_sync_accept_callback(listeners, path, state, allowed_hosts, deadline,
                         return parsed
                 finally:
                     conn.close()
-                if status is not None or head:
-                    bad += 1
+                # F6: every connection that did not end the wait counts -- a refusal, a head
+                # that never completed, and one that sent nothing at all before closing.
+                bad += 1
                 if bad >= OAUTH_CALLBACK_BAD_LIMIT:
                     raise OAuthError("callback_abuse")
     finally:
         for listener in listeners:
             listener.close()
-# END GENERATED: f536e19e1aaf
+# END GENERATED: 21389f15556a
 
 
 def _rt_oauth_providers() -> Dict[str, OAuthProvider]:
@@ -5709,7 +5735,7 @@ class _RtTokenState:
     status, error type, message) or None. Holds secrets: the repr names nothing."""
 
     __slots__ = ("lock", "access", "expires_at", "earliest_refresh_at", "refresh", "dead_refresh",
-                 "account_id", "residency", "client_id", "host_id", "failed")
+                 "account_id", "residency", "client_id", "host_id", "scope", "failed")
 
     def __init__(self, seed: Optional[OAuthSeed]) -> None:
         self.lock = threading.Lock()
@@ -5722,6 +5748,9 @@ class _RtTokenState:
         self.residency: Optional[str] = None
         self.client_id: Optional[str] = seed.client_id if seed is not None else None
         self.host_id: Optional[str] = seed.host_id if seed is not None else None
+        # The scope the last refresh answer granted (F35): an answer that omits scope keeps
+        # it (RFC 6749 6). In memory only; None until a refresh answer names one.
+        self.scope: Optional[str] = None
         self.failed: Optional[Tuple[float, type, int, str, str]] = None
 
     def __repr__(self) -> str:
@@ -5844,6 +5873,14 @@ class _RtTokenStore:
         refresh = oauth.get("refresh_token")
         if not _rt_header_value_ok(refresh, "token") or refresh in (state.refresh, state.dead_refresh):
             return False
+        # F37: the disk object passes the rules load_config applies to it (_rt_cfg_oauth: the
+        # minimum length, differing from auth_token, the key and field shapes) or is not adopted.
+        try:
+            _rt_cfg_oauth(oauth, "backends.%s" % backend.name, backend.profile, self.cfg.token.decode("ascii"))
+        except ConfigError:
+            log.warning("token store: backends.%s.oauth on disk not adopted: it fails the config rules",
+                        _log_value(backend.name))
+            return False
         account = oauth.get("account_id")
         if account is not None and not _rt_header_value_ok(account, "claim"):
             return False
@@ -5852,6 +5889,7 @@ class _RtTokenStore:
         state.refresh = refresh
         state.dead_refresh = None
         state.access = None
+        state.scope = None              # another grant: its scope is not known yet (F35)
         state.failed = None
         if account is not None:
             state.account_id = account
@@ -5883,7 +5921,8 @@ class _RtTokenStore:
             try:
                 request = _oauth_refresh_request(provider, client_id, refresh)
                 status, body = self.post(backend, request, user_agent, self.track)
-                got = _oauth_parse_token_response(status, body, int(self.clock()), refresh)
+                got = _oauth_parse_token_response(status, body, int(self.clock()), refresh,
+                                                  previous_scope=state.scope)     # F35: RFC 6749 6
                 tokens = (got["access_token"], got["refresh_token"], got["id_token"])
                 # KD-12: every returned token passes the one header-value validator (S5) ...
                 if not all(t is None or _rt_header_value_ok(t, "token") for t in tokens):
@@ -5955,6 +5994,7 @@ class _RtTokenStore:
         state.refresh = new_refresh
         state.account_id = account
         state.residency = residency
+        state.scope = got["scope"]
         state.failed = None
         return cred
 

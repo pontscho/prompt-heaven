@@ -621,8 +621,25 @@ def group_d(chk):
     chk.case(GD, "D7 body-cap-and-non-json", d7)
     chk.case(GD, "D8 token-shape-no-sentinel", d8)
     chk.case(GD, "D9 error-code-allow-list", d9)
+    def d12(mod):
+        # F35 (RFC 6749 6): a refresh answer without `scope` keeps the scope granted before;
+        # one with `scope` reports its own; with neither it is None.
+        problems = []
+        for label, tok, previous, want in (
+                ("omitted, previous kept", {"access_token": "at_tf"}, "openid tf.direct", "openid tf.direct"),
+                ("present, its own", {"access_token": "at_tf", "scope": "openid"}, "openid tf.direct", "openid"),
+                ("omitted, none before", {"access_token": "at_tf"}, None, None)):
+            try:
+                got = mod._oauth_parse_token_response(200, jbody(tok), NOW, "rt_prev", previous_scope=previous)
+            except Exception as exc:  # noqa: BLE001 -- a missing parameter is the red state
+                problems.append("%s: raised %s" % (label, type(exc).__name__))
+                continue
+            problems += problem_if(got.get("scope") != want, "%s: scope %r, wanted %r" % (label, got.get("scope"), want))
+        return problems
+
     chk.case(GD, "D10 refresh-floor-expires-in-zero", d10)
     chk.case(GD, "D11 huge-integer-literal-refused", d11)
+    chk.case(GD, "D12 refresh-scope-fallback", d12)
 
 
 # --- E. JWT and ID token ------------------------------------------------------------
@@ -674,6 +691,8 @@ def group_e(chk):
         for aud in ("issued_tf", ["other_tf", "issued_tf"]):
             claims = good_claims()
             claims["aud"] = aud
+            if isinstance(aud, list):
+                claims["azp"] = "issued_tf"     # multi-valued aud needs azp since F35 (E11)
             exc = oauth_error(mod, lambda c=claims: check(mod, c))
             problems += problem_if(exc is not None, "aud %r was refused: %r" % (aud, getattr(exc, "code", exc)))
         for aud in ("other_tf", ["other_tf"], []):
@@ -733,7 +752,31 @@ def group_e(chk):
     chk.case(GE, "E7 aud-str-list-mismatch", e7)
     chk.case(GE, "E8 exp-against-now", e8)
     chk.case(GE, "E9 nonce-and-required-scope", e9)
+    def e11(mod):
+        # F35 (OIDC Core 3.1.3.7 items 4-5): a multi-valued aud needs an azp, and an azp,
+        # whenever present, must be the client_id; a single aud without azp is unchanged.
+        problems = []
+        for label, aud, azp in (("two auds, no azp", ["other_tf", "issued_tf"], None),
+                                ("two auds, foreign azp", ["other_tf", "issued_tf"], "other_tf"),
+                                ("one aud, foreign azp", "issued_tf", "other_tf")):
+            claims = good_claims()
+            claims["aud"] = aud
+            if azp is not None:
+                claims["azp"] = azp
+            problems += expect_kind(mod, lambda c=claims: check(mod, c), "invalid_response", label, "azp")
+        for label, aud, azp in (("two auds, azp = client", ["other_tf", "issued_tf"], "issued_tf"),
+                                ("one-element list, no azp", ["issued_tf"], None),
+                                ("one aud, azp = client", "issued_tf", "issued_tf")):
+            claims = good_claims()
+            claims["aud"] = aud
+            if azp is not None:
+                claims["azp"] = azp
+            exc = oauth_error(mod, lambda c=claims: check(mod, c))
+            problems += problem_if(exc is not None, "%s was refused: %r" % (label, getattr(exc, "code", exc)))
+        return problems
+
     chk.case(GE, "E10 account-claims", e10)
+    chk.case(GE, "E11 azp-with-multi-aud", e11)
 
 
 # --- F. callback parse ----------------------------------------------------------------
@@ -1245,6 +1288,38 @@ def group_h(chk):
             sess.close()
         return problems
 
+    def h15(mod):
+        # F6: a connection that sends nothing and closes still costs the serial acceptor a
+        # turn; it counts against OAUTH_CALLBACK_BAD_LIMIT like a refused request, so a
+        # local process cannot keep the wait alive with empty connects.
+        limit = mod.OAUTH_CALLBACK_BAD_LIMIT
+        if not isinstance(limit, int) or not 1 <= limit <= 256:
+            return ["OAUTH_CALLBACK_BAD_LIMIT is %r, not a small positive int" % (limit,)]
+
+        def empty(port):
+            socket.create_connection((LOOPBACK, port), timeout=CLIENT_TIMEOUT_S).close()
+
+        sess = Session(mod)
+        try:
+            for _i in range(limit - 1):
+                empty(sess.port)
+            sent = limit - 1
+            problems = problem_if(not sess.still_waiting(), "the wait ended after %d empty connections, under the budget of %d" % (sent, limit))
+            for _extra in range(2):
+                sess.thread.join(SETTLE_S)
+                if not sess.thread.is_alive():
+                    break
+                try:
+                    empty(sess.port)
+                except OSError:
+                    break
+                sent += 1
+            problems += problem_if(not sess.finish(), "the acceptor still waits after %d empty connections" % sent)
+            problems += acceptor_error(mod, sess, "callback_abuse")
+            return problems, ["%d empty connections sent; budget %d" % (sent, limit)]
+        finally:
+            sess.close()
+
     chk.case(GH, "H1 good-callback-200-close-eof", h1)
     chk.case(GH, "H2 wrong-path-404-continues", h2)
     chk.case(GH, "H3 post-405", h3)
@@ -1259,6 +1334,7 @@ def group_h(chk):
     chk.case(GH, "H12 live-port-oserror-reuseaddr", h12)
     chk.case(GH, "H13 back-to-back-rebind", h13)
     chk.case(GH, "H14 matching-state-denied-200", h14)
+    chk.case(GH, "H15 empty-connections-budget", h15)
 
 
 # --- I. contract (ast over the source) ------------------------------------------------

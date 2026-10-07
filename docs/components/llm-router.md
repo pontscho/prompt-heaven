@@ -353,7 +353,7 @@ other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 | `oauth` | none | codex (required) and `openai` only: the login state, `{}` before the first `login`. Keys `Scripts/llm-router.py:_RT_OAUTH_PERSIST_KEYS` only — `refresh_token` (the token rule, at least 16 characters, different from `auth_token`), `account_id`, `expires_at`, and for `openai` the issued `client_id` and `host_id`; written by `login` and the router, never by hand in normal use `Scripts/llm-router.py:_rt_cfg_oauth` |
 | `identity` | the omp row | codex only: overrides of `originator`, `user-agent` and `version` in `Scripts/llm-router.py:_RT_CODEX_IDENTITY`, each 1-256 printable ASCII characters `Scripts/llm-router.py:_rt_cfg_identity` |
 | `auth_base_url` | the provider's | an OAuth profile only: where the token endpoint lives instead (tests, a proxy). The `base_url` rules, but `https` only, except an `http://` loopback host under `allow_private` and `allow_loopback`; with it the token endpoint inherits the backend's address policy and `ca_file`, without it the token endpoint is public-only with the system trust store |
-| `allow_cleartext_api_key` | `false` | a JSON bool; `true` lets the `api_key` travel over a non-loopback `http://` URL in clear text — a LAN backend you accept that for. No effect without an `api_key` |
+| `allow_cleartext_api_key` | `false` | a JSON bool; `true` lets the `api_key` — or an OAuth profile's access token, the same opt-in — travel over a non-loopback `http://` URL in clear text — a LAN backend you accept that for. No effect without an `api_key` or an `oauth` |
 | `auth_header` | `x-api-key` with an `api_key`, else `none` | `authorization`, `x-api-key` or `none`; anything but `none` needs an `api_key`; `mistral` and `openai` with an `api_key` use `authorization` only; refused on an OAuth profile, whose credential comes from the token store |
 | `forward_headers` | the kind's `DEFAULT_FORWARD` | lower-case names, each in the kind's `FORWARDABLE` (table below) |
 | `connect_timeout` | `Scripts/llm-router.py:_CONNECT_TIMEOUT_S` (10 s) | resolve, connect and TLS handshake under one deadline (the resolver runs on a daemon thread joined with what remains of it; a late answer is a 504 and the thread is abandoned); `0 < x <= 3600` |
@@ -818,7 +818,9 @@ read before relying on one of them. In brief:
   the identity was measured from one omp release and moves with every release.
 - **No ID-token signature check, and no runtime discovery.** The `openai` ID
   token's claims are checked, its signature is not; the provider rows are
-  static.
+  static. The access token's claims (the account id and residency) are trusted
+  because the token arrived on the TLS channel to the token endpoint, not
+  validated under OIDC Core 3.1.3.7, which governs the ID token only.
 - **Token persistence has windows.** A crash between the provider's rotation
   and the write, or a refresh that times out after the provider rotated, needs
   a re-login; so can a refresh answer whose check fails, since its rotated token
@@ -841,9 +843,6 @@ read before relying on one of them. In brief:
   sets live as long as the process and are never written down.
 - **A non-stream answer's `dropped_thinking` is not on the `req` line,** and the
   refresh made before an access token expires leaves no trace on it.
-- **An OAuth access token has no cleartext opt-in of its own:** under
-  `allow_private` it goes to a non-loopback `http://` `base_url` without the
-  `allow_cleartext_api_key` an `api_key` needs.
 - **The SIWC login is unverified live.** The namespace tool shape and the
   `openai` OAuth flow rest on the provider's documentation and on fakes; the
   live checkpoint for it has not run.
