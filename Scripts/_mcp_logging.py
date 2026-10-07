@@ -3,12 +3,29 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""Canonical source for how a server CONFIGURES logging -- not what it logs.
+"""Canonical source for how a server CONFIGURES logging -- not what it logs --
+and for the one helper every log line that quotes the peer must go through.
 
 The fleet's logging is three unrelated surfaces, and only one of them is
 duplicated. This file is that one: the twenty lines in every `main()` that
 decide a LEVEL from two flags and point a handler at stderr or at a 0600 file.
 The other two stay where they are, and the reasons differ.
+
+**`_log_value` is the second block, and it is a renderer, not a site
+(R-0070).** The wire log logs STRUCTURE only (ADR 0011) -- a method, an id, a
+tool name, the argument keys -- but structure is still text the PEER chose, so
+a method holding a line break writes a forged second line into the log
+(CWE-117; security review 2026-10-05, finding F19). mcp-proxy and mcp-search
+each carried a hand-written sanitiser and the router a third, byte-identical
+in behaviour; the other servers and `MCP_SKELETON.md` logged the fields raw.
+It belongs to THIS domain (ADR 0014: a source is a domain) because it decides
+how a value is written into a log line, which is what this file is about; it
+reads no `log` and calls no logger, so the reason the wire SITES stay out does
+not touch it. Its free names are `Any` and its two bounds, which is why every
+host lists `_LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value` on one marker.
+`tests/test_wire_log.py` gates that every structural field at both wire sites
+goes through it, and `tests/test_generated_region.py` group E pins what it
+does -- escaping, the bound, the cut marker -- once, here.
 
 **The wire log stays out, and the generator is why.** What `McpServer.run` and
 `McpServer._write` may log is a security invariant, decided in
@@ -90,6 +107,16 @@ bug.
 import logging
 import os
 import sys
+from typing import Any
+
+# The two bounds `_log_value` reads. They are blocks of their own because a test
+# names them (`mod._LOG_VALUE_WIDTH` in the proxy and router suites), and every
+# host lists all three names on one marker, because `free_names` refuses a region
+# that reads a name it neither defines nor imports. 80 characters is a long tool
+# or method name with room to spare; 16 keys is more arguments than any tool in
+# the fleet takes. Both were measured in mcp-proxy, where the block was written.
+_LOG_VALUE_WIDTH = 80
+_LOG_KEYS_SHOWN = 16
 
 
 def _configure_logging(debug, log_file):
@@ -109,3 +136,31 @@ def _configure_logging(debug, log_file):
         handlers.append(logging.StreamHandler(sys.stderr))
     fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
     logging.basicConfig(level=level, format=fmt, handlers=handlers)
+
+
+def _log_value(value: Any) -> str:
+    """A peer-chosen STRUCTURAL value as a log line may carry it (CWE-117).
+
+    For a method, an id, a tool name or the argument keys. A str is cut to
+    _LOG_VALUE_WIDTH characters before repr(), so every control character is
+    escaped, then capped at 4 * _LOG_VALUE_WIDTH; "..." follows whenever
+    either cut happened. An int or None as itself (a huge int as its bit
+    length); a list of keys item by item, at most _LOG_KEYS_SHOWN, one level
+    deep; anything else as its type name. Never handed a payload VALUE (ADR
+    0011). `Scripts/_mcp_logging.py` says why the block is here.
+    """
+    if isinstance(value, str):
+        cut = len(value) > _LOG_VALUE_WIDTH
+        r = repr(value[:_LOG_VALUE_WIDTH] if cut else value)
+        text = r[:4 * _LOG_VALUE_WIDTH]
+        return text + "..." if (cut or len(r) > 4 * _LOG_VALUE_WIDTH) else text
+    if value is None or isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value) if value.bit_length() <= 64 else "int(%d bits)" % value.bit_length()
+    if isinstance(value, list):
+        shown = [type(item).__name__ if isinstance(item, list) else _log_value(item) for item in value[:_LOG_KEYS_SHOWN]]
+        if len(value) > _LOG_KEYS_SHOWN:
+            shown.append("+%d more" % (len(value) - _LOG_KEYS_SHOWN))
+        return "[" + ", ".join(shown) + "]"
+    return type(value).__name__

@@ -246,6 +246,45 @@ from typing import Any, Callable, Deque, Dict, FrozenSet, List, NamedTuple, Opti
 log = logging.getLogger("mcp-proxy")
 
 
+# Every peer-chosen method, id, tool name or argument key reaches a log line
+# through _log_value: a line break in one would forge a line (CWE-117, R-0070).
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_logging.py :: _LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value
+_LOG_VALUE_WIDTH = 80
+
+
+_LOG_KEYS_SHOWN = 16
+
+
+def _log_value(value: Any) -> str:
+    """A peer-chosen STRUCTURAL value as a log line may carry it (CWE-117).
+
+    For a method, an id, a tool name or the argument keys. A str is cut to
+    _LOG_VALUE_WIDTH characters before repr(), so every control character is
+    escaped, then capped at 4 * _LOG_VALUE_WIDTH; "..." follows whenever
+    either cut happened. An int or None as itself (a huge int as its bit
+    length); a list of keys item by item, at most _LOG_KEYS_SHOWN, one level
+    deep; anything else as its type name. Never handed a payload VALUE (ADR
+    0011). `Scripts/_mcp_logging.py` says why the block is here.
+    """
+    if isinstance(value, str):
+        cut = len(value) > _LOG_VALUE_WIDTH
+        r = repr(value[:_LOG_VALUE_WIDTH] if cut else value)
+        text = r[:4 * _LOG_VALUE_WIDTH]
+        return text + "..." if (cut or len(r) > 4 * _LOG_VALUE_WIDTH) else text
+    if value is None or isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value) if value.bit_length() <= 64 else "int(%d bits)" % value.bit_length()
+    if isinstance(value, list):
+        shown = [type(item).__name__ if isinstance(item, list) else _log_value(item) for item in value[:_LOG_KEYS_SHOWN]]
+        if len(value) > _LOG_KEYS_SHOWN:
+            shown.append("+%d more" % (len(value) - _LOG_KEYS_SHOWN))
+        return "[" + ", ".join(shown) + "]"
+    return type(value).__name__
+# END GENERATED: c1f9ba374621
+
+
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_logging.py :: _configure_logging
 def _configure_logging(debug, log_file):
@@ -369,9 +408,6 @@ _MAX_TOOL_PAGES = 100
 _TOKEN_ENV = "MCP_PROXY_TOKEN"
 # Allowed child names (config "name"): lowercase, digits, '_' and '-', 1-32 chars.
 _CHILD_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-# _log_value: width of one logged wire string (repr form) and of one logged key list (CWE-117).
-_LOG_VALUE_WIDTH = 80
-_LOG_KEYS_SHOWN = 16
 
 # Phase 2: the Streamable HTTP front (--http). Localhost/VPN only, never public.
 _HTTP_DEFAULT_PATH = "/mcp"
@@ -816,38 +852,6 @@ def _log_task_failure(task: asyncio.Task) -> None:
     """
     if not task.cancelled() and task.exception() is not None:
         log.debug("background task failed: %s", type(task.exception()).__name__)
-
-
-def _log_value(value: Any) -> str:
-    """A STRUCTURAL wire value (method, id, tool name, argument keys) as it may
-    appear in a log line: no control character, bounded length (CWE-117).
-
-    A str is cut to _LOG_VALUE_WIDTH characters BEFORE repr() (F6: a huge wire
-    string is never copied whole), then logged as that repr() -- every control
-    character escaped -- capped at 4 * _LOG_VALUE_WIDTH characters, since one
-    escaped character can take up to ten; "..." follows whenever either cut
-    happened (R3-F5), so a capped repr is never mistaken for a whole one. An
-    int or None as itself
-    (a huge int as its bit length); a list (the argument KEYS) item by item, at
-    most _LOG_KEYS_SHOWN items; anything else as its type name only. Never
-    handed a payload VALUE (ADR 0011).
-    """
-    if isinstance(value, str):
-        cut = len(value) > _LOG_VALUE_WIDTH
-        r = repr(value[:_LOG_VALUE_WIDTH] if cut else value)
-        text = r[:4 * _LOG_VALUE_WIDTH]
-        return text + "..." if (cut or len(r) > 4 * _LOG_VALUE_WIDTH) else text
-    if value is None or isinstance(value, bool):
-        return str(value)
-    if isinstance(value, int):
-        return str(value) if value.bit_length() <= 64 else "int(%d bits)" % value.bit_length()
-    if isinstance(value, list):
-        shown = [type(item).__name__ if isinstance(item, list) else _log_value(item)   # one level only
-                 for item in value[:_LOG_KEYS_SHOWN]]
-        if len(value) > _LOG_KEYS_SHOWN:
-            shown.append("+%d more" % (len(value) - _LOG_KEYS_SHOWN))
-        return "[" + ", ".join(shown) + "]"
-    return type(value).__name__
 
 
 _BAD_ID_MESSAGE = "Invalid Request: id must be a string or an integer"

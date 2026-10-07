@@ -219,6 +219,11 @@ WEBSOCKET_CORE = ("WebSocketError", "WS_MAX_HANDSHAKE_BYTES",
                   "_ws_encode_frame", "_ws_parse_frame", "_ws_assemble",
                   "_ws_control_reply", "_WsConnection", "_ws_step")
 
+# The log-value sanitiser and the two bounds it reads (R-0070): one marker in
+# every host, constants first, because `free_names` refuses `_log_value` in a
+# region that does not also define the names it reads.
+LOG_VALUE_NAMES = ("_LOG_VALUE_WIDTH", "_LOG_KEYS_SHOWN", "_log_value")
+
 # The OAuth blocks call one another the same way, so every real host spells ONE
 # marker for them too: the sans-IO core below, in source order, then the I/O
 # wrapper it uses (`_oauth_listen`, `_oauth_sync_accept_callback`). The tab
@@ -2071,6 +2076,73 @@ def group_blocks(suite, blocks, lsp, paging, logmod):
         "the log file was created %04o, not 0600" % mode,
     ), detail=["path: %s" % log_path, "mode: %04o" % mode])
 
+    # `_log_value` (R-0070, CWE-117): a peer-chosen method, id, tool name or
+    # argument key on its way into a log line. Three properties, each pinned on
+    # the canonical module once, for every host that carries the region.
+    #
+    # 1. Nothing that ends or rewrites a line survives: CR, LF, the C0 and C1
+    #    controls, DEL, and the Unicode line and paragraph separators all come
+    #    out as backslash escapes, because a str is logged as its repr().
+    log_value = getattr(logmod, "_log_value", None)
+    width = getattr(logmod, "_LOG_VALUE_WIDTH", None)
+    shown = getattr(logmod, "_LOG_KEYS_SHOWN", None)
+    if log_value is None or width is None or shown is None:
+        for cid in ("log-value-escapes-line-breaks", "log-value-bounded-and-cut",
+                    "log-value-non-str-structure"):
+            suite.record(GE, cid, ["Scripts/_mcp_logging.py defines no "
+                                   "_log_value / _LOG_VALUE_WIDTH / _LOG_KEYS_SHOWN"])
+        return
+    forged = ("tools/call\r\n2026-10-07 mcp-git INFO forged"
+              "\x00\x1b[2J\x7f\x85" + chr(0x2028) + chr(0x2029))
+    out = log_value(forged)
+    bad = sorted({"U+%04X" % ord(ch) for ch in out
+                  if ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f
+                  or ord(ch) in (0x2028, 0x2029)})
+    problems = problem_if(bad, "control characters reached the line: %s" % bad)
+    problems += problem_if(out != repr(forged),
+                           "a short value is not logged as its repr(): %r" % out)
+    suite.record(GE, "log-value-escapes-line-breaks", problems,
+                 detail=["in : %r" % forged, "out: %s" % out])
+
+    # 2. Bounded, and every cut marked. A long str is cut BEFORE repr() and ends
+    #    in "..."; a str short enough to keep whole whose repr() still overruns
+    #    the 4 x width cap (every char an escape) is capped and ALSO ends in
+    #    "..."; a value at exactly the width is whole and unmarked.
+    problems, detail = [], []
+    for what, value, cut in (("long printable", "x" * (width * 10), True),
+                             ("escapes overrun the cap", "\x00" * width, True),
+                             ("exactly the width", "y" * width, False),
+                             ("short", "tools/call", False)):
+        got = log_value(value)
+        detail.append("%-24s: %d chars, ends %r" % (what, len(got), got[-4:]))
+        if len(got) > 4 * width + 3:
+            problems.append("%s: %d chars, cap %d" % (what, len(got), 4 * width + 3))
+        if got.endswith("...") is not cut:
+            problems.append("%s: cut marker %s" % (what, "missing" if cut else "on a whole value"))
+        if not cut and got != repr(value):
+            problems.append("%s: logged %r, not its repr()" % (what, got[:40]))
+    suite.record(GE, "log-value-bounded-and-cut", problems, detail=detail)
+
+    # 3. The non-str structure: an id is an int (a huge one as its bit length,
+    #    never 4300 digits), a key list is bounded at _LOG_KEYS_SHOWN items with
+    #    a "+N more" tail and one level deep, and anything else -- a dict, a
+    #    float, a nested list -- is its TYPE NAME, never its contents.
+    problems = []
+    for value, want in ((7, "7"), (None, "None"), (True, "True"),
+                        (2 ** 100, "int(101 bits)"), ({"k": "v"}, "dict"),
+                        (1.5, "float")):
+        got = log_value(value)
+        if got != want:
+            problems.append("_log_value(%r) gave %r, wanted %r" % (value, got, want))
+    keys = log_value(["k\n%d" % i for i in range(shown + 4)])
+    problems += problem_if(not keys.endswith(", +4 more]"),
+                           "a key list over %d items is not bounded: %r" % (shown, keys[-40:]))
+    problems += problem_if("\n" in keys, "a key's line break reached the line")
+    problems += problem_if(log_value([["a\n"], "b"]) != "[list, 'b']",
+                           "a nested list is not logged as its type name: %r"
+                           % log_value([["a\n"], "b"]))
+    suite.record(GE, "log-value-non-str-structure", problems)
+
 
 def group_tabs(suite, mod):
     """The tab refusal is PER BLOCK now, so both arms have to be live."""
@@ -2145,6 +2217,11 @@ def group_tabs(suite, mod):
         "_max_answer_chars": "DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars",
         WINDOW_RELAY: ", ".join(STRICT_NAMES + (WINDOW_NAME, WINDOW_RELAY)),
     }
+    # `_log_value` reads both of its bounds, so every host spells the three on
+    # one marker, constants first (R-0070); the two constants are rendered in
+    # that same shape rather than alone.
+    for name in LOG_VALUE_NAMES:
+        paired[name] = ", ".join(LOG_VALUE_NAMES)
     # The strict-JSON blocks call one another, so each is rendered inside the
     # one run every real host spells (R-0067/R-0068); `_ensure_dict` parses
     # through `_strict_loads`, which is why its marker above carries the run too.

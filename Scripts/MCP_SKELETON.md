@@ -110,6 +110,16 @@ Call sites use the standard levels: `log.debug(...)`, `log.info(...)`,
 (`log.debug("← %s", x)`), but a pre-formatted f-string argument is acceptable when
 porting (`log.debug(f"← {x}")`).
 
+**Anything the peer chose goes through `_log_value`** — the JSON-RPC `method`, the
+request `id`, the tool or function `name`, the argument KEYS. They are structure,
+not payload, so ADR 0011 lets them into the log; but they are still text the peer
+wrote, and one holding a line break writes a forged second line (CWE-117). The
+helper is a generated region from `Scripts/_mcp_logging.py`, carried with its two
+bounds on one marker (`_LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value`, §8): it logs
+a str as its bounded `repr()`, so every control character is escaped and a cut is
+marked `...`. `log.debug("Notification: %s", _log_value(method))`, never
+`log.debug(f"← {method}")`. `tests/test_wire_log.py` gates both wire sites (§5).
+
 > `MARKDOWN_MODE` (LSP trio: clangd/cuda/lua-lsp) is an orthogonal output-format
 > flag, **not** a logging concern — it stays as a global and is untouched by the
 > logging convergence.
@@ -279,7 +289,7 @@ The dispatcher is identical in shape for sync and async servers; only the keywor
         params = msg.get("params") or {}
 
         if msg_id is None:                       # JSON-RPC notification — never reply
-            log.debug("Notification: %s", method)
+            log.debug("Notification: %s", _log_value(method))
             return None
 
         if method == "initialize":
@@ -404,6 +414,9 @@ Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
                     continue
                 # F12/CWE-532: log protocol structure only, never payload
                 # values (params.content / result text can carry file contents).
+                # CWE-117: the structure is still PEER text, so every field goes
+                # through the generated _log_value (§2) -- a raw method holding
+                # a line break forges a log line.
                 # Defensive: params/arguments may be a non-dict on a malformed
                 # message; this is a debug log and must never crash the loop.
                 _p = msg.get("params")
@@ -412,8 +425,8 @@ Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
                 _args = _args if isinstance(_args, dict) else {}
                 log.debug(
                     "← method=%s id=%s fn=%s keys=%s",
-                    msg.get("method"), msg.get("id"), _p.get("name"),
-                    list(_args.keys()),
+                    _log_value(msg.get("method")), _log_value(msg.get("id")),
+                    _log_value(_p.get("name")), _log_value(list(_args.keys())),
                 )
                 # R-0006: on the loop thread, before dispatch, never answered.
                 if (msg.get("method") == "notifications/cancelled"
@@ -464,7 +477,7 @@ Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
             return
         task = by_id.get(key)
         if task is not None:
-            log.debug("cancelling id=%s", key)
+            log.debug("cancelling id=%s", _log_value(key))
             task.cancel()
 
     async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
@@ -487,9 +500,10 @@ Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
             log.exception("Response was not JSON-serialisable")
             out = _strict_dumps(self._error(response.get("id"), -32603,
                                             f"Response not serialisable: {exc}"))
-        # F12/CWE-532: structure only (id + outcome), no body.
+        # F12/CWE-532: structure only (id + outcome), no body; CWE-117: the id
+        # is the peer's, so it goes through _log_value.
         log.debug(
-            "→ id=%s %s", response.get("id"),
+            "→ id=%s %s", _log_value(response.get("id")),
             "error" if "error" in response else "ok",
         )
         try:
@@ -965,6 +979,7 @@ drift committed into a server turns the fleet red.
 - [ ] run() loop: readline on a dedicated `max_workers=1` executor, one task per message, `-32700`/`-32600` **answered**, readline and write guarded, every executor shut down (§5 — `tests/test_read_loop.py` gates this)
 - [ ] `_serve` wraps the handler in try/except and **writes** a `-32603` reply
 - [ ] `_configure_logging` present as a GENERATED region (`_mcp_logging.py`), called once from `main()`; `--debug` + `--log-file` present and hand-written (§6)
+- [ ] `_LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value` present as one GENERATED region (`_mcp_logging.py`), and every logged method / id / tool name / argument key passes through `_log_value` — both wire sites, the dispatcher's notification line, the cancel line, a handler-crash line that names the tool (§2; `tests/test_wire_log.py` gates the wire sites)
 - [ ] `_handle_tool_call` decodes a string `arguments` (JSON) before the dict guard (§7a)
 - [ ] param normalizer decodes a string `params` (JSON); every bool flag read via `_bool_param` (§7a/§7b)
 - [ ] `MARKDOWN_MODE` / subprocess `finally` cleanup left intact where present

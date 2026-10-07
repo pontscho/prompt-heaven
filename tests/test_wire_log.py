@@ -17,18 +17,18 @@ whatever mode and lifetime the operator's logging config happens to give it.
 `mcp-purity.py` is the only server where both ends were fixed, and its two
 sites are the canonical form this suite gates against:
 
-  OUTBOUND -- `McpServer._write`, `Scripts/mcp-purity.py:6059-6063`
+  OUTBOUND -- `McpServer._write` in `Scripts/mcp-purity.py`
       # F12/CWE-532: structure only (id + outcome), no body.
       log.debug(
-          "→ id=%s %s", response.get("id"),
+          "→ id=%s %s", _log_value(response.get("id")),
           "error" if "error" in response else "ok",
       )
 
-  INBOUND -- `McpServer.run`, `Scripts/mcp-purity.py:6009-6021`
+  INBOUND -- `McpServer.run` in `Scripts/mcp-purity.py`
       log.debug(
           "← method=%s id=%s fn=%s keys=%s",
-          msg.get("method"), msg.get("id"), _p.get("name"),
-          list(_args.keys()),
+          _log_value(msg.get("method")), _log_value(msg.get("id")),
+          _log_value(_p.get("name")), _log_value(list(_args.keys())),
       )
 
 Note the inbound form logs argument KEYS and never argument values.  That is
@@ -69,6 +69,22 @@ Two consequences of that wording are deliberate and worth stating:
     because gating a spelling fails a correct refactor -- the sibling gate in
     `test_read_loop.py` learned the same lesson over `create_task` vs
     `ensure_future`.
+
+A STRUCTURE FIELD IS STILL PEER TEXT (CWE-117, R-0070)
+------------------------------------------------------
+Structure is not the same thing as safe-to-print.  `method`, `id`, the tool
+`name` and the argument KEYS are chosen by the peer, so a method of
+`"x\\n2026-10-07 mcp-git INFO forged"` writes a second, forged line into the
+log through a site this suite would otherwise wave through as structure only
+(security review 2026-10-05, F19).  So every one of those four fields, at
+either site, must reach the log through `_log_value(...)` -- the generated
+block from `Scripts/_mcp_logging.py` that logs a str as its bounded repr().
+A field interpolated into an f-string, wrapped in `str()`, or passed bare is
+`RAW-FIELD-IN-WIRE-LOG`.  The sanitiser does not launder a payload:
+`_log_value(msg)` is still a LEAK, because the rule on payloads above is
+applied first and unchanged.  Group C also requires every server to carry
+`_log_value` as that generated region, so a site that names it cannot be
+calling a hand copy -- or nothing.
 
 One DECLARED limitation.  An `except ... as exc` name is not a payload root,
 so `log.warning("Invalid JSON: %s", exc)` passes.  That is a judgement, not an
@@ -151,7 +167,11 @@ parameter, a non-structural key on it (`response.get("result")`), an f-string
 interpolating `line`, `json.dumps(msg)[:200]`, a value reached inside
 `arguments`, and the `arguments` container logged whole -- plus three that must
 stay silent: the canonical form, the same fields spelled as subscripts, and a
-server with no wire log at all.  Each fixture asserts its problem codes AND its
+server with no wire log at all.  R-0070 added four structure-only plants that
+must still be refused as RAW (a bare `msg.get("method")`, a bare outbound
+`response.get("id")`, the method in an f-string, the keys in `str()`), one that
+proves `_log_value(json.dumps(msg))` is still a payload, and a control for
+group C's region check.  Each fixture asserts its problem codes AND its
 measured shapes by name, so the shape extractor is under control too, and a
 plant that failed to apply (a `.replace()` that matched nothing) is itself a
 recorded failure rather than a silent pass.
@@ -193,10 +213,11 @@ Exit code 0 iff every non-informational case passes.
 Groups:
   A  GATE     -- outbound `McpServer._write`, one case per server
   B  GATE     -- inbound `McpServer.run`, one case per server
-  C  ROSTER   -- the table covers the tree exactly, its totals hold, and it
-                 cannot declare a payload
-  D  control  -- planted defects the analyser MUST flag, and correct forms it
-                 must not
+  C  ROSTER   -- the table covers the tree exactly, its totals hold, it
+                 cannot declare a payload, and every server carries the
+                 generated _log_value
+  D  control  -- planted defects the analyser MUST flag (payloads, and raw
+                 structure fields), and correct forms it must not
   E  GATE     -- MCP_SKELETON.md's §5 sample, lifted and run through the same
                  analyser
   F  hygiene  -- every write under .claude/tmp, no bytecode, no new repo paths
@@ -282,7 +303,7 @@ WIRE = {
                         "tests/test_mcp_proxy.py K3/J26/J27"),
     "mcp-purity.py":   (OUT, FULL,
                         "the canonical form both sites are gated against "
-                        "(:6009-6021 inbound, :6059-6063 outbound)"),
+                        "(McpServer.run inbound, McpServer._write outbound)"),
     "mcp-tshark.py":   (OUT, FULL,
                         "tshark_call dispatcher; replies carry packet bytes"),
     "mcp-search.py":   (OUT, FULL,
@@ -317,6 +338,19 @@ TAINT_CUTTING = {"type", "isinstance", "callable"}
 
 LOG_LEVELS = {"debug", "info", "warning", "error", "exception", "critical"}
 
+# CWE-117 (R-0070): the structural fields whose TEXT the peer chooses.  Each one
+# must reach a wire log through SANITISER; `outcome`, `len` and `pred` are
+# literals, ints and bools the server computes, so they need nothing.
+SANITISER = "_log_value"
+SANITISED_FIELDS = {"method", "id", "name", "keys"}
+
+# Calls whose result is a number or a bool however peer-chosen the input text:
+# a raw field underneath one cannot forge a line.
+FIELD_CUTTING = TAINT_CUTTING | {"len"}
+
+# Where the sanitiser must come from: the generated region, never a hand copy.
+SANITISER_SOURCE = "_mcp_logging.py"
+
 # NOT a filter -- every `<anything>.<level>(...)` in a wire site is judged.
 # This set only decides whether the receiver is worth NAMING in the case
 # detail, so an unusual one is visible rather than silently trusted.
@@ -342,6 +376,7 @@ SHAPE = "WIRE-SHAPE-NOT-DECLARED"
 UNDECLARED_LOG = "UNDECLARED-WIRE-LOG"
 MISSING_LOG = "NO-WIRE-LOG"
 NOT_DECLARED = "SERVER-NOT-IN-TABLE"
+RAW = "RAW-FIELD-IN-WIRE-LOG"
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +567,64 @@ def _classify_call(node, env):
     return _combine(*[classify(a, env) for a in args])
 
 
+def _is_sanitiser_call(node):
+    """`_log_value(<one expression>)` -- the only spelling that sanitises."""
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == SANITISER and len(node.args) == 1
+            and not node.keywords)
+
+
+def _is_projection(node, env):
+    """True when *node* itself reaches a structure field of a wire value.
+
+    `msg.get("id")`, `msg["id"]`, `_args.keys()` -- the projection, not a
+    wrapper around one -- or a NAME the propagation marked FIELD, since
+    `method = msg.get("method")` then `log.debug("%s", method)` is the same
+    fact one assignment later.
+    """
+    if isinstance(node, ast.Name):
+        return env.get(node.id, PURE) == FIELD
+    if isinstance(node, ast.Subscript):
+        return classify(node.value, env)[0] != PURE
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        return (node.func.attr in ("get", "keys")
+                and classify(node.func.value, env)[0] != PURE)
+    return False
+
+
+def _raw_fields(node, env):
+    """Every peer-text structure field *node* logs without the sanitiser.
+
+    Walked rather than classified once, because `classify` reports only the
+    WORST label of an expression: `"%s %s" % (len(x), msg.get("method"))`
+    classifies by its first FIELD and would hide the second.  A
+    `_log_value(...)` call stops the walk -- whatever is inside it is
+    sanitised -- and so do the calls that return a number or a bool, a
+    comparison, and the test of a conditional, none of which can carry a line
+    break.
+    """
+    if node is None or _is_sanitiser_call(node):
+        return []
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in FIELD_CUTTING):
+        return []
+    if isinstance(node, ast.Compare):
+        return []
+    if isinstance(node, ast.IfExp):
+        return _raw_fields(node.body, env) + _raw_fields(node.orelse, env)
+    kind, label = classify(node, env)
+    if kind == PURE:
+        return []
+    if kind == FIELD and _is_projection(node, env):
+        if isinstance(node, ast.Name) or label in SANITISED_FIELDS:
+            return [label]
+        return []
+    out = []
+    for child in ast.iter_child_nodes(node):
+        out += _raw_fields(child, env)
+    return out
+
+
 def _assign_targets(node):
     out = []
     if isinstance(node, ast.Assign):
@@ -604,7 +697,7 @@ def _collect(site, scope, env, line_offset=0):
         base = _log_call_base(call)
         spelling = "%s.%s" % (base, call.func.attr)
         args = list(call.args) + [kw.value for kw in call.keywords]
-        local, leaks = [], []
+        local, leaks, raws = [], [], []
         for arg in args:
             kind, label = classify(arg, env)
             if kind == PURE:
@@ -614,6 +707,7 @@ def _collect(site, scope, env, line_offset=0):
                 leaks.append((kind, label, _src(arg)))
             else:
                 local.append(label)
+                raws += [(field, _src(arg)) for field in _raw_fields(arg, env)]
         if not local:
             continue                       # a literal-only log is not a wire log
         wire_logs += 1
@@ -629,6 +723,12 @@ def _collect(site, scope, env, line_offset=0):
                       "%r) -- a %s of the wire message, not its structure"
                       % (lineno, spelling, src, kind, label,
                          "container" if kind == CONTAINER else "value"))
+        for field, src in raws:
+            site.fail(RAW,
+                      "line %d: %s argument `%s` logs the peer-chosen %r "
+                      "without %s(...) -- a line break in it forges a log "
+                      "line (CWE-117)" % (lineno, spelling, src, field,
+                                          SANITISER))
     site.shape = tuple(tokens) if wire_logs else None
 
 
@@ -796,6 +896,41 @@ def group_inbound(suite, shapes):
     _group_site(suite, GB, shapes, "inn")
 
 
+def sanitiser_problem(source):
+    """None when *source* defines SANITISER once, inside its generated region.
+
+    The region is found by its BEGIN line naming SANITISER_SOURCE and listing
+    SANITISER among its names; the `def` must lie between that line and the
+    next END line.  Text for the markers and `ast` for the `def`: the markers
+    are an on-disk format, the definition is source.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return "unparseable: %s" % exc
+    defs = [n.lineno for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name == SANITISER]
+    if not defs:
+        return "no top-level %s" % SANITISER
+    if len(defs) > 1:
+        return "%d top-level definitions of %s (lines %s)" % (
+            len(defs), SANITISER, ", ".join(map(str, defs)))
+    begin = None
+    for lineno, line in enumerate(source.splitlines(), 1):
+        text = line.strip()
+        if text.startswith("# BEGIN GENERATED:") and "::" in text:
+            src, names = text[len("# BEGIN GENERATED:"):].split("::", 1)
+            if (src.strip() == SANITISER_SOURCE
+                    and SANITISER in [n.strip() for n in names.split(",")]):
+                begin = lineno
+        elif text.startswith("# END GENERATED:") and begin is not None:
+            if begin < defs[0] < lineno:
+                return None
+            begin = None
+    return ("%s (line %d) is a hand copy, not the %s region"
+            % (SANITISER, defs[0], SANITISER_SOURCE))
+
+
 def group_roster(suite, shapes, files):
     """C. the table covers the tree, its totals hold, it cannot declare a leak."""
     declared = set(WIRE)
@@ -856,6 +991,24 @@ def group_roster(suite, shapes, files):
                          "in the gate -- a failing server could be 'fixed' by "
                          "declaring %r as its expected shape" % PAYLOAD_TOKEN])
 
+    bad, carried = [], 0
+    for name in files:
+        with open(H.repo_path(SCAN_ROOT, name), encoding="utf-8") as fh:
+            why = sanitiser_problem(fh.read())
+        if why:
+            bad.append("%s: %s" % (name, why))
+        else:
+            carried += 1
+    suite.record(GC, "every server carries the generated %s" % SANITISER, bad,
+                 detail=["carried     : %d/%d" % (carried, len(files)),
+                         "source      : Scripts/%s" % SANITISER_SOURCE,
+                         "note        : a wire site that names %s must be "
+                         "calling the ONE generated copy -- a hand copy can "
+                         "drift from the bound and the escaping the "
+                         "generated_region suite unit-tests, and a missing one "
+                         "is a NameError the first time --debug is on"
+                         % SANITISER])
+
     resolved = [n for n, w in shapes.items() if w.out.root and w.inn.root]
     suite.record(GC, "the analyser resolved a payload root at both sites",
                  [] if len(resolved) == len(files)
@@ -873,13 +1026,13 @@ def group_roster(suite, shapes, files):
 INBOUND_GOOD = '''\
                 log.debug(
                     "← method=%s id=%s fn=%s keys=%s",
-                    msg.get("method"), msg.get("id"), _p.get("name"),
-                    list(_args.keys()),
+                    _log_value(msg.get("method")), _log_value(msg.get("id")),
+                    _log_value(_p.get("name")), _log_value(list(_args.keys())),
                 )'''
 
 OUTBOUND_GOOD = '''\
         log.debug(
-            "→ id=%s %s", response.get("id"),
+            "→ id=%s %s", _log_value(response.get("id")),
             "error" if "error" in response else "ok",
         )'''
 
@@ -989,7 +1142,34 @@ def _fixtures():
 
     add("ctl_subscript_key.py", [], OUT, MINIMAL,
         inbound='                log.debug("← method=%s id=%s",\n'
-                '                          msg["method"], msg["id"])')
+                '                          _log_value(msg["method"]),\n'
+                '                          _log_value(msg["id"]))')
+
+    # CWE-117 (R-0070): a structure field is still peer TEXT.  Each of these
+    # logs only structure -- the payload rule passes it -- and each must still
+    # be refused for reaching the log without the sanitiser.
+    add("ctl_raw_method.py", [RAW], OUT, FULL,
+        inbound='                log.debug(\n'
+                '                    "← method=%s id=%s fn=%s keys=%s",\n'
+                '                    msg.get("method"), _log_value(msg.get("id")),\n'
+                '                    _log_value(_p.get("name")),\n'
+                '                    _log_value(list(_args.keys())),\n'
+                '                )')
+
+    add("ctl_raw_out_id.py", [RAW], OUT, FULL,
+        outbound='        log.debug("→ id=%s %s", response.get("id"),\n'
+                 '                  "error" if "error" in response else "ok")')
+
+    add("ctl_raw_fstring.py", [RAW], OUT, ("method",),
+        inbound="                log.debug(f\"← {msg.get('method')}\")")
+
+    add("ctl_raw_keys_str.py", [RAW], OUT, MINIMAL[:1] + ("keys",),
+        inbound='                log.debug("← %s %s", _log_value(msg.get("method")),\n'
+                '                          str(list(_args.keys())))')
+
+    # The sanitiser does not launder a payload: the payload rule runs first.
+    add("ctl_laundered_payload.py", [PAYLOAD], OUT, (PAYLOAD_TOKEN,),
+        inbound='                log.debug("← %s", _log_value(json.dumps(msg)))')
 
     add("ctl_bare_out.py", [PAYLOAD], (PAYLOAD_TOKEN,), FULL,
         outbound='        log.debug("→ %s", out)')
@@ -1001,7 +1181,7 @@ def _fixtures():
         outbound='        log.debug("→ %s", response)')
 
     add("ctl_result_value.py", [PAYLOAD], ("id", PAYLOAD_TOKEN), FULL,
-        outbound='        log.debug("→ id=%s %s", response.get("id"),\n'
+        outbound='        log.debug("→ id=%s %s", _log_value(response.get("id")),\n'
                  '                  response.get("result"))')
 
     add("ctl_fstring_line.py", [PAYLOAD], OUT, (PAYLOAD_TOKEN,),
@@ -1011,11 +1191,11 @@ def _fixtures():
         inbound='                log.debug("← %s", json.dumps(msg)[:200])')
 
     add("ctl_arg_value.py", [PAYLOAD], OUT, ("method", PAYLOAD_TOKEN),
-        inbound='                log.debug("← %s %s", msg.get("method"),\n'
+        inbound='                log.debug("← %s %s", _log_value(msg.get("method")),\n'
                 '                          _args.get("content"))')
 
     add("ctl_container.py", [PAYLOAD], OUT, ("method", PAYLOAD_TOKEN),
-        inbound='                log.debug("← %s %s", msg.get("method"),\n'
+        inbound='                log.debug("← %s %s", _log_value(msg.get("method")),\n'
                 '                          _p.get("arguments"))')
 
     return out
@@ -1071,11 +1251,35 @@ def group_control(suite, fixture_root):
                        % (flagged, must)],
                  detail=["fixtures    : %d (%d defective, %d correct)"
                          % (len(FIXTURES), must, len(FIXTURES) - must),
-                         "note        : the three correct fixtures matter as "
-                         "much as the eight defective ones -- an analyser that "
+                         "note        : the %d correct fixtures matter as "
+                         "much as the %d defective ones -- an analyser that "
                          "refuses everything is as useless as one that refuses "
                          "nothing, and ctl_subscript_key proves the rule is on "
-                         "the value reached rather than on the spelling"])
+                         "the value reached rather than on the spelling"
+                         % (len(FIXTURES) - must, must)])
+
+    # The group C region check, against three synthetic hosts: it must refuse a
+    # hand copy and an absence, and accept the generated region.
+    region = ("# BEGIN GENERATED: %s :: _LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, %s\n"
+              "def %s(value):\n    return repr(value)\n"
+              "# END GENERATED: 000000000000\n"
+              % (SANITISER_SOURCE, SANITISER, SANITISER))
+    hand = "def %s(value):\n    return repr(value)\n" % SANITISER
+    other = region.replace(SANITISER_SOURCE, "_mcp_json.py")
+    cases = (("generated region", region, False),
+             ("hand copy", hand, True),
+             ("absent", "import os\n", True),
+             ("region from another source", other, True),
+             ("region plus a second copy", region + hand, True))
+    problems, lines = [], []
+    for what, source, refused in cases:
+        why = sanitiser_problem(source)
+        lines.append("%-26s: %s" % (what, why or "accepted"))
+        if bool(why) != refused:
+            problems.append("%s: %s, wanted %s" % (
+                what, "refused" if why else "accepted",
+                "refused" if refused else "accepted"))
+    suite.record(GD, "control-sanitiser-region", problems, detail=lines)
 
 
 # -- group E: the skeleton ---------------------------------------------------

@@ -32,6 +32,45 @@ from typing import Dict, List, Optional, Any, Callable
 log = logging.getLogger("mcp-gdc")
 
 
+# Every peer-chosen method, id, tool name or argument key reaches a log line
+# through _log_value: a line break in one would forge a line (CWE-117, R-0070).
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_logging.py :: _LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value
+_LOG_VALUE_WIDTH = 80
+
+
+_LOG_KEYS_SHOWN = 16
+
+
+def _log_value(value: Any) -> str:
+    """A peer-chosen STRUCTURAL value as a log line may carry it (CWE-117).
+
+    For a method, an id, a tool name or the argument keys. A str is cut to
+    _LOG_VALUE_WIDTH characters before repr(), so every control character is
+    escaped, then capped at 4 * _LOG_VALUE_WIDTH; "..." follows whenever
+    either cut happened. An int or None as itself (a huge int as its bit
+    length); a list of keys item by item, at most _LOG_KEYS_SHOWN, one level
+    deep; anything else as its type name. Never handed a payload VALUE (ADR
+    0011). `Scripts/_mcp_logging.py` says why the block is here.
+    """
+    if isinstance(value, str):
+        cut = len(value) > _LOG_VALUE_WIDTH
+        r = repr(value[:_LOG_VALUE_WIDTH] if cut else value)
+        text = r[:4 * _LOG_VALUE_WIDTH]
+        return text + "..." if (cut or len(r) > 4 * _LOG_VALUE_WIDTH) else text
+    if value is None or isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value) if value.bit_length() <= 64 else "int(%d bits)" % value.bit_length()
+    if isinstance(value, list):
+        shown = [type(item).__name__ if isinstance(item, list) else _log_value(item) for item in value[:_LOG_KEYS_SHOWN]]
+        if len(value) > _LOG_KEYS_SHOWN:
+            shown.append("+%d more" % (len(value) - _LOG_KEYS_SHOWN))
+        return "[" + ", ".join(shown) + "]"
+    return type(value).__name__
+# END GENERATED: c1f9ba374621
+
+
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_logging.py :: _configure_logging
 def _configure_logging(debug, log_file):
@@ -2221,7 +2260,7 @@ class McpServer:
         method = msg.get("method", "")
         msg_id = msg.get("id")
 
-        log.debug(f"<- {method} (id={msg_id})")
+        log.debug("<- %s (id=%s)", _log_value(method), _log_value(msg_id))
 
         if msg_id is None:
             return None
@@ -2299,7 +2338,7 @@ class McpServer:
                 return self._tool_error(msg_id, result["error"])
             return self._result(msg_id, {"content": [{"type": "text", "text": result}]})
         except Exception as e:
-            log.exception("Unhandled exception in handler '%s'", name)
+            log.exception("Unhandled exception in handler %s", _log_value(name))
             return self._tool_error(msg_id, f"Error in {name}: {e}")
 
     async def run(self) -> None:
@@ -2518,7 +2557,7 @@ class McpServer:
             return
         task = by_id.get(key)
         if task is not None:
-            log.debug("cancelling id=%s", key)
+            log.debug("cancelling id=%s", _log_value(key))
             task.cancel()
 
     async def _serve(self, msg: dict) -> None:
@@ -2580,16 +2619,16 @@ class McpServer:
             params = msg.get("params")
             name = (params.get("name") or "") if isinstance(params, dict) else ""
             if method == "tools/call":
-                log.debug("Handler '%s' exceeded the %ds global cap",
-                          name, HANDLER_CEILING_SECONDS)
+                log.debug("Handler %s exceeded the %ds global cap",
+                          _log_value(name), HANDLER_CEILING_SECONDS)
                 return self._tool_error(
                     msg_id,
                     f"Error in {name}: handler timed out "
                     f"({HANDLER_CEILING_SECONDS:.0f}s global cap). "
                     f"The server stayed responsive — retry the call.",
                 )
-            log.debug("Method '%s' exceeded the %ds global cap",
-                      method, HANDLER_CEILING_SECONDS)
+            log.debug("Method %s exceeded the %ds global cap",
+                      _log_value(method), HANDLER_CEILING_SECONDS)
             return self._error(
                 msg_id, -32603,
                 f"Handler timed out ({HANDLER_CEILING_SECONDS:.0f}s global cap): {method}")
@@ -2609,7 +2648,7 @@ class McpServer:
                                             f"Response not serialisable: {exc}"))
         # F12/CWE-532: structure only (id + outcome), no body.
         log.debug(
-            "→ id=%s %s", response.get("id"),
+            "→ id=%s %s", _log_value(response.get("id")),
             "error" if "error" in response else "ok",
         )
         try:

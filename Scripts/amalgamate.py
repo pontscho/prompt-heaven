@@ -90,8 +90,9 @@ CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 # Each takes the default run and `--check` exactly as a server does; the
 # `--census fleet` count stays the MCP glob's, because that census is ABOUT the
 # server fleet and says so in its first line. llm-router.py is a stdlib HTTP
-# server run by path, not an MCP server; it takes `_configure_logging` and the
-# OAuth core plus its callback wrapper.
+# server run by path, not an MCP server; it takes `_configure_logging`, the
+# `_log_value` sanitiser with its two bounds, and the OAuth core plus its
+# callback wrapper.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py",
                   "llm-router.py")
 
@@ -540,8 +541,13 @@ def render(source: str, names: List[str], blocks: Dict[str, str],
     # `_max_answer_chars` was lifted: a constant is given a region of its OWN
     # unless a block READS it, and the one pair that exists renders a constant
     # followed by a def, which is exactly where PEP 8 wants two blank lines.
-    # Two adjacent CONSTANTS in one region is the shape that would be wrong,
-    # and nothing asks for it. A region per constant also keeps the sentence
+    # Two adjacent CONSTANTS in one region is the shape that reads oddly, and
+    # exactly one marker asks for it: `_LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN,
+    # _log_value` (R-0070), because the def reads both bounds and `free_names`
+    # refuses it in any region that does not define them. Two blank lines
+    # between two constants is legal PEP 8 (E303 allows two), merely loose, so
+    # that was accepted rather than taught a third separator. A region per
+    # constant otherwise also keeps the sentence
     # explaining what the number is for -- host-specific prose -- above the
     # BEGIN marker where it was written.
     separator = "\n\n" if indent else "\n\n\n"

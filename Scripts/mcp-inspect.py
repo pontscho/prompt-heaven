@@ -67,6 +67,45 @@ from typing import Any, Dict, List, Optional, Tuple
 log = logging.getLogger("mcp-inspect")
 
 
+# Every peer-chosen method, id, tool name or argument key reaches a log line
+# through _log_value: a line break in one would forge a line (CWE-117, R-0070).
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_logging.py :: _LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value
+_LOG_VALUE_WIDTH = 80
+
+
+_LOG_KEYS_SHOWN = 16
+
+
+def _log_value(value: Any) -> str:
+    """A peer-chosen STRUCTURAL value as a log line may carry it (CWE-117).
+
+    For a method, an id, a tool name or the argument keys. A str is cut to
+    _LOG_VALUE_WIDTH characters before repr(), so every control character is
+    escaped, then capped at 4 * _LOG_VALUE_WIDTH; "..." follows whenever
+    either cut happened. An int or None as itself (a huge int as its bit
+    length); a list of keys item by item, at most _LOG_KEYS_SHOWN, one level
+    deep; anything else as its type name. Never handed a payload VALUE (ADR
+    0011). `Scripts/_mcp_logging.py` says why the block is here.
+    """
+    if isinstance(value, str):
+        cut = len(value) > _LOG_VALUE_WIDTH
+        r = repr(value[:_LOG_VALUE_WIDTH] if cut else value)
+        text = r[:4 * _LOG_VALUE_WIDTH]
+        return text + "..." if (cut or len(r) > 4 * _LOG_VALUE_WIDTH) else text
+    if value is None or isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value) if value.bit_length() <= 64 else "int(%d bits)" % value.bit_length()
+    if isinstance(value, list):
+        shown = [type(item).__name__ if isinstance(item, list) else _log_value(item) for item in value[:_LOG_KEYS_SHOWN]]
+        if len(value) > _LOG_KEYS_SHOWN:
+            shown.append("+%d more" % (len(value) - _LOG_KEYS_SHOWN))
+        return "[" + ", ".join(shown) + "]"
+    return type(value).__name__
+# END GENERATED: c1f9ba374621
+
+
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_logging.py :: _configure_logging
 def _configure_logging(debug, log_file):
@@ -2591,8 +2630,8 @@ class McpServer:
                 _args = _args if isinstance(_args, dict) else {}
                 log.debug(
                     "← method=%s id=%s fn=%s keys=%s",
-                    msg.get("method"), msg.get("id"), _p.get("name"),
-                    list(_args.keys()),
+                    _log_value(msg.get("method")), _log_value(msg.get("id")),
+                    _log_value(_p.get("name")), _log_value(list(_args.keys())),
                 )
                 # R-0006: a cancel is handled HERE, on the loop thread and
                 # before anything is dispatched -- never as a task of its own,
@@ -2664,7 +2703,7 @@ class McpServer:
             return
         task = by_id.get(key)
         if task is not None:
-            log.debug("cancelling id=%s", key)
+            log.debug("cancelling id=%s", _log_value(key))
             task.cancel()
 
     async def _serve(self, loop, workers: ThreadPoolExecutor, msg: dict) -> None:
@@ -2715,7 +2754,7 @@ class McpServer:
                                             f"Response not serialisable: {exc}"))
         # F12/CWE-532: structure only (id + outcome), no body.
         log.debug(
-            "→ id=%s %s", response.get("id"),
+            "→ id=%s %s", _log_value(response.get("id")),
             "error" if "error" in response else "ok",
         )
         try:
@@ -2732,7 +2771,7 @@ class McpServer:
         params = msg.get("params") or {}
 
         if msg_id is None:
-            log.debug("Notification: %s", method)
+            log.debug("Notification: %s", _log_value(method))
             return None
 
         if method == "initialize":

@@ -197,6 +197,45 @@ from typing import (
 log = logging.getLogger("llm-router")
 
 
+# Every client-chosen structural value (model, method, kind, argument keys) reaches a
+# log line through _log_value: a line break in one would forge a line (CWE-117, R-0070).
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_logging.py :: _LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value
+_LOG_VALUE_WIDTH = 80
+
+
+_LOG_KEYS_SHOWN = 16
+
+
+def _log_value(value: Any) -> str:
+    """A peer-chosen STRUCTURAL value as a log line may carry it (CWE-117).
+
+    For a method, an id, a tool name or the argument keys. A str is cut to
+    _LOG_VALUE_WIDTH characters before repr(), so every control character is
+    escaped, then capped at 4 * _LOG_VALUE_WIDTH; "..." follows whenever
+    either cut happened. An int or None as itself (a huge int as its bit
+    length); a list of keys item by item, at most _LOG_KEYS_SHOWN, one level
+    deep; anything else as its type name. Never handed a payload VALUE (ADR
+    0011). `Scripts/_mcp_logging.py` says why the block is here.
+    """
+    if isinstance(value, str):
+        cut = len(value) > _LOG_VALUE_WIDTH
+        r = repr(value[:_LOG_VALUE_WIDTH] if cut else value)
+        text = r[:4 * _LOG_VALUE_WIDTH]
+        return text + "..." if (cut or len(r) > 4 * _LOG_VALUE_WIDTH) else text
+    if value is None or isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value) if value.bit_length() <= 64 else "int(%d bits)" % value.bit_length()
+    if isinstance(value, list):
+        shown = [type(item).__name__ if isinstance(item, list) else _log_value(item) for item in value[:_LOG_KEYS_SHOWN]]
+        if len(value) > _LOG_KEYS_SHOWN:
+            shown.append("+%d more" % (len(value) - _LOG_KEYS_SHOWN))
+        return "[" + ", ".join(shown) + "]"
+    return type(value).__name__
+# END GENERATED: c1f9ba374621
+
+
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_logging.py :: _configure_logging
 def _configure_logging(debug, log_file):
@@ -260,9 +299,7 @@ _UPSTREAM_BODY_LIMIT = 64 * 1024 * 1024  # one non-stream upstream body
 # answered as any other 400, never learned from.
 _RT_LEARN_BODY_LIMIT = 64 * 1024
 _ERROR_TEXT_WIDTH = 300           # upstream error text relayed to the client, cut here
-# _log_value: width of one logged wire string (repr form) and of one logged key list (CWE-117).
-_LOG_VALUE_WIDTH = 80
-_LOG_KEYS_SHOWN = 16
+# _LOG_VALUE_WIDTH / _LOG_KEYS_SHOWN: generated with _log_value from _mcp_logging.py (R-0070).
 _MINTED_PREFIX = "toolu_lr"       # prefix of tool-use ids the router mints for Mistral
 _RT_SCRUB_DYNAMIC_CAP = 64        # unpinned runtime secrets the scrubber holds (KD-13)
 # A JWT: base64url header "eyJ...", payload, optional signature. Its first 8 characters are
@@ -346,38 +383,6 @@ _ANTHROPIC_ERROR_TYPES = frozenset({
 def _rt_error_body(err_type: str, message: str) -> dict:
     """The Anthropic error envelope every error answer carries."""
     return {"type": "error", "error": {"type": err_type, "message": message}}
-
-
-def _log_value(value: Any) -> str:
-    """A STRUCTURAL wire value (method, id, tool name, argument keys) as it may
-    appear in a log line: no control character, bounded length (CWE-117).
-
-    A str is cut to _LOG_VALUE_WIDTH characters BEFORE repr() (F6: a huge wire
-    string is never copied whole), then logged as that repr() -- every control
-    character escaped -- capped at 4 * _LOG_VALUE_WIDTH characters, since one
-    escaped character can take up to ten; "..." follows whenever either cut
-    happened (R3-F5), so a capped repr is never mistaken for a whole one. An
-    int or None as itself
-    (a huge int as its bit length); a list (the argument KEYS) item by item, at
-    most _LOG_KEYS_SHOWN items; anything else as its type name only. Never
-    handed a payload VALUE (ADR 0011).
-    """
-    if isinstance(value, str):
-        cut = len(value) > _LOG_VALUE_WIDTH
-        r = repr(value[:_LOG_VALUE_WIDTH] if cut else value)
-        text = r[:4 * _LOG_VALUE_WIDTH]
-        return text + "..." if (cut or len(r) > 4 * _LOG_VALUE_WIDTH) else text
-    if value is None or isinstance(value, bool):
-        return str(value)
-    if isinstance(value, int):
-        return str(value) if value.bit_length() <= 64 else "int(%d bits)" % value.bit_length()
-    if isinstance(value, list):
-        shown = [type(item).__name__ if isinstance(item, list) else _log_value(item)   # one level only
-                 for item in value[:_LOG_KEYS_SHOWN]]
-        if len(value) > _LOG_KEYS_SHOWN:
-            shown.append("+%d more" % (len(value) - _LOG_KEYS_SHOWN))
-        return "[" + ", ".join(shown) + "]"
-    return type(value).__name__
 
 
 def _rt_dumps(obj: Any) -> bytes:

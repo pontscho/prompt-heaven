@@ -451,7 +451,7 @@ SUITES = [
      "generator's census read path -- fleet, sources, per-block hosts and the "
      "hand-copy walk with its declared reasons -- derived, sorted, writes "
      "nothing; and every host parses and emits its peer frames through the "
-     "strict JSON blocks, with every other bare parse declared", 107),
+     "strict JSON blocks, with every other bare parse declared", 110),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
@@ -583,8 +583,10 @@ SUITES = [
      "every MCP server's wire logging is structure only -- protocol metadata "
      "and argument KEYS, never a payload body or value (F12/CWE-532), with "
      "the shape each site may log declared per server rather than inferred, "
+     "every peer-chosen method, id, tool name and key logged through the "
+     "generated _log_value (CWE-117), "
      "and MCP_SKELETON.md's own sample lifted by script and gated the same way",
-     57),
+     64),
     # TYPED for the same reason as the two above.  The count is 26 declared
     # sites + 17 servers + 4 roster + 11 control + 4 hygiene: the site total is
     # 17 layer-W plus 9 layer-D, so a server that gains or loses a catch-all
