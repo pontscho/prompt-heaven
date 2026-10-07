@@ -44,8 +44,9 @@ Layout: one file, eight units, in file order (each has one reason to change)
   5. Adapters -- Adapter (the interface), PassthroughAdapter, LlamacppAdapter (+ its quirk registry),
      MistralAdapter (+ the tool-id map, _rt_ms_translate, MistralStreamTranslator), the Responses
      vocabulary as data (_RT_RESPONSES_PROFILES, _RT_CODEX_IDENTITY), _rt_rs_translate,
-     ResponsesStreamTranslator, ResponsesAdapter with CodexAdapter / OpenaiAdapter, KIND_CLASSES,
-     ADAPTERS, RESERVED_KINDS. Pure: no socket, no clock.
+     ResponsesStreamTranslator, ResponsesAdapter with CodexAdapter / OpenaiAdapter, the kind
+     registry _RT_KIND_TABLE and what derives from it (_KINDS, RESERVED_KINDS,
+     _RT_KIND_AUTH_PROFILES, KIND_CLASSES, ADAPTERS). Pure: no socket, no clock.
   6. The outbound transport and the credentials it presents -- the generated OAuth region (from
      Scripts/_mcp_oauth.py), the OAuth provider rows, _RtTokenStore, the config lock, the
      hand-copied address classifier, _rt_resolve, _rt_open_socket, _RtHttpConnection /
@@ -574,10 +575,8 @@ def _rt_make_scrubber(secrets: Tuple[bytes, ...]) -> Callable[[str], str]:
 _RT_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _PEM_CERT_MARKER = "-----BEGIN CERTIFICATE-----"
 
-# Every backend kind the config enum knows; RESERVED_KINDS are in the enum but
-# refused by the loader (D6: anthropic is decided by its own plan).
-_KINDS = ("passthrough", "llamacpp", "mistral", "codex", "openai", "anthropic")
-RESERVED_KINDS = ("anthropic",)
+# The backend kinds (_KINDS, RESERVED_KINDS, _RT_KIND_AUTH_PROFILES) derive from the one
+# kind registry, _RT_KIND_TABLE in unit 5; the loader reads them at call time.
 
 
 def _rt_redacted_repr(obj: tuple, shown: Mapping[str, str]) -> str:
@@ -944,20 +943,6 @@ _RT_DEFAULT_PORTS = {"https": 443, "http": 80}
 # The keys a backend's oauth object may hold, and the keys the write-back persists.
 _RT_OAUTH_PERSIST_KEYS = ("refresh_token", "account_id", "expires_at", "client_id", "host_id")
 
-
-def _rt_kind_auth_profiles() -> Dict[str, Dict[str, str]]:
-    """kind -> {auth mode -> profile name} (M5): the data behind _rt_cfg_profile.
-
-    A kind absent here has no profile (""); a kind with one mode requires it;
-    a kind with both takes exactly one. Every name is a _RT_RESPONSES_PROFILES key.
-    """
-    return {
-        "codex": {"oauth": "codex"},
-        "openai": {"oauth": "openai-oauth", "api_key": "openai-apikey"},
-    }
-
-
-_RT_KIND_AUTH_PROFILES = _rt_kind_auth_profiles()
 
 # S5: the one header-value validator's rules. re.ASCII and explicit ranges, so a
 # lone surrogate (a "\ud800" JSON escape) never matches and is refused by name at
@@ -4678,14 +4663,72 @@ class OpenaiAdapter(ResponsesAdapter):
     }
 
 
+class _RtKindRow(NamedTuple):
+    """One backend kind of _RT_KIND_TABLE (R-0084, NFR-2)."""
+    kind: str                           # the config enum value (backends.<name>.kind)
+    adapter: Optional[Type[Adapter]]    # None = reserved: in the enum, refused by the loader (D6)
+    auth: Mapping[str, str]             # auth mode -> _RT_RESPONSES_PROFILES name (M5); {} = no profile
+
+
+_RT_KIND_AUTH_MODES = ("api_key", "oauth")
+
+# The kind registry: one row per kind, in the order the loader's refusal lists them.
+# _KINDS, RESERVED_KINDS, _RT_KIND_AUTH_PROFILES, KIND_CLASSES and ADAPTERS all derive
+# from it below, so a new kind is one row (J37-J39 gate the derivation).
+_RT_KIND_TABLE: Tuple[_RtKindRow, ...] = (
+    _RtKindRow("passthrough", PassthroughAdapter, {}),
+    _RtKindRow("llamacpp", LlamacppAdapter, {}),
+    _RtKindRow("mistral", MistralAdapter, {}),
+    _RtKindRow("codex", CodexAdapter, {"oauth": "codex"}),
+    _RtKindRow("openai", OpenaiAdapter, {"oauth": "openai-oauth", "api_key": "openai-apikey"}),
+    _RtKindRow("anthropic", None, {}),      # reserved: decided by its own plan (D6)
+)
+
+
+def _rt_check_kind_table(rows: Tuple[_RtKindRow, ...]) -> None:
+    """Refuse an inconsistent kind registry at import (R-0084): a RuntimeError naming the kind.
+
+    Each kind is a non-empty string with one row; a reserved row (adapter None)
+    has no auth profile; any other row's adapter is an Adapter subclass of that
+    very kind, and each auth mode is api_key or oauth naming an _RT_RESPONSES_PROFILES row.
+    """
+    seen = set()
+    for row in rows:
+        kind = row.kind
+        if not isinstance(kind, str) or not kind:
+            raise RuntimeError("kind registry: a row's kind must be a non-empty string")
+        if kind in seen:
+            raise RuntimeError(f"kind {kind}: two registry rows")
+        seen.add(kind)
+        if row.adapter is None:
+            if row.auth:
+                raise RuntimeError(f"kind {kind}: a reserved kind has no auth profile")
+            continue
+        if not isinstance(row.adapter, type) or not issubclass(row.adapter, Adapter):
+            raise RuntimeError(f"kind {kind}: the adapter is not an Adapter subclass")
+        if row.adapter.kind != kind:
+            raise RuntimeError(f"kind {kind}: adapter {row.adapter.__name__} is of kind {row.adapter.kind}")
+        for mode, profile in row.auth.items():
+            if mode not in _RT_KIND_AUTH_MODES:
+                raise RuntimeError(f"kind {kind}: unknown auth mode {mode}")
+            if profile not in _RT_RESPONSES_PROFILES:
+                raise RuntimeError(f"kind {kind}: auth {mode} names no Responses profile {profile}")
+
+
+_rt_check_kind_table(_RT_KIND_TABLE)
+
+# Every kind the config enum knows, in table order; RESERVED_KINDS are in the enum but
+# refused by the loader (D6: anthropic is decided by its own plan).
+_KINDS = tuple(row.kind for row in _RT_KIND_TABLE)
+RESERVED_KINDS = tuple(row.kind for row in _RT_KIND_TABLE if row.adapter is None)
+# kind -> {auth mode -> profile name} (M5): the data behind _rt_cfg_profile. A kind
+# absent here has no profile (""); a kind with one mode requires it; a kind with both
+# takes exactly one.
+_RT_KIND_AUTH_PROFILES: Dict[str, Dict[str, str]] = {
+    row.kind: dict(row.auth) for row in _RT_KIND_TABLE if row.auth}
 # kind -> adapter class: the single source of each kind's tables (load_config reads it).
 KIND_CLASSES: Dict[str, Type[Adapter]] = {
-    "passthrough": PassthroughAdapter,
-    "llamacpp": LlamacppAdapter,
-    "mistral": MistralAdapter,
-    "codex": CodexAdapter,
-    "openai": OpenaiAdapter,
-}
+    row.kind: row.adapter for row in _RT_KIND_TABLE if row.adapter is not None}
 
 
 def _rt_check_forward_tables(classes: Mapping[str, Type[Adapter]]) -> None:
@@ -4709,13 +4752,8 @@ def _rt_check_forward_tables(classes: Mapping[str, Type[Adapter]]) -> None:
 _rt_check_forward_tables(KIND_CLASSES)
 
 # kind -> adapter instance, one per kind of KIND_CLASSES (Steps 8, 9, 11).
-# A future kind in KIND_CLASSES but not here loads fine and is answered 501.
-ADAPTERS: Dict[str, Adapter] = {}
-ADAPTERS["passthrough"] = PassthroughAdapter()
-ADAPTERS["llamacpp"] = LlamacppAdapter()
-ADAPTERS["mistral"] = MistralAdapter()
-ADAPTERS["codex"] = CodexAdapter()
-ADAPTERS["openai"] = OpenaiAdapter()
+ADAPTERS: Dict[str, Adapter] = {
+    row.kind: row.adapter() for row in _RT_KIND_TABLE if row.adapter is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -7423,9 +7461,9 @@ class _RouterHandler(BaseHTTPRequestHandler):
             rec["route"], rec["kind"], rec["stream"] = inbound.route.name, backend.kind, int(inbound.stream)
             adapter = ADAPTERS.get(backend.kind)
             if adapter is None:
-                # Unreachable for a kind in ADAPTERS. Kept as the
-                # guard for a future kind added to KIND_CLASSES before its adapter
-                # methods exist: it is answered 501 rather than half-served.
+                # Unreachable: ADAPTERS and KIND_CLASSES derive from the same
+                # _RT_KIND_TABLE rows. Kept as the guard for a kind that loads
+                # without an adapter: it is answered 501 rather than half-served.
                 self._send_json(501, _rt_error_body("api_error", "backend kind %s is not wired yet"
                                                     % backend.kind))
                 return

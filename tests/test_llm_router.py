@@ -17652,6 +17652,7 @@ GJ_CASES = (
     "help: token off argv and history",  # J33
     "duplicate key -> ValueError",       # J34
     "role refusal logs type name only",  # J35
+    "kind registry values pinned",       # J39 (R-0084)
 )
 
 # J34 (F10): a key that appears twice in one object, at any depth, is a ValueError from
@@ -17683,8 +17684,8 @@ GJ_TF_PATH = "/tf/responses"
 GJ_TF_BACKEND = "tf-j28"
 GJ_TF_MODULE = "ph_llm_router_j28"
 GJ_TF_REFERENCE = "openai-apikey"
-GJ_TF_SCOPE = ("translator half only; a new config kind also needs _KINDS, _RT_KIND_AUTH_PROFILES, "
-               "KIND_CLASSES and ADAPTERS entries (NFR-2)")
+GJ_TF_SCOPE = ("translator half only; a new config kind also needs one _RT_KIND_TABLE row, from which "
+               "_KINDS, _RT_KIND_AUTH_PROFILES, KIND_CLASSES and ADAPTERS derive (NFR-2; J37-J39)")
 GJ_TF_DEF_RE = re.compile(r"^def _rt_responses_profiles\(", re.M)
 GJ_TF_NEXT_DEF_RE = re.compile(r"^(?:def|class) ", re.M)     # the function ends at the next top-level def
 # The rows tuple's close inside _rt_responses_profiles (other row builders share the shape).
@@ -17698,6 +17699,25 @@ GJ_TF_CLASS = '\n\nclass _TfAdapter(ResponsesAdapter):\n    kind = "%s"\n' % GJ_
 GJ_PERSIST_FORBIDDEN = ("access", "id_token")
 
 GJ_KINDS = ("codex", "llamacpp", "mistral", "openai", "passthrough")   # J12: KIND_CLASSES must hold all five
+
+# J39 (R-0084, NFR-2): the registry half of "a new kind is one row".  The five per-kind
+# names, pinned at their pre-R-0084 values -- type, order and content -- and written
+# here, never read from the module, so a derivation that drifts is a finding.
+GJ_REG_TABLE = "_RT_KIND_TABLE"
+GJ_REG_CHECK = "_rt_check_kind_table"
+GJ_REG_DERIVED = ("_KINDS", "RESERVED_KINDS", "_RT_KIND_AUTH_PROFILES", "KIND_CLASSES", "ADAPTERS")
+GJ_REG_KINDS = ("passthrough", "llamacpp", "mistral", "codex", "openai", "anthropic")
+GJ_REG_RESERVED = ("anthropic",)
+GJ_REG_AUTH = (("codex", (("oauth", "codex"),)),
+               ("openai", (("oauth", "openai-oauth"), ("api_key", "openai-apikey"))))
+GJ_REG_CLASSES = (("passthrough", "PassthroughAdapter"), ("llamacpp", "LlamacppAdapter"),
+                  ("mistral", "MistralAdapter"), ("codex", "CodexAdapter"), ("openai", "OpenaiAdapter"))
+# The A14 refusals, byte for byte: the unknown-kind list keeps the table's order.
+GJ_REG_REFUSALS = (
+    ({"kind": "tf-no-such-kind"}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai"),
+    ({"kind": 7}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai"),
+    ({"kind": "anthropic"}, 'backends.tf.kind: "anthropic" is reserved and not implemented'),
+)
 
 # J27 (Plan Step 5): the _RT_RESPONSES_PROFILES table is the contract -- every field of
 # every row, in the declared field order.  Values are written here, never read from the
@@ -17855,6 +17875,8 @@ GJ_STATIC_CASES = (
     "control: undeclared hand copy",     # J19 (J13)
     "control: J4a send plants",          # J23 (J4a)
     "control: J4a hook plants",          # J36 (J4a, R-0083)
+    "kind registry: one table",          # J37 (R-0084)
+    "control: kind registry plants",     # J38 (J37)
 )
 
 # J1 (Plan Step 8): the scopes allowed to call hmac.compare_digest, each with its
@@ -18341,6 +18363,128 @@ def gj_j19_checker(rows):
     return rule_j13(rows, GJ_J19_REASONS)
 
 
+# J37 (R-0084, NFR-2): one kind registry.  The table _RT_KIND_TABLE is bound once at
+# module level and checked there by _rt_check_kind_table(_RT_KIND_TABLE); each
+# GJ_REG_DERIVED name is bound exactly once, at module level, by an expression that
+# reads the table, is no container literal and names no kind (no str constant) -- and
+# is never written after (no item store, del, mutating method or `global`).  So no
+# derived name can hold a kind the table does not.
+GJ_REG_MUTATORS = frozenset({"update", "setdefault", "pop", "popitem", "clear", "__setitem__", "__delitem__"})
+GJ_REG_LITERALS = (ast.Dict, ast.Tuple, ast.List, ast.Set, ast.Constant)
+
+
+def gj_reg_binds(tree, names):
+    """({name: [(stmt, value)]}, [finding]): every binding of *names* in *tree*, plus the
+    item stores, deletes, mutating calls and `global` declarations of them."""
+    binds = {name: [] for name in names}
+    findings = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Delete):
+            targets, value = node.targets, None
+        else:
+            targets, value = [], None
+        for target in targets:
+            for sub in ast.walk(target):
+                if isinstance(sub, ast.Name) and sub.id in binds and isinstance(sub.ctx, (ast.Store, ast.Del)):
+                    binds[sub.id].append((node, value))
+                elif (isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name) and sub.value.id in binds
+                      and isinstance(sub.ctx, (ast.Store, ast.Del))):
+                    findings.append("%s[...] written by hand at line %d" % (sub.value.id, node.lineno))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in GJ_REG_MUTATORS and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in binds):
+            findings.append("%s.%s() mutates the registry at line %d"
+                            % (node.func.value.id, node.func.attr, node.lineno))
+        if isinstance(node, ast.Global):
+            for name in node.names:
+                if name in binds:
+                    findings.append("global %s declared at line %d" % (name, node.lineno))
+    return binds, findings
+
+
+def rule_j37(source):
+    tree, bad = gj_parse(source)
+    if tree is None:
+        return bad
+    top = set(id(stmt) for stmt in tree.body)
+    binds, findings = gj_reg_binds(tree, (GJ_REG_TABLE,) + GJ_REG_DERIVED)
+    for name, seen in binds.items():
+        if len(seen) != 1:
+            findings.append("%s is bound %d time(s), expected exactly once" % (name, len(seen)))
+        for stmt, value in seen:
+            if id(stmt) not in top:
+                findings.append("%s is bound below module level at line %d" % (name, stmt.lineno))
+            if name == GJ_REG_TABLE:
+                continue
+            if value is None or isinstance(value, GJ_REG_LITERALS):
+                findings.append("%s is a hand-written literal (line %d), not derived from %s"
+                                % (name, stmt.lineno, GJ_REG_TABLE))
+                continue
+            if not any(isinstance(n, ast.Name) and n.id == GJ_REG_TABLE for n in ast.walk(value)):
+                findings.append("%s does not read %s (line %d)" % (name, GJ_REG_TABLE, stmt.lineno))
+            kinds = [n.value for n in ast.walk(value) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+            for kind in kinds:
+                findings.append("%s names %r by hand (line %d)" % (name, kind, stmt.lineno))
+    checks = [stmt for stmt in tree.body
+              if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+              and gj_callee(stmt.value) == GJ_REG_CHECK
+              and [gj_is_name(arg, GJ_REG_TABLE) for arg in stmt.value.args] == [True]]
+    if len(checks) != 1:
+        findings.append("%d module-level %s(%s) call(s), expected exactly one"
+                        % (len(checks), GJ_REG_CHECK, GJ_REG_TABLE))
+    return findings
+
+
+GJ_J38_CLEAN = '''class Adapter:
+    kind = ""
+
+
+class TfAdapter(Adapter):
+    kind = "tf"
+
+
+class _RtKindRow(tuple):
+    pass
+
+
+_RT_KIND_TABLE = (
+    _RtKindRow(("tf", TfAdapter, {"api_key": "tf-key"})),
+    _RtKindRow(("tf-reserved", None, {})),
+)
+
+
+def _rt_check_kind_table(rows):
+    return rows
+
+
+_rt_check_kind_table(_RT_KIND_TABLE)
+_KINDS = tuple(row[0] for row in _RT_KIND_TABLE)
+RESERVED_KINDS = tuple(row[0] for row in _RT_KIND_TABLE if row[1] is None)
+_RT_KIND_AUTH_PROFILES = {row[0]: dict(row[2]) for row in _RT_KIND_TABLE if row[2]}
+KIND_CLASSES = {row[0]: row[1] for row in _RT_KIND_TABLE if row[1] is not None}
+ADAPTERS = {row[0]: row[1]() for row in _RT_KIND_TABLE if row[1] is not None}
+'''
+# J38: a registry a hand-written literal again, a kind added to a derived name only
+# (three spellings), a second binding, and the import-time check dropped.
+GJ_J38_PLANTED = GJ_J38_CLEAN.replace(
+    "KIND_CLASSES = {row[0]: row[1] for row in _RT_KIND_TABLE if row[1] is not None}\n",
+    "KIND_CLASSES = {\"tf\": TfAdapter}\n",
+).replace(
+    "RESERVED_KINDS = tuple(row[0] for row in _RT_KIND_TABLE if row[1] is None)\n",
+    "RESERVED_KINDS = tuple(row[0] for row in _RT_KIND_TABLE if row[1] is None) + (\"tf-extra\",)\n",
+).replace(
+    "_rt_check_kind_table(_RT_KIND_TABLE)\n",
+    "",
+) + '''ADAPTERS["tf-extra"] = TfAdapter()
+_RT_KIND_AUTH_PROFILES.update(tf={"oauth": "tf-key"})
+_KINDS = _KINDS + ("tf-extra",)
+'''
+
+
 GJ_CONTROLS = {
     "control: 2nd compare_digest": (rule_j1, GJ_J1_CLEAN, GJ_J1_PLANTED,
                                     ("3 compare_digest call(s)",
@@ -18366,6 +18510,13 @@ GJ_CONTROLS = {
                                   "the hook `track` is used in _rt_send() other than as an argument of the "
                                   "connection constructor cls(...)",
                                   "_rt_send in _post() passes the registration hook; only _rt_oauth_post may")),
+    "control: kind registry plants": (rule_j37, GJ_J38_CLEAN, GJ_J38_PLANTED,
+                                      ("KIND_CLASSES is a hand-written literal",
+                                       "RESERVED_KINDS names 'tf-extra' by hand",
+                                       "ADAPTERS[...] written by hand",
+                                       "_RT_KIND_AUTH_PROFILES.update() mutates the registry",
+                                       "_KINDS is bound 2 time(s), expected exactly once",
+                                       "0 module-level _rt_check_kind_table(_RT_KIND_TABLE) call(s)")),
 }
 
 
@@ -18388,7 +18539,7 @@ def gj_control(checker, clean, planted, needles):
 
 
 def group_j_static(suite):
-    """J1-J4 and J13 over the live router, then their planted controls J15-J19, J23 and J36."""
+    """J1-J4, J13 and J37 over the live router, then their planted controls J15-J19, J23, J36 and J38."""
     rel = os.path.relpath(SERVER, H.REPO_ROOT)
     results = {}
     try:
@@ -18436,6 +18587,17 @@ def group_j_static(suite):
                         or ["census      : no hand copy in %s" % rel])
     except (Exception, SystemExit) as exc:  # noqa: BLE001 -- a broken census fails the case
         results[cid] = (["the census raised %s: %s" % (type(exc).__name__, str(exc)[:200])], [])
+
+    # J37 -- the one kind registry, over the live router.
+    if source is not None:
+        cid = "kind registry: one table"
+        try:
+            results[cid] = (rule_j37(source),
+                            ["scope       : %s, derived once from %s: %s" % (rel, GJ_REG_TABLE,
+                                                                          ", ".join(GJ_REG_DERIVED)),
+                             "check       : %s(%s) at module level" % (GJ_REG_CHECK, GJ_REG_TABLE)])
+        except Exception as exc:  # noqa: BLE001 -- a broken rule fails, never aborts the group
+            results[cid] = (["rule raised %s: %s" % (type(exc).__name__, str(exc)[:200])], [])
 
     for cid, (checker, clean, planted, needles) in GJ_CONTROLS.items():
         try:
@@ -19220,9 +19382,81 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
             logger.setLevel(saved)
         return problems, ["logged      : " + s for s in shown]
 
+    def j39():
+        problems = gj_missing(mod, (GJ_REG_TABLE, GJ_REG_CHECK, "ConfigError", "_rt_cfg_backend")
+                              + GJ_REG_DERIVED)
+        if problems:
+            return problems, []
+        table = getattr(mod, GJ_REG_TABLE)
+        got = {
+            "_KINDS": (type(mod._KINDS).__name__, mod._KINDS),
+            "RESERVED_KINDS": (type(mod.RESERVED_KINDS).__name__, mod.RESERVED_KINDS),
+            "_RT_KIND_AUTH_PROFILES": (type(mod._RT_KIND_AUTH_PROFILES).__name__,
+                                       tuple((k, type(v).__name__, tuple(v.items()))
+                                             for k, v in mod._RT_KIND_AUTH_PROFILES.items())),
+            "KIND_CLASSES": (type(mod.KIND_CLASSES).__name__,
+                             tuple((k, v.__name__, v is getattr(mod, v.__name__, None))
+                                   for k, v in mod.KIND_CLASSES.items())),
+            "ADAPTERS": (type(mod.ADAPTERS).__name__,
+                         tuple((k, type(v).__name__, type(v) is mod.KIND_CLASSES.get(k))
+                               for k, v in mod.ADAPTERS.items())),
+        }
+        want = {
+            "_KINDS": ("tuple", GJ_REG_KINDS),
+            "RESERVED_KINDS": ("tuple", GJ_REG_RESERVED),
+            "_RT_KIND_AUTH_PROFILES": ("dict", tuple((k, "dict", v) for k, v in GJ_REG_AUTH)),
+            "KIND_CLASSES": ("dict", tuple((k, n, True) for k, n in GJ_REG_CLASSES)),
+            "ADAPTERS": ("dict", tuple((k, n, True) for k, n in GJ_REG_CLASSES)),
+        }
+        for name in GJ_REG_DERIVED:
+            if got[name] != want[name]:
+                problems.append("%s is %r, expected the pre-R-0084 %r" % (name, got[name], want[name]))
+        table_kinds = tuple(getattr(row, "kind", None) for row in table)
+        if table_kinds != GJ_REG_KINDS:
+            problems.append("%s rows are %r, expected %r" % (GJ_REG_TABLE, table_kinds, GJ_REG_KINDS))
+        check = getattr(mod, GJ_REG_CHECK)
+        try:
+            check(table)
+        except Exception as exc:  # noqa: BLE001 -- a refusal of the real table is the finding
+            problems.append("the real %s was refused: %s: %s" % (GJ_REG_TABLE, type(exc).__name__, exc))
+        rows = {row.kind: row for row in table}
+        plants = (
+            ("duplicate kind", table + (rows["mistral"],)),
+            ("adapter of another kind", tuple(row._replace(adapter=mod.MistralAdapter)
+                                              if row.kind == "llamacpp" else row for row in table)),
+            ("adapter not an Adapter", tuple(row._replace(adapter=dict) if row.kind == "llamacpp" else row
+                                             for row in table)),
+            ("unknown profile", tuple(row._replace(auth={"oauth": "tf-no-such-profile"})
+                                      if row.kind == "codex" else row for row in table)),
+            ("unknown auth mode", tuple(row._replace(auth={"tf-mode": "codex"})
+                                        if row.kind == "codex" else row for row in table)),
+            ("reserved kind with auth", tuple(row._replace(auth={"oauth": "codex"})
+                                              if row.kind == "anthropic" else row for row in table)),
+        )
+        shown = []
+        for label, planted in plants:
+            try:
+                check(planted)
+            except RuntimeError as exc:
+                shown.append("%s -> RuntimeError: %s" % (label, exc))
+            except Exception as exc:  # noqa: BLE001 -- the wrong type is the finding
+                problems.append("%s: refused with %s, expected RuntimeError" % (label, type(exc).__name__))
+            else:
+                problems.append("%s: %s accepted it" % (label, GJ_REG_CHECK))
+        for entry, message in GJ_REG_REFUSALS:
+            try:
+                mod._rt_cfg_backend("tf", dict(entry), "tf-router-token-j39")
+            except mod.ConfigError as exc:
+                if str(exc) != message:
+                    problems.append("kind %r refused as %r, expected %r" % (entry["kind"], str(exc), message))
+            else:
+                problems.append("kind %r was not refused" % (entry["kind"],))
+        return problems, ["kinds       : %s (reserved: %s)" % (", ".join(GJ_REG_KINDS), ", ".join(GJ_REG_RESERVED))] + \
+            ["refused     : " + s for s in shown]
+
     try:
         for cid, fn in zip(GJ_CASES, (j6, j7, j8, j12, j21, j24, j25, j26, j27, j28, j29, j30, j31, j32, j33,
-                                      j34, j35)):
+                                      j34, j35, j39)):
             try:
                 results[cid] = fn()
             except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
