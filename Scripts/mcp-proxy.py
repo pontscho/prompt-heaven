@@ -1896,6 +1896,32 @@ class McpServer:
         except OSError as exc:
             raise ConfigError(f"cannot write --ready-file: {exc.strerror or type(exc).__name__}") from None
 
+    @staticmethod
+    def _http_remove_ready_file(path: str) -> None:
+        """On an ordered shutdown, unlink the ready file only while it still holds
+        this process's pid (R-0075, the router's V24).
+
+        Read without following a symlink (O_NOFOLLOW: a link at the path is
+        refused, so neither it nor its target is touched); a file another writer
+        has replaced (another pid, not JSON, unreadable) is left alone. Best
+        effort: never raises; a refusal is logged at DEBUG by type only.
+
+        Declared limits: a replace between the read and the unlink is not seen
+        (the new file is removed); SIGKILL, or any exit that skips the ordered
+        shutdown, leaves the file behind with a dead pid.
+        """
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                data = json.loads(fh.read(4096))
+            pid = data.get("pid") if isinstance(data, dict) else None
+            if type(pid) is int and pid == os.getpid():
+                os.remove(path)
+            else:
+                log.debug("ready file left: not this pid")
+        except (OSError, ValueError) as exc:
+            log.debug("ready file left: %s", type(exc).__name__)
+
     async def serve_http(self, settings: "HttpSettings", srv: "_ProxyHttpServer") -> None:
         """Serve the bound listener until cancelled, then shut down in order (H1, round 3).
 
@@ -1933,6 +1959,10 @@ class McpServer:
                 await asyncio.sleep(0.05)
             if stopper.is_alive():
                 log.warning("http listener did not stop within %.0fs", _HTTP_BRIDGE_TIMEOUT_S)
+            # 4. Remove our ready file (R-0075): only while it holds our pid,
+            #    never through a symlink. SIGKILL skips this and leaves it.
+            if settings.ready_file:
+                self._http_remove_ready_file(settings.ready_file)
 
     # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
     # BEGIN GENERATED: _mcp_json.py :: _result, _error

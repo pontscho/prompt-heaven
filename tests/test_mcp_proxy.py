@@ -38,9 +38,9 @@ The case count is TYPED in run.py's SUITES table: this is a fixed case table,
 so a count that moves is the alarm.  The total below is the expected value; the
 run is authoritative.
 
-Total: 105 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 7, H 1, I 6, J 44, K 4,
+Total: 106 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 7, H 1, I 6, J 45, K 4,
 L 4; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4; R-0069 added
-J43, R-0076 J44).
+J43, R-0076 J44, R-0075 J45).
 
 Usage:
   python3 tests/test_mcp_proxy.py
@@ -2358,7 +2358,7 @@ def group_i(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
-# J. Streamable HTTP  (J1-J44)
+# J. Streamable HTTP  (J1-J45)
 # ---------------------------------------------------------------------------
 
 READY_TIMEOUT_S = 10.0       # --ready-file must appear within this
@@ -3838,6 +3838,9 @@ def group_j_hardening(suite, fixture_root):
 
     group_j_strict(suite, fixture_root, mod, mod_why)
 
+    # J45 -- an ordered shutdown removes the ready file only while it is ours.
+    j45_ready_file(suite, fixture_root, mod, mod_why)
+
 
 # -- J34-J42: the round-1/2/3 security-review rows of group J -----------------
 
@@ -4399,6 +4402,87 @@ def j33_shutdown(suite, fixture_root, mod, mod_why):
             if proxy.token in proxy.stderr_text():
                 problems.append("the bearer token occurs on the proxy's stderr")
         problems += reap_stubs(sandbox, children)
+    suite.record(GJ, cid, problems, detail=lines)
+
+
+J45_FOREIGN_PID = 1          # J45: a pid that is never the proxy's own
+
+
+def j45_ready_file(suite, fixture_root, mod, mod_why):
+    """J45: SIGTERM removes the ready file while it holds the proxy's own pid
+    (R-0075), leaves one another writer rewrote with a foreign pid, and never
+    follows a symlink: the ready path replaced by a link to a sentinel that
+    holds the proxy's OWN pid must leave both the link and the sentinel, so
+    only O_NOFOLLOW (not the pid check) can be what protects them."""
+    cid = "ready file removed, own pid only"
+    if mod is None:
+        suite.record(GJ, cid, [mod_why])
+        return
+    problems, lines = [], []
+    for mode in ("own", "foreign pid", "symlink"):
+        sandbox = new_sandbox(fixture_root, "j-ready")
+        children = one_stub(sandbox)
+        cfgpath = write_config(sandbox, children)
+        proxy = None
+        try:
+            proxy = HttpProxy(sandbox, cfgpath, label="j-ready")
+            if proxy.wait_ready() is None:
+                problems.append("%s: no ready file within %gs (rc=%r); stderr: %s"
+                                % (mode, READY_TIMEOUT_S, proxy.proc.poll(), stderr_tail(proxy)))
+                continue
+            path = proxy.ready_path
+            planted = None
+            sentinel = os.path.join(sandbox, "sentinel.json")
+            if mode == "foreign pid":
+                planted = json.dumps({"port": proxy.port, "pid": J45_FOREIGN_PID}) + "\n"
+                write_file(path, planted)
+            elif mode == "symlink":
+                planted = json.dumps({"port": proxy.port, "pid": proxy.proc.pid}) + "\n"
+                write_file(sentinel, planted)
+                os.remove(path)
+                os.symlink(sentinel, path)
+            rc = proxy.close()
+            if rc != 0:
+                problems.append("%s: exit code %r after SIGTERM, expected 0" % (mode, rc))
+            if mode == "own":
+                left = os.path.lexists(path)
+                if left:
+                    problems.append("own: the ready file survived an ordered shutdown")
+                lines.append("own         : rc %r, ready file left %s" % (rc, left))
+            elif mode == "foreign pid":
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        now = fh.read()
+                except OSError as exc:
+                    now = None
+                    problems.append("foreign pid: the rewritten ready file is gone (%s)"
+                                    % type(exc).__name__)
+                if now is not None and now != planted:
+                    problems.append("foreign pid: the rewritten ready file was changed")
+                lines.append("foreign pid : rc %r, file kept %s" % (rc, now == planted))
+            else:
+                link_kept = os.path.islink(path) and os.readlink(path) == sentinel
+                try:
+                    with open(sentinel, "r", encoding="utf-8") as fh:
+                        target_kept = fh.read() == planted
+                except OSError:
+                    target_kept = False
+                if not link_kept:
+                    problems.append("symlink: the symlink at the ready path was removed or changed")
+                if not target_kept:
+                    problems.append("symlink: the symlink's target was removed or changed")
+                lines.append("symlink     : rc %r, link kept %s, target kept %s"
+                             % (rc, link_kept, target_kept))
+        except Exception as exc:  # noqa: BLE001 -- any raise is the case's finding
+            problems.append("%s: case raised %s: %s" % (mode, type(exc).__name__, exc))
+        finally:
+            if proxy is not None:
+                proxy.close()
+                if proxy.token in proxy.stderr_text():
+                    problems.append("%s: the bearer token occurs on the proxy's stderr" % mode)
+            problems += reap_stubs(sandbox, children)
+    lines.append("declared    : a replace between the read and the unlink is not seen; "
+                 "SIGKILL leaves the file")
     suite.record(GJ, cid, problems, detail=lines)
 
 
