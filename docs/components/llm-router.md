@@ -64,7 +64,12 @@ minimum the router relies on, everything else untouched
 string, then the config's `default`, else a 404 `not_found_error`
 `Scripts/llm-router.py:_rt_route`. The backend's kind picks one adapter
 instance from `Scripts/llm-router.py:ADAPTERS`; the adapter classes, with their
-header tables and route options, are `Scripts/llm-router.py:KIND_CLASSES`.
+header tables and route options, are `Scripts/llm-router.py:KIND_CLASSES`. Both,
+with the kind enum, the reserved kinds and the kind-and-auth-mode to profile
+map, derive from one kind registry, one row per kind, refused at import if a
+row is inconsistent `Scripts/llm-router.py:_RT_KIND_TABLE`
+`Scripts/llm-router.py:_rt_check_kind_table`; a new kind is one row, except that
+mistral's two auth special cases are still code.
 
 **The file is eight units, and four of them are pure.** The module docstring
 lists them: errors and shared helpers, config, inbound, the SSE toolkit,
@@ -108,7 +113,8 @@ ignored; the body is always decoded as UTF-8), framed by exactly one decimal
 `Content-Length` no larger than `--body-limit`; `Transfer-Encoding` is a 411
 `Scripts/llm-router.py:_post`. The body must be a JSON object with finite
 numbers only — `NaN`, `Infinity` or a literal that overflows to one is a 400
-`Scripts/llm-router.py:_rt_loads`, and so is an integer literal longer than
+`Scripts/llm-router.py:_rt_loads`, so is a key repeated in one object (the key
+is not named), and so is an integer literal longer than
 `Scripts/llm-router.py:_RT_INT_LITERAL_LIMIT` digits, refused before `int()`
 can spend quadratic time on it on a Python without its own digit limit
 `Scripts/llm-router.py:_rt_bounded_int` — and `max_tokens` is an integer from 1 to
@@ -132,7 +138,10 @@ backend's 401 has forced a token refresh, and once after a 400 the adapter
 learned from — an unsupported sampling parameter (`openai` with an API key) or
 an unsupported `reasoning_effort` (`mistral`); both 400s are read before any
 byte reaches the client, so the stream path learns too, and a request gets one
-learn retry whichever it is `Scripts/llm-router.py:_post`.
+learn retry whichever it is `Scripts/llm-router.py:_post`. Only a 400 body up to
+`Scripts/llm-router.py:_RT_LEARN_BODY_LIMIT` (64 KiB) is parsed for a learn; a
+larger one is still read under the non-stream bound and relayed, never learned
+from.
 
 **One writer, one pump.** The handler thread is the only thread that writes to
 the client. A streaming request adds exactly one reader thread, the upstream
@@ -166,7 +175,9 @@ refresh the token endpoint refuses as expired or revoked, are a 401
 `authentication_error` naming the backend and the command that fixes it,
 `llm-router.py login --backend <name>`, because only a fresh login can
 `Scripts/llm-router.py:ResponsesAdapter` — the KD-16 deviation in
-[[0028-route-by-model-translate-at-the-edge]]. The Responses error codes the
+[[0028-route-by-model-translate-at-the-edge]]. An OAuth backend's upstream 403
+keeps its mapped status but relays a fixed text, "backend `<name>` refused this
+login (upstream 403)", never the upstream message. The Responses error codes the
 router types itself (usage and rate limits as 429, an unsupported SIWC route as
 403) are `Scripts/llm-router.py:_RT_RS_ERROR_CODES`.
 
@@ -213,7 +224,11 @@ rule, never the value `Scripts/llm-router.py:_rt_refuse`.
 
 **The ordered shutdown.** A POST accepted from then on gets a 529 and a live
 stream gets one `event: error` "router shutting down"; every live upstream
-socket is shut down; running handlers are drained for at most
+socket is shut down — a token POST's included, which is registered from its
+connect on, before the TLS handshake, so a stalled handshake, request write or
+response head is interrupted too `Scripts/llm-router.py:_rt_track_add`, and a
+token write waiting on the config flock gives up, keeping the token in memory
+with one WARNING `Scripts/llm-router.py:_rt_config_lock`; running handlers are drained for at most
 `Scripts/llm-router.py:_DRAIN_S`; then the listener closes, the ready file is
 removed if it still holds this process's pid, and the log handlers are flushed
 `Scripts/llm-router.py:_rt_shutdown`.
@@ -253,11 +268,17 @@ The browser flow prints the authorize URL and waits for the redirect on a
 loopback listener — codex on `127.0.0.1:1455` (plus `[::1]:1455` when it can),
 `openai` on an ephemeral `127.0.0.1` port — or for the redirect URL pasted on
 stdin, whichever comes first `Scripts/llm-router.py:_rt_login_browser`
-`Scripts/llm-router.py:_rt_login_paste_reader`. The device flow prints a code to
-enter at the provider and polls at the provider's interval
+`Scripts/llm-router.py:_rt_login_paste_reader`; every callback connection that
+does not end the wait, one that sent no byte included, counts against the
+listener's bad-connection budget
+`Scripts/_mcp_oauth.py:_oauth_sync_accept_callback`. The device flow prints a code to
+enter at the provider, beside a warning to enter it only for a login you just
+started yourself (a code longer than 64 characters is refused), and polls at the
+provider's interval
 `Scripts/llm-router.py:_rt_login_device`. The `openai` login registers a
 dynamic client, receives an issued `client_id` and a `host_id`, and checks the
-ID token's issuer, audience, expiry and nonce and the granted scope before
+ID token's issuer, audience (a multi-valued `aud` needs an `azp`, and an `azp`
+must be the `client_id`), expiry and nonce and the granted scope before
 anything is stored `Scripts/llm-router.py:_rt_oauth_check_answer`. `login`
 exits 0 after the token is written and 2 on any refusal — a busy 1455 names
 `--device` as the way out. A refused login prints its failure kind and an
@@ -528,13 +549,19 @@ system text becomes `instructions` (a mid-conversation `system` turn a
 `developer` input item in place), `tool_use` / `tool_result` become
 `function_call` / `function_call_output` items whose ids are a pure function of
 the Anthropic ids, a tool's JSON-schema `pattern` holding a lookaround or a
-backreference is dropped because the upstream refuses it
+backreference is dropped because the upstream refuses it, and a schema nested
+deeper than `Scripts/llm-router.py:_RT_RS_SCHEMA_DEPTH_LIMIT` (64) levels is a
+400 naming the tool's `input_schema`
 `Scripts/llm-router.py:_rt_rs_schema`, `store` is false, and the `prompt_cache_key` is a hash of the backend and the
 client's `metadata.user_id` (else the first user text), so a resumed
 conversation lands on the same upstream cache
 `Scripts/llm-router.py:_rt_rs_cache_key`. The upstream is **always**
 asked for a stream; a non-stream client request runs the same translator into a
 message collector over the whole answer `Scripts/llm-router.py:_RtMessageCollector`.
+A function call naming a tool the request did not offer is refused like a
+malformed one — a 502, or one `event: error` on a stream — and the name is not
+echoed `Scripts/llm-router.py:ResponsesStreamTranslator`; the chat-completions
+(mistral) translator has no such check.
 Responses streams get their own bounds: a line up to
 `Scripts/llm-router.py:_RT_RS_SSE_LINE_LIMIT` (8 MiB), an event up to
 `Scripts/llm-router.py:_RT_RS_SSE_EVENT_LIMIT` (16 MiB).
@@ -599,7 +626,9 @@ never gets a lock file `Scripts/llm-router.py:_rt_startup_sweep`.
 
 **A login on disk wins.** When a refresh fails because the login expired or was
 revoked, a different refresh token on disk — a `login` ran, or another router
-rotated it — is adopted once and refreshed; a token that failed that way is
+rotated it — is adopted once and refreshed, but only if the disk `oauth` object
+passes the rules the loader applies to it `Scripts/llm-router.py:_rt_cfg_oauth`
+(else one WARNING and no adoption); a token that failed that way is
 dropped and never adopted again, so the next `login` is picked up by the next
 request. And a `login` that lands while a refresh of the old grant is in flight
 is never overwritten: the writer sees a disk token that is neither the one the
@@ -824,13 +853,19 @@ read before relying on one of them. In brief:
 - **Token persistence has windows.** A crash between the provider's rotation
   and the write, or a refresh that times out after the provider rotated, needs
   a re-login; so can a refresh answer whose check fails, since its rotated token
-  is discarded. A hand edit landing between the writer's re-check and its
+  is discarded, and a shutdown that arrives while the write waits on the config
+  flock, since the wait gives up and the rotated token, kept in memory only, is
+  lost with the process. A hand edit landing between the writer's re-check and its
   rename can be lost; the flock serializes only the router and `login`.
   Non-POSIX systems are unsupported. An interpreter without the
   directory-relative file operations gets no write-back at all.
 - **The refresh lock is held across the token POST and the write**, so a waiter
-  can give up with 503 while the holder is still legitimately writing, and a
-  token POST in flight at shutdown can outlive the drain.
+  can give up with 503 while the holder is still legitimately writing. A
+  shutdown interrupts a token POST from its connect on, but not the resolve
+  and the TCP connect themselves: those are bounded by `connect_timeout`, and
+  the drain abandons a handler still in them after
+  `Scripts/llm-router.py:_DRAIN_S`. Non-stream upstream calls are unchanged
+  by this (the bullet on the drain above).
 - **The scrubber keeps a bounded number of superseded tokens**
   (`Scripts/llm-router.py:_RT_SCRUB_DYNAMIC_CAP`, 64); current ones are pinned
   and never evicted.

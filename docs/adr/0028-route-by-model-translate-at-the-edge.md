@@ -1146,3 +1146,52 @@ Three statements above that mcp-proxy lacks a fix the router has are no longer t
 - **The ready file removed on shutdown** (1748f46, R-0075, mcp_proxy J45). mcp-proxy unlinks its ready file on an ordered shutdown only while it holds its own pid, opened with `O_NOFOLLOW`, with the same declared read-then-unlink race and SIGKILL limit as the router's V24. Row P17's "which mcp-proxy does not do" and the out-of-scope bullet "mcp-proxy's ready file is not removed on shutdown" no longer hold; deviation 29 is no longer a difference between the two copies.
 
 The two copies are still hand-held and no gate holds them equal, but these ports narrow the divergence the canonical-source lift (roadmap R-0072) would have to reconcile.
+
+## Addendum (2026-10-07): R-0085, R-0083 and R-0084 -- hardenings, the interruptible token POST and one kind registry
+
+Three roadmap items closed on 2026-10-07 close or narrow declared limits recorded above; the body above stays as written on its date. A limit number here is one of "Declared limits added by this feature" in the codex/openai addendum; a finding id `F<n>` is the 2026-10-07 code-mode security review's. Case counts are the commits' own.
+
+### R-0085 -- the review's optional hardenings (a5a27bb, 225466c)
+
+The review's verifiers recorded optional hardenings beside SUPPRESSED verdicts. Each was done red first, in two commits.
+
+a5a27bb, `llm_router` 363 -> 371 (J34 J35 K26 N36-N39 O17), `mcp_oauth` 64 -> 65 (G5):
+
+- **F10** `_rt_loads` refuses a key repeated in one object, with a fixed text that never echoes the key.
+- **F15** the role refusal DEBUG lines log the role's type name only.
+- **F22** a tool schema nested deeper than 64 levels (`_RT_RS_SCHEMA_DEPTH_LIMIT`) is a 400, never a `RecursionError` answered 500.
+- **F23** a message-matched unsupported sampling parameter is learned only when `err.param` is null or names the same parameter.
+- **F27** the Responses adapter's `_pending` entry is popped in a `finally` on every error exit (a learn-path 400, an upstream that closes without an answer).
+- **F42** the `OAuthError` kind passes through `_log_value` on the refresh-failure line.
+- **F45** the learn path parses an upstream 400 body only up to 64 KiB (`_RT_LEARN_BODY_LIMIT`); a larger one is relayed as before and not learned from. It caps what the learn path parses, not what it reads: the body is still read under `_UPSTREAM_BODY_LIMIT`.
+- **F51** `_mcp_oauth` refuses a device `user_code` over 64 characters (regenerated into the router).
+- **F52** the device login prints a phishing warning beside the code.
+
+225466c, `llm_router` 371 -> 376 (A49 M22 M23 N40 O18), `mcp_oauth` 65 -> 68 (D12 E11 H15):
+
+- **F6** an empty callback connection counts against the login acceptor's bad-connection budget.
+- **F12** an OAuth access token over a non-loopback `http://` `base_url` needs the same `allow_cleartext_api_key` opt-in as an `api_key`; without it the backend is refused at load. **Limit 32 is closed**, and the component page no longer lists it.
+- **F26** on the Responses kinds only, a call to a tool the request did not offer is refused on the existing "backend returned a tool call" path (502, or one error event on a stream), the name not echoed. Chat-completions (mistral) is not covered: its fixtures offer no tools.
+- **F30** an OAuth backend's upstream 403 relays a fixed text; the status stays.
+- **F33** test only: the login works without the `api.connectors` scopes.
+- **F35** a refresh answer that omits `scope` falls back to the previously granted one; an ID token whose `aud` holds more than one audience needs an `azp`, and a present `azp` must equal the `client_id`. Limit 1 (no signature check) is unchanged.
+- **F37** an adopted disk token must pass `_rt_cfg_oauth`'s checks (the minimum length, differing from `auth_token`, the key and field shapes) or it is not adopted, with one WARNING. **Limit 14 is narrowed**: where it says a disk token is adopted only if it passes the `token` rule, it now has to pass the loader's `oauth` rules.
+- **F39** documentation only, on the component page: the access token's claims are trusted on the TLS channel. Limit 23 already said so.
+
+### R-0083 -- a token POST inside `_rt_send` is interruptible on shutdown (0267c3b)
+
+`_rt_send` takes a registration hook, `track` (`srv.inflight`, `srv.inflight_lock`, `srv.closing`), handed only to the connection constructor. The plain socket is registered right after its connect; the TLS socket is wrapped with `do_handshake_on_connect=False` and registered before its handshake, so a shutdown during the handshake, the request write or the response head interrupts it, as it already did the body read. `_rt_track_add` shuts down at once a socket registered after `closing` is set. The config flock poll gives up on `closing`: a `ConfigError`, the token kept in memory, one WARNING.
+
+**J4a is amended a second time** (after KD-7's amendment above): it pins `_rt_send`'s exact parameters, allows the hook only as a `cls(...)` argument, and allows only `_rt_oauth_post` to pass it. J36 plants three violations. N41 and N42 ran red first: a 3.5 s abandoned drain became a 0.5 s exit. `llm_router` 376 -> 379.
+
+**Limit 6 is narrowed.** Its last sentence -- a token POST still inside `_rt_send`, or a handler polling the flock, can outlive `_DRAIN_S` (3 s) and is abandoned -- now holds only as follows:
+
+- the resolve and the TCP connect are still unregistered: `connect_timeout` bounds them, and the drain abandons such a handler after `_DRAIN_S`;
+- the flock wait no longer outlives the drain, but a rotated token whose write it was waiting for is kept in memory only and lost with the process, so a shutdown that hits the flock wait can need a re-login -- a window beside limits 4 and 17;
+- non-stream upstream calls are unchanged.
+
+### R-0084 -- one kind registry (82a4e1a)
+
+One `_RtKindRow` table, `_RT_KIND_TABLE` (kind, adapter class or `None` for a reserved kind, auth mode -> Responses profile), sits after the adapter classes. `_KINDS`, `RESERVED_KINDS`, `_RT_KIND_AUTH_PROFILES`, `KIND_CLASSES` and `ADAPTERS` are derived from it with the values and order they had, and `_rt_check_kind_table` refuses a bad row at import. The unused `_rt_kind_auth_profiles()` is removed; the A14 refusal texts are unchanged. J37 (each name bound once from the table, never a literal, never mutated), J38 (six planted violations) and J39 (the values pinned, six broken tables refused, the A14 texts byte-exact) ran red first. `llm_router` 379 -> 382.
+
+**Limit 25 is closed**, and with it the M5 note R-0084 was filed under: the four registries are no longer listed, not gated -- they are derived from one table and gated by J37-J39, the registry half of NFR-2 that J28 did not cover. KD-12's case of a kind in `KIND_CLASSES` but not in `ADAPTERS` can no longer come from the table, since both derive from the same rows; the 501 guard stays, for a kind that loads without an adapter. **Still a code edit for a new kind:** mistral's two auth special cases.
