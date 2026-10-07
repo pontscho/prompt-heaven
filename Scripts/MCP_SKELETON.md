@@ -332,7 +332,14 @@ WHY is `docs/adr/0008-a-serialized-read-loop-looks-like-a-dead-server.md`.
    unanswered until it times out (a hung server, not one bad line), and a bare
    `5` reaching `msg.get()` used to kill the process. Plain wording, **not**
    §7a's `Near the failure:` window: that quotes one hand-encoded field, this is
-   a whole raw line.
+   a whole raw line. **Parse with `_strict_loads`, write with `_strict_dumps`**
+   (generated from `Scripts/_mcp_json.py`, R-0067/R-0068): the stdlib reads
+   `NaN`/`Infinity` and writes them back, and on 3.9.6 parses a huge integer
+   literal at quadratic cost. `_strict_loads` refuses both as a
+   `json.JSONDecodeError`, so the `-32700` arm below answers them unchanged;
+   `_strict_dumps` raises `ValueError` on a non-finite float, which the
+   `_write` fallback already turns into a `-32603`. `tests/test_generated_region.py`
+   group H fails a server that parses or emits a frame with bare `json`.
 4. **Both ends of the pipe guarded, every executor shut down** — a detached
    stdin *raises* rather than returning `""`, a client hanging up mid-reply
    raises `BrokenPipeError`, and an unshut executor hangs exit via
@@ -383,7 +390,7 @@ Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
                 if not line:
                     continue
                 try:
-                    msg = json.loads(line)
+                    msg = _strict_loads(line)              # NaN / long ints refused too
                 except json.JSONDecodeError as exc:
                     log.warning("Invalid JSON: %s", exc)
                     self._write(self._error(None, -32700, f"Parse error: {exc}"))
@@ -475,11 +482,11 @@ Reference: `mcp-jenkins.py:2660`; `mcp-forge.py:1694` is the same shape in tabs.
         """No lock needed: handlers run in the worker pool, but `_serve` resumes on
         the event-loop thread after its await, so two replies cannot interleave."""
         try:
-            out = json.dumps(response)
+            out = _strict_dumps(response)                  # NaN/Infinity -> ValueError
         except (TypeError, ValueError) as exc:
             log.exception("Response was not JSON-serialisable")
-            out = json.dumps(self._error(response.get("id"), -32603,
-                                         f"Response not serialisable: {exc}"))
+            out = _strict_dumps(self._error(response.get("id"), -32603,
+                                            f"Response not serialisable: {exc}"))
         # F12/CWE-532: structure only (id + outcome), no body.
         log.debug(
             "→ id=%s %s", response.get("id"),
@@ -581,7 +588,7 @@ dict guard catches anything still not an object):
 ```python
 if isinstance(arguments, str):
     try:
-        arguments = json.loads(arguments)
+        arguments = _strict_loads(arguments)
     except json.JSONDecodeError:
         pass
 if not isinstance(arguments, dict):
@@ -601,7 +608,7 @@ not optional is that one of the two happens:
 ```python
 if isinstance(params, str):
     try:
-        params = json.loads(params)
+        params = _strict_loads(params)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"'params' was a string but not valid JSON: {exc}. "
@@ -631,17 +638,20 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
 
 Both functions above are **generated, not hand-written**, in every server that
 factors this out into an `_ensure_dict`. Do not copy them in: paste the marker
-pair and let §8 fill the body. They travel on ONE marker, dependency first —
+pair and let §8 fill the body. They travel on ONE marker, dependency first,
+behind the six strict-JSON blocks every server carries (R-0067/R-0068) —
 
 ```python
-# BEGIN GENERATED: _mcp_json.py :: _json_error_window, _ensure_dict
+# BEGIN GENERATED: _mcp_json.py :: JSON_INT_LITERAL_LIMIT, _json_no_constant, _json_finite_float, _json_bounded_int, _strict_loads, _strict_dumps, _json_error_window, _ensure_dict
 ```
 
-— because `_ensure_dict` reads `_json_error_window`, and a region may only reach
-names its host *imports*. Asking for `_ensure_dict` alone is refused by name. A
-server that keeps the logic inline against a local `params`, as the sample above
-shows, requests `_json_error_window` on its own instead; both shapes are live in
-the fleet and neither is the deprecated one.
+— because `_ensure_dict` reads `_json_error_window` and `_strict_loads`, and a
+region may only reach names its host *imports* or the region itself defines.
+Asking for `_ensure_dict` alone is refused by name. A server that keeps the
+logic inline against a local `params`, as the sample above shows, requests the
+six strict blocks and `_json_error_window` without `_ensure_dict`; both shapes
+are live in the fleet and neither is the deprecated one. `_strict_loads` raises
+`json.JSONDecodeError` for every refusal, so `exc.pos` still feeds the window.
 
 Do **not** go further and try to *repair* the broken JSON. The failure shape is
 ambiguous (a prematurely closed string is indistinguishable from a genuinely

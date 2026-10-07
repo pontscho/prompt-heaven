@@ -14,8 +14,9 @@ label, and this one has been narrowed twice: LSP `Content-Length` framing was
 not a JSON helper and now lives in `_mcp_lsp.py`, and `_rows_note` renders a
 sentence for a human onto the last line of a text payload -- paging, not JSON --
 so it now lives in `_mcp_paging.py`. What belongs here is the JSON-RPC
-envelopes, wire-value coercion, and JSON error reporting: the blocks below, and
-nothing whose reason for existing is a different concern.
+envelopes, wire-value coercion, strict JSON parsing and emitting for a peer's
+frames, and JSON error reporting: the blocks below, and nothing whose reason
+for existing is a different concern.
 
 **No server imports this module.** Its named blocks are inlined into each server
 between `# BEGIN GENERATED` / `# END GENERATED` markers by
@@ -39,10 +40,14 @@ down: its two lines are identical in three servers, but its body reads a
 per-server `FUNCTION_ALIASES` table, so sharing it means sharing a promise about
 the host's globals. Until that promise has a form and a check, it stays out.
 
-Every block below except `_ensure_dict` was lifted VERBATIM from
+Every block below except `_ensure_dict` and the six strict-JSON blocks was
+lifted VERBATIM from
 `Scripts/mcp-purity.py`, which is why a LIFT's first generated diff is marker
 lines only, with zero changed body
-lines — the evidence that the lift was faithful. (The fleet's one deliberate
+lines — the evidence that the lift was faithful. The strict-JSON blocks
+(R-0067, R-0068) are NEW code with no copy anywhere to lift from; their
+comment block below says what they refuse and why each refusal is a
+JSONDecodeError. (The fleet's one deliberate
 exception to that rule was `_rows_note`, and the account of it travelled with
 the block to `_mcp_paging.py`, where the code it describes now lives.) An
 ADOPTION claims nothing of the kind: a server whose copy DIFFERED shows every
@@ -64,7 +69,7 @@ the docstring and gets it back, and `mcp-forge` carried a six-line comment that
 is the next paragraph.
 
 **`value` is still the STRING in the `except` branch, and the window depends on
-that.** `value = json.loads(value)` binds nothing when `json.loads` raises, so
+that.** `value = _strict_loads(value)` binds nothing when it raises, so
 the name still holds the text the caller sent and `_json_error_window` can be
 handed it. `mcp-forge` alone wrote this down, on the stated reasoning that it
 was the file the others were copied from. That reasoning now points here, so the
@@ -76,7 +81,9 @@ mechanics rather than tidiness.** `host_provides` offers a region only the
 host's module-level IMPORTS, never the names another region defines, so a region
 holding `_ensure_dict` alone is refused BY NAME in all seven hosts. The pair is
 spelled `_mcp_json.py :: _json_error_window, _ensure_dict`, dependency first,
-after `DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars`. The consequence lands in
+after `DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars` -- and since R-0067/R-0068
+`_ensure_dict` parses through `_strict_loads`, so the six strict-JSON blocks
+stand in front of the window on that same marker. The consequence lands in
 the SUITE rather than here: `mcp-forge`, `mcp-git` and `mcp-inspect` had
 `_ensure_dict` as their ONLY caller of the window, so the moment it moved inside
 the region those three had no window call site visible from outside one, and the
@@ -183,6 +190,90 @@ def _int_param(value, default: int) -> int:
         return default
 
 
+# --- strict JSON on the wire (R-0067, R-0068) ---------------------------------
+#
+# The stdlib's json is lax in two ways a peer can reach. It reads NaN, Infinity
+# and -Infinity (and 1e999 as an infinity) and writes them back again, which no
+# strict JSON peer can parse (R-0067). And the int-digit limit that answers
+# CVE-2020-10735 exists only from Python 3.9.14: on the macOS system Python
+# 3.9.6 a multi-megabyte run of digits is parsed at quadratic cost (R-0068).
+# Every host parses each frame a peer sends with `_strict_loads` and writes each
+# frame with `_strict_dumps`; tests/test_generated_region.py group H gates that
+# no host does otherwise without a declared reason.
+#
+# The six travel as ONE run on one marker, dependency first: `_strict_loads`
+# reads the three hooks and the hook reads the bound, and a region may reach
+# only names its host imports or the region itself defines. The bound and the
+# refusal style mirror `_rt_loads` in llm-router.py and `_oauth_json_object` in
+# _mcp_oauth.py: 4300 is CPython 3.11's own int_max_str_digits default, counted
+# here in characters with the sign included, and the literal is refused before
+# int() ever sees it.
+#
+# Every refusal leaves `_strict_loads` as a json.JSONDecodeError, not a bare
+# ValueError, because that is the one exception every host's frame loop and
+# `_ensure_dict` already catch: a refused number then gets exactly the -32700
+# answer an unparseable line gets, and nothing new can escape as a crash. Each
+# hook passes the literal it refused as a second argument so the position can
+# be FOUND rather than reported as 0 -- `exc.pos` is what a host hands
+# `_json_error_window`. `find` returns the literal's first occurrence, so the
+# same characters inside an earlier string would move the window there; the
+# refusal itself does not depend on it.
+
+JSON_INT_LITERAL_LIMIT = 4300
+
+
+def _json_no_constant(name: str) -> float:
+    """json parse_constant: NaN, Infinity and -Infinity are not JSON (R-0067)."""
+    raise ValueError(f"non-finite number {name} is not JSON", name)
+
+
+def _json_finite_float(text: str) -> float:
+    """json parse_float: a literal that overflows to an infinity (1e999) is refused like NaN."""
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError(f"number {text[:32]} overflows to an infinity", text)
+    return value
+
+
+def _json_bounded_int(text: str) -> int:
+    """json parse_int: a literal over JSON_INT_LITERAL_LIMIT characters is refused before int() sees it (R-0068)."""
+    if len(text) > JSON_INT_LITERAL_LIMIT:
+        raise ValueError(f"integer literal of {len(text)} characters exceeds {JSON_INT_LITERAL_LIMIT}", text)
+    return int(text)
+
+
+def _strict_loads(text):
+    """json.loads for a peer's frame: every refusal is a json.JSONDecodeError.
+
+    *text* is str or bytes, as json.loads takes it. A NaN or infinity token, a
+    float that overflows to one and an integer literal over
+    JSON_INT_LITERAL_LIMIT characters are refused at the literal's position;
+    any other ValueError (an undecodable byte string) is re-raised as a
+    JSONDecodeError at position 0. RecursionError is not converted: a host
+    that answers deep nesting catches it itself.
+    """
+    try:
+        return json.loads(text, parse_constant=_json_no_constant, parse_float=_json_finite_float, parse_int=_json_bounded_int)
+    except json.JSONDecodeError:
+        raise
+    except ValueError as exc:
+        doc = text if isinstance(text, str) else bytes(text).decode("utf-8", "replace")
+        if len(exc.args) == 2 and isinstance(exc.args[1], str):
+            raise json.JSONDecodeError(exc.args[0], doc, max(0, doc.find(exc.args[1]))) from None
+        raise json.JSONDecodeError(str(exc), doc, 0) from None
+
+
+def _strict_dumps(obj) -> str:
+    """json.dumps for a frame to a peer: NaN and the infinities raise ValueError (R-0067).
+
+    allow_nan=False is the only difference: separators and ensure_ascii stay
+    json.dumps' defaults, so every frame that serialised before is
+    byte-identical. A caller that can be handed a non-finite float keeps the
+    ValueError arm it already has for a value json cannot serialise.
+    """
+    return json.dumps(obj, allow_nan=False)
+
+
 # --- JSON error reporting -----------------------------------------------------
 
 def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
@@ -204,7 +295,9 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
 # The window's only in-file caller, and the reason the two travel as a pair: a
 # marker naming `_ensure_dict` on its own is refused in every host, because the
 # name it reads is not an import anywhere. See the module docstring for the
-# reshape, and for why `value` still holds the caller's string below.
+# reshape, and for why `value` still holds the caller's string below. Since
+# R-0067/R-0068 it parses through `_strict_loads` too, so its marker carries the
+# six strict blocks in front of the window.
 
 def _ensure_dict(value: Any, name: str = "params") -> dict:
     """Coerce *value* to a dict.
@@ -217,7 +310,7 @@ def _ensure_dict(value: Any, name: str = "params") -> dict:
         return {}
     if isinstance(value, str):
         try:
-            value = json.loads(value)
+            value = _strict_loads(value)
         except json.JSONDecodeError as exc:
             msg = f"'{name}' was a string but not valid JSON: {exc}. "
             msg += f"Near the failure: {_json_error_window(value, exc.pos)}. "

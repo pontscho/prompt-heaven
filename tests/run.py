@@ -450,7 +450,8 @@ SUITES = [
      "a region's BEGIN line is the one its names resolve against; the "
      "generator's census read path -- fleet, sources, per-block hosts and the "
      "hand-copy walk with its declared reasons -- derived, sorted, writes "
-     "nothing", 97),
+     "nothing; and every host parses and emits its peer frames through the "
+     "strict JSON blocks, with every other bare parse declared", 107),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
@@ -686,7 +687,9 @@ SUITES = [
     # the round-3 review added G7, J41, J42 and L4 = 103; R-0069 added J43,
     # the stdlib's pre-auth refusals = 104; R-0076 added J44, 100 Continue
     # only after auth = 105; R-0075 added J45, the ready file removed on an
-    # ordered shutdown = 106), so a count that moves is the alarm, not noise.
+    # ordered shutdown = 106; R-0067/R-0068 added G8 and J46, a NaN /
+    # Infinity token or an over-long integer literal answered -32700 on both
+    # fronts = 108), so a count that moves is the alarm, not noise.
     ("mcp_proxy", run_mcp_proxy,
      "mcp-proxy, the aggregating relay: config refusals, eager start and "
      "duplicate-tool refusal, id/progress remapping, cancel forwarded with "
@@ -697,7 +700,7 @@ SUITES = [
      "total header deadline, strict headers, deep nesting, malformed "
      "header lines, id-less initialize, request id shape, fixed body-less "
      "stdlib refusals, 100 Continue only after auth, ready file removed "
-     "on shutdown", 106),
+     "on shutdown, NaN / over-long numbers refused -32700", 108),
     # TYPED: a fixed case table (A 49, B 31, C 14, D 16, E 14, F 25, G 22,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 39, K 26, L 20, M 23, N 42,
     # O 18 = 382), so a count that moves is the alarm, not noise.

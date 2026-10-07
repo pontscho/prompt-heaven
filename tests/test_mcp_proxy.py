@@ -38,9 +38,9 @@ The case count is TYPED in run.py's SUITES table: this is a fixed case table,
 so a count that moves is the alarm.  The total below is the expected value; the
 run is authoritative.
 
-Total: 106 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 7, H 1, I 6, J 45, K 4,
+Total: 108 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 8, H 1, I 6, J 46, K 4,
 L 4; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4; R-0069 added
-J43, R-0076 J44, R-0075 J45).
+J43, R-0076 J44, R-0075 J45; R-0067/R-0068 added G8 and J46).
 
 Usage:
   python3 tests/test_mcp_proxy.py
@@ -56,7 +56,8 @@ Groups:
   E  progress  -- token mapping both ways, after-result drop, strip
   F  restart   -- death mid-call, backoff, new pid, toolset, restart budget
   G  framing   -- 5 MiB result, frame limit, pollution, child requests,
-                  a deeply nested upstream line, an id of the wrong type
+                  a deeply nested upstream line, an id of the wrong type,
+                  a NaN / Infinity token or an over-long integer literal
   H  timeout   -- call_timeout cancels the child call
   I  shutdown  -- stdin EOF, grandchild sweep, SIGTERM, the stop ladder
   J  http      -- refuse-to-start rules, auth, Origin/Host, framing refusals,
@@ -68,7 +69,8 @@ Groups:
                   header deadline, deep nesting, repeated and near-miss
                   headers, no session left by a refused initialize,
                   malformed header lines, an id-less initialize, an id that
-                  is not a string or integer (initialize and a deep list id)
+                  is not a string or integer (initialize and a deep list id),
+                  a NaN / Infinity token or an over-long integer literal
   K  static    -- AST over the proxy source: spawn shape, logging, API floor
   L  hygiene   -- every write under .claude/tmp, no bytecode, no new repo paths,
                   _log_value marks every cut
@@ -1730,13 +1732,21 @@ def group_f(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
-# G. framing  (7 cases)
+# G. framing  (8 cases)
 # ---------------------------------------------------------------------------
 
 BIG_BYTES = 5 * 1024 * 1024  # G1: above asyncio's 64 KiB default StreamReader limit (SC-3)
 FRAME_LIMIT = 1024 * 1024    # G2: the config's frame_limit
 OVERSIZE_BYTES = 2000000     # G2: one non-JSON line over FRAME_LIMIT
 DEEP_NESTING = 100000        # A13, G6, J35: '[' count past the JSON decoder's recursion limit
+# G8, J46 (R-0067/R-0068): the tokens strict JSON lacks, and an integer literal
+# past the 4300-character bound.  NUMBER_ENV lifts 3.11+'s own digit limit so
+# the interpreter running this suite parses that literal as 3.9.6 does.
+NUMBER_DIGITS = 5000
+NUMBER_ROWS = (("NaN", 981, b"NaN"), ("Infinity", 982, b"Infinity"),
+               ("-Infinity", 983, b"-Infinity"), ("1e999", 984, b"1e999"),
+               ("%d-digit integer" % NUMBER_DIGITS, 985, b"9" * NUMBER_DIGITS))
+NUMBER_ENV = {"PYTHONINTMAXSTRDIGITS": "0"}
 
 
 def child_reply(reply):
@@ -1964,6 +1974,42 @@ def group_g(suite, fixture_root):
     live_case(suite, GG, "bad id type -> -32600, alive", fixture_root, "g7",
               one_stub, g7,
               detail=["upstream    : ping with id true, ping with id 1.5, then ping 971"])
+
+    # G8 -- R-0067/R-0068: a NaN / Infinity token and an integer literal over
+    # 4300 characters are parse errors -- -32700 with id null, the answer an
+    # unparseable line gets -- never a dispatched request; the proxy keeps
+    # serving.  PYTHONINTMAXSTRDIGITS=0 lifts 3.11+'s own digit limit, so this
+    # interpreter parses the long literal the way 3.9.6 (which has none) does
+    # and only the proxy's own bound can refuse it.
+    def g8(proxy):
+        problems = started(proxy)
+        if problems:
+            return problems, []
+        got = []
+        for label, rid, token in NUMBER_ROWS:
+            proxy.send(b'{"jsonrpc": "2.0", "id": %d, "method": "ping", "params": {"n": %s}}\n'
+                       % (rid, token))
+            reply = proxy.wait_for(lambda m, rid=rid: "method" not in m and m.get("id") in (None, rid))
+            code = ((reply or {}).get("error") or {}).get("code")
+            got.append("%s %r" % (label, code))
+            if reply is None or code != -32700 or reply.get("id") is not None:
+                problems.append("%s answered %r, expected a -32700 with id null"
+                                % (label, reply if reply is None else sorted(reply)))
+        proxy.request("ping", {}, 989)
+        pong = proxy.wait_id(989)
+        if pong is None or pong.get("result") != {}:
+            problems.append("ping after the numbers answered %r (rc=%r); stderr: %s"
+                            % (pong, proxy.poll(), stderr_tail(proxy)))
+        proxy.close()
+        problems += stderr_lacks(proxy, ["Traceback"])
+        return problems, ["answers     : %s; ping %s"
+                          % ("; ".join(got), "ok" if pong is not None else None)]
+
+    live_case(suite, GG, "non-finite / over-long number -> -32700, alive", fixture_root, "g8",
+              one_stub, g8, extra_env=NUMBER_ENV,
+              detail=["upstream    : ping carrying NaN, Infinity, -Infinity, 1e999 and a "
+                      "%d-digit integer, then ping 989" % NUMBER_DIGITS,
+                      "env         : PYTHONINTMAXSTRDIGITS=0 (3.9.6 has no digit limit)"])
 
 
 # ---------------------------------------------------------------------------
@@ -2574,7 +2620,7 @@ class HttpClient:
 class HttpProxy:
     """One live `mcp-proxy.py --http` with a 0600 token file and a ready file."""
 
-    def __init__(self, sandbox, cfgpath, extra_argv=(), label="http"):
+    def __init__(self, sandbox, cfgpath, extra_argv=(), label="http", extra_env=None):
         self.sandbox = sandbox
         self.token = new_token()
         self.token_path = write_file(os.path.join(sandbox, "tok"), self.token + "\n")
@@ -2590,7 +2636,7 @@ class HttpProxy:
         try:
             self.proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                                          stdout=subprocess.DEVNULL, stderr=self._err,
-                                         cwd=sandbox, env=http_env())
+                                         cwd=sandbox, env=http_env(extra_env))
         except Exception:
             self._err.close()
             raise
@@ -2656,12 +2702,13 @@ class HttpProxy:
                 pass
 
 
-def http_session(suite, fixture_root, label, cases, extra_argv=(), detail=()):
+def http_session(suite, fixture_root, label, cases, extra_argv=(), detail=(), extra_env=None):
     """Run several J cases against ONE live HTTP proxy, then reap.
 
     *cases* is a list of (cid, fn) with fn(proxy, client) -> (problems, detail).
     *extra_argv* may be a callable(sandbox) -> argv tuple, for a flag whose
-    value is a path inside the batch's own sandbox.  A failed start fails every case; a SIGTERM exit other than 0 and a stub
+    value is a path inside the batch's own sandbox; *extra_env* is added to the
+    proxy's environment.  A failed start fails every case; a SIGTERM exit other than 0 and a stub
     that outlived the proxy are findings recorded on every case of the batch.
     """
     sandbox = new_sandbox(fixture_root, label)
@@ -2673,7 +2720,7 @@ def http_session(suite, fixture_root, label, cases, extra_argv=(), detail=()):
     tail = []
     proxy = None
     try:
-        proxy = HttpProxy(sandbox, cfgpath, extra_argv, label=label)
+        proxy = HttpProxy(sandbox, cfgpath, extra_argv, label=label, extra_env=extra_env)
         if proxy.wait_ready() is None:
             why = ["no ready file within %gs (rc=%r); stderr: %s"
                    % (READY_TIMEOUT_S, proxy.proc.poll(), stderr_tail(proxy))]
@@ -4205,6 +4252,35 @@ def group_j_strict(suite, fixture_root, mod, mod_why):
         ("stdlib refusals fixed, body-less", j43),
         ("100 Continue only after auth", j44),
     ], detail=["proxy       : --http --port 0, default caps"])
+
+    # J46 -- R-0067/R-0068: a body carrying NaN / Infinity, an overflowing
+    # float or an integer literal over 4300 characters is a 400 -32700 with id
+    # null, as an unparseable body is, and the proxy keeps serving.  Its own
+    # session, because NUMBER_ENV (see G8) is the proxy's environment.
+    def j46(proxy, client):
+        problems, got = [], []
+        for label, rid, token in NUMBER_ROWS:
+            raw = (b'{"jsonrpc": "2.0", "id": %d, "method": "initialize", "params": '
+                   b'{"protocolVersion": "%s", "capabilities": {}, "n": %s}}'
+                   % (rid, PROTOCOL_VERSION.encode("ascii"), token))
+            reply = client.send(raw=raw)
+            body = reply.json() or {}
+            code = (body.get("error") or {}).get("code")
+            got.append("%s %d %r" % (label, reply.status, code))
+            if reply.status != 400 or code != -32700 or body.get("id") is not None:
+                problems.append("%s: status %d code %r id %r, expected 400 -32700 with id null"
+                                % (label, reply.status, code, body.get("id")))
+        after = client.send(init_body())
+        if after.status != 200:
+            problems.append("initialize after the numbers: status %d" % after.status)
+        return problems, ["answers     : %s" % "; ".join(got),
+                          "after       : initialize %d" % after.status]
+
+    http_session(suite, fixture_root, "j-numbers", [
+        ("non-finite / over-long number -> 400 -32700", j46),
+    ], detail=["proxy       : --http --port 0, default caps",
+               "env         : PYTHONINTMAXSTRDIGITS=0 (3.9.6 has no digit limit)"],
+       extra_env=NUMBER_ENV)
 
     # J38 -- an initialize refused at the in-flight cap leaves no session behind.
     def j38(proxy, client):

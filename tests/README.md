@@ -78,7 +78,7 @@ rationale lives in `docs/subsystems/tests.md`.
 | `checkpoint` | `test_checkpoint.py` | A–M |
 | `roadmap` | `test_roadmap.py` | A–M |
 | `roadmap_board` | `test_roadmap_board.py` | A–F |
-| `generated_region` | `test_generated_region.py` | A–G |
+| `generated_region` | `test_generated_region.py` | A–H |
 | `mcp_websocket` | `test_mcp_websocket.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
 | `cancel` | `test_cancel.py` | A–G |
@@ -276,7 +276,7 @@ tests/
                                            block that cannot close its script
                                            tag, --out name/symlink refusals;
                                            the live roadmap is digested)
-  test_generated_region.py   groups A-G   (in-memory only, writes nothing --
+  test_generated_region.py   groups A-H   (in-memory only, writes nothing --
                                            re-renders every generated region
                                            from the canonical source its own
                                            marker names and demands byte

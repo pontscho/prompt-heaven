@@ -137,9 +137,12 @@ Declared limits (accepted, not gated)
     inner awaitable's completion, so an upstream cancel landing in the same
     loop iteration as the child's reply may let the reply through (harmless:
     a client may ignore a response that arrives after its cancel).
-  * On Python < 3.9.14 a huge integer literal in a message parses at quadratic
-    cost (no int-digit limit, CVE-2020-10735); the HTTP body is bounded by
-    --max-body-bytes, stdin is the trusted parent.
+  * Every frame is parsed by _strict_loads (R-0067, R-0068): an integer literal
+    over 4300 characters and NaN/Infinity are refused as unparseable on every
+    Python, so 3.9.6's missing int-digit limit (CVE-2020-10735) no longer
+    reaches int(). A CHILD line so refused is dropped like any non-JSON line,
+    so the call it answered waits for its call_timeout. The config and the
+    ready file are read with plain json.loads: neither is a peer's frame.
   * Child-side logging is outside the wire_log gate. It logs structure only:
     a child-controlled method or id goes through _log_value (repr, bounded,
     CWE-117), never a params value; the proxy's own suite (K3) gates every
@@ -263,6 +266,68 @@ def _configure_logging(debug, log_file):
     fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
     logging.basicConfig(level=level, format=fmt, handlers=handlers)
 # END GENERATED: f77d402d6254
+
+
+# Strict JSON for every frame the proxy reads or writes, on both fronts and both
+# directions (R-0067, R-0068): a NaN/Infinity token, a float that overflows to
+# one and an integer literal over 4300 characters are refused as a
+# json.JSONDecodeError, and an emit refuses a non-finite float with ValueError.
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_json.py :: JSON_INT_LITERAL_LIMIT, _json_no_constant, _json_finite_float, _json_bounded_int, _strict_loads, _strict_dumps
+JSON_INT_LITERAL_LIMIT = 4300
+
+
+def _json_no_constant(name: str) -> float:
+    """json parse_constant: NaN, Infinity and -Infinity are not JSON (R-0067)."""
+    raise ValueError(f"non-finite number {name} is not JSON", name)
+
+
+def _json_finite_float(text: str) -> float:
+    """json parse_float: a literal that overflows to an infinity (1e999) is refused like NaN."""
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError(f"number {text[:32]} overflows to an infinity", text)
+    return value
+
+
+def _json_bounded_int(text: str) -> int:
+    """json parse_int: a literal over JSON_INT_LITERAL_LIMIT characters is refused before int() sees it (R-0068)."""
+    if len(text) > JSON_INT_LITERAL_LIMIT:
+        raise ValueError(f"integer literal of {len(text)} characters exceeds {JSON_INT_LITERAL_LIMIT}", text)
+    return int(text)
+
+
+def _strict_loads(text):
+    """json.loads for a peer's frame: every refusal is a json.JSONDecodeError.
+
+    *text* is str or bytes, as json.loads takes it. A NaN or infinity token, a
+    float that overflows to one and an integer literal over
+    JSON_INT_LITERAL_LIMIT characters are refused at the literal's position;
+    any other ValueError (an undecodable byte string) is re-raised as a
+    JSONDecodeError at position 0. RecursionError is not converted: a host
+    that answers deep nesting catches it itself.
+    """
+    try:
+        return json.loads(text, parse_constant=_json_no_constant, parse_float=_json_finite_float, parse_int=_json_bounded_int)
+    except json.JSONDecodeError:
+        raise
+    except ValueError as exc:
+        doc = text if isinstance(text, str) else bytes(text).decode("utf-8", "replace")
+        if len(exc.args) == 2 and isinstance(exc.args[1], str):
+            raise json.JSONDecodeError(exc.args[0], doc, max(0, doc.find(exc.args[1]))) from None
+        raise json.JSONDecodeError(str(exc), doc, 0) from None
+
+
+def _strict_dumps(obj) -> str:
+    """json.dumps for a frame to a peer: NaN and the infinities raise ValueError (R-0067).
+
+    allow_nan=False is the only difference: separators and ensure_ascii stay
+    json.dumps' defaults, so every frame that serialised before is
+    byte-identical. A caller that can be handed a non-finite float keeps the
+    ValueError arm it already has for a value json cannot serialise.
+    """
+    return json.dumps(obj, allow_nan=False)
+# END GENERATED: 37665b5ce9ad
 
 
 # ---------------------------------------------------------------------------
@@ -808,7 +873,7 @@ def _fallback_id(rid: Any) -> Any:
     same RecursionError, uncaught. A serialisable id is kept, so the caller
     still learns which request failed."""
     try:
-        json.dumps(rid)
+        _strict_dumps(rid)
     except (TypeError, ValueError, RecursionError):
         return None
     return rid
@@ -888,7 +953,7 @@ class ChildClient:
                 if not line:
                     continue
                 try:
-                    msg = json.loads(line)
+                    msg = _strict_loads(line)
                 except (ValueError, RecursionError):
                     log.debug("child=%s non-JSON stdout line (%d bytes) dropped", name, len(line))
                     continue
@@ -995,7 +1060,7 @@ class ChildClient:
 
     async def _send_line(self, obj: dict) -> None:
         """Write one message to the child's stdin: serialized, with a bounded drain (R-6)."""
-        payload = (json.dumps(obj) + "\n").encode("utf-8")
+        payload = (_strict_dumps(obj) + "\n").encode("utf-8")
         name = self.slot.spec.name
         async with self._send_lock:
             stdin = self.process.stdin if self.process is not None else None
@@ -1561,15 +1626,17 @@ class McpServer:
                     continue
 
                 try:
-                    msg = json.loads(line)
+                    msg = _strict_loads(line)
                 except (ValueError, RecursionError) as exc:
                     # Answering is not optional: a bare `continue` would leave
                     # the caller's id unanswered until it timed out, which is
                     # indistinguishable from a hung server. ValueError covers
-                    # JSONDecodeError and, on Python >= 3.9.14 only, the
-                    # int-digit limit (CVE-2020-10735; older 3.9 parses a huge
-                    # integer at quadratic cost and never raises); RecursionError
-                    # a deeply nested line -- unguarded, either escaped run().
+                    # JSONDecodeError, which is also how _strict_loads refuses
+                    # NaN/Infinity and an integer literal over
+                    # JSON_INT_LITERAL_LIMIT characters on every Python (R-0067,
+                    # R-0068: the CVE-2020-10735 int-digit limit exists only
+                    # from 3.9.14); RecursionError a deeply nested line --
+                    # unguarded, either escaped run().
                     log.warning("Invalid JSON: %s", exc)
                     self._write(self._error(None, -32700, f"Parse error: {exc}"))
                     continue
@@ -1705,13 +1772,13 @@ class McpServer:
         and this needs no lock.
         """
         try:
-            out = json.dumps(response)
+            out = _strict_dumps(response)
         except (TypeError, ValueError, RecursionError) as exc:   # F4: a too-deep reply too
             # A non-serialisable payload must not kill the loop mid-write, i.e.
             # after some bytes were already on the wire.
             log.exception("Response was not JSON-serialisable")
-            out = json.dumps(self._error(_fallback_id(response.get("id")), -32603,
-                                         f"Response not serialisable: {exc}"))
+            out = _strict_dumps(self._error(_fallback_id(response.get("id")), -32603,
+                                            f"Response not serialisable: {exc}"))
         # F12/CWE-532: structure only (id + outcome), no body.
         if log.isEnabledFor(logging.DEBUG):
             log.debug(
@@ -2298,11 +2365,11 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
         body = b""
         if obj is not None:
             try:
-                body = json.dumps(obj).encode("utf-8")
+                body = _strict_dumps(obj).encode("utf-8")
             except (TypeError, ValueError, RecursionError) as exc:   # F4: a too-deep reply too
                 log.warning("http response was not JSON-serialisable: %s", type(exc).__name__)
-                body = json.dumps(McpServer._error(_fallback_id(obj.get("id")), -32603,
-                                                   "Response not serialisable")).encode("utf-8")
+                body = _strict_dumps(McpServer._error(_fallback_id(obj.get("id")), -32603,
+                                                      "Response not serialisable")).encode("utf-8")
         self.send_response(status)
         if obj is not None:
             self.send_header("Content-Type", "application/json")
@@ -2384,9 +2451,11 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
             self.close_connection = True   # short body: the peer is gone or lying
             return
         try:
-            msg = json.loads(raw.decode("utf-8"))
-        # F16: deep nesting is a parse error. ValueError covers JSONDecodeError
-        # and, on Python >= 3.9.14 only, the int-digit limit (CVE-2020-10735).
+            msg = _strict_loads(raw.decode("utf-8"))
+        # F16: deep nesting is a parse error. ValueError covers JSONDecodeError,
+        # which is also how _strict_loads refuses NaN/Infinity and an integer
+        # literal over JSON_INT_LITERAL_LIMIT characters on every Python
+        # (R-0067, R-0068; the int-digit limit exists only from 3.9.14).
         except (UnicodeDecodeError, ValueError, RecursionError):
             self._send_json(400, McpServer._error(None, -32700, "Parse error"))
             return
@@ -2517,13 +2586,13 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
             if not isinstance(item, dict):
                 continue
             try:
-                data = json.dumps(item)
+                data = _strict_dumps(item)
             except (TypeError, ValueError, RecursionError) as exc:   # F4: a too-deep event too
                 log.warning("http event was not JSON-serialisable: %s", type(exc).__name__)
                 if "id" not in item:
                     continue
-                data = json.dumps(McpServer._error(_fallback_id(item.get("id")), -32603,
-                                                   "Response not serialisable"))
+                data = _strict_dumps(McpServer._error(_fallback_id(item.get("id")), -32603,
+                                                      "Response not serialisable"))
             self.wfile.write(b"event: message\ndata: " + data.encode("utf-8") + b"\n\n")
             self.wfile.flush()
             if "id" in item and log.isEnabledFor(logging.DEBUG):

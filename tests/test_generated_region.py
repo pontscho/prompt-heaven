@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generated-region drift gate -- groups A-G.
+"""Generated-region drift gate -- groups A-H.
 
 `Scripts/_mcp_brotli.py`, `Scripts/_mcp_chrome.py`,
 `Scripts/_mcp_codesearch.py`, `Scripts/_mcp_concurrency.py`,
@@ -92,6 +92,11 @@ Groups:
   G. CENSUS:  `--census`, the generator's READ path -- the counts a page used to
               type, derived from the same walk, sorted rather than merely
               stable, and unable to write
+  H. STRICT:  R-0067 + R-0068 -- every host carries the strict JSON blocks and
+              routes its frame read and write through them; every other bare
+              json parse, and every bare emit on the frame tier, is declared in
+              STRICT_JSON_EXCEPTIONS with its reason (ast, against the live
+              tree, with a synthetic control first)
 
 THE CENSUS IS GATED ON THREE PROPERTIES, NOT ON ITS PROSE. Its consumer is
 `docs/measurements.json`, which hands the argv to `mcp-wiki`'s `measure`: the
@@ -116,6 +121,7 @@ The case count lives in the SUITES table in tests/run.py, never here.
 Exit code 0 iff every non-informational case passes.
 """
 
+import ast
 import asyncio
 import contextlib
 import hashlib
@@ -249,6 +255,7 @@ GD = "D. HYGIENE: no bytecode, no source touched"
 GE = "E. BLOCKS: what each shared block actually does"
 GF = "F. TABS: per-block safety, host detection, space hosts untouched"
 GG = "G. CENSUS: the read path a page renders -- derived, sorted, writes nothing"
+GH = "H. STRICT: peer JSON is parsed and emitted through the strict blocks"
 
 # The census subjects, mirrored here for the reason CANONICAL_NAMES is: a fifth
 # subject added to the generator and not to this tuple leaves the new one with
@@ -317,6 +324,143 @@ WINDOW_MIN_HOSTS = 8
 # host -- it travels co-listed with the window on one marker. That co-listing is
 # why the liveness case below asks about the PAIR rather than about one name.
 WINDOW_RELAY = "_ensure_dict"
+
+# R-0067 + R-0068: the strict JSON blocks, in the order every host's marker
+# lists them (dependency first). `_strict_loads` refuses NaN, Infinity,
+# -Infinity, a float that overflows to an infinity and an integer literal over
+# JSON_INT_LITERAL_LIMIT characters, each as a json.JSONDecodeError; and
+# `_strict_dumps` is json.dumps with allow_nan=False.
+STRICT_NAMES = ("JSON_INT_LITERAL_LIMIT", "_json_no_constant", "_json_finite_float",
+                "_json_bounded_int", "_strict_loads", "_strict_dumps")
+
+# Group H's scope. Every PARSE in a host is gated, wherever it sits: a parse is
+# where both defects bite (NaN accepted, a long digit run parsed at quadratic
+# cost on 3.9.6), and a new `json.loads` should have to say why it may be lax.
+# An EMIT is gated only on the frame tier -- every method of `McpServer`, and
+# the whole of the one host whose every byte is a relayed frame -- because a
+# `json.dumps` that renders tool output INTO a text result never reaches the
+# wire as a JSON number: the frame emit around it is the strict one.
+JSON_PARSE_ATTRS = ("load", "loads")
+JSON_EMIT_ATTRS = ("dump", "dumps")
+FRAME_CLASS = "McpServer"
+WHOLE_FILE_FRAME_HOSTS = ("mcp-proxy.py",)
+
+# Every bare json call group H tolerates, keyed (host, enclosing qualname,
+# json attribute), with the MEASURED reason it is not a peer's frame. A row
+# whose site has gone fails `strict-exceptions-not-stale`, so the table cannot
+# outlive what it excuses.
+#
+# Two families are declared OUT OF SCOPE rather than safe: an upstream service's
+# HTTP body (context7, jenkins, Chrome's /json endpoints) and a non-MCP child's
+# stream (an LSP server's Content-Length body, Chrome's CDP websocket). Both are
+# peer bytes, and the quadratic int parse reaches them on 3.9.6 too; R-0067 and
+# R-0068 scope the MCP frame tier, so these are recorded here, by name, as the
+# next candidates instead of being widened silently into this change.
+_UPSTREAM = ("out of scope (R-0067/R-0068 cover MCP frames): an upstream "
+             "service's HTTP body, not a peer's MCP frame")
+_LSP_CHILD = ("out of scope (R-0067/R-0068 cover MCP frames): the LSP child's "
+              "Content-Length body, not a peer's MCP frame")
+STRICT_JSON_EXCEPTIONS = {
+    ("mcp-clangd.py", "read_lsp_message", "loads"): _LSP_CHILD,
+    ("mcp-cuda.py", "read_lsp_message", "loads"): _LSP_CHILD,
+    ("mcp-lua-lsp.py", "read_lsp_message", "loads"): _LSP_CHILD,
+    ("mcp-purity.py", "read_lsp_message", "loads"): _LSP_CHILD,
+    ("mcp-context7.py", "_parse_error_response", "loads"): _UPSTREAM,
+    ("mcp-context7.py", "handle_context7_resolve_library_id", "loads"): _UPSTREAM,
+    ("mcp-jenkins.py", "_read_response", "loads"): _UPSTREAM,
+    ("mcp-gdc.py", "GdcManager.get_targets", "loads"): _UPSTREAM,
+    ("mcp-gdc.py", "handle_new_page", "loads"): _UPSTREAM,
+    ("mcp-gdc.py", "CdpSession._recv_loop", "loads"):
+        "out of scope (R-0067/R-0068 cover MCP frames): Chrome's CDP websocket "
+        "message, not a peer's MCP frame",
+    ("mcp-inspect.py", "_v_json", "loads"):
+        "the `validate` tool's verdict on a user's file: it reports what the "
+        "stdlib parser accepts, and making it strict would change the verdict, "
+        "not harden a frame",
+    ("mcp-purity.py", "_RegexWorker._ask", "loads"):
+        "the server's own regex worker subprocess answering on a private "
+        "length-prefixed pipe the server spawned; not a peer",
+    ("mcp-cuda.py", "_prepare_compile_commands", "load"):
+        "a compile_commands.json in the user's project, read as a build input",
+    ("mcp-purity.py", "_prepare_compile_commands", "load"):
+        "a compile_commands.json in the user's project, read as a build input",
+    ("mcp-cuda.py", "handle_init", "load"):
+        "a compile_commands.json in the user's project, read as a build input",
+    ("mcp-tshark.py", "handle_config", "load"):
+        "the server's own saved-config file, written by this server",
+    ("mcp-webfetch.py", "_cache_load", "load"):
+        "the server's own cache entry, written by this server",
+    ("mcp-wiki.py", "load_measurements", "loads"):
+        "the repository's docs/measurements.json, a checked-in file",
+    ("mcp-proxy.py", "load_config", "loads"):
+        "the operator's --config / --config-json, refused on any parse error "
+        "including ValueError and RecursionError; not a peer's frame",
+    ("mcp-proxy.py", "McpServer._http_write_ready_file", "dump"):
+        "writes {port, pid}, two ints the proxy itself produced, to the "
+        "--ready-file; never a frame",
+    ("mcp-proxy.py", "McpServer._http_remove_ready_file", "loads"):
+        "reads back at most 4096 bytes of the --ready-file to compare a pid; "
+        "any ValueError leaves the file alone; never a frame",
+}
+
+
+@contextlib.contextmanager
+def int_digits_unlimited():
+    """Lift 3.11+'s int-digit limit for the duration (0 = none, as on 3.9.6)."""
+    get = getattr(sys, "get_int_max_str_digits", None)
+    if get is None:
+        yield
+        return
+    saved = get()
+    sys.set_int_max_str_digits(0)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(saved)
+
+
+def bare_json_calls(mod, label, text, sources):
+    """(qualname, attr, lineno) for every `json.<attr>(...)` call outside every region.
+
+    Read with `ast`, the fleet's rule for finding a call site; the region spans
+    come from the generator's own `audit_text`, so a call inside a generated
+    block -- `_ensure_dict` calling `_strict_loads`, `_strict_loads` calling
+    `json.loads` -- is the block, not a site.
+    """
+    spans = [(r.begin + 1, r.end + 1) for r in mod.audit_text(label, text, sources)]
+    found = []
+
+    def visit(node, scope):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, scope + [child.name])
+                continue
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id == "json"
+                    and child.func.attr in JSON_PARSE_ATTRS + JSON_EMIT_ATTRS
+                    and not any(b <= child.lineno <= e for b, e in spans)):
+                found.append((".".join(scope) or "<module>", child.func.attr, child.lineno))
+            visit(child, scope)
+
+    visit(ast.parse(text, filename=label), [])
+    return found
+
+
+def strict_violations(mod, label, text, sources, exceptions):
+    """(undeclared sites, declared keys seen) for one host under group H's scope."""
+    bad, seen = [], set()
+    for qualname, attr, lineno in bare_json_calls(mod, label, text, sources):
+        frame = (label in WHOLE_FILE_FRAME_HOSTS
+                 or qualname == FRAME_CLASS or qualname.startswith(FRAME_CLASS + "."))
+        if attr in JSON_EMIT_ATTRS and not frame:
+            continue
+        key = (label, qualname, attr)
+        if key in exceptions:
+            seen.add(key)
+            continue
+        bad.append("%s:%d %s: bare json.%s" % (label, lineno, qualname, attr))
+    return bad, seen
 
 
 def outside_regions(mod, label, text, sources):
@@ -1779,6 +1923,121 @@ def group_blocks(suite, blocks, lsp, paging, logmod):
         problems.append("a non-JSON string did not raise")
     suite.record(GE, "ensure-dict-message-names-field-and-window", problems)
 
+    # R-0067 + R-0068: the strict pair every host parses and emits a peer's
+    # frame through. Each refusal must be a json.JSONDecodeError and not merely
+    # a ValueError, because that is the ONE exception every host's frame loop
+    # and `_ensure_dict` catch -- anything wider would escape as a crash rather
+    # than reach the -32700 answer an unparseable line already gets.
+    missing = [name for name in STRICT_NAMES if not hasattr(blocks, name)]
+    absent = ["%s defines no %s" % (CANONICAL_NAME, name) for name in missing]
+    strict_loads = getattr(blocks, "_strict_loads", None)
+    strict_dumps = getattr(blocks, "_strict_dumps", None)
+
+    problems = list(absent)
+    if strict_loads is not None:
+        for text in ('{"jsonrpc": "2.0", "id": 1, "method": "ping"}',
+                     '[1, -2, 3.5, -0.0, 1e300, true, null, "\\u00e9"]',
+                     '{"a": {"b": [1, 2, {"c": "NaN Infinity"}]}}',
+                     b'{"id": "bytes in", "n": -12}'):
+            try:
+                got = strict_loads(text)
+            except Exception as exc:                   # noqa: BLE001 -- the point
+                problems.append("_strict_loads(%r) RAISED %s: %s"
+                                % (text, type(exc).__name__, exc))
+                continue
+            if got != json.loads(text):
+                problems.append("_strict_loads(%r) gave %r, json.loads %r"
+                                % (text, got, json.loads(text)))
+    suite.record(GE, "strict-loads-accepts-json", problems)
+
+    # The literal is FOUND, not merely refused: `exc.pos` is what a host hands
+    # `_json_error_window`, so it has to land on the token that was refused.
+    problems = list(absent)
+    if strict_loads is not None:
+        for token in ("NaN", "Infinity", "-Infinity", "1e999", "-1e999"):
+            text = '{"id": 1, "note": "a string", "n": %s}' % token
+            try:
+                got = strict_loads(text)
+            except json.JSONDecodeError as exc:
+                if not text[exc.pos:].startswith(token):
+                    problems.append("%s: refused, but pos %d points at %r"
+                                    % (token, exc.pos, text[exc.pos:exc.pos + 12]))
+                continue
+            except Exception as exc:                   # noqa: BLE001 -- the point
+                problems.append("%s: raised %s, not json.JSONDecodeError"
+                                % (token, type(exc).__name__))
+                continue
+            problems.append("%s: parsed to %r instead of being refused" % (token, got))
+    suite.record(GE, "strict-loads-refuses-non-finite", problems)
+
+    # The bound is in CHARACTERS, sign included, as `_rt_bounded_int` and
+    # `_oauth_bounded_int` count it. 3.11+ carries its own digit limit, so it is
+    # lifted for the duration: on 3.9.6 there is none, and a case that passed
+    # because the INTERPRETER refused the literal would prove nothing.
+    problems = list(absent)
+    if strict_loads is not None:
+        limit = getattr(blocks, "JSON_INT_LITERAL_LIMIT", None)
+        problems += problem_if(limit != 4300, "JSON_INT_LITERAL_LIMIT is %r, not 4300" % (limit,))
+        with int_digits_unlimited():
+            for literal, ok in (("7" * 4300, True), ("-" + "7" * 4299, True),
+                                ("7" * 4301, False), ("-" + "7" * 4300, False),
+                                ("7" * 50000, False)):
+                text = '{"id": 1, "n": %s}' % literal
+                try:
+                    got = strict_loads(text)
+                except json.JSONDecodeError as exc:
+                    if ok:
+                        problems.append("a %d-character literal was refused: %s"
+                                        % (len(literal), str(exc)[:80]))
+                    elif not text[exc.pos:].startswith(literal):
+                        problems.append("a %d-character literal: pos %d is not on it"
+                                        % (len(literal), exc.pos))
+                    continue
+                except Exception as exc:               # noqa: BLE001 -- the point
+                    problems.append("a %d-character literal raised %s, not "
+                                    "json.JSONDecodeError" % (len(literal), type(exc).__name__))
+                    continue
+                if not ok:
+                    problems.append("a %d-character literal parsed instead of being refused"
+                                    % len(literal))
+                elif got != {"id": 1, "n": int(literal)}:
+                    problems.append("a %d-character literal parsed wrong" % len(literal))
+    suite.record(GE, "strict-loads-int-literal-bound", problems)
+
+    problems = list(absent)
+    if strict_dumps is not None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            try:
+                got = strict_dumps({"id": 1, "result": {"n": value}})
+            except ValueError:
+                continue
+            except Exception as exc:                   # noqa: BLE001 -- the point
+                problems.append("%r raised %s, not ValueError" % (value, type(exc).__name__))
+                continue
+            problems.append("%r was emitted: %r" % (value, got))
+        # Every frame that serialised before must be byte-identical after.
+        frame = {"jsonrpc": "2.0", "id": "x", "result": {"text": "é \"q\"", "n": [1, 2.5]}}
+        problems += problem_if(strict_dumps(frame) != json.dumps(frame),
+                               "a finite frame is not byte-identical to json.dumps: %r"
+                               % strict_dumps(frame))
+    suite.record(GE, "strict-dumps-refuses-non-finite", problems)
+
+    # The relay rides the same rule: a stringified `params` carrying NaN is
+    # refused through the existing ValueError route, field named and window shown.
+    problems = []
+    try:
+        got = ensure('{"x": NaN}', "filter")
+    except ValueError as exc:
+        message = str(exc)
+        if "'filter'" not in message or "Near the failure:" not in message:
+            problems.append("refused, but the message lost the field or the window: %r"
+                            % message)
+    except Exception as exc:                           # noqa: BLE001 -- the point
+        problems.append("raised %s, not ValueError" % type(exc).__name__)
+    else:
+        problems.append("a NaN inside a string params was accepted: %r" % (got,))
+    suite.record(GE, "ensure-dict-refuses-non-finite", problems)
+
     # `_configure_logging` is measured on the one property that has already cost
     # a fleet-wide commit: `c8b74d0`, "every log file was created world-readable
     # in a world-writable directory", had to touch every server because the mode
@@ -1884,8 +2143,13 @@ def group_tabs(suite, mod):
     # the fixture emits what a server emits.
     paired = {
         "_max_answer_chars": "DEFAULT_MAX_ANSWER_CHARS, _max_answer_chars",
-        WINDOW_RELAY: "%s, %s" % (WINDOW_NAME, WINDOW_RELAY),
+        WINDOW_RELAY: ", ".join(STRICT_NAMES + (WINDOW_NAME, WINDOW_RELAY)),
     }
+    # The strict-JSON blocks call one another, so each is rendered inside the
+    # one run every real host spells (R-0067/R-0068); `_ensure_dict` parses
+    # through `_strict_loads`, which is why its marker above carries the run too.
+    for name in STRICT_NAMES:
+        paired[name] = ", ".join(STRICT_NAMES)
     # Every websocket block, inside the one marker shape its hosts spell: the
     # core, plus the block itself when it is a wrapper.
     for name in sources.get(WEBSOCKET_CANONICAL_NAME, {}):
@@ -2614,6 +2878,94 @@ def group_census(suite, mod):
                  detail=detail, text=hand_text)
 
 
+STRICT_CONTROL = (
+    "import json\n"
+    "\n\n"
+    "def _param(text):\n"
+    "    return json.loads(text)\n"
+    "\n\n"
+    "def _render(value):\n"
+    "    return json.dumps(value)\n"
+    "\n\n"
+    "%s %s :: _helper\n"
+    "def _helper():\n"
+    "    return json.loads('1')\n"
+    "%s\n"
+    "\n\n"
+    "class McpServer:\n"
+    "    def run(self, line):\n"
+    "        return json.loads(line)\n"
+    "\n"
+    "    def _write(self, response):\n"
+    "        return json.dumps(response)\n"
+    "\n"
+    "    def _quiet(self, response):\n"
+    "        return json.dumps(response)\n"
+) % (BEGIN_PREFIX, CANONICAL_NAME, END_PREFIX)
+
+
+def group_strict(suite, mod):
+    """H. R-0067 + R-0068: every peer frame goes through the strict blocks."""
+    sources = mod.load_all_blocks()
+    hosts = sorted(Path(SCRIPTS).glob(TARGET_GLOB))
+
+    # The checker first, on a synthetic host: a checker that silently matched
+    # nothing would read exactly like a clean fleet.
+    control_key = ("control.py", "McpServer._quiet", "dumps")
+    bad, seen = strict_violations(mod, "control.py", STRICT_CONTROL, SYNTH_SOURCES,
+                                  {control_key: "control"})
+    got = sorted(line.split(" ", 1)[1] for line in bad)
+    want = sorted(["McpServer.run: bare json.loads", "McpServer._write: bare json.dumps",
+                   "_param: bare json.loads"])
+    problems = problem_if(got != want, "the checker reported %r, expected %r" % (got, want))
+    problems += problem_if(seen != {control_key},
+                           "the declared control row was not consumed: %r" % (seen,))
+    suite.record(GH, "strict-gate-control", problems,
+                 detail=["caught      : %s" % "; ".join(got),
+                         "spared      : a module-level json.dumps (not the frame "
+                         "tier), a json.loads inside a region, one declared row"])
+
+    problems, detail = [], []
+    for path in hosts:
+        regioned = []
+        for region in mod.audit(path, sources):
+            if region.source == CANONICAL_NAME:
+                regioned += [name for name in region.names if name in STRICT_NAMES]
+        if tuple(regioned) != STRICT_NAMES:
+            problems.append("%s: its %s regions carry %r, expected %r"
+                            % (path.name, CANONICAL_NAME, regioned, STRICT_NAMES))
+    suite.record(GH, "strict-region-in-every-host", problems,
+                 detail=["%d host(s), each expected to carry %s"
+                         % (len(hosts), ", ".join(STRICT_NAMES))])
+
+    problems = []
+    for path in hosts:
+        text = path.read_text(encoding="utf-8")
+        body = outside_regions(mod, path.name, text, sources)
+        for name in ("_strict_loads", "_strict_dumps"):
+            if "%s(" % name not in body:
+                problems.append("%s: never calls %s outside a region" % (path.name, name))
+    suite.record(GH, "strict-blocks-called", problems,
+                 detail=["%d host(s): the frame read must call _strict_loads and the "
+                         "frame write _strict_dumps" % len(hosts)])
+
+    bad, seen = [], set()
+    for path in hosts:
+        found, used = strict_violations(mod, path.name, path.read_text(encoding="utf-8"),
+                                        sources, STRICT_JSON_EXCEPTIONS)
+        bad += found
+        seen |= used
+    suite.record(GH, "no-bare-json-on-peer-input", bad,
+                 detail=bad or ["every parse, and every frame-tier emit, is strict or "
+                                "declared (%d declared row(s))" % len(STRICT_JSON_EXCEPTIONS)])
+
+    stale = ["%s %s json.%s: declared, but no such site" % key
+             for key in sorted(set(STRICT_JSON_EXCEPTIONS) - seen)]
+    suite.record(GH, "strict-exceptions-not-stale", stale,
+                 detail=stale or ["%d declared row(s), each still excusing a live site"
+                                  % len(STRICT_JSON_EXCEPTIONS)])
+
+
 def group_hygiene(suite, pyc_before, digests_before):
     pyc_after = H.pycache_snapshot()
     suite.record(GD, "pycache-zero", problem_if(
@@ -2654,6 +3006,7 @@ def run(opts=None):
     group_blocks(suite, blocks, lsp, paging, logmod)
     group_tabs(suite, mod)
     group_census(suite, mod)
+    group_strict(suite, mod)
     group_hygiene(suite, pyc_before, digests_before)
 
     suite.print_summary()

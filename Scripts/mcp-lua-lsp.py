@@ -77,7 +77,62 @@ def _bool_param(value, default=False):
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_json.py :: _json_error_window
+# BEGIN GENERATED: _mcp_json.py :: JSON_INT_LITERAL_LIMIT, _json_no_constant, _json_finite_float, _json_bounded_int, _strict_loads, _strict_dumps, _json_error_window
+JSON_INT_LITERAL_LIMIT = 4300
+
+
+def _json_no_constant(name: str) -> float:
+    """json parse_constant: NaN, Infinity and -Infinity are not JSON (R-0067)."""
+    raise ValueError(f"non-finite number {name} is not JSON", name)
+
+
+def _json_finite_float(text: str) -> float:
+    """json parse_float: a literal that overflows to an infinity (1e999) is refused like NaN."""
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError(f"number {text[:32]} overflows to an infinity", text)
+    return value
+
+
+def _json_bounded_int(text: str) -> int:
+    """json parse_int: a literal over JSON_INT_LITERAL_LIMIT characters is refused before int() sees it (R-0068)."""
+    if len(text) > JSON_INT_LITERAL_LIMIT:
+        raise ValueError(f"integer literal of {len(text)} characters exceeds {JSON_INT_LITERAL_LIMIT}", text)
+    return int(text)
+
+
+def _strict_loads(text):
+    """json.loads for a peer's frame: every refusal is a json.JSONDecodeError.
+
+    *text* is str or bytes, as json.loads takes it. A NaN or infinity token, a
+    float that overflows to one and an integer literal over
+    JSON_INT_LITERAL_LIMIT characters are refused at the literal's position;
+    any other ValueError (an undecodable byte string) is re-raised as a
+    JSONDecodeError at position 0. RecursionError is not converted: a host
+    that answers deep nesting catches it itself.
+    """
+    try:
+        return json.loads(text, parse_constant=_json_no_constant, parse_float=_json_finite_float, parse_int=_json_bounded_int)
+    except json.JSONDecodeError:
+        raise
+    except ValueError as exc:
+        doc = text if isinstance(text, str) else bytes(text).decode("utf-8", "replace")
+        if len(exc.args) == 2 and isinstance(exc.args[1], str):
+            raise json.JSONDecodeError(exc.args[0], doc, max(0, doc.find(exc.args[1]))) from None
+        raise json.JSONDecodeError(str(exc), doc, 0) from None
+
+
+def _strict_dumps(obj) -> str:
+    """json.dumps for a frame to a peer: NaN and the infinities raise ValueError (R-0067).
+
+    allow_nan=False is the only difference: separators and ensure_ascii stay
+    json.dumps' defaults, so every frame that serialised before is
+    byte-identical. A caller that can be handed a non-finite float keeps the
+    ValueError arm it already has for a value json cannot serialise.
+    """
+    return json.dumps(obj, allow_nan=False)
+
+
 def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     """Return a repr'd slice of *text* centred on *pos*.
 
@@ -92,7 +147,7 @@ def _json_error_window(text: str, pos: int, radius: int = 48) -> str:
     lead = "..." if start > 0 else ""
     tail = "..." if end < len(text) else ""
     return f"{lead}{text[start:end]!r}{tail}"
-# END GENERATED: 4c5e7e3f59cb
+# END GENERATED: c61bc35931fc
 
 
 def _resolve_aliases(params: Any) -> dict:
@@ -102,7 +157,7 @@ def _resolve_aliases(params: Any) -> dict:
         return {}
     if isinstance(params, str):
         try:
-            params = json.loads(params)
+            params = _strict_loads(params)
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"'params' was a string but not valid JSON: {exc}. "
@@ -2161,7 +2216,7 @@ class McpServer:
         tool_args = params.get("arguments") or {}
         if isinstance(tool_args, str):
             try:
-                tool_args = json.loads(tool_args)
+                tool_args = _strict_loads(tool_args)
             except json.JSONDecodeError as exc:
                 return self._tool_error(
                     msg_id,
@@ -2244,7 +2299,7 @@ class McpServer:
                     continue
 
                 try:
-                    msg = json.loads(line)
+                    msg = _strict_loads(line)
                 except json.JSONDecodeError as exc:
                     # Answering is not optional: the bare `continue` that used to
                     # stand here left the caller's id unanswered until it timed
@@ -2390,13 +2445,13 @@ class McpServer:
         stdout and this needs no lock.
         """
         try:
-            out = json.dumps(response)
+            out = _strict_dumps(response)
         except (TypeError, ValueError) as exc:
             # A non-serialisable payload used to kill the loop mid-write, i.e.
             # after some bytes were already on the wire.
             log.exception("Response was not JSON-serialisable")
-            out = json.dumps(self._error(response.get("id"), -32603,
-                                         f"Response not serialisable: {exc}"))
+            out = _strict_dumps(self._error(response.get("id"), -32603,
+                                            f"Response not serialisable: {exc}"))
         log.debug("→ id=%s %s", response.get("id"),
                   "error" if "error" in response else "ok")
         try:
