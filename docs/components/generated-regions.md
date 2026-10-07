@@ -10,6 +10,7 @@ sources:
   - Scripts/_mcp_chrome.py
   - Scripts/_mcp_codesearch.py
   - Scripts/_mcp_concurrency.py
+  - Scripts/_mcp_httpfront.py
   - Scripts/_mcp_json.py
   - Scripts/_mcp_logging.py
   - Scripts/_mcp_lsp.py
@@ -20,7 +21,7 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: 2ef3ef9
+  commit: d3fca9e
   date: 2026-10-07
 links:
   - scripts
@@ -35,6 +36,8 @@ links:
   - 0026-speak-chrome-from-the-stdlib-verify-by-default
   - 0011-a-truncated-payload-carries-the-first-cookie
   - mcp-proxy
+  - llm-router
+  - 0029-the-http-front-is-a-domain
 ---
 
 # Generated regions
@@ -51,7 +54,8 @@ decoders they share with `Scripts/mcp-webfetch.py` and `Scripts/mcp-search.py`,
 and each takes the search domain it shares with `Scripts/mcp-search.py` — web
 search for the DDG script, code search for the grep.app one. The LLM router
 `Scripts/llm-router.py`, an HTTP server that is not an MCP server, takes the
-two logging regions and the OAuth client. They are targets because the generator **names them
+two logging regions, the OAuth client and the stdlib HTTP front it shares with
+`Scripts/mcp-proxy.py`. They are targets because the generator **names them
 by hand** `Scripts/amalgamate.py:DECLARED_HOSTS` — see "A host outside the glob"
 below — not because anything about them matches the server glob.
 
@@ -132,13 +136,13 @@ scanner, which is the rule that lets a page document the marker it also carries
 
 <!-- BEGIN MEASURED: generated-region-census -->
 - MCP servers matching `Scripts/mcp-*.py`: 17, of which 17 carry at least one generated region
-- live generated regions in them: 150
-- block instances those regions emit: 758
-- distinct canonical blocks named on a marker: 288, out of the 347 defined by the 12 canonical sources
+- live generated regions in them: 156
+- block instances those regions emit: 769
+- distinct canonical blocks named on a marker: 299, out of the 358 defined by the 13 canonical sources
 
-Regions by how many blocks one marker names: 73 name 1 block; 34 name 2 blocks; 17 name 3 blocks; 1 name 6 blocks; 8 name 7 blocks; 8 name 8 blocks; 1 name 18 blocks; 1 name 19 blocks; 2 name 21 blocks; 2 name 25 blocks; 1 name 37 blocks; 2 name 137 blocks.
+Regions by how many blocks one marker names: 76 name 1 block; 35 name 2 blocks; 19 name 3 blocks; 1 name 6 blocks; 8 name 7 blocks; 8 name 8 blocks; 1 name 18 blocks; 1 name 19 blocks; 2 name 21 blocks; 2 name 25 blocks; 1 name 37 blocks; 2 name 137 blocks.
 
-The 77 region(s) that name more than one block, by the list written on the marker:
+The 80 region(s) that name more than one block, by the list written on the marker:
 
 | Blocks named on one marker | Regions |
 |---|---|
@@ -156,12 +160,15 @@ The 77 region(s) that name more than one block, by the list written on the marke
 | `JSON_INT_LITERAL_LIMIT`, `_json_no_constant`, `_json_finite_float`, `_json_bounded_int`, `_strict_loads`, `_strict_dumps` | 1 |
 | `WebSocketError`, `WS_MAX_HANDSHAKE_BYTES`, `WS_MAX_FRAME_BYTES`, `WS_MAX_MESSAGE_BYTES`, `_ws_parse_url`, `_ws_handshake_request`, `_ws_handshake_split`, `_ws_handshake_verify`, `_ws_mask`, `_ws_encode_frame`, `_ws_parse_frame`, `_ws_assemble`, `_ws_control_reply`, `_WsConnection`, `_ws_step`, `_ws_connect`, `_ws_recv`, `_ws_send` | 1 |
 | `_CODE_LINE_SEPARATORS`, `_code_clean`, `_code_line`, `_code_field`, `_ext_to_lang`, `EXT_TO_LANG`, `detect_language`, `_SnippetParser`, `extract_code_from_snippet`, `build_github_url`, `_grep_hits`, `_grep_str`, `parse_grep_results`, `warmup_code_session`, `_body_is_json`, `_grep_app_blocked`, `search_github`, `_code_fence`, `format_code_results` | 1 |
+| `_http_write_ready_file`, `_http_remove_ready_file` | 1 |
 | `_normalize`, `_WEB_LINE_SEPARATORS`, `_web_clean`, `_web_line`, `_WEB_URL_SAFE`, `_web_url`, `decode_duckduckgo_url`, `_raw_href`, `_has_class`, `_LiteParser`, `parse_lite_results`, `_decode_bing_url`, `_VOID_TAGS`, `_H`, `_LISTING`, `_FONTSTYLE`, `_start_close`, `_START_CLOSE`, `_end_priority`, `_END_PRIORITY`, `_END_PRIORITY_DEFAULT`, `_Node`, `_TREE_MAX_DEPTH`, `_TREE_SCAN_BUDGET`, `_TreeBuilder`, `_child_elements`, `_descendant_text`, `_iter_elements`, `parse_bing_results`, `warmup_session`, `_DDG_CHALLENGE_MARKERS`, `_ddg_blocked`, `search_ddg`, `_bing_blocked`, `search_bing`, `run_web`, `format_web_results` | 1 |
+| `parse_request`, `handle_expect_100`, `_single_header` | 1 |
+| `server_bind`, `process_request`, `handle_error` | 1 |
 
 Generated into every one of the 17 servers: `JSON_INT_LITERAL_LIMIT`, `_LOG_KEYS_SHOWN`, `_LOG_VALUE_WIDTH`, `_configure_logging`, `_json_bounded_int`, `_json_finite_float`, `_json_no_constant`, `_log_value`, `_strict_dumps`, `_strict_loads`.
 Generated into every server but `Scripts/mcp-proxy.py`: `_json_error_window`.
 Generated into every server but `Scripts/mcp-webfetch.py`: `_error`, `_result`.
-<!-- END MEASURED: 88c81903188a -->
+<!-- END MEASURED: 2ea11b64102b -->
 
 A single region may name several blocks, and that is the whole of the gap between
 the region count and the block-instance count.
@@ -172,7 +179,7 @@ left them in: the first two had read `70` and `84` since before the logging
 source existed, and the third read `11` against a table that summed to thirteen
 further down this same page.
 
-## Twelve canonical sources, and why twelve
+## Thirteen canonical sources, and why thirteen
 
 The registry is a hand-written tuple, not a glob `Scripts/amalgamate.py:CANONICAL_NAMES`,
 because a glob would let an unrelated file become a generation source by merely
@@ -213,6 +220,7 @@ decides when a sixth source is warranted are
 | `Scripts/_mcp_codesearch.py` | how a code query becomes code results from grep.app — the request, the JSON answer and its HTML snippet, the block signal, and the rendered markdown |
 | `Scripts/_mcp_chrome.py` | how a client makes the bytes a server receives indistinguishable from what Chrome sends — the ClientHello, the h2 preface and HEADERS blocks, the HTTP/1.1 request head — and how it survives what a hostile server sends back |
 | `Scripts/_mcp_concurrency.py` | how many tool calls a server runs at once |
+| `Scripts/_mcp_httpfront.py` | how a stdlib `http.server` listener takes a connection and gets it through the header phase safely — connection admission, the total header deadline, request-line hardening — plus the ready file a supervisor waits on and the bearer token value it compares against |
 | `Scripts/_mcp_json.py` | JSON-RPC envelopes, wire-value coercion, strict JSON parsing and emitting for a peer's frames, JSON error reporting |
 | `Scripts/_mcp_logging.py` | how a server CONFIGURES logging — level, sink, file mode — and how a peer-chosen structural value is written into a log line |
 | `Scripts/_mcp_lsp.py` | how the LSP wire is spoken — `Content-Length` framing for a message, the `file://` DocumentUri for a path, the client-side hops that put a message on that wire, and the two spellings of a resolved path |
@@ -293,7 +301,7 @@ Unicode class they judge and fails on any disagreement
 stay disjoint (`sources-disjoint`); the agreement is a behavioural gate, not a
 naming one.
 
-`Scripts/_mcp_oauth.py` is the twelfth, and the newest. It arrived with the
+`Scripts/_mcp_oauth.py` is the twelfth. It arrived with the
 router's `codex` and `openai` backends, which hold an OAuth grant, refresh it
 while they serve, and log in through the router's `login` subcommand. Its one
 host is `Scripts/llm-router.py`. Neither the Chrome source nor the WebSocket one
@@ -321,6 +329,32 @@ why it is not whole are recorded in
 clock as the way a protocol source stays host-neutral are recorded in
 [[0025-generate-do-not-import]] (addendum).
 
+`Scripts/_mcp_httpfront.py` is the thirteenth, and the newest (R-0072). It was
+lifted out of two hosts, `Scripts/mcp-proxy.py` and `Scripts/llm-router.py`,
+whose stdlib HTTP fronts had been a declared, adapted copy of each other with no
+gate holding them equal. It holds only the mechanism both hosts carried as
+byte-identical twins: `_HeaderDeadlineReader`, the refusal-header pair, the
+token value check, the ready-file pair, and six **methods** — `server_bind`,
+`process_request` and `handle_error` for the server class, `parse_request`,
+`handle_expect_100` and `_single_header` for the handler class
+`Scripts/_mcp_httpfront.py`. The methods are top-level `def`s in the source and
+land at an in-class marker's column, as the LSP source's client methods do; what
+is new is that they override stdlib members and call `super()`, which works only
+once rendered, so group E drives them rendered inside a synthetic class. None
+of the existing sources could hold it without becoming a shelf: the Chrome
+source is the client side of the wire, the OAuth source one protocol's loopback
+redirect, and the logging source decides how a line is written, not when a
+server stops reading headers. Policy never travels in a block: the reader's cap,
+the token floor and its error class, the ready file's error class and logger are
+arguments; `parse_request` reads the handler's own `self.timeout`; the server
+blocks log through a class attribute `front_log` bound to the host's logger.
+What differs between the hosts — `setup`, `handle_one_request`,
+`process_request_thread`, `send_error`, `log_message` and the constructors —
+stays hand-written and is declared row by row in
+`tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS`, which group I reads.
+The decision, the adaptation table, the policy seams and the declared limits
+are [[0029-the-http-front-is-a-domain]].
+
 That column is the half no command can print: a domain is a decision about what a
 source is *for*. What each source actually **defines** is measured
 `Scripts/amalgamate.py:census_sources`, and the two tables are deliberately not
@@ -336,6 +370,7 @@ answer, and the one thing this page must not let a generator answer for them.
 | `Scripts/_mcp_chrome.py` | 137 | `CHROME_PROFILE`, `CH_DEFAULT_DECODE_CAP`, `CH_HPACK_TABLE_BYTES`, `CH_MAX_BODY_BYTES`, `CH_MAX_CONTENT_CODINGS`, `CH_MAX_COOKIES`, `CH_MAX_COOKIES_PER_DOMAIN`, `CH_MAX_COOKIE_BYTES`, `CH_MAX_FRAME_BYTES`, `CH_MAX_H1_CHUNK_LINE_BYTES`, `CH_MAX_H1_HEADERS`, `CH_MAX_H1_HEAD_BYTES`, `CH_MAX_H2_CONTINUATION_FRAMES`, `CH_MAX_H2_CONTROL_FRAMES`, `CH_MAX_H2_EMPTY_FRAMES`, `CH_MAX_HANDSHAKE_BYTES`, `CH_MAX_HEADER_BLOCK_BYTES`, `CH_MAX_HEADER_LIST_BYTES`, `CH_MAX_HPACK_INT`, `CH_MAX_HPACK_INT_CONTINUATIONS`, `CH_MAX_KEY_UPDATES`, `CH_MAX_PLAINTEXT_BYTES`, `CH_MAX_RECORD_BYTES`, `CH_MAX_REDIRECTS`, `ChromeBodyTooLarge`, `ChromeClientError`, `ChromeTls12Error`, `_CH_AES_TABLES`, `_CH_ALERT_NAMES`, `_CH_BAD_PORTS`, `_CH_EE_FORBIDDEN`, `_CH_FINGERPRINT_NAMES`, `_CH_FINGERPRINT_PREFIXES`, `_CH_FRAMING_NAMES`, `_CH_FRAMING_PREFIXES`, `_CH_H2_ERROR_NAMES`, `_CH_HPACK_STATIC`, `_CH_HRR_RANDOM`, `_CH_HUFFMAN`, `_CH_HUFFMAN_DECODE`, `_CH_KEY_SHARE_BYTES`, `_CH_P256_B`, `_CH_P256_GX`, `_CH_P256_GY`, `_CH_P256_N`, `_CH_P256_P`, `_CH_PUBLIC_SUFFIXES`, `_CH_REDIRECT_CODES`, `_CH_SERVER_SHARE_BYTES`, `_CH_SITE_RANK`, `_CH_TCHAR_SYMBOLS`, `_CH_TLS13_SUITES`, `_CH_TRANSLATION_PREFIXES`, `_CH_X25519_A24`, `_CH_X25519_P`, `_ChAesGcm`, `_ChChaCha20Poly1305`, `_ChCookieJar`, `_ChDeadlineSocket`, `_ChFallbackConnection`, `_ChH1Connection`, `_ChH2Connection`, `_ChHandshakeReader`, `_ChHeaders`, `_ChHpackDecoder`, `_ChHpackEncoder`, `_ChMlKem768`, `_ChReader`, `_ChRecordCipher`, `_ChRecordReader`, `_ChResponse`, `_ChSession`, `_ChTls`, `_ChTlsStream`, `_ch_address_refused`, `_ch_aes_tables`, `_ch_alert_name`, `_ch_check_caller_headers`, `_ch_client_hello`, `_ch_cookie_crumbs`, `_ch_cookie_date`, `_ch_decode_body`, `_ch_derive_secret`, `_ch_draw`, `_ch_embedded_ipv4`, `_ch_grease`, `_ch_h2_frame`, `_ch_header_pairs`, `_ch_hello_extensions`, `_ch_hello_wire`, `_ch_hkdf_expand`, `_ch_hkdf_expand_label`, `_ch_hkdf_extract`, `_ch_hpack_decode_int`, `_ch_hpack_decode_string`, `_ch_hpack_int`, `_ch_hpack_static`, `_ch_hpack_string`, `_ch_huffman_decode`, `_ch_huffman_decode_table`, `_ch_huffman_encode`, `_ch_huffman_size`, `_ch_huffman_table`, `_ch_idna_encode`, `_ch_is_ip_host`, `_ch_is_public_suffix`, `_ch_key_share_entry`, `_ch_key_share_new`, `_ch_key_share_secret`, `_ch_leading_digits`, `_ch_open_socket`, `_ch_origin_of`, `_ch_origin_text`, `_ch_p256_add`, `_ch_p256_double`, `_ch_p256_keypair`, `_ch_p256_mul`, `_ch_p256_shared`, `_ch_parse_server_hello`, `_ch_permutation`, `_ch_profile_headers`, `_ch_public_only_policy`, `_ch_referer_for`, `_ch_sec_fetch_site`, `_ch_session_new`, `_ch_site_of`, `_ch_sni_name`, `_ch_split_url`, `_ch_traffic_cipher`, `_ch_transport_error`, `_ch_unvetted_policy`, `_ch_vec`, `_ch_x25519`, `_ch_x25519_cswap`, `_ch_x25519_keypair`, `_ch_zlib_decode`, `_chrome_profile` |
 | `Scripts/_mcp_codesearch.py` | 19 | `EXT_TO_LANG`, `_CODE_LINE_SEPARATORS`, `_SnippetParser`, `_body_is_json`, `_code_clean`, `_code_fence`, `_code_field`, `_code_line`, `_ext_to_lang`, `_grep_app_blocked`, `_grep_hits`, `_grep_str`, `build_github_url`, `detect_language`, `extract_code_from_snippet`, `format_code_results`, `parse_grep_results`, `search_github`, `warmup_code_session` |
 | `Scripts/_mcp_concurrency.py` | 1 | `MAX_INFLIGHT_REQUESTS` |
+| `Scripts/_mcp_httpfront.py` | 11 | `_HTTP_STDLIB_REFUSAL_HEADERS`, `_HeaderDeadlineReader`, `_http_remove_ready_file`, `_http_token_value`, `_http_write_ready_file`, `_single_header`, `handle_error`, `handle_expect_100`, `parse_request`, `process_request`, `server_bind` |
 | `Scripts/_mcp_json.py` | 12 | `JSON_INT_LITERAL_LIMIT`, `_bool_param`, `_ensure_dict`, `_error`, `_int_param`, `_json_bounded_int`, `_json_error_window`, `_json_finite_float`, `_json_no_constant`, `_result`, `_strict_dumps`, `_strict_loads` |
 | `Scripts/_mcp_logging.py` | 4 | `_LOG_KEYS_SHOWN`, `_LOG_VALUE_WIDTH`, `_configure_logging`, `_log_value` |
 | `Scripts/_mcp_lsp.py` | 7 | `_abs_path`, `_abs_uri`, `_notify`, `_request`, `encode_lsp_message`, `path_to_uri`, `uri_to_path` |
@@ -345,8 +380,8 @@ answer, and the one thing this page must not let a generator answer for them.
 | `Scripts/_mcp_websocket.py` | 22 | `WS_MAX_FRAME_BYTES`, `WS_MAX_HANDSHAKE_BYTES`, `WS_MAX_MESSAGE_BYTES`, `WebSocketError`, `_WsConnection`, `_ws_assemble`, `_ws_connect`, `_ws_control_reply`, `_ws_encode_frame`, `_ws_handshake_request`, `_ws_handshake_split`, `_ws_handshake_verify`, `_ws_mask`, `_ws_parse_frame`, `_ws_parse_url`, `_ws_recv`, `_ws_send`, `_ws_step`, `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send` |
 | `Scripts/_mcp_zstd.py` | 25 | `ZSTD_DIRS_LINUX`, `ZSTD_DIRS_MACOS`, `ZSTD_FILES_LINUX`, `ZSTD_FILES_MACOS`, `ZSTD_MAX_CHUNK_BYTES`, `ZSTD_SONAMES_LINUX`, `ZSTD_SONAMES_MACOS`, `ZSTD_WINDOW_LOG_MAX`, `_ZSTD_D_WINDOW_LOG_MAX`, `_ZSTD_FRAME_MAGIC`, `_ZSTD_SKIPPABLE_TAIL`, `_ZSTD_STATE`, `_ZSTD_SYMBOLS`, `_ZstdInBuffer`, `_ZstdOutBuffer`, `_zstd_attempts`, `_zstd_cdll`, `_zstd_check_magic`, `_zstd_configure`, `_zstd_decompress`, `_zstd_error`, `_zstd_exists`, `_zstd_find_library`, `_zstd_load`, `_zstd_platform` |
 
-12 canonical sources define 347 blocks between them, and no name is defined by two of them.
-<!-- END MEASURED: f93d0400e037 -->
+13 canonical sources define 358 blocks between them, and no name is defined by two of them.
+<!-- END MEASURED: b1a6b219736d -->
 
 Its closing line is the disjointness the suite gates as a check rather than a
 count. The paging row read `5` until the edit that added the logging row: the
@@ -418,6 +453,17 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `all 137 blocks (whole source)` | `Scripts/_mcp_chrome.py` | 4 | `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 | `all 19 blocks (whole source)` | `Scripts/_mcp_codesearch.py` | 2 | `Scripts/mcp-search.py`, `Scripts/search_github.py` |
 | `MAX_INFLIGHT_REQUESTS` | `Scripts/_mcp_concurrency.py` | 10 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_HTTP_STDLIB_REFUSAL_HEADERS` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_HeaderDeadlineReader` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_http_remove_ready_file` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_http_token_value` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_http_write_ready_file` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_single_header` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `handle_error` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `handle_expect_100` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `parse_request` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `process_request` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `server_bind` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
 | `JSON_INT_LITERAL_LIMIT` | `Scripts/_mcp_json.py` | 17 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_bool_param` | `Scripts/_mcp_json.py` | 11 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-wiki.py` |
 | `_ensure_dict` | `Scripts/_mcp_json.py` | 8 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py` |
@@ -528,8 +574,8 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 0 | no host |
 | `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 4 | `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 
-20 hosts scanned; 347 canonical blocks, of which 343 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
-<!-- END MEASURED: 5bbcbeae792a -->
+20 hosts scanned; 358 canonical blocks, of which 354 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
+<!-- END MEASURED: 0059681cc6fb -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
@@ -726,11 +772,13 @@ rather than by the fleet census.
 
 `Scripts/llm-router.py` is the third declared host, and the first that shares no
 domain with the other two: a stdlib HTTP server run by path, not an MCP server,
-and space-indented. It takes two sources: two regions from the logging source —
+and space-indented. It takes three sources: two regions from the logging source —
 `_configure_logging`, and `_LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value` on one
-marker, which replaced the router's own hand copy in `72ed9b4` — and the OAuth
+marker, which replaced the router's own hand copy in `72ed9b4` — the OAuth
 client from `Scripts/_mcp_oauth.py` on one marker, the sans-IO core then its
-loopback wrapper. It takes none of the strict-JSON blocks: its request bodies
+loopback wrapper, and the HTTP front from `Scripts/_mcp_httpfront.py` in six
+regions, two of them inside its server and handler classes, exactly as
+`Scripts/mcp-proxy.py` takes it. It takes none of the strict-JSON blocks: its request bodies
 are parsed by its own `_rt_loads` `Scripts/llm-router.py:_rt_loads`. It did not have to be declared again
 for the second source, because the host list names files, not sources. The `_mcp_chrome.py`
 address classifier it needs for its upstream connections is kept as declared
@@ -849,9 +897,15 @@ command counts resolver bodies yet.
 live tree against the canonical sources, B the marker and hash contract, C the
 negative controls, D hygiene, E what each shared block actually *does*, F tab
 safety, G the `--census` output this page renders — re-derived, proven
-sorted, and unable to write `tests/test_generated_region.py:group_census` — and
-H strict JSON on the wire `tests/test_generated_region.py:group_strict`. The
-hand-copy census is informational, and every other case is a gated failure.
+sorted, and unable to write `tests/test_generated_region.py:group_census` — H
+strict JSON on the wire `tests/test_generated_region.py:group_strict`, and I the
+HTTP front's pins `tests/test_generated_region.py:group_httpfront_pins`: every
+stdlib member the two front hosts' classes override is generated or declared in
+`HTTPFRONT_ADAPTATIONS`, a row naming no hand override of a stdlib member is
+stale, each hand `process_request_thread` releases its connection slot in a
+`finally`, and the seams the generated members read are present, with planted
+controls for each rule. The hand-copy census is informational, and every other
+case is a gated failure.
 
 Group H runs its checker on a synthetic host first, because a checker that
 matched nothing would read exactly like a clean fleet; then it requires every
@@ -864,8 +918,10 @@ is a row in `tests/test_generated_region.py:STRICT_JSON_EXCEPTIONS`, keyed by
 host, enclosing function and json attribute, with the reason it is not a peer's
 MCP frame, and a row whose site has gone fails `strict-exceptions-not-stale`.
 The rows are of two kinds. Some are not peer input at all — a checked-in or
-self-written file, the operator's config, the proxy's own ready file, purity's
-private regex worker. The others are peer bytes declared **out of scope rather
+self-written file, the operator's config, purity's private regex worker. The
+proxy's own ready file needs no row any more: since R-0072 its read and write
+are the generated `_http_write_ready_file` / `_http_remove_ready_file`, and a
+bare json call inside a generated region is spared. The others are peer bytes declared **out of scope rather
 than safe**: an LSP child's `Content-Length` body in the four LSP servers, the
 upstream HTTP bodies `mcp-context7`, `mcp-jenkins` and `mcp-gdc` read, gdc's CDP
 websocket messages, and `mcp-inspect`'s `_v_json`, which reports what the stdlib

@@ -33,8 +33,9 @@ envelope. Requires only Python 3.9+ stdlib modules.
 Layout: one file, eight units, in file order (each has one reason to change)
 -----------------------------------------------------------------------------
   1. ConfigError, ApiError, UpstreamError, _STATUS_TO_TYPE, _rt_error_body() -- the error classes and
-     the Anthropic error envelope; plus the pure helpers units 2-5 share: _log_value, _http_token_value
-     (verbatim mcp-proxy copies), _rt_dumps(), _rt_loads() and _rt_make_scrubber() (KD-9).
+     the Anthropic error envelope; plus the pure helpers units 2-5 share: _log_value (generated from
+     Scripts/_mcp_logging.py), _http_token_value (generated from Scripts/_mcp_httpfront.py),
+     _rt_dumps(), _rt_loads() and _rt_make_scrubber() (KD-9).
   2. BackendSpec, RouteSpec, RouterConfig, load_config() -- the config schema. Pure: reads, and on
      login/refresh rewrites, one file; never opens a socket.
   3. InboundRequest, _rt_parse_inbound(), _rt_route() -- validate the Anthropic request once; route lookup;
@@ -51,8 +52,8 @@ Layout: one file, eight units, in file order (each has one reason to change)
      Scripts/_mcp_oauth.py), the OAuth provider rows, _RtTokenStore, the config lock, the
      hand-copied address classifier, _rt_resolve, _rt_open_socket, _RtHttpConnection /
      _RtHttpsConnection, _rt_send(). The only code that opens an outbound socket.
-  7. The HTTP front -- an adapted copy of mcp-proxy's (ADR 0028): _RouterHttpServer,
-     _HeaderDeadlineReader, _RouterHandler, the upstream pump (_rt_pump) and the relay loops.
+  7. The HTTP front -- generated from Scripts/_mcp_httpfront.py (ADR 0029) plus the router's declared
+     adaptations: _RouterHttpServer, _RouterHandler, the upstream pump (_rt_pump) and the relay loops.
   8. Entry point -- argparse, main(), signal handling and shutdown, and the login subcommand.
 
 Units 2-5 reference no socket, ssl, http, select, time or threading name: every

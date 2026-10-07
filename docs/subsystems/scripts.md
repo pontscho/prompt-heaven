@@ -7,7 +7,7 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 2ef3ef9
+  commit: d3fca9e
   date: 2026-10-07
 links:
   - overview
@@ -33,6 +33,7 @@ links:
   - 0021-contain-by-the-admitted-root
   - 0024-pure-python-39-and-the-stdlib
   - 0026-speak-chrome-from-the-stdlib-verify-by-default
+  - 0029-the-http-front-is-a-domain
 ---
 
 # Scripts & MCP Servers
@@ -168,9 +169,10 @@ check runs it as an unregistered server against a stub child
 framing ceiling, the restart budget, the forwarded cancel — the HTTP front's
 access rules, how to run it for ai-soul, how it is tested and its declared
 limits are [[mcp-proxy]]; why it relays and never composes is
-[[0027-the-proxy-relays-it-never-composes]]. Its HTTP front has one adapted copy
-outside the fleet, the LLM router's `Scripts/llm-router.py:_RouterHttpServer`
-(see "LLM router" below).
+[[0027-the-proxy-relays-it-never-composes]]. Its HTTP front's identical pieces
+are generated from `Scripts/_mcp_httpfront.py` into it and into the LLM router's
+`Scripts/llm-router.py:_RouterHttpServer`, each keeping declared adaptations
+([[0029-the-http-front-is-a-domain]]; see "LLM router" below).
 
 `Scripts/mcp-search.py` (`search_call`: web search over DDG lite and Bing, code
 search over grep.app) is the other live server outside the table: it is **not
@@ -1078,11 +1080,12 @@ opened without following a symlink
 there is no inline-config flag because argv is visible in `ps`. An OAuth backend
 is signed in by the `login` subcommand (browser or device flow)
 `Scripts/llm-router.py:_rt_login`, which writes its tokens back into that same
-config. Its HTTP front is an adapted copy of [[mcp-proxy]]'s rather than a
-canonical source, and its generated regions are the two logging regions
-(`_configure_logging`, and `_log_value` with its two bounds, which replaced the
-router's hand copy in R-0070) and the OAuth core from `Scripts/_mcp_oauth.py`
-([[generated-regions]]). The
+config. Its HTTP front is generated from `Scripts/_mcp_httpfront.py`, shared
+with [[mcp-proxy]], plus the router's declared adaptations, and its generated
+regions are the two logging regions (`_configure_logging`, and `_log_value` with
+its two bounds, which replaced the router's hand copy in R-0070), the OAuth core
+from `Scripts/_mcp_oauth.py` and the HTTP front from `Scripts/_mcp_httpfront.py`
+([[generated-regions]], [[0029-the-http-front-is-a-domain]]). The
 command line, the config schema and its OAuth write-back, the per-kind header
 allow-lists, the security rules, the `llm_router` suite and the declared limits
 are [[llm-router]]; why it routes by model and translates at the edge is

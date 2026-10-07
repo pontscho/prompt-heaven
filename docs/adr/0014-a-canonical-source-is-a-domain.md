@@ -264,3 +264,23 @@ Alternative 1's measurement still holds for the new names. `_strict_loads` and `
 ### Counts superseded
 
 The statement under "The rule for a sixth source" that `_mcp_logging.py` holds one block is superseded, and so is thread 3 of the 2026-09-29 addendum, which lists it as a one-block source. The source now defines four blocks: `_configure_logging`, `_LOG_VALUE_WIDTH`, `_LOG_KEYS_SHOWN` and `_log_value`. `_mcp_concurrency.py` is the only one-block source left. As before, block count is not the test, and the source took the renderer because the renderer belongs to the same domain. The rendered per-source table in [[generated-regions]] is the authority for the current counts.
+
+## Addendum (2026-10-07): the thirteenth registry entry, the stdlib HTTP server front
+
+R-0072 added `Scripts/_mcp_httpfront.py` to the registry `Scripts/amalgamate.py:CANONICAL_NAMES` and to its hand mirror in `tests/test_generated_region.py`. This is a domain decided under this page's rule, not a source ratified after the fact ([[0029-the-http-front-is-a-domain]]).
+
+### The count
+
+The registry now holds thirteen names, counted in both tuples (the generator's and the suite's mirror) at `18f2b24`. This supersedes the twelve stated in the 2026-10-07 addendum on the OAuth source, which stays as written for its date. `sources-registered` checks the number, and `every-source-in-use` checks that a live region requests the new source; both were observed red before the registration.
+
+### Why none of the existing sources holds it
+
+- `Scripts/_mcp_chrome.py` answers how a client's bytes look like Chrome's. The HTTP front is the server side of HTTP/1.1: when a listener admits a connection, how long it waits for headers, which request lines it refuses before any handler runs. Filing it there would also put it out of its hosts' reach, because the Chrome source is whole and neither host takes the client.
+- `Scripts/_mcp_oauth.py` opens one socket, the loopback redirect listener of one protocol, which reads one request head and answers one page. It says nothing about connection admission or a header deadline for a long-lived server.
+- `Scripts/_mcp_logging.py` decides how a log line is written. The front's server members log, but the logger reaches them as a `self` seam, and when a server stops reading headers is not a logging question.
+
+Under the rule above, a source that would hold a second domain is not cheaper than a second source.
+
+### The price
+
+One line in each of the two registries, as this page says it should be. No `WHOLE_SOURCES` entry and no `*_CORE` mirror: no block of the source names another, so each of its six regions per host refreshes on its own.

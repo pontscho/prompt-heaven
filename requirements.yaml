@@ -2327,7 +2327,7 @@ implementation_plan:
       description: "Step 5.0: move docs/feature-implementation-plan.md to .claude/tmp/feature-implementation-plan.md before any wiki reindex, ingest or measure"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/feature-implementation-plan.md
       type: delete
-      status: pending
+      status: completed
       size: ss
       implementation_details: |
         The file is untracked: a plain move to .claude/tmp/feature-implementation-plan.md (no git mv,
@@ -2344,7 +2344,7 @@ implementation_plan:
       description: "Step 5.1: write ADR 0029 'the HTTP front is a domain' through /p:wiki"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0029-the-http-front-is-a-domain.md
       type: create
-      status: pending
+      status: completed
       size: l
       size_rationale: "A full decision record with policy, adaptation and risk tables, red-run quotes and declared limits."
       implementation_details: |
@@ -2390,7 +2390,7 @@ implementation_plan:
       description: "Step 5.2: ADR 0012 addendum 'the self-method clause narrowed' via addendum.py"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0012-the-transport-tier-diverged.md
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         Stage {"title": "the self-method clause narrowed", "body": "..."} as JSON in
@@ -2425,7 +2425,7 @@ implementation_plan:
       description: "Step 5.2: ADR 0014 addendum 'the thirteenth registry entry, the stdlib HTTP server front' via addendum.py"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0014-a-canonical-source-is-a-domain.md
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         Staged JSON + addendum.py as in task-035. Body: the registry holds thirteen names in both
@@ -2453,7 +2453,7 @@ implementation_plan:
       description: "Step 5.2: ADR 0025 addendum 'Generation copies code, not policy -- for members taking self' via addendum.py"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0025-generate-do-not-import.md
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         Staged JSON + addendum.py. Body: the first source whose blocks are rendered as instance
@@ -2482,7 +2482,7 @@ implementation_plan:
       description: "Step 5.2: ADR 0027 addendum 'R-0072: the HTTP front is lifted' via addendum.py"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0027-the-proxy-relays-it-never-composes.md
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         Staged JSON + addendum.py. Body: the proxy's front mechanism (_HeaderDeadlineReader, the
@@ -2503,7 +2503,7 @@ implementation_plan:
       description: "Step 5.2: ADR 0028 addendum 'R-0072: the front's identical pieces are generated' (incl. the superseded :767 anchor) via addendum.py"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/adr/0028-route-by-model-translate-at-the-edge.md
       type: modify
-      status: pending
+      status: completed
       size: m
       implementation_details: |
         Staged JSON + addendum.py. Body:
@@ -2531,7 +2531,7 @@ implementation_plan:
       description: "Step 5.3: update the five project-forge.yaml target descriptions (generated_region, amalgamate_check, py_deps, mcp_proxy, llm_router)"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/project-forge.yaml
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         - :200 generated_region: "one of the twelve" -> "one of the thirteen"; append "Plus group I, the
@@ -2570,7 +2570,7 @@ implementation_plan:
       description: "Step 5.4: docs/components/mcp-proxy.md -- move anchors to Scripts/_mcp_httpfront.py and rewrite the prose that became false (:138-140, :169-172, :183, :231)"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/components/mcp-proxy.md
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         - :138-140: "the `_mcp_logging.py` and `_mcp_json.py` regions only" -> "the `_mcp_logging.py`,
@@ -2596,7 +2596,7 @@ implementation_plan:
       description: "Step 5.4: docs/components/llm-router.md -- ready-file anchors (:210, KD-6 note) and the false prose at :49-51 and :184-195"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/components/llm-router.md
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         - :210 --ready-file row: anchors `Scripts/llm-router.py:_rt_write_ready_file` /
@@ -2620,7 +2620,7 @@ implementation_plan:
       description: "Step 5.4: docs/components/generated-regions.md -- thirteen sources, the HTTP front domain row and paragraph, the sources: entry, re-measured census regions"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/components/generated-regions.md
       type: modify
-      status: pending
+      status: completed
       size: m
       implementation_details: |
         - :175 heading "Twelve canonical sources, and why twelve" -> thirteen.
@@ -2642,7 +2642,7 @@ implementation_plan:
       description: "Step 5.4: docs/subsystems/tests.md -- the generated_region (:241), py_deps (:254) and mcp_proxy (:258) rows"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/subsystems/tests.md
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         - :254 py_deps row: the NEW_39_SCOPE list "the Chrome client, its two decoders, the capture
@@ -2668,7 +2668,7 @@ implementation_plan:
       description: "Step 5.4: docs/subsystems/scripts.md -- the proxy's (:171-173) and the router's (:1081-1085) HTTP front prose"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/docs/subsystems/scripts.md
       type: modify
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         - :171-173: "Its HTTP front has one adapted copy outside the fleet" -> "Its HTTP front's
@@ -2690,7 +2690,7 @@ implementation_plan:
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/Scripts/llm-router.py
       function_name: (module docstring)
       type: modify
-      status: pending
+      status: completed
       size: ss
       implementation_details: |
         - Unit 1 (:36-37): "_log_value, _http_token_value\n (verbatim mcp-proxy copies)" -> say
@@ -2722,7 +2722,7 @@ implementation_plan:
       description: "Step 5.6: stage the two ROADMAP CANDIDATE texts (proxy V3 pre-auth bound; proxy distinct-character token floor) in .claude/tmp/roadmap-candidates-r0072.md for user approval"
       file_path: /Users/zoltan.ponekker/Code/prompt-heaven/.claude/tmp/roadmap-candidates-r0072.md
       type: create
-      status: pending
+      status: completed
       size: s
       implementation_details: |
         Write with purity_call create_text_file, in the `ROADMAP CANDIDATE:` shape of
@@ -2745,3 +2745,17 @@ implementation_plan:
         - /Users/zoltan.ponekker/Code/prompt-heaven/docs/roadmap/roadmap.md
       test_requirements: "The file exists under .claude/tmp/ with two ROADMAP CANDIDATE entries; docs/roadmap/roadmap.md is unchanged by this task."
       dependencies: [task-034]
+implementation_complete: true
+implementation_date: 2026-10-07
+inspector_verdict: COMPLETE
+security_verdict: APPROVE
+validation_fan_out_rounds: 1
+implementation_notes:
+  - "Code commit 18f2b24; roadmap close d3fca9e. Fan-out converged in round 1; LOW G1-G3 fixed after it (G1 red first) and verified on generated_region and mcp_proxy only (agent decision, overnight)."
+  - "Step 5 docs written by a mason, then p:wiki ingest (base ea70244): gating 0, ADR 0029 indexed."
+documentation_updated: true
+documentation_pages_touched: [adr-0029, adr-0012, adr-0014, adr-0025, adr-0027, adr-0028, mcp-proxy, llm-router, generated-regions, tests, scripts]
+documentation_open_items:
+  - "ADR 0028 frontmatter description still says three kinds (frozen)."
+  - "wiki verify does not resolve dotted Class.method anchors (two false advisories on ADR 0028)."
+  - "Roadmap candidates C-1..C-3 staged in .claude/tmp/roadmap-candidates-r0072.md, awaiting user approval."

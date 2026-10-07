@@ -1209,3 +1209,20 @@ One `_RtKindRow` table, `_RT_KIND_TABLE` (kind, adapter class or `None` for a re
 ### Not taken
 
 The router did not take the six strict-JSON blocks that `d4a241b` (R-0067, R-0068) generated into the MCP fleet. Its request bodies are still parsed by its own `_rt_loads` (deviation 20 and F9 above), which already refuses non-finite numbers and integer literals over 4300 characters. The fleet's `_strict_loads` mirrors its bound and refusal style.
+
+## Addendum (2026-10-07): R-0072: the front's identical pieces are generated
+
+`18f2b24` (R-0072) lifted the identical half of this page's copied front into the canonical source `Scripts/_mcp_httpfront.py`, generated into both the router and `Scripts/mcp-proxy.py` ([[0029-the-http-front-is-a-domain]]). The body above, its copy table and its anchors stay as written on their date.
+
+### What this changes on this page
+
+- Now generated: row P5 (`_http_token_value`), row P11 (`_single_header`), the `parse_request` half of P8, `_HeaderDeadlineReader`, the `server_bind` / `process_request` / `handle_error` part of P7, and row P17 (the ready file). `handle_expect_100` and the stdlib-refusal header pair are generated too.
+- `_rt_write_ready_file` and `_rt_remove_ready_file` are renamed: they are the generated `_http_write_ready_file` and `_http_remove_ready_file`, which take the error class and the logger as arguments. The removal now logs the proxy's two type-only DEBUG lines (KD-6 of ADR 0029).
+- Deviation 17, the reader's per-recv cap, is now a constructor argument of the generated `_HeaderDeadlineReader`: the router passes its socket timeout, the proxy its header bound.
+- D3 of ADR 0029 converged the stdlib refusals: the router's `send_error` now adds `nosniff` and `no-store`, through the generated constant.
+- Still hand-held, as declared adaptations pinned by `tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS`: the rest of P7 (the constructor, `process_request_thread` with the drain count) and of P8 (`setup`, `handle_one_request` with the shorter pre-auth bound), and P9, P10, P12, P13 and P14.
+- The first 2026-10-07 addendum's "the two copies are still hand-held and no gate holds them equal" and the R-0070 addendum's "two verbatim units remain hand-held" no longer hold for the lifted blocks: `amalgamate.py --check` holds them equal through the source.
+
+### Anchor superseded
+
+Deviation 29 anchors `Scripts/llm-router.py:_rt_remove_ready_file`. That anchor no longer resolves: the function is now `_http_remove_ready_file`, generated from `Scripts/_mcp_httpfront.py:_http_remove_ready_file` into the router. The original line stays as written. This is the only ADR anchor the lift breaks: ADR 0027's `Scripts/mcp-proxy.py:_HeaderDeadlineReader` still resolves, this page's `Scripts/llm-router.py:_rt_cfg_token` is unchanged, and row P17 names `_rt_write_ready_file` / `_rt_remove_ready_file` in a table cell without a path, which is not an anchor.

@@ -157,3 +157,17 @@ The consequence above, that a shared helper must be pasteable, limits a block to
 - **The clock is the host's.** No block reads the time. `now` is an argument, and the callback acceptor takes a `clock` callable. A test pins the time instead of sleeping through it, and the host keeps the one clock its own deadlines already use.
 
 This is the rule the search sources already followed for their session, which is injected and never created `Scripts/_mcp_websearch.py:run_web`, now stated for a protocol source. Generation copies code, not policy, so a canonical source that would otherwise carry a policy takes it as an argument. A second host gets the protocol without the router's choices.
+
+## Addendum (2026-10-07): Generation copies code, not policy -- for members taking self
+
+R-0072 generated `Scripts/_mcp_httpfront.py` into `Scripts/mcp-proxy.py` and `Scripts/llm-router.py` ([[0029-the-http-front-is-a-domain]]). Six of its blocks are rendered as methods inside each host's server and handler class, override stdlib members and call `super()`. The previous addendum's rule, that a canonical source takes as an argument any policy it would otherwise carry, extends to them, with one refinement a method needs and a function does not.
+
+### Three ways in, and one way out
+
+A generated method can reach host policy in three ways only: through `self.timeout`, the stdlib handler's own attribute; through an argument evaluated at call time (the reader's `cap`, the token check's `min_len` and `error`, the ready file's `error` and `logger`); or through a small hand-written `_front_*` hook method in the host that reads the host constant at call time. What it may not do is read a class attribute that snapshots a module constant at class definition. The one exception is `front_log`, bound to the logger object rather than to a value.
+
+### The measurement behind the rule
+
+The router's in-process test rig `tests/test_llm_router.py:FastRouter` patches module constants with `setattr` while a test runs, and it patches `_RouterHandler.timeout` together with `_HTTP_HEADER_TIMEOUT_S`, because the stdlib's `setup` applies the class attribute. A new class attribute holding the header bound would not be patched: the deadline test B14 would then run `parse_request`'s per-recv bound at 10 s instead of the patched value, and stay green. So the generated `parse_request` reads `self.timeout`, the one attribute the rig already patches, and the router's static rule J40 clause (e) refuses any other class-level assignment reading an `_HTTP_` or `_TOKEN_` name. The logger is safe as a class attribute because the rig attaches its handler to the logger object and never rebinds the module's `log`.
+
+This lift needed no hook method: the only members that would, `setup` and `handle_one_request`, stay hand-written in each host as declared adaptations. The rule is recorded in the source's docstring for the next member that does.

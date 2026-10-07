@@ -6,11 +6,12 @@ title: mcp-proxy — one MCP endpoint relaying a project root's child servers
 description: The stdlib-only relay in front of a project root's child MCP servers -- unprefixed tool names with a duplicate refusing startup, verbatim payloads under a framing ceiling, eager start, a restart budget that disables, a cancel forwarded one hop to the child, and a Streamable HTTP front for ai-soul; how it is tested and what it declares rather than gates.
 sources:
   - Scripts/mcp-proxy.py
+  - Scripts/_mcp_httpfront.py
   - tests/test_mcp_proxy.py
   - tests/files/mcp_proxy/tf_stub_child.py
 verified:
-  commit: 575d201
-  date: 2026-10-06
+  commit: d3fca9e
+  date: 2026-10-07
 links:
   - 0027-the-proxy-relays-it-never-composes
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
@@ -22,6 +23,7 @@ links:
   - 0028-route-by-model-translate-at-the-edge
   - 0013-the-ceiling-is-a-payload-class
   - 0015-ambiguity-is-the-defect
+  - 0029-the-http-front-is-a-domain
 ---
 
 # mcp-proxy
@@ -136,8 +138,10 @@ child that exited cleanly. The exit codes are listed in the module docstring
 `Scripts/mcp-proxy.py`.
 
 The plumbing it shares with the fleet is generated, not imported: the
-`_mcp_logging.py` and `_mcp_json.py` regions only `Scripts/mcp-proxy.py:_configure_logging`
-`Scripts/mcp-proxy.py:_result` ([[generated-regions]]). Two of them replaced
+`_mcp_logging.py`, `_mcp_json.py` and `_mcp_httpfront.py` regions
+`Scripts/mcp-proxy.py:_configure_logging` `Scripts/mcp-proxy.py:_result`
+`Scripts/_mcp_httpfront.py:_HeaderDeadlineReader` ([[generated-regions]],
+[[0029-the-http-front-is-a-domain]]). Two of them replaced
 hand-written code. `_log_value`, through which every peer- or child-chosen
 method, id, tool name or argument key reaches a log line (CWE-117), is the
 generated block from `Scripts/_mcp_logging.py` since R-0070
@@ -166,10 +170,12 @@ the children, and the HTTP layer only validates the client's
 own only their socket and a queue and reach loop state through a bridge whose
 every wait is bounded `Scripts/mcp-proxy.py:_bridge`.
 
-This front has a second carrier: `Scripts/llm-router.py` holds a declared,
-adapted copy of it rather than importing it, and no gate holds the two equal,
-so a fix here has to be carried there by hand
-([[llm-router]], [[0028-route-by-model-translate-at-the-edge]]).
+This front has a second carrier. Its identical pieces are generated from
+`Scripts/_mcp_httpfront.py` into both this proxy and `Scripts/llm-router.py`,
+so a fix to them is made once in the source; what differs stays hand-written in
+each host as a declared adaptation, pinned by `generated_region` group I
+([[0029-the-http-front-is-a-domain]], [[llm-router]],
+[[0028-route-by-model-translate-at-the-edge]]).
 
 **Access.** The bind is an IPv4 literal, loopback by default (`127.0.0.1`); any
 other address needs `--allow-remote`, and IPv6 and host names are refused
@@ -180,7 +186,7 @@ you, with no group or other permission bits `Scripts/mcp-proxy.py:_http_token_fi
 — or `MCP_PROXY_TOKEN`, which `main()` pops from the environment before anything
 is spawned, so no child inherits it `Scripts/mcp-proxy.py:main`. The token must
 be at least `Scripts/mcp-proxy.py:_TOKEN_MIN_LEN` printable ASCII characters
-`Scripts/mcp-proxy.py:_http_token_value`, is compared in constant time, and is
+`Scripts/_mcp_httpfront.py:_http_token_value`, is compared in constant time, and is
 never logged. HTTP mode refuses `--config-json`, since argv is visible in `ps`
 `Scripts/mcp-proxy.py:_http_cli_defaults`.
 
@@ -228,7 +234,7 @@ kept only for a cancelled non-`tools/call` request.
 --token-file <token> --port <N>` (`--port 0`, the default, picks an ephemeral
 port; `--ready-file` reports it, and an ordered shutdown removes that file again
 while it still holds the proxy's own pid, never through a symlink
-`Scripts/mcp-proxy.py:_http_remove_ready_file`), then point the SDK's
+`Scripts/_mcp_httpfront.py:_http_remove_ready_file`), then point the SDK's
 `StreamableHTTPClientTransport` at `http://127.0.0.1:<N>/mcp` — `127.0.0.1`, not
 `localhost`, because the listener is IPv4-only — with
 `Authorization: Bearer <token>` in `requestInit.headers`. Two client-side

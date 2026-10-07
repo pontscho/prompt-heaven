@@ -489,3 +489,20 @@ Round 3 above credits `Scripts/mcp-proxy.py:_log_value` with the `...` cut marke
 ### Not changed
 
 Alternative 13 ("Taking more generated regions for consistency") is not reversed. Each of the two new regions has live call sites in the proxy and is required fleet-wide by a gate: `tests/test_generated_region.py` group H for the strict blocks, and `tests/test_wire_log.py` group C for `_log_value`.
+
+## Addendum (2026-10-07): R-0072: the HTTP front is lifted
+
+The proxy's HTTP front mechanism is now generated from the canonical source `Scripts/_mcp_httpfront.py` ([[0029-the-http-front-is-a-domain]]), in `18f2b24`; the body above stays as written on its date.
+
+- Generated into the proxy: `_HeaderDeadlineReader`, the refusal-header pair `_HTTP_STDLIB_REFUSAL_HEADERS`, the token check `_http_token_value`, the ready-file pair, and, inside `_ProxyHttpServer` and `_ProxyHttpHandler`, `server_bind`, `process_request`, `handle_error`, `parse_request`, `handle_expect_100` and `_single_header`. The same text is generated into `Scripts/llm-router.py`.
+- `McpServer._http_write_ready_file` and `McpServer._http_remove_ready_file` left the class and became the module-level generated pair `_http_write_ready_file` / `_http_remove_ready_file`. Their behaviour is unchanged; proxy J45 still drives both.
+- The proxy keeps by hand what differs from the router: `setup` (the reader's cap is the header bound), `handle_one_request` (one header bound for every request), `process_request_thread`, `log_message`, `send_error` and the constructor, each a row of `tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS`.
+- The anchor `Scripts/mcp-proxy.py:_HeaderDeadlineReader` in "The security review, three rounds" still resolves: the class is still a module-level class in the proxy, now inside a generated region.
+
+### One statement above no longer holds
+
+The R-0067/R-0068 addendum says `tests/test_generated_region.py:STRICT_JSON_EXCEPTIONS` declares the ready-file read and the ready-file write. Both rows were deleted in R-0072: group H spares a bare json call inside a generated region, and both calls now sit in one. The config read is still declared there.
+
+### Counts
+
+`mcp_proxy` went from 108 to 110 cases: K5 "front policy bound" pins the injected policy (`front_log`, the handler's `timeout`, the reader's cap, the token floor passed to `_http_token_value`) with its own plant, and J47 "weak token -> rc 2" refuses a 31-character token and a token holding a space at start. The proxy still has no pre-auth header bound and no distinct-character token floor; both are declared limits of ADR 0029 and staged as roadmap candidates.

@@ -7,10 +7,11 @@ description: The stdlib-only HTTP server between Claude Code and several kinds o
 sources:
   - Scripts/llm-router.py
   - Scripts/_mcp_oauth.py
+  - Scripts/_mcp_httpfront.py
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: 2ef3ef9
+  commit: d3fca9e
   date: 2026-10-07
 links:
   - 0028-route-by-model-translate-at-the-edge
@@ -25,6 +26,7 @@ links:
   - 0015-ambiguity-is-the-defect
   - 0024-pure-python-39-and-the-stdlib
   - 0025-generate-do-not-import
+  - 0029-the-http-front-is-a-domain
 ---
 
 # llm-router
@@ -47,10 +49,11 @@ It is pure Python 3.9 and the standard library
 ([[0024-pure-python-39-and-the-stdlib]]), and it is not an MCP server.
 
 This page is the *shape*. Why the router routes by model and translates at the
-edge, why its HTTP front is a declared copy of [[mcp-proxy]]'s rather than a
-canonical source, and every alternative that lost, is frozen in
-[[0028-route-by-model-translate-at-the-edge]]; where it sits among the repo's
-scripts is [[scripts]].
+edge, why its HTTP front began as a declared copy of [[mcp-proxy]]'s, and every
+alternative that lost, is frozen in
+[[0028-route-by-model-translate-at-the-edge]]; why the identical part was later
+lifted into `Scripts/_mcp_httpfront.py` is [[0029-the-http-front-is-a-domain]];
+where it sits among the repo's scripts is [[scripts]].
 
 ## The shape
 
@@ -188,7 +191,11 @@ head of the outbound-transport unit, the OAuth protocol from
 grants, the token answer and the ID token, the loopback callback listener —
 with its transport and clock injected by the router, so the router keeps its
 one sender and its one address policy ([[0014-a-canonical-source-is-a-domain]],
-[[0025-generate-do-not-import]]). `Scripts/llm-router.py` is a hand-declared
+[[0025-generate-do-not-import]]), and the HTTP front's identical mechanism from
+`Scripts/_mcp_httpfront.py` -- the header deadline reader, connection
+admission, request-line hardening, the token check and the ready file -- with
+the router's adaptations kept by hand ([[0029-the-http-front-is-a-domain]]).
+`Scripts/llm-router.py` is a hand-declared
 host of the generator `Scripts/amalgamate.py:DECLARED_HOSTS`
 ([[generated-regions]]). The address
 classifier is a declared verbatim hand copy from `Scripts/_mcp_chrome.py`
@@ -207,7 +214,7 @@ Network settings are flags; routing and secrets are the config. There is no
 | `--port` | `0` (ephemeral) | `0`-`65535` |
 | `--allow-remote` | off | allows a non-loopback `--bind` — a VPN interface, never a public one: `0.0.0.0` and any global address are refused even with it, while `100.64.0.0/10` (CGNAT, used by VPNs such as Tailscale) is accepted |
 | `--allowed-origin` | none | repeatable; an exact `scheme://host[:port]`, http or https, no path, query or trailing slash |
-| `--ready-file` | none | written `0600` and atomically after the bind: `{"port": N, "pid": P}` `Scripts/llm-router.py:_rt_write_ready_file`; removed on a clean shutdown while it still holds the router's pid `Scripts/llm-router.py:_rt_remove_ready_file` |
+| `--ready-file` | none | written `0600` and atomically after the bind: `{"port": N, "pid": P}` `Scripts/_mcp_httpfront.py:_http_write_ready_file`; removed on a clean shutdown while it still holds the router's pid `Scripts/_mcp_httpfront.py:_http_remove_ready_file`; a file left in place (another pid, not JSON, unreadable, a symlink) is logged at DEBUG by type only |
 | `--body-limit` | 32 MiB `Scripts/llm-router.py:_ROUTER_BODY_LIMIT` | bytes, inside `Scripts/llm-router.py:_BODY_LIMIT_RANGE` (1 MiB to 256 MiB) |
 | `--max-connections` | `Scripts/llm-router.py:_HTTP_CONNECTION_CAP` (32) | inside `Scripts/llm-router.py:_CONNECTION_CAP_RANGE` (1 to 1024); past it a connection gets a bare 503 and is closed |
 | `--debug` | off | DEBUG logging to stderr |
@@ -666,7 +673,9 @@ forwardable header sent twice, or whose value holds a CR or LF, is a 400
 naming the header `Scripts/llm-router.py:_rt_parse_inbound`. Every refusal is an Anthropic
 envelope with `Connection: close` `Scripts/llm-router.py:_refuse`, and the
 stdlib's own refusals (400, 414, 431, 501, 505) answer fixed texts so they never
-quote the request line or the method `Scripts/llm-router.py:send_error`. A 401
+quote the request line or the method, and carry `nosniff` and `no-store` as
+mcp-proxy's do `Scripts/llm-router.py:send_error`
+`Scripts/_mcp_httpfront.py:_HTTP_STDLIB_REFUSAL_HEADERS`. A 401
 or 403 is logged with the status and the peer address only.
 
 **Outbound: SSRF policy.** The backend's host is resolved on every connect and
