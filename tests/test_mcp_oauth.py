@@ -834,10 +834,25 @@ def group_g(chk):
             problems += problem_if(got.get("interval") != want, "interval %r gave %r, wanted %r" % (given, got.get("interval"), want))
         return problems
 
+    def g5(mod):
+        # F51: the user_code is printed for the user to type, so an endpoint cannot make the
+        # login print a screenful: more than 64 characters is invalid_response (64 is the
+        # bound OAuthError puts on a code; a real code is 9).  64 itself is accepted.
+        problems = []
+        for size in (9, 64):
+            code = "U" * size
+            got = mod._oauth_parse_device_start(200, jbody({"device_auth_id": "da_tf", "user_code": code, "interval": 5}))
+            problems += problem_if(got.get("user_code") != code, "a %d-character user_code gave %r" % (size, got.get("user_code")))
+        for size in (65, 4096):
+            problems += expect_kind(mod, lambda s=size: mod._oauth_parse_device_start(200, jbody({"device_auth_id": "da_tf", "user_code": "U" * s, "interval": 5})),
+                                    "invalid_response", "a %d-character user_code" % size)
+        return problems
+
     chk.case(GG, "G1 usercode-parse", g1)
     chk.case(GG, "G2 poll-pending-403-404", g2)
     chk.case(GG, "G3 poll-granted", g3)
     chk.case(GG, "G4 interval-clamped", g4)
+    chk.case(GG, "G5 usercode-length-capped", g5)
 
 
 # --- H. callback listener ------------------------------------------------------------

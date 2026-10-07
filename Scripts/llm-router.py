@@ -250,6 +250,10 @@ _PUMP_JOIN_S = 2.0                # handler's bound on joining the upstream pump
 _DRAIN_S = 3.0                    # shutdown drain for in-flight streams
 _CA_FILE_LIMIT = 1024 * 1024      # a backend's ca_file size bound
 _UPSTREAM_BODY_LIMIT = 64 * 1024 * 1024  # one non-stream upstream body
+# F45: the largest upstream 400 body parsed for a learn (an unsupported sampling name, a
+# supported reasoning_effort set); a real refusal is a few hundred bytes. A larger one is
+# answered as any other 400, never learned from.
+_RT_LEARN_BODY_LIMIT = 64 * 1024
 _ERROR_TEXT_WIDTH = 300           # upstream error text relayed to the client, cut here
 # _log_value: width of one logged wire string (repr form) and of one logged key list (CWE-117).
 _LOG_VALUE_WIDTH = 80
@@ -404,11 +408,27 @@ def _rt_bounded_int(text: str) -> int:
     return int(text)
 
 
+def _rt_unique_pairs(pairs: List[Tuple[str, Any]]) -> dict:
+    """json object_pairs_hook: an object whose key appears twice is a ValueError (F10).
+
+    json.loads keeps the last value of a repeated key; two values for one key are
+    an ambiguity refused rather than resolved (ADR 0015), as load_config refuses
+    one. The key is not named: a body's keys are client or upstream text.
+    """
+    out: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate key")
+        out[key] = value
+    return out
+
+
 def _rt_loads(text: Union[str, bytes]) -> Any:
-    """json.loads for every inbound and upstream body: a non-finite number or an
-    over-long integer literal is a ValueError, so each caller's malformed-JSON
-    path answers it (V19, F9)."""
-    return json.loads(text, parse_constant=_rt_no_constant, parse_float=_rt_finite_float, parse_int=_rt_bounded_int)
+    """json.loads for every inbound and upstream body: a non-finite number, an
+    over-long integer literal or a key repeated in one object is a ValueError, so
+    each caller's malformed-JSON path answers it (V19, F9, F10)."""
+    return json.loads(text, object_pairs_hook=_rt_unique_pairs, parse_constant=_rt_no_constant,
+                      parse_float=_rt_finite_float, parse_int=_rt_bounded_int)
 
 
 def _http_token_value(value: str, where: str) -> bytes:
@@ -1720,11 +1740,12 @@ def _rt_parse_inbound(endpoint: str, body: Any, headers: Any, cfg: RouterConfig)
         if not isinstance(message, dict):
             raise _rt_bad(where, "must be an object")
         role = message.get("role")
+        # F15: the refusal's DEBUG line names the role's type only, never its value (ADR 0011).
         if role not in _RT_ROLES:
-            log.debug("refused %s.role=%s", where, _log_value(role))
+            log.debug("refused %s.role=%s", where, type(role).__name__)
             raise _rt_bad(where + ".role", "must be user, assistant or system")
         if role == "system" and i == 0:
-            log.debug("refused %s.role=%s", where, _log_value(role))
+            log.debug("refused %s.role=%s", where, type(role).__name__)
             raise _rt_bad(where + ".role", "must be user or assistant: a system message may only "
                                            "follow the first message (the top-level system comes first)")
         content = message.get("content")
@@ -3912,21 +3933,30 @@ def _rt_rs_text_message(role: str, part_type: str, texts: List[str]) -> dict:
 # Regex constructs the Responses schema validator refuses (measured live 2026-10-07:
 # "Invalid JSON schema: regex lookaround is not supported"): lookaround, backreferences.
 _RT_RS_SCHEMA_REGEX_REFUSED = re.compile(r"\(\?<?[=!]|\\[1-9]|\\k<")
+# The deepest tool input_schema translated, in nested containers (dict or list), the
+# schema itself counted as 1 (F22). A real tool schema nests a handful of levels; 64 is
+# an order of magnitude of headroom and keeps _rt_rs_schema's recursion (two frames a
+# level) far below the interpreter's limit, so a deeper one is the client's 400, never a
+# RecursionError the handler answers 500.
+_RT_RS_SCHEMA_DEPTH_LIMIT = 64
 
 
-def _rt_rs_schema(schema: Any) -> Any:
+def _rt_rs_schema(schema: Any, where: str = "input_schema", depth: int = 1) -> Any:
     """*schema* copied without the string `pattern` keywords upstream would refuse.
 
     One such pattern 400s the whole request, so a client MCP tool carrying one
     (ai-soul's source field) would make every turn fail. Only a string value is a
-    regex keyword; a property NAMED "pattern" holds a dict and is kept.
+    regex keyword; a property NAMED "pattern" holds a dict and is kept. A container
+    nested deeper than _RT_RS_SCHEMA_DEPTH_LIMIT is a 400 naming *where* (F22).
     """
+    if isinstance(schema, (dict, list)) and depth > _RT_RS_SCHEMA_DEPTH_LIMIT:
+        raise _rt_bad(where, "must nest at most %d levels" % _RT_RS_SCHEMA_DEPTH_LIMIT)
     if isinstance(schema, dict):
-        return {key: _rt_rs_schema(value) for key, value in schema.items()
+        return {key: _rt_rs_schema(value, where, depth + 1) for key, value in schema.items()
                 if not (key == "pattern" and isinstance(value, str)
                         and _RT_RS_SCHEMA_REGEX_REFUSED.search(value))}
     if isinstance(schema, list):
-        return [_rt_rs_schema(value) for value in schema]
+        return [_rt_rs_schema(value, where, depth + 1) for value in schema]
     return schema
 
 
@@ -3948,7 +3978,9 @@ def _rt_unsupported_sampling(body: bytes, sent: Tuple[str, ...]) -> Optional[str
     OpenAI's shape {"error": {"message": "Unsupported parameter: '<p>' is not supported
     with this model.", "param": "<p>", "code": "unsupported_parameter"}}: the message
     naming p, or param p with code unsupported_parameter. Any other 400 -- an invalid
-    value for p included -- is None: it is relayed, never retried."""
+    value for p included -- is None: it is relayed, never retried. A message naming p
+    beside a present (non-null) param that is not p is None too (F23): the message may
+    reflect other text, and the structured field contradicting it is not overruled."""
     if not sent:
         return None
     try:
@@ -3958,12 +3990,12 @@ def _rt_unsupported_sampling(body: bytes, sent: Tuple[str, ...]) -> Optional[str
     err = obj.get("error") if isinstance(obj, dict) else None
     if not isinstance(err, dict):
         return None
+    param = err.get("param")
     message = err.get("message")
     if isinstance(message, str):
         match = _RT_UNSUPPORTED_PARAM_RE.search(message[:_RT_UNSUPPORTED_SCAN])
         if match is not None and match.group(1) in sent:
-            return match.group(1)
-    param = err.get("param")
+            return match.group(1) if param is None or param == match.group(1) else None
     if isinstance(param, str) and param in sent and err.get("code") == "unsupported_parameter":
         return param
     return None
@@ -4109,11 +4141,12 @@ def _rt_rs_translate(body: dict, route: RouteSpec, backend: str,
     tools = body.get("tools")
     if tools:
         translated_tools = []
-        for tool in tools:
+        for index, tool in enumerate(tools):
             entry: Dict[str, Any] = {"type": "function", "name": tool["name"]}
             if "description" in tool:
                 entry["description"] = tool["description"]
-            entry["parameters"] = _rt_rs_schema(tool.get("input_schema", {"type": "object", "properties": {}}))
+            entry["parameters"] = _rt_rs_schema(tool.get("input_schema", {"type": "object", "properties": {}}),
+                                                "tools.%d.input_schema" % index)
             translated_tools.append(entry)
         if profile.tool_shape == "namespace":
             out["tools"] = [{"type": "namespace", "name": _RT_RS_NAMESPACE,
@@ -5119,7 +5152,9 @@ def _oauth_parse_device_start(status, body):
 
     Returns a dict with `device_auth_id`, `user_code` and `interval`; both ids
     must pass _oauth_token_ok, since one is shown to the user and the other is
-    sent back on every poll.
+    sent back on every poll. The user_code is printed for the user to type, so
+    one over 64 characters -- the bound OAuthError puts on a code; a real one is
+    about 9 -- is refused too (F51).
     """
     _oauth_status_refusal(status)
     if status != 200:
@@ -5127,7 +5162,7 @@ def _oauth_parse_device_start(status, body):
     obj = _oauth_json_object(body)
     device_auth_id = obj.get("device_auth_id")
     user_code = obj.get("user_code")
-    if not _oauth_token_ok(device_auth_id) or not _oauth_token_ok(user_code):
+    if not _oauth_token_ok(device_auth_id) or not _oauth_token_ok(user_code) or len(user_code) > 64:
         raise OAuthError("invalid_response")
     return {"device_auth_id": device_auth_id, "user_code": user_code, "interval": _oauth_device_interval(obj.get("interval"))}
 
@@ -5477,7 +5512,7 @@ def _oauth_sync_accept_callback(listeners, path, state, allowed_hosts, deadline,
     finally:
         for listener in listeners:
             listener.close()
-# END GENERATED: a0b8c46e0cc9
+# END GENERATED: f536e19e1aaf
 
 
 def _rt_oauth_providers() -> Dict[str, OAuthProvider]:
@@ -5869,8 +5904,8 @@ class _RtTokenStore:
                     state.access = None
                     raise ApiError(401, "authentication_error", "backend %s: the login expired or was revoked; "
                                    "run llm-router.py login --backend %s" % (name, name)) from None
-                log.warning("token refresh failed: backend %s, %s (code %s)", _log_value(name), exc.kind,
-                            _log_value(exc.code or "none"))
+                log.warning("token refresh failed: backend %s, %s (code %s)", _log_value(name),
+                            _log_value(exc.kind), _log_value(exc.code or "none"))     # F42: the kind too
                 if exc.kind == "rate_limited":
                     err = UpstreamError(429, "rate_limit_error",
                                         "backend %s: the token endpoint is rate limiting" % name)
@@ -7269,6 +7304,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
         rec = self._rt_rec
         rec["endpoint"] = endpoint
         rec["in"] = length
+        inbound: Optional[InboundRequest] = None
+        adapter: Optional[Adapter] = None
         try:
             inbound = _rt_parse_inbound(endpoint, body, self.headers, srv.cfg)
             backend = inbound.backend
@@ -7331,11 +7368,15 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 if (learns or effort is not None) and not rec["learn_retry"] and resp.status == 400:
                     read = self._rt_read_upstream(conn, resp, inbound)
                     retry: Optional[InboundRequest] = None
-                    name = _rt_unsupported_sampling(read[2], adapter.sampling_sent(inbound)) if learns else None
+                    # F45: a body over _RT_LEARN_BODY_LIMIT is never parsed for a learn; it is
+                    # answered as any other 400 (the relay reads it under _UPSTREAM_BODY_LIMIT).
+                    learnable = len(read[2]) <= _RT_LEARN_BODY_LIMIT
+                    name = _rt_unsupported_sampling(read[2], adapter.sampling_sent(inbound)) \
+                        if learns and learnable else None
                     if name is not None:
                         retry = self._rt_sampling_inbound(
                             inbound, srv.sampling_learn(backend.name, inbound.route.model, name))
-                    else:
+                    elif learnable:
                         supported = _rt_ms_unsupported_effort(read[2], effort)
                         if supported is not None:
                             retry = inbound._replace(effort_supported=srv.effort_learn(
@@ -7371,6 +7412,14 @@ class _RouterHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._rt_head_sent:
                 self._send_json(500, _rt_error_body("api_error", "internal error"))
+        finally:
+            # F27: an exit that never reached stream_translator -- a 400 answered from the
+            # learn path's read, a failed send, a refusal after upstream_request -- leaves
+            # this request's _pending entry; popped while the inbound is alive, so its id
+            # cannot have been reused. A no-op once stream_translator took it.
+            pending = getattr(adapter, "_pending", None)
+            if inbound is not None and isinstance(pending, dict):
+                pending.pop(id(inbound), None)
 
     def _rt_sampling_inbound(self, inbound: InboundRequest, learned: FrozenSet[str]) -> InboundRequest:
         """*inbound* carrying *learned* as its sampling_drop; a route override that is dropped
@@ -8120,6 +8169,10 @@ def _rt_login_device(args: argparse.Namespace, cfg: RouterConfig, backend: Backe
     _rt_login_pin(cfg, pinned, start["device_auth_id"])     # immediately (S7); user_code is shown by design
     print("llm-router: open %s and enter the code %s" % (provider.device_verify_url, start["user_code"]),
           file=sys.stderr, flush=True)
+    # F52: whoever started a device flow receives the grant its code approves -- a code
+    # someone else sent you is a phishing attempt.
+    print("llm-router: only enter this code if you just started this login yourself; "
+          "if someone sent it to you, do not enter it", file=sys.stderr, flush=True)
     poll = _oauth_device_poll_request(provider, start["device_auth_id"], start["user_code"])
     while True:
         if time.monotonic() + start["interval"] > deadline:

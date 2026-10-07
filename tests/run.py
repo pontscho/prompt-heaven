@@ -457,13 +457,13 @@ SUITES = [
      "the size caps and strict UTF-8, the asyncio and blocking-socket "
      "wrappers -- then mcp-gdc's generated copy driven against a loopback "
      "CDP peer", 41),
-    # TYPED: A 4, B 5, C 5, D 11, E 10, F 7, G 4, H 14, I 4 = 64
+    # TYPED: A 4, B 5, C 5, D 11, E 10, F 7, G 5, H 14, I 4 = 65
     ("mcp_oauth", run_mcp_oauth,
      "the stdlib OAuth 2.0 helpers: PKCE and state, the authorize URL, the "
      "exchange, refresh and device request builders, token response and "
      "ID-token parsing with every refusal typed, the callback parse, the "
      "device flow, the loopback callback listener on a fake clock, and the "
-     "ast contract over the source", 64),
+     "ast contract over the source", 65),
     # TYPED: a fixed case table.  Every row that needs the host's libbrotlidec
     # or libzstd is recorded as INFO when the library is absent rather than
     # omitted, so the count is the same on every host.
@@ -697,8 +697,8 @@ SUITES = [
      "header lines, id-less initialize, request id shape, fixed body-less "
      "stdlib refusals, 100 Continue only after auth", 105),
     # TYPED: a fixed case table (A 48, B 31, C 14, D 16, E 14, F 25, G 22,
-    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 33, K 25, L 20, M 21, N 35,
-    # O 16 = 363), so a count that moves is the alarm, not noise.
+    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 35, K 26, L 20, M 21, N 39,
+    # O 17 = 371), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
@@ -706,7 +706,7 @@ SUITES = [
      "registry, Mistral translation and stream state machine, the codex "
      "and openai Responses kinds (request translation and stream), OAuth "
      "token store, login and config write-back, timeouts and disconnects "
-     "per kind, secret leaks, static rules, hygiene", 363),
+     "per kind, secret leaks, static rules, hygiene", 371),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

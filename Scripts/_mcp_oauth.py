@@ -603,7 +603,9 @@ def _oauth_parse_device_start(status, body):
 
     Returns a dict with `device_auth_id`, `user_code` and `interval`; both ids
     must pass _oauth_token_ok, since one is shown to the user and the other is
-    sent back on every poll.
+    sent back on every poll. The user_code is printed for the user to type, so
+    one over 64 characters -- the bound OAuthError puts on a code; a real one is
+    about 9 -- is refused too (F51).
     """
     _oauth_status_refusal(status)
     if status != 200:
@@ -611,7 +613,7 @@ def _oauth_parse_device_start(status, body):
     obj = _oauth_json_object(body)
     device_auth_id = obj.get("device_auth_id")
     user_code = obj.get("user_code")
-    if not _oauth_token_ok(device_auth_id) or not _oauth_token_ok(user_code):
+    if not _oauth_token_ok(device_auth_id) or not _oauth_token_ok(user_code) or len(user_code) > 64:
         raise OAuthError("invalid_response")
     return {"device_auth_id": device_auth_id, "user_code": user_code, "interval": _oauth_device_interval(obj.get("interval"))}
 

@@ -9473,9 +9473,16 @@ GK_CASES = (
     "openai-oauth: one namespace tool",  # K23
     "namespace tool_choice; others flat",  # K24
     "apikey: override in, learned out",  # K25
+    "deep tool schema -> 400, not 500",  # K26
 )
 GK_IDS = ("K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14", "K15",
-          "K16", "K17", "K18", "K19", "K20", "K21", "K22", "K23", "K24", "K25")
+          "K16", "K17", "K18", "K19", "K20", "K21", "K22", "K23", "K24", "K25", "K26")
+# K26 (F22): the deepest tool input_schema translated, in nested containers (dict or list)
+# counting the schema itself as 1 -- written here, never read from the module.  One level
+# more is a 400 invalid_request_error; so is a nesting past the interpreter's recursion
+# limit, which must never surface as a RecursionError (the handler's 500).
+GK_SCHEMA_DEPTH = 64
+GK_SCHEMA_ABYSS = 5000
 
 GK_BACKEND = "tf-codex-k"
 GK_OTHER_BACKEND = "tf-openai-k"
@@ -10567,6 +10574,50 @@ def group_k(suite, fixture_root):
             shown.append("%s -> %r" % (label, got))
         return problems, ["sampling    : " + s for s in shown]
 
+    def k26():
+        # F22: _rt_rs_schema recursed without a bound, so a deep enough input_schema raised
+        # RecursionError -- the handler's 500.  The bound refuses it as the client's 400.
+        def chain(depth):
+            """*depth* nested containers, built iteratively: one dict ({"items": ...}) or, every
+            4th level, one list per level, the innermost {"type": "string"} counted as 1."""
+            node = {"type": "string"}
+            for level in range(depth - 1):
+                node = [node] if level % 4 == 3 else {"items": node}
+            return node
+        problems, shown = [], []
+        for profile in GK_PROFILES:
+            adapter = getattr(mod, GK_ADAPTER[GK_KIND[profile]])()
+            for label, depth, ok in (("at the bound", GK_SCHEMA_DEPTH, True),
+                                     ("one past", GK_SCHEMA_DEPTH + 1, False),
+                                     ("past the recursion limit", GK_SCHEMA_ABYSS, False)):
+                tools = [{"name": "tf_deep", "input_schema": chain(depth)},
+                         {"name": "Read", "input_schema": GK_SCHEMA_READ}]
+                inbound = gk_inbound(mod, gk_body(user_hi, tools=tools), gk_route(mod), profile)
+                for hook in ("upstream_request", "count_tokens"):
+                    case = "%s, %s (%s)" % (label, hook, profile)
+                    try:
+                        getattr(adapter, hook)(inbound)
+                    except Exception as exc:  # noqa: BLE001 -- the type is the finding
+                        if ok:
+                            problems.append("%s: raised %s, expected it translated" % (case, type(exc).__name__))
+                        elif not isinstance(exc, mod.ApiError):
+                            problems.append("%s: raised %s, expected an ApiError 400 (the handler answers "
+                                            "anything else 500)" % (case, type(exc).__name__))
+                        elif exc.status != 400 or exc.err_type != "invalid_request_error" \
+                                or "tools.0.input_schema" not in exc.message:
+                            problems.append("%s: ApiError(%r, %r, %r), expected 400 invalid_request_error "
+                                            "naming tools.0.input_schema" % (case, exc.status, exc.err_type,
+                                                                             exc.message[:120]))
+                        else:
+                            shown.append("%s -> 400 %s" % (case, exc.message[:80]))
+                    else:
+                        if not ok:
+                            problems.append("%s: accepted, expected an ApiError 400" % case)
+                        else:
+                            shown.append("%s -> translated" % case)
+        return problems, ["schema      : " + s for s in shown[:6]] + \
+            ["schema      : %d outcome(s) in all" % len(shown)]
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -10580,7 +10631,7 @@ def group_k(suite, fixture_root):
            needs(k7, idmap, anth, tr), needs(k8, tr), needs(k9, tr), needs(k10, tr), needs(k11, tr, ck),
            needs(k12, tr), needs(k13, tr), needs(k14, tr, eff), needs(k15, tr, eff), needs(k16, tr, unsign),
            needs(k17, tr, unsign), needs(k18, tr, unsign), needs(k19, tr), needs(k20, tr), needs(k21, tr),
-           needs(k22, tr), needs(k23, tr), needs(k24, tr), needs(k25, tr))
+           needs(k22, tr), needs(k23, tr), needs(k24, tr), needs(k25, tr), needs(k26, tr))
     try:
         for cid, fn in zip(GK_CASES, fns):
             try:
@@ -12660,10 +12711,14 @@ GN_CASES = (
     "login mid-refresh: disk kept",      # N33
     "mistral: learned effort, 1 retry",  # N34
     "mistral: effort 400s relayed",      # N35
+    "param differs from text: no learn",  # N36
+    "error exits leave no _pending",     # N37
+    "refresh-failure kind escaped",      # N38
+    "over-cap 400 body: relayed, no learn",  # N39
 )
 GN_IDS = ("N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12", "N13",
           "N14", "N15", "N16", "N17", "N18", "N19", "N20", "N21", "N22", "N23", "N24", "N25", "N26", "N27", "N28",
-          "N29", "N30", "N31", "N32", "N33", "N34", "N35")
+          "N29", "N30", "N31", "N32", "N33", "N34", "N35", "N36", "N37", "N38", "N39")
 
 GN_BACKEND = "tf-codex-n"                   # the OAuth backend every N case routes to
 GN_BACKEND_2 = "tf-codex-n2"                # N9, N10: a second OAuth backend on the same peers
@@ -12744,6 +12799,21 @@ GN_EFFORT_ROUTES = {m: "claude-" + m for m in (GN_EFFORT_MODEL, GN_EFFORT_MODEL_
 GN_EFFORT_THINKING = {"type": "enabled", "budget_tokens": 2048}     # band "low" (the live 400's request)
 GN_EFFORT_MSG = "reasoning_effort %s is not supported for this model, supported values: [%s]"
 GN_EFFORT_LEARNED = "reasoning_effort learned"   # the router's one INFO line per learn
+# N36 (F23): the message names one sampling parameter; a present `param` must name the same.
+GN_UNSUPPORTED_MSG = GN_SAMPLING_UNSUPPORTED["error"]["message"]
+GN_SENT_BOTH = ("temperature", "top_p")
+# N37 (F27): a stream request's error exits, on an openai-apikey backend (GN_OPENAI).
+GN_UP_500 = {"error": {"message": "tf n37: the upstream failed", "type": "server_error"}}
+GN_PENDING_SETTLE_S = 1.0                   # N37: the handler's finally runs within this of the answer
+# N38 (F42): an OAuthError whose kind holds a line break, forged past the constructor.
+GN_FORGED_KIND = "tf-n38\nforged kind"
+# N39 (F45): a 400 "Unsupported parameter" body padded past the learn path's 64 KiB cap
+# (written here, never read from the module) is relayed, never learned; under it, learned.
+GN_LEARN_CAP = 64 * 1024
+GN_SAMPLING_BIG = "gpt-tf-n-bigbody"        # its 400 body is GN_LEARN_CAP + 1 KiB
+GN_SAMPLING_SMALL = "gpt-tf-n-smallbody"    # its 400 body is GN_LEARN_CAP - 4 KiB
+GN_SAMPLING_ROUTE_BIG = "claude-tf-n-bigbody"
+GN_SAMPLING_ROUTE_SMALL = "claude-tf-n-smallbody"
 # N8, N17 (openai-oauth half), N18: openai backends with an oauth object (profile openai-oauth,
 # Plan Step 16, FR-6).  The values are the openai provider row's, written here, never read
 # from the module; the issued client id and host id are the seed a SIWC login persisted.
@@ -14682,9 +14752,184 @@ def gn_n33(fixture_root, ctx):
                       % (len(sent), "= login" if on_disk == login else "!= login")]
 
 
+def gn_n36(fixture_root, ctx):
+    """N36 (F23): _rt_unsupported_sampling learns the name its message matched only when the
+    error's `param`, if present (not null), names that same parameter -- a message that
+    reflects other text cannot teach a name the structured field contradicts.  The param
+    form (param + code unsupported_parameter, no matching message) is unchanged."""
+    del fixture_root, ctx
+    mod = H.load_module_from_path("ph_llm_router_n36", SERVER)
+    problems = gn_need(mod, ("_rt_unsupported_sampling",))
+    if problems:
+        return problems, []
+    shown = []
+    for label, err, want in (
+            ("param names the other sent name", {"message": GN_UNSUPPORTED_MSG, "param": "top_p",
+                                                 "code": "unsupported_parameter"}, None),
+            ("param names an unsent name", {"message": GN_UNSUPPORTED_MSG, "param": "tf_other"}, None),
+            ("param not a string", {"message": GN_UNSUPPORTED_MSG, "param": 7}, None),
+            ("param equal", {"message": GN_UNSUPPORTED_MSG, "param": "temperature"}, "temperature"),
+            ("param absent", {"message": GN_UNSUPPORTED_MSG}, "temperature"),
+            ("param null", {"message": GN_UNSUPPORTED_MSG, "param": None}, "temperature"),
+            ("param + code, other text", {"message": "tf n36 other text", "param": "top_p",
+                                          "code": "unsupported_parameter"}, "top_p")):
+        body = json.dumps({"error": err}).encode("ascii")
+        kind, got = gn_call(lambda: mod._rt_unsupported_sampling(body, GN_SENT_BOTH))
+        if kind != "ok":
+            problems.append("%s: raised %s" % (label, type(got).__name__))
+        elif got != want:
+            problems.append("%s: learned %r, expected %r" % (label, got, want))
+        shown.append("%s -> %r" % (label, got))
+    return problems, ["learn       : " + s for s in shown]
+
+
+def gn_n37(fixture_root, ctx):
+    """N37 (F27): a stream request's upstream_request leaves its (estimate, dropped) in the
+    adapter's _pending for stream_translator; an exit that never reaches the translator --
+    a 400 read on the learn path and answered, an upstream that closes unanswered -- must
+    still pop it (a 500 is the control: its relay builds the translator first): after each
+    request the openai adapter's _pending is as it was.  In-process
+    (FastRouter) on a private module, so the adapter instance is the server's own."""
+    mod = H.load_module_from_path("ph_llm_router_n37", SERVER)
+    problems = gn_need(mod, ("ADAPTERS",))
+    if problems:
+        return problems, []
+
+    def up(_index, request):
+        try:
+            sent = json.loads((request.get("body") or b"").decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            sent = {}
+        if isinstance(sent, dict) and "temperature" in sent:
+            return [("respond_json", 400, GN_SAMPLING_OTHER_400)]
+        if b"tf n37 no answer" in (request.get("body") or b""):
+            return []                   # recorded, then closed unanswered: the send fails
+        return [("respond_json", 500, GN_UP_500)]
+
+    def body(rig):
+        adapter = mod.ADAPTERS.get("openai")
+        pending = getattr(adapter, "_pending", None)
+        if not isinstance(pending, dict):
+            return ["the openai adapter has no _pending dict"], []
+        out, shown = [], []
+        for label, extra in (("500 relayed", {}), ("400 on the learn path", {"temperature": 1}),
+                             ("no answer", {})):
+            before = len(pending)
+            req = gi_body(gn_route(GN_OPENAI), "tf n37 %s" % label)
+            req["stream"] = True
+            req.update(extra)
+            try:
+                status, _h, _data = rig.client.post(obj=req)
+            except (OSError, http.client.HTTPException) as exc:
+                status = type(exc).__name__
+            rig.statuses.append(status)
+            if not isinstance(status, int) or status < 400:
+                out.append("%s: answered %r, expected an error status" % (label, status))
+            # The pop may run just after the answer was written (a finally): settle briefly.
+            settle = time.monotonic() + GN_PENDING_SETTLE_S
+            while len(pending) != before and time.monotonic() < settle:
+                time.sleep(0.01)
+            if len(pending) != before:
+                out.append("%s: the adapter's _pending grew %d -> %d: the error exit left the "
+                           "request's entry behind" % (label, before, len(pending)))
+            shown.append("%s -> %r, _pending %d -> %d" % (label, status, before, len(pending)))
+        return out, ["requests    : " + s for s in shown]
+    return gn_run(fixture_root, "n37", None, up, gn_sampling_backends, body, fast=(mod, ()))
+
+
+def gn_n38(fixture_root, ctx):
+    """N38 (F42): the refresh-failure WARNING line passes the OAuthError kind through
+    _log_value like every other wire-derived field of the line: a kind holding a line
+    break (forged past OAuthError's constructor) is logged escaped, never raw."""
+    del ctx
+    mod, cfg, _path, problems = gn_inproc(fixture_root, "n38", {GN_BACKEND: {"refresh_token": TF_REFRESH_CODEX}})
+    if problems:
+        return problems, []
+
+    def forged(*_args, **_kwargs):
+        exc = mod.OAuthError("invalid_response")
+        exc.kind = GN_FORGED_KIND
+        raise exc
+
+    mod._oauth_parse_token_response = forged
+    records = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    grab = Grab(level=logging.DEBUG)
+    logger = mod.log
+    saved = logger.level
+    logger.addHandler(grab)
+    logger.setLevel(logging.DEBUG)
+    try:
+        store = mod._RtTokenStore(None, cfg, post=GnPost(lambda _i: (200, gn_token_body(TF_ACCESS_CODEX))))
+        kind, got = gn_call(lambda: store.credential(cfg.backends[GN_BACKEND]))
+    finally:
+        logger.removeHandler(grab)
+        logger.setLevel(saved)
+    if kind != "exc" or not isinstance(got, mod.UpstreamError):
+        problems.append("credential() ended %s %s, expected UpstreamError" % (kind, type(got).__name__))
+    lines = [r for r in records if "token refresh failed" in r]
+    if not lines:
+        problems.append("no `token refresh failed` line was logged")
+    for line in lines:
+        if "\n" in line or "\r" in line:
+            problems.append("the refresh-failure line carries a raw line break: %r" % line[:160])
+        if repr(GN_FORGED_KIND) not in line:
+            problems.append("the refresh-failure line does not log the kind as _log_value does (%r): %r"
+                            % (repr(GN_FORGED_KIND), line[:160]))
+    return problems, ["logged      : %r" % line[:160] for line in lines]
+
+
+def gn_padded_400(total):
+    """GN_SAMPLING_UNSUPPORTED as *total* bytes of JSON: the same error object plus a tf_pad field."""
+    head = json.dumps(GN_SAMPLING_UNSUPPORTED)[:-1] + ', "tf_pad": "'
+    tail = '"}'
+    return (head + "x" * (total - len(head) - len(tail)) + tail).encode("ascii")
+
+
+def gn_n39(fixture_root, ctx):
+    """N39 (F45): the learn path reads an upstream 400 under its own cap (64 KiB) rather than the
+    64 MiB non-2xx read: a 400 "Unsupported parameter: 'temperature'" whose body is over it is
+    not learned -- relayed as any other 400, stream or not, the next request still sending
+    temperature -- while the same 400 under the cap is learned and retried once (N31)."""
+    routes = {GN_SAMPLING_ROUTE_BIG: {"backend": GN_OPENAI, "model": GN_SAMPLING_BIG},
+              GN_SAMPLING_ROUTE_SMALL: {"backend": GN_OPENAI, "model": GN_SAMPLING_SMALL}}
+    sizes = {GN_SAMPLING_BIG: GN_LEARN_CAP + 1024, GN_SAMPLING_SMALL: GN_LEARN_CAP - 4096}
+
+    def up(_index, request):
+        try:
+            sent = json.loads((request.get("body") or b"").decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            sent = {}
+        model = sent.get("model") if isinstance(sent, dict) else None
+        if model in sizes and "temperature" in sent:
+            return [("respond_json", 400, gn_padded_400(sizes[model]))]
+        return gn_up_ok(ctx["lines"])
+
+    def body(rig):
+        needle = "Unsupported parameter"
+        problems = gn_sampling_ask(rig, GN_SAMPLING_ROUTE_BIG, False, "over cap, non-stream", 400,
+                                   "invalid_request_error", needle, temperature=1)
+        problems += gn_sampling_expect("over cap, non-stream", gn_sampling_seen(rig, 0), [(GN_SAMPLING_BIG, 1, None)])
+        problems += gn_sampling_ask(rig, GN_SAMPLING_ROUTE_BIG, True, "over cap, stream", 400,
+                                    "invalid_request_error", needle, temperature=1)
+        problems += gn_sampling_expect("over cap, stream", gn_sampling_seen(rig, 1), [(GN_SAMPLING_BIG, 1, None)])
+        problems += gn_sampling_ask(rig, GN_SAMPLING_ROUTE_SMALL, False, "under cap, learns", temperature=1)
+        problems += gn_sampling_expect("under cap, learns", gn_sampling_seen(rig, 2),
+                                       [(GN_SAMPLING_SMALL, 1, None), (GN_SAMPLING_SMALL, None, None)])
+        problems += gn_sampling_log(rig, [None, None, "temperature"])
+        return problems, ["upstream    : 400 Unsupported parameter, %d B body on %s, %d B on %s (cap %d B)"
+                          % (sizes[GN_SAMPLING_BIG], GN_SAMPLING_BIG, sizes[GN_SAMPLING_SMALL],
+                             GN_SAMPLING_SMALL, GN_LEARN_CAP)]
+    return gn_run(fixture_root, "n39", None, up, gn_sampling_backends, body, argv=gn_sampling_argv, routes=routes)
+
+
 GN_FNS = (gn_n1, gn_n2, gn_n3, gn_n4, gn_n5, gn_n6, gn_n7, gn_n8, gn_n9, gn_n10, gn_n11, gn_n12, gn_n13,
           gn_n14, gn_n15, gn_n16, gn_n17, gn_n18, gn_n19, gn_n20, gn_n21, gn_n22, gn_n23, gn_n24, gn_n25, gn_n26, gn_n27, gn_n28,
-          gn_n29, gn_n30, gn_n31, gn_n32, gn_n33, gn_n34, gn_n35)
+          gn_n29, gn_n30, gn_n31, gn_n32, gn_n33, gn_n34, gn_n35, gn_n36, gn_n37, gn_n38, gn_n39)
 
 
 def group_n(suite, fixture_root):
@@ -14761,8 +15006,14 @@ GO_CASES = (
     "--timeout 5: exit 2, no write",     # O14
     "two logins back to back",           # O15
     "device --debug: no secret out",     # O16
+    "device: warning beside the code",   # O17
 )
-GO_IDS = ("O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13", "O14", "O15", "O16")
+GO_IDS = ("O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13", "O14", "O15", "O16",
+          "O17")
+# O17 (F52): a device code is a phishing vector -- whoever started the flow gets the grant
+# the user approves -- so the login says, on the code's line or the next, to enter it only
+# for a login the user started.  Matched case-insensitively; typed here, never read.
+GO_DEVICE_WARNING = "only enter this code if you just started this login yourself"
 
 GO_BACKEND = "tf-codex-o"                   # the codex backend every O login names
 GO_MODEL = "gpt-tf-o"
@@ -15658,6 +15909,25 @@ def go_o16(fixture_root, ctx):
     return go_run(fixture_root, "o16", body, port=False, device=go_mint_device("o16"))
 
 
+def go_o17(fixture_root, ctx):
+    """O17 (F52): `login --device` prints GO_DEVICE_WARNING on the user_code's stderr line or
+    the line right after it, and still completes (exit 0, login ok)."""
+    def body(rig):
+        proc = rig.login(["--device"])
+        problems = rig.finish(proc, 0, GO_OK)
+        lines = proc.stderr_text().splitlines()
+        at = [i for i, line in enumerate(lines) if rig.device["user_code"] in line]
+        if not at:
+            return problems + ["%s: the user_code is not on stderr" % proc.label], []
+        near = lines[at[0]:at[0] + 2]
+        warned = any(GO_DEVICE_WARNING in line.lower() for line in near)
+        if not warned:
+            problems.append("%s: no %r on the user_code's line or the next" % (proc.label, GO_DEVICE_WARNING))
+        return problems, ["warning     : %s, %d stderr line(s) after the code"
+                          % ("beside the code" if warned else "absent", len(lines) - at[0] - 1)]
+    return go_run(fixture_root, "o17", body, port=False, device=go_mint_device("o17"))
+
+
 # -- O2, O3, O10: the openai (SIWC) browser login ---------------------------
 
 class GoSiwcAuth:
@@ -15924,7 +16194,7 @@ def go_o10(fixture_root, ctx):
 
 
 GO_FNS = (go_o1, go_o2, go_o3, go_o4, go_o5, go_o6, go_o7, go_o8, go_o9, go_o10, go_o11, go_o12, go_o13, go_o14,
-          go_o15, go_o16)
+          go_o15, go_o16, go_o17)
 
 
 def group_o(suite, fixture_root):
@@ -17141,7 +17411,22 @@ GJ_CASES = (
     "huge int literal -> ValueError",    # J31
     "collector joins many deltas once",  # J32
     "help: token off argv and history",  # J33
+    "duplicate key -> ValueError",       # J34
+    "role refusal logs type name only",  # J35
 )
+
+# J34 (F10): a key that appears twice in one object, at any depth, is a ValueError from
+# _rt_loads -- the config loader's rule (ADR 0015) on every inbound and upstream body.
+GJ_DUP_REFUSED = (
+    ("top level", '{"tfdup":1,"tfdup":2}'),
+    ("nested object", '{"model":"m","o":{"tfdup":"a","tfdup":"b"}}'),
+    ("object in a list", '{"messages":[{"role":"user","role":"assistant"}]}'),
+    ("bytes, equal values", b'{"tfdup":1,"tfdup":1}'),
+)
+# The same key in different objects is not a duplicate.
+GJ_DUP_CONTROL = '{"tfdup":1,"o":{"tfdup":2},"l":[{"tfdup":3},{"tfdup":4}]}'
+# J35 (F15): the validator's refusal DEBUG line names the role's type, never its value.
+GJ_ROLE_SENTINEL = "tf-role-SENTINEL-" + secrets.token_hex(8)
 
 # J33 (F47): the --help example must keep the router token off the curl argv (ps) and
 # out of shell history.  Typed here, never read from the module.
@@ -18563,8 +18848,86 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
         return problems, ["checked     : %s" % ", ".join(sorted(texts)), "required    : " + GJ_HELP_READ,
                           "required    : " + GJ_HELP_CURL]
 
+    def j34():
+        # F10: json.loads silently keeps the last value of a repeated key.  _rt_loads parses
+        # every inbound and upstream body, so it refuses one the way load_config does (ADR
+        # 0015), as the ValueError every caller's malformed-JSON path already answers.
+        problems = gj_missing(mod, ("_rt_loads",))
+        if problems:
+            return problems, []
+        shown = []
+        for label, text in GJ_DUP_REFUSED:
+            try:
+                got = mod._rt_loads(text)
+            except ValueError:
+                shown.append("%s -> ValueError" % label)
+            except Exception as exc:  # noqa: BLE001 -- any other type is the finding
+                problems.append("%s: raised %s, expected ValueError" % (label, type(exc).__name__))
+            else:
+                problems.append("%s: parsed to %r, expected ValueError (one value silently kept)" % (label, got))
+        try:
+            got = mod._rt_loads(GJ_DUP_CONTROL)
+        except Exception as exc:  # noqa: BLE001 -- refusing distinct objects is the defect
+            problems.append("control: the same key in different objects was refused: %s" % type(exc).__name__)
+        else:
+            if got != json.loads(GJ_DUP_CONTROL):
+                problems.append("control: parsed as %r" % (got,))
+        return problems, ["refused     : " + s for s in shown] + ["control     : %s parsed" % GJ_DUP_CONTROL]
+
+    def j35():
+        # F15: the role refusal's DEBUG line names the role's TYPE only (ADR 0011: a wire
+        # value never reaches a log line), for a role outside the set and for a first
+        # message whose role is "system"; both are still a 400 naming the field.
+        problems = gj_missing(mod, ("_rt_parse_inbound", "ApiError", "log"))
+        if problems:
+            return problems, []
+        records = []
+
+        class Grab(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        grab = Grab(level=logging.DEBUG)
+        logger = mod.log
+        saved = logger.level
+        logger.addHandler(grab)
+        logger.setLevel(logging.DEBUG)
+        shown = []
+        try:
+            for label, role, type_name in (("unknown role", GJ_ROLE_SENTINEL, "str"),
+                                           ("system first", "system", "str"),
+                                           ("non-string role", {GJ_ROLE_SENTINEL: 1}, "dict")):
+                del records[:]
+                body = {"model": GJ_MODEL, "max_tokens": 16, "messages": [{"role": role, "content": "tf j35"}]}
+                try:
+                    mod._rt_parse_inbound("messages", body, {}, None)
+                except mod.ApiError as exc:
+                    if exc.status != 400 or "messages.0.role" not in exc.message:
+                        problems.append("%s: ApiError %r %r, expected 400 naming messages.0.role"
+                                        % (label, exc.status, exc.message[:120]))
+                except Exception as exc:  # noqa: BLE001 -- any other type is the finding
+                    problems.append("%s: raised %s, expected ApiError 400" % (label, type(exc).__name__))
+                else:
+                    problems.append("%s: accepted, expected ApiError 400" % label)
+                lines = [r for r in records if "role=" in r]
+                if not lines:
+                    problems.append("%s: no refusal DEBUG line naming role= was logged" % label)
+                for line in lines:
+                    logged = line.split("role=", 1)[1]
+                    if logged != type_name:
+                        problems.append("%s: the DEBUG line logs role=%s, expected the type name %r only"
+                                        % (label, logged[:80], type_name))
+                    if GJ_ROLE_SENTINEL in line:
+                        problems.append("%s: the role value reached the log line" % label)
+                shown.extend("%s -> %s" % (label, line) for line in lines)
+        finally:
+            logger.removeHandler(grab)
+            logger.setLevel(saved)
+        return problems, ["logged      : " + s for s in shown]
+
     try:
-        for cid, fn in zip(GJ_CASES, (j6, j7, j8, j12, j21, j24, j25, j26, j27, j28, j29, j30, j31, j32, j33)):
+        for cid, fn in zip(GJ_CASES, (j6, j7, j8, j12, j21, j24, j25, j26, j27, j28, j29, j30, j31, j32, j33,
+                                      j34, j35)):
             try:
                 results[cid] = fn()
             except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
