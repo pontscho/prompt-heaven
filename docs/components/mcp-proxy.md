@@ -183,6 +183,16 @@ chunked bodies and batches are refused; an `initialize` without an id is
 refused; and an id that is neither a string nor an integer is refused `-32600`
 with id null, before any session is touched `Scripts/mcp-proxy.py:_post` —
 stdio refuses it the same way `Scripts/mcp-proxy.py:_bad_request_id`.
+The refusals the stdlib sends itself before any of these checks run (400, 414,
+431, 501, 505) are fixed and body-less: the status table's reason phrase,
+`Content-Length: 0`, `Connection: close`, `nosniff` and `no-store`, and never a
+byte of the request line, method or a header `Scripts/mcp-proxy.py:send_error`.
+Every refusal goes out with an HTTP/1.1 head even when the stdlib still flags the
+request HTTP/0.9, which covers a bare two-word `GET` too
+`Scripts/mcp-proxy.py:_refuse`. `Expect: 100-continue` gets its interim
+`100 Continue` only after the bearer, Origin/Host, media type and body cap pass,
+just before the body is read, so a refused request gets its final status and no
+100 `Scripts/mcp-proxy.py:handle_expect_100`; any other `Expect` value is ignored.
 Connections, sessions and in-flight requests are capped (`--max-connections`,
 `--max-sessions`, `--max-inflight`), and idle sessions are evicted after
 `--session-idle` `Scripts/mcp-proxy.py:_HTTP_ONLY_FLAGS`.
@@ -201,7 +211,9 @@ kept only for a cancelled non-`tools/call` request.
 **Running it for ai-soul.** Start
 `python3 Scripts/mcp-proxy.py --http --config <config.json> --project-root <root>
 --token-file <token> --port <N>` (`--port 0`, the default, picks an ephemeral
-port; `--ready-file` reports it), then point the SDK's
+port; `--ready-file` reports it, and an ordered shutdown removes that file again
+while it still holds the proxy's own pid, never through a symlink
+`Scripts/mcp-proxy.py:_http_remove_ready_file`), then point the SDK's
 `StreamableHTTPClientTransport` at `http://127.0.0.1:<N>/mcp` — `127.0.0.1`, not
 `localhost`, because the listener is IPv4-only — with
 `Authorization: Bearer <token>` in `requestInit.headers`. Two client-side
@@ -267,3 +279,7 @@ of the proxy meets first:
   structure-only by construction and gated by the proxy's own suite instead,
   and children inherit the proxy's stderr unfiltered.
 - A grandchild that put itself in its own session survives the group sweep.
+- The ready file's removal is best effort: a file another writer puts in its
+  place between the pid read and the unlink is removed unseen, and SIGKILL, or
+  any exit that skips the ordered shutdown, leaves the file behind with a dead
+  pid.

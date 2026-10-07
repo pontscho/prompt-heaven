@@ -1136,3 +1136,13 @@ Added after the plan:
 31. The proactive refresh leaves no trace on the `req` line, and `message_start`'s `input_tokens` is the router's estimate while `message_delta` carries the upstream's measurement.
 32. An OAuth access token goes to a non-loopback `http://` `base_url` under `allow_private` with no cleartext opt-in of its own, unlike an `api_key`'s `allow_cleartext_api_key` (review F12, CWE-319).
 33. J10 (no new repo path) can fail when another writer works in the same repository during a run.
+
+## Addendum (2026-10-07): mcp-proxy now carries the router's three fixes
+
+Three statements above that mcp-proxy lacks a fix the router has are no longer true at the commits named here; the body above stays as written on its date.
+
+- **Pre-auth refusals and the HTTP/0.9 guard** (c69b643, R-0069, mcp_proxy J43). mcp-proxy now overrides `send_error` with a fixed, body-less answer (the status table's reason phrase, `Content-Length: 0`, `Connection: close`, nosniff, no-store; the request line is never reflected) and carries the HTTP/0.9 guard at the top of its `_refuse`. The parenthesis in "An Anthropic JSON body in `_refuse`" that calls F42 unfixed in ADR 0027 is closed; the router's JSON error body stays a deviation, the fixed-text `send_error` and the guard's placement are now shared.
+- **`100 Continue` after auth** (6e91e1d, R-0076, mcp_proxy J44). mcp-proxy's `handle_expect_100` sends nothing and its `_post` sends the 100 only after the bearer, Origin/Host, media type and body-cap checks, so the out-of-scope bullet "mcp-proxy sends `100 Continue` before authentication" no longer holds, and deviation 18 is no longer a difference between the two copies.
+- **The ready file removed on shutdown** (1748f46, R-0075, mcp_proxy J45). mcp-proxy unlinks its ready file on an ordered shutdown only while it holds its own pid, opened with `O_NOFOLLOW`, with the same declared read-then-unlink race and SIGKILL limit as the router's V24. Row P17's "which mcp-proxy does not do" and the out-of-scope bullet "mcp-proxy's ready file is not removed on shutdown" no longer hold; deviation 29 is no longer a difference between the two copies.
+
+The two copies are still hand-held and no gate holds them equal, but these ports narrow the divergence the canonical-source lift (roadmap R-0072) would have to reconcile.

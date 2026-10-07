@@ -435,3 +435,23 @@ resumability and server-initiated GET streams; child→client requests other tha
 `ping` (refused with `-32601` and logged); acting on `tools/list_changed`
 (logged, ignored); Linux `PR_SET_PDEATHSIG`; IPv6 on the listener (a revisit
 item, not a gap); and registering the proxy in `~/.claude.json`.
+
+## Addendum (2026-10-07): three ports from llm-router (R-0069, R-0076, R-0075)
+
+Three fixes the llm-router's copy of this HTTP front already carried ([[0028-route-by-model-translate-at-the-edge]]) were ported back into `Scripts/mcp-proxy.py`, each with a `mcp_proxy` case written red first; the suite went from 103 to 106 cases, group J from J1-J42 to J1-J45.
+
+### R-0069: the stdlib's pre-auth refusals are fixed and body-less (c69b643, J43)
+
+`send_error` is overridden: the refusals the stdlib sends itself before any proxy check (400, 414, 431, 501, 505) ignore `message` and `explain`, which can quote the request line, the method or a header, and go out through `_refuse` with the fixed reason phrase from the status table, no body, `Content-Length: 0`, `Connection: close`, `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`. The router's HTTP/0.9 guard was ported into `_refuse`: `parse_request` leaves `request_version` at `HTTP/0.9` before it parses the version word (and keeps it for a bare two-word `GET /`, which reaches `do_GET`), and the stdlib writes no status line or header for HTTP/0.9, so every refusal is now sent with an HTTP/1.1 head. J43 sends nine raw requests (bad version word, four-word line, HTTP/0.9 non-GET, HTTP/2.0, an over-long request line, an unknown method, an over-long header line, too many headers, a bare HTTP/0.9 `GET`) and checks the status, the empty body, the headers, the fixed reason phrase and that no byte of the request's marker is reflected.
+
+This closes **F42** ("pre-auth refusals use the stdlib's error pages") in "Verified, and deliberately not fixed" above: it is no longer an open finding.
+
+### R-0076: 100 Continue only after auth and framing pass (6e91e1d, J44)
+
+`handle_expect_100`, which the stdlib calls from `parse_request` before any auth, now sends nothing. `_post` sends the interim `100 Continue` itself after the bearer, Origin/Host, media type and body-cap checks, right before the body read, and only for `Expect: 100-continue` (case-insensitive) on HTTP/1.1; any other `Expect` value is ignored, with no 100 and no 417, as the router does (its V37, ADR 0028 deviation 18). J44 checks that a wrong bearer, a foreign Origin, a wrong media type and a `Content-Length` over the cap each get only their final status with no interim 100, that an accepted request gets exactly `[100, 200]` with its body sent after the 100, and that `Expect: tf-other` gets a plain 200.
+
+### R-0075: the ready file is removed on an ordered shutdown, own pid only (1748f46, J45)
+
+`serve_http`'s shutdown now ends by calling `_http_remove_ready_file`, which opens the ready file with `O_NOFOLLOW`, reads its JSON, and unlinks it only when its `pid` equals `os.getpid()`; a symlink at the path, another pid, non-JSON or an unreadable file is left alone and logged at DEBUG, structure only. It never raises. This is the router's V24 fix (ADR 0028 deviation 29). J45 checks three modes after SIGTERM: the proxy's own file is removed; a file rewritten with a foreign pid is left unchanged; and a symlink at the ready path pointing at a sentinel that holds the proxy's OWN pid leaves both the link and the sentinel, so only `O_NOFOLLOW`, not the pid check, can be what protects them.
+
+Declared, not gated: a file replaced between the read and the unlink is not seen, and the replacement is removed; SIGKILL, or any exit that skips the ordered shutdown, leaves the file behind with a dead pid. These join the declared limits above.
