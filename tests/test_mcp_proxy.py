@@ -38,8 +38,9 @@ The case count is TYPED in run.py's SUITES table: this is a fixed case table,
 so a count that moves is the alarm.  The total below is the expected value; the
 run is authoritative.
 
-Total: 103 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 7, H 1, I 6, J 42, K 4,
-L 4; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4).
+Total: 104 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 7, H 1, I 6, J 43, K 4,
+L 4; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4; R-0069 added
+J43).
 
 Usage:
   python3 tests/test_mcp_proxy.py
@@ -2357,7 +2358,7 @@ def group_i(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
-# J. Streamable HTTP  (J1-J42)
+# J. Streamable HTTP  (J1-J43)
 # ---------------------------------------------------------------------------
 
 READY_TIMEOUT_S = 10.0       # --ready-file must appear within this
@@ -2827,6 +2828,13 @@ def raw_exchange(client, pairs, body, timeout=J_RAW_TIMEOUT_S):
     lines += ["%s: %s" % kv for kv in pairs]
     lines.append("Content-Length: %d" % len(body))
     request = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
+    return raw_request(client, request, timeout)
+
+
+def raw_request(client, request, timeout=J_RAW_TIMEOUT_S):
+    """(status, headers, closed, raw bytes) of *request* sent verbatim on a raw
+    socket, read until the server closes or *timeout* passes; status None when
+    the answer has no parseable status line."""
     data, closed = b"", False
     with socket.create_connection((client.host, client.port), timeout=timeout) as sock:
         sock.sendall(request)
@@ -3837,6 +3845,36 @@ J_TRICKLE_STEP_S = 1.0       # J34: one header byte per this, far under the per-
 J_TRICKLE_SLACK_S = 3.0      # J34: the cut must land within _HTTP_HEADER_TIMEOUT_S + this
 J_ORPHAN_TRIES = 3           # J38: initializes refused at the in-flight cap
 J_DEEP_ID_BAND = 16          # J42: depths swept below the deepest id that still parses
+J43_MARK = b"<script>TFMARK"  # J43: client text the stdlib would quote into its error page
+J43_MARK_TOKEN = b"TFMARK"    # J43: must not occur in the answer, raw or HTML-escaped
+J43_LINE_LIMIT = 65537       # J43: the stdlib's readline bound; one byte past it is 414/431
+J43_MAX_HEADERS = 100        # J43: http.client's _MAXHEADERS; one more is 431
+
+
+def j43_rows(host):
+    """(label, request bytes, expected status, stdlib refusal?) of J43. Each
+    request ends exactly where the stdlib stops reading, so no unread byte turns
+    the server's close into a reset that could discard the answer."""
+    pad_line = b"GET /" + J43_MARK
+    pad_line += b"A" * (J43_LINE_LIMIT - len(pad_line))
+    head = b"POST /mcp HTTP/1.1\r\nHost: " + host + b"\r\n"
+    big_header = b"X-Tf: " + J43_MARK
+    big_header += b"A" * (J43_LINE_LIMIT - len(big_header))
+    many = b"".join(b"X-Tf-%d: %s\r\n" % (i, J43_MARK) for i in range(J43_MAX_HEADERS))
+    return (
+        ("bad version word", b"GET /mcp " + J43_MARK + b"\r\n", 400, True),
+        ("four-word line", b"GET /mcp " + J43_MARK + b" HTTP/1.1\r\n", 400, True),
+        ("HTTP/0.9 non-GET", J43_MARK + b" /mcp\r\n", 400, True),
+        ("HTTP/2.0", b"GET /mcp HTTP/2.0\r\n", 505, True),
+        ("request line too long", pad_line, 414, True),
+        ("unknown method", b"TF" + J43_MARK + b" /mcp HTTP/1.1\r\nHost: " + host
+         + b"\r\nConnection: close\r\n\r\n", 501, True),
+        ("header line too long", head + big_header, 431, True),
+        ("too many headers", head + many, 431, True),
+        # The proxy's own refusal of a bare HTTP/0.9 GET: the stdlib writes no
+        # head for HTTP/0.9, so the answer must still be sent with one.
+        ("HTTP/0.9 GET, no Host", b"GET /mcp\r\n\r\n", 403, False),
+    )
 
 
 def strict_pairs(client, sid=None, version=PROTOCOL_VERSION, extra=()):
@@ -4020,6 +4058,47 @@ def group_j_strict(suite, fixture_root, mod, mod_why):
                               % (lo, hi, len(probes), J_DEEP_ID_BAND),
                               "after       : initialize %d" % after.status]
 
+    # J43 -- every refusal the stdlib answers before any proxy check (send_error)
+    # is fixed and body-less (R-0069): the status line carries the fixed reason
+    # phrase, Content-Length 0, nosniff, no-store, Connection: close, and no byte
+    # of the request line, method or header reaches the answer.
+    def j43(proxy, client):
+        host = ("%s:%d" % (client.host, client.port)).encode("ascii")
+        problems, got = [], []
+        for label, request, want, stdlib in j43_rows(host):
+            status, headers, closed, data = raw_request(client, request)
+            got.append("%s %r" % (label, status))
+            if status != want:
+                problems.append("%s: status %r, expected %d" % (label, status, want))
+                continue
+            head, _sep, body = data.partition(b"\r\n\r\n")
+            if body:
+                problems.append("%s: a %d-byte body" % (label, len(body)))
+            if headers.get("content-length") != "0":
+                problems.append("%s: Content-Length %r, expected '0'"
+                                % (label, headers.get("content-length")))
+            if headers.get("connection", "").lower() != "close" or not closed:
+                problems.append("%s: Connection %r, closed by the server %s"
+                                % (label, headers.get("connection"), closed))
+            if stdlib:
+                if headers.get("x-content-type-options") != "nosniff":
+                    problems.append("%s: X-Content-Type-Options %r, expected nosniff"
+                                    % (label, headers.get("x-content-type-options")))
+                if headers.get("cache-control") != "no-store":
+                    problems.append("%s: Cache-Control %r, expected no-store"
+                                    % (label, headers.get("cache-control")))
+                reason = head.split(b"\r\n", 1)[0].split(b" ", 2)[2:]
+                fixed = http.HTTPStatus(want).phrase.encode("ascii")
+                if reason != [fixed]:
+                    problems.append("%s: reason phrase %r, expected %r" % (label, reason, fixed))
+            if J43_MARK_TOKEN in data:
+                problems.append("%s: the request's marker is reflected in the answer" % label)
+        after = client.send(init_body())
+        if after.status != 200:
+            problems.append("initialize after the refusals: status %d" % after.status)
+        return problems, ["answers     : %s" % "; ".join(got),
+                          "after       : initialize %d" % after.status]
+
     http_session(suite, fixture_root, "j-strict", [
         ("header trickle cut at deadline", j34),
         ("deep nesting -> 400 -32700", j35),
@@ -4027,6 +4106,7 @@ def group_j_strict(suite, fixture_root, mod, mod_why):
         ("media type matched exactly", j37),
         ("malformed header line refused", j40),
         ("deep list id answered", j42),
+        ("stdlib refusals fixed, body-less", j43),
     ], detail=["proxy       : --http --port 0, default caps"])
 
     # J38 -- an initialize refused at the in-flight cap leaves no session behind.

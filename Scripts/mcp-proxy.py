@@ -323,6 +323,9 @@ _HTTP_SOCKET_TIMEOUT_S = 30.0     # per-recv socket timeout after auth
 _HTTP_KEEPALIVE_S = 15.0          # SSE ": keepalive" comment interval while a tools/call waits
 _HTTP_BRIDGE_TIMEOUT_S = 5.0      # bound on every handler-thread wait on the loop (H1, round 3)
 _HTTP_SINK_PROGRESS_CAP = 1024    # queued progress items per HTTP response; response, markers + sentinel never dropped
+# Extra headers of the stdlib's own refusals (send_error: 400/414/431/501/505),
+# answered fixed and body-less (R-0069).
+_HTTP_STDLIB_REFUSAL_HEADERS = (("X-Content-Type-Options", "nosniff"), ("Cache-Control", "no-store"))
 _SESSION_GONE = object()          # sink marker: the session closed before _http_start ran -> 404
 _REQUEST_STARTED = object()       # sink marker: _http_start created and registered the task
 _BUSY = object()                  # sink marker: --max-inflight reached -> 503 + Connection: close (R-34)
@@ -2159,7 +2162,15 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
 
         A 401 or 403 is logged at WARNING with the status and the peer address
         only (F41) -- never a header value, never the presented token.
+
+        HTTP/0.9 guard (the llm-router's M1, R-0069): parse_request sets
+        request_version to "HTTP/0.9" before it parses the version word (and
+        keeps it for a bare two-word `GET /`, which reaches do_GET), and
+        send_response_only writes no status line and no header for HTTP/0.9.
+        Every refusal is therefore sent with an HTTP/1.1 head.
         """
+        if getattr(self, "request_version", None) == "HTTP/0.9":
+            self.request_version = "HTTP/1.1"
         self.send_response(status)
         for name, value in extra_headers:
             self.send_header(name, value)
@@ -2173,6 +2184,17 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
             log.warning("http refused status=%d peer=%s", status, self.client_address[0])
         else:
             log.debug("-> http id=%s %s status=%d", None, "refused", status)
+
+    def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
+        """The stdlib's own refusals (400/414/431/501/505, and any other it
+        routes here) as a fixed, body-less answer (R-0069): `message` and
+        `explain` are ignored, since they can quote the request line, the
+        method or a header; the reason phrase is the fixed one send_response
+        takes from the status. nosniff and no-store are added here;
+        Content-Length 0, Connection: close and the HTTP/0.9 guard come from _refuse.
+        """
+        self.close_connection = True
+        self._refuse(code, _HTTP_STDLIB_REFUSAL_HEADERS)
 
     def _single_header(self, name: str):
         """(ok, value) of a header that must appear at most once (ADR 0015:
