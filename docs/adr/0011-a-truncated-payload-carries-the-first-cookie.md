@@ -260,3 +260,27 @@ which this gate does not read and does not need to.
   DESTINATION bound it — the level gated by the new suite, the destination by the
   0600 pair recorded in the paragraph above. Stated here so the next reader does
   not mistake the analyser's silence for a clean measurement.
+
+## Addendum (2026-10-07): a structure field is still peer text (R-0070, 72ed9b4)
+
+This page decided that the two wire sites log structure only: method, id, tool name and argument keys inbound, id and outcome outbound. It did not decide how those fields are written, and they were logged raw. Structure is not the same thing as safe to print. Each of those fields is text the peer chose, so a method holding a line break writes a forged second line into the log (CWE-117; security review 2026-10-05, finding F19). `72ed9b4` closes that, and the structure-only rule above is unchanged by it.
+
+### What changed
+
+- Every structural field at both wire sites now reaches the log through `_log_value`. A str is cut to `_LOG_VALUE_WIDTH` (80) characters before `repr()`, so every control character is escaped, then capped at four times that width, and `...` marks either cut. An int or None is logged as itself, and a huge int as its bit length. A key list is logged item by item, at most `_LOG_KEYS_SHOWN` (16) items and one level deep. Anything else is logged as its type name `Scripts/_mcp_logging.py:_log_value`. The cancel, notification and dispatcher lines, the handler-crash tool name and gdc's cap lines go through it too, as does `Scripts/MCP_SKELETON.md` (sections 2, 4, 5 and 9).
+- `_log_value` is a generated block, not a hand copy. `mcp-proxy`, `mcp-search` and `llm-router` each carried an identical copy, and those three became one block in `Scripts/_mcp_logging.py`. The block is generated into all 17 servers and the router, with its two bounds on one marker. The alternative "extract `_write` into a generated region" above is not reopened by this. `_log_value` reads no `log` and calls no logger, so the `host_provides` refusal that keeps the wire sites hand-written does not apply to it. The sites stay hand-written, and only the renderer they call is shared.
+
+### The gate, extended
+
+`tests/test_wire_log.py` went from 57 to 64 cases and was run red first (35 of 64).
+
+- **`RAW-FIELD-IN-WIRE-LOG`.** It fails a `method`, `id`, `name` or `keys` field that reaches a wire log without `_log_value(...)`: passed bare, interpolated into an f-string, or wrapped in `str()`. A field under `len`, `type`, `isinstance` or `callable`, or under a comparison, cannot carry a line break and passes.
+- **The payload rule runs first.** The sanitiser does not launder a payload, so `_log_value(json.dumps(msg))` is still a payload leak.
+- **Group C requires the generated block.** Every server must define `_log_value` once, inside the `_mcp_logging.py` region, so a site that names it cannot be calling a hand copy, or calling nothing.
+- **Group D plants.** It gained four structure-only plants that must be refused as RAW, one laundered-payload plant, and a control for the group C region check.
+
+The case count above (53) and the six-group description are the gate as it was decided. The current count lives in `tests/run.py:SUITES`.
+
+### Left out on purpose
+
+Methods a server's own child chooses are not in scope: the messages a language server sends to the LSP-backed MCP servers, and Chrome's CDP stream behind `mcp-gdc`. This gate reads only `run` and `_write`, the two MCP wire sites, and the commit leaves those child-originated lines as they were.

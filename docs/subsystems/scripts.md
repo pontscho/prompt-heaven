@@ -1004,7 +1004,9 @@ bounded by those two constants and accepted.
 **Logging is structure only.** A search note is logged as the endpoint, the fixed
 event token, the query index and either a status code or an exception class name —
 never the query text, a body or an exception message `Scripts/mcp-search.py:note_for`.
-Wire values in the debug log are bounded and escaped `Scripts/mcp-search.py:_log_value`
+Wire values in the debug log are bounded and escaped by the generated
+`_log_value` from `Scripts/_mcp_logging.py`, no longer a hand copy (R-0070)
+`Scripts/mcp-search.py:_log_value`
 ([[0011-a-truncated-payload-carries-the-first-cookie]]). A grep.app answer that is
 JSON but not in grep.app's shape is a parse failure — a `grep_schema` note and no
 results, with the session kept — not a transport error
@@ -1077,8 +1079,10 @@ there is no inline-config flag because argv is visible in `ps`. An OAuth backend
 is signed in by the `login` subcommand (browser or device flow)
 `Scripts/llm-router.py:_rt_login`, which writes its tokens back into that same
 config. Its HTTP front is an adapted copy of [[mcp-proxy]]'s rather than a
-canonical source, and its generated regions are the logging block and the OAuth
-core from `Scripts/_mcp_oauth.py` ([[generated-regions]]). The
+canonical source, and its generated regions are the two logging regions
+(`_configure_logging`, and `_log_value` with its two bounds, which replaced the
+router's hand copy in R-0070) and the OAuth core from `Scripts/_mcp_oauth.py`
+([[generated-regions]]). The
 command line, the config schema and its OAuth write-back, the per-kind header
 allow-lists, the security rules, the `llm_router` suite and the declared limits
 are [[llm-router]]; why it routes by model and translates at the edge is

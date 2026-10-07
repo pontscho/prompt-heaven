@@ -80,6 +80,9 @@ inside `Scripts/mcp-proxy.py:_FRAME_RANGE`. It bounds one newline-delimited
 message, not how much of an answer the caller gets: a line over it is a
 desynced stream, so the incarnation dies and is restarted, while a non-JSON
 line under it is pollution and is dropped `Scripts/mcp-proxy.py:_reader_loop`.
+The child reader parses strictly, so a child line carrying `NaN`, `Infinity` or
+an integer literal over 4300 characters counts as non-JSON and is dropped too;
+the call it would have answered waits for its `call_timeout`.
 There is no per-call output cap — the child already applied its own
 [[0013-the-ceiling-is-a-payload-class]].
 
@@ -134,7 +137,19 @@ child that exited cleanly. The exit codes are listed in the module docstring
 
 The plumbing it shares with the fleet is generated, not imported: the
 `_mcp_logging.py` and `_mcp_json.py` regions only `Scripts/mcp-proxy.py:_configure_logging`
-`Scripts/mcp-proxy.py:_result` ([[generated-regions]]). The child MCP client is
+`Scripts/mcp-proxy.py:_result` ([[generated-regions]]). Two of them replaced
+hand-written code. `_log_value`, through which every peer- or child-chosen
+method, id, tool name or argument key reaches a log line (CWE-117), is the
+generated block from `Scripts/_mcp_logging.py` since R-0070
+`Scripts/mcp-proxy.py:_log_value`, no longer the proxy's own copy. And every
+frame the proxy reads or writes, on both fronts and in both directions — the
+stdio loop, the child reader, `_send_line`, the HTTP `_post`, `_send_json` and
+`_stream_sse` — goes through the generated `_strict_loads` / `_strict_dumps`
+(R-0067, R-0068) `Scripts/mcp-proxy.py:_strict_loads`: `NaN`, `Infinity`, a
+float that overflows to one and an integer literal over 4300 characters are
+refused as unparseable on every Python, answered `-32700` upstream (a 400 on
+HTTP), and a non-finite float is never emitted. The config and the ready file
+are read with plain `json.loads`, since neither is a peer's frame. The child MCP client is
 hand-written, and its methods are named `rpc` / `notify_child` so the hand-copy
 census never mistakes them for the LSP request block.
 
@@ -278,6 +293,9 @@ of the proxy meets first:
 - Child-side and HTTP logging are outside the fleet's wire-log gate; they are
   structure-only by construction and gated by the proxy's own suite instead,
   and children inherit the proxy's stderr unfiltered.
+- A child reply refused by the strict parse (`NaN`, `Infinity`, an integer
+  literal over 4300 characters) is dropped like any non-JSON line, so the call
+  it answered waits for its `call_timeout` rather than failing at once.
 - A grandchild that put itself in its own session survives the group sweep.
 - The ready file's removal is best effort: a file another writer puts in its
   place between the pid read and the unlink is removed unseen, and SIGKILL, or

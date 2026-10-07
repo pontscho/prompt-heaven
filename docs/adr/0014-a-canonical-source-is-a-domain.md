@@ -246,3 +246,21 @@ The protocol is the domain; a vendor is not. Each provider's endpoints, client i
 ### Why it is not WHOLE
 
 `WHOLE_SOURCES` still holds five names `Scripts/amalgamate.py:WHOLE_SOURCES`, and `_mcp_oauth.py` is not among them. The source follows the websocket precedent rather than the Chrome one: a sans-IO core plus a thin I/O wrapper of two blocks, `_oauth_listen` and `_oauth_sync_accept_callback`, which the router takes on one marker with the core first. A future host that receives the redirect through its own HTTP front can take the core without the wrapper, and a WHOLE declaration would forbid exactly that. The cost is the one the websocket source pays: the core's block list is mirrored by hand as `OAUTH_CORE` in `tests/test_generated_region.py`, beside `WEBSOCKET_CORE`. The mirror has already had to move once: the security review's F2 and F9 fixes added `OAUTH_MIN_REFRESH_INTERVAL_S`, `OAUTH_INT_LITERAL_LIMIT` and `_oauth_bounded_int` to the source, and the same three names to `OAUTH_CORE` and to the router's marker.
+
+## Addendum (2026-10-07): two domains widened in place, strict JSON and the log-value renderer (R-0067, R-0068, R-0070)
+
+Two fleet-wide changes on 2026-10-07 put new blocks into existing sources instead of opening new ones. The rule above decided both placements: each new block answers a question its source already owns, so neither source becomes a shelf.
+
+### `_mcp_json.py` took strict parsing and emitting (`d4a241b`)
+
+Six new blocks: `JSON_INT_LITERAL_LIMIT`, the three `json.loads` hooks `_json_no_constant`, `_json_finite_float` and `_json_bounded_int`, then `_strict_loads` and `_strict_dumps` `Scripts/_mcp_json.py:_strict_loads`. The source docstring widens the domain from "JSON-RPC envelopes, wire-value coercion, and JSON error reporting" to include "strict JSON parsing and emitting for a peer's frames". This is how a frame is parsed and written, which is what the envelope source is for. The blocks are new code, not a lift, and the docstring says so, so their first generated diff is not marker-only. `_ensure_dict` now parses through `_strict_loads`. Its marker therefore carries all eight names: the six first, then `_json_error_window, _ensure_dict`.
+
+Alternative 1's measurement still holds for the new names. `_strict_loads` and `_strict_dumps` carry no `_json_` prefix, and no prefix was added retroactively (the 2026-09-29 addendum, thread 1).
+
+### `_mcp_logging.py` took `_log_value` (`72ed9b4`)
+
+`_log_value` renders a peer-chosen structural value for a log line (CWE-117). It is written once with its two bounds, `_LOG_VALUE_WIDTH` and `_LOG_KEYS_SHOWN`, and it replaced three identical hand copies in `mcp-proxy`, `mcp-search` and `llm-router` `Scripts/_mcp_logging.py:_log_value`. The logging source is the right home because the block decides how a value is written into a log line. It reads no `log` and calls no logger, so it does not cross into what gets logged, the wire log of [[0011-a-truncated-payload-carries-the-first-cookie]], which stays out of the source. The source docstring now names it as the second block.
+
+### Counts superseded
+
+The statement under "The rule for a sixth source" that `_mcp_logging.py` holds one block is superseded, and so is thread 3 of the 2026-09-29 addendum, which lists it as a one-block source. The source now defines four blocks: `_configure_logging`, `_LOG_VALUE_WIDTH`, `_LOG_KEYS_SHOWN` and `_log_value`. `_mcp_concurrency.py` is the only one-block source left. As before, block count is not the test, and the source took the renderer because the renderer belongs to the same domain. The rendered per-source table in [[generated-regions]] is the authority for the current counts.

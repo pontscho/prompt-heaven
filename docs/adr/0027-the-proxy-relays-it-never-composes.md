@@ -455,3 +455,37 @@ This closes **F42** ("pre-auth refusals use the stdlib's error pages") in "Verif
 `serve_http`'s shutdown now ends by calling `_http_remove_ready_file`, which opens the ready file with `O_NOFOLLOW`, reads its JSON, and unlinks it only when its `pid` equals `os.getpid()`; a symlink at the path, another pid, non-JSON or an unreadable file is left alone and logged at DEBUG, structure only. It never raises. This is the router's V24 fix (ADR 0028 deviation 29). J45 checks three modes after SIGTERM: the proxy's own file is removed; a file rewritten with a foreign pid is left unchanged; and a symlink at the ready path pointing at a sentinel that holds the proxy's OWN pid leaves both the link and the sentinel, so only `O_NOFOLLOW`, not the pid check, can be what protects them.
 
 Declared, not gated: a file replaced between the read and the unlink is not seen, and the replacement is removed; SIGKILL, or any exit that skips the ordered shutdown, leaves the file behind with a dead pid. These join the declared limits above.
+
+## Addendum (2026-10-07): strict JSON on both fronts and the generated _log_value (R-0067, R-0068, R-0070)
+
+Two fleet-wide commits on 2026-10-07 changed the proxy. They closed two findings listed under "Verified, and deliberately not fixed" and replaced one hand-written helper with generated code.
+
+### R-0067 and R-0068: every frame is parsed and written strictly (`d4a241b`, G8, J46)
+
+The proxy took the six strict-JSON blocks from `Scripts/_mcp_json.py` as a new generated region `Scripts/mcp-proxy.py:_strict_loads`. It routes every frame it reads or writes through them, on both fronts and in both directions:
+
+- the stdio read loop;
+- the child reader;
+- `_send_line` to a child;
+- `_write` and its fallback;
+- `_fallback_id`;
+- the HTTP `_post`, `_send_json` and `_stream_sse`.
+
+`NaN`, `Infinity`, `-Infinity`, a float that overflows to an infinity (`1e999`) and an integer literal over 4300 characters, sign included, are each refused as a `json.JSONDecodeError` on every Python. They are answered `-32700` on both fronts. A non-finite float is never emitted.
+
+- **F19 / R-0067 is closed.** `NaN` and `Infinity` are no longer accepted and re-emitted as non-JSON.
+- **F20 / R-0068 is closed.** The module docstring's old declared limit is replaced: "on Python < 3.9.14 a huge integer literal parses at quadratic cost (CVE-2020-10735)". The literal is now refused before `int()` sees it, so 3.9.6's missing int-digit limit no longer matters on a frame.
+
+The config and the ready file are still read with plain `json.loads`, because neither is a peer's frame. `tests/test_generated_region.py:STRICT_JSON_EXCEPTIONS` declares both sites, and so does the ready-file write. `mcp_proxy` went from 106 to 108 cases.
+
+### A new declared limit: a refused child line is dropped
+
+The child reader treats a line the strict parse refuses exactly like any other non-JSON stdout line under the frame limit. The line is dropped and logged at DEBUG with the child's name and the line's length only. The upstream call that line would have answered is not failed at once. It waits for the child's `call_timeout`. This is declared in the module docstring and not gated.
+
+### R-0070: `_log_value` is the generated block (`72ed9b4`)
+
+Round 3 above credits `Scripts/mcp-proxy.py:_log_value` with the `...` cut marker. The proxy's hand-written copy and its two bounds are gone. The name now resolves to the block generated from `Scripts/_mcp_logging.py`, which has the same behaviour, cut marker included, and proxy case L4 stays green. The "Logging" declared limit stands as written. Child-side and HTTP logging remain outside the `wire_log` gate, and a child-controlled method or id goes through `_log_value`.
+
+### Not changed
+
+Alternative 13 ("Taking more generated regions for consistency") is not reversed. Each of the two new regions has live call sites in the proxy and is required fleet-wide by a gate: `tests/test_generated_region.py` group H for the strict blocks, and `tests/test_wire_log.py` group C for `_log_value`.

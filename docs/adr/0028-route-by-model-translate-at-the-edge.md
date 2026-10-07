@@ -1195,3 +1195,17 @@ a5a27bb, `llm_router` 363 -> 371 (J34 J35 K26 N36-N39 O17), `mcp_oauth` 64 -> 65
 One `_RtKindRow` table, `_RT_KIND_TABLE` (kind, adapter class or `None` for a reserved kind, auth mode -> Responses profile), sits after the adapter classes. `_KINDS`, `RESERVED_KINDS`, `_RT_KIND_AUTH_PROFILES`, `KIND_CLASSES` and `ADAPTERS` are derived from it with the values and order they had, and `_rt_check_kind_table` refuses a bad row at import. The unused `_rt_kind_auth_profiles()` is removed; the A14 refusal texts are unchanged. J37 (each name bound once from the table, never a literal, never mutated), J38 (six planted violations) and J39 (the values pinned, six broken tables refused, the A14 texts byte-exact) ran red first. `llm_router` 379 -> 382.
 
 **Limit 25 is closed**, and with it the M5 note R-0084 was filed under: the four registries are no longer listed, not gated -- they are derived from one table and gated by J37-J39, the registry half of NFR-2 that J28 did not cover. KD-12's case of a kind in `KIND_CLASSES` but not in `ADAPTERS` can no longer come from the table, since both derive from the same rows; the 501 guard stays, for a kind that loads without an adapter. **Still a code edit for a new kind:** mistral's two auth special cases.
+
+## Addendum (2026-10-07): _log_value is generated, no longer a copy of the proxy's (R-0070)
+
+"The HTTP front is a copy" lists row P16: `_log_value`, copied verbatim from `Scripts/mcp-proxy.py` with `_LOG_VALUE_WIDTH = 80` and `_LOG_KEYS_SHOWN = 16`. It also names `_log_value` as one of the three verbatim units the two files share. `72ed9b4` (R-0070) lifted that unit into the canonical logging source `Scripts/_mcp_logging.py:_log_value` and generated it into all 17 servers and into the router. The router's hand copy and its two constants were deleted. The router now carries `_LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value` as one generated region beside `_configure_logging` `Scripts/llm-router.py:_log_value`. The behaviour is byte-identical, and router case J11 stays green.
+
+### What this changes on this page
+
+- **Row P16 is no longer a hand-held copy.** `amalgamate.py --check` now holds it equal to the proxy's, through the canonical source. "A later lift is a move without renames" turned out to be true: the name was kept, and so were the two constant names the tests read.
+- **Two verbatim units remain hand-held:** `_http_token_value` and `_HeaderDeadlineReader`. The second is adapted since validation round 1. These and the adapted front are still the drift risk (R13) that the canonical-source lift of the front (roadmap R-0072) would have to reconcile.
+- **The router's declared hand copies are unchanged.** They are still the three `Scripts/_mcp_chrome.py` address-classifier names in "The hand copies". `_log_value` was never among them, because it is not a canonical-block name the hand-copy census could see until this commit made it one.
+
+### Not taken
+
+The router did not take the six strict-JSON blocks that `d4a241b` (R-0067, R-0068) generated into the MCP fleet. Its request bodies are still parsed by its own `_rt_loads` (deviation 20 and F9 above), which already refuses non-finite numbers and integer literals over 4300 characters. The fleet's `_strict_loads` mirrors its bound and refusal style.
