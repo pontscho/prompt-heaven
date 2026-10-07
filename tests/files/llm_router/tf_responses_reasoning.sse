@@ -1,0 +1,60 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_tf_m_reasoning","object":"response","created_at":1759622400,"status":"in_progress","model":"gpt-tf-upstream","output":[],"usage":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_tf_m_reasoning","object":"response","created_at":1759622400,"status":"in_progress","model":"gpt-tf-upstream","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_tf_m_reasoning","type":"reasoning","summary":[]}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","sequence_number":3,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":4,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":0,"delta":"**Reading the request**\n\nThe user"}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":5,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":0,"delta":" says hello ✓ tf m2."}
+
+event: response.reasoning_summary_text.done
+data: {"type":"response.reasoning_summary_text.done","sequence_number":6,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":0,"text":"**Reading the request**\n\nThe user says hello ✓ tf m2."}
+
+event: response.reasoning_summary_part.done
+data: {"type":"response.reasoning_summary_part.done","sequence_number":7,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"**Reading the request**\n\nThe user says hello ✓ tf m2."}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","sequence_number":8,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":1,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":9,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":1,"delta":"**Answering briefly**"}
+
+event: response.reasoning_summary_text.done
+data: {"type":"response.reasoning_summary_text.done","sequence_number":10,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":1,"text":"**Answering briefly**"}
+
+event: response.reasoning_summary_part.done
+data: {"type":"response.reasoning_summary_part.done","sequence_number":11,"item_id":"rs_tf_m_reasoning","output_index":0,"summary_index":1,"part":{"type":"summary_text","text":"**Answering briefly**"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":12,"output_index":0,"item":{"id":"rs_tf_m_reasoning","type":"reasoning","encrypted_content":"gAAAAABo-tf_m2_reasoning_placeholder_0001+/QrSt_uV==","summary":[{"type":"summary_text","text":"**Reading the request**\n\nThe user says hello ✓ tf m2."},{"type":"summary_text","text":"**Answering briefly**"}]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":13,"output_index":1,"item":{"id":"msg_tf_m_reasoning","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":14,"item_id":"msg_tf_m_reasoning","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":15,"item_id":"msg_tf_m_reasoning","output_index":1,"content_index":0,"delta":"Hi"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":16,"item_id":"msg_tf_m_reasoning","output_index":1,"content_index":0,"delta":" there, tf m2!"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","sequence_number":17,"item_id":"msg_tf_m_reasoning","output_index":1,"content_index":0,"text":"Hi there, tf m2!"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":18,"output_index":1,"item":{"id":"msg_tf_m_reasoning","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi there, tf m2!","annotations":[]}]}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":19,"response":{"id":"resp_tf_m_reasoning","object":"response","created_at":1759622400,"status":"completed","model":"gpt-tf-upstream","output":[{"id":"rs_tf_m_reasoning","type":"reasoning","encrypted_content":"gAAAAABo-tf_m2_reasoning_placeholder_0001+/QrSt_uV==","summary":[{"type":"summary_text","text":"**Reading the request**\n\nThe user says hello ✓ tf m2."},{"type":"summary_text","text":"**Answering briefly**"}]},{"id":"msg_tf_m_reasoning","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi there, tf m2!","annotations":[]}]}],"usage":{"input_tokens":140,"input_tokens_details":{"cached_tokens":40},"output_tokens":72,"output_tokens_details":{"reasoning_tokens":64},"total_tokens":212}}}
+

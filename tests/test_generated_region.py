@@ -140,6 +140,7 @@ LOGGING_SOURCE = H.repo_path("Scripts", "_mcp_logging.py")
 LSP_SOURCE = H.repo_path("Scripts", "_mcp_lsp.py")
 PAGING_SOURCE = H.repo_path("Scripts", "_mcp_paging.py")
 WEBSOCKET_SOURCE = H.repo_path("Scripts", "_mcp_websocket.py")
+OAUTH_SOURCE = H.repo_path("Scripts", "_mcp_oauth.py")
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
 TARGET = H.repo_path("Scripts", "mcp-purity.py")
 SCRIPTS = H.repo_path("Scripts")
@@ -160,6 +161,7 @@ CHROME_CANONICAL_NAME = "_mcp_chrome.py"
 ZSTD_CANONICAL_NAME = "_mcp_zstd.py"
 WEBSEARCH_CANONICAL_NAME = "_mcp_websearch.py"
 CODESEARCH_CANONICAL_NAME = "_mcp_codesearch.py"
+OAUTH_CANONICAL_NAME = "_mcp_oauth.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
@@ -171,8 +173,8 @@ CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
                    CODESEARCH_CANONICAL_NAME,
                    CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
                    LOGGING_CANONICAL_NAME,
-                   LSP_CANONICAL_NAME, PAGING_CANONICAL_NAME,
-                   WEBSEARCH_CANONICAL_NAME,
+                   LSP_CANONICAL_NAME, OAUTH_CANONICAL_NAME,
+                   PAGING_CANONICAL_NAME, WEBSEARCH_CANONICAL_NAME,
                    WEBSOCKET_CANONICAL_NAME, ZSTD_CANONICAL_NAME)
 
 # The hosts OUTSIDE `TARGET_GLOB`, mirrored for the reason the source registry
@@ -210,6 +212,35 @@ WEBSOCKET_CORE = ("WebSocketError", "WS_MAX_HANDSHAKE_BYTES",
                   "_ws_handshake_split", "_ws_handshake_verify", "_ws_mask",
                   "_ws_encode_frame", "_ws_parse_frame", "_ws_assemble",
                   "_ws_control_reply", "_WsConnection", "_ws_step")
+
+# The OAuth blocks call one another the same way, so every real host spells ONE
+# marker for them too: the sans-IO core below, in source order, then the I/O
+# wrapper it uses (`_oauth_listen`, `_oauth_sync_accept_callback`). The tab
+# fixture renders each block inside exactly that shape, for the reason it does
+# the websocket ones.
+OAUTH_CORE = ("OAUTH_TOKEN_LIMIT", "OAUTH_BODY_LIMIT", "OAUTH_JWT_LIMIT",
+              "OAUTH_INT_LITERAL_LIMIT", "OAUTH_REFRESH_SKEW_S", "OAUTH_MIN_REFRESH_INTERVAL_S",
+              "OAUTH_CALLBACK_HEAD_LIMIT",
+              "OAUTH_CALLBACK_BAD_LIMIT", "OAUTH_CALLBACK_CONN_TIMEOUT_S",
+              "OAUTH_ERROR_KINDS", "OAUTH_RELOGIN_CODES", "OAUTH_ERROR_CODES",
+              "OAUTH_TRANSIENT_CODES", "OAUTH_CODE_ALPHABET",
+              "OAUTH_B64URL_ALPHABET", "OAUTH_ID_ALPHABET", "OAuthError",
+              "_oauth_pairs_ok", "OAuthProvider", "_oauth_b64url",
+              "_oauth_b64url_decode", "_oauth_pkce_pair", "_oauth_new_state",
+              "_oauth_uuid4_urn", "_oauth_token_ok", "_oauth_state_matches",
+              "_oauth_authorize_url", "_oauth_form_headers",
+              "_oauth_json_headers", "_oauth_exchange_request",
+              "_oauth_refresh_request", "_oauth_device_start_request",
+              "_oauth_device_poll_request", "_oauth_error_code",
+              "_oauth_no_duplicate_keys", "_oauth_no_constant",
+              "_oauth_bounded_int", "_oauth_json_object", "_oauth_status_refusal",
+              "_oauth_error_refusal", "_oauth_parse_token_response",
+              "_oauth_device_interval", "_oauth_parse_device_start",
+              "_oauth_parse_device_poll", "_oauth_id_ok", "_oauth_jwt_claims",
+              "_oauth_check_id_token", "_oauth_scope_has",
+              "_oauth_account_claims", "_oauth_token_due",
+              "_oauth_parse_callback", "_oauth_callback_page",
+              "_oauth_callback_verdict")
 
 GA = "A. GATE: live regions match their canonical source"
 GB = "B. CONTRACT: marker spelling, hashing, anchoring, layout, disjointness"
@@ -344,7 +375,8 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
 
     The two search sources paid it a sixth time, for `random`, `parse_qs`,
     `urlencode` and `HTMLParser` -- both taken whole, like the Chrome client --
-    and then a seventh, for `unicodedata`, when both took a render sanitizer.
+    and then a seventh, for `unicodedata`, when both took a render sanitizer,
+    and an eighth, for `secrets` and `select`, when the OAuth core arrived.
     """
     return (
         '"""A tab-indented target."""\n'
@@ -362,6 +394,8 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "import pathlib\n"
         "import random\n"
         "import re\n"
+        "import secrets\n"
+        "import select\n"
         "import socket\n"
         "import ssl\n"
         "import struct\n"
@@ -378,7 +412,7 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "def _existing():\n"
         "\tif True:\n"
         "\t\treturn asyncio, json, logging, os, pathlib, re, sys, Any\n"
-        "\treturn urlparse, url2pathname\n"
+        "\treturn urlparse, url2pathname, secrets, select\n"
         "\n\n"
         "%s %s :: %s\n" % (BEGIN_PREFIX, source, names)
         + "%s\n" % END_PREFIX
@@ -1857,6 +1891,11 @@ def group_tabs(suite, mod):
     for name in sources.get(WEBSOCKET_CANONICAL_NAME, {}):
         extra = () if name in WEBSOCKET_CORE else (name,)
         paired[name] = ", ".join(WEBSOCKET_CORE + extra)
+    # Every OAuth block, the same way: the core, plus the block itself when it
+    # is a wrapper.
+    for name in sources.get(OAUTH_CANONICAL_NAME, {}):
+        extra = () if name in OAUTH_CORE else (name,)
+        paired[name] = ", ".join(OAUTH_CORE + extra)
     problems, emitted = [], 0
     for name in safe:
         source = next(s for s, blocks in sources.items() if name in blocks)
@@ -2601,7 +2640,8 @@ def run(opts=None):
     pyc_before = H.pycache_snapshot()
     digests_before = {p: H.sha256_file(p) for p in
                       (SOURCE, CONCURRENCY_SOURCE, LOGGING_SOURCE, LSP_SOURCE,
-                       PAGING_SOURCE, WEBSOCKET_SOURCE, GENERATOR, TARGET)}
+                       PAGING_SOURCE, WEBSOCKET_SOURCE, OAUTH_SOURCE, GENERATOR,
+                       TARGET)}
 
     mod = H.load_module_from_path("amalgamate_under_test", GENERATOR)
     blocks = H.load_module_from_path("mcp_json_under_test", SOURCE)

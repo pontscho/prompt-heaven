@@ -13,6 +13,7 @@ sources:
   - Scripts/_mcp_json.py
   - Scripts/_mcp_logging.py
   - Scripts/_mcp_lsp.py
+  - Scripts/_mcp_oauth.py
   - Scripts/_mcp_paging.py
   - Scripts/_mcp_websearch.py
   - Scripts/_mcp_websocket.py
@@ -48,7 +49,7 @@ decoders they share with `Scripts/mcp-webfetch.py` and `Scripts/mcp-search.py`,
 and each takes the search domain it shares with `Scripts/mcp-search.py` — web
 search for the DDG script, code search for the grep.app one. The LLM router
 `Scripts/llm-router.py`, an HTTP server that is not an MCP server, takes the
-logging block only. They are targets because the generator **names them
+logging block and the OAuth client. They are targets because the generator **names them
 by hand** `Scripts/amalgamate.py:DECLARED_HOSTS` — see "A host outside the glob"
 below — not because anything about them matches the server glob.
 
@@ -131,7 +132,7 @@ scanner, which is the rule that lets a page document the marker it also carries
 - MCP servers matching `Scripts/mcp-*.py`: 17, of which 17 carry at least one generated region
 - live generated regions in them: 132
 - block instances those regions emit: 605
-- distinct canonical blocks named on a marker: 279, out of the 283 defined by the 11 canonical sources
+- distinct canonical blocks named on a marker: 279, out of the 338 defined by the 12 canonical sources
 
 Regions by how many blocks one marker names: 81 name 1 block; 42 name 2 blocks; 1 name 18 blocks; 1 name 19 blocks; 2 name 21 blocks; 2 name 25 blocks; 1 name 37 blocks; 2 name 137 blocks.
 
@@ -155,7 +156,7 @@ The 51 region(s) that name more than one block, by the list written on the marke
 Generated into every one of the 17 servers: `_configure_logging`.
 Generated into every server but `Scripts/mcp-proxy.py`: `_json_error_window`.
 Generated into every server but `Scripts/mcp-webfetch.py`: `_error`, `_result`.
-<!-- END MEASURED: b63ec7005fb8 -->
+<!-- END MEASURED: 1e4dbe1229e5 -->
 
 A single region may name several blocks, and that is the whole of the gap between
 the region count and the block-instance count.
@@ -166,7 +167,7 @@ left them in: the first two had read `70` and `84` since before the logging
 source existed, and the third read `11` against a table that summed to thirteen
 further down this same page.
 
-## Eleven canonical sources, and why eleven
+## Twelve canonical sources, and why twelve
 
 The registry is a hand-written tuple, not a glob `Scripts/amalgamate.py:CANONICAL_NAMES`,
 because a glob would let an unrelated file become a generation source by merely
@@ -210,6 +211,7 @@ decides when a sixth source is warranted are
 | `Scripts/_mcp_json.py` | JSON-RPC envelopes, wire-value coercion, JSON error reporting |
 | `Scripts/_mcp_logging.py` | how a server CONFIGURES logging — level, sink, file mode |
 | `Scripts/_mcp_lsp.py` | how the LSP wire is spoken — `Content-Length` framing for a message, the `file://` DocumentUri for a path, the client-side hops that put a message on that wire, and the two spellings of a resolved path |
+| `Scripts/_mcp_oauth.py` | how a native public client obtains, keeps and renews an OAuth 2.0 / OIDC grant — PKCE, the authorize redirect, the code, refresh and device grants, the token-endpoint answers and the ID-token claims, and the loopback redirect it listens on |
 | `Scripts/_mcp_paging.py` | how much of a result a caller gets, and how it is told where the rest is |
 | `Scripts/_mcp_websearch.py` | how a query becomes web results — the request each endpoint (DDG lite, Bing) is sent, the page it answers with and how it is parsed, the block signal, and the run loop that moves a batch from DDG to Bing |
 | `Scripts/_mcp_websocket.py` | how a client speaks the WebSocket wire — the upgrade, the frames, message assembly, the control frames it must answer, and the ceilings on what a peer can make it allocate |
@@ -249,7 +251,7 @@ results are recorded in [[0026-speak-chrome-from-the-stdlib-verify-by-default]];
 `tests/test_mcp_chrome.py` and `tests/test_mcp_decoders.py`, again rather than
 group E here.
 
-The newest two arrived together with `Scripts/mcp-search.py` (`8dde3a6`), when the
+Two more arrived together with `Scripts/mcp-search.py` (`8dde3a6`), when the
 search code left the two CLIs: `Scripts/_mcp_websearch.py`, how a query becomes
 web results (DDG lite first, Bing after a DDG block), and
 `Scripts/_mcp_codesearch.py`, how a query becomes code results from grep.app. They
@@ -286,6 +288,34 @@ Unicode class they judge and fails on any disagreement
 stay disjoint (`sources-disjoint`); the agreement is a behavioural gate, not a
 naming one.
 
+`Scripts/_mcp_oauth.py` is the twelfth, and the newest. It arrived with the
+router's `codex` and `openai` backends, which hold an OAuth grant, refresh it
+while they serve, and log in through the router's `login` subcommand. Its one
+host is `Scripts/llm-router.py`. Neither the Chrome source nor the WebSocket one
+could hold it without becoming a shelf: one answers how a client looks like
+Chrome on the wire, the other a frame protocol, and neither says what a grant
+is or when it is dead. The source holds the **protocol only**. The provider
+rows (endpoints, client ids, scopes) are one vendor's data and stay in the host,
+written with the source's row type `Scripts/llm-router.py:_rt_oauth_providers`.
+The transport and the clock are **injected**: every request builder returns
+`(url, headers, body)` for the host to send, and no block reads the time, so the
+router's own framing and address policy guard the token endpoint
+`Scripts/_mcp_oauth.py`. It is not a `WHOLE_SOURCES` entry. It follows the
+websocket shape instead: a sans-IO core, then a two-block loopback wrapper
+(`_oauth_listen`, `_oauth_sync_accept_callback`), all on one marker with the
+core first. The suite mirrors the core's list by hand as `OAUTH_CORE`, as it does
+`WEBSOCKET_CORE`, so a block added to the source and not to the mirror fails by
+name. The security review's F2 and F9 fixes were the first such additions:
+`OAUTH_MIN_REFRESH_INTERVAL_S` (a floor on clock-driven refreshes),
+`OAUTH_INT_LITERAL_LIMIT` and `_oauth_bounded_int` (a bound on a JSON integer
+literal's length) joined the source, `OAUTH_CORE` and the router's marker
+together. The behaviour is gated by its own suite, `tests/test_mcp_oauth.py`,
+rather than by group E here. The domain decision, the plan's ordinal for it and
+why it is not whole are recorded in
+[[0014-a-canonical-source-is-a-domain]] (addendum); the injected transport and
+clock as the way a protocol source stays host-neutral are recorded in
+[[0025-generate-do-not-import]] (addendum).
+
 That column is the half no command can print: a domain is a decision about what a
 source is *for*. What each source actually **defines** is measured
 `Scripts/amalgamate.py:census_sources`, and the two tables are deliberately not
@@ -304,13 +334,14 @@ answer, and the one thing this page must not let a generator answer for them.
 | `Scripts/_mcp_json.py` | 6 | `_bool_param`, `_ensure_dict`, `_error`, `_int_param`, `_json_error_window`, `_result` |
 | `Scripts/_mcp_logging.py` | 1 | `_configure_logging` |
 | `Scripts/_mcp_lsp.py` | 7 | `_abs_path`, `_abs_uri`, `_notify`, `_request`, `encode_lsp_message`, `path_to_uri`, `uri_to_path` |
+| `Scripts/_mcp_oauth.py` | 55 | `OAUTH_B64URL_ALPHABET`, `OAUTH_BODY_LIMIT`, `OAUTH_CALLBACK_BAD_LIMIT`, `OAUTH_CALLBACK_CONN_TIMEOUT_S`, `OAUTH_CALLBACK_HEAD_LIMIT`, `OAUTH_CODE_ALPHABET`, `OAUTH_ERROR_CODES`, `OAUTH_ERROR_KINDS`, `OAUTH_ID_ALPHABET`, `OAUTH_INT_LITERAL_LIMIT`, `OAUTH_JWT_LIMIT`, `OAUTH_MIN_REFRESH_INTERVAL_S`, `OAUTH_REFRESH_SKEW_S`, `OAUTH_RELOGIN_CODES`, `OAUTH_TOKEN_LIMIT`, `OAUTH_TRANSIENT_CODES`, `OAuthError`, `OAuthProvider`, `_oauth_account_claims`, `_oauth_authorize_url`, `_oauth_b64url`, `_oauth_b64url_decode`, `_oauth_bounded_int`, `_oauth_callback_page`, `_oauth_callback_verdict`, `_oauth_check_id_token`, `_oauth_device_interval`, `_oauth_device_poll_request`, `_oauth_device_start_request`, `_oauth_error_code`, `_oauth_error_refusal`, `_oauth_exchange_request`, `_oauth_form_headers`, `_oauth_id_ok`, `_oauth_json_headers`, `_oauth_json_object`, `_oauth_jwt_claims`, `_oauth_listen`, `_oauth_new_state`, `_oauth_no_constant`, `_oauth_no_duplicate_keys`, `_oauth_pairs_ok`, `_oauth_parse_callback`, `_oauth_parse_device_poll`, `_oauth_parse_device_start`, `_oauth_parse_token_response`, `_oauth_pkce_pair`, `_oauth_refresh_request`, `_oauth_scope_has`, `_oauth_state_matches`, `_oauth_status_refusal`, `_oauth_sync_accept_callback`, `_oauth_token_due`, `_oauth_token_ok`, `_oauth_uuid4_urn` |
 | `Scripts/_mcp_paging.py` | 7 | `DEFAULT_MAX_ANSWER_CHARS`, `DEFAULT_MAX_CHARS`, `PAGE_LINE_RESERVE`, `_FENCE_LINE_RE`, `_max_answer_chars`, `_offset`, `_rows_note` |
 | `Scripts/_mcp_websearch.py` | 37 | `_DDG_CHALLENGE_MARKERS`, `_END_PRIORITY`, `_END_PRIORITY_DEFAULT`, `_FONTSTYLE`, `_H`, `_LISTING`, `_LiteParser`, `_Node`, `_START_CLOSE`, `_TREE_MAX_DEPTH`, `_TREE_SCAN_BUDGET`, `_TreeBuilder`, `_VOID_TAGS`, `_WEB_LINE_SEPARATORS`, `_WEB_URL_SAFE`, `_bing_blocked`, `_child_elements`, `_ddg_blocked`, `_decode_bing_url`, `_descendant_text`, `_end_priority`, `_has_class`, `_iter_elements`, `_normalize`, `_raw_href`, `_start_close`, `_web_clean`, `_web_line`, `_web_url`, `decode_duckduckgo_url`, `format_web_results`, `parse_bing_results`, `parse_lite_results`, `run_web`, `search_bing`, `search_ddg`, `warmup_session` |
 | `Scripts/_mcp_websocket.py` | 22 | `WS_MAX_FRAME_BYTES`, `WS_MAX_HANDSHAKE_BYTES`, `WS_MAX_MESSAGE_BYTES`, `WebSocketError`, `_WsConnection`, `_ws_assemble`, `_ws_connect`, `_ws_control_reply`, `_ws_encode_frame`, `_ws_handshake_request`, `_ws_handshake_split`, `_ws_handshake_verify`, `_ws_mask`, `_ws_parse_frame`, `_ws_parse_url`, `_ws_recv`, `_ws_send`, `_ws_step`, `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send` |
 | `Scripts/_mcp_zstd.py` | 25 | `ZSTD_DIRS_LINUX`, `ZSTD_DIRS_MACOS`, `ZSTD_FILES_LINUX`, `ZSTD_FILES_MACOS`, `ZSTD_MAX_CHUNK_BYTES`, `ZSTD_SONAMES_LINUX`, `ZSTD_SONAMES_MACOS`, `ZSTD_WINDOW_LOG_MAX`, `_ZSTD_D_WINDOW_LOG_MAX`, `_ZSTD_FRAME_MAGIC`, `_ZSTD_SKIPPABLE_TAIL`, `_ZSTD_STATE`, `_ZSTD_SYMBOLS`, `_ZstdInBuffer`, `_ZstdOutBuffer`, `_zstd_attempts`, `_zstd_cdll`, `_zstd_check_magic`, `_zstd_configure`, `_zstd_decompress`, `_zstd_error`, `_zstd_exists`, `_zstd_find_library`, `_zstd_load`, `_zstd_platform` |
 
-11 canonical sources define 283 blocks between them, and no name is defined by two of them.
-<!-- END MEASURED: bc26888754d8 -->
+12 canonical sources define 338 blocks between them, and no name is defined by two of them.
+<!-- END MEASURED: 80a1139baf6b -->
 
 Its closing line is the disjointness the suite gates as a check rather than a
 count. The paging row read `5` until the edit that added the logging row: the
@@ -352,6 +383,61 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `encode_lsp_message` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
 | `path_to_uri` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
 | `uri_to_path` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
+| `OAUTH_B64URL_ALPHABET` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_BODY_LIMIT` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_CALLBACK_BAD_LIMIT` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_CALLBACK_CONN_TIMEOUT_S` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_CALLBACK_HEAD_LIMIT` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_CODE_ALPHABET` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_ERROR_CODES` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_ERROR_KINDS` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_ID_ALPHABET` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_INT_LITERAL_LIMIT` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_JWT_LIMIT` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_MIN_REFRESH_INTERVAL_S` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_REFRESH_SKEW_S` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_RELOGIN_CODES` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_TOKEN_LIMIT` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAUTH_TRANSIENT_CODES` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAuthError` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `OAuthProvider` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_account_claims` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_authorize_url` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_b64url` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_b64url_decode` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_bounded_int` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_callback_page` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_callback_verdict` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_check_id_token` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_device_interval` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_device_poll_request` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_device_start_request` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_error_code` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_error_refusal` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_exchange_request` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_form_headers` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_id_ok` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_json_headers` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_json_object` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_jwt_claims` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_listen` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_new_state` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_no_constant` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_no_duplicate_keys` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_pairs_ok` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_parse_callback` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_parse_device_poll` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_parse_device_start` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_parse_token_response` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_pkce_pair` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_refresh_request` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_scope_has` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_state_matches` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_status_refusal` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_sync_accept_callback` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_token_due` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_token_ok` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
+| `_oauth_uuid4_urn` | `Scripts/_mcp_oauth.py` | 1 | `Scripts/llm-router.py` |
 | `DEFAULT_MAX_ANSWER_CHARS` | `Scripts/_mcp_paging.py` | 7 | `Scripts/mcp-context7.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py` |
 | `DEFAULT_MAX_CHARS` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-wiki.py` |
 | `PAGE_LINE_RESERVE` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-webfetch.py` |
@@ -384,8 +470,8 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 0 | no host |
 | `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 4 | `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 
-20 hosts scanned; 283 canonical blocks, of which 279 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
-<!-- END MEASURED: 55ce55e92db3 -->
+20 hosts scanned; 338 canonical blocks, of which 334 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
+<!-- END MEASURED: 3b847c3ecbad -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
@@ -401,8 +487,8 @@ oversight — the pair renders the reader together with its own `24000`
 `Scripts/_mcp_paging.py:DEFAULT_MAX_ANSWER_CHARS`, so taking the marker would
 take the value.
 
-The logging source is the newest and the only one whose domain is defined by
-what it EXCLUDES. Configuring logging is not the same question as what gets
+The logging source is the only one whose domain is defined by what it
+EXCLUDES. Configuring logging is not the same question as what gets
 logged: the wire log is a security invariant decided in
 [[0011-a-truncated-payload-carries-the-first-cookie]] and gated by
 `tests/test_wire_log.py`, and that ADR already rejected lifting `_write` into a
@@ -579,7 +665,10 @@ rather than by the fleet census.
 
 `Scripts/llm-router.py` is the third declared host, and the first that shares no
 domain with the other two: a stdlib HTTP server run by path, not an MCP server,
-and space-indented. It takes `_configure_logging` only. The `_mcp_chrome.py`
+and space-indented. It takes two sources: `_configure_logging` from the logging
+source, and the OAuth client from `Scripts/_mcp_oauth.py` on one marker, the
+sans-IO core then its loopback wrapper. It did not have to be declared again
+for the second source, because the host list names files, not sources. The `_mcp_chrome.py`
 address classifier it needs for its upstream connections is kept as declared
 hand copies rather than generated — the router takes a few of that source's
 blocks, and the Chrome client is a source a host takes whole or not at all — so

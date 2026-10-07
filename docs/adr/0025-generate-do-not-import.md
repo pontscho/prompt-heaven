@@ -140,3 +140,20 @@ equal.
 - **The gate carries the rule.** `tests/test_generated_region.py` proves the
   copies match the canonical text and exercises each block once. Its module
   docstring states the single-file reason too.
+
+## Addendum (2026-10-07): a second canonical source in a host that is not a server
+
+`Scripts/llm-router.py` is the third declared host `Scripts/amalgamate.py:DECLARED_HOSTS`, and until its `codex` and `openai` kinds it took one block, `_configure_logging`. It now takes a second canonical source, `Scripts/_mcp_oauth.py`, on one marker that names the OAuth core and its two-block loopback wrapper. The declared-host tuple did not grow: it holds the same three names, because the router was already in it.
+
+### The grounds, re-checked for the router
+
+The router is run by path, as the DDG search script was when [[0023-the-websocket-client-is-a-sixth-domain]] re-checked this decision. Grounds 1 and 4 apply to it in the same way. An imported `_mcp_oauth.py` would write `Scripts/__pycache__` the first time the router started without `-B`. A copy of the router taken on its own would stop at an `ImportError` the moment a `codex` or `openai` backend, or the `login` subcommand, needed the OAuth code. Taking a second source changes neither answer, so the rule held for the router with no exception written for it.
+
+### An injected transport and clock keep a protocol source host-neutral
+
+The consequence above, that a shared helper must be pasteable, limits a block to builtins, the stdlib and names the host imports. A protocol client has two further dependencies that a pasted block cannot own without choosing them for every host: a transport and a clock. The OAuth source owns neither `Scripts/_mcp_oauth.py`:
+
+- **The transport is the host's.** Every request builder returns `(url, headers, body)`, and the host sends it. In the router that is the single framing owner `Scripts/llm-router.py:_rt_send`, so the address policy, the trust store and the timeouts that guard the upstream traffic guard the token endpoint too. The alternative, a source that performs its own HTTP with `http.client`, was refused: it would have generated a second header-writing site and a second TLS and SSRF path into the host, outside the router's own static rules.
+- **The clock is the host's.** No block reads the time. `now` is an argument, and the callback acceptor takes a `clock` callable. A test pins the time instead of sleeping through it, and the host keeps the one clock its own deadlines already use.
+
+This is the rule the search sources already followed for their session, which is injected and never created `Scripts/_mcp_websearch.py:run_web`, now stated for a protocol source. Generation copies code, not policy, so a canonical source that would otherwise carry a policy takes it as an argument. A second host gets the protocol without the router's choices.

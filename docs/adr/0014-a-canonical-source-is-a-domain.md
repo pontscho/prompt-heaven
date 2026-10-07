@@ -224,3 +224,25 @@ R-0002 found the consequence for the sources themselves (`43140ae`, and this pag
 ### 3. One-block sources stay separate
 
 `Scripts/_mcp_concurrency.py` and `Scripts/_mcp_logging.py` each hold one block, and neither is merged into another source. Block count never triggers a merge. This page already says so: "Block count is not the test; domain is." A merge would make the receiving source hold two domains, which is the shelf this page refuses. The question is revisited only if a source's domain argument fails, never because the source stayed small.
+
+## Addendum (2026-10-07): the twelfth registry entry, the OAuth client source
+
+The llm-router `codex` and `openai` kinds added `Scripts/_mcp_oauth.py` to the registry `Scripts/amalgamate.py:CANONICAL_NAMES` and to its hand mirror in `tests/test_generated_region.py`. This is a domain decided under this page's rule, not a source ratified after the fact.
+
+### Two counts, and which one is a measurement
+
+The registry now holds twelve names, counted in both tuples (the generator's and the suite's mirror) on the working tree over `76fa06a`. The plan called the source the seventh domain decision, continuing the ordinal [[0023-the-websocket-client-is-a-sixth-domain]] started; [[0027-the-proxy-relays-it-never-composes]] used the same ordinal for the `_mcp_mcpclient.py` it refused. That ordinal is a label, not a count anything reproduces: the Chrome client and its two decoders arrived as one decision and the two search sources as another, so no rule turns eleven files into six decisions. The number `sources-registered` checks is the registry entry, twelve, and that is the number [[generated-regions]] uses. The ordinal is recorded here only so the plan's word can be traced.
+
+### Why neither the Chrome nor the WebSocket source holds it
+
+- `Scripts/_mcp_chrome.py` answers how a client's bytes look like Chrome's on the wire. The OAuth source puts no bytes on a wire of its own: every request builder returns `(url, headers, body)` and the host posts it through its own transport `Scripts/_mcp_oauth.py:_oauth_refresh_request`. What to send to a token endpoint and what its answer means is not a wire question. Filing it there would also have put it out of its one host's reach: the Chrome source is in `WHOLE_SOURCES`, and the router takes none of the client. Its address classifier is three declared hand copies `Scripts/amalgamate.py:HAND_COPY_REASONS`.
+- `Scripts/_mcp_websocket.py` answers a frame protocol: the upgrade, the frames, the control frames a client must answer. A grant has no frames. The one socket the OAuth source opens is the loopback redirect listener, which reads one HTTP request head and answers one page.
+- Neither says what a grant is, when it is dead and needs a new login, or what an ID token's claims mean. Under the rule above, a source that would hold a second domain is not cheaper than a second source.
+
+### Why the provider rows stay in the host
+
+The protocol is the domain; a vendor is not. Each provider's endpoints, client id and scopes are one vendor's data. Written into the canonical source, they would make it a shelf of vendors the moment a second provider arrived. The source defines only the row type, `OAuthProvider` `Scripts/_mcp_oauth.py:OAuthProvider`, and the host builds its rows with it `Scripts/llm-router.py:_rt_oauth_providers`.
+
+### Why it is not WHOLE
+
+`WHOLE_SOURCES` still holds five names `Scripts/amalgamate.py:WHOLE_SOURCES`, and `_mcp_oauth.py` is not among them. The source follows the websocket precedent rather than the Chrome one: a sans-IO core plus a thin I/O wrapper of two blocks, `_oauth_listen` and `_oauth_sync_accept_callback`, which the router takes on one marker with the core first. A future host that receives the redirect through its own HTTP front can take the core without the wrapper, and a WHOLE declaration would forbid exactly that. The cost is the one the websocket source pays: the core's block list is mirrored by hand as `OAUTH_CORE` in `tests/test_generated_region.py`, beside `WEBSOCKET_CORE`. The mirror has already had to move once: the security review's F2 and F9 fixes added `OAUTH_MIN_REFRESH_INTERVAL_S`, `OAUTH_INT_LITERAL_LIMIT` and `_oauth_bounded_int` to the source, and the same three names to `OAUTH_CORE` and to the router's marker.

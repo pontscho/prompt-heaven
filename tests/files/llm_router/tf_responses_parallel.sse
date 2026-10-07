@@ -1,0 +1,30 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_tf_m_parallel","object":"response","created_at":1759622400,"status":"in_progress","model":"gpt-tf-upstream","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"fc_tf_m_read","type":"function_call","status":"in_progress","arguments":"","call_id":"call_tfRead07","name":"Read"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":2,"item_id":"fc_tf_m_read","output_index":0,"delta":"{\"file_path\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_tf_m_read","output_index":0,"delta":"\"/tf/m7.txt\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"id":"fc_tf_m_read","type":"function_call","status":"completed","arguments":"{\"file_path\":\"/tf/m7.txt\"}","call_id":"call_tfRead07","name":"Read"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":5,"output_index":1,"item":{"id":"fc_tf_m_bash","type":"function_call","status":"in_progress","arguments":"","call_id":"call_tfBash07","name":"Bash"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":6,"item_id":"fc_tf_m_bash","output_index":1,"delta":"{\"command\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":7,"item_id":"fc_tf_m_bash","output_index":1,"delta":"\"ls /tf/m7\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":8,"output_index":1,"item":{"id":"fc_tf_m_bash","type":"function_call","status":"completed","arguments":"{\"command\":\"ls /tf/m7\"}","call_id":"call_tfBash07","name":"Bash"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_tf_m_parallel","object":"response","created_at":1759622400,"status":"completed","model":"gpt-tf-upstream","output":[{"id":"fc_tf_m_read","type":"function_call","status":"completed","arguments":"{\"file_path\":\"/tf/m7.txt\"}","call_id":"call_tfRead07","name":"Read"},{"id":"fc_tf_m_bash","type":"function_call","status":"completed","arguments":"{\"command\":\"ls /tf/m7\"}","call_id":"call_tfBash07","name":"Bash"}],"usage":{"input_tokens":80,"input_tokens_details":{"cached_tokens":32},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":110}}}
+

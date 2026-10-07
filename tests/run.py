@@ -154,6 +154,10 @@ def run_mcp_websocket(opts):
     return run_python_suite("test_mcp_websocket", opts)
 
 
+def run_mcp_oauth(opts):
+    return run_python_suite("test_mcp_oauth", opts)
+
+
 def run_mcp_decoders(opts):
     return run_python_suite("test_mcp_decoders", opts)
 
@@ -453,6 +457,13 @@ SUITES = [
      "the size caps and strict UTF-8, the asyncio and blocking-socket "
      "wrappers -- then mcp-gdc's generated copy driven against a loopback "
      "CDP peer", 41),
+    # TYPED: A 4, B 5, C 5, D 11, E 10, F 7, G 4, H 14, I 4 = 64
+    ("mcp_oauth", run_mcp_oauth,
+     "the stdlib OAuth 2.0 helpers: PKCE and state, the authorize URL, the "
+     "exchange, refresh and device request builders, token response and "
+     "ID-token parsing with every refusal typed, the callback parse, the "
+     "device flow, the loopback callback listener on a fake clock, and the "
+     "ast contract over the source", 64),
     # TYPED: a fixed case table.  Every row that needs the host's libbrotlidec
     # or libzstd is recorded as INFO when the library is absent rather than
     # omitted, so the count is the same on every host.
@@ -628,7 +639,7 @@ SUITES = [
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
-     "builder declared", 59),
+     "builder declared", 60),
     # TYPED: a fixed case table (A 6, B 9, C 5, E 2).
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
@@ -683,15 +694,17 @@ SUITES = [
      "tools/call as SSE with keepalive, caps, shutdown with live traffic, "
      "total header deadline, strict headers, deep nesting, malformed "
      "header lines, id-less initialize, request id shape", 103),
-    # TYPED: a fixed case table (A 27, B 29, C 14, D 14, E 13, F 16, G 17,
-    # H 6 x 3 kinds + H7 + H8-H9 = 21, I 7, J 22 = 180), so a count that
-    # moves is the alarm, not noise.
+    # TYPED: a fixed case table (A 48, B 31, C 14, D 16, E 14, F 25, G 22,
+    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 33, K 25, L 20, M 21, N 35,
+    # O 16 = 363), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
      "SSRF policy and verified TLS, passthrough relay, llama.cpp quirk "
-     "registry, Mistral translation and stream state machine, timeouts and "
-     "disconnects per kind, secret leaks, static rules, hygiene", 180),
+     "registry, Mistral translation and stream state machine, the codex "
+     "and openai Responses kinds (request translation and stream), OAuth "
+     "token store, login and config write-back, timeouts and disconnects "
+     "per kind, secret leaks, static rules, hygiene", 363),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

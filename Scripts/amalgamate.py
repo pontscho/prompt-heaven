@@ -76,8 +76,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 # legitimate as any other. Adding a source is a deliberate edit here.
 CANONICAL_NAMES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_codesearch.py",
                    "_mcp_concurrency.py", "_mcp_json.py", "_mcp_logging.py",
-                   "_mcp_lsp.py", "_mcp_paging.py", "_mcp_websearch.py",
-                   "_mcp_websocket.py", "_mcp_zstd.py")
+                   "_mcp_lsp.py", "_mcp_oauth.py", "_mcp_paging.py",
+                   "_mcp_websearch.py", "_mcp_websocket.py", "_mcp_zstd.py")
 CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 
 # Hosts OUTSIDE `TARGET_GLOB` that take generated blocks, each named by hand for
@@ -90,7 +90,8 @@ CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 # Each takes the default run and `--check` exactly as a server does; the
 # `--census fleet` count stays the MCP glob's, because that census is ABOUT the
 # server fleet and says so in its first line. llm-router.py is a stdlib HTTP
-# server run by path, not an MCP server; it takes `_configure_logging` only.
+# server run by path, not an MCP server; it takes `_configure_logging` and the
+# OAuth core plus its callback wrapper.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py",
                   "llm-router.py")
 

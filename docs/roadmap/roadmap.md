@@ -30,6 +30,18 @@ WIP now: 0 of 3. Archive: 59 closed items (50 done, 9 dropped).
 | inbox | R-0074 | idea  | Refuse 192.0.0.0/24 under the public address policy in the canonical Chrome client                  | yes   |
 | inbox | R-0075 | idea  | Remove mcp-proxy's ready file on an ordered shutdown                                                | yes   |
 | inbox | R-0076 | idea  | Send mcp-proxy's 100 Continue only after authentication                                             | yes   |
+| inbox | R-0077 | idea  | llm-router: keep the omp auth-gateway measurement as a record (rejected passthrough route)          | yes   |
+| inbox | R-0078 | idea  | llm-router: re-measure the codex identity on each omp release                                       | yes   |
+| inbox | R-0079 | idea  | llm-router: SIWC token revocation and logout                                                        | yes   |
+| inbox | R-0080 | idea  | llm-router: H-group coverage for codex over OAuth                                                   | yes   |
+| inbox | R-0081 | idea  | llm-router: run live checkpoint E (SIWC openai OAuth login) and finish checkpoint D                 | yes   |
+| inbox | R-0082 | idea  | llm-router: re-measure earliest_refresh_at and the SIWC tool shape live                             | no    |
+| inbox | R-0083 | idea  | llm-router: interrupt a token POST still inside _rt_send on shutdown                                | yes   |
+| inbox | R-0084 | idea  | llm-router: one kind registry instead of four                                                       | yes   |
+| inbox | R-0085 | idea  | llm-router: optional security hardenings from the 2026-10-07 review                                 | yes   |
+| inbox | R-0086 | idea  | llm-router: keep the OAuth refresh token in the OS keychain instead of the 0600 config              | yes   |
+| inbox | R-0087 | idea  | llm-router: effort learning and an effort field on the req line for the Responses kinds             | yes   |
+| inbox | R-0088 | idea  | llm-router: put the non-stream dropped_thinking count on the req line                               | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -198,9 +210,12 @@ tags: [scripts, security]
 
 Security review round 1, finding F20 (verified LOW, CWE-400), and round 2 F5. The CVE-2020-10735 int-digit limit exists only from Python 3.9.14; the macOS system 3.9.6 parses a multi-megabyte digit run at quadratic cost. Today this is a declared limit in the module docstring (HTTP body bounded by --max-body-bytes, stdin is the trusted parent). A pre-parse digit-run cap would lift it for every fleet server, so it may belong in a shared canonical source.
 
+Update 2026-10-07: the llm-router security review of 2026-10-07 (finding F9, verified LOW) found the same gap in llm-router and the _mcp_oauth canonical source, and it was fixed there: _rt_loads and _oauth_json_object now refuse an integer literal longer than 4300 characters (static case J31). That makes two more carriers of the same guard, which strengthens the case for one shared copy; mcp-proxy still has none.
+
 ### Log
 
 - 2026-10-03 new->unset: proposed by p:security-review
+- 2026-10-07 unset->unset: edited why: extended with the llm-router F9 fix (security review 2026-10-07)
 
 ## R-0069 · mcp-proxy: pre-auth stdlib error pages
 
@@ -314,3 +329,215 @@ Counterpart of llm-router finding V37 (verified LOW, CWE-696), fixed in the rout
 ### Log
 
 - 2026-10-06 new->unset: proposed by llm-router validation round 1
+
+## R-0077 · llm-router: keep the omp auth-gateway measurement as a record (rejected passthrough route)
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-omp-gateway-measurement
+blocked_by: []
+tags: [llm-router]
+
+Before the native codex and openai kinds were built, routing through the omp auth gateway with the existing passthrough kind was measured on 2026-10-06 and rejected: count_tokens returned 404, thinking was dropped silently, cache tokens were always 0, the streamed input_tokens was 0, and tool ids looked like call_...|fc_.... The feature plan (rejected alternative, plan Step 18 item a) keeps it only as a measurement record, also summarised in the ADR 0028 addendum.
+
+This item holds that record so a later proposal to route through the gateway starts from the measured facts. Re-measure the five points before reconsidering it; drop the item once the native kinds make the question moot.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by llm-router codex/openai plan Step 18 (task-060)
+
+## R-0078 · llm-router: re-measure the codex identity on each omp release
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-codex-identity-remeasure
+blocked_by: []
+tags: [llm-router]
+
+The codex kind sends the omp client identity, copied by user decision (declared limit 12 of the ADR 0028 addendum). Measurement M1 on 2026-10-06 read it from oh-my-pi tag v18.6.1 (commit 2a2c6dcbbb558c0f8145f67f28b3370984f2bf60): User-Agent omp/18.6.1 (the template is omp/ followed by omp's own release version, no platform or arch), originator omp, client version 0.159.0. Live checkpoint B (2026-10-07) accepted that UA.
+
+Every changeable value is a row (_RT_CODEX_IDENTITY, _RT_OMP_USER_AGENT), so drift is a row edit, but nothing notices when omp moves on and the codex backend's version gate starts refusing a stale identity (plan risk: codex wire drift). The work: on each omp release re-read the UA, originator and client version from the omp source, update the rows and record the date. The ToS risk of the impersonation itself is a separate declared limit (security review 2026-10-07, F19).
+
+### Log
+
+- 2026-10-07 new->unset: proposed by llm-router codex/openai plan Step 18 (task-060)
+
+## R-0079 · llm-router: SIWC token revocation and logout
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-siwc-revocation-logout
+blocked_by: []
+tags: [llm-router, oauth]
+
+Token revocation and logout are out of scope for the native codex and openai kinds (feature plan Out of Scope, together with runtime OIDC discovery and a background refresh thread; the _mcp_oauth canonical source lists revocation as out of scope too). Today a grant obtained with llm-router.py login stays in backends.<n>.oauth of the 0600 config until another login replaces it; nothing revokes it at the provider or removes it locally.
+
+The work: a logout path for an OAuth backend that revokes the grant where the provider offers it and removes the oauth object through the same flock-held persist path login uses, with the scrubber and log rules (no token in any log line or error text) unchanged.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by llm-router codex/openai plan Step 18 (task-060)
+
+## R-0080 · llm-router: H-group coverage for codex over OAuth
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-h-group-codex-oauth
+blocked_by: []
+tags: [llm-router, tests]
+
+Declared limit 10 of the ADR 0028 addendum: the H group of tests/test_llm_router.py covers the openai kind with an api_key only, and codex timeouts are covered only through N13. The codex kind over its OAuth token store therefore has no H-group case of its own. The work: run the H-group timeout cases (or the subset that differs by auth path) against a codex backend served by the OAuth token store, red first where a case exposes a gap.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by llm-router codex/openai plan Step 18 (task-060)
+
+## R-0081 · llm-router: run live checkpoint E (SIWC openai OAuth login) and finish checkpoint D
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-checkpoint-e
+blocked_by: []
+tags: [llm-router, oauth]
+
+Live checkpoint E of the codex/openai feature (llm-router.py login for an openai SIWC backend, then text, a tool and thinking from Claude Code) was NOT run; it is still open, and SC-6 wants checkpoints A-E recorded in the ADR 0028 addendum. Checkpoint D (openai with an api key, 2026-10-07) proved auth, path and headers, but the account had no credits, so only the billing error relay was observed; full success needs OpenAI credits.
+
+The work: with Zoltan's OK, run E against the real account and record the result; rerun D once the account has credits. E is also where the desk-only answers get confirmed (see the SIWC tool-shape re-measure item).
+
+### Log
+
+- 2026-10-07 new->unset: proposed by task-060 (checkpoint status 2026-10-07)
+
+## R-0082 · llm-router: re-measure earliest_refresh_at and the SIWC tool shape live
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-siwc-tool-shape-refresh-units
+blocked_by: [R-0081]
+tags: [llm-router, oauth]
+
+Measurement M2 stayed desk-only. The SIWC tool shape was answered on 2026-10-06 from the SIWC preview-limitations docs (group function and custom tools in namespaces, or supply them as additional_tools input items), and by user decision of 2026-10-07 the openai-oauth profile sends one namespace tool (namespace name claude_code). It was never confirmed live, because checkpoint E did not run. Two further live unknowns were pinned by choice, not measurement: how tool_choice targets a namespaced tool (sent as the plain function name), and whether replayed function_call input items need the namespace field.
+
+earliest_refresh_at: no provider the OAuth source serves sends a refresh-not-before hint, so it is set to issue time plus OAUTH_MIN_REFRESH_INTERVAL_S (60 s, the 2026-10-07 security review fix F2), and it is honoured in-process only (declared limit 15). Whether a provider ever sends such a hint, and in what units, was not observed on the wire.
+
+The work: at the first live SIWC login and request, confirm or flip the tool shape (one row value plus one translator branch), pin the tool_choice and replay forms, and look for a refresh hint in the token answers of both providers.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by llm-router codex/openai plan Step 18 (task-060)
+
+## R-0083 · llm-router: interrupt a token POST still inside _rt_send on shutdown
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-shutdown-token-post
+blocked_by: []
+tags: [llm-router]
+
+Out of scope for the codex/openai feature and declared (limit 6 of the ADR 0028 addendum). Only the body read after _rt_send returns is registered in srv.inflight. A refresh POST still in connect, TLS, request write or response head is not, so a shutdown during that phase waits up to connect_timeout plus _RT_OAUTH_IDLE_S (15 s per read) and the drain, after _DRAIN_S (3 s), abandons the thread. A handler polling the config flock can outlive the drain the same way.
+
+Registering the socket earlier needs a hook inside _rt_send, the single framing owner that static rule J4a pins, so the fix includes a J4a amendment with a planted negative control that still fires.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by llm-router codex/openai plan Step 18 (task-060)
+
+## R-0084 · llm-router: one kind registry instead of four
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-single-kind-registry
+blocked_by: []
+tags: [llm-router, shared-code]
+
+NFR-2 of the codex/openai feature: a dialect that is also a new config kind costs one profile row, a three-line ResponsesAdapter subclass, and one entry each in _KINDS, _RT_KIND_AUTH_PROFILES, KIND_CLASSES and ADAPTERS. Static case J28 gates only the translator half (row plus subclass); the four registries are listed, not gated (declared limit 25, M5).
+
+Making them data-driven from one registry was out of scope because it touches every existing kind and the A14 refusal path. The work: derive the four from one table, checked at import, and extend J28 (or a new J case) to cover the registry half, so a new kind is one row.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by llm-router codex/openai plan Step 18 (task-060)
+
+## R-0085 · llm-router: optional security hardenings from the 2026-10-07 review
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-optional-hardenings
+blocked_by: []
+severity: low
+tags: [llm-router, oauth, security]
+
+The 2026-10-07 code-mode security review of the codex/openai kinds and the _mcp_oauth source (docs/reviews/security-review-20261007-123500.md, verdict APPROVE) fixed all five verified LOW findings. Its verifiers also recorded optional hardenings next to SUPPRESSED verdicts; none is a finding, and these were not done:
+
+- F6: count zero-byte callback connections against the bad-connection budget of the login callback acceptor.
+- F10: refuse duplicate keys in _rt_loads (no differential parser exists today).
+- F12: an OAuth access token sent over non-loopback http with allow_private has no cleartext opt-in, unlike the api_key path (CWE-319, undeclared).
+- F15: log only the role's type name in the validator refusal DEBUG line.
+- F22: bound tool-schema recursion depth in _rt_rs_schema and answer 400 instead of a RecursionError 500.
+- F23: require err.param to equal the matched name, when present, before learning an unsupported sampling parameter.
+- F26: refuse an upstream tool name that was not offered.
+- F27: pop the adapter's pending entry in a finally on error exits.
+- F30: a fixed text for an OAuth-backend 403 instead of the scrubbed upstream message.
+- F33: test the login without the api.connectors scopes.
+- F35: a scope fallback on refresh; check azp when aud is multi-valued.
+- F37: reuse the _rt_cfg_oauth length and auth_token-collision checks when a disk token is adopted.
+- F39: documentation nuance -- access-token claims are trusted on the TLS channel, not under OIDC Core 3.1.3.7.
+- F42: pass the OAuthError kind through _log_value at the refresh-failure log line.
+- F45: a smaller body cap when reading an upstream 400 error body (today the 64 MiB non-2xx read path).
+- F51: refuse a device-flow user_code longer than about 64 characters.
+- F52: print an only-enter-this-code-if-you-just-started-this-login warning next to the device code (phishing).
+
+F41 (refresh token in the OS keychain) has its own item. Each is small; pick them up one at a time, red first where testable.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by security review 2026-10-07
+
+## R-0086 · llm-router: keep the OAuth refresh token in the OS keychain instead of the 0600 config
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-refresh-token-keychain
+blocked_by: []
+severity: low
+tags: [llm-router, oauth, security]
+
+Security review 2026-10-07, F41 (suppressed: by design under FR-4) with the optional hardening OS keychain storage for the refresh token. Today the refresh token of a codex or openai SIWC backend is stored in plain text in backends.<n>.oauth of the router config, protected by the 0600 mode, the owner and directory checks and the flock-held atomic rewrite. Any process running as the user can read it.
+
+The work is first a decision: which keychain on which platform (macOS Keychain, a Linux secret service) and how to reach it under the pure-stdlib rule of ADR 0024, how a missing keychain falls back, and how the cross-process persist rules (flock, adoption of a disk token, the re-login conflict check of F40) map onto it.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by security review 2026-10-07
+
+## R-0087 · llm-router: effort learning and an effort field on the req line for the Responses kinds
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-responses-effort-learning
+blocked_by: []
+tags: [llm-router]
+
+The reasoning_effort_map route option and the learn-from-400 effort remap (user decision 2026-10-07) exist for the mistral kind only: a 400 naming the supported values teaches the router a per (backend, model) set, and the req line carries effort=<sent> when it remapped. The Responses kinds (codex, openai) have neither; this is a declared limit. Live, codex accepted low, medium, high and xhigh (checkpoint C, 2026-10-07), so nothing forced it yet, but a model that supports fewer efforts would get its 400 relayed.
+
+Second half: the codex req line has no effort field, so the effort actually sent (derived from the thinking budget band by _rt_rs_effort) is not observable live; checkpoint C derived it from the code. The work: an effort= field on the Responses req line, then the map and the learned remap for the Responses kinds, red first.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by task-060 (docs extras 2026-10-07)
+
+## R-0088 · llm-router: put the non-stream dropped_thinking count on the req line
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:llm-router-nonstream-dropped-thinking
+blocked_by: []
+tags: [llm-router, logging]
+
+On replay the adapters drop a thinking block they cannot carry (a foreign or undecodable signature, a redacted block) and count it in dropped_thinking. On the stream path the count reaches the req line; on the non-stream path it is computed but not logged, for every kind (mistral and the Responses kinds alike). This is a declared limit of the 2026-10-07 Mistral thinking work.
+
+The work: a channel from the adapter's non-stream response path back to the handler that writes the req line, so dropped_thinking is logged the same way on both paths, with a case proving it.
+
+### Log
+
+- 2026-10-07 new->unset: proposed by task-060 (docs extras 2026-10-07)

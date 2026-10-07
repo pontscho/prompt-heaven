@@ -1,0 +1,12 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_tf_m_failed","object":"response","created_at":1759622400,"status":"in_progress","model":"gpt-tf-upstream","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_tf_m_failed","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_tf_m_failed","output_index":0,"content_index":0,"delta":"tf m10 partial"}
+
+event: response.failed
+data: {"type":"response.failed","sequence_number":3,"response":{"id":"resp_tf_m_failed","object":"response","created_at":1759622400,"status":"failed","model":"gpt-tf-upstream","output":[],"error":{"code":"usage_limit_reached","message":"The usage limit has been reached"},"usage":null}}
+

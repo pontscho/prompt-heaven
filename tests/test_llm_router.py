@@ -46,6 +46,10 @@ Groups:
   F  mistral request      -- Anthropic -> chat-completions translation
   G  mistral stream       -- chat-completions SSE -> Anthropic SSE translation
   H  timeouts/disconnect  -- idle and total deadlines, a client that hangs up
+  K  responses request    -- Anthropic -> Responses translation (codex, openai)
+  L  config write-back    -- the atomic, directory-relative rewrite of backends.<n>.oauth
+  N  token store          -- refresh, the per-backend lock, one forced refresh per 401 (codex)
+  O  login                -- the codex login subcommand: browser callback, paste, device flow
   I  secret leak          -- no sentinel in stderr, the log, a body or a wrong peer
   J  static and hygiene   -- AST over the router source, writes, bytecode, tree
 """
@@ -53,10 +57,12 @@ Groups:
 import ast
 import base64
 import calendar
+import errno
 import hashlib
 import http.client
 import ipaddress
 import json
+import logging
 import os
 import pathlib
 import platform
@@ -68,6 +74,7 @@ import shutil
 import signal
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -132,7 +139,42 @@ TF_ROUTER_TOKEN = "tf-router-token-" + secrets.token_hex(16)
 TF_KEY_MISTRAL = "tfkey-mistral-SENTINEL+" + secrets.token_hex(16)
 TF_KEY_PASS = "tfkey-pass-SENTINEL-" + secrets.token_hex(16)
 TF_CLIENT_XKEY = "tfkey-client-SENTINEL-" + secrets.token_hex(16)
-SENTINELS = (TF_ROUTER_TOKEN, TF_KEY_MISTRAL, TF_KEY_PASS, TF_CLIENT_XKEY)
+
+# The OAuth sentinels (Plan Step 11).  The access and ID tokens are unsigned
+# JWTs, as the token endpoint mints them: a codex access token carries the
+# https://api.openai.com/auth chatgpt_account_id claim the router reads (FR-6),
+# and a random payload field so no two runs share a stem.  Every one ends in
+# the per-run 32-hex tail (GJ_SENTINEL_HEX_RE): a JWT's signature segment is it.
+TF_JWT_HEAD = "eyJhbGci"                 # base64url of '{"alg' -- the first 8 chars of every JWT
+TF_ACCOUNT_CODEX = "acct_tf-codex-" + secrets.token_hex(4)    # the claim rule: [A-Za-z0-9_-]{1,128}
+
+
+def tf_jwt(claims):
+    """An unsigned JWT over *claims* plus a random `tf` field; its signature is 32 random hex."""
+    def b64(data):
+        return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+    payload = dict(claims, tf=secrets.token_hex(8))
+    return ".".join((b64(b'{"alg":"none","typ":"JWT"}'),
+                     b64(json.dumps(payload, separators=(",", ":")).encode("ascii")),
+                     secrets.token_hex(16)))
+
+
+def tf_is_jwt(value):
+    """True for a JWT-shaped sentinel: its first-8 form is every JWT's public header (KD-13)."""
+    return value.startswith(TF_JWT_HEAD) and value.count(".") == 2
+
+
+TF_REFRESH_CODEX = "tfrefresh-codex-SENTINEL-" + secrets.token_hex(16)
+TF_REFRESH_OPENAI = "tfrefresh-openai-SENTINEL-" + secrets.token_hex(16)
+TF_ACCESS_CODEX = tf_jwt({"https://api.openai.com/auth": {"chatgpt_account_id": TF_ACCOUNT_CODEX}})
+TF_ACCESS_OPENAI = tf_jwt({"https://api.openai.com/auth": {"chatgpt_account_id": "acct_tf-openai"}})
+TF_ID_TOKEN = tf_jwt({"iss": "https://auth.openai.com", "aud": "oaiapp_tf-Client_01", "exp": 4102444800})
+TF_AUTH_CODE = "tf-auth-code-SENTINEL-" + secrets.token_hex(16)
+TF_KEY_OPENAI = "tfkey-openai-SENTINEL-" + secrets.token_hex(16)
+TF_TOKEN_ERRDESC = "tf-token-errdesc-SENTINEL-" + secrets.token_hex(16)
+SENTINELS = (TF_ROUTER_TOKEN, TF_KEY_MISTRAL, TF_KEY_PASS, TF_CLIENT_XKEY,
+             TF_REFRESH_CODEX, TF_REFRESH_OPENAI, TF_ACCESS_CODEX, TF_ACCESS_OPENAI,
+             TF_ID_TOKEN, TF_AUTH_CODE, TF_KEY_OPENAI, TF_TOKEN_ERRDESC)
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +471,113 @@ def read_sse(resp):
 
 
 # ---------------------------------------------------------------------------
+# The in-process router at millisecond deadlines
+# ---------------------------------------------------------------------------
+# A case whose observable is one of the router's own deadlines (the ping
+# interval, the relay tick, the pre-auth/header/body bounds, the OAuth idle
+# timeout and negative cache) runs against a _RouterHttpServer of a privately
+# loaded module with that constant patched to millisecond scale: the same code
+# path, waited out in milliseconds instead of the production 1-60 s.  Every
+# patched constant is read at run time except the handler's class-level
+# `timeout`, bound to _HTTP_HEADER_TIMEOUT_S at class definition, which is
+# patched with it.  Everything is restored when the rig closes.  The router's
+# logger goes, at DEBUG (as --debug), to a 0600 file in the sandbox that I1
+# sweeps like a subprocess stderr.  A case that proves a real signal or a real
+# process exit (H4, N25) stays a subprocess at the production constants.
+
+FAST_TICK_S = 0.05      # _RT_TICK_S (1 s): the relay's ping / idle / closing / client-EOF wake-up
+FAST_PING_S = 0.4       # _PING_INTERVAL_S (15 s)
+FAST_RELAY = (("_RT_TICK_S", FAST_TICK_S), ("_PING_INTERVAL_S", FAST_PING_S))
+FAST_TICK = (("_RT_TICK_S", FAST_TICK_S),)      # a case that must see no ping keeps the 15 s interval
+FAST_INPROC_NAMES = ("_RouterHttpServer", "RouterSettings", "load_config")
+FAST_LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"   # _configure_logging's
+
+
+class FastRouter:
+    """A private module's _RouterHttpServer on 127.0.0.1:0 serving the config at
+    *cfgpath*, with *patch* ((module constant, value) pairs) set on the module while
+    it lives.  `client` is its RouterClient, or None (and `why` says so) when the
+    module is missing or lacks a name.  With *tokens* the server gets a token store
+    bound to *cfgpath*, as main() builds it (a rotation is written back)."""
+
+    def __init__(self, mod, mod_why, sandbox, cfgpath, patch, label="fast", max_connections=4, tokens=False):
+        self.mod = mod
+        self.saved = []
+        self.srv = self.thread = self.client = None
+        self.why = None
+        self.log_handler = self.log_saved = None
+        if mod is None:
+            self.why = mod_why or "the module did not load"
+            return
+        absent = [name for name, _value in patch if not isinstance(getattr(mod, name, None), (int, float))]
+        problems = missing_names(mod, FAST_INPROC_NAMES + (("_RtTokenStore",) if tokens else ()))
+        if absent or problems:
+            self.why = "; ".join((["the module defines no %s" % ", ".join(absent)] if absent else []) + problems)
+            return
+        try:
+            for name, value in patch:
+                self.saved.append((mod, name, getattr(mod, name)))
+                setattr(mod, name, value)
+                if name == "_HTTP_HEADER_TIMEOUT_S":
+                    # StreamRequestHandler.setup() applies the class attribute, bound at definition.
+                    self.saved.append((mod._RouterHandler, "timeout", mod._RouterHandler.timeout))
+                    mod._RouterHandler.timeout = value
+            self._log_to(os.path.join(sandbox, label + ".log"))
+            cfg = mod.load_config(cfgpath)
+            store = mod._RtTokenStore(cfgpath, cfg) if tokens else None
+            self.srv = mod._RouterHttpServer(("127.0.0.1", 0), h_settings(mod, max_connections), cfg, tokens=store)
+            self.thread = threading.Thread(target=self.srv.serve_forever, name="tf-fast-serve", daemon=True)
+            self.thread.start()
+            self.client = RouterClient(self.srv.server_port, TF_ROUTER_TOKEN)
+        except BaseException:
+            self.close()
+            raise
+
+    def _log_to(self, path):
+        """The router's logger -> *path* (0600) at DEBUG, unpropagated, until close()."""
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.fchmod(fd, 0o600)
+        WRITES.append(path)
+        LOG_PATHS.append(path)
+        handler = logging.StreamHandler(os.fdopen(fd, "a", encoding="utf-8"))
+        handler.setFormatter(logging.Formatter(FAST_LOG_FORMAT))
+        handler.setLevel(logging.DEBUG)
+        logger = self.mod.log
+        self.log_saved = (logger.level, logger.propagate)
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        self.log_handler = handler
+
+    def close(self):
+        """Stop serving, detach the log file, restore every patched value; idempotent."""
+        if self.srv is not None:
+            srv, self.srv = self.srv, None
+            h_unserve(srv, self.thread)
+        if self.log_handler is not None:
+            handler, self.log_handler = self.log_handler, None
+            logger = self.mod.log
+            logger.removeHandler(handler)
+            logger.setLevel(self.log_saved[0])
+            logger.propagate = self.log_saved[1]
+            handler.close()
+            try:
+                handler.stream.close()
+            except (OSError, ValueError):
+                pass
+        while self.saved:
+            owner, name, value = self.saved.pop()
+            setattr(owner, name, value)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+# ---------------------------------------------------------------------------
 # The scripted upstream peer
 # ---------------------------------------------------------------------------
 
@@ -488,6 +637,9 @@ class ScriptedPeer:
                                                  then TCP is dropped -- over TLS without a
                                                  close_notify, the D12 ragged EOF
       ("redirect", location[, status])           a 307 (or *status*) with Location, no body
+      ("respond_raw", data)                      *data* (bytes) sent verbatim: a head with no
+                                                 Content-Type or a JSON one (N17), or a head whose body
+                                                 never follows (N25)
 
     A normal end of the script closes the connection; over TLS it first sends a
     close_notify, so a close-delimited stream ends cleanly.  `closed_event` is
@@ -659,6 +811,8 @@ class ScriptedPeer:
             state["budget"] = int(args[0])
         elif verb == "redirect":
             self._redirect(conn, state, *args)
+        elif verb == "respond_raw":
+            self._send(conn, state, bytes(args[0]))
         else:
             raise ValueError("unknown ScriptedPeer verb %r" % (verb,))
 
@@ -796,6 +950,27 @@ GA_CASES = (
     "short api_key refused",             # A25
     "cleartext api_key refused",         # A26
     "route display_name validated",      # A27
+    "codex oauth {} loads, defaults",    # A28
+    "openai api_key -> openai-apikey",   # A29
+    "openai oauth: no sampling opts",    # A30
+    "openai api_key+oauth refused",      # A31
+    "openai neither mode refused",       # A32
+    "codex api_key / no oauth refused",  # A33
+    "auth_header on oauth profiles",     # A34
+    "oauth keys refused by name",        # A35
+    "bad refresh_token refused",         # A36
+    "client_id/host_id shapes",          # A37
+    "identity keys and values",          # A38
+    "no-profile keys; oauth repr",       # A39
+    "one header-value validator",        # A40
+    "auth_base_url scheme rules",        # A41
+    "route token limits accepted",       # A42
+    "route token limits refused",        # A43
+    "sampling overrides per kind",       # A44
+    "sampling override refusals",        # A45
+    "mistral reasoning_effort option",   # A46
+    "reasoning_effort_map accepted",     # A47
+    "reasoning_effort_map refused",      # A48
 )
 
 # (label, text, is_config_error) of every exception group A provoked and every
@@ -807,6 +982,19 @@ GA_TOKEN_HINT = "secrets.token_urlsafe(32)"     # A13: every auth_token refusal 
 GA_ALPHABET = "abcdefghijklmnopqrstuvwxyz"      # A13: a token of exactly n distinct characters
 # A26: http:// backends whose api_key needs no opt-in (a loopback host).
 GA_LOOPBACK_HTTP = ("http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080")
+# A28-A41 (Plan Step 6): the Responses kinds, their OAuth seed and identity.
+GA_CODEX = "tf-codex"                           # a codex backend name (profile codex)
+GA_OPENAI = "tf-openai"                         # an openai backend name (openai-oauth / openai-apikey)
+GA_REFRESH = "tf-refresh-SENTINEL-" + secrets.token_hex(16)   # an oauth.refresh_token: never in a refusal
+GA_SEED_FIELDS = ("refresh_token", "account_id", "expires_at", "client_id", "host_id")
+GA_CLIENT_ID = "oaiapp_tf-Client_01"            # A37: the issued client id shape
+GA_HOST_ID = "urn:uuid:0f1e2d3c-4b5a-4987-a654-3210fedcba98"   # A37: a lower-case v4 URN
+GA_AUTH_PORT = 18443                            # A41: a loopback auth_base_url port (never dialled)
+GA_LIMIT_KEYS = ("max_input_tokens", "max_tokens")   # A42/A43: a route's optional advertised caps
+# A46: the reasoning_effort values Mistral's chat-completions API takes (docs.mistral.ai, 2026-10-07).
+GA_MS_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# A47, A48: the mistral reasoning_effort_map option (user decision 2026-10-07: "xhigh: high, ...").
+GA_MS_EFFORT_MAP = {"low": "high", "medium": "high", "xhigh": "high", "max": "high"}
 
 
 def ga_redact(text):
@@ -884,6 +1072,72 @@ def ga_module_value(mod, name, problems):
 def ga_dup_text(cfg, raw):
     """*cfg* as JSON with the GA_DUP_MARKER string replaced by the raw JSON text *raw*."""
     return json.dumps(cfg, indent=2).replace(json.dumps(GA_DUP_MARKER), raw)
+
+
+def ga_add_backend(name, entry, options=None):
+    """A cfg_with mutate: backends.<name> = a copy of *entry*, plus routes.<name>-route -> it."""
+    def mutate(cfg):
+        cfg["backends"][name] = dict(entry)
+        route = {"backend": name, "model": "tf-model"}
+        if options is not None:
+            route["options"] = dict(options)
+        cfg["routes"][name + "-route"] = route
+    return mutate
+
+
+def ga_ascii(problems):
+    """*problems* with every non-ASCII character escaped, so a lone surrogate never breaks a FAIL line."""
+    return [p.encode("ascii", "backslashreplace").decode("ascii") for p in problems]
+
+
+def ga_profile_base(mod, profile, problems):
+    """(scheme, host, port, base_path) of the profile row's default_base_url, read from the module."""
+    rows = ga_module_value(mod, "_RT_RESPONSES_PROFILES", problems)
+    row = rows.get(profile) if isinstance(rows, dict) else None
+    url = getattr(row, "default_base_url", None)
+    if not isinstance(url, str):
+        problems.append("_RT_RESPONSES_PROFILES has no %s row with a default_base_url" % profile)
+        return None
+    parts = urllib.parse.urlsplit(url)
+    return (parts.scheme, parts.hostname, parts.port or {"https": 443, "http": 80}[parts.scheme],
+            parts.path.rstrip("/"))
+
+
+def ga_spec_problems(cfg, name, want, label):
+    """Problems unless backends.<name> carries every field of *want*; secrets are never shown."""
+    spec = (getattr(cfg, "backends", None) or {}).get(name)
+    if spec is None:
+        return ["%s: the loaded config has no backends.%s" % (label, name)]
+    problems = []
+    for field, value in want.items():
+        if not hasattr(spec, field):
+            problems.append("%s: BackendSpec has no field %s" % (label, field))
+            continue
+        got = getattr(spec, field)
+        if got != value:
+            shown = "<redacted>" if field in ("api_key", "oauth") else repr(got)
+            problems.append("%s: backends.%s.%s = %s, expected %r"
+                            % (label, name, field, shown,
+                               "<the configured value>" if field in ("api_key", "oauth") else value))
+    return problems
+
+
+def ga_seed_problems(cfg, name, want, label):
+    """Problems unless backends.<name>.oauth is an OAuthSeed whose fields equal *want* (absent -> None)."""
+    spec = (getattr(cfg, "backends", None) or {}).get(name)
+    seed = getattr(spec, "oauth", None)
+    if seed is None:
+        return ["%s: backends.%s.oauth is not an OAuthSeed (None or no field)" % (label, name)]
+    problems = []
+    for field in GA_SEED_FIELDS:
+        got = getattr(seed, field, "<no field>")
+        expected = want.get(field)
+        if got != expected:
+            shown = "<redacted>" if field == "refresh_token" else repr(got)
+            problems.append("%s: backends.%s.oauth.%s = %s, expected %s"
+                            % (label, name, field, shown,
+                               "<the configured value>" if field == "refresh_token" else repr(expected)))
+    return problems
 
 
 def ga_cli_refused(sandbox, cfgpath, stem, extra, needles):
@@ -1232,11 +1486,15 @@ def group_a(suite, fixture_root):
                             "options", {"tf_bogus_option": 1}))
         problems += ga_refused(mod, path, ["claude-sonnet-4-5", "tf_bogus_option"],
                                "mistral route option tf_bogus_option")
-        path = cfg_with("default-option.json",
-                        lambda cfg: cfg["default"].__setitem__("options", {"temperature": 0.3}))
-        problems += ga_refused(mod, path, ["temperature"],
-                               "passthrough default route option temperature")
-        return problems, ["options     : unknown on mistral; any on passthrough (it has none)"]
+        # Since the live finding of 2026-10-07 passthrough takes temperature / top_p (A44);
+        # every other option, top_k and max_tokens_cap included, is still unknown on it.
+        for option, value in (("top_k", 5), ("max_tokens_cap", 1000)):
+            path = cfg_with("default-option-%s.json" % option,
+                            lambda cfg, o=option, v=value: cfg["default"].__setitem__("options", {o: v}))
+            problems += ga_refused(mod, path, ["default.options", option],
+                                   "passthrough default route option %s" % option)
+        return problems, ["options     : unknown on mistral; top_k, max_tokens_cap on passthrough "
+                          "(only temperature / top_p are its)"]
 
     def a17():
         ca_file = sandbox_ca_file(sandbox)
@@ -1470,6 +1728,491 @@ def group_a(suite, fixture_root):
                           "accepted    : a non-ASCII name; exactly %d characters "
                           "(_RT_DISPLAY_NAME_LIMIT); unset -> None" % limit]
 
+    cx_where = "backends.%s" % GA_CODEX
+    oa_where = "backends.%s" % GA_OPENAI
+
+    def raw_cfg(name, mutate, raw):
+        """A config whose GA_DUP_MARKER string value is replaced by the raw JSON text *raw*."""
+        cfg = ga_base_config()
+        mutate(cfg)
+        return write_file(os.path.join(sandbox, name), ga_dup_text(cfg, raw))
+
+    def a28():
+        problems = []
+        base = ga_profile_base(mod, "codex", problems)
+        path = cfg_with("codex-empty.json", ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": {}}))
+        cfg, ctl = ga_accepted(mod, path, "codex with oauth {}")
+        problems += ctl
+        if cfg is not None:
+            want = {"kind": "codex", "profile": "codex", "api_key": None, "auth_header": "none",
+                    "identity": (), "auth_base": None, "allow_private": False}
+            if base is not None:
+                want.update(zip(("scheme", "host", "port", "base_path"), base))
+            problems += ga_spec_problems(cfg, GA_CODEX, want, "oauth {}")
+            problems += ga_seed_problems(cfg, GA_CODEX, {}, "oauth {}")
+        seeded = {"refresh_token": GA_REFRESH, "account_id": "acct_tf-01", "expires_at": 0}
+        path = cfg_with("codex-seeded.json",
+                        ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": dict(seeded)}))
+        cfg, ctl = ga_accepted(mod, path, "codex with a seeded oauth")
+        problems += ctl
+        if cfg is not None:
+            problems += ga_seed_problems(cfg, GA_CODEX, seeded, "seeded oauth")
+            if GA_REFRESH.encode("ascii") not in (getattr(cfg, "secrets", None) or ()):
+                problems.append("seeded oauth: RouterConfig.secrets does not hold the refresh_token")
+            with open(path, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+            if getattr(cfg, "source_digest", None) != digest:
+                problems.append("seeded oauth: RouterConfig.source_digest is not sha256 of the file read")
+        return problems, ["config      : {kind: codex, oauth: {}} -> profile codex, the row's "
+                          "default_base_url, auth_header none, empty OAuthSeed",
+                          "seeded      : refresh_token in secrets; source_digest == sha256(file)"]
+
+    def a29():
+        problems = []
+        base = ga_profile_base(mod, "openai-apikey", problems)
+        path = cfg_with("openai-apikey.json",
+                        ga_add_backend(GA_OPENAI, {"kind": "openai", "api_key": TF_KEY_PASS},
+                                       {"temperature": 0.3, "top_p": 0.9, "max_tokens_cap": 4096}))
+        cfg, ctl = ga_accepted(mod, path, "openai with api_key and sampling options")
+        problems += ctl
+        if cfg is not None:
+            want = {"kind": "openai", "profile": "openai-apikey", "api_key": TF_KEY_PASS,
+                    "auth_header": "authorization", "oauth": None}
+            if base is not None:
+                want.update(zip(("scheme", "host", "port", "base_path"), base))
+            problems += ga_spec_problems(cfg, GA_OPENAI, want, "openai api_key")
+        return problems, ["config      : {kind: openai, api_key} -> openai-apikey, authorization; "
+                          "temperature/top_p/max_tokens_cap accepted"]
+
+    def a30():
+        problems = []
+        path = cfg_with("openai-oauth.json",
+                        ga_add_backend(GA_OPENAI, {"kind": "openai", "oauth": {}},
+                                       {"reasoning_effort": "low"}))
+        cfg, ctl = ga_accepted(mod, path, "openai with oauth {}")
+        problems += ctl
+        if cfg is not None:
+            problems += ga_spec_problems(cfg, GA_OPENAI,
+                                         {"kind": "openai", "profile": "openai-oauth", "api_key": None,
+                                          "auth_header": "none"}, "openai oauth")
+        for option, value in (("temperature", 0.3), ("top_p", 0.9), ("max_tokens_cap", 4096)):
+            path = cfg_with("openai-oauth-%s.json" % option,
+                            ga_add_backend(GA_OPENAI, {"kind": "openai", "oauth": {}}, {option: value}))
+            problems += ga_refused(mod, path, ["routes.%s-route" % GA_OPENAI, option],
+                                   "openai-oauth route option %s" % option)
+        return problems, ["config      : {kind: openai, oauth: {}} -> openai-oauth, auth_header none",
+                          "refused     : temperature, top_p, max_tokens_cap on its route (sampling False)"]
+
+    def a31():
+        path = cfg_with("openai-both.json",
+                        ga_add_backend(GA_OPENAI, {"kind": "openai", "api_key": TF_KEY_PASS, "oauth": {}}))
+        return ga_refused(mod, path, [oa_where, "exactly one", "api_key", "oauth"],
+                          "openai with api_key and oauth"), []
+
+    def a32():
+        path = cfg_with("openai-neither.json", ga_add_backend(GA_OPENAI, {"kind": "openai"}))
+        return ga_refused(mod, path, [oa_where, "exactly one", "api_key", "oauth"],
+                          "openai with neither"), []
+
+    def a33():
+        problems = []
+        path = cfg_with("codex-apikey.json",
+                        ga_add_backend(GA_CODEX, {"kind": "codex", "api_key": TF_KEY_PASS, "oauth": {}}))
+        problems += ga_refused(mod, path, [cx_where, "api_key", "oauth"], "codex with an api_key")
+        path = cfg_with("codex-no-oauth.json", ga_add_backend(GA_CODEX, {"kind": "codex"}))
+        problems += ga_refused(mod, path, [cx_where, "oauth"], "codex without oauth")
+        return problems, ["refused     : codex with api_key; codex with no oauth object"]
+
+    def a34():
+        problems = []
+        for stem, name, entry in (
+                ("codex", GA_CODEX, {"kind": "codex", "oauth": {}, "auth_header": "none"}),
+                ("openai-oauth", GA_OPENAI, {"kind": "openai", "oauth": {}, "auth_header": "authorization"}),
+                ("openai-apikey", GA_OPENAI, {"kind": "openai", "api_key": TF_KEY_PASS,
+                                              "auth_header": "x-api-key"})):
+            path = cfg_with("auth-header-%s.json" % stem, ga_add_backend(name, entry))
+            problems += ga_refused(mod, path, ["backends.%s.auth_header" % name],
+                                   "auth_header on %s" % stem)
+        path = cfg_with("auth-header-apikey-ok.json",
+                        ga_add_backend(GA_OPENAI, {"kind": "openai", "api_key": TF_KEY_PASS,
+                                                   "auth_header": "authorization"}))
+        _cfg, ctl = ga_accepted(mod, path, "control: openai-apikey with auth_header authorization")
+        return problems + ctl, ["refused     : any auth_header on codex / openai-oauth; x-api-key on "
+                                "openai-apikey", "control     : authorization on openai-apikey"]
+
+    def a35():
+        problems = []
+        for stem, oauth, needle in (("unknown", {"tf_bogus_oauth": 1}, "tf_bogus_oauth"),
+                                    ("client-id", {"client_id": GA_CLIENT_ID}, "client_id"),
+                                    ("host-id", {"host_id": GA_HOST_ID}, "host_id")):
+            path = cfg_with("codex-oauth-%s.json" % stem,
+                            ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": oauth}))
+            problems += ga_refused(mod, path, [cx_where + ".oauth", needle], "codex oauth.%s" % needle)
+        path = cfg_with("codex-oauth-string.json",
+                        ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": "tf-not-an-object"}))
+        problems += ga_refused(mod, path, [cx_where + ".oauth"], "codex oauth a string")
+        return problems, ["refused     : an unknown oauth key, client_id and host_id on codex, "
+                          "a non-object -- each by name"]
+
+    def a36():
+        problems = []
+        need = ga_module_value(mod, "_API_KEY_MIN_LEN", problems)
+        if not isinstance(need, int):
+            return problems, []
+        short = GA_REFRESH[:need - 1]
+        where = cx_where + ".oauth.refresh_token"
+        for stem, value, needles in (("short", short, [where, str(need)]),
+                                     ("space", GA_REFRESH + " tail", [where]),
+                                     ("token", TF_ROUTER_TOKEN, [where, "auth_token"]),
+                                     ("number", 12345, [where])):
+            path = cfg_with("refresh-%s.json" % stem,
+                            ga_add_backend(GA_CODEX, {"kind": "codex",
+                                                      "oauth": {"refresh_token": value}}))
+            problems += ga_refused(mod, path, needles, "refresh_token %s" % stem,
+                                   absent=(GA_REFRESH, short))
+        return problems, ["bound       : _API_KEY_MIN_LEN = %d (read from the module)" % need,
+                          "refused     : short, whitespace, == auth_token, not a string; "
+                          "no refusal holds the value"]
+
+    def a37():
+        problems = []
+        where = oa_where + ".oauth"
+        for stem, key, value in (
+                ("client-prefix", "client_id", "tf-not-oaiapp"),
+                ("client-long", "client_id", "oaiapp_" + "c" * 129),
+                ("client-char", "client_id", "oaiapp_tf.client"),
+                ("host-v1", "host_id", "urn:uuid:0f1e2d3c-4b5a-1987-a654-3210fedcba98"),
+                ("host-upper", "host_id", GA_HOST_ID.upper().replace("URN:UUID:", "urn:uuid:")),
+                ("host-bare", "host_id", GA_HOST_ID[len("urn:uuid:"):])):
+            path = cfg_with("openai-%s.json" % stem,
+                            ga_add_backend(GA_OPENAI, {"kind": "openai", "oauth": {key: value}}))
+            problems += ga_refused(mod, path, ["%s.%s" % (where, key)], "openai oauth.%s %s" % (key, stem))
+        seeded = {"client_id": GA_CLIENT_ID, "host_id": GA_HOST_ID}
+        path = cfg_with("openai-ids-ok.json",
+                        ga_add_backend(GA_OPENAI, {"kind": "openai", "oauth": dict(seeded)}))
+        cfg, ctl = ga_accepted(mod, path, "control: a valid client_id and host_id")
+        problems += ctl
+        if cfg is not None:
+            problems += ga_seed_problems(cfg, GA_OPENAI, seeded, "control")
+        return problems, ["refused     : client_id not oaiapp_ / > 128 / '.'; host_id v1 / upper-case / "
+                          "no urn:uuid: prefix",
+                          "control     : oaiapp_ client_id and a v4 urn:uuid host_id load"]
+
+    def a38():
+        problems = []
+        known = ga_module_value(mod, "_RT_CODEX_IDENTITY", problems)
+        keys = [k for k, _v in known] if isinstance(known, tuple) else []
+        if "originator" not in keys:
+            problems.append("_RT_CODEX_IDENTITY has no originator key (the cases below need it)")
+            return problems, []
+        where = cx_where + ".identity"
+        for stem, identity, needles in (
+                ("unknown", {"tf_bogus_identity": "tf"}, [where, "tf_bogus_identity"]),
+                ("cr", {"originator": "tf-orig\rX-Injected: 1"}, [where, "originator"]),
+                ("number", {"originator": 7}, [where, "originator"]),
+                ("list", ["originator"], [where])):
+            path = cfg_with("identity-%s.json" % stem,
+                            ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": {}, "identity": identity}))
+            problems += ga_refused(mod, path, needles, "codex identity %s" % stem)
+        for stem, entry in (("oauth", {"kind": "openai", "oauth": {}}),
+                            ("apikey", {"kind": "openai", "api_key": TF_KEY_PASS})):
+            entry = dict(entry, identity={"originator": "tf-orig"})
+            path = cfg_with("identity-openai-%s.json" % stem, ga_add_backend(GA_OPENAI, entry))
+            problems += ga_refused(mod, path, [oa_where + ".identity"], "identity on openai %s" % stem)
+        override = {"originator": "tf-orig"}
+        path = cfg_with("identity-ok.json",
+                        ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": {}, "identity": override}))
+        cfg, ctl = ga_accepted(mod, path, "control: identity originator override")
+        problems += ctl
+        if cfg is not None:
+            got = getattr((cfg.backends or {}).get(GA_CODEX), "identity", None)
+            if not isinstance(got, tuple) or dict(got) != override:
+                problems.append("control: backends.%s.identity = %r, expected the pairs of %r"
+                                % (GA_CODEX, got, override))
+        return problems, ["keys        : %s (read from _RT_CODEX_IDENTITY)" % ", ".join(keys),
+                          "refused     : unknown key, CR, a number, a list; identity on openai",
+                          "control     : {originator: tf-orig} -> BackendSpec.identity pairs"]
+
+    def a39():
+        problems = []
+        for key, value in (("oauth", {}), ("identity", {"originator": "tf-orig"}),
+                           ("auth_base_url", "https://auth.example")):
+            path = cfg_with("mistral-%s.json" % key,
+                            lambda cfg, k=key, v=value: cfg["backends"]["mistral"].__setitem__(k, v))
+            problems += ga_refused(mod, path, ["backends.mistral.%s" % key], "%s on mistral" % key)
+        path = cfg_with("auth-base-query.json",
+                        ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": {},
+                                                  "auth_base_url": "https://auth.example/?tf-q-ga39=1"}))
+        problems += ga_refused(mod, path, [cx_where + ".auth_base_url", "query"],
+                               "auth_base_url with a query", absent=("tf-q-ga39",))
+        # The repr half (unit 2 types only): built in-process, no loader involved.
+        try:
+            seed = mod.OAuthSeed(refresh_token=GA_REFRESH, account_id="acct_tf-01", expires_at=0,
+                                 client_id=None, host_id=None)
+            spec = mod.BackendSpec(name=GA_CODEX, kind="codex", scheme="https", host="tf-codex.invalid",
+                                   port=443, base_path="", allow_private=False, allow_loopback=False,
+                                   ca_file=None, ca_pem=None, api_key=None, auth_header="none",
+                                   forward_headers=frozenset(), connect_timeout=5.0, idle_timeout=30.0,
+                                   profile="codex", oauth=seed)
+        except Exception as exc:  # noqa: BLE001 -- a missing type or field is the finding
+            problems.append("cannot build BackendSpec(oauth=OAuthSeed(...)): %s: %s"
+                            % (type(exc).__name__, ga_redact(str(exc))[:200]))
+        else:
+            text = repr(spec)
+            if "oauth=<redacted>" not in text:
+                problems.append("repr(BackendSpec) does not show oauth=<redacted>")
+            if "api_key=<redacted>" not in text:
+                problems.append("repr(BackendSpec) does not show api_key=<redacted>")
+            if "refresh_token=<redacted>" not in repr(seed):
+                problems.append("repr(OAuthSeed) does not show refresh_token=<redacted>")
+            if GA_REFRESH in text or GA_REFRESH in repr(seed) or GA_REFRESH in str(seed):
+                problems.append("a repr of BackendSpec or OAuthSeed holds the refresh_token")
+        return problems, ["refused     : oauth, identity, auth_base_url on mistral (by field path); "
+                          "auth_base_url with a query",
+                          "repr        : BackendSpec oauth=<redacted>, OAuthSeed refresh_token=<redacted>"]
+
+    def a40():
+        problems = []
+        acct = cx_where + ".oauth.account_id"
+        cases = (("acct-cr", "account_id", '"acct_tf\\r01"', acct, "acct_tf\r01"),
+                 ("acct-space", "account_id", '"acct_tf 01"', acct, "acct_tf 01"),
+                 ("acct-surrogate", "account_id", '"acct_tf\\ud800"', acct, "acct_tf\ud800"),
+                 ("refresh-surrogate", "refresh_token", '"%s\\ud800"' % GA_REFRESH,
+                  cx_where + ".oauth.refresh_token", GA_REFRESH))
+        for stem, key, raw, where, value in cases:
+            path = raw_cfg("validator-%s.json" % stem,
+                           ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": {key: GA_DUP_MARKER}}), raw)
+            problems += ga_refused(mod, path, [where], "oauth.%s %s" % (key, stem), absent=(value,))
+        path = raw_cfg("validator-identity-surrogate.json",
+                       ga_add_backend(GA_CODEX, {"kind": "codex", "oauth": {},
+                                                 "identity": {"originator": GA_DUP_MARKER}}),
+                       '"tf-orig\\ud800"')
+        problems += ga_refused(mod, path, [cx_where + ".identity"], "identity originator surrogate",
+                               absent=("tf-orig\ud800",))
+        return ga_ascii(problems), ["refused     : account_id with CR, space, \\ud800; refresh_token and "
+                                    "an identity value with \\ud800 (raw JSON escapes)",
+                                    "expect      : a ConfigError naming the field, never a traceback "
+                                    "or the value"]
+
+    def a41():
+        problems = []
+        loop_url = "http://127.0.0.1:%d" % GA_AUTH_PORT
+        where = cx_where + ".auth_base_url"
+        for stem, url, flags in (("http-public", "http://auth.example", {"allow_private": True}),
+                                 ("loop-private-only", loop_url, {"allow_private": True})):
+            entry = dict({"kind": "codex", "oauth": {}, "auth_base_url": url}, **flags)
+            path = cfg_with("auth-base-%s.json" % stem, ga_add_backend(GA_CODEX, entry))
+            problems += ga_refused(mod, path, [where], "auth_base_url %s" % stem)
+        for stem, url, flags, want in (
+                ("loop-both", loop_url, {"allow_private": True, "allow_loopback": True},
+                 ("http", "127.0.0.1", GA_AUTH_PORT, "")),
+                ("https", "https://auth.example", {}, ("https", "auth.example", 443, ""))):
+            entry = dict({"kind": "codex", "oauth": {}, "auth_base_url": url}, **flags)
+            path = cfg_with("auth-base-%s.json" % stem, ga_add_backend(GA_CODEX, entry))
+            cfg, ctl = ga_accepted(mod, path, "control: auth_base_url %s" % stem)
+            problems += ctl
+            if cfg is not None:
+                problems += ga_spec_problems(cfg, GA_CODEX, {"auth_base": want}, "auth_base_url %s" % stem)
+        return problems, ["refused     : http://auth.example with allow_private; %s with allow_private "
+                          "only" % loop_url,
+                          "accepted    : %s with allow_private + allow_loopback; https:// with neither"
+                          % loop_url]
+
+    def a42():
+        problems = []
+        top = ga_module_value(mod, "_RT_TOKEN_LIMIT_MAX", problems)
+        if not isinstance(top, int):
+            return problems, []
+        # route key -> the limits it sets (an absent key stays unset); "(default)" is the default route.
+        want = {"claude-sonnet-4-5": {"max_input_tokens": 262144, "max_tokens": 32768},
+                "claude-haiku-4-5": {"max_tokens": 8192},
+                "tf-a-input-only": {"max_input_tokens": top},
+                "tf-a-independent": {"max_input_tokens": 1000, "max_tokens": 2000},
+                "tf-a-none": {},
+                "(default)": {"max_input_tokens": 1}}
+
+        def limits(cfg):
+            for key in ("tf-a-input-only", "tf-a-independent", "tf-a-none"):
+                cfg["routes"][key] = {"backend": "mistral", "model": "tf-model"}
+            for key, values in want.items():
+                entry = cfg["default"] if key == "(default)" else cfg["routes"][key]
+                entry.update(values)
+        cfg, problems = ga_accepted(mod, cfg_with("token-limits-good.json", limits),
+                                    "token limits on routes and the default")
+        if cfg is not None:
+            for key, values in want.items():
+                spec = cfg.default if key == "(default)" else cfg.routes.get(key)
+                for field in GA_LIMIT_KEYS:
+                    got = getattr(spec, field, "<no %s field>" % field)
+                    if got != values.get(field):
+                        problems.append("%s: RouteSpec.%s %r, expected %r"
+                                        % (key, field, got, values.get(field)))
+        return problems, ["accepted    : both keys; max_tokens only; max_input_tokens only at %d "
+                          "(_RT_TOKEN_LIMIT_MAX); max_tokens > max_input_tokens (independent caps); "
+                          "neither; max_input_tokens 1 on the default" % top,
+                          "RouteSpec   : each value reaches its field; an unset key is None"]
+
+    def a43():
+        problems = []
+        top = ga_module_value(mod, "_RT_TOKEN_LIMIT_MAX", problems)
+        if not isinstance(top, int):
+            return problems, []
+        bad = (("0", 0), ("-1", -1), ("%d" % (top + 1), top + 1), ("1.5", 1.5), ("true", True),
+               ("the string \"262144\"", "262144"), ("null", None))
+        places = (("routes.claude-sonnet-4-5", lambda cfg: cfg["routes"]["claude-sonnet-4-5"]),
+                  ("default", lambda cfg: cfg["default"]))
+        n = 0
+        for where, place in places:
+            for field in GA_LIMIT_KEYS:
+                for label, value in bad:
+                    n += 1
+                    path = cfg_with("token-limit-bad-%d.json" % n,
+                                    lambda cfg, p=place, f=field, v=value: p(cfg).__setitem__(f, v))
+                    absent = (value,) if isinstance(value, str) else ()
+                    problems += ga_refused(mod, path, ["%s.%s" % (where, field), "1-%d" % top],
+                                           "%s.%s %s" % (where, field, label), absent=absent)
+        return problems, ["refused     : 0, -1, %d, 1.5, true, \"262144\", null -- max_input_tokens and "
+                          "max_tokens, on a route and on the default" % (top + 1),
+                          "message     : names the path and the range 1-%d, never the value "
+                          "or a sentinel" % top]
+
+    # A44/A45 (live finding 2026-10-07): the route sampling overrides on every kind whose
+    # request carries sampling -- passthrough (the default route), llamacpp, mistral and
+    # openai-apikey -- and their refusals; codex / openai-oauth never send sampling.
+    sampling_places = (
+        ("default", "passthrough", None, lambda cfg: cfg["default"], lambda c: c.default),
+        ("routes.claude-haiku-4-5", "llamacpp", None, lambda cfg: cfg["routes"]["claude-haiku-4-5"],
+         lambda c: c.routes["claude-haiku-4-5"]),
+        ("routes.claude-sonnet-4-5", "mistral", None, lambda cfg: cfg["routes"]["claude-sonnet-4-5"],
+         lambda c: c.routes["claude-sonnet-4-5"]),
+        ("routes.%s-route" % GA_OPENAI, "openai-apikey",
+         ga_add_backend(GA_OPENAI, {"kind": "openai", "api_key": TF_KEY_PASS}),
+         lambda cfg: cfg["routes"][GA_OPENAI + "-route"], lambda c: c.routes[GA_OPENAI + "-route"]))
+
+    def sampling_cfg(name, add, place, options):
+        def mutate(cfg):
+            if add is not None:
+                add(cfg)
+            place(cfg)["options"] = dict(options)
+        return cfg_with(name, mutate)
+
+    def a44():
+        problems, shown = [], []
+        for where, kind, add, place, spec_of in sampling_places:
+            for tag, options, want in (("floats", {"temperature": 0.25, "top_p": 0.5}, (0.25, 0.5)),
+                                       ("ints", {"temperature": 2, "top_p": 0}, (2.0, 0.0)),
+                                       ("temperature only", {"temperature": 0}, (0.0, None))):
+                label = "%s %s %s" % (kind, where, tag)
+                cfg, ctl = ga_accepted(mod, sampling_cfg("sampling-ok-%s-%s.json" % (kind, tag.replace(" ", "-")),
+                                                         add, place, options), label)
+                problems += ctl
+                if cfg is None:
+                    continue
+                opts = spec_of(cfg).options
+                got = (opts.get("temperature"), opts.get("top_p"))
+                if got != want or any(v is not None and type(v) is not float for v in got):
+                    problems.append("%s: options (temperature, top_p) = %r, expected the floats %r"
+                                    % (label, got, want))
+            shown.append("%s (%s)" % (kind, where))
+        return problems, ["accepted    : temperature 0-2 and top_p 0-1 (an int as a float) on " + ", ".join(shown)]
+
+    def a45():
+        problems = []
+        bad = (("temperature", "-0.1", -0.1), ("temperature", "2.5", 2.5), ("temperature", "true", True),
+               ("temperature", "the string \"0.5\"", "0.5"), ("temperature", "null", None),
+               ("top_p", "1.5", 1.5), ("top_p", "-0.5", -0.5), ("top_p", "false", False),
+               ("top_p", "the string \"0.75\"", "0.75"))
+        rules = {"temperature": "a number from 0 to 2", "top_p": "a number from 0 to 1"}
+        n = 0
+        for where, kind, add, place, _spec_of in sampling_places:
+            for key, label, value in bad:
+                n += 1
+                path = sampling_cfg("sampling-bad-%d.json" % n, add, place, {key: value})
+                problems += ga_refused(mod, path, ["%s.options.%s" % (where, key), rules[key]],
+                                       "%s %s %s" % (kind, key, label),
+                                       absent=(value,) if isinstance(value, str) else ())
+        for backend, entry, profile in ((GA_CODEX, {"kind": "codex", "oauth": {}}, "codex"),
+                                        (GA_OPENAI, {"kind": "openai", "oauth": {}}, "openai-oauth")):
+            for key in ("temperature", "top_p"):
+                path = cfg_with("sampling-%s-%s.json" % (profile, key),
+                                ga_add_backend(backend, entry, {key: 0.5}))
+                problems += ga_refused(mod, path, ["routes.%s-route.options.%s" % (backend, key),
+                                                   "profile %s" % profile],
+                                       "%s route option %s" % (profile, key))
+        return problems, ["refused     : -0.1, 2.5, true, \"0.5\", null (temperature); 1.5, -0.5, false, \"0.75\" "
+                          "(top_p) -- on passthrough, llamacpp, mistral, openai-apikey",
+                          "refused     : temperature, top_p on codex and openai-oauth (sampling False), "
+                          "the message naming the path and the profile"]
+
+    def a46():
+        problems = []
+        where = "routes.claude-sonnet-4-5.options.reasoning_effort"
+
+        def with_effort(value):
+            def mutate(cfg):
+                cfg["routes"]["claude-sonnet-4-5"]["options"] = {"reasoning_effort": value}
+            return mutate
+        for value in GA_MS_EFFORTS:
+            cfg, ctl = ga_accepted(mod, cfg_with("ms-effort-%s.json" % value, with_effort(value)),
+                                   "mistral reasoning_effort %s" % value)
+            problems += ctl
+            if cfg is not None:
+                got = cfg.routes["claude-sonnet-4-5"].options.get("reasoning_effort")
+                if got != value:
+                    problems.append("mistral reasoning_effort %s: options value %r, expected %r" % (value, got, value))
+        for n, (label, value) in enumerate((("ultra", "ultra"), ("MAX", "MAX"), ("true", True), ("1", 1),
+                                            ("null", None))):
+            problems += ga_refused(mod, cfg_with("ms-effort-bad-%d.json" % n, with_effort(value)),
+                                   [where, "max"], "mistral reasoning_effort %s" % label,
+                                   absent=(value,) if isinstance(value, str) else ())
+        return problems, ["accepted    : reasoning_effort %s on a mistral route" % ", ".join(GA_MS_EFFORTS),
+                          "refused     : ultra, MAX, true, 1, null -- naming the path and the choice list"]
+
+    def with_effort_map(value):
+        def mutate(cfg):
+            cfg["routes"]["claude-sonnet-4-5"]["options"] = {"reasoning_effort_map": value}
+        return mutate
+
+    def a47():
+        problems, shown = [], []
+        table = (("the user's example", GA_MS_EFFORT_MAP),
+                 ("all seven keys", {e: GA_MS_EFFORTS[-1 - i] for i, e in enumerate(GA_MS_EFFORTS)}),
+                 ("empty", {}),
+                 ("beside a fixed reasoning_effort", None))
+        for n, (label, value) in enumerate(table):
+            if value is None:
+                def mutate(cfg):
+                    cfg["routes"]["claude-sonnet-4-5"]["options"] = {"reasoning_effort": "high",
+                                                                     "reasoning_effort_map": GA_MS_EFFORT_MAP}
+                want = GA_MS_EFFORT_MAP
+            else:
+                mutate, want = with_effort_map(value), value
+            cfg, ctl = ga_accepted(mod, cfg_with("ms-effort-map-%d.json" % n, mutate),
+                                   "reasoning_effort_map %s" % label)
+            problems += ctl
+            if cfg is not None:
+                got = cfg.routes["claude-sonnet-4-5"].options.get("reasoning_effort_map")
+                if got != want:
+                    problems.append("reasoning_effort_map %s: options value %r, expected %r" % (label, got, want))
+            shown.append(label)
+        return problems, ["accepted    : " + ", ".join(shown)]
+
+    def a48():
+        problems = []
+        where = "routes.claude-sonnet-4-5.options.reasoning_effort_map"
+        eight = {e: "high" for e in GA_MS_EFFORTS}
+        eight["tf-extra"] = "high"
+        table = (("a list", ["low"], ()), ("a string", "low:high", ("low:high",)), ("null", None, ()),
+                 ("an int", 1, ()), ("key ultra", {"ultra": "high"}, ("ultra",)),
+                 ("key LOW", {"LOW": "high"}, ("LOW",)), ("value ultra", {"low": "ultra"}, ("ultra",)),
+                 ("value HIGH", {"low": "HIGH"}, ("HIGH",)), ("value null", {"low": None}, ()),
+                 ("value 1", {"low": 1}, ()), ("eight entries", eight, ("tf-extra",)))
+        for n, (label, value, absent) in enumerate(table):
+            problems += ga_refused(mod, cfg_with("ms-effort-map-bad-%d.json" % n, with_effort_map(value)),
+                                   [where, "max", "7"], "reasoning_effort_map %s" % label, absent=absent)
+        return problems, ["refused     : " + ", ".join(label for label, _v, _a in table)
+                          + " -- naming the path, the choice list and the 7-entry cap, never the value"]
+
     def a12():
         problems = []
 
@@ -1500,8 +2243,13 @@ def group_a(suite, fixture_root):
         GA_CASES[14]: a15, GA_CASES[15]: a16, GA_CASES[16]: a17, GA_CASES[17]: a18,
         GA_CASES[18]: a19, GA_CASES[19]: a20, GA_CASES[20]: a21, GA_CASES[21]: a22,
         GA_CASES[22]: a23, GA_CASES[23]: a24, GA_CASES[24]: a25, GA_CASES[25]: a26,
-        GA_CASES[26]: a27,
-        GA_CASES[11]: a12,      # last: it sweeps every message the others provoked
+        GA_CASES[26]: a27, GA_CASES[27]: a28, GA_CASES[28]: a29, GA_CASES[29]: a30,
+        GA_CASES[30]: a31, GA_CASES[31]: a32, GA_CASES[32]: a33, GA_CASES[33]: a34,
+        GA_CASES[34]: a35, GA_CASES[35]: a36, GA_CASES[36]: a37, GA_CASES[37]: a38,
+        GA_CASES[38]: a39, GA_CASES[39]: a40, GA_CASES[40]: a41, GA_CASES[41]: a42,
+        GA_CASES[42]: a43, GA_CASES[43]: a44, GA_CASES[44]: a45, GA_CASES[45]: a46,
+        GA_CASES[46]: a47, GA_CASES[47]: a48,
+        GA_CASES[11]: a12,    # last: it sweeps every message the others provoked
     }
     results = {}
     for cid, fn in cases.items():
@@ -1551,6 +2299,8 @@ GB_CASES = (
     "models: auth, Host, Origin",        # B27
     "models: query keys, methods",       # B28
     "models: no routes -> data []",      # B29
+    "mid-conversation system rules",     # B30
+    "models: token limits advertised",   # B31
 )
 
 # "Accepted" in a B case means "not a front refusal" (plan section 8): the status
@@ -1575,8 +2325,15 @@ GB_BODY_LIMIT = 16 << 20         # --body-limit of the shared router: above B22'
 GB_UNREAD_BODY_LEN = 10485760    # B22: the declared Content-Length whose body is withheld
 GB_UNREAD_ANSWER_S = 1.0         # B22: the 401 must arrive within this, body never sent
 GB_BODY_WAIT_S = 1.0             # B22: with a valid bearer, no answer while the body is withheld
-GB_TRICKLE_STEP_S = 1.0          # B14: one header byte per this, far under the per-recv timeout
-GB_TRICKLE_SLACK_S = 3.0         # B14: the cut must land within _HTTP_HEADER_TIMEOUT_S + this
+# B14 and B23 run in-process (FastRouter) with the pre-auth, header and body deadlines
+# patched to these; the module's own values are still read and B14 still checks their order.
+GB_FAST_PREAUTH_S = 0.5          # B14: _HTTP_PREAUTH_TIMEOUT_S (5 s), patched
+GB_FAST_HEADER_S = 2.0           # B14: _HTTP_HEADER_TIMEOUT_S (10 s), patched with _RouterHandler.timeout
+GB_FAST_BODY_S = 0.5             # B23: _HTTP_BODY_TIMEOUT_S (60 s), patched
+GB_TRICKLE_STEP_S = 0.1          # B14, B23: one byte per this, 1/5 of the deadline, far under the per-recv timeout
+GB_TRICKLE_SLACK_S = 0.75        # B14, B23: the cut must land within the deadline + this
+GB_KEEPALIVE_OVER_S = 0.5        # B14: the authenticated keep-alive idles this far past the pre-auth bound ...
+GB_KEEPALIVE_UNDER_S = 1.0       # ... and at least this far under the header bound
 GB_PARTIAL_LINE = b"POST /v1/messages HTTP/1.1\r\n"   # B14/B20: a request line, then nothing
 GB_DEEP_DEPTH = 100000           # B18: array nesting far past the interpreter's recursion limit
 GB_LONG_LINE = 65536 + 64        # B21: the stdlib reads at most 65537 bytes of a request line
@@ -1627,18 +2384,26 @@ GB_DEFAULT_DISPLAY = "TF Default Display Name"     # set on the default route; n
 GB_MODELS_QUERY = "limit=20&after_id=tf-a&before_id=tf-b&beta=true"   # every allowed key, values ignored
 GB_LIST_KEYS = frozenset({"data", "has_more", "first_id", "last_id"})
 GB_ENTRY_KEYS = frozenset({"type", "id", "display_name", "created_at"})
+# B31: the advertised token limits, after the fields above, in this order (context_window
+# repeats max_input_tokens); a route key absent here -- or a limit absent from its row -- is null.
+GB_LIMIT_ORDER = ("max_input_tokens", "max_tokens", "context_window")
+GB_MODEL_LIMITS = {"tf-b-second": {"max_input_tokens": 262144, "max_tokens": 32768},
+                   "tf b/third": {"max_tokens": 8192}}
 GB_CREATED_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 GB_CREATED_SLACK_S = 2.0       # created_at (second precision) must lie in [launch - this, now + this]
 
 
-def gb_models_config(peer_url, routes=GB_MODEL_ROUTES):
-    """gb_config with *routes* (each display_name set when given) and a named default."""
+def gb_models_config(peer_url, routes=GB_MODEL_ROUTES, limits=None):
+    """gb_config with *routes* (each display_name set when given, plus the route's row
+    of *limits* -- a GB_MODEL_LIMITS-shaped dict -- when given) and a named default."""
+    limits = limits or {}
     cfg = gb_config(peer_url)
     cfg["routes"] = {}
     for key, display in routes:
         entry = {"backend": "tfpeer", "model": "tf-model"}
         if display is not None:
             entry["display_name"] = display
+        entry.update(limits.get(key, {}))
         cfg["routes"][key] = entry
     cfg["default"] = {"backend": "tfpeer", "model": "tf-model", "display_name": GB_DEFAULT_DISPLAY}
     return cfg
@@ -1672,10 +2437,12 @@ def gb_json_200(label, status, hdrs, body):
 
 def gb_check_entry(label, entry, want_id, want_display, launched):
     """Problems unless *entry* is exactly {type: model, id, display_name, created_at}
+    (plus, optionally, the GB_LIMIT_ORDER keys: B31 owns their presence and values)
     with a second-precision RFC 3339 UTC created_at between the router's launch and now."""
-    if not isinstance(entry, dict) or set(entry) != GB_ENTRY_KEYS:
-        return ["%s: entry %r, expected exactly the keys %s"
-                % (label, ga_redact(str(entry))[:160], sorted(GB_ENTRY_KEYS))]
+    if not isinstance(entry, dict) or set(entry) not in (GB_ENTRY_KEYS,
+                                                         GB_ENTRY_KEYS | frozenset(GB_LIMIT_ORDER)):
+        return ["%s: entry %r, expected exactly the keys %s (+ %s)"
+                % (label, ga_redact(str(entry))[:160], sorted(GB_ENTRY_KEYS), ", ".join(GB_LIMIT_ORDER))]
     problems = []
     for key, want in (("type", "model"), ("id", want_id), ("display_name", want_display)):
         if entry[key] != want:
@@ -1890,7 +2657,7 @@ def gb_control(client, label="control: a valid request"):
 
 
 def gb_body_trickle(client, bound, out):
-    """B23, on its own thread: a valid bearer and Content-Length GB_TRICKLE_BODY_LEN,
+    """B23: a valid bearer and Content-Length GB_TRICKLE_BODY_LEN,
     then one body byte per GB_TRICKLE_STEP_S (far under the per-recv timeout)
     until the router closes or *bound* + GB_TRICKLE_SLACK_S passes.  *out* gets
     {"closed", "took", "sent", "data"} (and "error" on a connect failure)."""
@@ -1919,10 +2686,12 @@ def group_b(suite, fixture_root):
     refusals, the stdlib's own refusals, the ready file, bind-first and the cap.
 
     One live router (--allowed-origin, --body-limit 16 MiB) in front of one
-    loopback passthrough peer serves every case but B16 (a busy port), B20
+    loopback passthrough peer serves every case but B14 and B23 (the same config
+    served in-process with the pre-auth/header/body deadlines patched to
+    milliseconds, FastRouter), B16 (a busy port), B20
     (its own router with --max-connections 1), B25-B28 (a second router on the
-    same peer whose routes carry display_name) and B29 (a router with no
-    routes).  The models cases also assert that the peer is never contacted.
+    same peer whose routes carry display_name), B29 (a router with no
+    routes) and B31 (a router whose routes carry token limits).  The models cases also assert that the peer is never contacted.
     Every front refusal must be an
     Anthropic envelope of KD-14's type with Connection: close; "accepted" means
     "not a front refusal" and never pins the status behind the front.  A router
@@ -1956,13 +2725,11 @@ def group_b(suite, fixture_root):
                                  label="models", extra_argv=("--allowed-origin", GB_OK_ORIGIN))
         mclient = models_proc.client() if models_proc.wait_ready() is not None else None
         mwhy = gb_not_ready(models_proc) if mclient is None else None
-        # B23 runs on its own thread from here, so its deadline overlaps the other cases.
-        body_bound = getattr(mod, "_HTTP_BODY_TIMEOUT_S", None) if mod is not None else None
-        trickle, trickle_thread = {}, None
-        if client is not None and isinstance(body_bound, (int, float)):
-            trickle_thread = threading.Thread(target=gb_body_trickle,
-                                              args=(client, body_bound, trickle), daemon=True)
-            trickle_thread.start()
+
+        def fast(label, patch):
+            """B14, B23: this config on the same peer, served in-process with *patch*."""
+            box = new_sandbox(fixture_root, "front-" + label)
+            return FastRouter(mod, mod_why, box, write_config(box, gb_config(peer.url())), patch, label=label)
 
         def live(fn):
             def case():
@@ -1988,24 +2755,30 @@ def group_b(suite, fixture_root):
         def b23():
             if mod is None:
                 return [mod_why], []
-            if not isinstance(body_bound, (int, float)):
+            module_bound = getattr(mod, "_HTTP_BODY_TIMEOUT_S", None)
+            if not isinstance(module_bound, (int, float)):
                 return ["the module defines no _HTTP_BODY_TIMEOUT_S"], []
-            trickle_thread.join(body_bound + GB_TRICKLE_SLACK_S + RAW_TIMEOUT_S + GB_TRICKLE_STEP_S)
+            body_bound = GB_FAST_BODY_S
+            trickle = {}
+            with fast("b23", (("_HTTP_BODY_TIMEOUT_S", body_bound),)) as router:
+                if router.client is None:
+                    return [router.why], []
+                gb_body_trickle(router.client, body_bound, trickle)
             problems = []
-            if trickle_thread.is_alive() or "took" not in trickle:
+            if "took" not in trickle:
                 return ["the body trickle did not finish"], []
             if "error" in trickle:
                 problems.append("the body trickle could not connect: %s" % trickle["error"])
             elif not trickle["closed"]:
-                problems.append("a body trickle (1 byte / %gs) still open after %.1fs (total "
+                problems.append("a body trickle (1 byte / %gs) still open after %.2fs (total "
                                 "body deadline %gs)" % (GB_TRICKLE_STEP_S, trickle["took"], body_bound))
             if trickle.get("data"):
                 problems.append("the cut sent %d byte(s); expected a close without an answer"
                                 % len(trickle["data"]))
-            return problems, ["trickle     : %d body byte(s) of %d declared, closed %s after %.1fs "
-                              "(deadline %gs from the module, slack %gs)"
+            return problems, ["trickle     : %d body byte(s) of %d declared, closed %s after %.2fs "
+                              "(in-process, deadline %gs patched over the module's %gs, slack %gs)"
                               % (trickle["sent"], GB_TRICKLE_BODY_LEN, trickle["closed"],
-                                 trickle["took"], body_bound, GB_TRICKLE_SLACK_S)]
+                                 trickle["took"], body_bound, module_bound, GB_TRICKLE_SLACK_S)]
 
         def b24():
             if mod is None:
@@ -2254,64 +3027,70 @@ def group_b(suite, fixture_root):
             problems = []
             # V3: a connection that has not authenticated yet gets the shorter
             # pre-auth deadline; an authenticated keep-alive one keeps the header one.
-            bound = ga_module_value(mod, "_HTTP_PREAUTH_TIMEOUT_S", problems)
-            header_bound = ga_module_value(mod, "_HTTP_HEADER_TIMEOUT_S", problems)
-            if not isinstance(bound, (int, float)) or not isinstance(header_bound, (int, float)):
+            module_bound = ga_module_value(mod, "_HTTP_PREAUTH_TIMEOUT_S", problems)
+            module_header = ga_module_value(mod, "_HTTP_HEADER_TIMEOUT_S", problems)
+            if not isinstance(module_bound, (int, float)) or not isinstance(module_header, (int, float)):
                 return problems, []
-            if bound >= header_bound:
+            if module_bound >= module_header:
                 problems.append("_HTTP_PREAUTH_TIMEOUT_S %g is not under _HTTP_HEADER_TIMEOUT_S %g"
-                                % (bound, header_bound))
-            sent, closed = 0, False
-            sock = socket.create_connection((client.host, client.port), timeout=RAW_TIMEOUT_S)
-            t0 = time.monotonic()
-            try:
-                sock.sendall(GB_PARTIAL_LINE)
-                while time.monotonic() - t0 < bound + GB_TRICKLE_SLACK_S:
-                    try:
-                        sock.sendall(b"X")
-                        sent += 1
-                    except OSError:
-                        closed = True
-                        break
-                    closed, _data = socket_closed_by_peer(sock, time.monotonic() + GB_TRICKLE_STEP_S)
-                    if closed:
-                        break
-            finally:
+                                % (module_bound, module_header))
+            # The cut and the keep-alive run in-process, both deadlines patched (same order).
+            bound, header_bound = GB_FAST_PREAUTH_S, GB_FAST_HEADER_S
+            with fast("b14", (("_HTTP_PREAUTH_TIMEOUT_S", bound), ("_HTTP_HEADER_TIMEOUT_S", header_bound))) as router:
+                if router.client is None:
+                    return problems + [router.why], []
+                fclient = router.client
+                sent, closed = 0, False
+                sock = socket.create_connection((fclient.host, fclient.port), timeout=RAW_TIMEOUT_S)
+                t0 = time.monotonic()
                 try:
-                    sock.close()
-                except OSError:
-                    pass
-            took = time.monotonic() - t0
-            if not closed:
-                problems.append("a header trickle (1 byte / %gs) still open after %.1fs "
-                                "(total deadline %gs)" % (GB_TRICKLE_STEP_S, took, bound))
-            problems += gb_control(client, "after the cut: a valid request")
-            # The authenticated keep-alive connection idles past the pre-auth bound
-            # and is still served: it is under the header deadline, not the pre-auth one.
-            idle = min(bound + 1.0, header_bound - 1.0)
-            conn = client.connect()
-            try:
-                answers = []
-                for n in range(2):
-                    if n:
-                        time.sleep(idle)
-                    conn.request("POST", client.path, body=json.dumps(gb_body()).encode("utf-8"),
-                                 headers=client.headers())
-                    resp = conn.getresponse()
-                    data = resp.read()
-                    RESPONSE_BODIES.append(("keep-alive POST %d" % n, data))
-                    answers.append(resp.status)
-                    problems += gb_accepted("keep-alive request %d" % n, resp.status, data)
-            except (OSError, http.client.HTTPException) as exc:
-                problems.append("an authenticated keep-alive connection idle %.1fs was cut (%s): "
-                                "it got the pre-auth deadline" % (idle, type(exc).__name__))
-            finally:
-                conn.close()
-            return problems, ["trickle     : %d byte(s), closed %s after %.1fs (pre-auth deadline "
-                              "%gs from the module, slack %gs)"
-                              % (sent, closed, took, bound, GB_TRICKLE_SLACK_S),
+                    sock.sendall(GB_PARTIAL_LINE)
+                    while time.monotonic() - t0 < bound + GB_TRICKLE_SLACK_S:
+                        try:
+                            sock.sendall(b"X")
+                            sent += 1
+                        except OSError:
+                            closed = True
+                            break
+                        closed, _data = socket_closed_by_peer(sock, time.monotonic() + GB_TRICKLE_STEP_S)
+                        if closed:
+                            break
+                finally:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                took = time.monotonic() - t0
+                if not closed:
+                    problems.append("a header trickle (1 byte / %gs) still open after %.2fs "
+                                    "(total deadline %gs)" % (GB_TRICKLE_STEP_S, took, bound))
+                problems += gb_control(fclient, "after the cut: a valid request")
+                # The authenticated keep-alive connection idles past the pre-auth bound
+                # and is still served: it is under the header deadline, not the pre-auth one.
+                idle = min(bound + GB_KEEPALIVE_OVER_S, header_bound - GB_KEEPALIVE_UNDER_S)
+                conn = fclient.connect()
+                try:
+                    answers = []
+                    for n in range(2):
+                        if n:
+                            time.sleep(idle)
+                        conn.request("POST", fclient.path, body=json.dumps(gb_body()).encode("utf-8"),
+                                     headers=fclient.headers())
+                        resp = conn.getresponse()
+                        data = resp.read()
+                        RESPONSE_BODIES.append(("keep-alive POST %d" % n, data))
+                        answers.append(resp.status)
+                        problems += gb_accepted("keep-alive request %d" % n, resp.status, data)
+                except (OSError, http.client.HTTPException) as exc:
+                    problems.append("an authenticated keep-alive connection idle %.1fs was cut (%s): "
+                                    "it got the pre-auth deadline" % (idle, type(exc).__name__))
+                finally:
+                    conn.close()
+            return problems, ["trickle     : %d byte(s), closed %s after %.2fs (in-process, pre-auth "
+                              "deadline %gs patched over the module's %gs, slack %gs)"
+                              % (sent, closed, took, bound, module_bound, GB_TRICKLE_SLACK_S),
                               "keep-alive  : authenticated, idle %.1fs, then served (header "
-                              "deadline %gs)" % (idle, header_bound)]
+                              "deadline %gs patched over the module's %gs)" % (idle, header_bound, module_header)]
 
         def b15():
             problems = []
@@ -2742,6 +3521,108 @@ def group_b(suite, fixture_root):
             finally:
                 empty.close()
 
+        def b30():
+            problems, shown = [], []
+            mid_str = {"role": "system", "content": "tf mid system"}
+            mid_list = {"role": "system", "content": [
+                {"type": "text", "text": "tf mid one", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "tf mid two"}]}
+            user, asst = {"role": "user", "content": "tf ping"}, {"role": "assistant", "content": "tf ok"}
+            for label, msgs in (("system string at messages.1", [user, mid_str]),
+                                ("system text blocks at messages.1", [user, mid_list, asst, user]),
+                                ("two system entries mid-conversation", [user, asst, mid_str, user, mid_list])):
+                obj = gb_body()
+                obj["messages"] = msgs
+                before = len(peer.requests)
+                status, _h, body = client.post(obj=obj)
+                more = gb_accepted(label, status, body)
+                if not more and status == 400:
+                    _t, msg, _why = gb_envelope(body)
+                    more = ["%s: status 400 (%s)" % (label, ga_redact(msg or "")[:120])]
+                if not more and len(peer.requests) == before:
+                    more = ["%s: accepted but the peer was not contacted" % label]
+                problems += more
+                shown.append("%s -> %r" % (label, status))
+            image = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                 "data": "iVBORw0KGgoAAAANSUhEUg=="}}
+            tool = {"type": "tool_use", "id": "toolu_tf_b30", "name": "Read", "input": {}}
+            for label, msgs, needles in (
+                    ("system at messages.0", [{"role": "system", "content": "tf sys"}, user],
+                     ("messages.0.role",)),
+                    ("system with an image block", [user, {"role": "system", "content": [
+                        {"type": "text", "text": "tf a"}, image]}], ("messages.1.content.1",)),
+                    ("system with a tool_use block", [user, asst, {"role": "system", "content": [tool]}],
+                     ("messages.2.content.0",)),
+                    ("role tool", [user, {"role": "tool", "content": "tf t"}],
+                     ("messages.1.role", "must be user, assistant or system"))):
+                obj = gb_body()
+                obj["messages"] = msgs
+                before = len(peer.requests)
+                status, _h, body = client.post(obj=obj)
+                etype, msg, bad = gb_envelope(body)
+                if status != 400 or bad or etype != GB_TYPES[400] or any(n not in msg for n in needles):
+                    problems.append("%s: status %r, %r; expected a 400 naming %s"
+                                    % (label, status, bad or ga_redact(msg or "")[:120], " / ".join(needles)))
+                problems += peer_untouched(before, label)
+                shown.append("%s -> %r %s" % (label, status, ga_redact(msg or "")[:80]))
+            problems += gb_control(client)
+            return problems, ["case        : " + s for s in shown]
+
+        def gb_limit_problems(label, entry, key):
+            """Problems unless *entry* ends with GB_LIMIT_ORDER, in that order, holding
+            GB_MODEL_LIMITS[key] (null when unset) and context_window == max_input_tokens."""
+            if not isinstance(entry, dict):
+                return ["%s: entry is %s, expected an object" % (label, type(entry).__name__)]
+            row = GB_MODEL_LIMITS.get(key, {})
+            want = {"max_input_tokens": row.get("max_input_tokens"), "max_tokens": row.get("max_tokens"),
+                    "context_window": row.get("max_input_tokens")}
+            problems = []
+            order = ["type", "id", "display_name", "created_at"] + list(GB_LIMIT_ORDER)
+            if list(entry) != order:
+                problems.append("%s: keys %r, expected %r (the limits after the existing fields)"
+                                % (label, list(entry), order))
+            for field, value in want.items():
+                if entry.get(field, "<absent>") != value:
+                    problems.append("%s: %s %r, expected %r" % (label, field, entry.get(field, "<absent>"),
+                                                                value))
+            return problems
+
+        def b31():
+            box = new_sandbox(fixture_root, "models-limits")
+            started = time.time()
+            lim = RouterProc(box, write_config(box, gb_models_config(peer.url(), limits=GB_MODEL_LIMITS)),
+                             label="models-limits")
+            try:
+                if lim.wait_ready() is None:
+                    return [gb_not_ready(lim)], []
+                lc = lim.client()
+                before = len(peer.requests)
+                status, hdrs, body = gb_get(lc, GB_MODELS_PATH)
+                obj, problems = gb_json_200("GET /v1/models, limits", status, hdrs, body)
+                if obj is not None:
+                    problems += gb_check_list("GET /v1/models, limits", obj, GB_MODEL_ROUTES, started)
+                    for entry in obj.get("data") or []:
+                        key = entry.get("id") if isinstance(entry, dict) else None
+                        problems += gb_limit_problems("GET /v1/models [%s]" % key, entry, key)
+                for key, quoted in (("claude-sonnet-4-5", "claude-sonnet-4-5"),
+                                    ("tf-b-second", "tf-b-second"), ("tf b/third", "tf%20b%2Fthird")):
+                    label = "GET /v1/models/%s" % quoted
+                    status, hdrs, body = gb_get(lc, "/v1/models/" + quoted)
+                    entry, bad = gb_json_200(label, status, hdrs, body)
+                    problems += bad
+                    if entry is not None:
+                        display = dict(GB_MODEL_ROUTES).get(key) or key
+                        problems += gb_check_entry(label, entry, key, display, started)
+                        problems += gb_limit_problems(label, entry, key)
+                problems += peer_untouched(before, "models limits")
+                return problems, ["config      : tf-b-second max_input_tokens 262144 + max_tokens 32768; "
+                                  "'tf b/third' max_tokens 8192 only; claude-sonnet-4-5 neither",
+                                  "list, {id}  : max_input_tokens, max_tokens, context_window "
+                                  "(= max_input_tokens) after the existing fields; unset -> null",
+                                  "existing    : type, id, display_name, created_at unchanged"]
+            finally:
+                lim.close()
+
         cases = [(GB_CASES[0], live(b1)), (GB_CASES[1], live(b2)), (GB_CASES[2], live(b3)),
                  (GB_CASES[3], live(b4)), (GB_CASES[4], live(b5)), (GB_CASES[5], live(b6)),
                  (GB_CASES[6], live(b7)), (GB_CASES[7], live(b8)), (GB_CASES[8], live(b9)),
@@ -2752,7 +3633,7 @@ def group_b(suite, fixture_root):
                  (GB_CASES[23], live(b24)), (GB_CASES[22], live(b23)),
                  (GB_CASES[24], live_models(b25)), (GB_CASES[25], live_models(b26)),
                  (GB_CASES[26], live_models(b27)), (GB_CASES[27], live_models(b28)),
-                 (GB_CASES[28], b29),
+                 (GB_CASES[28], b29), (GB_CASES[29], live(b30)), (GB_CASES[30], b31),
                  (GB_CASES[16], live(b17))]   # last: it sweeps every error body the others provoked
         for cid, fn in cases:
             try:
@@ -3682,6 +4563,8 @@ GD_CASES = (
     "TLS ragged EOF after stop ok",      # D12
     "oversized event -> error",          # D13
     "bare CR / BOM parsed as a client",  # D14
+    "mid-conversation system verbatim",  # D15
+    "route sampling override wins",      # D16
 )
 
 GD_BACKEND = "tfd"
@@ -3689,15 +4572,18 @@ GD_TLS_BACKEND = "tfdtls"
 GD_DEFAULT_MODEL = "tf-d-default"
 GD_UNROUTED = "claude-unrouted-x"
 # route key claude-tf-<n> -> upstream model tf-<n>; d12/d12b on the verified-TLS backend.
-GD_ROUTES = ("d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d8b", "d9", "d9b", "d11", "d13")
+GD_ROUTES = ("d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d8b", "d9", "d9b", "d11", "d13", "d15")
 GD_TLS_ROUTES = ("d12", "d12b")
 GD_COUNT = 4242                       # D6: the peer's input_tokens
 GD_EVENT_LIMIT_FALLBACK = 2 * 1024 * 1024   # D13: _SSE_EVENT_LIMIT per the plan, when the module lacks it
 GD_D13_LINE = 65536                   # D13: one data: line's bytes, far under _SSE_LINE_LIMIT
 GD_D13_MARKER = "tf-d13-oversized-"
-GD_D4_GAPS = (8.0, 8.5)               # D4: silences before ": tf-c2" and ": tf-c3" -- 16.5 s > _PING_INTERVAL_S
-GD_D4_PINGS = 1                       # D4: pings in that silence under the ping rule (one per 15 s since a write)
-GD_IDLE_S = 30                        # both D backends: idle_timeout above D4's 8.5 s gaps between comment lines
+# D4 runs in-process (FastRouter) with _PING_INTERVAL_S patched to GD_D4_PING_S: its
+# 1.5 s of comments sit mid-window between one and two intervals (0.5 s each side).
+GD_D4_PING_S = 1.0                    # D4: _PING_INTERVAL_S (15 s), patched; _RT_TICK_S is FAST_TICK_S
+GD_D4_GAPS = (0.7, 0.8)               # D4: silences before ": tf-c2" and ": tf-c3" -- 1.5 s, in [1, 2) x GD_D4_PING_S
+GD_D4_PINGS = 1                       # D4: pings in that silence under the ping rule (one per interval since a write)
+GD_IDLE_S = 30                        # both D backends: idle_timeout above D4's gaps between comment lines
 
 GD_ANSWER = {"id": "msg_tf_pass", "type": "message", "role": "assistant",
              "model": AN_UPSTREAM_MODEL, "content": [{"type": "text", "text": "ok ✓"}],
@@ -3721,6 +4607,59 @@ def gd_error(etype, message):
 
 
 GD_BOM = b"\xef\xbb\xbf"
+
+
+def gd_d16(mod):
+    """D16 (live finding 2026-10-07), in-process: a passthrough route's options.temperature /
+    options.top_p (validated by the kind's own ROUTE_OPTIONS) replace the client's values and
+    are injected when the client sent none; an unset option keeps the client's value; the
+    count_tokens body is the client's, sampling untouched (Anthropic's count_tokens takes none)."""
+    if mod is None:
+        return ["the router module cannot be imported"], []
+    adapter_cls = getattr(mod, "PassthroughAdapter", None)
+    if adapter_cls is None:
+        return ["the module defines no PassthroughAdapter"], []
+    backend = mod.BackendSpec(name=GD_BACKEND, kind="passthrough", scheme="https", host="tf-pass.invalid",
+                              port=443, base_path="", allow_private=False, allow_loopback=False,
+                              ca_file=None, ca_pem=None, api_key=None, auth_header="x-api-key",
+                              forward_headers=frozenset(), connect_timeout=5.0, idle_timeout=30.0)
+    table = (("route wins", {"temperature": 0.2, "top_p": 0.5}, {"temperature": 1, "top_p": 0.9},
+              {"temperature": 0.2, "top_p": 0.5}),
+             ("injected when absent", {"temperature": 0.2, "top_p": 0.5}, {}, {"temperature": 0.2, "top_p": 0.5}),
+             ("temperature only", {"temperature": 0}, {"temperature": 1, "top_p": 0.9},
+              {"temperature": 0.0, "top_p": 0.9}),
+             ("no option", {}, {"temperature": 1}, {"temperature": 1}))
+    problems, shown = [], []
+    for label, options, client, want_sampling in table:
+        try:
+            checked = adapter_cls.validate_options(dict(options), "routes.claude-tf-d16.options")
+        except Exception as exc:  # noqa: BLE001 -- a refusal is the finding
+            problems.append("%s: the passthrough kind refuses %s: %s" % (label, sorted(options), exc))
+            continue
+        sent = {"model": "claude-tf-d16", "max_tokens": 64, "messages": [{"role": "user", "content": "tf d16"}]}
+        sent.update(client)
+        route = mod.RouteSpec(name="claude-tf-d16", backend=GD_BACKEND, model="tf-d16", options=checked)
+        for endpoint in ("messages", "count_tokens"):
+            inbound = mod.InboundRequest(endpoint=endpoint, requested_model=sent["model"], body=ge_clone(sent),
+                                         stream=False, route=route, backend=backend, client_headers={},
+                                         scrub=lambda text: text)
+            adapter = adapter_cls()
+            local = adapter.upstream_request(inbound) if endpoint == "messages" else adapter.count_tokens(inbound)
+            if isinstance(local, dict):
+                problems.append("%s %s: answered locally, expected a forwarded body" % (label, endpoint))
+                continue
+            up = json.loads(local[1].decode("utf-8"))
+            want = {k: v for k, v in sent.items() if k not in ("temperature", "top_p")}
+            want["model"] = "tf-d16"
+            want.update(want_sampling if endpoint == "messages" else
+                        {k: v for k, v in client.items()})
+            if up != want:
+                problems.append("%s %s: sampling (temperature, top_p) = (%r, %r), expected (%r, %r) "
+                                "(differing key(s): %s)"
+                                % (label, endpoint, up.get("temperature"), up.get("top_p"), want.get("temperature"),
+                                   want.get("top_p"), ge_diff_keys(up, want)))
+        shown.append("%s -> %r" % (label, want_sampling))
+    return problems, ["route       : " + s for s in shown] + ["count_tokens: the client's sampling, unchanged"]
 
 
 def gd_d14(mod):
@@ -3800,6 +4739,20 @@ def gd_d1_body():
             "tf_future_field": {"nested": [1, 2.5, None, True, "✓"]}}
 
 
+def gd_d15_body():
+    """D15: Claude Code 2.1.154+'s mid-conversation role "system" entries (string and
+    text blocks with cache_control), which a passthrough relays as sent."""
+    return {"model": "claude-tf-d15", "max_tokens": 64, "stream": False,
+            "system": [{"type": "text", "text": "tf sys", "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": "tf d15 é✓"},
+                         {"role": "system", "content": "<system-reminder>tf mid</system-reminder>"},
+                         {"role": "assistant", "content": "ok"},
+                         {"role": "user", "content": [{"type": "text", "text": "again"}]},
+                         {"role": "system", "content": [
+                             {"type": "text", "text": "tf mid one", "cache_control": {"type": "ephemeral"}},
+                             {"type": "text", "text": "tf mid two"}]}]}
+
+
 def gd_oversized_lines(limit):
     """D13: one event whose lines before its blank line total limit + 1 bytes
     (newlines included), spread over data: lines of at most GD_D13_LINE bytes."""
@@ -3828,7 +4781,7 @@ def gd_scripts(limit):
     d4_gaps[d4_lines.index(": tf-c3")] = GD_D4_GAPS[1]
     rate = gd_error("rate_limit_error", "tf slow down")
     return {
-        "tf-d1": answer, "tf-d2": answer, "tf-d11": answer, GD_DEFAULT_MODEL: answer,
+        "tf-d1": answer, "tf-d2": answer, "tf-d11": answer, "tf-d15": answer, GD_DEFAULT_MODEL: answer,
         "tf-d3": [("respond_sse", GD_STREAM_LINES)],
         "tf-d4": [("respond_sse", d4_lines, d4_gaps)],
         "tf-d5": [("respond_sse", AN_HEAD + AN_DELTA)],
@@ -3939,7 +4892,8 @@ def group_d(suite, fixture_root):
     One live router (--debug) in front of two passthrough peers: a plain one
     whose script is chosen by the upstream model (route claude-tf-<n> -> model
     tf-<n>), and a verified-TLS one for D12.  D10's second half runs its own
-    router without a default route.  Before the passthrough adapter is wired
+    router without a default route; D4 serves the same config in-process with
+    the ping interval patched (FastRouter).  Before the passthrough adapter is wired
     every routed request is the 501 "backend kind passthrough is not wired yet":
     each case FAILS naming that status, never crashes the group.
     """
@@ -4072,15 +5026,21 @@ def group_d(suite, fixture_root):
                               "client      : %d line(s): %s" % (len(got), ev_shape(out["events"]))]
 
         def d4():
-            conn, resp, problems = open_stream(client, gd_body("claude-tf-d4", stream=True))
-            if problems:
-                return problems, []
-            t0 = time.monotonic()
-            try:
-                out = read_stream(resp)
-            finally:
-                close_stream(conn, resp)
-            elapsed = time.monotonic() - t0
+            # The same config and peers, served in-process with the ping interval patched.
+            with FastRouter(mod, "cannot import %s" % os.path.relpath(SERVER, H.REPO_ROOT), sandbox, cfgpath,
+                            (("_RT_TICK_S", FAST_TICK_S), ("_PING_INTERVAL_S", GD_D4_PING_S)),
+                            label="pass-d4") as fast:
+                if fast.client is None:
+                    return [fast.why], []
+                conn, resp, problems = open_stream(fast.client, gd_body("claude-tf-d4", stream=True))
+                if problems:
+                    return problems, []
+                t0 = time.monotonic()
+                try:
+                    out = read_stream(resp)
+                finally:
+                    close_stream(conn, resp)
+                elapsed = time.monotonic() - t0
             events = out["events"]
             names = ev_names(events)
             if out["comments"]:
@@ -4101,6 +5061,8 @@ def group_d(suite, fixture_root):
             problems += ev_unparsed(events)
             return problems, ["peer        : ': tf-pre-start', message_start, 3 comments over %.1f s, "
                               "then the rest" % sum(GD_D4_GAPS),
+                              "router      : in-process, _PING_INTERVAL_S %g, _RT_TICK_S %g"
+                              % (GD_D4_PING_S, FAST_TICK_S),
                               "client      : %s in %.1f s" % (ev_shape(events), elapsed)]
 
         def d5():
@@ -4283,6 +5245,28 @@ def group_d(suite, fixture_root):
                               % (limit + 1, GD_D13_LINE, limit_note),
                               "client      : %s, %d bytes" % (ev_shape(out["events"]), total)]
 
+        def d15():
+            sent = gd_d15_body()
+            status, _h, body = client.post(obj=sent)
+            problems = answer_status("the client", status, body, 200)
+            got, more = gd_one_request(peer, "tf-d15")
+            problems += more
+            if got is not None:
+                _request, up = got
+                want = dict(sent)
+                want["model"] = "tf-d15"
+                if up != want:
+                    keys = sorted(k for k in set(up) | set(want) if up.get(k) != want.get(k))
+                    problems.append("the upstream body differs from the client's beyond the model: "
+                                    "key(s) %s" % ", ".join(keys))
+                roles = [m.get("role") for m in up.get("messages") or () if isinstance(m, dict)]
+                if roles != [m["role"] for m in sent["messages"]]:
+                    problems.append("upstream roles %r, expected the client's %r"
+                                    % (roles, [m["role"] for m in sent["messages"]]))
+            return problems, ["client      : roles %s, top-level system list"
+                              % ", ".join(m["role"] for m in sent["messages"]),
+                              "answer      : status %r" % status]
+
         for cid, fn in zip(GD_CASES, (d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13)):
             try:
                 results[cid] = live(fn)()
@@ -4293,6 +5277,16 @@ def group_d(suite, fixture_root):
             results[GD_CASES[13]] = gd_d14(mod)      # in-process: needs no live router
         except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
             results[GD_CASES[13]] = (["case raised %s: %s"
+                                      % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+        try:
+            results[GD_CASES[14]] = live(d15)()
+        except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+            results[GD_CASES[14]] = (["case raised %s: %s"
+                                      % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+        try:
+            results[GD_CASES[15]] = gd_d16(mod)      # in-process: needs no live router
+        except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+            results[GD_CASES[15]] = (["case raised %s: %s"
                                       % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
     except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
         setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
@@ -4326,6 +5320,7 @@ GE_CASES = (
     "quirks_off honoured",               # E11
     "registry rows = six names",         # E12
     "default route echoes model",        # E13
+    "mid-conversation system collapsed", # E14
 )
 
 # E12: the six names Step 4 wrote provisionally, as a LITERAL -- never the module's
@@ -4470,6 +5465,7 @@ def ge_scripts(fx):
     answer = [("respond_json", 200, GE_ANSWER)]
     scripts = {("tf-e9", False): [("respond_json", 200, {"input_tokens": GE_COUNT})],
                ("tf-e11", False): answer, ("tf-e11b", False): answer,
+               ("tf-e14", False): answer, ("tf-e14b", False): answer,
                (GE_DEFAULT_MODEL, False): answer}
     if fx:
         scripts.update({("tf-e8", False): [("respond_json", 400, fx["error_json"])],
@@ -4495,7 +5491,7 @@ def ge_dispatch(scripts):
 def ge_config(peer_url):
     """One llama.cpp backend (no key: auth_header none), the E routes, a default route."""
     routes = {"claude-tf-" + n: {"backend": GE_BACKEND, "model": "tf-" + n}
-              for n in ("e8", "e8s", "e9", "e10", "e11b")}
+              for n in ("e8", "e8s", "e9", "e10", "e11b", "e14", "e14b")}
     routes["claude-tf-e11"] = {"backend": GE_BACKEND, "model": "tf-e11",
                                "options": {"quirks_off": ["tool-results-first"]}}
     return {"auth_token": TF_ROUTER_TOKEN,
@@ -5012,6 +6008,42 @@ def group_e(suite, fixture_root):
                               "stream      : %s" % shape,
                               "non-stream  : status %r model %r" % (status, model)]
 
+        def e14():
+            problems, shown = [], []
+            mids = [{"role": "system", "content": "tf mid one"},
+                    {"role": "system", "content": [
+                        {"type": "text", "text": "tf mid two", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "tf mid three"}]}]
+            history = [{"role": "user", "content": "tf start"}, mids[0],
+                       {"role": "assistant", "content": "tf ok"},
+                       {"role": "user", "content": "tf again"}, mids[1]]
+            kept = [m for m in history if m["role"] != "system"]
+            for label, model, system, want_system in (
+                    ("list system + 2 mid", "e14", ge_clone(GE_SYSTEM_LIST),
+                     GE_SYSTEM_JOINED + "\n\ntf mid one\n\ntf mid two\n\ntf mid three"),
+                    ("no system + 2 mid", "e14b", None, "tf mid one\n\ntf mid two\n\ntf mid three")):
+                sent = ge_body("claude-tf-" + model, messages=ge_clone(history))
+                if system is not None:
+                    sent["system"] = system
+                status, _h, body = client.post(obj=sent)
+                problems += ["%s: %s" % (label, p) for p in answer_status("the client", status, body, 200)]
+                got, more = gd_one_request(peer, "tf-" + model)
+                problems += ["%s: %s" % (label, p) for p in more]
+                if got is None:
+                    continue
+                up = got[1]
+                want = ge_clone(sent)
+                want["model"] = "tf-" + model
+                want["system"] = want_system
+                want["messages"] = ge_clone(kept)
+                if up != want:
+                    problems.append("%s: the upstream body is not the client's with every mid-conversation "
+                                    "system collapsed into system (differing key(s): %s; system %r, roles %r)"
+                                    % (label, ge_diff_keys(up, want), up.get("system"),
+                                       [m.get("role") for m in up.get("messages") or () if isinstance(m, dict)]))
+                shown.append("%s -> system %r" % (label, up.get("system")))
+            return problems, ["upstream    : " + s for s in shown]
+
         def e12():
             problems, names, shown = [], [], []
             for reg, expected in GE_REGISTRIES:
@@ -5046,7 +6078,7 @@ def group_e(suite, fixture_root):
             return problems, ["rows        : %s" % (", ".join(shown) or "(no registry)")]
 
         fns = (inproc(e1), inproc(e2), inproc(e3), inproc(e4), inproc(e5), inproc(e6), inproc(e7),
-               e8, live(e9), replayed(e10), live(e11), inproc(e12), replayed(e13))
+               e8, live(e9), replayed(e10), live(e11), inproc(e12), replayed(e13), live(e14))
         for cid, fn in zip(GE_CASES, fns):
             try:
                 results[cid] = fn()
@@ -5087,6 +6119,15 @@ GF_CASES = (
     "image -> image_url data URL",       # F14
     "minted id round trip",              # F15
     "minted keeps id, hashed walks",     # F16
+    "mid-conversation system collapsed", # F17
+    "reasoning_effort: option, bands",   # F18
+    "lms1 thinking -> one chunk first",  # F19
+    "two lms1 blocks merged",            # F20
+    "foreign, redacted dropped, counted",# F21
+    "effort map, then learned remap",    # F22
+    "fixed reasoning_effort: no remap",  # F23
+    "effort remap: nearest, tie higher", # F24
+    "effort 400 matcher: tolerant",      # F25
 )
 
 GF_BACKEND = "tff"
@@ -5104,7 +6145,7 @@ GF_DEFENSIVE_RULE = "provenance  : defensive, not observed (A-7 Mistral rule, pe
 GF_DEFENSIVE_FIXTURE = "provenance  : defensive, not observed (synthetic fixture, pending M5)"
 # F11: the only keys a translated body (and each of its parts) may carry (plan Step 10).
 GF_TOP_KEYS = frozenset({"model", "messages", "max_tokens", "temperature", "top_p", "stop", "stream",
-                         "tools", "tool_choice", "parallel_tool_calls"})
+                         "tools", "tool_choice", "parallel_tool_calls", "reasoning_effort"})
 GF_MESSAGE_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
 GF_PART_KEYS = frozenset({"type", "text", "image_url"})
 # F11: what the stuffed request carries that no Mistral body may.
@@ -5115,6 +6156,100 @@ GF_CACHE = {"type": "ephemeral"}
 GF_FORCED_DIGEST = hashlib.sha256(b"tf-forced-collision").digest()   # F7: what both forced ids hash to
 GF_COLLIDE = ("toolu_tff_col_a", "toolu_tff_col_b")                   # F7: sorted, a first
 GF_PNG = "iVBORw0KGgoAAAANSUhEUg=="                                     # F14: a base64 payload (no image)
+GF_LMS = "lms1."                            # F18-F21, G5/G18-G22: the router's Mistral thinking signature prefix
+# F18: (label, route options, body thinking or None, the reasoning_effort expected or None = no key).
+GF_EFFORTS = (
+    ("option wins over a budget", {"reasoning_effort": "max"}, {"type": "enabled", "budget_tokens": 1024}, "max"),
+    ("option without thinking", {"reasoning_effort": "none"}, None, "none"),
+    ("budget 1024", {}, {"type": "enabled", "budget_tokens": 1024}, "low"),
+    ("budget 10000", {}, {"type": "enabled", "budget_tokens": 10000}, "medium"),
+    ("budget 20000", {}, {"type": "enabled", "budget_tokens": 20000}, "high"),
+    ("budget 40000", {}, {"type": "enabled", "budget_tokens": 40000}, "xhigh"),
+    ("thinking absent", {}, None, None),
+    ("thinking disabled", {}, {"type": "disabled"}, None),
+)
+# F22-F25 (user decision 2026-10-07): the reasoning_effort_map option and the learned supported set.
+GF_EFFORT_MAP = {"low": "high", "medium": "high", "xhigh": "high", "max": "high"}
+GF_LEARNED = frozenset({"high", "none"})    # what the live mistral-medium-3-5 400 listed
+# F22: (label, map or None, body thinking or None, the learned set, the reasoning_effort expected or None).
+GF_MAPPED = (
+    ("map: budget 2048 (low)", GF_EFFORT_MAP, {"type": "enabled", "budget_tokens": 2048}, frozenset(), "high"),
+    ("map: adaptive (medium)", GF_EFFORT_MAP, {"type": "adaptive"}, frozenset(), "high"),
+    ("map: budget 40000 (xhigh)", GF_EFFORT_MAP, {"type": "enabled", "budget_tokens": 40000}, frozenset(), "high"),
+    ("map: budget 20000, not a key", GF_EFFORT_MAP, {"type": "enabled", "budget_tokens": 20000}, frozenset(),
+     "high"),
+    ("map {low: medium}: budget 10000", {"low": "medium"}, {"type": "enabled", "budget_tokens": 10000}, frozenset(),
+     "medium"),
+    ("map: thinking absent", GF_EFFORT_MAP, None, frozenset(), None),
+    ("learned only: budget 2048", None, {"type": "enabled", "budget_tokens": 2048}, GF_LEARNED, "high"),
+    ("map {low: medium} then learned {high, none}", {"low": "medium"},
+     {"type": "enabled", "budget_tokens": 2048}, GF_LEARNED, "high"),
+    ("map {low: medium} then learned {medium, none}", {"low": "medium"},
+     {"type": "enabled", "budget_tokens": 2048}, frozenset({"medium", "none"}), "medium"),
+    ("learned: thinking absent", None, None, GF_LEARNED, None),
+)
+# F24: (wanted, supported, expected) -- _rt_ms_effort_remap, order none<minimal<low<medium<high<xhigh<max.
+GF_REMAP = (
+    ("low", {"low", "high"}, "low"),            # wanted in the set: kept
+    ("low", {"high", "none"}, "high"),          # none excluded: high, not the equally near none
+    ("xhigh", {"low", "high"}, "high"),         # nearest below
+    ("minimal", {"medium", "max"}, "medium"),   # nearest above
+    ("max", {"minimal", "medium"}, "medium"),   # nearest below, two away
+    ("medium", {"low", "high"}, "high"),        # tie: the higher
+    ("medium", {"minimal", "max"}, "minimal"),  # two below beats three above
+    ("minimal", {"none", "low"}, "low"),        # none excluded although nearer
+    ("high", {"none"}, "none"),                 # only none: none
+)
+GF_EFFORT_400 = ("reasoning_effort low is not supported for this model, supported values: "
+                 "[<ReasoningEffort.high: 'high'>, <ReasoningEffort.none: 'none'>]")
+# F25: (label, the upstream 400 body, the effort sent, the supported set expected or None = not learnable).
+GF_EFFORT_BODIES = (
+    ("error.message", json.dumps({"error": {"message": GF_EFFORT_400, "type": "invalid_request_error"}}), "low",
+     GF_LEARNED),
+    ("top-level message", json.dumps({"object": "error", "message": GF_EFFORT_400, "type": "invalid_request_error",
+                                      "param": None, "code": None}), "low", GF_LEARNED),
+    ("detail string", json.dumps({"detail": GF_EFFORT_400}), "low", GF_LEARNED),
+    ("another effort named", json.dumps({"message": GF_EFFORT_400}), "medium", None),
+    ("nothing sent", json.dumps({"message": GF_EFFORT_400}), None, None),
+    ("unquoted list", json.dumps({"message": "reasoning_effort low is not supported for this model, supported "
+                                             "values: [high, none]"}), "low", None),
+    ("names outside the vocabulary", json.dumps({"message": "reasoning_effort low is not supported for this "
+                                                            "model, supported values: ['ultra', 'HIGH']"}),
+     "low", None),
+    ("the sent value listed", json.dumps({"message": "reasoning_effort low is not supported for this model, "
+                                                     "supported values: ['low', 'high']"}), "low", None),
+    ("another 400", json.dumps({"message": "max_tokens: must be positive"}), "low", None),
+    ("not JSON", "reasoning_effort low is not supported", "low", None),
+)
+
+
+def gf_lms(signature=""):
+    """The router signature of a Mistral thinking chunk: GF_LMS + urlsafe base64 of *signature*."""
+    return GF_LMS + base64.urlsafe_b64encode(signature.encode("utf-8")).decode("ascii")
+
+
+def gf_think(text, signature):
+    return {"type": "thinking", "thinking": text, "signature": signature}
+
+
+def gf_ms_think(text, signature=None):
+    """The one Mistral thinking chunk a replayed assistant turn may carry."""
+    chunk = {"type": "thinking", "thinking": [{"type": "text", "text": text}]}
+    if signature is not None:
+        chunk["signature"] = signature
+    return chunk
+
+
+def gf_dropped(mod, body, route):
+    """(the request-side dropped_thinking the stream translator starts from, problems): a stream
+    request through MistralAdapter.upstream_request then stream_translator, as the handler runs them."""
+    adapter, why = gf_adapter(mod, "stream_translator")
+    if adapter is None:
+        return None, [why]
+    sent = dict(ge_clone(body), stream=True)
+    inbound = gf_inbound(mod, "messages", sent, route)
+    adapter.upstream_request(inbound)
+    return getattr(adapter.stream_translator(inbound), "dropped_thinking", None), []
 
 
 def gf_need(mod, names):
@@ -5408,8 +6543,15 @@ def group_f(suite, fixture_root):
         for needle in ("tf think", "tf-sig", "tf-redacted"):
             if needle in dumped:
                 problems.append("a thinking block survived (%r in the body)" % needle)
+        # A foreign-signed thinking block and a redacted_thinking block cannot be carried: both
+        # are dropped and counted (the req line's dropped_thinking starts from them).
+        dropped, more = gf_dropped(mod, gf_body(history), gf_route(mod))
+        problems += more
+        if dropped != 2:
+            problems.append("dropped_thinking %r, expected 2 (the foreign thinking and the redacted block)"
+                            % (dropped,))
         return problems, ["arguments   : %r" % (arguments,),
-                          "call ids    : %s" % calls]
+                          "call ids    : %s" % calls, "dropped     : %r" % (dropped,)]
 
     def f3():
         pairs = (("toolu_tff_a", "Read"), ("toolu_tff_b", "Bash"))
@@ -5706,6 +6848,9 @@ def group_f(suite, fixture_root):
         extra = sorted(set(out) - GF_TOP_KEYS)
         if extra:
             problems.append("top-level key(s) outside the explicit list: %s" % extra)
+        # The stuffed thinking (enabled, 1024) is carried as reasoning_effort, never as itself.
+        if out.get("reasoning_effort") != "low":
+            problems.append("reasoning_effort %r, expected 'low' (thinking budget 1024)" % (out.get("reasoning_effort"),))
         leaked = sorted({"%s.%s" % (path, key) for path, key in gf_keys(out) if key in stuffed})
         if leaked:
             problems.append("stuffed key(s) reached the Mistral body: %s" % leaked[:6])
@@ -5898,6 +7043,239 @@ def group_f(suite, fixture_root):
         return problems, ["walk        : %s alone -> %s; with %s -> %s" % (hashed, h9, minted, both),
                           "ids         : %s" % calls]
 
+    def f17():
+        problems, shown = [], []
+        mid_list = {"role": "system", "content": [{"type": "text", "text": "tf mid two", "cache_control": GF_CACHE},
+                                                  {"type": "text", "text": "tf mid three"}]}
+        system_list = [{"type": "text", "text": "tf sys one", "cache_control": GF_CACHE},
+                       {"type": "text", "text": "tf sys two"}]
+        history = [{"role": "user", "content": "tf hi"}, {"role": "system", "content": "tf mid one"},
+                   {"role": "assistant", "content": "tf ok"}, {"role": "user", "content": "tf again"}, mid_list]
+        pair = gf_pair_history([("toolu_tff_f17", "Read")])
+        pair.insert(2, {"role": "system", "content": "tf mid tool"})
+        table = (
+            ("list system + 2 mid", gf_body(history, system=system_list),
+             [{"role": "system", "content": "tf sys one\n\ntf sys two\n\ntf mid one\n\ntf mid two\n\ntf mid three"},
+              {"role": "user", "content": "tf hi"}, {"role": "assistant", "content": "tf ok"},
+              {"role": "user", "content": "tf again"}]),
+            ("no system, mid between users",
+             gf_body([{"role": "user", "content": "tf hi"}, {"role": "system", "content": "tf mid"},
+                      {"role": "user", "content": "tf b"}]),
+             [{"role": "system", "content": "tf mid"}, {"role": "user", "content": "tf hi\n\ntf b"}]),
+            ("mid between tool_use and tool_result", gf_body(pair, system="tf sys"), None),
+        )
+        for label, body, want in table:
+            out, more = gf_translate(mod, body, gf_route(mod), label)
+            problems += more
+            if out is None:
+                continue
+            msgs = out["messages"]
+            roles = [m.get("role") for m in msgs]
+            if roles.count("system") != 1 or roles[:1] != ["system"]:
+                problems.append("%s: roles %r, expected exactly one system message, first" % (label, roles))
+            if "cache_control" in json.dumps(out):
+                problems.append("%s: cache_control survived the translation" % label)
+            if want is not None and msgs != want:
+                problems.append("%s: messages %r, expected %r" % (label, msgs, want))
+            if want is None:
+                if roles != ["system", "user", "assistant", "tool"]:
+                    problems.append("%s: roles %r, expected system, user, assistant, tool" % (label, roles))
+                elif msgs[0]["content"] != "tf sys\n\ntf mid tool":
+                    problems.append("%s: system %r, expected 'tf sys\\n\\ntf mid tool'" % (label, msgs[0]["content"]))
+            shown.append("%s -> roles %s" % (label, ", ".join(str(r) for r in roles)))
+        return problems, ["collapse    : " + s for s in shown]
+
+    def f18():
+        problems, shown = [], []
+        msgs = [{"role": "user", "content": "tf effort"}]
+        for label, options, thinking, want in GF_EFFORTS:
+            body = gf_body(msgs) if thinking is None else gf_body(msgs, thinking=thinking)
+            out, more = gf_translate(mod, body, gf_route(mod, **options), label)
+            problems += more
+            if out is None:
+                continue
+            got = out.get("reasoning_effort", "<absent>")
+            if got != (want if want is not None else "<absent>"):
+                problems.append("%s: reasoning_effort %r, expected %s"
+                                % (label, got, repr(want) if want is not None else "no key"))
+            leaked = sorted({key for _path, key in gf_keys(out) if key in ("thinking", "reasoning_content")})
+            if leaked:
+                problems.append("%s: the body carries %s (Mistral answers 422 extra_forbidden)" % (label, leaked))
+            shown.append("%s -> %s" % (label, got))
+        # adaptive: whatever the Responses kinds send for it (one band table, one rule).
+        effort = getattr(mod, "_rt_rs_effort", None)
+        body = gf_body(msgs, thinking={"type": "adaptive"})
+        out, more = gf_translate(mod, body, gf_route(mod), "adaptive")
+        problems += more
+        if out is not None and callable(effort):
+            want = effort(body, gf_route(mod))
+            if out.get("reasoning_effort") != want:
+                problems.append("adaptive: reasoning_effort %r, expected %r (the Responses kinds' value)"
+                                % (out.get("reasoning_effort"), want))
+            shown.append("adaptive -> %r" % (out.get("reasoning_effort"),))
+        return problems, ["effort      : " + s for s in shown]
+
+    def f19():
+        problems, shown = [], []
+        table = (
+            ("thinking then text",
+             [gf_think("tf ms think", gf_lms("tf-ms-sig")), {"type": "text", "text": "tf answer"}],
+             [gf_ms_think("tf ms think", "tf-ms-sig"), {"type": "text", "text": "tf answer"}], None),
+            ("text then thinking (the chunk still first)",
+             [{"type": "text", "text": "tf answer"}, gf_think("tf ms think", gf_lms("tf-ms-sig"))],
+             [gf_ms_think("tf ms think", "tf-ms-sig"), {"type": "text", "text": "tf answer"}], None),
+            ("empty payload: no signature key",
+             [gf_think("tf ms think", gf_lms()), {"type": "text", "text": "tf answer"}],
+             [gf_ms_think("tf ms think"), {"type": "text", "text": "tf answer"}], None),
+            ("thinking + tool_use",
+             [gf_think("tf ms think", gf_lms("tf-ms-sig")), gf_tool_use("toolu_tff_f19")],
+             [gf_ms_think("tf ms think", "tf-ms-sig")], "Read"),
+        )
+        for label, blocks, want, tool in table:
+            history = [{"role": "user", "content": "tf start"}, {"role": "assistant", "content": blocks}]
+            if tool is not None:
+                history.append({"role": "user", "content": [gf_tool_result("toolu_tff_f19", "tf r")]})
+            else:
+                history.append({"role": "user", "content": "tf next"})
+            out, more = gf_translate(mod, gf_body(history), gf_route(mod), label)
+            problems += more
+            if out is None:
+                continue
+            assistants = [m for m in out["messages"] if isinstance(m, dict) and m.get("role") == "assistant"]
+            got = assistants[0].get("content") if assistants else None
+            if got != want:
+                problems.append("%s: assistant content %r, expected %r" % (label, got, want))
+            calls = gf_call_ids(out["messages"])
+            if tool is not None and [n for _i, n in calls] != [tool]:
+                problems.append("%s: tool_calls %r, expected one %s call beside the content" % (label, calls, tool))
+            dropped, more = gf_dropped(mod, gf_body(history), gf_route(mod))
+            problems += more
+            if dropped != 0:
+                problems.append("%s: dropped_thinking %r, expected 0 (the block was carried)" % (label, dropped))
+            shown.append("%s -> %s" % (label, [p.get("type") for p in got] if isinstance(got, list) else got))
+        return problems, ["replay      : " + s for s in shown]
+
+    def f20():
+        blocks = [gf_think("tf one", gf_lms("tf-sig-1")), gf_think("tf two", gf_lms()),
+                  {"type": "text", "text": "tf answer"}, gf_think("tf three", gf_lms("tf-sig-3"))]
+        history = [{"role": "user", "content": "tf start"}, {"role": "assistant", "content": blocks},
+                   {"role": "user", "content": "tf next"}]
+        out, problems = gf_translate(mod, gf_body(history), gf_route(mod), "three lms1 blocks")
+        if out is None:
+            return problems, []
+        assistants = [m for m in out["messages"] if isinstance(m, dict) and m.get("role") == "assistant"]
+        got = assistants[0].get("content") if assistants else None
+        want = [gf_ms_think("tf one\n\ntf two\n\ntf three", "tf-sig-3"), {"type": "text", "text": "tf answer"}]
+        if got != want:
+            problems.append("assistant content %r, expected ONE thinking chunk (texts joined, the last "
+                            "signature) then the text %r" % (got, want))
+        return problems, ["merged      : %r" % (got,)]
+
+    def f21():
+        problems, shown = [], []
+        table = (
+            ("foreign signature", gf_think("tf think foreign", "tf-anthropic-sig"), 1),
+            ("redacted", {"type": "redacted_thinking", "data": "tf-redacted"}, 1),
+            ("lms1 payload not base64", gf_think("tf think bad", GF_LMS + "!!not*b64"), 1),
+            ("another backend's lrs1", gf_think("tf think lrs", "lrs1.tff.QUJD"), 1),
+        )
+        for label, block, want in table:
+            history = [{"role": "user", "content": "tf start"},
+                       {"role": "assistant", "content": [block, {"type": "text", "text": "tf answer"}]},
+                       {"role": "user", "content": "tf next"}]
+            out, more = gf_translate(mod, gf_body(history), gf_route(mod), label)
+            problems += more
+            if out is not None:
+                assistants = [m for m in out["messages"] if isinstance(m, dict) and m.get("role") == "assistant"]
+                got = assistants[0].get("content") if assistants else None
+                if got != "tf answer":
+                    problems.append("%s: assistant content %r, expected the plain string 'tf answer'" % (label, got))
+                if "tf think" in json.dumps(out) or "tf-redacted" in json.dumps(out):
+                    problems.append("%s: the dropped block reached the body" % label)
+            dropped, more = gf_dropped(mod, gf_body(history), gf_route(mod))
+            problems += more
+            if dropped != want:
+                problems.append("%s: dropped_thinking %r, expected %d" % (label, dropped, want))
+            shown.append("%s -> dropped %r" % (label, dropped))
+        return problems, ["dropped     : " + s for s in shown]
+
+    def gf_effort(body, route, supported, label):
+        """(reasoning_effort or "<absent>", problems) of _rt_ms_translate(body, route, supported)."""
+        sent = ge_clone(body)
+        out = mod._rt_ms_translate(sent, route, frozenset(supported))
+        problems = ["%s: _rt_ms_translate mutated its input" % label] if sent != body else []
+        if not isinstance(out, dict):
+            return None, problems + ["%s: returned %s, expected a dict" % (label, type(out).__name__)]
+        return out.get("reasoning_effort", "<absent>"), problems
+
+    def f22():
+        problems, shown = [], []
+        msgs = [{"role": "user", "content": "tf effort map"}]
+        for label, emap, thinking, supported, want in GF_MAPPED:
+            body = gf_body(msgs) if thinking is None else gf_body(msgs, thinking=thinking)
+            options = {} if emap is None else {"reasoning_effort_map": emap}
+            got, more = gf_effort(body, gf_route(mod, **options), supported, label)
+            problems += more
+            if got != (want if want is not None else "<absent>"):
+                problems.append("%s: reasoning_effort %r, expected %s"
+                                % (label, got, repr(want) if want is not None else "no key"))
+            shown.append("%s -> %s" % (label, got))
+        # The adapter carries the learned set from the request (InboundRequest.effort_supported).
+        body = gf_body(msgs, thinking={"type": "enabled", "budget_tokens": 2048})
+        inbound = gf_inbound(mod, "messages", body, gf_route(mod))
+        if "effort_supported" not in getattr(mod.InboundRequest, "_fields", ()):
+            problems.append("InboundRequest has no effort_supported field (the learned set never reaches the adapter)")
+        else:
+            adapter, why = gf_adapter(mod, "upstream_request")
+            if adapter is None:
+                problems.append(why)
+            else:
+                _path, raw = adapter.upstream_request(inbound._replace(effort_supported=GF_LEARNED))
+                got = json.loads(raw.decode("utf-8")).get("reasoning_effort")
+                if got != "high":
+                    problems.append("MistralAdapter.upstream_request with effort_supported {high, none}: "
+                                    "reasoning_effort %r, expected 'high' (budget 2048 is low)" % (got,))
+                shown.append("adapter, learned {high, none}, budget 2048 -> %s" % got)
+        return problems, ["effort      : " + s for s in shown]
+
+    def f23():
+        problems, shown = [], []
+        msgs = [{"role": "user", "content": "tf effort fixed"}]
+        route = gf_route(mod, reasoning_effort="low", reasoning_effort_map={"low": "high"})
+        for label, thinking, supported in (
+                ("budget 2048, no learned set", {"type": "enabled", "budget_tokens": 2048}, frozenset()),
+                ("budget 40000, learned {high, none}", {"type": "enabled", "budget_tokens": 40000}, GF_LEARNED),
+                ("thinking absent, learned {high, none}", None, GF_LEARNED)):
+            body = gf_body(msgs) if thinking is None else gf_body(msgs, thinking=thinking)
+            got, more = gf_effort(body, route, supported, label)
+            problems += more
+            if got != "low":
+                problems.append("%s: reasoning_effort %r, expected 'low' (the route's fixed option, sent as is)"
+                                % (label, got))
+            shown.append("%s -> %s" % (label, got))
+        return problems, ["fixed       : reasoning_effort low, map {low: high}: " + s for s in shown]
+
+    def f24():
+        problems, shown = [], []
+        for wanted, supported, want in GF_REMAP:
+            got = mod._rt_ms_effort_remap(wanted, frozenset(supported))
+            if got != want:
+                problems.append("_rt_ms_effort_remap(%r, %s) = %r, expected %r"
+                                % (wanted, sorted(supported), got, want))
+            shown.append("%s in %s -> %s" % (wanted, "{%s}" % ", ".join(sorted(supported)), got))
+        return problems, ["remap       : " + s for s in shown]
+
+    def f25():
+        problems, shown = [], []
+        for label, raw, sent, want in GF_EFFORT_BODIES:
+            got = mod._rt_ms_unsupported_effort(raw.encode("utf-8"), sent)
+            if got != want:
+                problems.append("%s: _rt_ms_unsupported_effort = %r, expected %r"
+                                % (label, sorted(got) if isinstance(got, frozenset) else got,
+                                   sorted(want) if want is not None else None))
+            shown.append("%s -> %s" % (label, sorted(got) if isinstance(got, (set, frozenset)) else got))
+        return problems, ["matcher     : " + s for s in shown]
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -5908,7 +7286,9 @@ def group_f(suite, fixture_root):
     tr, idmap, anth = "_rt_ms_translate", "_rt_ms_tool_id_map", "_rt_ms_anthropic_id"
     fns = (needs(f1, tr), needs(f2, tr), needs(f3, tr), needs(f4, tr), needs(f5, idmap, tr),
            needs(f6, idmap, tr), needs(f7, idmap, tr), needs(f8, anth, tr), needs(f9, tr), needs(f10, tr),
-           needs(f11, tr), f12, needs(f13, tr), needs(f14, tr), needs(f15, idmap, tr), needs(f16, idmap, tr))
+           needs(f11, tr), f12, needs(f13, tr), needs(f14, tr), needs(f15, idmap, tr), needs(f16, idmap, tr),
+           needs(f17, tr), needs(f18, tr), needs(f19, tr), needs(f20, tr), needs(f21, tr),
+           needs(f22, tr), needs(f23, tr), needs(f24, "_rt_ms_effort_remap"), needs(f25, "_rt_ms_unsupported_effort"))
     try:
         for cid, fn in zip(GF_CASES, fns):
             try:
@@ -5933,7 +7313,7 @@ GG_CASES = (
     "one tool -> one json delta",        # G2
     "parallel tools in index order",     # G3
     "text closed before tools",          # G4
-    "delta.content as a list",           # G5
+    "list thinking -> thinking block",   # G5
     "unknown p key ignored",             # G6
     "usage from the last chunk",         # G7
     "length -> max_tokens",              # G8
@@ -5946,7 +7326,13 @@ GG_CASES = (
     "live TLS: minted ids round trip",   # G15
     "model echo, exact route",           # G16
     "model echo, default route",         # G17
+    "thinking fragments -> one block",   # G18
+    "transition delta [thinking, text]", # G19
+    "empty deltas ignored",              # G20
+    "thinking then a tool call",         # G21
+    "non-stream thinking + text",        # G22
 )
+GG_LIVE = (14, 17)                          # GG_CASES[14:17] (G15-G17) run against the live rig
 
 GG_BACKEND = "tfg"
 GG_ROUTE = "claude-tf-g"                    # the in-process requested model (an exact route)
@@ -6222,6 +7608,52 @@ def gg_blocks(events):
             elif delta.get("type") == "input_json_delta":
                 blocks[-1]["json"] += delta.get("partial_json") or ""
     return blocks
+
+
+def ms_think(text, signature=None, closed=None):
+    """One Mistral thinking chunk (a content part): its text as one inner text part."""
+    part = {"type": "thinking", "thinking": [{"type": "text", "text": text}]}
+    if closed is not None:
+        part["closed"] = closed
+    if signature is not None:
+        part["signature"] = signature
+    return part
+
+
+def gg_thinking(events):
+    """[{"index", "type", "thinking" (joined thinking_deltas), "deltas", "signatures"}] per content block."""
+    blocks = []
+    for name, obj in events:
+        if obj is None:
+            continue
+        if name == "content_block_start":
+            cb = obj.get("content_block") or {}
+            blocks.append({"index": obj.get("index"), "type": cb.get("type"), "thinking": "", "deltas": 0,
+                           "signatures": [], "start": cb})
+        elif name == "content_block_delta" and blocks:
+            delta = obj.get("delta") or {}
+            if delta.get("type") == "thinking_delta":
+                blocks[-1]["thinking"] += delta.get("thinking") or ""
+                blocks[-1]["deltas"] += 1
+            elif delta.get("type") == "signature_delta":
+                blocks[-1]["signatures"].append(delta.get("signature"))
+    return blocks
+
+
+def gg_think_check(label, block, text, signature):
+    """Problems unless *block* (gg_thinking) is one thinking block holding *text*, closed by ONE
+    signature_delta equal to gf_lms(*signature*)."""
+    if block.get("type") != "thinking":
+        return ["%s: block %r is %r, expected thinking" % (label, block.get("index"), block.get("type"))]
+    problems = []
+    if block["start"] != {"type": "thinking", "thinking": "", "signature": ""}:
+        problems.append("%s: content_block_start %r, expected an empty thinking block" % (label, block["start"]))
+    if block["thinking"] != text:
+        problems.append("%s: thinking %r, expected %r" % (label, block["thinking"], text))
+    if block["signatures"] != [gf_lms(signature)]:
+        problems.append("%s: signature_delta(s) %r, expected exactly [%r]" % (label, block["signatures"],
+                                                                             gf_lms(signature)))
+    return problems
 
 
 def gg_message_delta(events):
@@ -6633,34 +8065,32 @@ def group_g(suite, fixture_root):
 
     def g5():
         lines = ms_lines(MS_ROLE,
-                         ms_chunk({"content": [{"type": "text", "text": "tf g5 a"},
-                                               {"type": "thinking", "thinking": [{"type": "text",
-                                                                                  "text": "tf g5 hidden"}]},
-                                               {"type": "text", "text": "tf g5 b"}]}),
-                         ms_chunk({"content": [{"type": "thinking", "thinking": [{"type": "text",
-                                                                                   "text": "tf g5 hidden 2"}]}]}),
-                         ms_chunk({"content": [{"type": "text", "text": " tf g5 c"}]}),
+                         ms_chunk({"content": [ms_think("tf g5 think", "tf-g5-sig")]}),
+                         ms_chunk({"content": [{"type": "text", "text": "tf g5 a"}]}),
+                         ms_chunk({"content": [{"type": "text", "text": " tf g5 b"}]}),
                          ms_stop("stop", ms_usage(5, 6)))
         run, problems = drive(lines)
         if run is None:
             return problems, []
         problems += gg_wellformed("content lists", run)
+        think = gg_thinking(run["events"])
         blocks = gg_blocks(run["events"])
-        text = "".join(t or "" for b in blocks for t in b["texts"])
-        if [b["type"] for b in blocks] != ["text"]:
-            problems.append("blocks %s, expected one text block" % [b["type"] for b in blocks])
-        if not ("tf g5 a" in text and "tf g5 b" in text and " tf g5 c" in text
-                and text.index("tf g5 a") < text.index("tf g5 b") < text.index(" tf g5 c")):
-            problems.append("text %r does not hold the three text parts in order" % text)
-        if "hidden" in run["out"].decode("utf-8", "replace"):
-            problems.append("a thinking part reached the client")
+        if [b["type"] for b in blocks] != ["thinking", "text"]:
+            problems.append("blocks %s, expected a thinking block then a text block" % [b["type"] for b in blocks])
+        else:
+            problems += gg_think_check("block 0", think[0], "tf g5 think", "tf-g5-sig")
+            if blocks[1]["texts"] != ["tf g5 a", " tf g5 b"]:
+                problems.append("text deltas %r, expected ['tf g5 a', ' tf g5 b']" % (blocks[1]["texts"],))
         if any(t == "" for b in blocks for t in b["texts"]):
             problems.append("an empty text_delta was emitted for the thinking-only chunk")
-        # The plan's DEBUG counter (§9 dropped_thinking=<n>): two thinking parts were dropped.
+        problems += gg_complete("content lists", run, "end_turn", ms_usage(5, 6))
+        # The plan's DEBUG counter (§9 dropped_thinking=<n>): a carried thinking chunk is not dropped.
         dropped = getattr(run["tr"], "dropped_thinking", None)
-        if dropped != 2:
-            problems.append("dropped_thinking is %r, expected 2 (one per dropped thinking part)" % (dropped,))
-        return problems, ["text        : %r" % text, "dropped     : dropped_thinking %r" % (dropped,)]
+        if dropped != 0:
+            problems.append("dropped_thinking is %r, expected 0 (the thinking chunk was carried)" % (dropped,))
+        return problems, ["client      : %s" % ev_shape(run["events"]),
+                          "signature   : %r" % (think[0]["signatures"] if think else None,),
+                          "dropped     : dropped_thinking %r" % (dropped,)]
 
     def g6():
         def padded(chunk):
@@ -7094,9 +8524,138 @@ def group_g(suite, fixture_root):
     def g17():
         return gg_echo(live.get("rig"), GG_UNROUTED, GG_DEFAULT_MODEL)
 
-    fns = (g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13, g14, g15, g16, g17)
+    def thinking_text(label, lines, want_types, think_text, signature, texts, stop="end_turn"):
+        """(run, problems): *lines* driven; the blocks are *want_types*, block 0 the one thinking
+        block (*think_text*, gf_lms(*signature*)), the text block's deltas *texts*, nothing dropped."""
+        run, problems = drive(lines)
+        if run is None:
+            return None, problems
+        problems += gg_wellformed(label, run)
+        blocks, think = gg_blocks(run["events"]), gg_thinking(run["events"])
+        if [b["type"] for b in blocks] != want_types:
+            problems.append("%s: blocks %s (%s), expected %s"
+                            % (label, [b["type"] for b in blocks], ev_shape(run["events"]), want_types))
+            return run, problems
+        problems += gg_think_check(label, think[0], think_text, signature)
+        for b in blocks:
+            if b["type"] == "text" and b["texts"] != texts:
+                problems.append("%s: text deltas %r, expected %r" % (label, b["texts"], texts))
+        if any(t == "" for b in blocks for t in b["texts"]) or any(
+                obj and (obj.get("delta") or {}).get("thinking") == "" for _n, obj in run["events"]):
+            problems.append("%s: an empty text_delta or thinking_delta was emitted" % label)
+        problems += gg_complete(label, run, stop)
+        dropped = getattr(run["tr"], "dropped_thinking", None)
+        if dropped != 0:
+            problems.append("%s: dropped_thinking %r, expected 0" % (label, dropped))
+        return run, problems
+
+    def g18():
+        frags = ["tf g18 one ", "tf g18 two ", "tf g18 three"]
+        chunks = [ms_chunk({"content": [ms_think(f, closed=True)]}) for f in frags[:-1]]
+        chunks.append(ms_chunk({"content": [ms_think(frags[-1], "tf-g18-sig", closed=True)]}))
+        lines = ms_lines(MS_ROLE, *chunks + [ms_text("tf g18 answer"), ms_stop("stop", ms_usage(5, 9))])
+        run, problems = thinking_text("fragments", lines, ["thinking", "text"], "".join(frags), "tf-g18-sig",
+                                      ["tf g18 answer"])
+        if run is None:
+            return problems, []
+        think = gg_thinking(run["events"])
+        if think and think[0]["deltas"] != len(frags):
+            problems.append("%d thinking_delta(s), expected %d (one per fragment, `closed` is no end marker)"
+                            % (think[0]["deltas"], len(frags)))
+        return problems, ["client      : %s" % ev_shape(run["events"])]
+
+    def g19():
+        lines = ms_lines(MS_ROLE, ms_chunk({"content": [ms_think("tf g19 a ")]}),
+                         ms_chunk({"content": [ms_think("tf g19 b", "tf-g19-sig"),
+                                               {"type": "text", "text": "tf g19 answer"}]}),
+                         ms_text(" tf g19 more"), ms_stop("stop", ms_usage(5, 9)))
+        run, problems = thinking_text("transition", lines, ["thinking", "text"], "tf g19 a tf g19 b", "tf-g19-sig",
+                                      ["tf g19 answer", " tf g19 more"])
+        return problems, ["client      : %s" % ev_shape(run["events"]) if run is not None else "(not run)"]
+
+    def g20():
+        lines = ms_lines(MS_ROLE, ms_chunk({"content": [ms_think("tf g20 a ")]}), ms_chunk({}),
+                         ms_chunk({"content": ""}), ms_chunk({"content": []}), ms_chunk({"content": None}),
+                         ms_chunk({"content": [ms_think("")]}),
+                         ms_chunk({"content": [{"type": "thinking", "thinking": []}]}),
+                         ms_chunk({"content": [{"type": "text", "text": ""}]}),
+                         ms_chunk({"content": [ms_think("tf g20 b", "tf-g20-sig")]}),
+                         ms_text("tf g20 answer"), ms_stop("stop", ms_usage(5, 9)))
+        run, problems = thinking_text("empty deltas", lines, ["thinking", "text"], "tf g20 a tf g20 b", "tf-g20-sig",
+                                      ["tf g20 answer"])
+        # A thinking part that is not a list of chunks cannot be carried: dropped and counted.
+        bad, more = drive(ms_lines(MS_ROLE, ms_chunk({"content": [{"type": "thinking", "thinking": "tf g20 bad"}]}),
+                                   ms_text("tf g20 answer"), ms_stop("stop", ms_usage(5, 9))))
+        problems += more
+        if bad is not None:
+            dropped = getattr(bad["tr"], "dropped_thinking", None)
+            if dropped != 1 or "tf g20 bad" in bad["out"].decode("utf-8", "replace"):
+                problems.append("unparseable thinking: dropped_thinking %r (expected 1), %s"
+                                % (dropped, ev_shape(bad["events"])))
+        return problems, ["client      : %s" % ev_shape(run["events"]) if run is not None else "(not run)"]
+
+    def g21():
+        head = ms_lines(MS_ROLE, ms_chunk({"content": [ms_think("tf g21 plan", "tf-g21-sig")]}), done=False)
+        lines = head + ms_lines(ms_tools(ms_tool(0, '{"file_path": "/tf/g21"}', "tfToolG21", "Read")),
+                                ms_stop("tool_calls", ms_usage(5, 9)))
+        run, problems = thinking_text("thinking, tool", lines, ["thinking", "tool_use"], "tf g21 plan", "tf-g21-sig",
+                                      [], stop="tool_use")
+        if run is not None:
+            blocks = gg_blocks(run["events"])
+            if len(blocks) == 2:
+                problems += gg_tool_check("block 1", blocks[1], {"id": "tfToolG21", "name": "Read",
+                                                                 "args": '{"file_path": "/tf/g21"}'})
+            # The thinking block closes when the tool call ARRIVES, not at the end of the stream.
+            feed = run["feeds"][len(head)] if len(run["feeds"]) > len(head) else b""
+            if b"signature_delta" not in feed:
+                problems.append("the thinking block was not closed by the tool-call chunk's own feed")
+        return problems, ["client      : %s" % ev_shape(run["events"]) if run is not None else "(not run)"]
+
+    def g22():
+        adapter, why = (getattr(mod, "ADAPTERS", None) or {}).get("mistral"), None
+        if adapter is None:
+            adapter, why = gf_adapter(mod, "json_response")
+        if adapter is None:
+            return [why], []
+        inbound = gg_inbound(mod, stream=False)
+        usage = ms_usage(25, 15)
+        sig1 = {"type": "thinking", "thinking": "tf g22 a tf g22 b", "signature": gf_lms("tf-g22-sig")}
+        table = (
+            ("thinking + text", [ms_think("tf g22 a tf g22 b", "tf-g22-sig", closed=True),
+                                 {"type": "text", "text": "tf g22 answer"}], None,
+             [sig1, {"type": "text", "text": "tf g22 answer"}], "end_turn"),
+            ("two thinking chunks merged", [ms_think("tf g22 a "), ms_think("tf g22 b", "tf-g22-sig"),
+                                            {"type": "text", "text": "tf g22 answer"}], None,
+             [sig1, {"type": "text", "text": "tf g22 answer"}], "end_turn"),
+            ("no signature", [ms_think("tf g22 c"), {"type": "text", "text": "tf g22 answer"}], None,
+             [{"type": "thinking", "thinking": "tf g22 c", "signature": gf_lms()},
+              {"type": "text", "text": "tf g22 answer"}], "end_turn"),
+            ("thinking + tool call", [ms_think("tf g22 a tf g22 b", "tf-g22-sig")],
+             [{"id": "tfToolG22", "type": "function", "function": {"name": "Read", "arguments": '{"p":1}'}}],
+             [sig1, {"type": "tool_use", "id": gg_anthropic_id("tfToolG22"), "name": "Read", "input": {"p": 1}}],
+             "tool_use"),
+        )
+        problems, shown = [], []
+        for label, content, calls, want, stop in table:
+            message = {"role": "assistant", "content": content}
+            if calls is not None:
+                message["tool_calls"] = calls
+            body = json.dumps(ms_answer(message, "tool_calls" if calls else "stop", usage)).encode("utf-8")
+            got = adapter.json_response(inbound, 200, body)
+            if not (isinstance(got, tuple) and len(got) == 2 and isinstance(got[1], dict)):
+                problems.append("%s: json_response returned %r" % (label, type(got).__name__))
+                continue
+            status, obj = got
+            if status != 200 or obj.get("content") != want or obj.get("stop_reason") != stop:
+                problems.append("%s: %r content %r stop_reason %r, expected 200 %r %r"
+                                % (label, status, obj.get("content"), obj.get("stop_reason"), want, stop))
+            shown.append("%s -> %s" % (label, [b.get("type") for b in obj.get("content") or []]))
+        return problems, ["mapping     : " + s for s in shown]
+
+    fns = (g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13, g14, g15, g16, g17, g18, g19, g20, g21, g22)
+    lo, hi = GG_LIVE
     try:
-        for cid, fn in zip(GG_CASES[:14], fns[:14]):
+        for cid, fn in zip(GG_CASES[:lo] + GG_CASES[hi:], fns[:lo] + fns[hi:]):
             try:
                 results[cid] = fn()
             except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
@@ -7105,7 +8664,7 @@ def group_g(suite, fixture_root):
             live["why"] = fx_why
         else:
             live["rig"] = GgLive(fixture_root, fx)
-        for cid, fn in zip(GG_CASES[14:], fns[14:]):
+        for cid, fn in zip(GG_CASES[lo:hi], fns[lo:hi]):
             try:
                 results[cid] = fn()
             except Exception as exc:  # noqa: BLE001
@@ -7135,6 +8694,9 @@ def group_g(suite, fixture_root):
 # Step 11 (task-047) added "mistral" (OpenAI-style `data:` chunks and
 # `data: [DONE]`; the client's message_start comes from the translator's
 # begin(), the head chunk only opens the upstream) plus the mistral-only H8/H9.
+# Plan Step 15 (task-047, KD-18) added "openai" with api_key (profile
+# openai-apikey): Responses `event:`/`data:` events driving ResponsesAdapter
+# through the same relay loop; no auth peer, the credential is TF_KEY_OPENAI.
 
 H_TITLES = (
     "ping in 16 s silence",              # H1
@@ -7150,13 +8712,15 @@ GH_H9 = "mist: EOF seen while buffering"  # H9, mistral only (M2)
 
 H_ROUTE = "claude-tf-h"
 H_UPSTREAM_MODEL = "tf-h-model"
-H_SILENCE_S = 16.0               # H1: the upstream's silence after its first event
+# H1-H3, H7-H9 run in-process (FastRouter) at FAST_TICK_S / FAST_PING_S; H4-H6 stay
+# subprocesses (H4 sends a real SIGTERM; H5, H6 wait on no deadline).
+H_SILENCE_S = 1.2                # H1: the upstream's silence after its first event, 3 x FAST_PING_S
 H_LONG_IDLE_S = 30               # H1, H3, H4, H7: idle_timeout above every silence (M11)
 H_HOLD_S = 30.0                  # H3, H4, H7: the upstream holds the stream open and silent this long
-H_STALL_S = 12.0                 # H2: the upstream's silence, far past idle_timeout 3
-H_IDLE_S = 3                     # H2: the suite's default idle_timeout (LOOPBACK_DEFAULTS)
-H_ERROR_SLACK_S = 2.0            # H2: the error must arrive within idle_timeout + this
-H_CLOSE_S = 2.0                  # H3, H7: the peer must see its socket closed within this
+H_STALL_S = 1.2                  # H2: the upstream's silence, 4 x idle_timeout H_IDLE_S
+H_IDLE_S = 0.3                   # H2: the backend's idle_timeout (6 x FAST_TICK_S)
+H_ERROR_SLACK_S = 0.5            # H2: the error must arrive within idle_timeout + this (10 x FAST_TICK_S)
+H_CLOSE_S = 0.5                  # H3, H7: the peer must see its socket closed within this (10 x FAST_TICK_S)
 H_EXIT_S = 5.0                   # H4: SIGTERM -> event: error and exit 0 within this
 H_529_S = 1.0                    # H4: the in-process 529 must be answered within this
 H_529_DECLARED = 4096            # H4: the Content-Length of the 529 request, body never sent
@@ -7171,10 +8735,17 @@ H_PARTIAL_MARKER = "tf-h6-partial"
 # H6 x mistral: a chunk cut mid-JSON (the line ends, the object never does), then EOF.
 H_MS_PARTIAL = ('data: {"id":"tfcmpl-g-inline","object":"chat.completion.chunk","choices":[{"index":0,'
                 '"delta":{"content":"tf-h6-partial')
-H_FRAGMENT_GAP_S = 1.0           # H8, H9: one tool-argument fragment per this
-H8_FRAGMENTS = 20                # H8: 20 fragments ~ 20 s, past the 15 s ping interval with nothing written
-H9_FRAGMENTS = 90                # H9: "indefinitely" -- the peer outlasts any sane hang-up detection
-H9_CLOSE_S = 3.0                 # H9: the peer must see its socket closed within this
+H_RS_ITEM = "msg_tf_h_inline"    # the openai row's message item id
+H_RS_RESPONSE = {"id": "resp_tf_h_inline", "object": "response", "created_at": 1759622400,
+                 "model": H_UPSTREAM_MODEL, "output": []}
+# H6 x openai: an event line, then its data line cut mid-JSON, no closing blank line, then EOF.
+H_RS_PARTIAL = ["event: response.output_text.delta",
+                'data: {"type":"response.output_text.delta","item_id":"' + H_RS_ITEM + '","output_index":0,'
+                '"content_index":0,"delta":"tf-h6-partial']
+H_FRAGMENT_GAP_S = 0.1           # H8, H9: one tool-argument fragment per this (2 x FAST_TICK_S)
+H8_FRAGMENTS = 20                # H8: 20 fragments ~ 2 s, 5 x the FAST_PING_S interval with nothing written
+H9_FRAGMENTS = 90                # H9: "indefinitely" -- ~9 s, the peer outlasts any sane hang-up detection
+H9_CLOSE_S = 1.0                 # H9: the peer must see its socket closed within this (20 x FAST_TICK_S)
 
 
 def h_entry_passthrough(url, **extra):
@@ -7193,6 +8764,30 @@ def h_entry_mistral(url, **extra):
     entry = {"kind": "mistral", "base_url": url, "api_key": TF_KEY_MISTRAL}   # auth_header: authorization
     entry.update(extra)
     return entry
+
+
+def h_entry_openai(url, **extra):
+    entry = {"kind": "openai", "base_url": url, "api_key": TF_KEY_OPENAI}     # profile openai-apikey
+    entry.update(extra)
+    return entry
+
+
+def h_rs_lines(*events):
+    """SSE lines (no newlines) of Responses *events*: `event: <type>`, `data: <compact JSON>`, blank
+    each (gm_ev's shape; the H table is built before group M's helpers exist)."""
+    lines = []
+    for obj in events:
+        lines += ["event: " + obj["type"], "data: " + json.dumps(obj, separators=(",", ":"), ensure_ascii=False), ""]
+    return lines
+
+
+def h_rs_response(status, **extra):
+    return dict(H_RS_RESPONSE, status=status, **extra)
+
+
+def h_rs_text(delta):
+    return {"type": "response.output_text.delta", "item_id": H_RS_ITEM, "output_index": 0,
+            "content_index": 0, "delta": delta}
 
 
 H_PROFILES = {
@@ -7232,8 +8827,34 @@ H_PROFILES = {
                       "type": "internal_server_error", "param": None, "code": "1000"},   # Mistral's shape
         "inproc_529": False,
     },
+    "openai": {
+        "tag": "oai",
+        "entry": h_entry_openai,
+        # Responses events: response.created (message_start is begin()'s, the head only
+        # opens the upstream), the message item and one text delta (-> content_block_start
+        # + the first delta), the rest through response.completed.
+        "head": h_rs_lines({"type": "response.created", "response": h_rs_response("in_progress", usage=None)}),
+        "delta": h_rs_lines({"type": "response.output_item.added", "output_index": 0,
+                             "item": {"id": H_RS_ITEM, "type": "message", "status": "in_progress",
+                                      "role": "assistant", "content": []}},
+                            h_rs_text("Hello")),
+        "finish": h_rs_lines(h_rs_text(" wörld ✓"),
+                             {"type": "response.output_item.done", "output_index": 0,
+                              "item": {"id": H_RS_ITEM, "type": "message", "status": "completed",
+                                       "role": "assistant",
+                                       "content": [{"type": "output_text", "text": "Hello wörld ✓",
+                                                    "annotations": []}]}},
+                             {"type": "response.completed",
+                              "response": h_rs_response("completed",
+                                                        usage={"input_tokens": 12, "output_tokens": 5,
+                                                               "total_tokens": 17})}),
+        "partial": H_RS_PARTIAL,
+        "error_500": {"error": {"message": "tf openai internal error", "type": "server_error",
+                                "param": None, "code": None}},            # the platform's shape
+        "inproc_529": False,
+    },
 }
-H_KINDS = ("passthrough", "llamacpp", "mistral")
+H_KINDS = ("passthrough", "llamacpp", "mistral", "openai")
 
 
 def h_case_ids(kind):
@@ -7279,6 +8900,37 @@ class HRig:
     def close(self):
         if self.proc is not None:
             self.proc.close()
+        self.peer.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+class HFastRig:
+    """HRig's fixture -- the same peer, backend, route and config -- with the router
+    in-process (FastRouter) under *patch*, for a case whose observable is a router
+    deadline (H1-H3, H8, H9).  `client` is None (and `why` says so) if it never served."""
+
+    def __init__(self, fixture_root, kind, label, script, mod, mod_why, patch=FAST_RELAY, **backend):
+        profile = H_PROFILES[kind]
+        self.sandbox = new_sandbox(fixture_root, "h-%s-%s" % (profile["tag"], label))
+        self.peer = ScriptedPeer(script=script)
+        self.router = None
+        try:
+            self.cfgpath = write_config(self.sandbox, h_config(profile["entry"](self.peer.url(), **backend)))
+            self.router = FastRouter(mod, mod_why, self.sandbox, self.cfgpath, patch, label=label)
+        except BaseException:
+            self.close()
+            raise
+        self.client, self.why = self.router.client, self.router.why
+
+    def close(self):
+        if self.router is not None:
+            self.router.close()
         self.peer.close()
 
     def __enter__(self):
@@ -7381,7 +9033,7 @@ def h_cases(kind, fixture_root, mod=None, mod_why=None):
 
     def h1():
         script = [("respond_sse", full, gaps_after(head, H_SILENCE_S))]
-        with HRig(fixture_root, kind, "h1", script, idle_timeout=H_LONG_IDLE_S) as rig:
+        with HFastRig(fixture_root, kind, "h1", script, mod, mod_why, idle_timeout=H_LONG_IDLE_S) as rig:
             if rig.client is None:
                 return [rig.why], []
             conn, resp, problems = open_stream(rig.client, h_body())
@@ -7399,17 +9051,19 @@ def h_cases(kind, fixture_root, mod=None, mod_why=None):
             problems.append("the first client event is %r, expected message_start (L13)"
                             % (names[0] if names else None))
         if "ping" not in names:
-            problems.append("no event: ping during a %.0f s upstream silence" % H_SILENCE_S)
+            problems.append("no event: ping during a %.1f s upstream silence (ping interval %g s)"
+                            % (H_SILENCE_S, FAST_PING_S))
         if not names or names[-1] != "message_stop" or "error" in names:
             problems.append("the stream did not complete with message_stop (%s)" % ev_shape(events))
         problems += ev_unparsed(events)
-        return problems, ["upstream    : first event, %.0f s silence, the rest; idle_timeout %d"
+        return problems, ["upstream    : first event, %.1f s silence, the rest; idle_timeout %d"
                           % (H_SILENCE_S, H_LONG_IDLE_S),
+                          "router      : in-process, _PING_INTERVAL_S %g, _RT_TICK_S %g" % (FAST_PING_S, FAST_TICK_S),
                           "client      : %s in %.1f s" % (ev_shape(events), took)]
 
     def h2():
         script = [("respond_sse", full, gaps_after(head, H_STALL_S))]
-        with HRig(fixture_root, kind, "h2", script) as rig:
+        with HFastRig(fixture_root, kind, "h2", script, mod, mod_why, FAST_TICK, idle_timeout=H_IDLE_S) as rig:
             if rig.client is None:
                 return [rig.why], []
             conn, resp, problems = open_stream(rig.client, h_body())
@@ -7425,18 +9079,19 @@ def h_cases(kind, fixture_root, mod=None, mod_why=None):
         if events and events[-1][0] == "error":
             late = events[-1][2] - events[0][2]
             if late > H_IDLE_S + H_ERROR_SLACK_S:
-                problems.append("the error came %.1f s after the first event, expected within %d + %.0f s"
+                problems.append("the error came %.2f s after the first event, expected within %g + %g s"
                                 % (late, H_IDLE_S, H_ERROR_SLACK_S))
         if not out["eof"]:
             problems.append("the stream was not closed after the error (%s)" % (out["exc"] or "no EOF"))
-        return problems, ["upstream    : first event, then %.0f s silence; idle_timeout %d"
+        return problems, ["upstream    : first event, then %.1f s silence; idle_timeout %g"
                           % (H_STALL_S, H_IDLE_S),
+                          "router      : in-process, _RT_TICK_S %g" % FAST_TICK_S,
                           "client      : %s; error after %s" % (
-                              ev_shape(events), "%.1f s" % late if late is not None else "-")]
+                              ev_shape(events), "%.2f s" % late if late is not None else "-")]
 
     def h3():
         script = [("respond_sse", full, gaps_after(head + delta, H_HOLD_S))]
-        with HRig(fixture_root, kind, "h3", script, idle_timeout=H_LONG_IDLE_S) as rig:
+        with HFastRig(fixture_root, kind, "h3", script, mod, mod_why, FAST_TICK, idle_timeout=H_LONG_IDLE_S) as rig:
             if rig.client is None:
                 return [rig.why], []
             conn, resp, problems = open_stream(rig.client, h_body())
@@ -7569,16 +9224,18 @@ def h7(fixture_root, mod, mod_why):
     lines = profile["head"] + profile["delta"] + profile["finish"]
     peer = ScriptedPeer(script=[("respond_sse", lines, [0.0] * len(profile["head"]) + [H_HOLD_S])],
                         tls=True)
-    srv = thread = None
+    router = None
     closes, rounds = [], 0
     baseline = after = None
     sixth = "not run"
     try:
         sandbox = new_sandbox(fixture_root, "h7")
         entry = profile["entry"](peer.url(), ca_file=sandbox_ca_file(sandbox), idle_timeout=H_LONG_IDLE_S)
-        cfg = mod.load_config(write_config(sandbox, h_config(entry)))
-        srv, thread = h_serve(mod, cfg, H7_MAX_CONNECTIONS)
-        client = RouterClient(srv.server_port, TF_ROUTER_TOKEN)
+        router = FastRouter(mod, mod_why, sandbox, write_config(sandbox, h_config(entry)), FAST_TICK,
+                            label="h7", max_connections=H7_MAX_CONNECTIONS)
+        if router.client is None:
+            return [router.why], []
+        client = router.client
         baseline = threading.active_count()
 
         def one(n):
@@ -7624,11 +9281,12 @@ def h7(fixture_root, mod, mod_why):
             sixth = "ok" if not found else found[0]
             problems += found
     finally:
-        if srv is not None:
-            h_unserve(srv, thread)
+        if router is not None:
+            router.close()
         peer.close()
     shown = ", ".join("%.2f" % c if c is not None else "never" for c in closes) or "-"
-    return problems, ["router      : in-process, max_connections %d, verified TLS peer" % H7_MAX_CONNECTIONS,
+    return problems, ["router      : in-process, max_connections %d, verified TLS peer, _RT_TICK_S %g"
+                      % (H7_MAX_CONNECTIONS, FAST_TICK_S),
                       "streams     : %d run; peer closed after %s s" % (rounds, shown),
                       "threads     : baseline %s, after the fifth %s; sixth stream: %s"
                       % (baseline, after, sixth)]
@@ -7655,13 +9313,15 @@ def h_ms_fragments(tid, count, finish):
     return lines, gaps, "".join(frags)
 
 
-def h8(fixture_root):
-    """H8 (mistral, M2): tool-argument fragments every 1 s for ~20 s, then
-    finish_reason tool_calls.  The tool call is buffered (KD-5), so nothing is
-    written after message_start: the relay's last-WRITE ping timer must still fire
-    (A-6), then the whole tool block and message_stop arrive."""
+def h8(fixture_root, mod, mod_why):
+    """H8 (mistral, M2): tool-argument fragments every H_FRAGMENT_GAP_S for H8_FRAGMENTS
+    gaps (5 ping intervals), then finish_reason tool_calls; in-process at FAST_PING_S.
+    The tool call is buffered (KD-5), so nothing is written after message_start: the
+    relay's last-WRITE ping timer must still fire (A-6), then the whole tool block and
+    message_stop arrive."""
     lines, gaps, args = h_ms_fragments("tfToolH08", H8_FRAGMENTS, True)
-    with HRig(fixture_root, "mistral", "h8", [("respond_sse", lines, gaps)], idle_timeout=H_LONG_IDLE_S) as rig:
+    with HFastRig(fixture_root, "mistral", "h8", [("respond_sse", lines, gaps)], mod, mod_why,
+                  idle_timeout=H_LONG_IDLE_S) as rig:
         if rig.client is None:
             return [rig.why], []
         conn, resp, problems = open_stream(rig.client, h_body())
@@ -7682,8 +9342,8 @@ def h8(fixture_root):
     pings = [i for i in range(1, at) if names[i] == "ping"]
     others = sorted({names[i] for i in range(1, at)} - {"ping"})
     if not pings:
-        problems.append("no event: ping while the tool call was buffered (%d fragments, %.0f s apart, "
-                        "nothing else written)" % (H8_FRAGMENTS, H_FRAGMENT_GAP_S))
+        problems.append("no event: ping while the tool call was buffered (%d fragments, %g s apart, "
+                        "nothing else written; ping interval %g s)" % (H8_FRAGMENTS, H_FRAGMENT_GAP_S, FAST_PING_S))
     if others:
         problems.append("%s was written while the tool call was still streaming in (KD-5 buffers it)" % others)
     tail = names[at:]
@@ -7702,20 +9362,23 @@ def h8(fixture_root):
                 problems.append("the tool input %r, expected %r" % ((delta or "")[:120], args[:120]))
         except (ValueError, AttributeError) as exc:
             problems.append("the tool block does not parse: %s" % type(exc).__name__)
-    ping_at = ["%.1f" % (events[i][2] - events[0][2]) for i in pings]
-    return problems, ["upstream    : %d tool-argument fragments %.0f s apart, then tool_calls"
+    ping_at = ["%.2f" % (events[i][2] - events[0][2]) for i in pings]
+    return problems, ["upstream    : %d tool-argument fragments %g s apart, then tool_calls"
                       % (H8_FRAGMENTS, H_FRAGMENT_GAP_S),
+                      "router      : in-process, _PING_INTERVAL_S %g, _RT_TICK_S %g" % (FAST_PING_S, FAST_TICK_S),
                       "client      : %s in %.1f s; ping(s) at %s s after message_start"
                       % (ev_shape(events), took, ", ".join(ping_at) or "-")]
 
 
-def h9(fixture_root):
-    """H9 (mistral, M2): tool-argument fragments every 1 s indefinitely; the client
-    hangs up right after message_start.  Nothing is ever written to the client while
-    the call is buffered, so only the relay's client-EOF poll (KD-4) can notice: the
-    peer must see its upstream socket closed within H9_CLOSE_S."""
+def h9(fixture_root, mod, mod_why):
+    """H9 (mistral, M2): tool-argument fragments every H_FRAGMENT_GAP_S indefinitely
+    (in-process at FAST_TICK_S); the client hangs up right after message_start.
+    Nothing is ever written to the client while the call is buffered, so only the
+    relay's client-EOF poll (KD-4) can notice: the peer must see its upstream socket
+    closed within H9_CLOSE_S."""
     lines, gaps, _args = h_ms_fragments("tfToolH09", H9_FRAGMENTS, False)
-    with HRig(fixture_root, "mistral", "h9", [("respond_sse", lines, gaps)], idle_timeout=H_LONG_IDLE_S) as rig:
+    with HFastRig(fixture_root, "mistral", "h9", [("respond_sse", lines, gaps)], mod, mod_why, FAST_TICK,
+                  idle_timeout=H_LONG_IDLE_S) as rig:
         if rig.client is None:
             return [rig.why], []
         conn, resp, problems = open_stream(rig.client, h_body())
@@ -7740,7 +9403,8 @@ def h9(fixture_root):
     elif took > H9_CLOSE_S:
         problems.append("the peer saw its socket closed %.2f s after the hang-up, expected within %.1f s"
                         % (took, H9_CLOSE_S))
-    return problems, ["upstream    : tool-argument fragments %.0f s apart, never finished" % H_FRAGMENT_GAP_S,
+    return problems, ["upstream    : tool-argument fragments %g s apart, never finished; _RT_TICK_S %g"
+                      % (H_FRAGMENT_GAP_S, FAST_TICK_S),
                       "client      : %s, then hung up" % ev_shape(out["events"]),
                       "peer        : %s" % ("closed after %.2f s" % took if seen else "never closed")]
 
@@ -7748,7 +9412,8 @@ def h9(fixture_root):
 def group_h(suite, fixture_root):
     """H. timeouts and disconnect: H1-H6 per kind in H_KINDS (each its own peer and
     router), H8 and H9 on mistral (tool deltas buffered, nothing written), then H7
-    once on passthrough over verified TLS, in-process.
+    once on passthrough over verified TLS.  H1-H3, H7-H9 run in-process at
+    millisecond deadlines (FastRouter); H4-H6 run the router subprocess.
 
     Before a kind's adapter is wired every stream request on it is the 501
     "backend kind <kind> is not wired yet": each case FAILS naming it."""
@@ -7762,7 +9427,7 @@ def group_h(suite, fixture_root):
     for kind in H_KINDS:
         cases += h_cases(kind, fixture_root, mod, mod_why)
     if "mistral" in H_KINDS:
-        cases += [(GH_H8, lambda: h8(fixture_root)), (GH_H9, lambda: h9(fixture_root))]
+        cases += [(GH_H8, lambda: h8(fixture_root, mod, mod_why)), (GH_H9, lambda: h9(fixture_root, mod, mod_why))]
     cases.append((GH_H7, lambda: h7(fixture_root, mod, mod_why)))
     for cid, fn in cases:
         try:
@@ -7770,6 +9435,6534 @@ def group_h(suite, fixture_root):
         except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
             problems, detail = ["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], []
         suite.record(GH, cid, problems, detail=detail)
+
+
+# ---------------------------------------------------------------------------
+# Group K: responses request
+# ---------------------------------------------------------------------------
+
+GK = "K. responses request"
+
+# Plan Step 9 (K1-K13, K20), Plan Step 14 (K14-K19: reasoning -- effort bands,
+# signatures back in), checkpoint B (K21, K22) and Plan Step 16 / user decision
+# 2026-10-07 (K23, K24: the openai-oauth namespace tool shape).  Every declared id
+# is recorded exactly once.
+GK_CASES = (
+    "system string -> instructions",     # K1
+    "system blocks joined",              # K2
+    "user text + image -> input_*",      # K3
+    "assistant text -> output_text",     # K4
+    "tool_use/tool_result pair",         # K5
+    "safe id round trip",                # K6
+    "id with | hashed, stable",          # K7
+    "unpaired call/output repaired",     # K8
+    "tools and tool_choice mapping",     # K9
+    "parallel_tool_calls",               # K10
+    "always keys, cache key, no id",     # K11
+    "oauth profiles: no sampling",       # K12
+    "apikey: sampling + cap",            # K13
+    "effort bands from thinking",        # K14
+    "reasoning_effort option wins",      # K15
+    "thinking sig -> reasoning first",   # K16
+    "redacted_thinking -> reasoning",    # K17
+    "bad signatures dropped, counted",   # K18
+    "257 reasoning: 256 kept, 1 drop",   # K19
+    "unknown dropped, input intact",     # K20
+    "mid system -> developer item",      # K21
+    "tool schema: refused regex dropped",  # K22
+    "openai-oauth: one namespace tool",  # K23
+    "namespace tool_choice; others flat",  # K24
+    "apikey: override in, learned out",  # K25
+)
+GK_IDS = ("K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14", "K15",
+          "K16", "K17", "K18", "K19", "K20", "K21", "K22", "K23", "K24", "K25")
+
+GK_BACKEND = "tf-codex-k"
+GK_OTHER_BACKEND = "tf-openai-k"
+GK_ROUTE = "claude-tf-k"
+GK_MODEL = "gpt-tf-k"
+GK_PROFILES = ("codex", "openai-oauth", "openai-apikey")
+GK_OAUTH_PROFILES = ("codex", "openai-oauth")
+GK_KIND = {"codex": "codex", "openai-oauth": "openai", "openai-apikey": "openai"}
+GK_ADAPTER = {"codex": "CodexAdapter", "openai": "OpenaiAdapter"}
+GK_ORPHAN = "[tool result for an earlier call]\n"     # _RT_MS_ORPHAN, as a literal: the plan fixes it
+GK_NO_RESULT = "(no result)"
+GK_B62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"   # string.digits + ascii_letters
+GK_CALL_HASHED_RE = re.compile(r"^call_[A-Za-z0-9]{24}$")
+GK_ANTH_HASHED_RE = re.compile(r"^toolu_lrh_[A-Za-z0-9]{22}$")
+GK_CACHE_KEY_RE = re.compile(r"^lr-[A-Za-z0-9]{24}$")
+GK_ALWAYS = (("store", False), ("stream", True), ("include", ["reasoning.encrypted_content"]),
+             ("reasoning", {"summary": "auto"}))
+# The only top-level keys a translated body may carry (plan Step 9, explicit key list).
+GK_TOP_KEYS = frozenset({"model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls",
+                         "store", "stream", "include", "prompt_cache_key", "reasoning", "text",
+                         "temperature", "top_p", "max_output_tokens"})
+# K12: what an OAuth profile never sends, even when the inbound body has it.
+GK_UNSAMPLED = ("temperature", "top_p", "max_output_tokens", "stop", "metadata", "top_k")
+# K20: keys no translated body carries at any depth.
+GK_NEVER = frozenset({"cache_control", "foo", "service_tier", "future_field", "context_management",
+                      "metadata", "top_k", "stop_sequences", "max_tokens", "input_schema", "tool_use_id"})
+GK_CACHE = {"type": "ephemeral"}
+GK_PNG = "iVBORw0KGgoAAAANSUhEUg=="     # a base64 payload (no image)
+GK_SCHEMA_READ = {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}
+GK_SCHEMA_BASH = {"type": "object", "properties": {"command": {"type": "string"}}}
+# K14-K19 (Plan Step 14, KD-6, KD-14).  The values are written here, never read from
+# the module: the bands, the prefix, the 1 MiB limit and the 256 cap are the contract.
+GK_EFFORT_BANDS = ((4096, "low"), (4097, "medium"), (16384, "medium"), (16385, "high"),
+                   (32768, "high"), (32769, "xhigh"))      # KD-14: budget_tokens -> effort
+GK_SIG_PREFIX = "lrs1."                                     # _RT_RS_SIG_PREFIX
+GK_SIG_LIMIT = 1024 * 1024                                  # _RT_RS_SIGNATURE_LIMIT
+GK_REASONING_CAP = 256                                      # _RT_RS_REASONING_CAP
+GK_ENC = "gAAAAABo-tf_k_reasoning_blob-0123+/AbCd_eF=="     # invented: no real encrypted_content, no dot
+GK_FOREIGN_SIG = "EqQBCkYIBRgCKkB0Zi1rLWFudGhyb3BpYy1zaWduYXR1cmU="   # Anthropic-shaped: no lrs1. prefix
+# K22 (checkpoint B, live 2026-10-07): the regex constructs the Responses schema validator
+# refuses -- lookaround and backreferences -- written here, never read from the module.
+GK_REGEX_REFUSED = re.compile(r"\(\?<?[=!]|\\[1-9]|\\k<")
+# The real-world ai-soul source.pattern as regex source text: the \u escapes are the regex's own, and
+# the \u + ffff split keeps every editing tool from decoding it into a U+FFFF noncharacter.
+GK_LOOKAROUND = r"^(?:(?![^\u0000-\u" + "ffff" + r"])[^\u0000-\u001F])*$"
+# K23/K24 (user decision 2026-10-07, SIWC preview limitations: function tools must be
+# grouped in a namespace): on the openai-oauth row every Claude Code tool goes into ONE
+# top-level namespace tool.  The plan names no namespace, so the name is this suite's
+# choice; the description's text is the implementation's (a non-empty string).
+GK_NAMESPACE = "claude_code"
+GK_NAMESPACE_KEYS = frozenset({"type", "name", "description", "tools"})
+GK_FLAT_PROFILES = ("codex", "openai-apikey")      # tool_shape "function": unchanged
+
+
+def gk_refused_patterns(schema, path="$"):
+    """Every path whose string `pattern` keyword holds a refused construct (a dict named pattern is a property)."""
+    found = []
+    if isinstance(schema, dict):
+        for key, value in schema.items():
+            if key == "pattern" and isinstance(value, str) and GK_REGEX_REFUSED.search(value):
+                found.append("%s.pattern" % path)
+            else:
+                found += gk_refused_patterns(value, "%s.%s" % (path, key))
+    elif isinstance(schema, list):
+        for index, value in enumerate(schema):
+            found += gk_refused_patterns(value, "%s[%d]" % (path, index))
+    return found
+
+
+def gk_flat_tools(tools):
+    """The function entries of a translated `tools` list, a namespace tool's own list
+    flattened in place (K22 reads either shape; K23 asserts which one is sent)."""
+    flat = []
+    for tool in tools or []:
+        if isinstance(tool, dict) and tool.get("type") == "namespace":
+            flat += [t for t in tool.get("tools") or [] if isinstance(t, dict)]
+        elif isinstance(tool, dict):
+            flat.append(tool)
+    return flat
+
+
+def gk_sig(enc, backend=GK_BACKEND):
+    """KD-6: the router's plain, backend-bound thinking signature."""
+    return GK_SIG_PREFIX + backend + "." + enc
+
+
+def gk_reasoning(enc):
+    """KD-6: the one input item a valid signature becomes (the summary is never replayed)."""
+    return {"type": "reasoning", "encrypted_content": enc, "summary": []}
+
+
+def gk_thinking(sig, text="tf think"):
+    return {"type": "thinking", "thinking": text, "signature": sig}
+
+
+def gk_redacted(data):
+    return {"type": "redacted_thinking", "data": data}
+
+
+def gk_kinds(items):
+    """[(type, role)] of the input items (K16-K19 compare placement, not content)."""
+    return [(i.get("type"), i.get("role")) if isinstance(i, dict) else (type(i).__name__, None) for i in items]
+
+
+def gk_reasoning_items(items):
+    return [i for i in items if isinstance(i, dict) and i.get("type") == "reasoning"]
+
+
+def gk_need(mod, names):
+    """One problem naming every symbol of *names* the module does not define (red, never a crash)."""
+    absent = [n for n in names if not hasattr(mod, n)]
+    if not absent:
+        return []
+    step = "14" if all(n in ("_rt_rs_effort", "_rt_rs_unsign") for n in absent) else "9"
+    return ["the module defines no %s (Step %s not landed)" % (", ".join(absent), step)]
+
+
+def gk_route(mod, **options):
+    return mod.RouteSpec(name=GK_ROUTE, backend=GK_BACKEND, model=GK_MODEL, options=dict(options))
+
+
+def gk_backend(mod, profile, name=GK_BACKEND):
+    """A Responses BackendSpec for an in-process InboundRequest (no credential: nothing is sent)."""
+    return mod.BackendSpec(name=name, kind=GK_KIND[profile], scheme="https", host="tf-responses.invalid",
+                           port=443, base_path="", allow_private=False, allow_loopback=False,
+                           ca_file=None, ca_pem=None, api_key=None, auth_header="authorization",
+                           forward_headers=frozenset(), connect_timeout=5.0, idle_timeout=30.0,
+                           profile=profile)
+
+
+def gk_inbound(mod, body, route, profile, endpoint="messages"):
+    return mod.InboundRequest(endpoint=endpoint, requested_model=body.get("model"), body=body,
+                              stream=bool(body.get("stream")), route=route, backend=gk_backend(mod, profile),
+                              client_headers={}, scrub=lambda text: text)
+
+
+def gk_body(messages, **extra):
+    body = {"model": GK_ROUTE, "max_tokens": 256, "stream": True, "messages": messages}
+    body.update(extra)
+    return body
+
+
+def gk_tool_use(tid, name="Read", tool_input=None):
+    return {"type": "tool_use", "id": tid, "name": name,
+            "input": tool_input if tool_input is not None else {"file_path": "/tf/" + tid}}
+
+
+def gk_tool_result(tid, content, is_error=False):
+    block = {"type": "tool_result", "tool_use_id": tid, "content": content}
+    if is_error:
+        block["is_error"] = True
+    return block
+
+
+def gk_msg(role, part_type, *texts):
+    return {"type": "message", "role": role, "content": [{"type": part_type, "text": t} for t in texts]}
+
+
+def gk_b62(digest, width):
+    """The plan's _rt_b62, re-derived here so K11 pins the cache-key formula, not the module's helper."""
+    value = int.from_bytes(digest, "big")
+    chars = []
+    while value:
+        value, rem = divmod(value, 62)
+        chars.append(GK_B62[rem])
+    return "".join(reversed(chars)).rjust(width, "0")[:width]
+
+
+def gk_translate(mod, body, route=None, profile="codex", label="", backend=GK_BACKEND, want_dropped=None):
+    """(out, problems): _rt_rs_translate(body, route, backend, profile row) checked to leave its
+    input unmutated and to return (a NEW dict with an input list, a non-negative int) -- and,
+    when *want_dropped* is given, that int to be exactly the signatures dropped (K16-K19)."""
+    problems = gk_need(mod, ("_rt_rs_translate", "_RT_RESPONSES_PROFILES"))
+    if problems:
+        return None, problems
+    rows = mod._RT_RESPONSES_PROFILES
+    if profile not in rows:
+        return None, ["%s: _RT_RESPONSES_PROFILES has no %s row" % (label, profile)]
+    sent = ge_clone(body)
+    result = mod._rt_rs_translate(sent, route if route is not None else gk_route(mod), backend, rows[profile])
+    if sent != body:
+        problems.append("%s: _rt_rs_translate mutated its input" % label)
+    if not (isinstance(result, tuple) and len(result) == 2):
+        return None, problems + ["%s: returned %s, expected (responses_body, dropped)"
+                                 % (label, type(result).__name__)]
+    out, dropped = result
+    if out is sent:
+        problems.append("%s: _rt_rs_translate returned its input, not a new dict" % label)
+    if not (isinstance(dropped, int) and not isinstance(dropped, bool) and dropped >= 0):
+        problems.append("%s: dropped is %r, expected a non-negative int" % (label, dropped))
+    elif want_dropped is not None and dropped != want_dropped:
+        problems.append("%s: dropped is %d, expected %d (each dropped signature counted)"
+                        % (label, dropped, want_dropped))
+    if not isinstance(out, dict) or not isinstance(out.get("input"), list):
+        problems.append("%s: returned %s, expected a dict with an input list"
+                        % (label, type(out).__name__ if not isinstance(out, dict) else "a dict without one"))
+        return None, problems
+    return out, problems
+
+
+def gk_shape(items):
+    """A compact, comparable view of the input items: messages as (type, role, ((part type, text|url), ...)),
+    calls as (type, call_id, name), outputs as (type, call_id, output)."""
+    shape = []
+    for item in items:
+        kind = item.get("type") if isinstance(item, dict) else type(item).__name__
+        if kind == "message":
+            parts = tuple((p.get("type"), p.get("text", p.get("image_url"))) if isinstance(p, dict) else (p,)
+                          for p in (item.get("content") or []))
+            shape.append((kind, item.get("role"), parts))
+        elif kind == "function_call":
+            shape.append((kind, item.get("call_id"), item.get("name")))
+        elif kind == "function_call_output":
+            shape.append((kind, item.get("call_id"), item.get("output")))
+        else:
+            shape.append((kind,))
+    return shape
+
+
+def gk_pairing(items, label):
+    """Problems unless every function_call has exactly one function_call_output after it and before
+    the next user message, and no output names a call that did not come first."""
+    problems = []
+    open_calls, answered = {}, set()
+    for index, item in enumerate(items):
+        kind = item.get("type") if isinstance(item, dict) else None
+        if kind == "function_call":
+            open_calls[item.get("call_id")] = index
+        elif kind == "function_call_output":
+            cid = item.get("call_id")
+            if cid in answered:
+                problems.append("%s: item %d answers %r a second time" % (label, index, cid))
+            elif cid not in open_calls:
+                problems.append("%s: item %d answers %r, which no earlier open call has" % (label, index, cid))
+            else:
+                answered.add(cid)
+                del open_calls[cid]
+        elif kind == "message" and item.get("role") == "user" and open_calls:
+            problems.append("%s: user message at item %d while %s is unanswered" % (label, index, sorted(open_calls)))
+            open_calls = {}
+    if open_calls:
+        problems.append("%s: call(s) %s never answered" % (label, sorted(open_calls)))
+    return problems
+
+
+def gk_refused(mod, label, fn):
+    """Problems unless fn() raises the module's ApiError with status 400."""
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 -- any other type is the finding
+        api = getattr(mod, "ApiError", None)
+        if api is None or not isinstance(exc, api):
+            return ["%s: raised %s, expected an ApiError 400" % (label, type(exc).__name__)]
+        if getattr(exc, "status", None) != 400:
+            return ["%s: ApiError status %r, expected 400" % (label, getattr(exc, "status", None))]
+        return []
+    return ["%s: accepted, expected an ApiError 400" % label]
+
+
+def gk_item_ids(out):
+    """Every path inside out["input"] that carries an `id` key (K11: none may)."""
+    return ["%s.%s" % (path, key) for path, key in gf_keys(out.get("input"), "$.input") if key == "id"]
+
+
+def group_k(suite, fixture_root):
+    """K. responses request: the Anthropic -> Responses request translation (Plan Step 9),
+    in-process.  Every case calls the plan's named functions -- `_rt_rs_translate(body,
+    route, backend, profile)`, `_rt_rs_call_id_map(ids)`, `_rt_rs_anthropic_id(call_id)`,
+    `_rt_rs_cache_key(body, backend)` and the Responses adapters' `upstream_request /
+    count_tokens` -- with each profile row taken from `_RT_RESPONSES_PROFILES`, never a
+    kind.  Before Step 9 lands every case FAILS naming the missing function, never
+    crashes the group."""
+    del fixture_root            # in-process only: nothing is written
+    results = {}
+    try:
+        mod = H.load_module_from_path("ph_llm_router_k", SERVER)
+    except Exception as exc:  # noqa: BLE001 -- an import failure fails the group
+        for cid in GK_CASES:
+            suite.record(GK, cid, ["cannot import %s: %s: %s"
+                                   % (os.path.relpath(SERVER, H.REPO_ROOT), type(exc).__name__, exc)])
+        return
+
+    user_hi = [{"role": "user", "content": "tf hi"}]
+
+    def k1():
+        problems, shown = [], []
+        for profile in GK_PROFILES:
+            out, more = gk_translate(mod, gk_body(user_hi, system="tf sys"), profile=profile,
+                                     label="string system (%s)" % profile)
+            problems += more
+            if out is None:
+                continue
+            if out.get("instructions") != "tf sys":
+                problems.append("%s: instructions %r, expected 'tf sys'" % (profile, out.get("instructions")))
+            if out["input"] != [gk_msg("user", "input_text", "tf hi")]:
+                problems.append("%s: input %r, expected only the user message (no system/developer item)"
+                                % (profile, gk_shape(out["input"])))
+            shown.append("%s -> instructions %r" % (profile, out.get("instructions")))
+        out, more = gk_translate(mod, gk_body(user_hi), label="no system")
+        problems += more
+        if out is not None:
+            if out.get("instructions") not in (None, ""):
+                problems.append("no system: instructions %r, expected none" % (out.get("instructions"),))
+            if out["input"] != [gk_msg("user", "input_text", "tf hi")]:
+                problems.append("no system: input %r, expected only the user message" % (gk_shape(out["input"]),))
+        return problems, ["system      : " + s for s in shown]
+
+    def k2():
+        system = [{"type": "text", "text": "tf sys one", "cache_control": GK_CACHE},
+                  {"type": "text", "text": "tf sys two"}]
+        out, problems = gk_translate(mod, gk_body(user_hi, system=system), label="list system")
+        if out is None:
+            return problems, []
+        if out.get("instructions") != "tf sys one\n\ntf sys two":
+            problems.append("list system: instructions %r, expected the texts joined with a blank line"
+                            % (out.get("instructions"),))
+        if "cache_control" in json.dumps(out):
+            problems.append("list system: cache_control survived the translation")
+        if out["input"] != [gk_msg("user", "input_text", "tf hi")]:
+            problems.append("list system: input %r, expected only the user message" % (gk_shape(out["input"]),))
+        return problems, ["instructions: %r" % (out.get("instructions"),)]
+
+    def k3():
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": GK_PNG}}
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "tf look"}, image]}]
+        out, problems = gk_translate(mod, gk_body(msgs), label="text + image")
+        want = [{"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "tf look"},
+                             {"type": "input_image", "image_url": "data:image/png;base64," + GK_PNG}]}]
+        if out is not None and out["input"] != want:
+            problems.append("text + image: input %r, expected %r" % (out["input"], want))
+        bad = [{"role": "user", "content": [{"type": "image", "source": {"type": "file", "file_id": "tf"}}]}]
+        if not gk_need(mod, ("_rt_rs_translate",)):
+            problems += gk_refused(mod, "image source type file",
+                                   lambda: mod._rt_rs_translate(gk_body(bad), gk_route(mod), GK_BACKEND,
+                                                                mod._RT_RESPONSES_PROFILES["codex"]))
+        return problems, ["input       : %r" % (gk_shape(out["input"]) if out is not None else None,)]
+
+    def k4():
+        msgs = [{"role": "user", "content": "tf q"},
+                {"role": "assistant", "content": [{"type": "text", "text": "tf a"}]},
+                {"role": "user", "content": "tf q2"},
+                {"role": "assistant", "content": "tf s"},
+                {"role": "user", "content": [{"type": "text", "text": "tf q3"}]}]
+        out, problems = gk_translate(mod, gk_body(msgs), label="assistant text")
+        want = [gk_msg("user", "input_text", "tf q"), gk_msg("assistant", "output_text", "tf a"),
+                gk_msg("user", "input_text", "tf q2"), gk_msg("assistant", "output_text", "tf s"),
+                gk_msg("user", "input_text", "tf q3")]
+        if out is not None and out["input"] != want:
+            problems.append("assistant text: input %r, expected %r" % (gk_shape(out["input"]), gk_shape(want)))
+        return problems, ["input       : %r" % (gk_shape(out["input"]) if out is not None else None,)]
+
+    def k5():
+        tool_input = {"file_path": "/tf/ä ✓", "n": 1, "flags": [True, None]}
+        history = [{"role": "user", "content": "tf start"},
+                   {"role": "assistant", "content": [{"type": "text", "text": "calling"},
+                                                     gk_tool_use("toolu_tfk_a", "Read", tool_input)]},
+                   {"role": "user", "content": [gk_tool_result("toolu_tfk_a", "tf result")]},
+                   {"role": "assistant", "content": [gk_tool_use("toolu_tfk_b", "Bash", {"command": "tf"})]},
+                   {"role": "user", "content": [gk_tool_result("toolu_tfk_b", [{"type": "text", "text": "tf b"}],
+                                                               is_error=True)]}]
+        out, problems = gk_translate(mod, gk_body(history), label="tool history")
+        if out is None:
+            return problems, []
+        items = out["input"]
+        problems += gk_pairing(items, "tool history")
+        calls = [i for i in items if isinstance(i, dict) and i.get("type") == "function_call"]
+        outputs = [i for i in items if isinstance(i, dict) and i.get("type") == "function_call_output"]
+        if len(calls) != 2 or len(outputs) != 2:
+            problems.append("tool history: %d call(s) and %d output(s), expected 2 and 2" % (len(calls), len(outputs)))
+            return problems, ["input       : %r" % (gk_shape(items),)]
+        for call in calls:
+            if set(call) != {"type", "call_id", "name", "arguments"}:
+                problems.append("function_call keys %s, expected type, call_id, name, arguments" % sorted(call))
+        if [c.get("name") for c in calls] != ["Read", "Bash"]:
+            problems.append("function_call names %r, expected Read, Bash" % ([c.get("name") for c in calls],))
+        args = calls[0].get("arguments")
+        try:
+            parsed = json.loads(args) if isinstance(args, str) else None
+        except ValueError:
+            parsed = None
+        if parsed != tool_input:
+            problems.append("function_call arguments %r do not parse back to the tool_use input" % (args,))
+        if [c.get("call_id") for c in calls] != [o.get("call_id") for o in outputs]:
+            problems.append("call_ids %r but output call_ids %r (a pair disagrees)"
+                            % ([c.get("call_id") for c in calls], [o.get("call_id") for o in outputs]))
+        for out_item in outputs:
+            if set(out_item) != {"type", "call_id", "output"}:
+                problems.append("function_call_output keys %s, expected type, call_id, output" % sorted(out_item))
+        if [o.get("output") for o in outputs] != ["tf result", "Error: tf b"]:
+            problems.append("outputs %r, expected 'tf result' and 'Error: tf b'" % ([o.get("output") for o in outputs],))
+        return problems, ["input       : %r" % (gk_shape(items),)]
+
+    def k6():
+        problems = []
+        mapping = mod._rt_rs_call_id_map(["toolu_call_abc"])
+        if mapping != {"toolu_call_abc": "call_abc"}:
+            problems.append("_rt_rs_call_id_map(['toolu_call_abc']) = %r, expected {'toolu_call_abc': 'call_abc'}"
+                            % (mapping,))
+        back = mod._rt_rs_anthropic_id("call_abc")
+        if back != "toolu_call_abc":
+            problems.append("_rt_rs_anthropic_id('call_abc') = %r, expected 'toolu_call_abc'" % (back,))
+        history = [{"role": "user", "content": "tf start"},
+                   {"role": "assistant", "content": [gk_tool_use("toolu_call_abc")]},
+                   {"role": "user", "content": [gk_tool_result("toolu_call_abc", "tf r")]}]
+        out, more = gk_translate(mod, gk_body(history), label="safe id")
+        problems += more
+        if out is not None:
+            ids = [(i.get("type"), i.get("call_id")) for i in out["input"]
+                   if isinstance(i, dict) and i.get("type") in ("function_call", "function_call_output")]
+            if ids != [("function_call", "call_abc"), ("function_call_output", "call_abc")]:
+                problems.append("safe id: call items %r, expected call_abc on both" % (ids,))
+        return problems, ["round trip  : toolu_call_abc -> %r -> %r" % (mapping.get("toolu_call_abc")
+                                                                       if isinstance(mapping, dict) else None, back)]
+
+    def k7():
+        problems = []
+        odd = ["toolu_tf|k7", "tf-plain-k7", "toolu_" + "x" * 65]
+        first = mod._rt_rs_call_id_map(list(odd))
+        second = mod._rt_rs_call_id_map(list(reversed(odd)))
+        if not isinstance(first, dict) or set(first) != set(odd):
+            return ["_rt_rs_call_id_map returned %r, expected a dict keyed by exactly the %d ids"
+                    % (first, len(odd))], []
+        bad = sorted(k for k, v in first.items() if not (isinstance(v, str) and GK_CALL_HASHED_RE.match(v)))
+        if bad:
+            problems.append("id(s) %s map to %r, not call_ + 24 base62" % (bad, [first[k] for k in bad]))
+        if first != second:
+            problems.append("the map depends on the input order: %r vs %r" % (first, second))
+        if len(set(first.values())) != len(first):
+            problems.append("two ids share one call_id: %r" % (first,))
+        for call_id in ("call|tf", "c" * 65):
+            got = mod._rt_rs_anthropic_id(call_id)
+            if not (isinstance(got, str) and GK_ANTH_HASHED_RE.match(got)):
+                problems.append("_rt_rs_anthropic_id(%r) = %r, expected toolu_lrh_ + 22 base62" % (call_id[:16], got))
+            elif got != mod._rt_rs_anthropic_id(call_id):
+                problems.append("_rt_rs_anthropic_id(%r) is not stable" % (call_id[:16],))
+        history = [{"role": "user", "content": "tf start"},
+                   {"role": "assistant", "content": [gk_tool_use("toolu_tf|k7")]},
+                   {"role": "user", "content": [gk_tool_result("toolu_tf|k7", "tf r")]}]
+        runs = []
+        for attempt in (1, 2):
+            out, more = gk_translate(mod, gk_body(history), label="hashed id run %d" % attempt)
+            problems += more
+            if out is not None:
+                problems += gk_pairing(out["input"], "hashed id run %d" % attempt)
+                runs.append([i.get("call_id") for i in out["input"]
+                             if isinstance(i, dict) and i.get("type") in ("function_call", "function_call_output")])
+        if len(runs) == 2:
+            if runs[0] != runs[1]:
+                problems.append("hashed id: two translations differ: %r vs %r" % (runs[0], runs[1]))
+            if runs[0] != [first.get("toolu_tf|k7")] * 2:
+                problems.append("hashed id: call items %r, expected the map's %r on both"
+                                % (runs[0], first.get("toolu_tf|k7")))
+        return problems, ["hashed      : %r" % (first,)]
+
+    def k8():
+        history = [{"role": "user", "content": "tf start"},
+                   {"role": "assistant", "content": [gk_tool_use("toolu_k8_a", "Read"),
+                                                     gk_tool_use("toolu_k8_b", "Bash", {"command": "tf"})]},
+                   {"role": "user", "content": [gk_tool_result("toolu_k8_a", "ra"),
+                                                {"type": "text", "text": "tf next"}]},
+                   {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                   {"role": "user", "content": [gk_tool_result("toolu_k8_ghost", "tf ghost")]}]
+        out, problems = gk_translate(mod, gk_body(history), label="unpaired")
+        if out is None:
+            return problems, []
+        items = out["input"]
+        shape = gk_shape(items)
+        problems += gk_pairing(items, "unpaired")
+        outputs = {i.get("call_id"): i.get("output") for i in items
+                   if isinstance(i, dict) and i.get("type") == "function_call_output"}
+        if outputs != {"k8_a": "ra", "k8_b": GK_NO_RESULT}:
+            problems.append("outputs %r, expected k8_a 'ra' and a synthetic %r for k8_b" % (outputs, GK_NO_RESULT))
+        orphan = ("message", "user", (("input_text", GK_ORPHAN + "tf ghost"),))
+        if not shape or shape[-1] != orphan:
+            problems.append("the orphan tool_result is not the last item as a user input_text %r: %r"
+                            % (GK_ORPHAN + "tf ghost", shape[-1:] if shape else shape))
+        nxt = ("message", "user", (("input_text", "tf next"),))
+        said = ("message", "assistant", (("output_text", "ok"),))
+        if nxt not in shape or said not in shape or shape.index(nxt) > shape.index(said):
+            problems.append("the user 'tf next' and assistant 'ok' messages are missing or out of order: %r"
+                            % (shape,))
+        if "toolu_k8_ghost" in json.dumps(out) or "k8_ghost" in [i.get("call_id") for i in items
+                                                                  if isinstance(i, dict)]:
+            problems.append("the orphan's id reached the body")
+        return problems, ["input       : %r" % (shape,)]
+
+    def k9():
+        tools = [{"name": "Read", "description": "tf read", "input_schema": GK_SCHEMA_READ, "cache_control": GK_CACHE},
+                 {"name": "Bash", "description": "tf bash", "input_schema": GK_SCHEMA_BASH}]
+        want_tools = [{"type": "function", "name": "Read", "description": "tf read", "parameters": GK_SCHEMA_READ},
+                      {"type": "function", "name": "Bash", "description": "tf bash", "parameters": GK_SCHEMA_BASH}]
+        problems, shown = [], []
+        for choice, want in (({"type": "auto"}, "auto"), ({"type": "any"}, "required"), ({"type": "none"}, "none"),
+                             ({"type": "tool", "name": "Read"}, {"type": "function", "name": "Read"})):
+            label = "tool_choice %s" % choice["type"]
+            out, more = gk_translate(mod, gk_body(user_hi, tools=tools, tool_choice=choice), label=label)
+            problems += more
+            if out is None:
+                continue
+            if out.get("tools") != want_tools:
+                problems.append("%s: tools %r, expected %r" % (label, out.get("tools"), want_tools))
+            if out.get("tool_choice") != want:
+                problems.append("%s: tool_choice %r, expected %r" % (label, out.get("tool_choice"), want))
+            shown.append("%s -> %r" % (choice["type"], out.get("tool_choice")))
+        if not gk_need(mod, ("_rt_rs_translate",)):
+            problems += gk_refused(mod, "tool_choice type tf",
+                                   lambda: mod._rt_rs_translate(gk_body(user_hi, tools=tools,
+                                                                        tool_choice={"type": "tf"}),
+                                                                gk_route(mod), GK_BACKEND,
+                                                                mod._RT_RESPONSES_PROFILES["codex"]))
+        return problems, ["tool_choice : " + s for s in shown]
+
+    def k10():
+        tools = [{"name": "Read", "description": "tf read", "input_schema": GK_SCHEMA_READ}]
+        problems, shown = [], []
+        for label, extra, want in (("no tool_choice", {}, True),
+                                   ("auto, disable", {"tool_choice": {"type": "auto",
+                                                                      "disable_parallel_tool_use": True}}, False),
+                                   ("any, keep", {"tool_choice": {"type": "any",
+                                                                  "disable_parallel_tool_use": False}}, True)):
+            out, more = gk_translate(mod, gk_body(user_hi, tools=tools, **extra), label=label)
+            problems += more
+            if out is None:
+                continue
+            if out.get("parallel_tool_calls") is not want:
+                problems.append("%s: parallel_tool_calls %r, expected %r" % (label, out.get("parallel_tool_calls"), want))
+            shown.append("%s -> %r" % (label, out.get("parallel_tool_calls")))
+        return problems, ["parallel    : " + s for s in shown]
+
+    def k11():
+        problems, shown = [], []
+        prefix = mod._RT_RS_CACHE_KEY_PREFIX
+        tools = [{"name": "Read", "description": "tf read", "input_schema": GK_SCHEMA_READ}]
+        history = [{"role": "user", "content": [{"type": "text", "text": "tf first"}]},
+                   {"role": "assistant", "content": [{"type": "text", "text": "tf a"}, gk_tool_use("toolu_k11")]},
+                   {"role": "user", "content": [gk_tool_result("toolu_k11", "tf r")]}]
+        body = gk_body(history, stream=False, tools=tools, metadata={"user_id": "tf-user-k11"})
+        want_key = "lr-" + gk_b62(hashlib.sha256(prefix + (GK_BACKEND + "\0" + "tf-user-k11").encode("utf-8"))
+                                  .digest(), 24)
+        for profile in GK_PROFILES:
+            out, more = gk_translate(mod, body, profile=profile, label="always (%s)" % profile)
+            problems += more
+            if out is None:
+                continue
+            for key, value in GK_ALWAYS:
+                if out.get(key) != value or type(out.get(key)) is not type(value):
+                    problems.append("%s: %s is %r, expected %r" % (profile, key, out.get(key), value))
+            if out.get("model") != GK_MODEL:
+                problems.append("%s: model %r, expected the route's %r" % (profile, out.get("model"), GK_MODEL))
+            extra = sorted(set(out) - GK_TOP_KEYS)
+            if extra:
+                problems.append("%s: key(s) %s outside the explicit list" % (profile, extra))
+            if out.get("prompt_cache_key") != want_key:
+                problems.append("%s: prompt_cache_key %r, expected %r (lr- + b62(sha256(prefix + backend NUL "
+                                "user_id)), 24)" % (profile, out.get("prompt_cache_key"), want_key))
+            ids = gk_item_ids(out)
+            if ids:
+                problems.append("%s: input item(s) carry an id: %s" % (profile, ids))
+            if "text" in out:
+                problems.append("%s: text %r sent with no verbosity option" % (profile, out.get("text")))
+            again, more = gk_translate(mod, body, profile=profile, label="again (%s)" % profile)
+            problems += more
+            if again is not None and again != out:
+                problems.append("%s: two translations of one body differ" % profile)
+            # What upstream_request sends is this body, at the row's path; count_tokens answers locally.
+            cls = getattr(mod, GK_ADAPTER[GK_KIND[profile]], None)
+            if cls is None:
+                problems.append("%s: the module defines no %s" % (profile, GK_ADAPTER[GK_KIND[profile]]))
+                continue
+            inbound = gk_inbound(mod, body, gk_route(mod), profile)
+            sent = cls().upstream_request(inbound)
+            row = mod._RT_RESPONSES_PROFILES[profile]
+            if not (isinstance(sent, tuple) and len(sent) == 2 and sent[0] == row.path
+                    and isinstance(sent[1], bytes) and json.loads(sent[1].decode("ascii")) == out):
+                problems.append("%s: upstream_request did not return (%r, the translated body as bytes)"
+                                % (profile, row.path))
+            counted = cls().count_tokens(gk_inbound(mod, body, gk_route(mod), profile, endpoint="count_tokens"))
+            n = counted.get("input_tokens") if isinstance(counted, dict) else None
+            if not (isinstance(n, int) and not isinstance(n, bool) and n >= 1) or set(counted) != {"input_tokens"}:
+                problems.append("%s: count_tokens returned %r, expected a local {input_tokens: N >= 1}"
+                                % (profile, counted))
+            shown.append("%s -> key %s, path %s" % (profile, out.get("prompt_cache_key"), row.path))
+        # The helper is the formula; the key moves with the backend and with the first user text.
+        if mod._rt_rs_cache_key(body, GK_BACKEND) != want_key:
+            problems.append("_rt_rs_cache_key(body, backend) = %r, expected %r"
+                            % (mod._rt_rs_cache_key(body, GK_BACKEND), want_key))
+        if mod._rt_rs_cache_key(body, GK_OTHER_BACKEND) == want_key:
+            problems.append("_rt_rs_cache_key does not depend on the backend")
+        plain_a = gk_body(history + [{"role": "assistant", "content": "tf x"}, {"role": "user", "content": "tf y"}])
+        plain_b = gk_body(history)
+        plain_c = gk_body([{"role": "user", "content": "tf other first"}])
+        key_a, key_b, key_c = (mod._rt_rs_cache_key(b, GK_BACKEND) for b in (plain_a, plain_b, plain_c))
+        want_text = "lr-" + gk_b62(hashlib.sha256(prefix + (GK_BACKEND + "\0" + "tf first").encode("utf-8"))
+                                   .digest(), 24)
+        if not (key_a == key_b == want_text):
+            problems.append("no user_id: keys %r, %r, expected both %r (the first user text)" % (key_a, key_b, want_text))
+        if key_c == key_a:
+            problems.append("no user_id: a different first user text gives the same key")
+        out, more = gk_translate(mod, body, route=gk_route(mod, verbosity="low"), label="verbosity low")
+        problems += more
+        if out is not None and out.get("text") != {"verbosity": "low"}:
+            problems.append("verbosity low: text %r, expected {'verbosity': 'low'}" % (out.get("text"),))
+        return problems, ["profile     : " + s for s in shown]
+
+    def k12():
+        body = gk_body(user_hi, max_tokens=999, temperature=0.3, top_p=0.9, top_k=5, stop_sequences=["tf-stop"],
+                       metadata={"user_id": "tf-user-k12"})
+        problems, shown = [], []
+        for profile in GK_OAUTH_PROFILES:
+            for options in ({}, {"verbosity": "high", "count_divisor": 2}):
+                label = "%s %s" % (profile, sorted(options) or "no options")
+                out, more = gk_translate(mod, body, route=gk_route(mod, **options), profile=profile, label=label)
+                problems += more
+                if out is None:
+                    continue
+                sent = sorted(k for k in GK_UNSAMPLED + ("stop_sequences", "max_tokens") if k in out)
+                if sent:
+                    problems.append("%s: carries %s, which the profile never sends" % (label, sent))
+                shown.append("%s -> keys %s" % (label, sorted(out)))
+        return problems, ["oauth       : " + s for s in shown]
+
+    def k13():
+        body = gk_body(user_hi, max_tokens=999, temperature=0.3, top_p=0.9, top_k=5, stop_sequences=["tf-stop"])
+        problems, shown = [], []
+        for label, options, want in (("body values", {}, (0.3, 0.9, 999)),
+                                     ("route wins, cap", {"temperature": 0.1, "top_p": 0.5, "max_tokens_cap": 100},
+                                      (0.1, 0.5, 100)),
+                                     ("cap above max_tokens", {"max_tokens_cap": 5000}, (0.3, 0.9, 999))):
+            out, more = gk_translate(mod, body, route=gk_route(mod, **options), profile="openai-apikey", label=label)
+            problems += more
+            if out is None:
+                continue
+            got = (out.get("temperature"), out.get("top_p"), out.get("max_output_tokens"))
+            if got != want:
+                problems.append("%s: (temperature, top_p, max_output_tokens) = %r, expected %r" % (label, got, want))
+            leaked = sorted(k for k in ("stop", "stop_sequences", "top_k", "max_tokens") if k in out)
+            if leaked:
+                problems.append("%s: carries %s, which no Responses body takes" % (label, leaked))
+            shown.append("%s -> %r" % (label, got))
+        return problems, ["apikey      : " + s for s in shown]
+
+    def k14():
+        problems, shown = [], []
+        route = gk_route(mod)
+        cases = [("enabled, budget %d" % b, {"type": "enabled", "budget_tokens": b}, e) for b, e in GK_EFFORT_BANDS]
+        cases += [("adaptive", {"type": "adaptive"}, "medium"), ("disabled", {"type": "disabled"}, None),
+                  ("absent", None, None)]
+        for label, thinking, want in cases:
+            body = gk_body(user_hi) if thinking is None else gk_body(user_hi, thinking=thinking)
+            got = mod._rt_rs_effort(ge_clone(body), route)
+            if got != want:
+                problems.append("_rt_rs_effort(%s) = %r, expected %r" % (label, got, want))
+            # Every band through the codex translation; one band through every profile.
+            for profile in (GK_PROFILES if label == "enabled, budget 16385" else ("codex",)):
+                out, more = gk_translate(mod, body, profile=profile, label="%s (%s)" % (label, profile))
+                problems += more
+                if out is None:
+                    continue
+                want_reasoning = {"summary": "auto"} if want is None else {"effort": want, "summary": "auto"}
+                if out.get("reasoning") != want_reasoning:
+                    problems.append("%s (%s): reasoning %r, expected %r"
+                                    % (label, profile, out.get("reasoning"), want_reasoning))
+                if out.get("include") != ["reasoning.encrypted_content"]:
+                    problems.append("%s (%s): include %r, expected it always sent" % (label, profile, out.get("include")))
+            shown.append("%s -> %r" % (label, got))
+        return problems, ["effort      : " + s for s in shown]
+
+    def k15():
+        problems, shown = [], []
+        for option, thinking, other in (("minimal", {"type": "enabled", "budget_tokens": 32769}, "xhigh"),
+                                        ("high", None, None),
+                                        ("none", {"type": "adaptive"}, "medium"),
+                                        ("xhigh", {"type": "disabled"}, None),
+                                        ("low", {"type": "enabled", "budget_tokens": 16385}, "high")):
+            label = "option %s, thinking %s" % (option, (thinking or {}).get("type", "absent"))
+            body = gk_body(user_hi) if thinking is None else gk_body(user_hi, thinking=thinking)
+            route = gk_route(mod, reasoning_effort=option)
+            got = mod._rt_rs_effort(ge_clone(body), route)
+            if got != option:
+                problems.append("_rt_rs_effort(%s) = %r, expected the route option %r (the body alone gives %r)"
+                                % (label, got, option, other))
+            for profile in GK_PROFILES:
+                out, more = gk_translate(mod, body, route=route, profile=profile, label="%s (%s)" % (label, profile))
+                problems += more
+                if out is not None and out.get("reasoning") != {"effort": option, "summary": "auto"}:
+                    problems.append("%s (%s): reasoning %r, expected %r"
+                                    % (label, profile, out.get("reasoning"), {"effort": option, "summary": "auto"}))
+            shown.append("%s -> %r" % (label, got))
+        return problems, ["option      : " + s for s in shown]
+
+    def k16():
+        problems, shown = [], []
+        enc_a, enc_b = GK_ENC + "A", GK_ENC + "B"
+        # The thinking block sits AFTER the text in the first turn: it still comes first.
+        history = [{"role": "user", "content": "tf q"},
+                   {"role": "assistant", "content": [{"type": "text", "text": "tf a"},
+                                                     gk_thinking(gk_sig(enc_a), "tf think one"),
+                                                     gk_tool_use("toolu_k16")]},
+                   {"role": "user", "content": [gk_tool_result("toolu_k16", "tf r")]},
+                   {"role": "assistant", "content": [gk_thinking(gk_sig(enc_b), "tf think two"),
+                                                     {"type": "text", "text": "tf done"}]},
+                   {"role": "user", "content": "tf next"}]
+        want_kinds = [("message", "user"), ("reasoning", None), ("message", "assistant"), ("function_call", None),
+                      ("function_call_output", None), ("reasoning", None), ("message", "assistant"),
+                      ("message", "user")]
+        for profile in GK_PROFILES:
+            label = "thinking (%s)" % profile
+            out, more = gk_translate(mod, gk_body(history), profile=profile, label=label, want_dropped=0)
+            problems += more
+            if out is None:
+                continue
+            items = out["input"]
+            if gk_kinds(items) != want_kinds:
+                problems.append("%s: items %r, expected %r (each turn's reasoning item first)"
+                                % (label, gk_kinds(items), want_kinds))
+            got = gk_reasoning_items(items)
+            if got != [gk_reasoning(enc_a), gk_reasoning(enc_b)]:
+                problems.append("%s: reasoning items %r, expected exactly %r"
+                                % (label, got, [gk_reasoning(enc_a), gk_reasoning(enc_b)]))
+            if "tf think" in json.dumps(out):
+                problems.append("%s: the thinking text was replayed (the summary is never sent back)" % label)
+            problems += gk_pairing(items, label)
+            shown.append("%s -> %s" % (label, [k for k, _r in gk_kinds(items)]))
+        got = mod._rt_rs_unsign(GK_BACKEND, gk_sig(enc_a))
+        if got != enc_a:
+            problems.append("_rt_rs_unsign(backend, %r...) = %r, expected the encrypted_content"
+                            % (gk_sig(enc_a)[:24], got))
+        if not hasattr(mod, "_rt_rs_signature"):
+            problems.append("the module defines no _rt_rs_signature (the unsign pair)")
+        else:
+            minted = mod._rt_rs_signature(GK_BACKEND, enc_a)
+            if minted != gk_sig(enc_a):
+                problems.append("_rt_rs_signature(backend, enc) = %r, expected %r" % (minted, gk_sig(enc_a)))
+            elif mod._rt_rs_unsign(GK_BACKEND, minted) != enc_a:
+                problems.append("_rt_rs_unsign does not invert _rt_rs_signature")
+        return problems, ["placement   : " + s for s in shown]
+
+    def k17():
+        problems, shown = [], []
+        enc_a, enc_b = GK_ENC + "C", GK_ENC + "D"
+        for label, blocks, want in (
+                ("redacted_thinking", [gk_redacted(gk_sig(enc_a)), {"type": "text", "text": "tf a"}],
+                 [gk_reasoning(enc_a)]),
+                ("thinking + redacted, in block order",
+                 [{"type": "text", "text": "tf a"}, gk_thinking(gk_sig(enc_a)), gk_redacted(gk_sig(enc_b))],
+                 [gk_reasoning(enc_a), gk_reasoning(enc_b)])):
+            history = [{"role": "user", "content": "tf q"}, {"role": "assistant", "content": blocks},
+                       {"role": "user", "content": "tf next"}]
+            out, more = gk_translate(mod, gk_body(history), label=label, want_dropped=0)
+            problems += more
+            if out is None:
+                continue
+            want_kinds = [("message", "user")] + [("reasoning", None)] * len(want) + [("message", "assistant"),
+                                                                                      ("message", "user")]
+            if gk_kinds(out["input"]) != want_kinds:
+                problems.append("%s: items %r, expected %r" % (label, gk_kinds(out["input"]), want_kinds))
+            if gk_reasoning_items(out["input"]) != want:
+                problems.append("%s: reasoning items %r, expected exactly %r"
+                                % (label, gk_reasoning_items(out["input"]), want))
+            shown.append("%s -> %s" % (label, [k for k, _r in gk_kinds(out["input"])]))
+        got = mod._rt_rs_unsign(GK_BACKEND, gk_sig(enc_a))
+        if got != enc_a:
+            problems.append("_rt_rs_unsign(backend, a redacted_thinking data) = %r, expected the encrypted_content"
+                            % (got,))
+        return problems, ["redacted    : " + s for s in shown]
+
+    def k18():
+        problems, shown = [], []
+        oversize = gk_sig("A" * (GK_SIG_LIMIT + 1))
+        bad = (("a foreign Anthropic signature", GK_FOREIGN_SIG),
+               ("garbled: bad charset", gk_sig("tf not*base64!")),
+               ("garbled: no backend part", GK_SIG_PREFIX + GK_ENC),
+               ("garbled: empty content", gk_sig("")),
+               ("another backend's name", gk_sig(GK_ENC, GK_OTHER_BACKEND)),
+               ("oversize (encrypted_content 1 MiB + 1)", oversize))
+        plain = [gk_msg("user", "input_text", "tf q"), gk_msg("assistant", "output_text", "tf a"),
+                 gk_msg("user", "input_text", "tf next")]
+        for label, value in bad:
+            for block_label, block in (("thinking", gk_thinking(value)), ("redacted_thinking", gk_redacted(value))):
+                history = [{"role": "user", "content": "tf q"},
+                           {"role": "assistant", "content": [block, {"type": "text", "text": "tf a"}]},
+                           {"role": "user", "content": "tf next"}]
+                case = "%s as %s" % (label, block_label)
+                out, more = gk_translate(mod, gk_body(history), label=case, want_dropped=1)
+                problems += more
+                if out is not None and out["input"] != plain:
+                    problems.append("%s: input %r, expected the turn without a reasoning item" % (case, gk_kinds(out["input"])))
+            got = mod._rt_rs_unsign(GK_BACKEND, value)
+            if got is not None:
+                problems.append("_rt_rs_unsign(backend, %s) = %r..., expected None" % (label, str(got)[:24]))
+            shown.append("%s -> unsign %s" % (label, "None" if got is None else "a value"))
+        # All of them in one turn, with one valid signature: one item, every bad one counted.
+        blocks = [gk_thinking(v) for _l, v in bad] + [gk_thinking(gk_sig(GK_ENC)), {"type": "text", "text": "tf a"}]
+        history = [{"role": "user", "content": "tf q"}, {"role": "assistant", "content": blocks},
+                   {"role": "user", "content": "tf next"}]
+        out, more = gk_translate(mod, gk_body(history), label="mixed turn", want_dropped=len(bad))
+        problems += more
+        if out is not None and gk_reasoning_items(out["input"]) != [gk_reasoning(GK_ENC)]:
+            problems.append("mixed turn: reasoning items %r, expected only the valid one"
+                            % ([str(i)[:60] for i in gk_reasoning_items(out["input"])],))
+        return problems, ["dropped     : " + s for s in shown]
+
+    def k19():
+        problems, shown = [], []
+        encs = [GK_ENC + "%03d" % n for n in range(GK_REASONING_CAP + 1)]
+        first, second = encs[:129], encs[129:]
+        history = [{"role": "user", "content": "tf q"},
+                   {"role": "assistant", "content": [gk_thinking(gk_sig(e)) for e in first]
+                    + [{"type": "text", "text": "tf a"}]},
+                   {"role": "user", "content": "tf q2"},
+                   {"role": "assistant", "content": [gk_redacted(gk_sig(e)) for e in second]
+                    + [{"type": "text", "text": "tf b"}]},
+                   {"role": "user", "content": "tf q3"}]
+        out, more = gk_translate(mod, gk_body(history), label="257 items", want_dropped=1)
+        problems += more
+        if out is not None:
+            got = gk_reasoning_items(out["input"])
+            want = [gk_reasoning(e) for e in encs[:GK_REASONING_CAP]]
+            if got != want:
+                problems.append("257 items: %d reasoning item(s) kept, expected the first %d in order"
+                                % (len(got), GK_REASONING_CAP))
+            texts = [i for i in out["input"] if isinstance(i, dict) and i.get("type") == "message"]
+            if gk_shape(texts) != gk_shape([gk_msg("user", "input_text", "tf q"),
+                                            gk_msg("assistant", "output_text", "tf a"),
+                                            gk_msg("user", "input_text", "tf q2"),
+                                            gk_msg("assistant", "output_text", "tf b"),
+                                            gk_msg("user", "input_text", "tf q3")]):
+                problems.append("257 items: the messages %r are not the five turns intact" % (gk_shape(texts),))
+            shown.append("257 -> %d kept" % len(got))
+        cap = history[:2] + [{"role": "user", "content": "tf q2"},
+                             {"role": "assistant", "content": [gk_redacted(gk_sig(e)) for e in second[:-1]]}]
+        out, more = gk_translate(mod, gk_body(cap), label="256 items", want_dropped=0)
+        problems += more
+        if out is not None:
+            kept = len(gk_reasoning_items(out["input"]))
+            if kept != GK_REASONING_CAP:
+                problems.append("256 items: %d kept, expected all %d" % (kept, GK_REASONING_CAP))
+            shown.append("256 -> %d kept" % kept)
+        return problems, ["cap         : " + s for s in shown]
+
+    def k20():
+        tools =[{"name": "Read", "description": "tf read", "input_schema": GK_SCHEMA_READ, "cache_control": GK_CACHE}]
+        history = [{"role": "user", "content": [{"type": "text", "text": "tf q", "cache_control": GK_CACHE}]},
+                   {"role": "assistant", "content": [{"type": "text", "text": "tf a", "cache_control": GK_CACHE},
+                                                     gk_tool_use("toolu_k20")]},
+                   {"role": "user", "content": [dict(gk_tool_result("toolu_k20", [
+                       {"type": "text", "text": "tf r", "cache_control": GK_CACHE}]), cache_control=GK_CACHE)]}]
+        body = gk_body(history, tools=tools, temperature=0.2, top_k=5, stop_sequences=["tf-stop"],
+                       system=[{"type": "text", "text": "tf sys", "cache_control": GK_CACHE}],
+                       metadata={"user_id": "tf-user-k20", "foo": "tf-foo"}, service_tier="auto",
+                       context_management={"edits": []}, future_field={"tf": 1})
+        frozen = json.dumps(body, sort_keys=True)
+        problems, shown = [], []
+        for profile in GK_PROFILES:
+            out, more = gk_translate(mod, body, profile=profile, label="stuffed (%s)" % profile)
+            problems += more
+            if json.dumps(body, sort_keys=True) != frozen:
+                problems.append("%s: the caller's body changed (deep compare)" % profile)
+            if out is None:
+                continue
+            found = sorted({"%s.%s" % (path, key) for path, key in gf_keys(out) if key in GK_NEVER})
+            if found:
+                problems.append("%s: unknown or Anthropic-only key(s) reached the body: %s" % (profile, found[:8]))
+            if "tf-foo" in json.dumps(out):
+                problems.append("%s: metadata.foo's value reached the body" % profile)
+            shown.append("%s -> keys %s" % (profile, sorted(out)))
+        return problems, ["stuffed     : " + s for s in shown]
+
+    def k21():
+        problems, shown = [], []
+        mid_list = {"role": "system", "content": [{"type": "text", "text": "tf mid two", "cache_control": GK_CACHE},
+                                                  {"type": "text", "text": "tf mid three"}]}
+        history = [{"role": "user", "content": "tf hi"}, {"role": "system", "content": "tf mid one"},
+                   {"role": "assistant", "content": "tf ok"}, {"role": "user", "content": "tf again"}, mid_list]
+        plain = [m for m in history if m["role"] != "system"]
+        want = [gk_msg("user", "input_text", "tf hi"), gk_msg("developer", "input_text", "tf mid one"),
+                gk_msg("assistant", "output_text", "tf ok"), gk_msg("user", "input_text", "tf again"),
+                gk_msg("developer", "input_text", "tf mid two\n\ntf mid three")]
+        tool_history = [{"role": "user", "content": "tf q"},
+                        {"role": "assistant", "content": [gk_tool_use("toolu_k21")]},
+                        {"role": "system", "content": "tf mid tool"},
+                        {"role": "user", "content": [gk_tool_result("toolu_k21", "tf r")]}]
+        for profile in GK_PROFILES:
+            label = "2 mid (%s)" % profile
+            out, more = gk_translate(mod, gk_body(history, system="tf sys"), profile=profile, label=label)
+            problems += more
+            base, more = gk_translate(mod, gk_body(plain, system="tf sys"), profile=profile, label=label + " base")
+            problems += more
+            if out is None or base is None:
+                continue
+            if out["input"] != want:
+                problems.append("%s: input %r, expected %r" % (label, gk_shape(out["input"]), gk_shape(want)))
+            if out.get("instructions") != "tf sys" or base.get("instructions") != "tf sys":
+                problems.append("%s: instructions %r, expected 'tf sys' unchanged"
+                                % (label, out.get("instructions")))
+            if out.get("prompt_cache_key") != base.get("prompt_cache_key"):
+                problems.append("%s: prompt_cache_key moved with the mid-conversation system entries" % label)
+            if "cache_control" in json.dumps(out):
+                problems.append("%s: cache_control survived the translation" % label)
+            tool_out, more = gk_translate(mod, gk_body(tool_history), profile=profile, label=label + " tool")
+            problems += more
+            if tool_out is not None:
+                kinds = [(i.get("type"), i.get("role")) for i in tool_out["input"]]
+                if kinds != [("message", "user"), ("function_call", None), ("message", "developer"),
+                             ("function_call_output", None)]:
+                    problems.append("%s tool: items %r, expected user, function_call, developer, "
+                                    "function_call_output" % (label, kinds))
+                elif tool_out["input"][3].get("output") != "tf r":
+                    problems.append("%s tool: the tool_result was not paired with its call" % label)
+            shown.append("%s -> %s" % (label, [i.get("role", i.get("type")) for i in out["input"]]))
+        return problems, ["developer   : " + s for s in shown]
+
+    def k22():
+        # Regression (live 2026-10-07, written after the fix): the codex Responses endpoint 400s
+        # "regex lookaround is not supported" on one such `pattern` in any tool schema.
+        schema = {"type": "object", "required": ["source", "pattern"], "properties": {
+            "source": {"type": "string", "description": "tf src", "pattern": GK_LOOKAROUND},
+            "pattern": {"type": "string", "pattern": "^[a-z]+$"},
+            "either": {"anyOf": [{"type": "string", "pattern": "(a)\\1"}, {"type": "integer"}]},
+            "list": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": "(?<=x)y"}}}}
+        want = {"type": "object", "required": ["source", "pattern"], "properties": {
+            "source": {"type": "string", "description": "tf src"},
+            "pattern": {"type": "string", "pattern": "^[a-z]+$"},
+            "either": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+            "list": {"type": "array", "items": {"type": "string", "minLength": 1}}}}
+        problems, shown = [], []
+        # The oracle must bite: on the unfiltered schema (an identity filter) it names all three.
+        if len(gk_refused_patterns(schema)) != 3:
+            problems.append("oracle: %r on the raw schema, expected 3 refused patterns"
+                            % gk_refused_patterns(schema))
+        tools = [{"name": "tf_soul", "description": "tf soul", "input_schema": schema},
+                 {"name": "Read", "input_schema": GK_SCHEMA_READ}]
+        body = gk_body(user_hi, tools=tools)
+        frozen = json.dumps(body, sort_keys=True)
+        for profile in GK_PROFILES:
+            label = "refused regex (%s)" % profile
+            out, more = gk_translate(mod, body, profile=profile, label=label)
+            problems += more
+            if json.dumps(body, sort_keys=True) != frozen:
+                problems.append("%s: the caller's body changed (deep compare)" % label)
+            if out is None:
+                continue
+            sent = {t.get("name"): t.get("parameters") for t in gk_flat_tools(out.get("tools"))}
+            params = sent.get("tf_soul")
+            left = gk_refused_patterns(params)
+            if left:
+                problems.append("%s: refused pattern(s) reached upstream at %s" % (label, left))
+            if params != want:
+                problems.append("%s: parameters %r, expected %r" % (label, params, want))
+            if sent.get("Read") != GK_SCHEMA_READ:
+                problems.append("%s: a pattern-free schema changed: %r" % (label, sent.get("Read")))
+            shown.append("%s -> %d refused left, pattern property %r"
+                         % (label, len(left), ((params or {}).get("properties") or {}).get("pattern")))
+        return problems, ["schema      : " + s for s in shown]
+
+    # K23/K24: the tools of one body -- a cache_control to drop, a description-less tool and
+    # K22's refused-regex schema -- so the namespace must hold exactly what the function shape
+    # builds, _rt_rs_schema filtering included.
+    ns_schema = {"type": "object", "properties": {"source": {"type": "string", "pattern": GK_LOOKAROUND},
+                                                  "word": {"type": "string", "pattern": "^[a-z]+$"}}}
+    ns_tools = [{"name": "Read", "description": "tf read", "input_schema": GK_SCHEMA_READ, "cache_control": GK_CACHE},
+                {"name": "Bash", "description": "tf bash", "input_schema": GK_SCHEMA_BASH},
+                {"name": "tf_soul", "input_schema": ns_schema}]
+    ns_want = [{"type": "function", "name": "Read", "description": "tf read", "parameters": GK_SCHEMA_READ},
+               {"type": "function", "name": "Bash", "description": "tf bash", "parameters": GK_SCHEMA_BASH},
+               {"type": "function", "name": "tf_soul",
+                "parameters": {"type": "object", "properties": {"source": {"type": "string"},
+                                                                "word": {"type": "string", "pattern": "^[a-z]+$"}}}}]
+
+    def k23():
+        problems, shown = [], []
+        flat, more = gk_translate(mod, gk_body(user_hi, tools=ns_tools), profile="openai-apikey",
+                                  label="function shape (openai-apikey)")
+        problems += more
+        if flat is not None and flat.get("tools") != ns_want:
+            problems.append("function shape: tools %r, expected %r" % (flat.get("tools"), ns_want))
+        out, more = gk_translate(mod, gk_body(user_hi, tools=ns_tools), profile="openai-oauth",
+                                 label="namespace shape (openai-oauth)")
+        problems += more
+        if out is not None:
+            tools = out.get("tools")
+            if not (isinstance(tools, list) and len(tools) == 1 and isinstance(tools[0], dict)):
+                problems.append("openai-oauth: tools %r, expected exactly ONE namespace tool"
+                                % (json.dumps(tools)[:240],))
+            else:
+                ns = tools[0]
+                if ns.get("type") != "namespace" or ns.get("name") != GK_NAMESPACE:
+                    problems.append("openai-oauth: the tool is type %r name %r, expected type 'namespace' name %r"
+                                    % (ns.get("type"), ns.get("name"), GK_NAMESPACE))
+                if set(ns) != GK_NAMESPACE_KEYS:
+                    problems.append("openai-oauth: the namespace keys are %s, expected %s"
+                                    % (sorted(ns), sorted(GK_NAMESPACE_KEYS)))
+                if not (isinstance(ns.get("description"), str) and ns.get("description").strip()):
+                    problems.append("openai-oauth: the namespace description %r is not a non-empty string"
+                                    % (ns.get("description"),))
+                if ns.get("tools") != ns_want:
+                    problems.append("openai-oauth: the namespace's tools %r, expected the function entries %r"
+                                    % (json.dumps(ns.get("tools"))[:240], json.dumps(ns_want)[:240]))
+                if flat is not None and ns.get("tools") != flat.get("tools"):
+                    problems.append("openai-oauth: the namespace's tools differ from what the function shape "
+                                    "builds for the same body")
+                if gk_refused_patterns(ns.get("tools")):
+                    problems.append("openai-oauth: refused pattern(s) reached upstream at %s"
+                                    % gk_refused_patterns(ns.get("tools")))
+                shown.append("openai-oauth -> namespace %r holding %s"
+                             % (ns.get("name"), [t.get("name") for t in gk_flat_tools(tools)]))
+        # No tools (absent or []) is no tools key on the namespace row too: an empty namespace is never sent.
+        for label, extra in (("no tools", {}), ("tools []", {"tools": []})):
+            bare, more = gk_translate(mod, gk_body(user_hi, **extra), profile="openai-oauth",
+                                      label="%s (openai-oauth)" % label)
+            problems += more
+            if bare is not None and "tools" in bare:
+                problems.append("%s (openai-oauth): tools %r sent, expected the key omitted"
+                                % (label, bare.get("tools")))
+        return problems, ["namespace   : " + s for s in shown]
+
+    def k24():
+        problems, shown = [], []
+        # tool_choice in the namespace form.  How a tool INSIDE a namespace is targeted is not
+        # documented in the plan or the SIWC notes: the plain function-name form is pinned and
+        # is a live unknown for checkpoint E.
+        for choice, want in (({"type": "auto"}, "auto"), ({"type": "any"}, "required"), ({"type": "none"}, "none"),
+                             ({"type": "tool", "name": "Bash"}, {"type": "function", "name": "Bash"})):
+            label = "tool_choice %s (openai-oauth)" % choice["type"]
+            out, more = gk_translate(mod, gk_body(user_hi, tools=ns_tools, tool_choice=choice),
+                                     profile="openai-oauth", label=label)
+            problems += more
+            if out is None:
+                continue
+            if out.get("tool_choice") != want:
+                problems.append("%s: tool_choice %r, expected %r" % (label, out.get("tool_choice"), want))
+            if [t.get("type") for t in out.get("tools") or [] if isinstance(t, dict)] != ["namespace"]:
+                problems.append("%s: tools are not the one namespace tool: %r"
+                                % (label, [t.get("type") for t in out.get("tools") or [] if isinstance(t, dict)]))
+            shown.append("%s -> %r" % (choice["type"], out.get("tool_choice")))
+        # The function-shape rows are unchanged: the flat list, no namespace anywhere.
+        for profile in GK_FLAT_PROFILES:
+            label = "flat (%s)" % profile
+            out, more = gk_translate(mod, gk_body(user_hi, tools=ns_tools, tool_choice={"type": "tool", "name": "Bash"}),
+                                     profile=profile, label=label)
+            problems += more
+            if out is None:
+                continue
+            if out.get("tools") != ns_want:
+                problems.append("%s: tools %r, expected the function entries %r"
+                                % (label, json.dumps(out.get("tools"))[:240], json.dumps(ns_want)[:240]))
+            if '"namespace"' in json.dumps(out):
+                problems.append("%s: a namespace reached a function-shape body" % label)
+            if out.get("tool_choice") != {"type": "function", "name": "Bash"}:
+                problems.append("%s: tool_choice %r, expected {'type': 'function', 'name': 'Bash'}"
+                                % (label, out.get("tool_choice")))
+            shown.append("%s -> %d function tool(s)" % (label, len(out.get("tools") or [])))
+        return problems, ["choice      : " + s for s in shown]
+
+    def k25():
+        # Live finding 2026-10-07: the route override is injected when the client sent none,
+        # and a name in InboundRequest.sampling_drop (learned unsupported) is never sent --
+        # not even as a route override; the other sampling key is kept.
+        problems, shown = [], []
+        absent = gk_body(user_hi, max_tokens=999)
+        out, more = gk_translate(mod, absent, route=gk_route(mod, temperature=0.4, top_p=0.6),
+                                 profile="openai-apikey", label="override, client none")
+        problems += more
+        if out is not None:
+            got = (out.get("temperature"), out.get("top_p"))
+            if got != (0.4, 0.6):
+                problems.append("override, client none: (temperature, top_p) = %r, expected (0.4, 0.6) injected"
+                                % (got,))
+            shown.append("override, client none -> %r" % (got,))
+        if "sampling_drop" not in getattr(mod.InboundRequest, "_fields", ()):
+            return problems + ["InboundRequest has no sampling_drop field (the learned drop)"], shown
+        sent = gk_body(user_hi, max_tokens=999, temperature=1, top_p=0.9)
+        adapter = getattr(mod, GK_ADAPTER["openai"])()
+        for label, options, drop, want in (
+                ("learned temperature, override", {"temperature": 0.4}, {"temperature"}, (None, 0.9)),
+                ("learned temperature, client", {}, {"temperature"}, (None, 0.9)),
+                ("learned both", {"top_p": 0.6}, {"temperature", "top_p"}, (None, None)),
+                ("nothing learned", {"temperature": 0.4}, set(), (0.4, 0.9))):
+            inbound = gk_inbound(mod, ge_clone(sent), gk_route(mod, **options), "openai-apikey")
+            inbound = inbound._replace(sampling_drop=frozenset(drop))
+            _path, raw = adapter.upstream_request(inbound)
+            body = json.loads(raw.decode("utf-8"))
+            got = (body.get("temperature"), body.get("top_p"))
+            present = tuple(k for k in ("temperature", "top_p") if k in body)
+            if got != want or len(present) != sum(v is not None for v in want):
+                problems.append("%s: (temperature, top_p) = %r with key(s) %s, expected %r"
+                                % (label, got, present, want))
+            shown.append("%s -> %r" % (label, got))
+        return problems, ["sampling    : " + s for s in shown]
+
+    def needs(fn, *names):
+        """The case, failing once with the missing names before it runs (one red line, not one per call)."""
+        def case():
+            missing = gk_need(mod, names)
+            return (missing, []) if missing else fn()
+        return case
+
+    tr, idmap, anth, ck = "_rt_rs_translate", "_rt_rs_call_id_map", "_rt_rs_anthropic_id", "_rt_rs_cache_key"
+    eff, unsign = "_rt_rs_effort", "_rt_rs_unsign"      # Plan Step 14
+    fns = (needs(k1, tr), needs(k2, tr), needs(k3, tr), needs(k4, tr), needs(k5, tr), needs(k6, idmap, anth, tr),
+           needs(k7, idmap, anth, tr), needs(k8, tr), needs(k9, tr), needs(k10, tr), needs(k11, tr, ck),
+           needs(k12, tr), needs(k13, tr), needs(k14, tr, eff), needs(k15, tr, eff), needs(k16, tr, unsign),
+           needs(k17, tr, unsign), needs(k18, tr, unsign), needs(k19, tr), needs(k20, tr), needs(k21, tr),
+           needs(k22, tr), needs(k23, tr), needs(k24, tr), needs(k25, tr))
+    try:
+        for cid, fn in zip(GK_CASES, fns):
+            try:
+                results[cid] = fn()
+            except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                results[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+    except Exception as exc:  # noqa: BLE001
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    else:
+        setup = "case did not run"
+    for cid, kid in zip(GK_CASES, GK_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GK, cid, problems, detail=["case        : " + kid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
+# Group L: config write-back
+# ---------------------------------------------------------------------------
+
+GL = "L. config write-back"
+
+GL_CASES = (
+    "rewrite keeps outside + order",     # L1
+    "result 0600, own, regular",         # L2
+    "symlinked config refused",          # L3
+    "0644 config refused",               # L4
+    "hash mismatch merges, INFO",        # L5
+    "read_oauth: disk, no symlink",      # L6
+    "backend removed: conflict",         # L7
+    "kind changed: conflict",            # L8
+    "duplicate key: conflict",           # L9
+    "ENOSPC: original intact",           # L10
+    "fsync file then directory",         # L11
+    "O_EXCL collision: fresh name",      # L12
+    "change before rename: retry",       # L13
+    "access/id_token dropped",           # L14
+    "lone surrogate: ConfigError",       # L15
+    "unsafe dir: no lock, refused",      # L16
+    "cross-process flock",               # L17
+    "stale-temp sweep: own only",        # L18
+    "startup sweep conditional",         # L19
+    "dir swapped after the check",       # L20
+)
+
+# KD-10 step 0: the support guard of _rt_config_dir_check, as six (function,
+# os set) memberships.  os.replace is not in os.supports_dir_fd (measured on
+# 3.9.21 and 3.14), so the writer renames with os.rename(src_dir_fd=, dst_dir_fd=).
+GL_GUARD = (("open", "supports_dir_fd"), ("stat", "supports_dir_fd"), ("unlink", "supports_dir_fd"),
+            ("rename", "supports_dir_fd"), ("listdir", "supports_fd"), ("stat", "supports_follow_symlinks"))
+GL_GUARD_SKIP = "skipped: dir_fd guard failed (see L20)"
+
+GL_CODEX = "tf-codex-l"                      # the OAuth backend every L case rewrites
+GL_KIND = "codex"
+GL_CONFIG = "config.json"
+GL_REFRESH_OLD = "tf-l-refresh-old-SENTINEL-" + secrets.token_hex(16)   # the seed on disk
+GL_REFRESH_NEW = "tf-l-refresh-new-SENTINEL-" + secrets.token_hex(16)   # the rotated token written
+GL_ACCESS = "tf-l-access-SENTINEL-" + secrets.token_hex(16)             # L14: never persisted
+GL_ID_TOKEN = "tf-l-idtoken-SENTINEL-" + secrets.token_hex(16)          # L14: never persisted
+GL_SECRETS = (GL_REFRESH_OLD, GL_REFRESH_NEW, GL_ACCESS, GL_ID_TOKEN) + SENTINELS
+GL_OAUTH_OLD = {"refresh_token": GL_REFRESH_OLD, "account_id": "acct_tf-l01", "expires_at": 0}
+GL_OAUTH_NEW = {"refresh_token": GL_REFRESH_NEW, "account_id": "acct_tf-l01", "expires_at": 1999999999}
+GL_OAUTH_PATH = ("backends", GL_CODEX, "oauth")
+GL_UNICODE = "Modèle ✓ 模型"     # L1: a non-ASCII display_name survives the rewrite
+GL_ADDED_ROUTE = "claude-tf-l-added"         # L5/L13: the route another writer adds on disk
+GL_PINNED_HEX = "a5a5a5a5a5a5a5a5"           # L12: the first temp name the seam hands out (pre-created)
+GL_FRESH_HEX = "5a5a5a5a5a5a5a5a"            # L12: the second one
+GL_WRITER = ("_rt_config_dir_check", "_rt_config_update_oauth")
+GL_LOCKING = ("_rt_config_lock", "_rt_config_unlock")
+GL_ABSENT = object()
+GL_LOCK = GL_CONFIG + ".lock"                # KD-20: the sidecar flock file, never deleted
+GL_OWN_TEMP = ".%s.0123456789abcdef.tmp" % GL_CONFIG   # an own-pattern stale temp (L16, L18, L19)
+GL_LOCK_WAIT_S = 0.3                         # L17: _RT_CONFIG_LOCK_WAIT_S while the helper holds the lock
+GL_LOCK_SLACK_S = 2.0                        # L17: the refusal must land within the patched wait + this
+GL_HELPER_READY_S = 10.0                     # L17: the helper must report the lock held within this
+GL_HELPER_EXIT_S = 10.0                      # L17: the helper must exit within this after stdin closes
+# L17: holds LOCK_EX on argv[1] until its stdin closes.
+GL_HELPER = ("import fcntl, os, sys\n"
+             "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+             "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+             "sys.stdout.write('locked\\n')\n"
+             "sys.stdout.flush()\n"
+             "sys.stdin.read()\n")
+
+
+def gl_config():
+    """A valid config (a fresh copy per call): an OAuth codex backend, a llamacpp
+    backend whose route carries nested float options and a non-ASCII display_name,
+    a passthrough backend, and the default route."""
+    return {
+        "auth_token": TF_ROUTER_TOKEN,
+        "backends": {
+            "infernox": {"kind": "passthrough", "base_url": "https://infernox.lan:8443",
+                         "allow_private": True, "api_key": TF_KEY_PASS, "auth_header": "x-api-key"},
+            GL_CODEX: {"kind": GL_KIND, "oauth": dict(GL_OAUTH_OLD)},
+            "llama": {"kind": "llamacpp", "base_url": "https://llama.lan:8443", "allow_private": True},
+        },
+        "routes": {
+            "claude-tf-l-codex": {"backend": GL_CODEX, "model": "gpt-tf-codex"},
+            "claude-tf-l-llama": {"backend": "llama", "model": "qwen3-coder", "display_name": GL_UNICODE,
+                                  "options": {"temperature": 0.1, "top_p": 0.001}},
+            "claude-tf-l-pass": {"backend": "infernox", "model": "local-model"},
+        },
+        "default": {"backend": "infernox", "model": "local-model"},
+    }
+
+
+def gl_text(cfg, ensure_ascii=False):
+    """*cfg* as config text; top_p is spelled `1e-3` on disk, so L1 sees an exponent survive."""
+    return json.dumps(cfg, indent=2, ensure_ascii=ensure_ascii).replace('"top_p": 0.001', '"top_p": 1e-3') + "\n"
+
+
+def gl_setup(fixture_root, label, text=None, mode=0o600):
+    """(sandbox, path): a fresh 0700 sandbox holding config.json at *mode*."""
+    sandbox = new_sandbox(fixture_root, label)
+    path = write_file(os.path.join(sandbox, GL_CONFIG), gl_text(gl_config()) if text is None else text, mode)
+    return sandbox, path
+
+
+def gl_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def gl_digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def gl_temps(sandbox, keep=()):
+    """Every `*.tmp` entry of *sandbox* not in *keep* (a writer must leave none)."""
+    return sorted(n for n in os.listdir(sandbox) if n.endswith(".tmp") and n not in keep)
+
+
+def gl_redact(text):
+    for value in GL_SECRETS:
+        text = text.replace(value, "<sentinel>")
+    return text
+
+
+def gl_update(mod, path, oauth, expected, backend=GL_CODEX, kind=GL_KIND):
+    """KD-10 steps 0 and 1-8 as a caller runs them: the directory check first, then the
+    writer relative to the checked descriptor, which is closed in finally."""
+    dfd = mod._rt_config_dir_check(path)
+    try:
+        return mod._rt_config_update_oauth(path, dfd, backend, kind, dict(oauth), expected)
+    finally:
+        os.close(dfd)
+
+
+def gl_refused(mod, label, fn, needles=(), conflict=None):
+    """Problems unless fn() raises mod.ConfigError naming every needle and no secret.
+    conflict True: it must be a ConfigConflict; False: it must not be one."""
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 -- any other type is the finding
+        msg = str(exc)
+        if not isinstance(exc, getattr(mod, "ConfigError", ())):
+            return ["%s: raised %s instead of ConfigError: %s" % (label, type(exc).__name__, gl_redact(msg)[:200])]
+        problems = []
+        is_conflict = isinstance(exc, getattr(mod, "ConfigConflict", ()))
+        if conflict is True and not is_conflict:
+            problems.append("%s: ConfigError %r, expected a ConfigConflict" % (label, gl_redact(msg)[:200]))
+        if conflict is False and is_conflict:
+            problems.append("%s: ConfigConflict %r, expected a plain ConfigError" % (label, gl_redact(msg)[:200]))
+        missing = [n for n in needles if n not in msg]
+        if missing:
+            problems.append("%s: ConfigError %r does not name %r" % (label, gl_redact(msg)[:200], missing))
+        if any(value in msg for value in GL_SECRETS):
+            problems.append("%s: the refusal echoes a value it must never show" % label)
+        return problems
+    return ["%s: accepted, expected a ConfigError" % label]
+
+
+def gl_untouched(label, sandbox, path, before, keep=()):
+    """Problems unless *path* still holds *before* byte for byte and *sandbox* holds no temp."""
+    problems = []
+    if gl_bytes(path) != before:
+        problems.append("%s: the config is not byte-identical" % label)
+    stray = gl_temps(sandbox, keep)
+    if stray:
+        problems.append("%s: %d temp file(s) left: %s" % (label, len(stray), stray))
+    return problems
+
+
+def gl_disk_oauth(label, data):
+    """(parsed, problems): the rewritten text parsed, and whether its oauth is GL_OAUTH_NEW exactly."""
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except ValueError as exc:
+        return None, ["%s: the rewritten file does not parse: %s" % (label, type(exc).__name__)]
+    got = parsed.get("backends", {}).get(GL_CODEX, {}).get("oauth") if isinstance(parsed, dict) else None
+    if got != GL_OAUTH_NEW:
+        shown = sorted(got) if isinstance(got, dict) else type(got).__name__
+        return parsed, ["%s: backends.%s.oauth on disk is not the persisted keys (keys %s)"
+                        % (label, GL_CODEX, shown)]
+    return parsed, []
+
+
+def gl_outside(obj):
+    """A deep copy of *obj* without backends.<GL_CODEX>.oauth (the one value the writer may change)."""
+    out = json.loads(json.dumps(obj))
+    try:
+        del out["backends"][GL_CODEX]["oauth"]
+    except (KeyError, TypeError):
+        pass
+    return out
+
+
+def gl_key_order(obj, path=()):
+    """Every object key of *obj* as a path, in document order; the inside of the
+    rewritten oauth object is not walked (its own key order is the writer's)."""
+    out = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            here = path + (key,)
+            out.append(here)
+            if here != GL_OAUTH_PATH:
+                out += gl_key_order(value, here)
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj):
+            out += gl_key_order(value, path + (index,))
+    return out
+
+
+def gl_swap(mod, name, value):
+    """Set mod.<name> = value; the previous value (or GL_ABSENT) for gl_restore."""
+    old = getattr(mod, name, GL_ABSENT)
+    setattr(mod, name, value)
+    return old
+
+
+def gl_restore(mod, name, old):
+    if old is GL_ABSENT:
+        if hasattr(mod, name):
+            delattr(mod, name)
+    else:
+        setattr(mod, name, old)
+
+
+def gl_guard_problems():
+    """One named problem per missing membership of the _rt_config_dir_check guard (R3-M2, R4-L2)."""
+    return ["dir_fd guard: os.%s not in os.%s on %s" % (name, members, sys.version.split()[0])
+            for name, members in GL_GUARD if getattr(os, name) not in getattr(os, members)]
+
+
+def gl_lock_refused(mod, label, path, needles=()):
+    """Problems unless _rt_config_lock(path, dfd) raises ConfigError (dfd from the directory
+    check); a descriptor it wrongly returns is released."""
+    dfd = mod._rt_config_dir_check(path)
+    got = []
+    try:
+        return gl_refused(mod, label, lambda: got.append(mod._rt_config_lock(path, dfd)), needles=needles)
+    finally:
+        for fd in got:
+            mod._rt_config_unlock(fd)
+        os.close(dfd)
+
+
+def gl_plant(sandbox, name, mode=0o600, text="tf-l-planted\n"):
+    """A planted entry of *sandbox*; its path."""
+    return write_file(os.path.join(sandbox, name), text, mode)
+
+
+class GlRecords(logging.Handler):
+    """Collects every record of the router's logger while installed (L5, L16)."""
+
+    def __init__(self, mod):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+        self.logger = mod.log
+        self.saved = (self.logger.level, self.logger.propagate)
+        self.logger.addHandler(self)
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False
+
+    def emit(self, record):
+        self.records.append(record)
+
+    def close(self):
+        self.logger.removeHandler(self)
+        self.logger.setLevel(self.saved[0])
+        self.logger.propagate = self.saved[1]
+        super().close()
+
+    def messages(self, level):
+        return [r.getMessage() for r in self.records if r.levelno == level]
+
+
+def group_l(suite, fixture_root):
+    """L. config write-back (Plan Step 7, KD-10, KD-20), in process: each case over
+    a 0600 config.json in a fresh 0700 sandbox under the run's fixture root, never
+    the operator's config.  Every case runs `dfd = _rt_config_dir_check(path)`
+    first and passes that descriptor on, closing it in finally.  A missing writer
+    symbol is one red problem per case (gj_missing), never a crash.
+
+    Head-of-group guard (R4-L2), not a counted case: the six dir_fd memberships
+    are checked before L1.  On a miss L20 is the one named FAIL, L1-L19 are
+    recorded INFO "skipped: dir_fd guard failed (see L20)" (as detail), and nothing else runs,
+    so a host lacking a primitive yields one failure and 20 records, not a cascade."""
+    guard = gl_guard_problems()
+    if guard:
+        # The skip line is detail, not a problem: _harness counts any record that
+        # carries a problem as a failure whatever its status (Result.ok), and the
+        # guard must yield exactly one failure.
+        for cid in GL_CASES[:-1]:
+            suite.record(GL, cid, [], status=H.INFO, detail=[GL_GUARD_SKIP])
+        suite.record(GL, GL_CASES[-1], guard, detail=["guard       : %s" % sys.version.split()[0]])
+        return
+    try:
+        mod = H.load_module_from_path("ph_llm_router_l", SERVER)
+    except Exception as exc:  # noqa: BLE001 -- an import failure fails the group
+        for cid in GL_CASES:
+            suite.record(GL, cid, ["cannot import %s: %s: %s"
+                                   % (os.path.relpath(SERVER, H.REPO_ROOT), type(exc).__name__, exc)])
+        return
+
+    def l1():
+        sandbox, path = gl_setup(fixture_root, "l1")
+        before_bytes = gl_bytes(path)
+        before = json.loads(before_bytes.decode("utf-8"))
+        miss = gj_missing(mod, GL_WRITER)
+        if miss:
+            return miss, []
+        digest = gl_update(mod, path, GL_OAUTH_NEW, gl_digest(before_bytes))
+        after_bytes = gl_bytes(path)
+        after, problems = gl_disk_oauth("L1", after_bytes)
+        if after is not None:
+            if gl_outside(after) != gl_outside(before):
+                problems.append("a value outside backends.%s.oauth changed" % GL_CODEX)
+            if gl_key_order(after) != gl_key_order(before):
+                problems.append("the key order outside the oauth object changed")
+        if digest != gl_digest(after_bytes):
+            problems.append("the returned digest is not sha256 of the file written")
+        problems += gl_untouched("L1", sandbox, path, after_bytes)
+        return problems, ["config      : unicode display_name, 0.1 and 1e-3, nested options, "
+                          "three backends, the default route",
+                          "checked     : outside-equal, key order, oauth == persisted keys, digest, no temp"]
+
+    def l2():
+        sandbox, path = gl_setup(fixture_root, "l2")
+        miss = gj_missing(mod, GL_WRITER)
+        if miss:
+            return miss, []
+        gl_update(mod, path, GL_OAUTH_NEW, gl_digest(gl_bytes(path)))
+        st = os.lstat(path)
+        problems = []
+        if not stat.S_ISREG(st.st_mode):
+            problems.append("the result is not a regular file")
+        if st.st_uid != os.geteuid():
+            problems.append("the result is owned by uid %d, not euid %d" % (st.st_uid, os.geteuid()))
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            problems.append("the result is mode %04o, expected 0600" % stat.S_IMODE(st.st_mode))
+        problems += gl_disk_oauth("L2", gl_bytes(path))[1]
+        return problems, ["result      : %04o uid %d" % (stat.S_IMODE(st.st_mode), st.st_uid)]
+
+    def l3():
+        sandbox = new_sandbox(fixture_root, "l3")
+        target = write_file(os.path.join(sandbox, "target.json"), gl_text(gl_config()))
+        path = os.path.join(sandbox, GL_CONFIG)
+        os.symlink("target.json", path)
+        WRITES.append(path)
+        before = gl_bytes(target)
+        miss = gj_missing(mod, GL_WRITER)
+        if miss:
+            return miss, []
+        problems = gl_refused(mod, "symlinked config.json",
+                              lambda: gl_update(mod, path, GL_OAUTH_NEW, gl_digest(before)))
+        if not os.path.islink(path):
+            problems.append("config.json is no longer a symlink")
+        problems += gl_untouched("L3", sandbox, target, before)
+        return problems, ["config      : config.json -> target.json (0600)"]
+
+    def l4():
+        sandbox, path = gl_setup(fixture_root, "l4", mode=0o644)
+        before = gl_bytes(path)
+        miss = gj_missing(mod, GL_WRITER)
+        if miss:
+            return miss, []
+        problems = gl_refused(mod, "0644 config", lambda: gl_update(mod, path, GL_OAUTH_NEW, gl_digest(before)))
+        mode = stat.S_IMODE(os.lstat(path).st_mode)
+        if mode != 0o644:
+            problems.append("the config mode moved to %04o" % mode)
+        problems += gl_untouched("L4", sandbox, path, before)
+        return problems, ["config      : 0644"]
+
+    def l5():
+        sandbox, path = gl_setup(fixture_root, "l5")
+        load_digest = gl_digest(gl_bytes(path))
+        other = gl_config()
+        other["routes"][GL_ADDED_ROUTE] = {"backend": "infernox", "model": "tf-l5-added"}
+        write_file(path, gl_text(other))           # another writer, after our load
+        miss = gj_missing(mod, GL_WRITER)
+        if miss:
+            return miss, []
+        rec = GlRecords(mod)
+        try:
+            gl_update(mod, path, GL_OAUTH_NEW, load_digest)
+        finally:
+            rec.close()
+        after_bytes = gl_bytes(path)
+        after, problems = gl_disk_oauth("L5", after_bytes)
+        if after is not None and gl_outside(after) != gl_outside(json.loads(gl_text(other))):
+            problems.append("the merge did not keep the other writer's change (route %s)" % GL_ADDED_ROUTE)
+        infos = rec.messages(logging.INFO)
+        if not any("config changed since load" in m for m in infos):
+            problems.append("no INFO 'config changed since load' (INFO lines: %d)" % len(infos))
+        if any(v in m for m in (r.getMessage() for r in rec.records) for v in GL_SECRETS):
+            problems.append("a log line carries a token")
+        problems += gl_untouched("L5", sandbox, path, after_bytes)
+        return problems, ["disk        : a route added after the load digest was taken",
+                          "log         : %d INFO line(s)" % len(infos)]
+
+    def l6():
+        sandbox, path = gl_setup(fixture_root, "l6")
+        miss = gj_missing(mod, ("_rt_config_read_oauth",))
+        if miss:
+            return miss, []
+        problems = []
+        got = mod._rt_config_read_oauth(path, GL_CODEX)
+        if got != GL_OAUTH_OLD:
+            problems.append("returned %s, not the disk oauth object"
+                            % (sorted(got) if isinstance(got, dict) else type(got).__name__))
+        link = os.path.join(sandbox, "link.json")
+        os.symlink(GL_CONFIG, link)
+        WRITES.append(link)
+        try:
+            via_link = mod._rt_config_read_oauth(link, GL_CODEX)
+        except Exception as exc:  # noqa: BLE001
+            if not isinstance(exc, mod.ConfigError):
+                problems.append("a symlink raised %s instead of ConfigError" % type(exc).__name__)
+        else:
+            if via_link is not None:
+                problems.append("a symlinked config was read (returned %s)" % type(via_link).__name__)
+        return problems, ["checked     : the seed object; link.json -> config.json refused"]
+
+    def conflict_case(label, text):
+        """L7-L9: the disk holds *text* (changed shape since the load digest); ConfigConflict, nothing written."""
+        def case():
+            sandbox, path = gl_setup(fixture_root, label.lower())
+            load_digest = gl_digest(gl_bytes(path))
+            write_file(path, text)
+            before = gl_bytes(path)
+            miss = gj_missing(mod, GL_WRITER)
+            if miss:
+                return miss, []
+            problems = gl_refused(mod, label, lambda: gl_update(mod, path, GL_OAUTH_NEW, load_digest),
+                                  conflict=True)
+            problems += gl_untouched(label, sandbox, path, before)
+            return problems, ["checked     : ConfigConflict, byte-identical, no temp"]
+        return case
+
+    removed = gl_config()
+    del removed["backends"][GL_CODEX]
+    del removed["routes"]["claude-tf-l-codex"]
+    rekinded = gl_config()
+    rekinded["backends"][GL_CODEX] = {"kind": "passthrough", "base_url": "https://codex.lan:8443",
+                                      "allow_private": True}
+    dup_text = gl_text(gl_config())
+    dup_from = '"kind": "%s",' % GL_KIND
+    dup_text = dup_text.replace(dup_from, dup_from + "\n      " + dup_from, 1)
+
+    def l9():
+        if dup_from not in dup_text or dup_text.count(dup_from) != 2:
+            return ["fixture: the duplicate kind key was not planted"], []
+        return conflict_case("L9", dup_text)()
+
+    def l10():
+        sandbox, path = gl_setup(fixture_root, "l10")
+        before = gl_bytes(path)
+        miss = gj_missing(mod, GL_WRITER + ("_rt_os_write",))
+        if miss:
+            return miss, []
+        calls = []
+
+        def enospc(fd, data):
+            calls.append(len(data))
+            raise OSError(errno.ENOSPC, "tf: no space left on device")
+
+        old = gl_swap(mod, "_rt_os_write", enospc)
+        try:
+            problems = gl_refused(mod, "ENOSPC", lambda: gl_update(mod, path, GL_OAUTH_NEW, gl_digest(before)),
+                                  conflict=False)
+        finally:
+            gl_restore(mod, "_rt_os_write", old)
+        if not calls:
+            problems.append("the _rt_os_write seam was never called")
+        problems += gl_untouched("L10", sandbox, path, before)
+        return problems, ["seam        : _rt_os_write raised ENOSPC %d time(s)" % len(calls)]
+
+    def l11():
+        sandbox, path = gl_setup(fixture_root, "l11")
+        miss = gj_missing(mod, GL_WRITER + ("_rt_fsync",))
+        if miss:
+            return miss, []
+        calls = []
+
+        def fsync(fd):
+            st = os.fstat(fd)
+            calls.append(("file" if stat.S_ISREG(st.st_mode) else "dir" if stat.S_ISDIR(st.st_mode)
+                          else "other", st.st_ino))
+            os.fsync(fd)
+
+        old = gl_swap(mod, "_rt_fsync", fsync)
+        try:
+            gl_update(mod, path, GL_OAUTH_NEW, gl_digest(gl_bytes(path)))
+        finally:
+            gl_restore(mod, "_rt_fsync", old)
+        want = [("file", os.lstat(path).st_ino), ("dir", os.stat(sandbox).st_ino)]
+        problems = [] if calls == want else ["fsync calls %s, expected [file (the new config inode), "
+                                              "dir (the checked directory)]" % [k for k, _i in calls]]
+        problems += gl_disk_oauth("L11", gl_bytes(path))[1]
+        return problems, ["fsync       : %s" % ", ".join(k for k, _i in calls)]
+
+    def l12():
+        sandbox, path = gl_setup(fixture_root, "l12")
+        planted_name = ".%s.%s.tmp" % (GL_CONFIG, GL_PINNED_HEX)
+        planted = write_file(os.path.join(sandbox, planted_name), "tf-l12-planted\n")
+        planted_before = gl_bytes(planted)
+        miss = gj_missing(mod, GL_WRITER)
+        if miss:
+            return miss, []
+        calls = []
+
+        def token_hex(nbytes=None):
+            calls.append(nbytes)
+            if len(calls) == 1:
+                return GL_PINNED_HEX
+            if len(calls) == 2:
+                return GL_FRESH_HEX
+            return secrets.token_hex(nbytes)
+
+        shim = types.SimpleNamespace(**{k: getattr(secrets, k) for k in dir(secrets) if not k.startswith("_")})
+        shim.token_hex = token_hex
+        old = gl_swap(mod, "secrets", shim)
+        try:
+            gl_update(mod, path, GL_OAUTH_NEW, gl_digest(gl_bytes(path)))
+        finally:
+            gl_restore(mod, "secrets", old)
+        problems = gl_disk_oauth("L12", gl_bytes(path))[1]
+        if len(calls) < 2:
+            problems.append("secrets.token_hex was called %d time(s): no fresh name after the collision"
+                            % len(calls))
+        if not os.path.isfile(planted) or gl_bytes(planted) != planted_before:
+            problems.append("the pre-created temp file was replaced or removed")
+        problems += gl_untouched("L12", sandbox, path, gl_bytes(path), keep=(planted_name,))
+        return problems, ["seam        : token_hex -> %s (planted), then %s" % (GL_PINNED_HEX, GL_FRESH_HEX),
+                          "calls       : %d" % len(calls)]
+
+    def l13():
+        sandbox, path = gl_setup(fixture_root, "l13")
+        miss = gj_missing(mod, GL_WRITER + ("_rt_fsync",))
+        if miss:
+            return miss, []
+        other = gl_config()
+        other["routes"][GL_ADDED_ROUTE] = {"backend": "infernox", "model": "tf-l13-added"}
+        fired = []
+
+        def fsync(fd):
+            if not fired and stat.S_ISREG(os.fstat(fd).st_mode):
+                fired.append(True)
+                write_file(path, gl_text(other))   # a non-cooperating writer, after the temp write
+            os.fsync(fd)
+
+        old = gl_swap(mod, "_rt_fsync", fsync)
+        try:
+            gl_update(mod, path, GL_OAUTH_NEW, gl_digest(gl_bytes(path)))
+        finally:
+            gl_restore(mod, "_rt_fsync", old)
+        after_bytes = gl_bytes(path)
+        after, problems = gl_disk_oauth("L13", after_bytes)
+        if not fired:
+            problems.append("the seam never fired (no fsync of a regular file)")
+        elif after is not None and gl_outside(after) != gl_outside(json.loads(gl_text(other))):
+            problems.append("the final file lost the concurrent change (route %s)" % GL_ADDED_ROUTE)
+        problems += gl_untouched("L13", sandbox, path, after_bytes)
+        return problems, ["seam        : the config rewritten between the temp write and the rename"]
+
+    def l14():
+        sandbox, path = gl_setup(fixture_root, "l14")
+        miss = gj_missing(mod, GL_WRITER)
+        if miss:
+            return miss, []
+        planted = dict(GL_OAUTH_NEW, access_token=GL_ACCESS, id_token=GL_ID_TOKEN)
+        gl_update(mod, path, planted, gl_digest(gl_bytes(path)))
+        after_bytes = gl_bytes(path)
+        problems = gl_disk_oauth("L14", after_bytes)[1]
+        for label, value in (("access_token", GL_ACCESS), ("id_token", GL_ID_TOKEN)):
+            if value.encode("ascii") in after_bytes:
+                problems.append("the planted %s reached the file" % label)
+        problems += gl_untouched("L14", sandbox, path, after_bytes)
+        return problems, ["planted     : access_token, id_token in the oauth argument"]
+
+    def l15():
+        cfg = gl_config()
+        cfg["routes"]["claude-tf-l-pass"]["display_name"] = "tf \ud800 l15"
+        text = gl_text(cfg, ensure_ascii=True)
+        if "\\ud800" not in text:
+            return ["fixture: the \\ud800 escape is not in the config text"], []
+        sandbox, path = gl_setup(fixture_root, "l15", text=text)
+        before = gl_bytes(path)
+        problems = []
+        try:
+            mod.load_config(path)
+        except Exception as exc:  # noqa: BLE001 -- the fixture must load (the escape is valid JSON)
+            problems.append("fixture: load_config refused it: %s: %s" % (type(exc).__name__, gl_redact(str(exc))[:200]))
+        miss = gj_missing(mod, GL_WRITER)
+        if miss:
+            return problems + miss, []
+        problems += gl_refused(mod, "lone surrogate", lambda: gl_update(mod, path, GL_OAUTH_NEW, gl_digest(before)),
+                               needles=("not valid Unicode",), conflict=False)
+        problems += gl_untouched("L15", sandbox, path, before)
+        return problems, ["config      : a route display_name holding the JSON escape \\ud800"]
+
+    def l16():
+        sandbox, path = gl_setup(fixture_root, "l16")
+        lock = os.path.join(sandbox, GL_LOCK)
+        before = gl_bytes(path)
+        miss = gj_missing(mod, GL_WRITER + GL_LOCKING + ("_rt_startup_sweep",))
+        if miss:
+            return miss, []
+        cfg = mod.load_config(path)                # holds the codex (oauth) backend
+        planted = gl_plant(sandbox, GL_OWN_TEMP)
+        problems = []
+        warnings = []
+        try:
+            for mode in (0o770, 0o702):
+                os.chmod(sandbox, mode)
+                problems += gl_refused(mod, "directory %04o" % mode,
+                                       lambda: os.close(mod._rt_config_dir_check(path)), needles=("directory",))
+                if os.path.lexists(lock):
+                    problems.append("directory %04o: %s was created (the check must run first)" % (mode, GL_LOCK))
+            os.chmod(sandbox, 0o770)
+            rec = GlRecords(mod)
+            try:
+                mod._rt_startup_sweep(path, cfg)
+            except Exception as exc:  # noqa: BLE001 -- a refusal is one WARNING, swallowed
+                problems.append("_rt_startup_sweep raised %s (a refusal is logged and swallowed)"
+                                % type(exc).__name__)
+            finally:
+                rec.close()
+            warnings = rec.messages(logging.WARNING)
+            if len(warnings) != 1:
+                problems.append("startup sweep over a 0770 directory: %d WARNING line(s), expected 1"
+                                % len(warnings))
+            if os.path.lexists(lock):
+                problems.append("startup sweep over a 0770 directory created %s" % GL_LOCK)
+            if not os.path.isfile(planted):
+                problems.append("startup sweep over a 0770 directory removed the planted temp")
+        finally:
+            os.chmod(sandbox, 0o700)
+        problems += gl_untouched("L16", sandbox, path, before, keep=(GL_OWN_TEMP,))
+
+        link_box, link_path = gl_setup(fixture_root, "l16-link")
+        target = gl_plant(link_box, "lock-target", text="")
+        os.symlink("lock-target", os.path.join(link_box, GL_LOCK))
+        WRITES.append(os.path.join(link_box, GL_LOCK))
+        problems += gl_lock_refused(mod, "symlinked lock", link_path)
+        if not os.path.islink(os.path.join(link_box, GL_LOCK)) or gl_bytes(target) != b"":
+            problems.append("symlinked lock: the link or its target was changed")
+
+        loose_box, loose_path = gl_setup(fixture_root, "l16-mode")
+        gl_plant(loose_box, GL_LOCK, mode=0o644, text="")
+        problems += gl_lock_refused(mod, "0644 lock", loose_path)
+        return problems, ["directory   : 0770 and 0702 refused before any lock file",
+                          "startup     : %d WARNING over 0770, planted temp kept" % len(warnings),
+                          "lock        : a symlink and a 0644 file refused"]
+
+    def l17():
+        sandbox, path = gl_setup(fixture_root, "l17")
+        lock = os.path.join(sandbox, GL_LOCK)
+        before = gl_bytes(path)
+        miss = gj_missing(mod, GL_WRITER + GL_LOCKING + ("_RT_CONFIG_LOCK_WAIT_S",))
+        if miss:
+            return miss, []
+        WRITES.append(lock)
+        helper = subprocess.Popen([sys.executable, "-B", "-c", GL_HELPER, lock], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        problems = []
+        waited = None
+        try:
+            ready = select.select([helper.stdout], [], [], GL_HELPER_READY_S)[0]
+            if not ready or helper.stdout.readline().strip() != b"locked":
+                return ["the helper never reported the lock held within %.0f s" % GL_HELPER_READY_S], []
+            old = gl_swap(mod, "_RT_CONFIG_LOCK_WAIT_S", GL_LOCK_WAIT_S)
+            try:
+                dfd = mod._rt_config_dir_check(path)
+            except BaseException:
+                gl_restore(mod, "_RT_CONFIG_LOCK_WAIT_S", old)
+                raise
+            try:
+                got = []
+                start = time.monotonic()
+                problems += gl_refused(mod, "lock held by the helper",
+                                       lambda: got.append(mod._rt_config_lock(path, dfd)),
+                                       needles=("another process holds the config lock",))
+                waited = time.monotonic() - start
+                for fd in got:
+                    mod._rt_config_unlock(fd)
+                if waited > GL_LOCK_WAIT_S + GL_LOCK_SLACK_S:
+                    problems.append("the refusal took %.2f s: the patched wait of %.1f s was not honoured"
+                                    % (waited, GL_LOCK_WAIT_S))
+                if gl_bytes(path) != before:
+                    problems.append("the config changed while the helper held the lock")
+                helper.stdin.close()
+                helper.wait(timeout=GL_HELPER_EXIT_S)
+                fd = mod._rt_config_lock(path, dfd)
+                try:
+                    mod._rt_config_update_oauth(path, dfd, GL_CODEX, GL_KIND, dict(GL_OAUTH_NEW), gl_digest(before))
+                finally:
+                    mod._rt_config_unlock(fd)
+            finally:
+                os.close(dfd)
+                gl_restore(mod, "_RT_CONFIG_LOCK_WAIT_S", old)
+        finally:
+            if helper.poll() is None:
+                helper.kill()
+                helper.wait(timeout=GL_HELPER_EXIT_S)
+            for pipe in (helper.stdin, helper.stdout):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+        problems += gl_disk_oauth("L17 after the release", gl_bytes(path))[1]
+        try:
+            st = os.lstat(lock)
+        except OSError:
+            problems.append("%s is gone after the write (it must never be deleted)" % GL_LOCK)
+        else:
+            if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600:
+                problems.append("%s is not a 0600 regular file (mode %04o)" % (GL_LOCK, stat.S_IMODE(st.st_mode)))
+        return problems, ["helper      : flock LOCK_EX on %s, released by closing its stdin" % GL_LOCK,
+                          "refused     : %s" % ("after %.2f s (wait patched to %.1f s)" % (waited, GL_LOCK_WAIT_S)
+                                                if waited is not None else "not reached")]
+
+    def l18():
+        sandbox, path = gl_setup(fixture_root, "l18")
+        miss = gj_missing(mod, ("_rt_config_dir_check", "_rt_config_sweep_temps"))
+        if miss:
+            return miss, []
+        loose = ".%s.fedcba9876543210.tmp" % GL_CONFIG
+        link = ".%s.00112233445566aa.tmp" % GL_CONFIG
+        mismatch = ".%s.xyz.tmp" % GL_CONFIG
+        other = ".other.json.0123456789abcdef.tmp"
+        gl_plant(sandbox, GL_OWN_TEMP)
+        gl_plant(sandbox, loose, mode=0o644)
+        target = gl_plant(sandbox, "sweep-target")
+        os.symlink("sweep-target", os.path.join(sandbox, link))
+        WRITES.append(os.path.join(sandbox, link))
+        gl_plant(sandbox, mismatch)
+        gl_plant(sandbox, other)
+        dfd = mod._rt_config_dir_check(path)
+        try:
+            removed = mod._rt_config_sweep_temps(path, dfd)
+        finally:
+            os.close(dfd)
+        problems = []
+        if os.path.lexists(os.path.join(sandbox, GL_OWN_TEMP)):
+            problems.append("the own-pattern 0600 temp was not removed")
+        for name, why in ((loose, "the 0644 temp"), (link, "the symlinked temp"),
+                          (mismatch, "the pattern mismatch"), (other, "another config's temp")):
+            if not os.path.lexists(os.path.join(sandbox, name)):
+                problems.append("%s was removed" % why)
+        if not os.path.islink(os.path.join(sandbox, link)) or not os.path.isfile(target):
+            problems.append("the symlinked temp or its target was changed")
+        if removed != 1:
+            problems.append("returned %r, expected 1" % (removed,))
+        return problems, ["planted     : own 0600, own-pattern 0644, own-pattern symlink, "
+                          "pattern mismatch, another base name",
+                          "returned    : %r" % (removed,)]
+
+    def l19():
+        miss = gj_missing(mod, GL_WRITER + GL_LOCKING + ("_rt_startup_sweep",))
+        if miss:
+            return miss, []
+        problems = []
+        cfg = gl_config()
+        for backend, route in ((GL_CODEX, "claude-tf-l-codex"), ("llama", "claude-tf-l-llama")):
+            del cfg["backends"][backend]
+            del cfg["routes"][route]
+        cfg["backends"]["tf-openai-l"] = {"kind": "openai", "api_key": TF_KEY_MISTRAL}
+        cfg["routes"]["claude-tf-l-openai"] = {"backend": "tf-openai-l", "model": "gpt-tf-l"}
+        sandbox, path = gl_setup(fixture_root, "l19", text=gl_text(cfg))
+        planted = gl_plant(sandbox, GL_OWN_TEMP)
+        try:
+            loaded = mod.load_config(path)
+        except Exception as exc:  # noqa: BLE001 -- the fixture must load
+            return ["fixture: load_config refused it: %s: %s" % (type(exc).__name__, gl_redact(str(exc))[:200])], []
+        mod._rt_startup_sweep(path, loaded)
+        if os.path.lexists(os.path.join(sandbox, GL_LOCK)):
+            problems.append("no oauth backend: _rt_startup_sweep created %s" % GL_LOCK)
+        if not os.path.isfile(planted):
+            problems.append("no oauth backend: _rt_startup_sweep removed the planted temp")
+
+        ro_box, ro_path = gl_setup(fixture_root, "l19-ro")
+        before = gl_bytes(ro_path)
+        ro = []
+        os.chmod(ro_box, 0o500)
+        try:
+            ro += gl_lock_refused(mod, "lock in a 0500 directory", ro_path, needles=("cannot open the config lock",))
+            dfd = mod._rt_config_dir_check(ro_path)
+            try:
+                ro += gl_refused(mod, "rewrite in a 0500 directory",
+                                 lambda: mod._rt_config_update_oauth(ro_path, dfd, GL_CODEX, GL_KIND,
+                                                                     dict(GL_OAUTH_NEW), gl_digest(before)),
+                                 needles=("cannot rewrite the config file",), conflict=False)
+            finally:
+                os.close(dfd)
+        finally:
+            os.chmod(ro_box, 0o700)
+        ro += gl_untouched("L19 0500", ro_box, ro_path, before)
+        if os.path.lexists(os.path.join(ro_box, GL_LOCK)):
+            ro.append("0500 directory: %s was created" % GL_LOCK)
+        detail = ["no oauth    : passthrough + openai-apikey -> no lock file, planted temp kept",
+                  "0500 dir    : the lock open and the temp open map OSError to ConfigError"]
+        if os.geteuid() == 0:
+            # root ignores the directory mode: the 0500 half proves nothing (INFO, not FAIL).
+            return (problems or None), detail + ["euid 0      : the 0500 half is informational (%d note(s))"
+                                                 % len(ro)]
+        return problems + ro, detail
+
+    def l20():
+        guard = gl_guard_problems()      # R3-M2: the guard named on the test host, first
+        if guard:
+            return guard, []
+        sandbox, path = gl_setup(fixture_root, "l20")
+        moved = sandbox + ".moved"
+        before = gl_bytes(path)
+        miss = gj_missing(mod, GL_WRITER + GL_LOCKING + ("_rt_config_sweep_temps",))
+        if miss:
+            return miss, ["guard       : all six dir_fd memberships hold on %s" % sys.version.split()[0]]
+        decoy = gl_config()
+        decoy["routes"]["claude-tf-l20-decoy"] = {"backend": "infernox", "model": "tf-l20-decoy"}
+        decoy_text = gl_text(decoy)
+        real_check = mod._rt_config_dir_check
+        swapped = []
+
+        def check(p):
+            dfd = real_check(p)
+            os.rename(sandbox, moved)
+            WRITES.append(moved)
+            os.mkdir(sandbox, 0o700)
+            os.chmod(sandbox, 0o700)
+            write_file(os.path.join(sandbox, GL_CONFIG), decoy_text)
+            swapped.append(True)
+            return dfd
+
+        old = gl_swap(mod, "_rt_config_dir_check", check)
+        try:
+            dfd = mod._rt_config_dir_check(path)
+        finally:
+            gl_restore(mod, "_rt_config_dir_check", old)
+        try:
+            fd = mod._rt_config_lock(path, dfd)
+            try:
+                mod._rt_config_sweep_temps(path, dfd)
+                mod._rt_config_update_oauth(path, dfd, GL_CODEX, GL_KIND, dict(GL_OAUTH_NEW), gl_digest(before))
+            finally:
+                mod._rt_config_unlock(fd)
+        finally:
+            os.close(dfd)
+        problems = [] if swapped else ["the seam never swapped the directory"]
+        problems += gl_disk_oauth("L20 checked inode (<dir>.moved)", gl_bytes(os.path.join(moved, GL_CONFIG)))[1]
+        if gl_bytes(path) != decoy_text.encode("utf-8"):
+            problems.append("the new directory's config is not byte-identical")
+        extra = sorted(set(os.listdir(sandbox)) - {GL_CONFIG})
+        if extra:
+            problems.append("the new directory holds %s (no temp, no lock expected)" % extra)
+        if not os.path.isfile(os.path.join(moved, GL_LOCK)):
+            problems.append("the lock was not taken in the checked directory (<dir>.moved)")
+        return problems, ["guard       : all six dir_fd memberships hold on %s" % sys.version.split()[0],
+                          "seam        : <dir> renamed to <dir>.moved after the check; a 0700 decoy at <dir>"]
+
+    cases = dict(zip(GL_CASES, (l1, l2, l3, l4, l5, l6,
+                                conflict_case("L7", gl_text(removed)),
+                                conflict_case("L8", gl_text(rekinded)),
+                                l9, l10, l11, l12, l13, l14, l15, l16, l17, l18, l19, l20)))
+    for cid in GL_CASES:
+        try:
+            problems, detail = cases[cid]()
+        except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+            problems, detail = ["case raised %s: %s" % (type(exc).__name__, gl_redact(str(exc))[:200])], []
+        if problems is None:
+            suite.record(GL, cid, [], status=H.INFO, detail=detail)
+        else:
+            suite.record(GL, cid, problems, detail=detail)
+
+
+# ---------------------------------------------------------------------------
+# Group M: responses stream
+# ---------------------------------------------------------------------------
+
+GM = "M. responses stream"
+
+# Plan Step 10 (M1, M6-M20), Plan Step 14 (M2-M5: reasoning -- thinking
+# blocks, signatures, the dropped count) and Plan Step 16 / user decision 2026-10-07
+# (M21: a function_call carrying a "namespace" field).  Every declared id is recorded
+# exactly once.
+GM_CASES = (
+    "text only -> exact events",         # M1
+    "summary then text: thinking 0",     # M2
+    "summary parts: blank-line join",    # M3
+    "no summary -> redacted_thinking",   # M4
+    "oversize enc: empty sig, counted",  # M5
+    "tool whole at item done",           # M6
+    "two tools in output order",         # M7
+    "malformed tool args -> error",      # M8
+    "incomplete -> max_tokens",          # M9
+    "failed usage limit -> 429 error",   # M10
+    "five 429 codes via error",          # M11
+    "EOF, no terminal -> error",         # M12
+    "malformed data: -> error",          # M13
+    "event over 16 MiB -> error",        # M14
+    "over-cap tool args or count",       # M15
+    "unknown event ignored",             # M16
+    "cached-token usage mapping",        # M17
+    "error message scrubbed",            # M18
+    "collector == folded stream",        # M19
+    "json_response non-2xx shapes",      # M20
+    "namespaced call -> plain tool_use",  # M21
+)
+GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
+          "M16", "M17", "M18", "M19", "M20", "M21")
+
+GM_BACKEND = "tf-codex-m"
+GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
+GM_MODEL = "gpt-tf-m"
+GM_UPSTREAM_MODEL = "gpt-tf-upstream"       # every fixture and inline event names it; never echoed (KD-16)
+GM_INPUT_TOKENS = GG_INPUT_TOKENS           # the local estimate the translator is built with (gg_wellformed)
+GM_MSG_ID = "msg_tfm0123456789abcdef0123"   # M19: the collector's message id
+GM_EVENT_LIMIT_FALLBACK = 16 * 1024 * 1024  # _RT_RS_SSE_EVENT_LIMIT per the plan, when the row lacks it
+GM_EVENT_LINE = 6 * 1024 * 1024             # M14: one data line of an over-limit event (under the 8 MiB line cap)
+GM_RS_429 = ("usage_limit_reached", "usage_not_included", "rate_limit_exceeded",
+             "subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable")
+GM_RELOGIN = "run llm-router.py login --backend "    # KD-16 deviation: the OAuth 401 hint (plan Step 10)
+GM_UNKNOWN = ("tfunknownvalue", "tfunknownpart", "tfunknowndone")   # M16: never reach the client
+# M1, M2, M6, M7, M10 and M19 replay synthetic fixtures (tests/files/llm_router/README.md).
+GM_DEFENSIVE = "provenance  : defensive, not observed (synthetic fixture, Responses contract)"
+GM_FIXTURES = {"text": "tf_responses_text.sse", "tool": "tf_responses_tool.sse",
+               "parallel": "tf_responses_parallel.sse", "failed": "tf_responses_failed.sse",
+               "reasoning": "tf_responses_reasoning.sse"}
+GM_MESSAGE_KEYS = frozenset({"id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage"})
+# M2-M5 (Plan Step 14, KD-6): written here, never read from the module.
+GM_SIG_PREFIX = "lrs1." + GM_BACKEND + "."                # a minted signature: lrs1.<backend>.<encrypted_content>
+GM_SIG_LIMIT = 1024 * 1024                                # _RT_RS_SIGNATURE_LIMIT: the longest encrypted_content signed
+GM_ENC = "gAAAAABo-tf_m_reasoning_blob-4567+/GhIj_kL=="   # invented, inline events only (the fixture has its own)
+GM_THINK_START = {"type": "thinking", "thinking": "", "signature": ""}
+# M21: the namespace the openai-oauth row sends (K23's GK_NAMESPACE) and one that is not ours.
+# The plan says nothing on a foreign namespace: it is stripped and rendered like our own.
+GM_NS_OURS = "claude_code"
+GM_NS_FOREIGN = "tf_foreign_ns"
+
+
+def gm_need(mod, names):
+    """One problem naming every symbol of *names* the module does not define (red, never a crash)."""
+    absent = [n for n in names if not hasattr(mod, n)]
+    if not absent:
+        return []
+    return ["the module defines no %s (Step 10 not landed)" % ", ".join(absent)]
+
+
+def gm_ev(obj):
+    """SSE lines (no newlines) of one Responses event: `event: <type>`, `data: <compact JSON>`, blank."""
+    return ["event: " + obj["type"], "data: " + json.dumps(obj, separators=(",", ":"), ensure_ascii=False), ""]
+
+
+def gm_lines(*items):
+    """SSE lines of *items*: a dict is one event (gm_ev), a list is raw lines taken as they are."""
+    lines = []
+    for item in items:
+        lines += list(item) if isinstance(item, list) else gm_ev(item)
+    return lines
+
+
+def gm_response(status, **extra):
+    obj = {"id": "resp_tf_m_inline", "object": "response", "created_at": 1759622400, "status": status,
+           "model": GM_UPSTREAM_MODEL, "output": []}
+    obj.update(extra)
+    return obj
+
+
+def gm_created():
+    return {"type": "response.created", "response": gm_response("in_progress", usage=None)}
+
+
+def gm_msg_added(index=0):
+    return {"type": "response.output_item.added", "output_index": index,
+            "item": {"id": "msg_tf_m_inline", "type": "message", "status": "in_progress", "role": "assistant",
+                     "content": []}}
+
+
+def gm_msg_done(text, index=0):
+    return {"type": "response.output_item.done", "output_index": index,
+            "item": {"id": "msg_tf_m_inline", "type": "message", "status": "completed", "role": "assistant",
+                     "content": [{"type": "output_text", "text": text, "annotations": []}]}}
+
+
+def gm_text(delta, index=0):
+    return {"type": "response.output_text.delta", "item_id": "msg_tf_m_inline", "output_index": index,
+            "content_index": 0, "delta": delta}
+
+
+def gm_call(call_id, name, args, status="completed"):
+    return {"id": "fc_" + call_id, "type": "function_call", "status": status, "arguments": args,
+            "call_id": call_id, "name": name}
+
+
+def gm_call_added(index, call_id, name):
+    return {"type": "response.output_item.added", "output_index": index,
+            "item": gm_call(call_id, name, "", "in_progress")}
+
+
+def gm_args(index, call_id, delta):
+    return {"type": "response.function_call_arguments.delta", "item_id": "fc_" + call_id,
+            "output_index": index, "delta": delta}
+
+
+def gm_call_done(index, call_id, name, args):
+    return {"type": "response.output_item.done", "output_index": index, "item": gm_call(call_id, name, args)}
+
+
+def gm_usage(inp, out, cached=None):
+    usage = {"input_tokens": inp, "output_tokens": out, "total_tokens": inp + out}
+    if cached is not None:
+        usage["input_tokens_details"] = {"cached_tokens": cached}
+    return usage
+
+
+def gm_completed(usage, kind="response.completed", status="completed", **extra):
+    """A terminal event *kind* whose response carries *usage* (and any *extra* keys)."""
+    return {"type": kind, "response": gm_response(status, usage=usage, **extra)}
+
+
+def gm_rs_events(index, item_id, parts, enc=None):
+    """Events of one reasoning item at *index*: added, then per summary part (a list of text
+    deltas) part.added, the deltas, text.done, part.done -- then the item done, carrying the
+    joined summaries and, when *enc* is not None, its encrypted_content."""
+    events = [{"type": "response.output_item.added", "output_index": index,
+               "item": {"id": item_id, "type": "reasoning", "summary": []}}]
+    summaries = []
+    for si, deltas in enumerate(parts):
+        text = "".join(deltas)
+        summaries.append({"type": "summary_text", "text": text})
+        events.append({"type": "response.reasoning_summary_part.added", "item_id": item_id, "output_index": index,
+                       "summary_index": si, "part": {"type": "summary_text", "text": ""}})
+        events += [{"type": "response.reasoning_summary_text.delta", "item_id": item_id, "output_index": index,
+                    "summary_index": si, "delta": d} for d in deltas]
+        events.append({"type": "response.reasoning_summary_text.done", "item_id": item_id, "output_index": index,
+                       "summary_index": si, "text": text})
+        events.append({"type": "response.reasoning_summary_part.done", "item_id": item_id, "output_index": index,
+                       "summary_index": si, "part": {"type": "summary_text", "text": text}})
+    item = {"id": item_id, "type": "reasoning", "summary": summaries}
+    if enc is not None:
+        item["encrypted_content"] = enc
+    events.append({"type": "response.output_item.done", "output_index": index, "item": item})
+    return events
+
+
+def gm_rs_blocks(events):
+    """[{index, type, start, thinking, signature, sig_deltas, text, deltas}] of the content blocks:
+    thinking_delta, signature_delta and text_delta each joined (M2-M5)."""
+    blocks = []
+    for name, obj in events:
+        if obj is None:
+            continue
+        if name == "content_block_start":
+            cb = obj.get("content_block") or {}
+            blocks.append({"index": obj.get("index"), "type": cb.get("type"), "start": cb, "thinking": "",
+                           "signature": "", "sig_deltas": 0, "text": "", "deltas": 0})
+        elif name == "content_block_delta" and blocks:
+            delta = obj.get("delta") or {}
+            block = blocks[-1]
+            block["deltas"] += 1
+            if delta.get("type") == "thinking_delta":
+                block["thinking"] += delta.get("thinking") or ""
+            elif delta.get("type") == "signature_delta":
+                block["signature"] += delta.get("signature") or ""
+                block["sig_deltas"] += 1
+            elif delta.get("type") == "text_delta":
+                block["text"] += delta.get("text") or ""
+    return blocks
+
+
+def gm_rs_view(blocks):
+    """A compact, comparable view of gm_rs_blocks: (type, thinking|text|data, signature or None)."""
+    view = []
+    for b in blocks:
+        if b["type"] == "thinking":
+            view.append(("thinking", b["thinking"], b["signature"]))
+        elif b["type"] == "redacted_thinking":
+            view.append(("redacted_thinking", b["start"].get("data"), None))
+        else:
+            view.append((b["type"], b["text"], None))
+    return view
+
+
+def gm_rs_short(view):
+    """*view* with every long string cut (an oversize signature must never flood a FAIL line)."""
+    return [tuple((v[:48] + "...(%d)" % len(v)) if isinstance(v, str) and len(v) > 64 else v for v in row)
+            for row in view]
+
+
+def gm_tool_events(calls):
+    """Events of each (index, call_id, name, args) of *calls*: added, one argument delta (when the
+    arguments are a string), done -- one item at a time, in output order."""
+    events = []
+    for index, call_id, name, args in calls:
+        events.append(gm_call_added(index, call_id, name))
+        if isinstance(args, str) and args:
+            events.append(gm_args(index, call_id, args))
+        events.append(gm_call_done(index, call_id, name, args))
+    return events
+
+
+def gm_want_usage(usage):
+    """The plan's Responses -> Anthropic usage mapping: input minus cached (never below 0), output,
+    and the cached count as cache_read_input_tokens (0 when the details are absent)."""
+    cached = ((usage or {}).get("input_tokens_details") or {}).get("cached_tokens") or 0
+    return {"input_tokens": max(0, (usage or {}).get("input_tokens", 0) - cached),
+            "output_tokens": (usage or {}).get("output_tokens", 0), "cache_read_input_tokens": cached}
+
+
+def gm_fixtures():
+    """({key: [lines]}, {key: raw bytes}) of the four Responses fixtures; every data payload must
+    parse as a JSON object whose type is its event name (a broken fixture raises here)."""
+    lines_of, raw_of = {}, {}
+    for key, name in GM_FIXTURES.items():
+        with open(os.path.join(FIXTURES, name), "rb") as fh:
+            raw = fh.read()
+        lines = raw.decode("utf-8").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()                                 # the file's final newline
+        for event, data in an_events(lines):
+            obj = json.loads(data)
+            if not isinstance(obj, dict) or obj.get("type") != event:
+                raise ValueError("%s: event %s carries type %r" % (name, event, obj.get("type")
+                                                                   if isinstance(obj, dict) else None))
+        lines_of[key], raw_of[key] = lines, raw
+    return lines_of, raw_of
+
+
+def gm_parsed(lines):
+    """[parsed data object] of every event in *lines*."""
+    return [json.loads(data) for _event, data in an_events(lines)]
+
+
+def gm_fx_texts(lines):
+    return [o.get("delta") for o in gm_parsed(lines) if o.get("type") == "response.output_text.delta"]
+
+
+def gm_fx_calls(lines):
+    """The function_call items of every output_item.done of *lines*, in order."""
+    return [o["item"] for o in gm_parsed(lines)
+            if o.get("type") == "response.output_item.done" and (o.get("item") or {}).get("type") == "function_call"]
+
+
+def gm_fx_usage(lines):
+    for obj in gm_parsed(lines):
+        if obj.get("type") in ("response.completed", "response.incomplete", "response.done"):
+            return (obj.get("response") or {}).get("usage")
+    return None
+
+
+def gm_inbound(mod, profile="codex", stream=True):
+    """A Responses InboundRequest for *profile*, scrubbing with the router's own KD-9 scrubber
+    over the suite's sentinels (M18 and M20 assert error texts are scrubbed)."""
+    body = {"model": GM_ROUTE, "max_tokens": 256, "stream": stream,
+            "messages": [{"role": "user", "content": "tf m"}]}
+    scrub, _why = ge_scrubber(mod)
+    return mod.InboundRequest(endpoint="messages", requested_model=GM_ROUTE, body=body, stream=stream,
+                              route=mod.RouteSpec(name=GM_ROUTE, backend=GM_BACKEND, model=GM_MODEL, options={}),
+                              backend=gk_backend(mod, profile, name=GM_BACKEND), client_headers={},
+                              scrub=scrub if scrub is not None else (lambda text: text))
+
+
+def gm_usage_check(label, run, want):
+    md = gg_message_delta(run["events"]) or {}
+    if md.get("usage") != want:
+        return ["%s: message_delta usage %r, expected %r" % (label, md.get("usage"), want)]
+    return []
+
+
+def gm_tool_check(label, block, call):
+    """Problems unless *block* is the whole function_call *call*: a tool_use start with the id
+    toolu_<call_id>, the name, input {}, and ONE input_json_delta carrying the compact re-dump."""
+    want_id = "toolu_" + call["call_id"]
+    if block.get("type") != "tool_use":
+        return ["%s: block %r is %r, expected tool_use" % (label, block.get("index"), block.get("type"))]
+    problems = []
+    if block.get("id") != want_id:
+        problems.append("%s: tool id %r, expected %r" % (label, block.get("id"), want_id))
+    if block.get("name") != call["name"]:
+        problems.append("%s: tool name %r, expected %r" % (label, block.get("name"), call["name"]))
+    if block.get("input") != {}:
+        problems.append("%s: content_block_start input %r, expected {}" % (label, block.get("input")))
+    if block.get("deltas") != 1:
+        problems.append("%s: %d delta(s) in the tool block, expected ONE complete input_json_delta"
+                        % (label, block.get("deltas")))
+    want = json.dumps(json.loads(call["arguments"]), separators=(",", ":"), ensure_ascii=True)
+    if block.get("json") != want:
+        problems.append("%s: input_json %r, expected the compact re-dump %r" % (label, (block.get("json") or "")[:120],
+                                                                                 want[:120]))
+    return problems
+
+
+def gm_error(events):
+    """(type, message) of the first event: error, or (None, None)."""
+    for name, obj in events:
+        if name == "error" and obj is not None:
+            err = obj.get("error") or {}
+            return err.get("type"), err.get("message")
+    return None, None
+
+
+def gm_fold(events, message_id):
+    """The Anthropic message the encoder's *events* describe (M19): blocks joined, the
+    message_delta's stop_reason and usage, message_start's model, and *message_id*."""
+    model, stop, usage = None, None, None
+    content = []
+    for block in gg_blocks(events):
+        if block["type"] == "text":
+            content.append({"type": "text", "text": "".join(t or "" for t in block["texts"])})
+        elif block["type"] == "tool_use":
+            try:
+                tool_input = json.loads(block["json"] or "")
+            except ValueError:
+                tool_input = None
+            content.append({"type": "tool_use", "id": block["id"], "name": block["name"], "input": tool_input})
+        else:
+            content.append({"type": block["type"]})
+    for name, obj in events:
+        if name == "message_start" and obj is not None:
+            model = (obj.get("message") or {}).get("model")
+        elif name == "message_delta" and obj is not None:
+            stop = (obj.get("delta") or {}).get("stop_reason")
+            usage = obj.get("usage")
+    return {"id": message_id, "type": "message", "role": "assistant", "model": model, "content": content,
+            "stop_reason": stop, "stop_sequence": None, "usage": usage}
+
+
+def gm_first_feed(run, needle):
+    """The index in run["feeds"] of the first feed whose bytes hold *needle* (None when none does)."""
+    for i, chunk in enumerate(run["feeds"]):
+        if needle in chunk:
+            return i
+    return None
+
+
+def gm_envelope(label, got, want_status, want_type, needle=None):
+    """Problems unless json_response returned (want_status, the Anthropic error envelope of
+    want_type) whose message is scrubbed and, when given, holds *needle*."""
+    if not (isinstance(got, tuple) and len(got) == 2 and isinstance(got[1], dict)):
+        return ["%s: json_response returned %s, expected (status, dict)" % (label, type(got).__name__)]
+    status, obj = got
+    err = obj.get("error") if isinstance(obj.get("error"), dict) else {}
+    msg = err.get("message")
+    problems = []
+    if status != want_status or obj.get("type") != "error" or err.get("type") != want_type:
+        problems.append("%s: %r %s, expected %d %s" % (label, status, gi_redact(json.dumps(obj))[:160],
+                                                         want_status, want_type))
+    if set(obj) != {"type", "error"} or set(err) != {"type", "message"} or not isinstance(msg, str):
+        problems.append("%s: the envelope %s is not {type, error: {type, message}}"
+                        % (label, gi_redact(json.dumps(obj))[:160]))
+        return problems
+    if gi_redact(msg) != msg:
+        problems.append("%s: the message carries a sentinel (KD-9)" % label)
+    if needle is not None and needle not in msg:
+        problems.append("%s: the message %r does not hold %r" % (label, gi_redact(msg)[:160], needle))
+    return problems
+
+
+def group_m(suite, fixture_root):
+    """M. responses stream: the Responses SSE -> Anthropic stream translation (Plan Step 10),
+    in-process.  `ResponsesStreamTranslator(inbound, profile, input_tokens, dropped=0,
+    sink=None)` is driven as the relay loop drives it (gg_drive), its default sink the
+    AnthropicSseEncoder; M19 swaps in `_RtMessageCollector(message_id, model)` and the
+    Responses adapters' `json_response`, M20 maps the non-2xx shapes.  Every streamed case
+    first asserts a well-formed Anthropic stream (gg_wellformed), then its own rule.
+    Before Step 10 lands every case FAILS naming the missing class, never crashes the group."""
+    del fixture_root            # in-process only: nothing is written
+    results = {}
+    try:
+        mod = H.load_module_from_path("ph_llm_router_m", SERVER)
+    except Exception as exc:  # noqa: BLE001 -- an import failure fails the group
+        for cid in GM_CASES:
+            suite.record(GM, cid, ["cannot import %s: %s: %s"
+                                   % (os.path.relpath(SERVER, H.REPO_ROOT), type(exc).__name__, exc)])
+        return
+    try:
+        (fx, raw), fx_why = gm_fixtures(), None
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        fx, raw, fx_why = None, None, "the M fixtures cannot be read: %s" % type(exc).__name__
+    rows = getattr(mod, "_RT_RESPONSES_PROFILES", None) or {}
+    event_limit = getattr(rows.get("codex"), "event_limit", GM_EVENT_LIMIT_FALLBACK)
+    tool_limit = getattr(mod, "_RT_BUFFERED_TOOL_LIMIT", GG_TOOL_LIMIT_FALLBACK)
+    tool_count = getattr(mod, "_RT_BUFFERED_TOOL_COUNT", GG_TOOL_COUNT_FALLBACK)
+
+    def translator(profile="codex", sink=None):
+        """A fresh translator for *profile*'s row (the encoder sink unless *sink* is given)."""
+        cls = mod.ResponsesStreamTranslator
+        inbound = gm_inbound(mod, profile)
+        if sink is None:
+            return cls(inbound, rows[profile], GM_INPUT_TOKENS)
+        return cls(inbound, rows[profile], GM_INPUT_TOKENS, dropped=0, sink=sink)
+
+    def drive(lines, eof=True, profile="codex"):
+        return gg_drive(translator(profile), lines, eof)
+
+    def fx_or(why_lines):
+        return ([fx_why], why_lines) if fx is None else None
+
+    def m1():
+        early = fx_or([GM_DEFENSIVE])
+        if early:
+            return early
+        lines = fx["text"]
+        run = drive(lines)
+        problems = gg_wellformed("text fixture", run, requested=GM_ROUTE)
+        texts = gm_fx_texts(lines)
+        want = [("content_block_start", {"type": "content_block_start", "index": 0,
+                                         "content_block": {"type": "text", "text": ""}})]
+        want += [("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                          "delta": {"type": "text_delta", "text": t}}) for t in texts]
+        want += [("content_block_stop", {"type": "content_block_stop", "index": 0})]
+        events = run["events"]
+        want_names = ["message_start"] + gg_names(want) + ["message_delta", "message_stop"]
+        if gg_names(events) != want_names:
+            problems.append("events %s, expected %s" % (ev_shape(events), ", ".join(want_names)))
+        else:
+            for i, ((_wn, wobj), (_gn, gobj)) in enumerate(zip(want, events[1:])):
+                if gobj != wobj:
+                    problems.append("event %d is %r, expected %r" % (i + 1, gobj, wobj))
+            problems += gg_complete("text fixture", run, "end_turn")
+            problems += gm_usage_check("text fixture", run, gm_want_usage(gm_fx_usage(lines)))
+        if GM_UPSTREAM_MODEL.encode("ascii") in run["out"]:
+            problems.append("the upstream model %r reached the client (KD-16)" % GM_UPSTREAM_MODEL)
+        return problems, ["fixture     : %s, %d text delta(s)" % (GM_FIXTURES["text"], len(texts)),
+                          "client      : %s" % ev_shape(events), GM_DEFENSIVE]
+
+    def rs_tail(index, text):
+        """A message item at *index* with one text delta, then response.completed."""
+        return [gm_msg_added(index), gm_text(text, index), gm_msg_done(text, index), gm_completed(gm_usage(9, 9))]
+
+    def m2():
+        early = fx_or([GM_DEFENSIVE])
+        if early:
+            return early
+        lines = fx["reasoning"]
+        parsed = gm_parsed(lines)
+        items = [o["item"] for o in parsed if o.get("type") == "response.output_item.done"
+                 and (o.get("item") or {}).get("type") == "reasoning"]
+        sig = GM_SIG_PREFIX + items[0]["encrypted_content"]
+        thinks, parts = [], 0
+        for obj in parsed:
+            if obj.get("type") == "response.reasoning_summary_part.added":
+                if parts:
+                    thinks.append("\n\n")       # a part after an earlier one of the same item
+                parts += 1
+            elif obj.get("type") == "response.reasoning_summary_text.delta":
+                thinks.append(obj.get("delta"))
+        texts = gm_fx_texts(lines)
+        want = [("content_block_start", {"type": "content_block_start", "index": 0,
+                                         "content_block": dict(GM_THINK_START)})]
+        want += [("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                          "delta": {"type": "thinking_delta", "thinking": t}}) for t in thinks]
+        want += [("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                          "delta": {"type": "signature_delta", "signature": sig}}),
+                 ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                 ("content_block_start", {"type": "content_block_start", "index": 1,
+                                          "content_block": {"type": "text", "text": ""}})]
+        want += [("content_block_delta", {"type": "content_block_delta", "index": 1,
+                                          "delta": {"type": "text_delta", "text": t}}) for t in texts]
+        want += [("content_block_stop", {"type": "content_block_stop", "index": 1})]
+        run = drive(lines)
+        problems = gg_wellformed("reasoning fixture", run, requested=GM_ROUTE)
+        events = run["events"]
+        want_names = ["message_start"] + gg_names(want) + ["message_delta", "message_stop"]
+        if gg_names(events) != want_names:
+            problems.append("events %s, expected %s" % (ev_shape(events), ", ".join(want_names)))
+        else:
+            for i, ((_wn, wobj), (_gn, gobj)) in enumerate(zip(want, events[1:])):
+                if gobj != wobj:
+                    problems.append("event %d is %r, expected %r" % (i + 1, gobj, wobj))
+            problems += gg_complete("reasoning fixture", run, "end_turn")
+            problems += gm_usage_check("reasoning fixture", run, gm_want_usage(gm_fx_usage(lines)))
+        dropped = getattr(run["tr"], "dropped_thinking", None)
+        if dropped != 0:
+            problems.append("dropped_thinking %r, expected 0 (the reasoning item was rendered)" % (dropped,))
+        if GM_SIG_PREFIX.encode("ascii") not in run["out"]:
+            problems.append("no signature_delta starting %r reached the client" % GM_SIG_PREFIX)
+        if not hasattr(mod, "_rt_rs_signature"):
+            problems.append("the module defines no _rt_rs_signature (Step 14 not landed)")
+        elif mod._rt_rs_signature(GM_BACKEND, items[0]["encrypted_content"]) != sig:
+            problems.append("_rt_rs_signature(backend, enc) = %r, expected %r"
+                            % (mod._rt_rs_signature(GM_BACKEND, items[0]["encrypted_content"]), sig))
+        # The non-stream sink renders the same reasoning (one translator, two sinks).
+        collector = mod._RtMessageCollector(GM_MSG_ID, GM_ROUTE)
+        gg_drive(translator(sink=collector), lines)
+        want_content = [{"type": "thinking", "thinking": "".join(thinks), "signature": sig},
+                        {"type": "text", "text": "".join(texts)}]
+        got = collector.message().get("content") if collector.failed is None else collector.failed
+        if got != want_content:
+            problems.append("collector content %r, expected %r" % (got, want_content))
+        return problems, ["fixture     : %s, %d summary part(s), %d text delta(s)"
+                          % (GM_FIXTURES["reasoning"], parts, len(texts)),
+                          "client      : %s" % ev_shape(events), GM_DEFENSIVE]
+
+    def m3():
+        problems, shown = [], []
+        table = (("two parts",
+                  gm_lines(gm_created(), *gm_rs_events(0, "rs_tf_m3a", [["tf m3 one"], ["tf m3 ", "two"]], GM_ENC),
+                           *rs_tail(1, "tf m3 text")),
+                  [("thinking", "tf m3 one\n\ntf m3 two", GM_SIG_PREFIX + GM_ENC), ("text", "tf m3 text", None)]),
+                 ("three parts",
+                  gm_lines(gm_created(), *gm_rs_events(0, "rs_tf_m3b", [["tf a"], ["tf b"], ["tf c"]], GM_ENC + "3"),
+                           *rs_tail(1, "tf m3 text")),
+                  [("thinking", "tf a\n\ntf b\n\ntf c", GM_SIG_PREFIX + GM_ENC + "3"), ("text", "tf m3 text", None)]),
+                 ("one part (control)",
+                  gm_lines(gm_created(), *gm_rs_events(0, "rs_tf_m3c", [["tf m3 only"]], GM_ENC + "1"),
+                           *rs_tail(1, "tf m3 text")),
+                  [("thinking", "tf m3 only", GM_SIG_PREFIX + GM_ENC + "1"), ("text", "tf m3 text", None)]),
+                 ("two items, one part each",
+                  gm_lines(gm_created(), *gm_rs_events(0, "rs_tf_m3d", [["tf m3 first"]], GM_ENC + "1"),
+                           *gm_rs_events(1, "rs_tf_m3e", [["tf m3 second"]], GM_ENC + "2"),
+                           *rs_tail(2, "tf m3 text")),
+                  [("thinking", "tf m3 first", GM_SIG_PREFIX + GM_ENC + "1"),
+                   ("thinking", "tf m3 second", GM_SIG_PREFIX + GM_ENC + "2"), ("text", "tf m3 text", None)]))
+        for label, lines, want in table:
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE)
+            got = gm_rs_view(gm_rs_blocks(run["events"]))
+            if got != want:
+                problems.append("%s: blocks %r, expected %r" % (label, gm_rs_short(got), gm_rs_short(want)))
+            problems += gg_complete(label, run, "end_turn")
+            shown.append("%s -> %r" % (label, [g[1] for g in got if g[0] == "thinking"]))
+        return problems, ["join        : " + s for s in shown]
+
+    def m4():
+        problems, shown = [], []
+        sig = GM_SIG_PREFIX + GM_ENC
+        lines = gm_lines(gm_created(), *gm_rs_events(0, "rs_tf_m4a", [], GM_ENC), *rs_tail(1, "tf m4 text"))
+        run = drive(lines)
+        problems += gg_wellformed("no summary", run, requested=GM_ROUTE)
+        want = [("content_block_start", {"type": "content_block_start", "index": 0,
+                                         "content_block": {"type": "redacted_thinking", "data": sig}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("content_block_start", {"type": "content_block_start", "index": 1,
+                                         "content_block": {"type": "text", "text": ""}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 1,
+                                         "delta": {"type": "text_delta", "text": "tf m4 text"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1})]
+        events = run["events"]
+        want_names = ["message_start"] + gg_names(want) + ["message_delta", "message_stop"]
+        if gg_names(events) != want_names:
+            problems.append("no summary: events %s, expected %s" % (ev_shape(events), ", ".join(want_names)))
+        else:
+            for i, ((_wn, wobj), (_gn, gobj)) in enumerate(zip(want, events[1:])):
+                if gobj != wobj:
+                    problems.append("no summary: event %d is %r, expected %r" % (i + 1, gobj, wobj))
+            problems += gg_complete("no summary", run, "end_turn")
+        if getattr(run["tr"], "dropped_thinking", None) != 0:
+            problems.append("no summary: dropped_thinking %r, expected 0 (rendered as redacted_thinking)"
+                            % (getattr(run["tr"], "dropped_thinking", None),))
+        shown.append("no summary -> %s" % ev_shape(events))
+        # Neither a summary nor an encrypted_content: nothing is rendered, and it is counted.
+        lines = gm_lines(gm_created(), *gm_rs_events(0, "rs_tf_m4b", [], None), *rs_tail(1, "tf m4 text"))
+        run = drive(lines)
+        problems += gg_wellformed("no summary, no encrypted_content", run, requested=GM_ROUTE)
+        got = gm_rs_view(gm_rs_blocks(run["events"]))
+        if got != [("text", "tf m4 text", None)]:
+            problems.append("no summary, no encrypted_content: blocks %r, expected only the text at index 0"
+                            % (gm_rs_short(got),))
+        problems += gg_complete("no summary, no encrypted_content", run, "end_turn")
+        if getattr(run["tr"], "dropped_thinking", None) != 1:
+            problems.append("no summary, no encrypted_content: dropped_thinking %r, expected 1"
+                            % (getattr(run["tr"], "dropped_thinking", None),))
+        shown.append("neither -> %s" % ev_shape(run["events"]))
+        return problems, ["redacted    : " + s for s in shown]
+
+    def m5():
+        problems, shown = [], []
+        big, exact, garbled = "A" * (GM_SIG_LIMIT + 1), "B" * GM_SIG_LIMIT, "tf m5 not*base64!"
+        text = ("text", "tf m5 text", None)
+        table = (("summary, encrypted_content 1 MiB + 1", big, [["tf m5 think"]],
+                  [("thinking", "tf m5 think", ""), text], 1),
+                 ("summary, bad charset", garbled, [["tf m5 think"]], [("thinking", "tf m5 think", ""), text], 1),
+                 ("no summary, encrypted_content 1 MiB + 1", big, [], [text], 1),
+                 ("summary, exactly 1 MiB (control)", exact, [["tf m5 think"]],
+                  [("thinking", "tf m5 think", GM_SIG_PREFIX + exact), text], 0),
+                 ("no summary, exactly 1 MiB (control)", exact, [],
+                  [("redacted_thinking", GM_SIG_PREFIX + exact, None), text], 0))
+        for label, enc, parts, want, want_dropped in table:
+            lines = gm_lines(gm_created(), *gm_rs_events(0, "rs_tf_m5", parts, enc), *rs_tail(1, "tf m5 text"))
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE)
+            blocks = gm_rs_blocks(run["events"])
+            got = gm_rs_view(blocks)
+            if got != want:
+                problems.append("%s: blocks %r, expected %r" % (label, gm_rs_short(got), gm_rs_short(want)))
+            if any(b["type"] == "thinking" and not b["signature"] and b["sig_deltas"] for b in blocks):
+                problems.append("%s: an empty signature emitted a signature_delta" % label)
+            if want_dropped and GM_SIG_PREFIX.encode("ascii") in run["out"]:
+                problems.append("%s: a signature reached the client" % label)
+            problems += gg_complete(label, run, "end_turn")
+            dropped = getattr(run["tr"], "dropped_thinking", None)
+            if dropped != want_dropped:
+                problems.append("%s: dropped_thinking %r, expected %d" % (label, dropped, want_dropped))
+            shown.append("%s -> %s, dropped %r" % (label, [g[0] for g in got], dropped))
+        if not hasattr(mod, "_rt_rs_signature"):
+            problems.append("the module defines no _rt_rs_signature (Step 14 not landed)")
+        else:
+            for label, enc, want in (("1 MiB + 1", big, None), ("bad charset", garbled, None), ("absent", None, None),
+                                     ("exactly 1 MiB", exact, GM_SIG_PREFIX + exact)):
+                got = mod._rt_rs_signature(GM_BACKEND, enc)
+                if got != want:
+                    problems.append("_rt_rs_signature(backend, %s) = %s, expected %s"
+                                    % (label, "None" if got is None else "a %d-char value" % len(got),
+                                       "None" if want is None else "the minted signature"))
+        return problems, ["oversize    : " + s for s in shown]
+
+    def m6():
+        early = fx_or([GM_DEFENSIVE])
+        if early:
+            return early
+        lines = fx["tool"]
+        call = gm_fx_calls(lines)[0]
+        run = drive(lines)
+        problems = gg_wellformed("tool fixture", run, requested=GM_ROUTE)
+        want = ["message_start", "content_block_start", "content_block_delta", "content_block_stop",
+                "message_delta", "message_stop"]
+        if gg_names(run["events"]) != want:
+            problems.append("events %s, expected %s" % (ev_shape(run["events"]), ", ".join(want)))
+        blocks = gg_blocks(run["events"])
+        if blocks:
+            problems += gm_tool_check("tool fixture", blocks[0], call)
+        # Whole at output_item.done: nothing of the block before that event's closing blank line.
+        done_at = next(i for i, line in enumerate(lines)
+                       if line.startswith("data: ") and '"type":"response.output_item.done"' in line)
+        first = gm_first_feed(run, b"content_block_start")
+        if first != done_at + 1:
+            problems.append("the tool block started at feed %s, expected at the blank line ending "
+                            "output_item.done (line %d), not on an argument delta or later" % (first, done_at + 1))
+        problems += gg_complete("tool fixture", run, "tool_use")
+        problems += gm_usage_check("tool fixture", run, gm_want_usage(gm_fx_usage(lines)))
+        return problems, ["tool        : %s %s, whole at line %d" % (call["call_id"], call["name"], done_at + 1),
+                          "client      : %s" % ev_shape(run["events"]), GM_DEFENSIVE]
+
+    def m7():
+        early = fx_or([GM_DEFENSIVE])
+        if early:
+            return early
+        problems, shown = [], []
+        lead = gm_lines(gm_created(), gm_msg_added(0), gm_text("tf m7 lead"), gm_msg_done("tf m7 lead", 0),
+                        *gm_tool_events([(1, "call_tfRead07b", "Read", '{"file_path":"/tf/m7b"}'),
+                                         (2, "call_tfBash07b", "Bash", '{"command":"ls"}')]),
+                        gm_completed(gm_usage(9, 9)))
+        for label, lines, kinds in (("parallel fixture", fx["parallel"], ["tool_use", "tool_use"]),
+                                    ("text, then two tools", lead, ["text", "tool_use", "tool_use"])):
+            calls = gm_fx_calls(lines)
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE)
+            blocks = gg_blocks(run["events"])
+            if [b["type"] for b in blocks] != kinds:
+                problems.append("%s: blocks %s, expected %s" % (label, [b["type"] for b in blocks], kinds))
+            else:
+                for call, block in zip(calls, [b for b in blocks if b["type"] == "tool_use"]):
+                    problems += gm_tool_check("%s, %s" % (label, call["name"]), block, call)
+            problems += gg_complete(label, run, "tool_use")
+            shown.append("%s -> %s" % (label, [b.get("name") or b["type"] for b in blocks]))
+        return problems, ["order       : " + s for s in shown] + [GM_DEFENSIVE]
+
+    def m8():
+        problems, shown = [], []
+        for label, args in (("an unterminated object", '{"file_path": '), ("an array", "[1,2]"),
+                            ("a string", '"tf m8"'), ("a number", "3"), ("null", "null"), ("NaN", "NaN"),
+                            ("an object holding NaN", '{"d":NaN}'), ("an object holding 1e999", '{"d":1e999}'),
+                            ("arguments as a list", [1, 2])):
+            label = "arguments %s" % label
+            run = drive(gm_lines(gm_created(), *gm_tool_events([(0, "call_tfRead08", "Read", args)]),
+                                 gm_completed(gm_usage(2, 2))))
+            problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_failed(label, run)
+            if any(b["type"] == "tool_use" for b in gg_blocks(run["events"])):
+                problems.append("%s: a tool_use block was emitted for them" % label)
+            _etype, msg = gm_error(run["events"])
+            if not (isinstance(msg, str) and "malformed tool arguments" in msg):
+                problems.append("%s: the error message %r does not say 'malformed tool arguments'"
+                                % (label, gi_redact(str(msg))[:120]))
+            shown.append("%s -> %s" % (label, ev_shape(run["events"])))
+        label = "control: spaced object arguments are re-dumped"
+        call = gm_call("call_tfRead08", "Read", '{"file_path": "/tf/m8",  "n": 1}')
+        run = drive(gm_lines(gm_created(), *gm_tool_events([(0, call["call_id"], "Read", call["arguments"])]),
+                             gm_completed(gm_usage(2, 2))))
+        problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_complete(label, run, "tool_use")
+        blocks = gg_blocks(run["events"])
+        if [b["json"] for b in blocks] != ['{"file_path":"/tf/m8","n":1}']:
+            problems.append("%s: input_json %r, expected the compact re-dump" % (label, [b["json"] for b in blocks]))
+        shown.append("%s -> %s" % (label, ev_shape(run["events"])))
+        return problems, ["args        : " + s for s in shown]
+
+    def m9():
+        problems, shown = [], []
+        for label, reason, stop in (("incomplete, max_output_tokens", "max_output_tokens", "max_tokens"),
+                                    ("incomplete, content_filter", "content_filter", "end_turn")):
+            lines = gm_lines(gm_created(), gm_msg_added(), gm_text("tf m9"),
+                             gm_completed(gm_usage(3, 64), kind="response.incomplete", status="incomplete",
+                                          incomplete_details={"reason": reason}))
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE)
+            problems += gg_complete(label, run, stop)
+            shown.append("%s -> %r" % (label, ((gg_message_delta(run["events"]) or {}).get("delta") or {})
+                                       .get("stop_reason")))
+        return problems, ["stop_reason : " + s for s in shown]
+
+    def m10():
+        early = fx_or([GM_DEFENSIVE])
+        if early:
+            return early
+        run = drive(fx["failed"])
+        problems = gg_wellformed("failed fixture", run, requested=GM_ROUTE) + gg_failed("failed fixture", run)
+        etype, msg = gm_error(run["events"])
+        if etype != "rate_limit_error":
+            problems.append("failed fixture: error.type %r, expected rate_limit_error (usage_limit_reached)" % (etype,))
+        if b"tf m10 partial" not in run["out"]:
+            problems.append("failed fixture: the text before response.failed never reached the client")
+        if run["end"]:
+            problems.append("failed fixture: finish() after the error returned %d byte(s)" % len(run["end"]))
+        return problems, ["client      : %s" % ev_shape(run["events"]),
+                          "error       : %r %r" % (etype, gi_redact(str(msg))[:80]), GM_DEFENSIVE]
+
+    def m11():
+        problems, shown = [], []
+        table = [("code %s" % code, {"type": "error", "code": code, "message": "tf m11 " + code, "param": None},
+                  "rate_limit_error") for code in GM_RS_429]
+        table += [("error.code usage_not_included",
+                   {"type": "error", "error": {"type": "tf", "code": "usage_not_included", "message": "tf m11 nested"}},
+                   "rate_limit_error"),
+                  ("response.failed, response.error.code rate_limit_exceeded",
+                   gm_completed(None, kind="response.failed", status="failed",
+                                error={"code": "rate_limit_exceeded", "message": "tf m11 failed"}),
+                   "rate_limit_error"),
+                  ("code subscription_sharing_route_not_supported",
+                   {"type": "error", "code": "subscription_sharing_route_not_supported", "message": "tf m11 route"},
+                   "permission_error"),
+                  ("an unknown code", {"type": "error", "code": "tf_unknown_code", "message": "tf m11 unknown"},
+                   "api_error")]
+        for label, event, want in table:
+            lines = gm_lines(gm_created(), gm_msg_added(), gm_text("tf m11 before"), event,
+                             gm_text("tf m11 after"), gm_completed(gm_usage(1, 2)))
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_failed(label, run)
+            etype, _msg = gm_error(run["events"])
+            if etype != want:
+                problems.append("%s: error.type %r, expected %s" % (label, etype, want))
+            if b"tf m11 before" not in run["out"]:
+                problems.append("%s: the text before the error never reached the client" % label)
+            if b"tf m11 after" in run["out"]:
+                problems.append("%s: text after the error was emitted" % label)
+            shown.append("%s -> %r" % (label, etype))
+        return problems, ["error       : " + s for s in shown]
+
+    def m12():
+        problems, shown = [], []
+        for label, lines, completes in (
+                ("text, then EOF (no terminal event)",
+                 gm_lines(gm_created(), gm_msg_added(), gm_text("tf m12"), gm_text(" more")), False),
+                ("only response.created, then EOF", gm_lines(gm_created()), False),
+                ("control: response.completed, then EOF",
+                 gm_lines(gm_created(), gm_msg_added(), gm_text("tf m12"), gm_completed(gm_usage(2, 3))), True)):
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE)
+            if completes:
+                problems += gg_complete(label, run, "end_turn")
+            else:
+                problems += gg_failed(label, run)
+                _etype, msg = gm_error(run["events"])
+                if not (isinstance(msg, str) and "ended the stream early" in msg):
+                    problems.append("%s: the error message %r does not say 'ended the stream early' (KD-7)"
+                                    % (label, gi_redact(str(msg))[:120]))
+            shown.append("%s -> %s" % (label, ev_shape(run["events"])))
+        return problems, ["eof         : " + s for s in shown]
+
+    def m13():
+        problems, shown = [], []
+        for label, bad in (("not JSON", "data: {not json"),
+                           ("a truncated object", 'data: {"type":"response.output_text.delta","delta":"tf')):
+            lines = gm_lines(gm_created(), gm_msg_added(), gm_text("tf m13 before"),
+                             ["event: response.output_text.delta", bad, ""],
+                             gm_text("tf m13 after"), gm_completed(gm_usage(1, 1)))
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_failed(label, run)
+            _etype, msg = gm_error(run["events"])
+            if not (isinstance(msg, str) and "malformed stream event" in msg):
+                problems.append("%s: the error message %r does not say 'malformed stream event'"
+                                % (label, gi_redact(str(msg))[:120]))
+            if b"tf m13 before" not in run["out"]:
+                problems.append("%s: the text before the bad event never reached the client" % label)
+            if b"tf m13 after" in run["out"]:
+                problems.append("%s: text after the bad event was emitted" % label)
+            shown.append("%s -> %s" % (label, ev_shape(run["events"])))
+        return problems, ["data        : " + s for s in shown]
+
+    def m14():
+        problems = []
+        head = gm_lines(gm_created(), gm_msg_added(), gm_text("tf m14 before"))
+        # Over: data lines of GM_EVENT_LINE bytes each, one event, until the event passes the limit.
+        n = event_limit // GM_EVENT_LINE + 1
+        start = 'data: {"type":"response.output_text.delta","item_id":"msg_tf_m_inline","output_index":0,' \
+                '"content_index":0,"delta":"'
+        big = ["event: response.output_text.delta"]
+        for i in range(n):
+            big.append(("data: " if i else start) + "x" * GM_EVENT_LINE + ('"}' if i == n - 1 else ""))
+        big.append("")
+        lines = head + big + gm_lines(gm_text("tf m14 after"), gm_completed(gm_usage(1, 1)))
+        crossing = len(head) + n             # the index in lines of the data line that passes the limit
+        run = drive(lines)
+        problems += gg_wellformed("over the event limit", run, requested=GM_ROUTE)
+        problems += gg_failed("over the event limit", run)
+        first = gg_first_error_feed(run)
+        if first is None or first > crossing:
+            problems.append("over the event limit: the error came at line %s, expected by line %d (the data line "
+                            "that passed %d bytes, not the blank line after it)" % (first, crossing, event_limit))
+        if len(run["out"]) > GG_LEAK_BOUND:
+            problems.append("over the event limit: %d bytes reached the client" % len(run["out"]))
+        if b"tf m14 after" in run["out"]:
+            problems.append("over the event limit: text after the refused event was emitted")
+        over = "over: %d data line(s) of %d bytes in one event (limit %d) -> %s" % (
+            n, GM_EVENT_LINE, event_limit, ev_shape(run["events"]))
+        # Control: one event of two data lines, together under the limit, joined with "\n" (JSON whitespace).
+        half = (event_limit - 2 * 1024 * 1024) // 2
+        control = ["event: response.output_text.delta", start + "y" * half + '",',
+                   'data: "tf_pad":"' + "z" * half + '"}', ""]
+        run = drive(head + control + gm_lines(gm_completed(gm_usage(1, 1))))
+        label = "control: two data lines, %d bytes in one event" % (2 * half)
+        problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_complete(label, run, "end_turn")
+        texts = [t for b in gg_blocks(run["events"]) for t in b["texts"]]
+        if sum(len(t or "") for t in texts) != len("tf m14 before") + half:
+            problems.append("%s: %d text character(s) reached the client, expected %d"
+                            % (label, sum(len(t or "") for t in texts), len("tf m14 before") + half))
+        if b"zzzz" in run["out"]:
+            problems.append("%s: the unknown tf_pad value reached the client" % label)
+        return problems, ["limit       : event_limit = %d (profile row codex)" % event_limit,
+                          "event       : " + over, "event       : %s -> %s" % (label, ev_shape(run["events"]))]
+
+    def m15():
+        problems, shown = [], []
+        half = tool_limit // 2
+        for label, calls in (("one call of limit + 1 argument bytes",
+                              [(0, "call_tfWrite15a", gg_fragments(tool_limit + 1, False))]),
+                             ("two calls of limit + 1 argument bytes together",
+                              [(0, "call_tfWrite15b", gg_fragments(half, False)),
+                               (1, "call_tfWrite15c", gg_fragments(tool_limit - half + 1, False))])):
+            lines, marks, running = gm_lines(gm_created()), [], 0
+            for index, call_id, frags in calls:
+                lines += gm_ev(gm_call_added(index, call_id, "Write"))
+                for frag in frags:
+                    running += len(frag.encode("utf-8"))
+                    marks.append((len(lines) + 1, running))       # the data line of this delta event
+                    lines += gm_ev(gm_args(index, call_id, frag))
+                lines += gm_ev(gm_call_done(index, call_id, "Write", "{}"))
+            lines += gm_ev(gm_completed(gm_usage(2, 2)))
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_failed(label, run)
+            crossing, first = gg_crossing(marks, tool_limit), gg_first_error_feed(run)
+            # The event is dispatched on its blank line, one line after the data line that crossed.
+            if first is None or crossing is None or first > crossing + 1:
+                problems.append("%s: the error came at line %s, expected by line %s (the delta that crossed "
+                                "the cap, NFR-2b)" % (label, first, None if crossing is None else crossing + 1))
+            if len(run["out"]) > GG_LEAK_BOUND:
+                problems.append("%s: %d bytes reached the client" % (label, len(run["out"])))
+            shown.append("%s (%d bytes) -> %s" % (label, running, ev_shape(run["events"])[:80]))
+        args = "".join(gg_fragments(tool_limit // 4, True))
+        label = "control: one call of limit / 4 argument bytes"
+        lines = gm_lines(gm_created(), gm_call_added(0, "call_tfWrite15d", "Write"),
+                         *[gm_args(0, "call_tfWrite15d", f) for f in gg_fragments(tool_limit // 4, True)],
+                         gm_call_done(0, "call_tfWrite15d", "Write", args), gm_completed(gm_usage(2, 2)))
+        run = drive(lines)
+        problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_complete(label, run, "tool_use")
+        blocks = gg_blocks(run["events"])
+        if len(blocks) != 1 or len(blocks[0]["json"]) != len(args):
+            problems.append("%s: tool block(s) %s, expected one carrying all %d bytes"
+                            % (label, [len(b["json"]) for b in blocks], len(args)))
+        shown.append("%s -> %s" % (label, ev_shape(run["events"])[:80]))
+        for label, n, fits in (("count + 1 calls", tool_count + 1, False), ("control: count calls", tool_count, True)):
+            lines = gm_lines(gm_created(), *gm_tool_events([(i, "call_tfC%05d" % i, "Read", "{}") for i in range(n)]),
+                             gm_completed(gm_usage(2, 2)))
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE)
+            if fits:
+                problems += gg_complete(label, run, "tool_use")
+                if len(gg_blocks(run["events"])) != n:
+                    problems.append("%s: %d block(s), expected %d" % (label, len(gg_blocks(run["events"])), n))
+            else:
+                problems += gg_failed(label, run)
+                added = [i for i, line in enumerate(lines)
+                         if line.startswith("data: ") and '"type":"response.output_item.added"' in line]
+                first = gg_first_error_feed(run)
+                if first is None or first > added[-1] + 1:
+                    problems.append("%s: the error came at line %s, expected by line %d (the output_item.added "
+                                    "of call %d)" % (label, first, added[-1] + 1, n))
+            shown.append("%s (%d) -> %s" % (label, n, ev_shape(run["events"])[:80]))
+        return problems, (["limit       : _RT_BUFFERED_TOOL_LIMIT = %d, _RT_BUFFERED_TOOL_COUNT = %d"
+                           % (tool_limit, tool_count)] + ["tools       : " + s for s in shown])
+
+    def m16():
+        unknown = [{"type": "response.tf_future_event", "tf_value": GM_UNKNOWN[0]},
+                   {"type": "response.content_part.added", "item_id": "msg_tf_m_inline", "output_index": 0,
+                    "content_index": 0, "part": {"type": "output_text", "text": GM_UNKNOWN[1], "annotations": []}},
+                   {"type": "response.output_text.done", "item_id": "msg_tf_m_inline", "output_index": 0,
+                    "content_index": 0, "text": GM_UNKNOWN[2]}]
+        plain = [gm_created(), gm_msg_added(), gm_text("tf m16 a"), gm_text(" tf m16 b"),
+                 gm_msg_done("tf m16 a tf m16 b"), gm_completed(gm_usage(4, 5))]
+        mixed = plain[:3] + unknown[:2] + plain[3:4] + unknown[2:] + plain[4:]
+        base = drive(gm_lines(*plain))
+        run = drive(gm_lines(*mixed))
+        problems = gg_wellformed("without unknown events", base, requested=GM_ROUTE)
+        problems += gg_wellformed("with unknown events", run, requested=GM_ROUTE)
+        if gg_strip_id(run["events"]) != gg_strip_id(base["events"]):
+            problems.append("with unknown events the client sees %s, without them %s"
+                            % (ev_shape(run["events"]), ev_shape(base["events"])))
+        leaked = [v for v in GM_UNKNOWN if v.encode("ascii") in run["out"]]
+        if leaked:
+            problems.append("an unknown event's value reached the client: %s" % leaked)
+        problems += gg_complete("with unknown events", run, "end_turn")
+        counted = (getattr(run["tr"], "ignored_events", None), getattr(base["tr"], "ignored_events", None))
+        if not all(isinstance(c, int) and not isinstance(c, bool) for c in counted) \
+                or counted[0] - counted[1] != len(unknown):
+            problems.append("ignored_events %r with and %r without the %d unknown events, expected a difference "
+                            "of %d" % (counted[0], counted[1], len(unknown), len(unknown)))
+        return problems, ["client      : %s" % ev_shape(run["events"]),
+                          "ignored     : ignored_events %r (with) / %r (without)" % counted]
+
+    def m17():
+        problems, shown = [], []
+        for label, usage, kind, stop in (
+                ("cached 100 of 120", gm_usage(120, 9, 100), "response.completed", "end_turn"),
+                ("no input_tokens_details", gm_usage(50, 7), "response.completed", "end_turn"),
+                ("cached above input (clamped at 0)", gm_usage(10, 3, 30), "response.completed", "end_turn"),
+                ("cached 0", gm_usage(33, 4, 0), "response.completed", "end_turn"),
+                ("on response.incomplete", gm_usage(40, 64, 8), "response.incomplete", "max_tokens")):
+            extra = {"incomplete_details": {"reason": "max_output_tokens"}} if kind == "response.incomplete" else {}
+            lines = gm_lines(gm_created(), gm_msg_added(), gm_text("tf m17"),
+                             gm_completed(usage, kind=kind, status=kind.split(".")[1], **extra))
+            run = drive(lines)
+            want = gm_want_usage(usage)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_complete(label, run, stop)
+            problems += gm_usage_check(label, run, want)
+            shown.append("%s -> %r" % (label, (gg_message_delta(run["events"]) or {}).get("usage")))
+        return problems, ["usage       : " + s for s in shown]
+
+    def m18():
+        problems, shown = [], []
+        for label, event in (("error event", {"type": "error", "code": "server_error",
+                                              "message": "tf m18 upstream " + TF_KEY_PASS}),
+                             ("response.failed", gm_completed(None, kind="response.failed", status="failed",
+                                                              error={"code": "usage_limit_reached",
+                                                                     "message": "tf m18 failed " + TF_ROUTER_TOKEN}))):
+            run = drive(gm_lines(gm_created(), gm_msg_added(), gm_text("tf m18"), event))
+            problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_failed(label, run)
+            _etype, msg = gm_error(run["events"])
+            if not isinstance(msg, str) or gi_redact(msg) != msg or "[redacted]" not in msg:
+                problems.append("%s: the error message %r is not the upstream text scrubbed (KD-9)"
+                                % (label, gi_redact(str(msg))[:160]))
+            if gi_redact(run["out"].decode("utf-8", "replace")) != run["out"].decode("utf-8", "replace"):
+                problems.append("%s: a sentinel reached the client bytes" % label)
+            shown.append("%s -> %r" % (label, gi_redact(str(msg))[:80]))
+        return problems, ["error       : " + s for s in shown]
+
+    def m19():
+        early = fx_or([GM_DEFENSIVE])
+        if early:
+            return early
+        problems, shown = [], []
+        mixed = gm_lines(gm_created(), gm_msg_added(0), gm_text("tf m19 "), gm_text("ä ✓"),
+                         gm_msg_done("tf m19 ä ✓", 0),
+                         *gm_tool_events([(1, "call_tf|m19", "Read", '{"file_path": "/tf/m19"}')]),
+                         gm_completed(gm_usage(70, 11, 20)))
+        inline = {"text, then a hashed-id tool": mixed}
+        cases = [(key, fx[key], raw[key]) for key in ("text", "tool", "parallel", "failed")]
+        cases += [(key, lines, ("\n".join(lines) + "\n").encode("utf-8")) for key, lines in inline.items()]
+        for key, lines, body in cases:
+            enc = drive(lines)
+            collector = mod._RtMessageCollector(GM_MSG_ID, GM_ROUTE)
+            col = gg_drive(translator(sink=collector), lines)
+            label = "%s through both sinks" % key
+            if col["out"]:
+                problems.append("%s: the collector sink returned %d byte(s), expected none" % (label, len(col["out"])))
+            if getattr(collector, "started", None) is not True or getattr(collector, "closed", None) is not True:
+                problems.append("%s: collector started/closed %r/%r, expected True/True"
+                                % (label, getattr(collector, "started", None), getattr(collector, "closed", None)))
+            failed = getattr(collector, "failed", None)
+            etype, emsg = gm_error(enc["events"])
+            if etype is not None:
+                if failed != (etype, emsg):
+                    problems.append("%s: collector.failed %r, expected the encoder's error %r"
+                                    % (label, failed, (etype, gi_redact(str(emsg))[:80])))
+            else:
+                folded = gm_fold(enc["events"], GM_MSG_ID)
+                got = collector.message()
+                if failed:
+                    problems.append("%s: collector.failed %r on a completed stream" % (label, failed))
+                if not isinstance(got, dict) or set(got) != GM_MESSAGE_KEYS:
+                    problems.append("%s: message() keys %s, expected %s"
+                                    % (label, sorted(got) if isinstance(got, dict) else type(got).__name__,
+                                       sorted(GM_MESSAGE_KEYS)))
+                elif got != folded:
+                    problems.append("%s: message() %s differs from the folded stream %s"
+                                    % (label, json.dumps(got)[:200], json.dumps(folded)[:200]))
+            # The non-stream path is the same state machine: json_response(200, the SSE body).
+            adapter = (getattr(mod, "ADAPTERS", None) or {}).get("codex") or mod.CodexAdapter()
+            answer = adapter.json_response(gm_inbound(mod, stream=False), 200, body)
+            jlabel = "%s, json_response 200" % key
+            if etype is not None:
+                problems += gm_envelope(jlabel, answer, 429 if etype == "rate_limit_error" else 502,
+                                        etype if etype == "rate_limit_error" else "api_error")
+            elif not (isinstance(answer, tuple) and len(answer) == 2 and isinstance(answer[1], dict)):
+                problems.append("%s: returned %s, expected (200, message)" % (jlabel, type(answer).__name__))
+            else:
+                status, obj = answer
+                if status != 200 or not (isinstance(obj.get("id"), str) and GG_MSG_ID_RE.match(obj["id"])):
+                    problems.append("%s: status %r, id %r, expected 200 and a msg_ id" % (jlabel, status, obj.get("id")))
+                if dict(obj, id=GM_MSG_ID) != gm_fold(enc["events"], GM_MSG_ID):
+                    problems.append("%s: %s differs from the folded stream" % (jlabel, json.dumps(obj)[:200]))
+            shown.append("%s -> %s" % (key, "failed %r" % (etype,) if etype else ev_shape(enc["events"])[:80]))
+        return problems, ["sinks       : " + s for s in shown] + [GM_DEFENSIVE]
+
+    def m20():
+        if "json_response" not in vars(mod.ResponsesAdapter):
+            return ["ResponsesAdapter defines no json_response (Step 10 not landed)"], []
+        problems, shown = [], []
+        relogin = GM_RELOGIN + GM_BACKEND
+        table = (("detail string, 400", "codex", 400, {"detail": "tf m20 detail " + TF_KEY_PASS},
+                  400, "invalid_request_error", "tf m20 detail"),
+                 ("error.code usage_limit_reached, 429", "codex", 429,
+                  {"error": {"code": "usage_limit_reached", "message": "tf m20 usage"}}, 429, "rate_limit_error", None),
+                 ("error.code usage_not_included on a 400", "openai-oauth", 400,
+                  {"error": {"code": "usage_not_included", "message": "tf m20 plan"}}, 429, "rate_limit_error", None),
+                 ("403 subscription_sharing_route_not_supported", "openai-oauth", 403,
+                  {"error": {"code": "subscription_sharing_route_not_supported", "message": "tf m20 route"}},
+                  403, "permission_error", None),
+                 ("401 on codex (OAuth)", "codex", 401, {"error": {"code": "invalid_token", "message": "tf m20 401"}},
+                  401, "authentication_error", relogin),
+                 ("401 on openai-oauth", "openai-oauth", 401, {"detail": "Unauthorized"},
+                  401, "authentication_error", relogin),
+                 ("401 on openai-apikey", "openai-apikey", 401,
+                  {"error": {"message": "tf m20 bad key", "type": "invalid_request_error", "code": "invalid_api_key"}},
+                  502, "api_error", None),
+                 ("403 on openai-apikey, no code", "openai-apikey", 403, {"error": {"message": "tf m20 forbidden"}},
+                  502, "api_error", None),
+                 ("500, error.type only", "codex", 500,
+                  {"error": {"type": "server_error", "message": "tf m20 server " + TF_ROUTER_TOKEN}},
+                  502, "api_error", "tf m20 server"),
+                 ("503, not JSON", "codex", 503, b"<html>tf m20</html>", 529, "overloaded_error", None))
+        for label, profile, status, body, want_status, want_type, needle in table:
+            kind = GK_KIND[profile]
+            adapter = (getattr(mod, "ADAPTERS", None) or {}).get(kind) or getattr(mod, GK_ADAPTER[kind])()
+            data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+            got = adapter.json_response(gm_inbound(mod, profile, stream=False), status, data)
+            problems += gm_envelope("%s (%s)" % (label, profile), got, want_status, want_type, needle)
+            shown.append("%s -> %r" % (label, got[0] if isinstance(got, tuple) and got else got))
+        return problems, ["mapping     : " + s for s in shown]
+
+    def m21():
+        # SIWC returns a namespaced tool's function_call with "namespace" next to "name": the
+        # client's tool is the plain name (CC never sees the namespace).  A foreign namespace is
+        # stripped too (the plan does not say to refuse it).
+        calls = [dict(gm_call("call_tfNsRead21", "Read", '{"file_path":"/tf/m21"}'), namespace=GM_NS_OURS),
+                 dict(gm_call("call_tfNsBash21", "Bash", '{"command":"ls"}'), namespace=GM_NS_FOREIGN)]
+        events = [gm_created(), gm_msg_added(0), gm_text("tf m21"), gm_msg_done("tf m21", 0)]
+        for index, call in enumerate(calls, start=1):
+            events.append({"type": "response.output_item.added", "output_index": index,
+                           "item": dict(call, arguments="", status="in_progress")})
+            events.append(gm_args(index, call["call_id"], call["arguments"]))
+            events.append({"type": "response.output_item.done", "output_index": index, "item": call})
+        events.append(gm_completed(gm_usage(12, 5)))
+        lines = gm_lines(*events)
+        problems, shown = [], []
+        run = drive(lines, profile="openai-oauth")
+        problems += gg_wellformed("namespaced calls", run, requested=GM_ROUTE)
+        blocks = gg_blocks(run["events"])
+        if [b["type"] for b in blocks] != ["text", "tool_use", "tool_use"]:
+            problems.append("stream: blocks %s, expected [text, tool_use, tool_use]" % [b["type"] for b in blocks])
+        else:
+            for call, block in zip(calls, blocks[1:]):
+                problems += gm_tool_check("stream, %s (namespace %s)" % (call["name"], call["namespace"]), block, call)
+        problems += gg_complete("namespaced calls", run, "tool_use")
+        for ns in (GM_NS_OURS, GM_NS_FOREIGN):
+            if ns.encode("ascii") in run["out"]:
+                problems.append("stream: the namespace %r reached the client" % ns)
+        shown.append("stream     -> %s" % [b.get("name") or b["type"] for b in blocks])
+        # The non-stream path: the same state machine through the openai adapter's json_response.
+        want = [{"type": "text", "text": "tf m21"}] + [
+            {"type": "tool_use", "id": "toolu_" + c["call_id"], "name": c["name"], "input": json.loads(c["arguments"])}
+            for c in calls]
+        adapter = (getattr(mod, "ADAPTERS", None) or {}).get("openai") or getattr(mod, "OpenaiAdapter")()
+        answer = adapter.json_response(gm_inbound(mod, "openai-oauth", stream=False), 200,
+                                       ("\n".join(lines) + "\n").encode("utf-8"))
+        if not (isinstance(answer, tuple) and len(answer) == 2 and isinstance(answer[1], dict)):
+            problems.append("json_response 200: returned %s, expected (200, message)" % type(answer).__name__)
+        else:
+            status, obj = answer
+            if status != 200 or obj.get("content") != want:
+                problems.append("json_response 200: %r %s, expected 200 with content %s"
+                                % (status, json.dumps(obj.get("content", obj))[:240], json.dumps(want)[:240]))
+            if obj.get("stop_reason") != "tool_use":
+                problems.append("json_response 200: stop_reason %r, expected tool_use" % obj.get("stop_reason"))
+            if any(ns in json.dumps(obj) for ns in (GM_NS_OURS, GM_NS_FOREIGN)):
+                problems.append("json_response 200: a namespace reached the message")
+            shown.append("non-stream -> %s" % [c.get("name") or c.get("type") for c in obj.get("content") or []])
+        return problems, ["namespaced  : " + s for s in shown] + [GM_DEFENSIVE]
+
+    def needs(fn, *names):
+        """The case, failing once with the missing names before it runs (one red line, not one per call)."""
+        def case():
+            missing = gm_need(mod, names)
+            return (missing, []) if missing else fn()
+        return case
+
+    tr, col = "ResponsesStreamTranslator", "_RtMessageCollector"
+    fns = (needs(m1, tr), needs(m2, tr, col), needs(m3, tr), needs(m4, tr), needs(m5, tr),
+           needs(m6, tr), needs(m7, tr), needs(m8, tr), needs(m9, tr), needs(m10, tr),
+           needs(m11, tr), needs(m12, tr), needs(m13, tr), needs(m14, tr), needs(m15, tr), needs(m16, tr),
+           needs(m17, tr), needs(m18, tr), needs(m19, tr, col), needs(m20, "ResponsesAdapter"),
+           needs(m21, tr, "OpenaiAdapter"))
+    try:
+        for cid, fn in zip(GM_CASES, fns):
+            try:
+                results[cid] = fn()
+            except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                results[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+    except Exception as exc:  # noqa: BLE001
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    else:
+        setup = "case did not run"
+    for cid, mid in zip(GM_CASES, GM_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GM, cid, problems, detail=["case        : " + mid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
+# Group N: token store
+# ---------------------------------------------------------------------------
+
+GN = "N. token store"
+
+# Plan Step 11, the codex part of the token store; N19 (openai api_key) with
+# Plan Step 15 (task-047); N8, N18 and the openai-oauth half of N17 with Plan
+# Step 16 (task-049).  Every declared id is recorded exactly once.
+GN_CASES = (
+    "first request: one refresh POST",   # N1
+    "in expiry: no POST; {} -> 401",     # N2
+    "8 concurrent: one refresh POST",    # N3
+    "401 -> forced refresh -> 200",      # N4
+    "401, refresh, 401 -> 401 login",    # N5
+    "4 concurrent 401s: one refresh",    # N6
+    "invalid_grant: 401, not cached",    # N7
+    "oai reused: disk token adopted",    # N8
+    "two backends: both persisted",      # N9
+    "token with space or CR -> 502",     # N10
+    "loopback auth, no allow -> 502",    # N11
+    "auth redirect -> 502",              # N12
+    "auth stall -> 504, then recovers",  # N13
+    "codex header set and order",        # N14
+    "codex stream: text and a tool",     # N15
+    "codex non-stream: one JSON",        # N16
+    "no-CT 2xx relayed; codex JSON 502",  # N17 (codex and openai-oauth halves)
+    "oai refresh form; wrong aud -> 502",  # N18
+    "openai key: sampling, 429 retry",   # N19
+    "8 MiB-1 codex ok, 1 MiB+1 mistral", # N20
+    "login while running: no restart",   # N21
+    "lock wait bounded -> 503",          # N22
+    "failure cached 10 s: one POST",     # N23
+    "closing -> 529 within 0.5 s",       # N24
+    "SIGTERM in token body: exits",      # N25
+    "bad disk token or claim refused",   # N26
+    "auth spec inherits trust only",     # N27
+    "token error text never logged",     # N28
+    "codex stream == non-stream request",  # N29
+    "codex stream, upstream 400 relayed",  # N30
+    "oai key: learned temperature drop",   # N31
+    "oai key: override dropped, 400 kept",  # N32
+    "login mid-refresh: disk kept",      # N33
+    "mistral: learned effort, 1 retry",  # N34
+    "mistral: effort 400s relayed",      # N35
+)
+GN_IDS = ("N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12", "N13",
+          "N14", "N15", "N16", "N17", "N18", "N19", "N20", "N21", "N22", "N23", "N24", "N25", "N26", "N27", "N28",
+          "N29", "N30", "N31", "N32", "N33", "N34", "N35")
+
+GN_BACKEND = "tf-codex-n"                   # the OAuth backend every N case routes to
+GN_BACKEND_2 = "tf-codex-n2"                # N9, N10: a second OAuth backend on the same peers
+GN_EMPTY = "tf-codex-n-empty"               # N2: an `oauth: {}` backend (never logged in)
+GN_MODEL = "gpt-tf-n"
+GN_EXPIRES_IN = 3600                        # every minted access token: far outside the 5-minute skew
+GN_TOKEN_PATH = "/oauth/token"              # the codex provider row's token_url path, under auth_base_url
+GN_HINT = "llm-router.py login --backend %s"     # both login hints (KD-16): "needs a login" and "run ..."
+GN_REFRESH_FAILED = "token refresh failed (invalid_response)"
+GN_CONCURRENT = 8                           # N3: requests racing for the first refresh
+GN_STORM = 4                                # N6: requests that all get 401 with the same stale token
+GN_AUTH_DELAY_S = 1.0                       # N3, N9: the auth peer holds its answer this long
+GN_GATE_S = 10.0                            # N6: the upstream holds each stale 401 until all four arrived
+GN_JOIN_S = HTTP_TIMEOUT_S + 5.0            # a batch of concurrent requests must finish within this
+GN_IDLE_FALLBACK_S = 15.0                   # _RT_OAUTH_IDLE_S per the plan, when the module lacks it
+GN_FAIL_CACHE_FALLBACK_S = 10.0             # _RT_OAUTH_FAIL_CACHE_S per the plan, when the module lacks it
+# N13 runs in-process (FastRouter, a private module) with the OAuth idle timeout and the
+# negative-cache window patched; a held lock would cost connect_timeout (10 s) + idle.
+GN_N13_IDLE_S = 0.3                         # N13: _RT_OAUTH_IDLE_S (15 s), patched
+GN_N13_CACHE_S = 1.0                        # N13: _RT_OAUTH_FAIL_CACHE_S (10 s), patched
+GN_STALL_EXTRA_S = 1.0                      # N13: the auth peer stalls this long past the idle timeout
+GN_STALL_SLACK_S = 1.0                      # N13: the 504 must land within the idle timeout + this
+GN_QUICK_S = 0.5                            # N13: a request inside the negative-cache window answers within this
+GN_CACHE_SLACK_S = 0.2                      # N13: the third request waits the window out by this much more
+GN_SETTLE_S = 0.2                           # N2, N11: a late peer accept would have landed within this
+GN_UP_401 = ("respond_json", 401, {"error": {"message": "tf n: the access token expired",
+                                             "type": "invalid_request_error", "code": "token_expired"}})
+# N14-N17, N20: the codex wire (Plan Step 11, FR-7, KD-2).  The identity values are the
+# plan's (M1-measured omp v18.6.1), pinned here as literals, never read from the module.
+GN_CODEX_PATH = "/codex/responses"
+GN_MISTRAL_PATH = "/v1/chat/completions"
+GN_MISTRAL = "tf-mistral-n"                 # N20: a mistral backend on the same upstream peer
+GN_UA = "omp/18.6.1"
+GN_ORIGINATOR = "omp"
+GN_VERSION = "0.159.0"
+GN_BETA = "responses=experimental"
+GN_RESIDENCY = "tf-n14-residency"           # N14: the access token's chatgpt_data_residency claim
+GN_SESSION_RE = re.compile(r"^lr-[A-Za-z0-9]{24}$")    # session_id == the body's prompt_cache_key
+# The whole upstream head of a codex request, in wire order: Host (http.client's
+# putrequest), the ten of Plan Step 11, then _rt_send's own two.
+GN_HEADER_ORDER = ("host", "content-type", "accept", "user-agent", "chatgpt-account-id",
+                   "x-openai-internal-codex-residency", "openai-beta", "originator", "version",
+                   "session_id", "authorization", "accept-encoding", "content-length")
+GN_TEXT = "tf n15 text"                     # N15, N16: the text block
+GN_NO_STREAM = "did not answer with an event stream"   # N17: _relay_stream's refusal
+GN_UP_400_MSG = "tf n30: the upstream refused this request"   # N30: the upstream 400's message
+# N19: an openai backend with api_key (profile openai-apikey, Plan Step 15, KD-18).
+GN_OPENAI = "tf-openai-n"
+GN_OPENAI_PATH = "/v1/responses"            # the openai-apikey row's path, under base_url
+GN_OPENAI_SAMPLING = {"temperature": 0.3, "top_p": 0.9}
+GN_OPENAI_MAX = 64                          # the request's max_tokens -> max_output_tokens
+GN_OPENAI_RETRY = "7"                       # the upstream 429's Retry-After, relayed as is
+GN_OPENAI_429 = {"error": {"message": "tf n19: you exceeded your current quota", "type": "insufficient_quota",
+                           "param": None, "code": "usage_limit_reached"}}
+# N31, N32 (live finding 2026-10-07): a reasoning model refuses temperature; the router drops it.
+GN_SAMPLING_ROUTE = "claude-tf-n-reasoning"
+GN_SAMPLING_ROUTE_OTHER = "claude-tf-n-sampled"
+GN_SAMPLING_ROUTE_BAD = "claude-tf-n-badvalue"
+GN_SAMPLING_MODEL = "gpt-tf-n-reasoning"    # 400 Unsupported parameter to a body carrying temperature
+GN_SAMPLING_OTHER = "gpt-tf-n-sampled"      # the same backend, takes temperature
+GN_SAMPLING_BAD = "gpt-tf-n-badvalue"       # always 400, a refusal that is not "unsupported"
+GN_SAMPLING_OVERRIDE = 0.7                  # N32: the route's options.temperature
+GN_SAMPLING_UNSUPPORTED = {"error": {"message": "Unsupported parameter: 'temperature' is not supported with "
+                                                "this model.", "type": "invalid_request_error",
+                                     "param": "temperature", "code": "unsupported_parameter"}}
+GN_SAMPLING_OTHER_MSG = "tf n32: Invalid value for 'temperature'"
+GN_SAMPLING_OTHER_400 = {"error": {"message": GN_SAMPLING_OTHER_MSG + ": too hot.", "type": "invalid_request_error",
+                                   "param": "temperature", "code": "invalid_value"}}
+# N34, N35 (live finding 2026-10-07): a mistral model refuses reasoning_effort low ("supported
+# values: [high, none]"); the router learns the supported set and retries once with the remap.
+GN_EFFORT_MODEL = "tf-ms-n-effort"          # N34: 400s any effort but high / none, listing [high, none]
+GN_EFFORT_MODEL_S = "tf-ms-n-effort-s"      # N34: the same, learned on the stream path
+GN_EFFORT_UNPARSED = "tf-ms-n-unparsed"     # N35: 400s with an unquoted (unparseable) supported list
+GN_EFFORT_STUBBORN = "tf-ms-n-stubborn"     # N35: 400s every effort, each time listing another value
+GN_EFFORT_STUBBORN_S = "tf-ms-n-stubborn-s"     # N35: the same, on the stream path
+GN_EFFORT_ROUTES = {m: "claude-" + m for m in (GN_EFFORT_MODEL, GN_EFFORT_MODEL_S, GN_EFFORT_UNPARSED,
+                                               GN_EFFORT_STUBBORN, GN_EFFORT_STUBBORN_S)}
+GN_EFFORT_THINKING = {"type": "enabled", "budget_tokens": 2048}     # band "low" (the live 400's request)
+GN_EFFORT_MSG = "reasoning_effort %s is not supported for this model, supported values: [%s]"
+GN_EFFORT_LEARNED = "reasoning_effort learned"   # the router's one INFO line per learn
+# N8, N17 (openai-oauth half), N18: openai backends with an oauth object (profile openai-oauth,
+# Plan Step 16, FR-6).  The values are the openai provider row's, written here, never read
+# from the module; the issued client id and host id are the seed a SIWC login persisted.
+GN_OAI = "tf-oai-n"
+GN_OAI_2 = "tf-oai-n2"                      # N18: the second openai-oauth backend (wrong aud)
+GN_OAI_TOKEN_PATH = "/api/accounts/oauth/token"     # the openai row's token_url path, under auth_base_url
+GN_OAI_RESOURCE = "https://api.openai.com/v1"
+GN_OAI_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+GN_OAI_CLIENT = "oaiapp_tf-n-" + secrets.token_hex(8)        # the issued client id (seed)
+GN_OAI_WRONG_AUD = "oaiapp_tf-n18-other-" + secrets.token_hex(8)
+GN_OAI_HOST_ID = "urn:uuid:0f0e0d0c-0b0a-4908-8706-050403020100"
+GN_OAI_REUSED = {"error": "refresh_token_reused", "error_description": "tf n8: the refresh token was reused"}
+# Headers only the codex row sends (account_header, identity, beta): never on openai-apikey.
+GN_CODEX_ONLY = ("chatgpt-account-id", "x-openai-internal-codex-residency", "openai-beta", "originator",
+                 "version", "session_id")
+GN_LINE_OVER = "sent an SSE line over %d bytes"         # N20: the mistral refusal (_SSE_LINE_LIMIT)
+GN_SSE_LINE_FALLBACK = 1024 * 1024          # _SSE_LINE_LIMIT, when the module lacks it
+GN_RS_LINE_FALLBACK = 8 * 1024 * 1024       # _RT_RS_SSE_LINE_LIMIT, when the module lacks it
+# N22-N24, N26: in-process token stores over a sandbox config; the injected post never connects.
+GN_INPROC_URL = "https://127.0.0.1:9"       # base_url and auth_base_url (never contacted)
+GN_IN_IDLE_S = 0.3                          # N22: _RT_OAUTH_IDLE_S, patched on a private module
+GN_IN_CONNECT_S = 0.2                       # N22: the backend's connect_timeout
+GN_BOUND_LO_S = 0.4                         # N22: the 503 lands after connect + idle (0.5 s) ...
+GN_BOUND_HI_S = 1.5                         # ... and no later than this
+GN_BLOCK_S = 20.0                           # an injected post blocks at most this long
+GN_CLOSE_S = 0.5                            # N24: closing.set() -> 529 within this
+GN_CACHE_BELOW_S = 9.9                      # N23: still inside _RT_OAUTH_FAIL_CACHE_S
+GN_CACHE_ABOVE_S = 10.1                     # N23: past it
+GN_MONO_BASE = 1000.0                       # N23: the fake monotonic clock's start
+GN_RETRY = "a token refresh is in progress"
+GN_SHUTTING = "router shutting down"
+GN_TRANSIENT = "token refresh failed (transient)"
+GN_SEED_ACCOUNT = "acct_tf-n26-seed"        # N26: the seed account_id the bad claim falls back to
+GN_NOSEED = "tf-codex-n-noseed"             # N26: a backend with a seed refresh token, no account_id
+# N25: a token answer whose body never follows its head; SIGTERM meanwhile.
+GN_DRAIN_FALLBACK_S = 3.0                   # _DRAIN_S, when the module lacks it
+GN_EXIT_SLACK_S = 2.0                       # the router exits within _DRAIN_S + this
+GN_BODY_STALL_S = 60.0                      # the auth peer stalls the body this long (never reached)
+GN_TERM_SETTLE_S = 0.5                      # after the POST arrived: the head is read, the body read blocks
+GN_TERM_NEVER = ("pump did not exit", "shutdown drain abandoned")
+GN_STALLED_HEAD = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n"
+                   b"Connection: close\r\n\r\n")
+
+
+def gn_route(name):
+    return "claude-" + name
+
+
+def gn_mint_refresh(tag):
+    """A fresh per-case refresh token (the token rule: printable ASCII, no space, >= 16 chars)."""
+    return "tf-n-%s-refresh-" % tag + secrets.token_hex(16)
+
+
+def gn_mint_access():
+    """A fresh per-case codex access token: an unsigned JWT carrying the account claim."""
+    return tf_jwt({"https://api.openai.com/auth": {"chatgpt_account_id": TF_ACCOUNT_CODEX}})
+
+
+def gn_token_steps(access, refresh=None, delay=0.0):
+    """The auth peer's 200 token answer (no refresh_token: the grant keeps the old one)."""
+    obj = {"access_token": access, "token_type": "Bearer", "expires_in": GN_EXPIRES_IN}
+    if refresh is not None:
+        obj["refresh_token"] = refresh
+    return ([("stall", delay)] if delay else []) + [("respond_json", 200, obj)]
+
+
+def gn_rotating(answers, delay=0.0):
+    """An auth script: connection i gets answers[min(i, last)] = (access, refresh)."""
+    def script(index, _request):
+        access, refresh = answers[min(index, len(answers) - 1)]
+        return gn_token_steps(access, refresh, delay)
+    return script
+
+
+def gn_by_refresh(table, delay=0.0, other=None):
+    """An auth script keyed by the POSTed refresh_token: table[token] = (access, refresh);
+    any other token gets *other* (steps) or a 400 invalid_grant."""
+    def script(_index, request):
+        hit = table.get(gn_form(request).get("refresh_token"))
+        if hit is not None:
+            return gn_token_steps(hit[0], hit[1], delay)
+        return other if other is not None else \
+            [("respond_json", 400, {"error": "invalid_grant", "error_description": "tf n: revoked"})]
+    return script
+
+
+def gn_up_ok(lines):
+    """The upstream's 2xx: the Responses text fixture as an event stream."""
+    return [("respond_sse", list(lines))]
+
+
+def gn_origin(url):
+    """scheme://host:port of *url*: the ID-token issuer when auth_base_url is set (Plan Step 16)."""
+    parts = urllib.parse.urlsplit(url)
+    return "%s://%s" % (parts.scheme, parts.netloc)
+
+
+def gn_oai_backend(rig, refresh, client_id=GN_OAI_CLIENT):
+    """An openai-oauth backend entry on *rig*'s peers, seeded as a SIWC login leaves it."""
+    return {"kind": "openai", "base_url": rig.up.url(), "auth_base_url": rig.auth.url(), "ca_file": rig.ca_file,
+            "oauth": {"refresh_token": refresh, "client_id": client_id, "host_id": GN_OAI_HOST_ID}}
+
+
+def gn_oai_token(issuer, access, refresh, aud=GN_OAI_CLIENT):
+    """The openai auth peer's 200 refresh answer: tokens, scope and an unsigned ID token whose
+    iss is *issuer* (the auth base's origin) and aud *aud* (the issued client id when right)."""
+    id_token = tf_jwt({"iss": issuer, "aud": aud, "exp": int(time.time()) + GN_EXPIRES_IN})
+    return [("respond_json", 200, {"access_token": access, "refresh_token": refresh, "id_token": id_token,
+                                   "token_type": "Bearer", "expires_in": GN_EXPIRES_IN, "scope": GN_OAI_SCOPE})]
+
+
+def gn_oai_form_problems(label, request, refresh):
+    """Problems unless *request* is POST GN_OAI_TOKEN_PATH with a refresh-token form carrying
+    *refresh*, the issued client_id and the row's resource, and no scope (Plan Step 16)."""
+    line = request.get("line") or ""
+    problems = []
+    if line.split(" ")[:2] != ["POST", GN_OAI_TOKEN_PATH]:
+        problems.append("%s: %r, expected POST %s" % (label, line[:80], GN_OAI_TOKEN_PATH))
+    form = gn_form(request)
+    if form.get("grant_type") != "refresh_token":
+        problems.append("%s: grant_type %r, expected refresh_token" % (label, form.get("grant_type")))
+    if form.get("refresh_token") != refresh:
+        problems.append("%s did not carry the expected refresh token (%s)"
+                        % (label, "a different one" if form.get("refresh_token") else "none"))
+    if form.get("client_id") != GN_OAI_CLIENT:
+        problems.append("%s: client_id %r, expected the issued %r" % (label, form.get("client_id"), GN_OAI_CLIENT))
+    if form.get("resource") != GN_OAI_RESOURCE:
+        problems.append("%s: resource %r, expected %r" % (label, form.get("resource"), GN_OAI_RESOURCE))
+    if "scope" in form:
+        problems.append("%s carries scope %r, expected none (a refresh never sends scope)" % (label, form["scope"]))
+    return problems
+
+
+class GnGate:
+    """N6: each arrival waits until *want* have arrived (at most *timeout*), so every
+    stale request is in flight before the first 401 is answered."""
+
+    def __init__(self, want, timeout):
+        self.want, self.timeout, self.count = want, timeout, 0
+        self.cond = threading.Condition()
+
+    def arrive(self):
+        with self.cond:
+            self.count += 1
+            self.cond.notify_all()
+            self.cond.wait_for(lambda: self.count >= self.want, self.timeout)
+
+
+def gn_up_by_bearer(lines, stale, gate=None):
+    """An upstream script: the *stale* bearer gets a 401 (after *gate*), any other the fixture stream."""
+    def script(_index, request):
+        if gn_bearer(request) == "Bearer " + stale:
+            if gate is not None:
+                gate.arrive()
+            return [GN_UP_401]
+        return gn_up_ok(lines)
+    return script
+
+
+def gn_form(request):
+    """The form fields of one recorded token POST ({} when the body is not a form)."""
+    try:
+        return dict(urllib.parse.parse_qsl((request.get("body") or b"").decode("ascii"),
+                                           keep_blank_values=True, strict_parsing=True))
+    except (UnicodeDecodeError, ValueError):
+        return {}
+
+
+def gn_bearer(request):
+    """The Authorization value of one recorded request, or None (or "<n headers>" when repeated)."""
+    values = [v for k, v in request.get("headers") or () if k.lower() == "authorization"]
+    if len(values) > 1:
+        return "<%d headers>" % len(values)
+    return values[0] if values else None
+
+
+def gn_posts(peer):
+    """The form of every token POST the auth peer recorded, in arrival order."""
+    return [gn_form(r) for r in list(peer.requests)]
+
+
+def gn_bearers(peer):
+    return [gn_bearer(r) for r in list(peer.requests)]
+
+
+def gn_names(values, named):
+    """*values* shown by name ("A1", ...) from *named* = [(name, token)]: never the token itself."""
+    lookup = {"Bearer " + token: name for name, token in named}
+    lookup.update({token: name for name, token in named})
+    return [lookup.get(v, "other" if v is not None else "none") for v in values]
+
+
+def gn_post_problems(peer, want, refresh=None):
+    """Problems unless the auth peer saw exactly *want* refresh POSTs to GN_TOKEN_PATH, the
+    i-th carrying refresh[i] (a list; None, or a None entry, skips the token check)."""
+    reqs = list(peer.requests)
+    problems = []
+    if len(reqs) != want:
+        problems.append("%d refresh POST(s) reached the auth peer, expected %d" % (len(reqs), want))
+    for i, request in enumerate(reqs):
+        line = request.get("line") or ""
+        if line.split(" ")[:2] != ["POST", GN_TOKEN_PATH]:
+            problems.append("auth request %d: %r, expected POST %s" % (i, line[:80], GN_TOKEN_PATH))
+        form = gn_form(request)
+        if form.get("grant_type") != "refresh_token":
+            problems.append("auth request %d: grant_type %r, expected refresh_token"
+                            % (i, form.get("grant_type")))
+        if refresh is not None and i < len(refresh) and refresh[i] is not None \
+                and form.get("refresh_token") != refresh[i]:
+            problems.append("auth request %d did not carry the expected refresh token (%s)"
+                            % (i, "a different one" if form.get("refresh_token") else "none"))
+    return problems
+
+
+def gn_answer(label, got, want, etype=None, needle=None):
+    """Problems unless *got* = (status, type, message, body) is *want*; a 200 must be an
+    Anthropic message, an error the envelope of *etype* whose message holds *needle*."""
+    status, got_type, msg, body = got
+    shown = "" if msg is None else " (%s: %r)" % (got_type, gi_redact(msg)[:160])
+    if status != want:
+        return ["%s: status %r, expected %d%s" % (label, status, want, shown)]
+    if want == 200:
+        try:
+            obj = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            obj = None
+        if not isinstance(obj, dict) or obj.get("type") != "message":
+            return ["%s: the 200 body is not an Anthropic message: %r" % (label, gi_redact(gb_text(body))[:120])]
+        return []
+    problems = []
+    if msg is None:
+        return ["%s: the %d body is not an Anthropic error envelope: %r"
+                % (label, want, gi_redact(gb_text(body))[:120])]
+    if etype is not None and got_type != etype:
+        problems.append("%s: error.type %r, expected %r" % (label, got_type, etype))
+    if needle is not None and needle not in msg:
+        problems.append("%s: the message %r does not hold %r" % (label, gi_redact(msg)[:160], needle))
+    return problems
+
+
+def gn_parallel(calls, timeout=GN_JOIN_S):
+    """The results of *calls* run on one thread each, started together; an unfinished or
+    raising call is ("<reason>", None, None, b"")."""
+    out = [("not finished", None, None, b"")] * len(calls)
+
+    def run(i, fn):
+        try:
+            out[i] = fn()
+        except Exception as exc:  # noqa: BLE001 -- the type is the finding
+            out[i] = (type(exc).__name__, None, None, b"")
+
+    threads = [threading.Thread(target=run, args=(i, fn), daemon=True) for i, fn in enumerate(calls)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return list(out)
+
+
+def gn_outside(obj, names):
+    """A deep copy of *obj* without backends.<name>.oauth for each of *names*."""
+    out = json.loads(json.dumps(obj))
+    for name in names:
+        try:
+            del out["backends"][name]["oauth"]
+        except (KeyError, TypeError):
+            pass
+    return out
+
+
+def gn_disk(label, path, before, want, never=()):
+    """Problems unless the config at *path* is a 0600 regular file of ours holding want[name]
+    as backends.<name>.oauth.refresh_token (and no access_token / id_token key), every value
+    outside those oauth objects equal to *before*, and none of *never* (no access token on disk)."""
+    try:
+        st = os.lstat(path)
+        data = gl_bytes(path)
+    except OSError as exc:
+        return ["%s: the config cannot be read: %s" % (label, type(exc).__name__)]
+    problems = []
+    if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600 or st.st_uid != os.geteuid():
+        problems.append("%s: the rewritten config is mode %o (regular %s, ours %s), expected a 0600 "
+                        "regular file of ours" % (label, stat.S_IMODE(st.st_mode), stat.S_ISREG(st.st_mode),
+                                                 st.st_uid == os.geteuid()))
+    try:
+        obj = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return problems + ["%s: the config does not parse: %s" % (label, type(exc).__name__)]
+    for name, token in want.items():
+        try:
+            oauth = obj["backends"][name]["oauth"]
+        except (KeyError, TypeError):
+            oauth = None
+        if not isinstance(oauth, dict) or oauth.get("refresh_token") != token:
+            problems.append("%s: backends.%s.oauth.refresh_token on disk is not the rotated token"
+                            % (label, name))
+        elif {"access_token", "id_token"} & set(oauth):
+            problems.append("%s: backends.%s.oauth on disk holds %s"
+                            % (label, name, sorted({"access_token", "id_token"} & set(oauth))))
+    if gn_outside(obj, want) != gn_outside(before, want):
+        problems.append("%s: a value outside backends.<n>.oauth changed in the rewrite" % label)
+    if any(value.encode("ascii") in data for value in never):
+        problems.append("%s: an access token is on disk" % label)
+    return problems
+
+
+class GnRig:
+    """One N case: a sandbox, a TLS auth peer (the backend's auth_base_url), a TLS
+    upstream peer (its base_url), the test CA as its ca_file and, after start(),
+    one live router whose config routes claude-<name> to each backend."""
+
+    def __init__(self, fixture_root, label, auth_script, up_script):
+        self.sandbox = new_sandbox(fixture_root, label)
+        self.label = label
+        self.ca_file = sandbox_ca_file(self.sandbox)
+        self.auth = ScriptedPeer(script=auth_script, tls=True)
+        self.up = ScriptedPeer(script=up_script, tls=True)
+        self.proc = None
+        self.router = None
+        self.client = None
+        self.cfgpath = None
+        self.statuses = []
+
+    def backend(self, refresh=TF_REFRESH_CODEX, **extra):
+        """A codex backend entry on this rig's peers; *refresh* None is `oauth: {}`."""
+        entry = {"kind": "codex", "base_url": self.up.url(), "auth_base_url": self.auth.url(),
+                 "ca_file": self.ca_file, "oauth": {} if refresh is None else {"refresh_token": refresh}}
+        entry.update(extra)
+        return entry
+
+    def start(self, backends, extra_argv=(), routes=None, fast=None):
+        """Write the config and start the router: None, or the one problem why it never got ready.
+        *routes* (N31, N32) adds route entries beside the one claude-<name> route per backend.
+        *fast* (N13) is (module, patch): the router runs in-process (FastRouter, with the
+        config-bound token store main() builds) instead of as a subprocess."""
+        names = list(backends)
+        cfg = {"auth_token": TF_ROUTER_TOKEN, "backends": backends,
+               "routes": {gn_route(n): {"backend": n, "model": GN_MODEL} for n in names},
+               "default": {"backend": names[0], "model": GN_MODEL}}
+        if routes:
+            cfg["routes"].update(routes)
+        self.cfgpath = write_config(self.sandbox, cfg)
+        if fast is not None:
+            self.router = FastRouter(fast[0], None, self.sandbox, self.cfgpath, fast[1], label=self.label,
+                                     tokens=True)
+            self.client = self.router.client
+            return self.router.why
+        self.proc = RouterProc(self.sandbox, self.cfgpath, extra_argv=extra_argv, label=self.label)
+        if self.proc.wait_ready() is None:
+            return gb_not_ready(self.proc)
+        self.client = self.proc.client()
+        return None
+
+    def body(self, name=GN_BACKEND, stream=False, tools=False):
+        """The Messages request routed to *name*: one user turn (with *tools* the Read tool)."""
+        body = gi_body(gn_route(name), "tf n %s" % self.label)
+        if tools:
+            body["tools"] = [{"name": "Read", "description": "tf n: read a file", "input_schema": GK_SCHEMA_READ}]
+        if stream:
+            body["stream"] = True
+        return body
+
+    def ask(self, name=GN_BACKEND, timeout=HTTP_TIMEOUT_S, stream=False, tools=False):
+        """(status, error type, message, body) of one request routed to *name*, read whole
+        (with *stream* the request asks for a stream; a refusal is still a JSON envelope)."""
+        try:
+            status, _h, body = self.client.post(obj=self.body(name, stream, tools), timeout=timeout)
+        except (OSError, http.client.HTTPException) as exc:
+            self.statuses.append(type(exc).__name__)
+            return type(exc).__name__, None, None, b""
+        self.statuses.append(status)
+        etype, msg = None, None
+        if status >= 400:
+            etype, msg, _bad = gb_envelope(body)
+        return status, etype, msg, body
+
+    def detail(self):
+        return ["client      : %s" % (", ".join(str(s) for s in self.statuses) or "no request"),
+                "auth peer   : %d connection(s), %d POST(s)" % (self.auth.conns, len(self.auth.requests)),
+                "upstream    : %d connection(s), %d request(s)" % (self.up.conns, len(self.up.requests))]
+
+    def close(self):
+        if self.proc is not None:
+            self.proc.close()
+        if self.router is not None:
+            self.router.close()
+        self.auth.close()
+        self.up.close()
+
+
+def gn_run(fixture_root, label, auth_script, up_script, backends, body, argv=None, routes=None, fast=None):
+    """Run one N case: *backends(rig)* is the config's backends, *body(rig)* the checks,
+    *argv(rig)* (when given) the router's extra command line, *routes* extra route entries,
+    *fast* (module, patch) an in-process router instead of the subprocess."""
+    rig = GnRig(fixture_root, label, auth_script, up_script)
+    try:
+        why = rig.start(backends(rig), argv(rig) if argv is not None else (), routes=routes, fast=fast)
+        if why:
+            return [why], rig.detail()
+        problems, detail = body(rig)
+        return problems, list(detail) + rig.detail()
+    finally:
+        rig.close()
+
+
+def gn_one(rig):
+    return {GN_BACKEND: rig.backend()}
+
+
+def gn_n1(fixture_root, ctx):
+    """N1: the first codex request makes exactly one refresh POST with the seed; the config is
+    rewritten 0600 with the rotated token, every other value equal, and holds no access token."""
+    rot = gn_mint_refresh("n1")
+
+    def body(rig):
+        before = json.loads(gl_bytes(rig.cfgpath).decode("utf-8"))
+        problems = gn_answer("first request", rig.ask(), 200)
+        problems += gn_post_problems(rig.auth, 1, [TF_REFRESH_CODEX])
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX]:
+            problems.append("upstream bearer(s) %s, expected exactly [A1] (the refreshed access token)"
+                            % gn_names(bearers, [("A1", TF_ACCESS_CODEX)]))
+        problems += gn_disk("config", rig.cfgpath, before, {GN_BACKEND: rot}, never=(TF_ACCESS_CODEX,))
+        return problems, ["tokens      : seed TF_REFRESH_CODEX -> A1 = TF_ACCESS_CODEX, rotated refresh"]
+    return gn_run(fixture_root, "n1", gn_rotating([(TF_ACCESS_CODEX, rot)]), gn_up_ok(ctx["lines"]), gn_one, body)
+
+
+def gn_n2(fixture_root, ctx):
+    """N2: a second request inside expiry makes no refresh; an `oauth: {}` backend answers
+    401 with the login hint, contacting no peer."""
+    def backends(rig):
+        return {GN_BACKEND: rig.backend(), GN_EMPTY: rig.backend(refresh=None)}
+
+    def body(rig):
+        problems = []
+        for n in (1, 2):
+            problems += gn_answer("request %d" % n, rig.ask(), 200)
+        problems += gn_post_problems(rig.auth, 1, [TF_REFRESH_CODEX])
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX] * 2:
+            problems.append("upstream bearer(s) %s, expected [A1, A1] (one token, still inside expiry)"
+                            % gn_names(bearers, [("A1", TF_ACCESS_CODEX)]))
+        conns = (rig.auth.conns, rig.up.conns)
+        problems += gn_answer("oauth {} backend", rig.ask(GN_EMPTY), 401, "authentication_error",
+                              GN_HINT % GN_EMPTY)
+        time.sleep(GN_SETTLE_S)
+        if (rig.auth.conns, rig.up.conns) != conns:
+            problems.append("the oauth {} request contacted a peer (auth %d -> %d, upstream %d -> %d "
+                            "connection(s))" % (conns[0], rig.auth.conns, conns[1], rig.up.conns))
+        return problems, ["expiry      : expires_in %d s; then %s with oauth {}" % (GN_EXPIRES_IN, GN_EMPTY)]
+    return gn_run(fixture_root, "n2", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n2"))]),
+                  gn_up_ok(ctx["lines"]), backends, body)
+
+
+def gn_n3(fixture_root, ctx):
+    """N3: eight concurrent requests with no access token make exactly one refresh POST."""
+    def body(rig):
+        got = gn_parallel([rig.ask] * GN_CONCURRENT)
+        problems = []
+        for i, one in enumerate(got):
+            problems += gn_answer("request %d of %d" % (i + 1, GN_CONCURRENT), one, 200)
+        problems += gn_post_problems(rig.auth, 1, [TF_REFRESH_CODEX])
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX] * GN_CONCURRENT:
+            problems.append("upstream bearer(s) %s, expected %d x A1"
+                            % (gn_names(bearers, [("A1", TF_ACCESS_CODEX)]), GN_CONCURRENT))
+        return problems, ["race        : %d requests started together; the auth peer answers after %.1f s"
+                          % (GN_CONCURRENT, GN_AUTH_DELAY_S)]
+    return gn_run(fixture_root, "n3",
+                  gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n3"))], delay=GN_AUTH_DELAY_S),
+                  gn_up_ok(ctx["lines"]), gn_one, body)
+
+
+def gn_n4(fixture_root, ctx):
+    """N4: an upstream 401 gives one forced refresh (with the rotated token) and a retry
+    with the new bearer, then 200."""
+    a2, rot1, rot2 = gn_mint_access(), gn_mint_refresh("n4-1"), gn_mint_refresh("n4-2")
+    named = [("A1", TF_ACCESS_CODEX), ("A2", a2)]
+
+    def body(rig):
+        problems = gn_answer("request", rig.ask(), 200)
+        problems += gn_post_problems(rig.auth, 2, [TF_REFRESH_CODEX, rot1])
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX, "Bearer " + a2]:
+            problems.append("upstream bearer(s) %s, expected [A1, A2] (the 401, then the retry)"
+                            % gn_names(bearers, named))
+        return problems, ["upstream    : A1 -> 401, A2 -> the fixture stream"]
+    return gn_run(fixture_root, "n4", gn_rotating([(TF_ACCESS_CODEX, rot1), (a2, rot2)]),
+                  gn_up_by_bearer(ctx["lines"], TF_ACCESS_CODEX), gn_one, body)
+
+
+def gn_n5(fixture_root, ctx):
+    """N5: 401, forced refresh, 401 again -> the client gets 401 authentication_error with the
+    login hint, after exactly two upstream requests."""
+    a2 = gn_mint_access()
+    named = [("A1", TF_ACCESS_CODEX), ("A2", a2)]
+
+    def body(rig):
+        problems = gn_answer("request", rig.ask(), 401, "authentication_error", GN_HINT % GN_BACKEND)
+        problems += gn_post_problems(rig.auth, 2, [TF_REFRESH_CODEX, None])
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX, "Bearer " + a2]:
+            problems.append("upstream saw %d request(s) with bearer(s) %s, expected exactly two: [A1, A2]"
+                            % (len(bearers), gn_names(bearers, named)))
+        return problems, ["upstream    : every request -> 401"]
+    return gn_run(fixture_root, "n5",
+                  gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n5-1")), (a2, gn_mint_refresh("n5-2"))]),
+                  [GN_UP_401], gn_one, body)
+
+
+def gn_n6(fixture_root, ctx):
+    """N6: four concurrent requests that all get 401 with the same stale token cause exactly
+    one forced refresh; all four retry with the new token and get 200."""
+    a2 = gn_mint_access()
+    named = [("A1", TF_ACCESS_CODEX), ("A2", a2)]
+    gate = GnGate(GN_STORM, GN_GATE_S)
+
+    def body(rig):
+        got = gn_parallel([rig.ask] * GN_STORM)
+        problems = []
+        for i, one in enumerate(got):
+            problems += gn_answer("request %d of %d" % (i + 1, GN_STORM), one, 200)
+        problems += gn_post_problems(rig.auth, 2)
+        names = gn_names(gn_bearers(rig.up), named)
+        if names.count("A1") != GN_STORM or names.count("A2") != GN_STORM or len(names) != 2 * GN_STORM:
+            problems.append("upstream bearer(s) %s, expected %d x A1 (each 401) and %d x A2 (each retry)"
+                            % (names, GN_STORM, GN_STORM))
+        return problems, ["storm       : %d requests; the upstream holds each A1 401 until all %d arrived "
+                          "(gate count %d)" % (GN_STORM, GN_STORM, gate.count),
+                          "auth        : one initial refresh, then exactly one forced refresh"]
+    return gn_run(fixture_root, "n6",
+                  gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n6-1")), (a2, gn_mint_refresh("n6-2"))]),
+                  gn_up_by_bearer(ctx["lines"], TF_ACCESS_CODEX, gate), gn_one, body)
+
+
+def gn_n7(fixture_root, ctx):
+    """N7: invalid_grant with an unchanged disk token -> 401 login hint, config byte-identical;
+    a second request makes no POST; a new refresh_token written to the config (as login
+    would) is refreshed with by the third request, inside what would have been the
+    negative-cache window (R2-L2: relogin failures are not cached)."""
+    new, rot = gn_mint_refresh("n7-new"), gn_mint_refresh("n7-rot")
+
+    def body(rig):
+        before = gl_bytes(rig.cfgpath)
+        hint = GN_HINT % GN_BACKEND
+        problems = gn_answer("request 1 (invalid_grant)", rig.ask(), 401, "authentication_error", hint)
+        failed_at = time.monotonic()
+        problems += gn_post_problems(rig.auth, 1, [TF_REFRESH_CODEX])
+        if gl_bytes(rig.cfgpath) != before:
+            problems.append("after invalid_grant the config is not byte-identical")
+        posted = len(rig.auth.requests)
+        problems += gn_answer("request 2 (dead token)", rig.ask(), 401, "authentication_error", hint)
+        if len(rig.auth.requests) > posted:
+            problems.append("request 2 sent %d more refresh POST(s): the dead token was re-adopted"
+                            % (len(rig.auth.requests) - posted))
+        obj = json.loads(before.decode("utf-8"))
+        obj["backends"][GN_BACKEND]["oauth"]["refresh_token"] = new
+        write_file(rig.cfgpath, json.dumps(obj, indent=2), 0o600)
+        if time.monotonic() - failed_at >= ctx["cache"]:
+            problems.append("instrument: the third request starts %.1f s after the failure, outside the "
+                            "%.1f s window, so it proves nothing about caching"
+                            % (time.monotonic() - failed_at, ctx["cache"]))
+        problems += gn_answer("request 3 (new login on disk)", rig.ask(), 200)
+        problems += gn_post_problems(rig.auth, 2, [TF_REFRESH_CODEX, new])
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX]:
+            problems.append("upstream bearer(s) %s, expected exactly [A1] (only request 3 goes upstream)"
+                            % gn_names(bearers, [("A1", TF_ACCESS_CODEX)]))
+        return problems, ["auth        : the seed -> 400 invalid_grant; the new disk token -> 200"]
+    return gn_run(fixture_root, "n7", gn_by_refresh({new: (TF_ACCESS_CODEX, rot)}),
+                  gn_up_ok(ctx["lines"]), gn_one, body)
+
+
+def gn_n8(fixture_root, ctx):
+    """N8 (Plan Step 16, KD-10 adoption): an openai-oauth refresh answered 400
+    refresh_token_reused while the disk holds a different token (planted after the router
+    loaded, before the request) adopts the disk token, retries ONCE with it and gets 200;
+    both refresh forms carry the issued client_id and resource; the config then holds the
+    rotated token, the seed's client_id and host_id unchanged."""
+    seed, planted, rot = gn_mint_refresh("n8-seed"), gn_mint_refresh("n8-planted"), gn_mint_refresh("n8-rot")
+    access = gn_mint_access()
+    box = {}
+
+    def auth(_index, request):
+        if gn_form(request).get("refresh_token") == planted:
+            return gn_oai_token(box["iss"], access, rot)
+        return [("respond_json", 400, GN_OAI_REUSED)]
+
+    def backends(rig):
+        box["iss"] = gn_origin(rig.auth.url())
+        return {GN_OAI: gn_oai_backend(rig, seed)}
+
+    def body(rig):
+        obj = json.loads(gl_bytes(rig.cfgpath).decode("utf-8"))
+        obj["backends"][GN_OAI]["oauth"]["refresh_token"] = planted
+        write_file(rig.cfgpath, json.dumps(obj, indent=2), 0o600)
+        problems = gn_answer("request (seed reused, a newer token on disk)", rig.ask(GN_OAI), 200)
+        reqs = list(rig.auth.requests)
+        if len(reqs) != 2:
+            problems.append("%d refresh POST(s) reached the auth peer, expected 2 (the seed, then the disk "
+                            "token once)" % len(reqs))
+        for i, (req, want) in enumerate(zip(reqs, (seed, planted))):
+            problems += gn_oai_form_problems("refresh %d" % (i + 1), req, want)
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + access]:
+            problems.append("upstream bearer(s) %s, expected exactly [A1] (the adopted token's access token)"
+                            % gn_names(bearers, [("A1", access)]))
+        problems += gn_up_request("N8", rig.up, GN_OPENAI_PATH)[0]
+        problems += gn_disk("config", rig.cfgpath, obj, {GN_OAI: rot}, never=(access,))
+        try:
+            oauth = json.loads(gl_bytes(rig.cfgpath).decode("utf-8"))["backends"][GN_OAI]["oauth"]
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, OSError):
+            oauth = {}
+        if (oauth.get("client_id"), oauth.get("host_id")) != (GN_OAI_CLIENT, GN_OAI_HOST_ID):
+            problems.append("the rewritten oauth holds client_id %r, host_id %r, expected the seed's"
+                            % (oauth.get("client_id"), oauth.get("host_id")))
+        return problems, ["auth        : the seed -> 400 refresh_token_reused; the planted disk token -> 200"]
+    return gn_run(fixture_root, "n8", auth, gn_up_ok(ctx["lines"]), backends, body)
+
+
+def gn_n9(fixture_root, ctx):
+    """N9: two OAuth backends refreshing concurrently both end up in the file."""
+    seed2, rot1, rot2, a2 = gn_mint_refresh("n9-seed"), gn_mint_refresh("n9-1"), gn_mint_refresh("n9-2"), \
+        gn_mint_access()
+
+    def backends(rig):
+        return {GN_BACKEND: rig.backend(), GN_BACKEND_2: rig.backend(refresh=seed2)}
+
+    def body(rig):
+        before = json.loads(gl_bytes(rig.cfgpath).decode("utf-8"))
+        got = gn_parallel([rig.ask, lambda: rig.ask(GN_BACKEND_2)])
+        problems = gn_answer(GN_BACKEND, got[0], 200) + gn_answer(GN_BACKEND_2, got[1], 200)
+        problems += gn_post_problems(rig.auth, 2)
+        sent = sorted(p.get("refresh_token") or "" for p in gn_posts(rig.auth))
+        if sent != sorted([TF_REFRESH_CODEX, seed2]):
+            problems.append("the two refresh POSTs did not carry the two seeds, one each")
+        problems += gn_disk("config", rig.cfgpath, before, {GN_BACKEND: rot1, GN_BACKEND_2: rot2},
+                            never=(TF_ACCESS_CODEX, a2))
+        return problems, ["race        : %s and %s requested together; the auth peer answers after %.1f s"
+                          % (GN_BACKEND, GN_BACKEND_2, GN_AUTH_DELAY_S)]
+    return gn_run(fixture_root, "n9",
+                  gn_by_refresh({TF_REFRESH_CODEX: (TF_ACCESS_CODEX, rot1), seed2: (a2, rot2)},
+                                delay=GN_AUTH_DELAY_S),
+                  gn_up_ok(ctx["lines"]), backends, body)
+
+
+def gn_n10(fixture_root, ctx):
+    """N10: a refresh answer whose access token holds a space (one backend) or a CR (the
+    other) -> 502 "token refresh failed (invalid_response)", no upstream request."""
+    seed2 = gn_mint_refresh("n10-seed")
+    spaced = "tf-n10 space-" + secrets.token_hex(16)
+    carriage = "tf-n10-cr\r" + secrets.token_hex(16)
+
+    def backends(rig):
+        return {GN_BACKEND: rig.backend(), GN_BACKEND_2: rig.backend(refresh=seed2)}
+
+    def body(rig):
+        problems = gn_answer("space in the token", rig.ask(), 502, "api_error", GN_REFRESH_FAILED)
+        problems += gn_answer("CR in the token", rig.ask(GN_BACKEND_2), 502, "api_error", GN_REFRESH_FAILED)
+        problems += gn_post_problems(rig.auth, 2, [TF_REFRESH_CODEX, seed2])
+        if rig.up.conns:
+            problems.append("the upstream got %d connection(s): a refused token was used" % rig.up.conns)
+        return problems, ["tokens      : %s -> an access token with a space; %s -> one with a CR"
+                          % (GN_BACKEND, GN_BACKEND_2)]
+    return gn_run(fixture_root, "n10",
+                  gn_by_refresh({TF_REFRESH_CODEX: (spaced, None), seed2: (carriage, None)}),
+                  gn_up_ok(ctx["lines"]), backends, body)
+
+
+def gn_n11(fixture_root, ctx):
+    """N11: an auth host on loopback without allow_loopback -> 502 (the SSRF policy is
+    inherited by the auth spec), and no peer is contacted."""
+    def backends(rig):
+        return {GN_BACKEND: rig.backend(allow_loopback=False)}
+
+    def body(rig):
+        problems = gn_answer("request", rig.ask(), 502)
+        time.sleep(GN_SETTLE_S)
+        if rig.auth.conns or rig.up.conns:
+            problems.append("a peer was contacted (auth %d, upstream %d connection(s)): the loopback "
+                            "refusal did not hold" % (rig.auth.conns, rig.up.conns))
+        return problems, ["backend     : allow_private true, allow_loopback false, auth_base_url on 127.0.0.1"]
+    return gn_run(fixture_root, "n11", gn_rotating([(TF_ACCESS_CODEX, None)]),
+                  gn_up_ok(ctx["lines"]), backends, body)
+
+
+def gn_n12(fixture_root, ctx):
+    """N12: an auth peer answering a redirect -> 502; the redirect is never followed."""
+    target = ScriptedPeer(script=gn_rotating([(TF_ACCESS_CODEX, None)]), tls=True)
+    try:
+        def body(rig):
+            problems = gn_answer("request", rig.ask(), 502)
+            problems += gn_post_problems(rig.auth, 1, [TF_REFRESH_CODEX])
+            if target.conns:
+                problems.append("the redirect target got %d connection(s): the redirect was followed"
+                                % target.conns)
+            if rig.up.conns:
+                problems.append("the upstream got %d connection(s) after a failed refresh" % rig.up.conns)
+            return problems, ["auth        : 307 -> another TLS peer on 127.0.0.1 (never contacted)"]
+        return gn_run(fixture_root, "n12", [("redirect", target.url() + GN_TOKEN_PATH, 307)],
+                      gn_up_ok(ctx["lines"]), gn_one, body)
+    finally:
+        target.close()
+
+
+def gn_n13(fixture_root, ctx):
+    """N13: an auth peer stalling past _RT_OAUTH_IDLE_S -> 504 and the lock released (a
+    request inside the window answers at once, from the cache, with no POST); after the
+    window the same (unrotated) refresh token is POSTed again and accepted.  In-process on
+    a private module, _RT_OAUTH_IDLE_S and _RT_OAUTH_FAIL_CACHE_S patched to GN_N13_*."""
+    idle, cache = GN_N13_IDLE_S, GN_N13_CACHE_S
+    mod = H.load_module_from_path("ph_llm_router_n13", SERVER)
+    patch = (("_RT_OAUTH_IDLE_S", idle), ("_RT_OAUTH_FAIL_CACHE_S", cache))
+
+    def auth(index, _request):
+        if index == 0:
+            return [("stall", idle + GN_STALL_EXTRA_S)]
+        return gn_token_steps(TF_ACCESS_CODEX)
+
+    def body(rig):
+        shown = ["auth        : stalls %.1f s (idle %.1f s), then answers; window %.1f s "
+                 "(in-process, patched over the module's %g s / %g s)"
+                 % (idle + GN_STALL_EXTRA_S, idle, cache, ctx["idle"], ctx["cache"])]
+        t0 = time.monotonic()
+        got = rig.ask(timeout=idle + GN_STALL_SLACK_S + HTTP_TIMEOUT_S)
+        failed_at = time.monotonic()
+        problems = gn_answer("request 1 (auth stalls)", got, 504)
+        if got[0] != 504:
+            return problems + ["(the rest of the case needs the 504; not run)"], shown
+        if failed_at - t0 > idle + GN_STALL_SLACK_S:
+            problems.append("the 504 took %.2f s, past the idle timeout %.1f s + %.1f s"
+                            % (failed_at - t0, idle, GN_STALL_SLACK_S))
+        problems += gn_answer("request 2 (inside the window)", rig.ask(), 504)
+        if time.monotonic() - failed_at > GN_QUICK_S:
+            problems.append("request 2 took %.2f s: the backend lock was not released after the timeout"
+                            % (time.monotonic() - failed_at))
+        if len(rig.auth.requests) != 1:
+            problems.append("%d refresh POST(s) inside the negative-cache window, expected 1"
+                            % len(rig.auth.requests))
+        time.sleep(max(0.0, failed_at + cache + GN_CACHE_SLACK_S - time.monotonic()))
+        problems += gn_answer("request 3 (after the window)", rig.ask(), 200)
+        problems += gn_post_problems(rig.auth, 2, [TF_REFRESH_CODEX, TF_REFRESH_CODEX])
+        return problems, shown
+    return gn_run(fixture_root, "n13", auth, gn_up_ok(ctx["lines"]), gn_one, body, fast=(mod, patch))
+
+
+# -- N14-N17, N20: the codex wire -------------------------------------------
+
+def gn_tool_lines(call_id, args):
+    """A Responses stream with GN_TEXT (two deltas) at output 0 and one Read call at output 1."""
+    events = [gm_created(), gm_msg_added(0), gm_text(GN_TEXT[:6]), gm_text(GN_TEXT[6:]), gm_msg_done(GN_TEXT, 0)]
+    events += gm_tool_events([(1, call_id, "Read", args)])
+    events.append(gm_completed(gm_usage(30, 7)))
+    return gm_lines(*events)
+
+
+def gn_up_request(label, peer, path=GN_CODEX_PATH):
+    """(problems, the parsed JSON body) of the upstream's single request, which must be POST *path*."""
+    reqs = list(peer.requests)
+    if len(reqs) != 1:
+        return ["%s: the upstream saw %d request(s), expected exactly 1" % (label, len(reqs))], None
+    line = reqs[0].get("line") or ""
+    problems = []
+    if line.split(" ")[:2] != ["POST", path]:
+        problems.append("%s: the upstream request is %r, expected POST %s" % (label, line[:80], path))
+    try:
+        obj = json.loads((reqs[0].get("body") or b"").decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        obj = None
+    if not isinstance(obj, dict):
+        return problems + ["%s: the upstream body is not a JSON object" % label], None
+    if obj.get("stream") is not True:
+        problems.append("%s: the upstream body's stream is %r, expected true (FR-10: always a stream)"
+                        % (label, obj.get("stream")))
+    return problems, obj
+
+
+def gn_parsed_events(read):
+    """read_stream's events as [(name, parsed object or None)] (gg_blocks' shape)."""
+    out = []
+    for ev in read["events"]:
+        try:
+            obj = json.loads(ev[1])
+        except ValueError:
+            obj = None
+        out.append((ev[0], obj if isinstance(obj, dict) else None))
+    return out
+
+
+def gn_n14(fixture_root, ctx):
+    """N14: the codex upstream head is exactly Host, Content-Type, Accept, User-Agent,
+    chatgpt-account-id, x-openai-internal-codex-residency, OpenAI-Beta, originator, version,
+    session_id, Authorization, Accept-Encoding, Content-Length -- each once, with the omp
+    identity, the access token's claims and session_id == the body's prompt_cache_key."""
+    access = tf_jwt({"https://api.openai.com/auth": {"chatgpt_account_id": TF_ACCOUNT_CODEX,
+                                                     "chatgpt_data_residency": GN_RESIDENCY}})
+
+    def body(rig):
+        problems = gn_answer("request", rig.ask(), 200)
+        more, up_body = gn_up_request("N14", rig.up)
+        problems += more
+        reqs = list(rig.up.requests)
+        if not reqs:
+            return problems, []
+        pairs = [(k.lower(), v) for k, v in reqs[0].get("headers") or ()]
+        names = [k for k, _v in pairs]
+        if tuple(names) != GN_HEADER_ORDER:
+            problems.append("upstream header names %s, expected exactly %s" % (names, list(GN_HEADER_ORDER)))
+        got = dict(pairs)
+        want = {"content-type": "application/json", "accept": "text/event-stream", "user-agent": GN_UA,
+                "chatgpt-account-id": TF_ACCOUNT_CODEX, "x-openai-internal-codex-residency": GN_RESIDENCY,
+                "openai-beta": GN_BETA, "originator": GN_ORIGINATOR, "version": GN_VERSION,
+                "accept-encoding": "identity"}
+        for key, value in want.items():
+            if got.get(key) != value:
+                problems.append("upstream %s: %r, expected %r" % (key, gi_redact(str(got.get(key)))[:80], value))
+        if got.get("authorization") != "Bearer " + access:
+            problems.append("upstream authorization is %s, expected Bearer A1 (the refreshed access token)"
+                            % gn_names([got.get("authorization")], [("A1", access)]))
+        session = got.get("session_id")
+        if not (isinstance(session, str) and GN_SESSION_RE.match(session)):
+            problems.append("upstream session_id %r is not lr- + 24 base62" % session)
+        elif up_body is not None and up_body.get("prompt_cache_key") != session:
+            problems.append("upstream session_id %r differs from the body's prompt_cache_key %r"
+                            % (session, up_body.get("prompt_cache_key")))
+        return problems, ["identity    : %s / originator %s / version %s; residency claim %s"
+                          % (GN_UA, GN_ORIGINATOR, GN_VERSION, GN_RESIDENCY)]
+    return gn_run(fixture_root, "n14", gn_rotating([(access, gn_mint_refresh("n14"))]),
+                  gn_up_ok(ctx["lines"]), gn_one, body)
+
+
+def gn_n15(fixture_root, ctx):
+    """N15: a codex stream end to end -- the text block, then the Read call whole as one
+    tool_use (toolu_<call_id>), stop_reason tool_use, message_stop last; the upstream got
+    one POST /codex/responses with stream true."""
+    call = gm_call("call_tfN15", "Read", '{"file_path":"/tf/n15.txt"}')
+
+    def body(rig):
+        conn, resp, problems = open_stream(rig.client, rig.body(stream=True, tools=True))
+        if conn is None:
+            return problems + gn_up_request("N15", rig.up)[0], []
+        try:
+            read = read_stream(resp)
+        finally:
+            close_stream(conn, resp)
+        events = gn_parsed_events(read)
+        names = gg_names(events)
+        if "error" in names or names[-1:] != ["message_stop"]:
+            problems.append("the stream did not end in message_stop (%s; errors %s)"
+                            % (ev_shape(read["events"]), ev_errors(read["events"])))
+        start = (events[0][1] or {}).get("message") or {} if events and events[0][0] == "message_start" else {}
+        if start.get("model") != gn_route(GN_BACKEND):
+            problems.append("message_start model %r, expected the requested %r" % (start.get("model"),
+                                                                                    gn_route(GN_BACKEND)))
+        blocks = gg_blocks(events)
+        if [b["type"] for b in blocks] != ["text", "tool_use"]:
+            problems.append("blocks %s, expected [text, tool_use]" % [b["type"] for b in blocks])
+        else:
+            if "".join(t or "" for t in blocks[0]["texts"]) != GN_TEXT:
+                problems.append("the text block is %r, expected %r" % ("".join(t or "" for t in blocks[0]["texts"]),
+                                                                       GN_TEXT))
+            problems += gm_tool_check("the tool block", blocks[1], call)
+        stop = ((gg_message_delta(events) or {}).get("delta") or {}).get("stop_reason")
+        if stop != "tool_use":
+            problems.append("message_delta stop_reason %r, expected tool_use" % stop)
+        problems += gn_up_request("N15", rig.up)[0]
+        return problems, ["upstream    : text (2 deltas) + one Read call, response.completed"]
+    return gn_run(fixture_root, "n15", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n15"))]),
+                  gn_up_ok(gn_tool_lines(call["call_id"], call["arguments"])), gn_one, body)
+
+
+def gn_n16(fixture_root, ctx):
+    """N16: a codex non-stream request gets one aggregated Anthropic message (the text and
+    the whole tool_use, stop_reason tool_use, the requested model) from the upstream stream."""
+    call = gm_call("call_tfN16", "Read", '{"file_path":"/tf/n16.txt"}')
+    want_content = [{"type": "text", "text": GN_TEXT},
+                    {"type": "tool_use", "id": "toolu_call_tfN16", "name": "Read",
+                     "input": {"file_path": "/tf/n16.txt"}}]
+
+    def body(rig):
+        got = rig.ask(tools=True)
+        problems = gn_answer("request", got, 200)
+        problems += gn_up_request("N16", rig.up)[0]
+        if got[0] != 200:
+            return problems, []
+        obj = json.loads(got[3].decode("utf-8"))
+        if obj.get("content") != want_content:
+            problems.append("content %s, expected %s" % (json.dumps(obj.get("content"))[:240], json.dumps(want_content)))
+        if obj.get("stop_reason") != "tool_use":
+            problems.append("stop_reason %r, expected tool_use" % obj.get("stop_reason"))
+        if obj.get("model") != gn_route(GN_BACKEND) or obj.get("role") != "assistant":
+            problems.append("model/role %r/%r, expected %r/assistant" % (obj.get("model"), obj.get("role"),
+                                                                        gn_route(GN_BACKEND)))
+        return problems, ["upstream    : the N15 stream shape, aggregated (64 MiB cap)"]
+    return gn_run(fixture_root, "n16", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n16"))]),
+                  gn_up_ok(gn_tool_lines(call["call_id"], call["arguments"])), gn_one, body)
+
+
+def gn_n17(fixture_root, ctx):
+    """N17: a codex 2xx with no Content-Type at all is relayed as a normal stream (200,
+    message_stop last) -- the live codex endpoint answers a stream exactly so (measured
+    2026-10-07), hence require_event_stream=False on the codex row -- while a codex 2xx
+    with a wrong, non-empty Content-Type (application/json) is still 502 api_error "did
+    not answer with an event stream".  The openai-oauth half (Plan Step 16, moved from
+    Step 15 per R1-L5): an openai-oauth 2xx with no Content-Type is relayed the same way
+    (require_event_stream False on that row), after a refresh with the issued client_id."""
+    payload = b"".join(_peer_line_bytes(line) for line in ctx["lines"])
+    heads = (b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+    rot, oai_seed, oai_rot, oai_access = (gn_mint_refresh("n17"), gn_mint_refresh("n17-oai-seed"),
+                                          gn_mint_refresh("n17-oai-rot"), gn_mint_access())
+    box = {"codex": 0}
+
+    def up_script(_index, request):
+        if (request.get("line") or "").split(" ")[:2] == ["POST", GN_OPENAI_PATH]:
+            return [("respond_raw", heads[0] + payload)]
+        index, box["codex"] = box["codex"], box["codex"] + 1
+        return [("respond_raw", heads[min(index, len(heads) - 1)] + payload)]
+
+    def auth(_index, request):
+        if (request.get("line") or "").split(" ")[:2] == ["POST", GN_OAI_TOKEN_PATH]:
+            return gn_oai_token(box["iss"], oai_access, oai_rot)
+        return gn_token_steps(TF_ACCESS_CODEX, rot)
+
+    def backends(rig):
+        box["iss"] = gn_origin(rig.auth.url())
+        return {GN_BACKEND: rig.backend(), GN_OAI: gn_oai_backend(rig, oai_seed)}
+
+    def no_ct_stream(rig, name, label):
+        conn, resp, problems = open_stream(rig.client, rig.body(name, stream=True))
+        if conn is not None:
+            try:
+                read = read_stream(resp)
+            finally:
+                close_stream(conn, resp)
+            names = gg_names(gn_parsed_events(read))
+            if "error" in names or names[-1:] != ["message_stop"]:
+                problems.append("%s: the stream did not end in message_stop (%s; errors %s)"
+                                % (label, ev_shape(read["events"]), ev_errors(read["events"])))
+        return ["%s: %s" % (label, p) if not p.startswith(label) else p for p in problems]
+
+    def body(rig):
+        problems = no_ct_stream(rig, GN_BACKEND, "codex, no Content-Type")
+        problems += gn_answer("codex, JSON Content-Type stream request", rig.ask(stream=True), 502, "api_error",
+                              GN_NO_STREAM)
+        problems += no_ct_stream(rig, GN_OAI, "openai-oauth, no Content-Type")
+        reqs = list(rig.up.requests)
+        want = [GN_CODEX_PATH, GN_CODEX_PATH, GN_OPENAI_PATH]
+        got = [(req.get("line") or "").split(" ")[1] if len((req.get("line") or "").split(" ")) > 1 else ""
+               for req in reqs]
+        if got != want or any((req.get("line") or "").split(" ")[:1] != ["POST"] for req in reqs):
+            problems.append("N17: the upstream saw %s, expected POST %s" % (got, want))
+        oai_posts = [r for r in list(rig.auth.requests)
+                     if (r.get("line") or "").split(" ")[:2] == ["POST", GN_OAI_TOKEN_PATH]]
+        if len(oai_posts) != 1:
+            problems.append("%d openai refresh POST(s) reached the auth peer, expected 1" % len(oai_posts))
+        for post in oai_posts[:1]:
+            problems += gn_oai_form_problems("openai refresh", post, oai_seed)
+        return problems, ["upstream    : 200 + the text fixture; codex: no Content-Type, then application/json; "
+                          "openai-oauth: no Content-Type"]
+    return gn_run(fixture_root, "n17", auth, up_script, backends, body)
+
+
+def gn_n18(fixture_root, ctx):
+    """N18 (Plan Step 16, FR-6): the openai-oauth refresh form carries the issued client_id
+    and resource and no scope, and its ID token is checked -- an ID token whose aud is the
+    issued id (iss the auth base's origin) gives 200; one whose aud is another id gives 502
+    "token refresh failed (invalid_response)" and its access token never reaches the upstream."""
+    seed_a, seed_b = gn_mint_refresh("n18-a"), gn_mint_refresh("n18-b")
+    access_a, access_b = gn_mint_access(), gn_mint_access()
+    named = [("A_ok", access_a), ("A_wrong_aud", access_b)]
+    box = {}
+
+    def auth(_index, request):
+        token = gn_form(request).get("refresh_token")
+        if token == seed_a:
+            return gn_oai_token(box["iss"], access_a, gn_mint_refresh("n18-a-rot"))
+        if token == seed_b:
+            return gn_oai_token(box["iss"], access_b, gn_mint_refresh("n18-b-rot"), aud=GN_OAI_WRONG_AUD)
+        return [("respond_json", 400, {"error": "invalid_grant"})]
+
+    def backends(rig):
+        box["iss"] = gn_origin(rig.auth.url())
+        return {GN_OAI: gn_oai_backend(rig, seed_a), GN_OAI_2: gn_oai_backend(rig, seed_b)}
+
+    def body(rig):
+        problems = gn_answer("ID token aud = the issued id", rig.ask(GN_OAI), 200)
+        problems += gn_answer("ID token aud = another id", rig.ask(GN_OAI_2), 502, "api_error", GN_REFRESH_FAILED)
+        reqs = list(rig.auth.requests)
+        if len(reqs) != 2:
+            problems.append("%d refresh POST(s) reached the auth peer, expected 2 (one per backend)" % len(reqs))
+        for i, (req, want) in enumerate(zip(reqs, (seed_a, seed_b))):
+            problems += gn_oai_form_problems("refresh %d" % (i + 1), req, want)
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + access_a]:
+            problems.append("upstream bearer(s) %s, expected exactly [A_ok] (a token whose ID token fails is "
+                            "never used)" % gn_names(bearers, named))
+        return problems, ["id tokens   : iss %s; aud the issued id (%s), then another id (%s)"
+                          % (box.get("iss"), GN_OAI, GN_OAI_2)]
+    return gn_run(fixture_root, "n18", auth, gn_up_ok(ctx["lines"]), backends, body)
+
+
+def gn_n19(fixture_root, ctx):
+    """N19 (Plan Step 15): an openai api_key backend (profile openai-apikey) streams the text
+    fixture end to end; its one upstream POST /v1/responses carries the request's sampling
+    (temperature, top_p, max_output_tokens), Authorization: Bearer <api_key> and none of the
+    codex-only headers; the auth peer is never contacted (no token store on this profile); a
+    second stream request answered 429 usage_limit_reached with Retry-After: 7 is the JSON
+    429 rate_limit_error carrying retry-after: 7, never an SSE head."""
+    def up_script(index, _request):
+        if index == 0:
+            return gn_up_ok(ctx["lines"])
+        return [("respond_json", 429, GN_OPENAI_429, (("Retry-After", GN_OPENAI_RETRY),))]
+
+    def backends(rig):
+        return {GN_OPENAI: {"kind": "openai", "base_url": rig.up.url(), "ca_file": rig.ca_file,
+                            "api_key": TF_KEY_OPENAI}}
+
+    def body(rig):
+        req = rig.body(GN_OPENAI, stream=True)
+        req["max_tokens"] = GN_OPENAI_MAX
+        req.update(GN_OPENAI_SAMPLING)
+        conn, resp, problems = open_stream(rig.client, req)
+        if conn is not None:
+            try:
+                read = read_stream(resp)
+            finally:
+                close_stream(conn, resp)
+            names = gg_names(gn_parsed_events(read))
+            if "error" in names or names[-1:] != ["message_stop"]:
+                problems.append("the stream did not end in message_stop (%s; errors %s)"
+                                % (ev_shape(read["events"]), ev_errors(read["events"])))
+        more, up_body = gn_up_request("N19 stream", rig.up, GN_OPENAI_PATH)
+        problems += more
+        if up_body is not None:
+            want = dict(GN_OPENAI_SAMPLING, max_output_tokens=GN_OPENAI_MAX)
+            got = {k: up_body.get(k) for k in want}
+            if got != want:
+                problems.append("upstream sampling %r, expected %r (openai-apikey: sampling True)" % (got, want))
+            reqs = list(rig.up.requests)
+            pairs = [(k.lower(), v) for k, v in reqs[0].get("headers") or ()] if reqs else []
+            if gn_bearer(reqs[0]) != "Bearer " + TF_KEY_OPENAI:
+                problems.append("upstream authorization is %s, expected Bearer TF_KEY_OPENAI (the api_key)"
+                                % gn_names([gn_bearer(reqs[0])], [("TF_KEY_OPENAI", TF_KEY_OPENAI)]))
+            codex = sorted({k for k, _v in pairs} & set(GN_CODEX_ONLY))
+            if codex:
+                problems.append("upstream carries the codex-only header(s) %s" % codex)
+        try:
+            status, hdrs, data = rig.client.post(obj=req)
+        except (OSError, http.client.HTTPException) as exc:
+            status, hdrs, data = type(exc).__name__, {}, b""
+        rig.statuses.append(status)
+        etype, msg = None, None
+        if isinstance(status, int) and status >= 400:
+            etype, msg, _bad = gb_envelope(data)
+        problems += gn_answer("429 stream request", (status, etype, msg, data), 429, "rate_limit_error")
+        ctype = (hdrs.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if ctype == "text/event-stream":
+            problems.append("429 stream request: answered with an SSE head, expected a JSON envelope (KD-15)")
+        if status == 429 and hdrs.get("retry-after") != GN_OPENAI_RETRY:
+            problems.append("429 stream request: retry-after %r, expected %r relayed"
+                            % (hdrs.get("retry-after"), GN_OPENAI_RETRY))
+        reqs = list(rig.up.requests)
+        if len(reqs) != 2:
+            problems.append("N19: the upstream saw %d request(s), expected exactly 2" % len(reqs))
+        for req_seen in reqs:
+            line = req_seen.get("line") or ""
+            if line.split(" ")[:2] != ["POST", GN_OPENAI_PATH]:
+                problems.append("N19: the upstream request is %r, expected POST %s" % (line[:80], GN_OPENAI_PATH))
+        if rig.auth.conns or rig.auth.requests:
+            problems.append("the auth peer saw %d connection(s): an api_key profile never contacts it"
+                            % rig.auth.conns)
+        return problems, ["upstream    : 200 + the text fixture, then 429 usage_limit_reached, Retry-After %s"
+                          % GN_OPENAI_RETRY]
+    return gn_run(fixture_root, "n19", None, up_script, backends, body)
+
+
+def gn_n29(fixture_root, ctx):
+    """N29 (live S-codex-stream): the upstream request of a client stream:true is the one of a
+    client stream:false -- same request line, the same headers in the same order, the same
+    body bytes -- since the codex upstream is always a stream (FR-10); both answers 200."""
+
+    def body(rig):
+        problems = gn_answer("non-stream request", rig.ask(), 200)
+        status = rig.ask(stream=True)[0]
+        if status != 200:
+            problems.append("stream request: status %r, expected 200" % (status,))
+        reqs = list(rig.up.requests)
+        if len(reqs) != 2:
+            return problems + ["the upstream saw %d request(s), expected exactly 2" % len(reqs)], []
+        plain, streamed = reqs
+        if (plain.get("line") or "") != (streamed.get("line") or ""):
+            problems.append("request line %r (stream) differs from %r (non-stream)"
+                            % ((streamed.get("line") or "")[:80], (plain.get("line") or "")[:80]))
+        heads = [[(k.lower(), v) for k, v in r.get("headers") or ()] for r in reqs]
+        if heads[0] != heads[1]:
+            diff = sorted({k for k, _v in set(heads[0]) ^ set(heads[1])}) or ["(order)"]
+            problems.append("upstream headers differ between the modes: %s" % diff)
+        if (plain.get("body") or b"") != (streamed.get("body") or b""):
+            problems.append("the upstream body of the stream request differs from the non-stream one")
+        return problems, ["upstream    : two POSTs (stream false, then true), compared field by field"]
+    return gn_run(fixture_root, "n29", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n29"))]),
+                  gn_up_ok(ctx["lines"]), gn_one, body)
+
+
+def gn_n30(fixture_root, ctx):
+    """N30 (live S-codex-stream): a codex stream request answered 400 with a JSON error body
+    is the mapped 400 invalid_request_error carrying the upstream message (KD-14, KD-15) --
+    never _relay_stream's "did not answer with an event stream" (a 2xx-only refusal)."""
+    up = [("respond_json", 400, {"error": {"message": GN_UP_400_MSG, "type": "invalid_request_error"}})]
+
+    def body(rig):
+        got = rig.ask(stream=True)
+        problems = gn_answer("stream request", got, 400, "invalid_request_error", GN_UP_400_MSG)
+        if got[2] is not None and GN_NO_STREAM in got[2]:
+            problems.append("stream request: the 400 is answered with the 2xx refusal %r" % GN_NO_STREAM)
+        problems += gn_up_request("N30", rig.up)[0]
+        return problems, ["upstream    : 400 application/json {error: {message, type}}"]
+    return gn_run(fixture_root, "n30", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n30"))]),
+                  up, gn_one, body)
+
+
+# -- N31, N32: the learned sampling drop on openai-apikey (live finding 2026-10-07) --
+
+def gn_sampling_script(lines):
+    """The openai-apikey upstream of N31/N32, by the body's model: GN_SAMPLING_MODEL answers a
+    request carrying temperature 400 Unsupported parameter (a reasoning model); GN_SAMPLING_BAD
+    always answers 400 with another refusal; anything else the text fixture."""
+    def script(_index, request):
+        try:
+            sent = json.loads((request.get("body") or b"").decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            sent = {}
+        model = sent.get("model") if isinstance(sent, dict) else None
+        if model == GN_SAMPLING_BAD:
+            return [("respond_json", 400, GN_SAMPLING_OTHER_400)]
+        if model == GN_SAMPLING_MODEL and "temperature" in sent:
+            return [("respond_json", 400, GN_SAMPLING_UNSUPPORTED)]
+        return gn_up_ok(lines)
+    return script
+
+
+def gn_sampling_backends(rig):
+    return {GN_OPENAI: {"kind": "openai", "base_url": rig.up.url(), "ca_file": rig.ca_file,
+                        "api_key": TF_KEY_OPENAI}}
+
+
+def gn_sampling_argv(rig):
+    rig.log_path = os.path.join(rig.sandbox, "%s.log" % rig.label)
+    return ["--debug", "--log-file", rig.log_path]
+
+
+def gn_sampling_ask(rig, route, stream, label, want=200, etype=None, needle=None, **sampling):
+    """Problems of one request to *route* carrying *sampling*: a stream must end in message_stop
+    (when *want* is 200), anything else must be the *want* answer (a JSON envelope, never SSE)."""
+    req = gi_body(route, "tf n sampling %s" % label)
+    req["max_tokens"] = GN_OPENAI_MAX
+    req.update(sampling)
+    if stream:
+        req["stream"] = True
+    if stream and want == 200:
+        conn, resp, problems = open_stream(rig.client, req)
+        rig.statuses.append(200 if conn is not None else "refused")
+        if conn is None:
+            return ["%s: %s" % (label, p) for p in problems]
+        try:
+            read = read_stream(resp)
+        finally:
+            close_stream(conn, resp)
+        names = gg_names(gn_parsed_events(read))
+        if "error" in names or names[-1:] != ["message_stop"]:
+            return ["%s: the stream did not end in message_stop (%s; errors %s)"
+                    % (label, ev_shape(read["events"]), ev_errors(read["events"]))]
+        return []
+    try:
+        status, hdrs, data = rig.client.post(obj=req)
+    except (OSError, http.client.HTTPException) as exc:
+        status, hdrs, data = type(exc).__name__, {}, b""
+    rig.statuses.append(status)
+    got_type, msg = None, None
+    if isinstance(status, int) and status >= 400:
+        got_type, msg, _bad = gb_envelope(data)
+    problems = gn_answer(label, (status, got_type, msg, data), want, etype, needle)
+    if (hdrs.get("content-type") or "").split(";", 1)[0].strip().lower() == "text/event-stream" and want != 200:
+        problems.append("%s: answered with an SSE head, expected a JSON envelope (KD-15)" % label)
+    return problems
+
+
+def gn_sampling_seen(rig, start):
+    """The upstream bodies recorded from index *start* on, parsed ({} when one does not parse)."""
+    out = []
+    for request in list(rig.up.requests)[start:]:
+        try:
+            obj = json.loads((request.get("body") or b"").decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            obj = None
+        out.append(obj if isinstance(obj, dict) else {})
+    return out
+
+
+def gn_sampling_expect(label, seen, want):
+    """Problems unless *seen* (upstream bodies) are exactly *want*: [(model, temperature, top_p)],
+    None meaning the key is absent."""
+    got = [(b.get("model"), b.get("temperature"), b.get("top_p")) for b in seen]
+    absent = [("temperature" in b and b["temperature"] is None) or ("top_p" in b and b["top_p"] is None)
+              for b in seen]
+    if got != list(want) or any(absent):
+        return ["%s: the upstream saw (model, temperature, top_p) %r, expected %r" % (label, got, list(want))]
+    return []
+
+
+def gn_sampling_log(rig, want):
+    """Problems unless the req lines of the log, in order, carry sampling_dropped as *want*
+    (one entry per request: the dropped names joined with ",", or None for no field)."""
+    rig.proc.close()
+    try:
+        with open(rig.log_path, "r", encoding="utf-8", errors="replace") as fh:
+            logged = fh.read()
+    except OSError as exc:
+        return ["the --log-file cannot be read: %s" % type(exc).__name__]
+    got = []
+    for line in logged.splitlines():
+        if " req endpoint=" not in line and not line.startswith("req endpoint="):
+            continue
+        match = re.search(r"\bsampling_dropped=(\S+)", line)
+        got.append(match.group(1).strip("'\"") if match else None)
+    if got != list(want):
+        return ["the req lines carry sampling_dropped %r, expected %r" % (got, list(want))]
+    return []
+
+
+def gn_n31(fixture_root, ctx):
+    """N31: an openai-apikey model that refuses temperature (400 Unsupported parameter) --
+    a non-stream request carrying temperature and top_p is retried ONCE without temperature
+    (top_p kept) and answered 200; a following stream request to the same model goes out
+    without temperature on its first try; another model on the same backend still gets
+    temperature; the req lines name sampling_dropped=temperature on the first two only."""
+    routes = {GN_SAMPLING_ROUTE: {"backend": GN_OPENAI, "model": GN_SAMPLING_MODEL},
+              GN_SAMPLING_ROUTE_OTHER: {"backend": GN_OPENAI, "model": GN_SAMPLING_OTHER}}
+
+    def body(rig):
+        problems = gn_sampling_ask(rig, GN_SAMPLING_ROUTE, False, "non-stream, learns", temperature=1, top_p=0.9)
+        problems += gn_sampling_expect("non-stream, learns", gn_sampling_seen(rig, 0),
+                                       [(GN_SAMPLING_MODEL, 1, 0.9), (GN_SAMPLING_MODEL, None, 0.9)])
+        problems += gn_sampling_ask(rig, GN_SAMPLING_ROUTE, True, "stream, learned", temperature=1)
+        problems += gn_sampling_expect("stream, learned", gn_sampling_seen(rig, 2), [(GN_SAMPLING_MODEL, None, None)])
+        problems += gn_sampling_ask(rig, GN_SAMPLING_ROUTE_OTHER, False, "other model", temperature=1)
+        problems += gn_sampling_expect("other model", gn_sampling_seen(rig, 3), [(GN_SAMPLING_OTHER, 1, None)])
+        problems += gn_sampling_log(rig, ["temperature", "temperature", None])
+        return problems, ["upstream    : %s answers 400 Unsupported parameter 'temperature'; %s takes it"
+                          % (GN_SAMPLING_MODEL, GN_SAMPLING_OTHER)]
+    return gn_run(fixture_root, "n31", None, gn_sampling_script(ctx["lines"]), gn_sampling_backends, body,
+                  argv=gn_sampling_argv, routes=routes)
+
+
+def gn_n32(fixture_root, ctx):
+    """N32: a stream request whose route overrides temperature (the client sent none) goes out
+    with the override, is refused 400 Unsupported parameter before any client byte, and is
+    retried ONCE without it -- the client gets one whole stream; a following non-stream
+    request drops the override up front (unsupported wins over the config); a 400 with any
+    other message (param temperature, code invalid_value) is relayed without a retry, stream
+    or not."""
+    routes = {GN_SAMPLING_ROUTE: {"backend": GN_OPENAI, "model": GN_SAMPLING_MODEL,
+                                  "options": {"temperature": GN_SAMPLING_OVERRIDE}},
+              GN_SAMPLING_ROUTE_BAD: {"backend": GN_OPENAI, "model": GN_SAMPLING_BAD}}
+
+    def body(rig):
+        problems = gn_sampling_ask(rig, GN_SAMPLING_ROUTE, True, "stream, override, learns")
+        problems += gn_sampling_expect("stream, override, learns", gn_sampling_seen(rig, 0),
+                                       [(GN_SAMPLING_MODEL, GN_SAMPLING_OVERRIDE, None),
+                                        (GN_SAMPLING_MODEL, None, None)])
+        problems += gn_sampling_ask(rig, GN_SAMPLING_ROUTE, False, "non-stream, learned", temperature=1)
+        problems += gn_sampling_expect("non-stream, learned", gn_sampling_seen(rig, 2),
+                                       [(GN_SAMPLING_MODEL, None, None)])
+        for n, stream in enumerate((False, True)):
+            label = "other 400 (%s)" % ("stream" if stream else "non-stream")
+            problems += gn_sampling_ask(rig, GN_SAMPLING_ROUTE_BAD, stream, label, 400, "invalid_request_error",
+                                        GN_SAMPLING_OTHER_MSG, temperature=1)
+            problems += gn_sampling_expect(label, gn_sampling_seen(rig, 3 + n), [(GN_SAMPLING_BAD, 1, None)])
+        problems += gn_sampling_log(rig, ["temperature", "temperature", None, None])
+        return problems, ["route       : options.temperature %s on %s; %s answers 400 invalid_value"
+                          % (GN_SAMPLING_OVERRIDE, GN_SAMPLING_MODEL, GN_SAMPLING_BAD)]
+    return gn_run(fixture_root, "n32", None, gn_sampling_script(ctx["lines"]), gn_sampling_backends, body,
+                  argv=gn_sampling_argv, routes=routes)
+
+
+# -- N34, N35: the learned reasoning_effort remap on mistral (live finding 2026-10-07) --
+
+def gn_effort_quoted(names):
+    """The supported list as the live 400 printed it: <ReasoningEffort.x: 'x'>, ..."""
+    return ", ".join("<ReasoningEffort.%s: '%s'>" % (n, n) for n in names)
+
+
+def gn_effort_script(_index, request):
+    """The mistral upstream of N34/N35, by the body's model: GN_EFFORT_MODEL(_S) 400s every
+    reasoning_effort but high / none listing [high, none] (the top-level message shape);
+    GN_EFFORT_UNPARSED 400s with an unquoted list; GN_EFFORT_STUBBORN(_S) 400s every effort,
+    listing high (or medium for high) in the error.message shape; a 2xx is a chat completion
+    (an event stream when the body asks for one)."""
+    try:
+        sent = json.loads((request.get("body") or b"").decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        sent = {}
+    sent = sent if isinstance(sent, dict) else {}
+    model, effort = sent.get("model"), sent.get("reasoning_effort")
+    if model in (GN_EFFORT_MODEL, GN_EFFORT_MODEL_S) and effort not in (None, "high", "none"):
+        return [("respond_json", 400, {"object": "error", "type": "invalid_request_error", "param": None,
+                                       "code": None,
+                                       "message": GN_EFFORT_MSG % (effort, gn_effort_quoted(("high", "none")))})]
+    if model == GN_EFFORT_UNPARSED:
+        return [("respond_json", 400, {"object": "error", "type": "invalid_request_error",
+                                       "message": GN_EFFORT_MSG % (effort, "high, none")})]
+    if model in (GN_EFFORT_STUBBORN, GN_EFFORT_STUBBORN_S):
+        other = "medium" if effort == "high" else "high"
+        return [("respond_json", 400, {"error": {"type": "invalid_request_error",
+                                                 "message": GN_EFFORT_MSG % (effort, gn_effort_quoted((other,)))}})]
+    if sent.get("stream") is True:
+        return [("respond_sse", ms_lines(MS_ROLE, ms_text("tf n effort"), ms_stop("stop", ms_usage(5, 3))))]
+    return [("respond_json", 200, ms_answer({"role": "assistant", "content": "tf n effort"}, "stop"))]
+
+
+def gn_effort_backends(rig):
+    return {GN_MISTRAL: {"kind": "mistral", "base_url": rig.up.url(), "ca_file": rig.ca_file,
+                         "api_key": TF_KEY_MISTRAL}}
+
+
+def gn_effort_run(fixture_root, label, body):
+    routes = {route: {"backend": GN_MISTRAL, "model": model} for model, route in GN_EFFORT_ROUTES.items()}
+    return gn_run(fixture_root, label, None, gn_effort_script, gn_effort_backends, body,
+                  argv=gn_sampling_argv, routes=routes)
+
+
+def gn_effort_expect(label, seen, want):
+    """Problems unless *seen* (upstream bodies) are exactly *want*: [(model, reasoning_effort)]."""
+    got = [(b.get("model"), b.get("reasoning_effort")) for b in seen]
+    if got != list(want):
+        return ["%s: the upstream saw (model, reasoning_effort) %r, expected %r" % (label, got, list(want))]
+    return []
+
+
+def gn_effort_log(rig, want, learned):
+    """Problems unless the req lines carry effort= as *want* (one entry per request, None for no
+    field) and the INFO learn line appears once per model of *learned*, naming its supported set."""
+    rig.proc.close()
+    try:
+        with open(rig.log_path, "r", encoding="utf-8", errors="replace") as fh:
+            logged = fh.read().splitlines()
+    except OSError as exc:
+        return ["the --log-file cannot be read: %s" % type(exc).__name__]
+    got = []
+    for line in logged:
+        if " req endpoint=" in line or line.startswith("req endpoint="):
+            match = re.search(r"\beffort=(\S+)", line)
+            got.append(match.group(1).strip("'\"") if match else None)
+    problems = [] if got == list(want) else ["the req lines carry effort %r, expected %r" % (got, list(want))]
+    lines = [line for line in logged if GN_EFFORT_LEARNED in line]
+    for model, supported in learned.items():
+        hits = [line for line in lines if "'%s'" % model in line]
+        if len(hits) != 1 or supported not in hits[0] or " INFO " not in hits[0]:
+            problems.append("the %r line for %s: %d line(s) %r, expected one INFO line naming %s"
+                            % (GN_EFFORT_LEARNED, model, len(hits), [gi_redact(h)[:160] for h in hits], supported))
+    if len(lines) != len(learned):
+        problems.append("%d %r line(s), expected %d (one per learn)" % (len(lines), GN_EFFORT_LEARNED, len(learned)))
+    return problems
+
+
+def gn_n34(fixture_root, ctx):
+    """N34: a mistral model that refuses reasoning_effort low (400 "supported values: [high,
+    none]") -- a non-stream request with budget 2048 (band low) is retried ONCE with high and
+    answered 200, the peer seeing low then high; a second request goes straight to high (one
+    upstream request); a stream request to another such model learns the same way before any
+    client byte and the client gets one whole stream; the req lines carry effort=high on all
+    three, and one INFO learn line per model."""
+    del ctx
+
+    def body(rig):
+        route, route_s = GN_EFFORT_ROUTES[GN_EFFORT_MODEL], GN_EFFORT_ROUTES[GN_EFFORT_MODEL_S]
+        problems = gn_sampling_ask(rig, route, False, "non-stream, learns", thinking=GN_EFFORT_THINKING)
+        problems += gn_effort_expect("non-stream, learns", gn_sampling_seen(rig, 0),
+                                     [(GN_EFFORT_MODEL, "low"), (GN_EFFORT_MODEL, "high")])
+        problems += gn_sampling_ask(rig, route, False, "non-stream, learned", thinking=GN_EFFORT_THINKING)
+        problems += gn_effort_expect("non-stream, learned", gn_sampling_seen(rig, 2), [(GN_EFFORT_MODEL, "high")])
+        problems += gn_sampling_ask(rig, route_s, True, "stream, learns", thinking=GN_EFFORT_THINKING)
+        problems += gn_effort_expect("stream, learns", gn_sampling_seen(rig, 3),
+                                     [(GN_EFFORT_MODEL_S, "low"), (GN_EFFORT_MODEL_S, "high")])
+        problems += gn_effort_log(rig, ["high", "high", "high"],
+                                  {GN_EFFORT_MODEL: "high,none", GN_EFFORT_MODEL_S: "high,none"})
+        return problems, ["upstream    : %s, %s answer 400 reasoning_effort low ... [high, none]"
+                          % (GN_EFFORT_MODEL, GN_EFFORT_MODEL_S)]
+    return gn_effort_run(fixture_root, "n34", body)
+
+
+def gn_n35(fixture_root, ctx):
+    """N35: an unparseable supported list is relayed 400 without a retry (one upstream
+    request); a model that 400s again after the one retry has its second 400 relayed, never a
+    third request -- non-stream and stream (a JSON envelope, no SSE head) alike."""
+    del ctx
+
+    def body(rig):
+        problems = gn_sampling_ask(rig, GN_EFFORT_ROUTES[GN_EFFORT_UNPARSED], False, "unparseable list", 400,
+                                   "invalid_request_error", "supported values: [high, none]",
+                                   thinking=GN_EFFORT_THINKING)
+        problems += gn_effort_expect("unparseable list", gn_sampling_seen(rig, 0), [(GN_EFFORT_UNPARSED, "low")])
+        problems += gn_sampling_ask(rig, GN_EFFORT_ROUTES[GN_EFFORT_STUBBORN], False, "400 after the retry", 400,
+                                    "invalid_request_error", "reasoning_effort high is not supported",
+                                    thinking=GN_EFFORT_THINKING)
+        problems += gn_effort_expect("400 after the retry", gn_sampling_seen(rig, 1),
+                                     [(GN_EFFORT_STUBBORN, "low"), (GN_EFFORT_STUBBORN, "high")])
+        problems += gn_sampling_ask(rig, GN_EFFORT_ROUTES[GN_EFFORT_STUBBORN_S], True, "stream, 400 after the retry",
+                                    400, "invalid_request_error", "reasoning_effort high is not supported",
+                                    thinking=GN_EFFORT_THINKING)
+        problems += gn_effort_expect("stream, 400 after the retry", gn_sampling_seen(rig, 3),
+                                     [(GN_EFFORT_STUBBORN_S, "low"), (GN_EFFORT_STUBBORN_S, "high")])
+        problems += gn_effort_log(rig, [None, "high", "high"],
+                                  {GN_EFFORT_STUBBORN: "'high'", GN_EFFORT_STUBBORN_S: "'high'"})
+        return problems, ["upstream    : %s lists [high, none] unquoted; %s, %s 400 every effort"
+                          % (GN_EFFORT_UNPARSED, GN_EFFORT_STUBBORN, GN_EFFORT_STUBBORN_S)]
+    return gn_effort_run(fixture_root, "n35", body)
+
+
+def gn_big_delta_line(total):
+    """(data: line, delta) of one output_text.delta event whose line is *total* bytes with its newline."""
+    base = "data: " + json.dumps(gm_text(""), separators=(",", ":"))
+    delta = "a" * (total - 1 - len(base))
+    return "data: " + json.dumps(gm_text(delta), separators=(",", ":")), delta
+
+
+def gn_n20(fixture_root, ctx):
+    """N20: an 8 MiB - 1 byte line is relayed on codex (the profile's line cap), while a
+    1 MiB + 1 byte line is still refused on mistral (_SSE_LINE_LIMIT, one event: error)."""
+    big, delta = gn_big_delta_line(ctx["rs_line"] - 1)
+    codex = gm_lines(gm_created(), gm_msg_added(0), ["event: response.output_text.delta", big, ""],
+                     gm_msg_done("tf n20", 0), gm_completed(gm_usage(10, 5)))
+    long_line = "data: " + "x" * (ctx["sse_line"] + 1 - 1 - len("data: "))
+
+    def up(_index, request):
+        if (request.get("line") or "").split(" ")[:2] == ["POST", GN_MISTRAL_PATH]:
+            return [("respond_sse", [long_line, ""])]
+        return gn_up_ok(codex)
+
+    def backends(rig):
+        return {GN_BACKEND: rig.backend(),
+                GN_MISTRAL: {"kind": "mistral", "base_url": rig.up.url(), "ca_file": rig.ca_file,
+                             "api_key": TF_KEY_MISTRAL}}
+
+    def body(rig):
+        problems = []
+        conn, resp, more = open_stream(rig.client, rig.body(stream=True))
+        if conn is None:
+            problems += ["codex: " + p for p in more]
+        else:
+            try:
+                read = read_stream(resp)
+            finally:
+                close_stream(conn, resp)
+            events = gn_parsed_events(read)
+            names = gg_names(events)
+            if "error" in names or names[-1:] != ["message_stop"]:
+                problems.append("codex: the 8 MiB - 1 line did not complete (%s; errors %s)"
+                                % (ev_shape(read["events"]), [(t, gi_redact(m or "")[:120])
+                                                              for t, m in ev_errors(read["events"])]))
+            text = "".join("".join(t or "" for t in b["texts"]) for b in gg_blocks(events) if b["type"] == "text")
+            if text != delta:
+                problems.append("codex: the relayed text is %d chars, expected the %d-char delta"
+                                % (len(text), len(delta)))
+        conn, resp, more = open_stream(rig.client, rig.body(GN_MISTRAL, stream=True))
+        if conn is None:
+            problems += ["mistral: " + p for p in more]
+        else:
+            try:
+                read = read_stream(resp)
+            finally:
+                close_stream(conn, resp)
+            needle = GN_LINE_OVER % ctx["sse_line"]
+            if not any(m and needle in m for _t, m in ev_errors(read["events"])):
+                problems.append("mistral: no event: error holding %r after a %d-byte line (%s)"
+                                % (needle, ctx["sse_line"] + 1, ev_shape(read["events"])))
+        return problems, ["lines       : codex %d bytes (cap %d); mistral %d bytes (cap %d)"
+                          % (ctx["rs_line"] - 1, ctx["rs_line"], ctx["sse_line"] + 1, ctx["sse_line"])]
+    return gn_run(fixture_root, "n20", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("n20"))]),
+                  up, backends, body)
+
+
+# -- N21, N25, N28: the token store in the subprocess router ----------------
+
+def gn_n21(fixture_root, ctx):
+    """N21 (M3): login while the router runs, no restart -- `oauth: {}` answers 401 with the
+    login hint and contacts no peer; the config is then rewritten (as login would) with a
+    refresh token; the next request refreshes with it, gets 200, and the rotated token is
+    persisted."""
+    rot = gn_mint_refresh("n21")
+
+    def backends(rig):
+        return {GN_BACKEND: rig.backend(refresh=None)}
+
+    def body(rig):
+        hint = GN_HINT % GN_BACKEND
+        problems = gn_answer("request 1 (never logged in)", rig.ask(), 401, "authentication_error", hint)
+        time.sleep(GN_SETTLE_S)
+        if rig.auth.conns or rig.up.conns:
+            problems.append("request 1 contacted a peer (auth %d, upstream %d connection(s))"
+                            % (rig.auth.conns, rig.up.conns))
+        obj = json.loads(gl_bytes(rig.cfgpath).decode("utf-8"))
+        obj["backends"][GN_BACKEND]["oauth"] = {"refresh_token": TF_REFRESH_CODEX}
+        write_file(rig.cfgpath, json.dumps(obj, indent=2), 0o600)
+        if rig.proc.proc.poll() is not None:
+            return problems + ["the router exited before request 2"], []
+        problems += gn_answer("request 2 (after the login)", rig.ask(), 200)
+        problems += gn_post_problems(rig.auth, 1, [TF_REFRESH_CODEX])
+        problems += gn_disk("config", rig.cfgpath, obj, {GN_BACKEND: rot}, never=(TF_ACCESS_CODEX,))
+        return problems, ["login       : oauth {} -> the test writes refresh_token TF_REFRESH_CODEX (0600)"]
+    return gn_run(fixture_root, "n21", gn_rotating([(TF_ACCESS_CODEX, rot)]),
+                  gn_up_ok(ctx["lines"]), backends, body)
+
+
+def gn_n25(fixture_root, ctx):
+    """N25: SIGTERM while a refresh POST's body stalls (the head says Content-Length 4096)
+    -> the router exits within _DRAIN_S + 2 s, the client gets a 5xx, and stderr shows
+    neither "pump did not exit" nor an abandoned-handler warning."""
+    drain = ctx["drain"]
+
+    def body(rig):
+        box = {}
+
+        def ask():
+            box["got"] = rig.ask(timeout=GN_BODY_STALL_S)
+
+        thread = threading.Thread(target=ask, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + HTTP_TIMEOUT_S
+        while not rig.auth.requests and time.monotonic() < deadline and thread.is_alive():
+            time.sleep(PEER_POLL_S)
+        if not rig.auth.requests:
+            thread.join(HTTP_TIMEOUT_S)
+            got = box.get("got") or ("not finished", None, None, b"")
+            return ["the refresh POST never reached the auth peer (client: %r %s)"
+                    % (got[0], gi_redact(got[2] or "")[:120])], []
+        time.sleep(GN_TERM_SETTLE_S)
+        problems = []
+        t0 = time.monotonic()
+        rig.proc.proc.send_signal(signal.SIGTERM)
+        try:
+            rig.proc.proc.wait(timeout=drain + GN_EXIT_SLACK_S)
+            took = "%.1f s" % (time.monotonic() - t0)
+        except subprocess.TimeoutExpired:
+            took = "still running"
+            problems.append("the router did not exit within _DRAIN_S + %.0f s = %.1f s of SIGTERM"
+                            % (GN_EXIT_SLACK_S, drain + GN_EXIT_SLACK_S))
+        thread.join(HTTP_TIMEOUT_S)
+        got = box.get("got") or ("not finished", None, None, b"")
+        if not (isinstance(got[0], int) and 500 <= got[0] <= 599):
+            problems.append("the client got %r, expected a 5xx" % (got[0],))
+        err = rig.proc.stderr_text()
+        for needle in GN_TERM_NEVER:
+            if needle in err:
+                problems.append("stderr holds %r" % needle)
+        return problems, ["shutdown    : SIGTERM %.1f s after the POST; exit after %s; client %r"
+                          % (GN_TERM_SETTLE_S, took, got[0])]
+    return gn_run(fixture_root, "n25", [("respond_raw", GN_STALLED_HEAD), ("stall", GN_BODY_STALL_S)],
+                  gn_up_ok(ctx["lines"]), gn_one, body)
+
+
+def gn_n28(fixture_root, ctx):
+    """N28 (S8): a refresh answered 400 {"error": "weird_code_<TF_TOKEN_ERRDESC>",
+    "error_description": TF_TOKEN_ERRDESC} -> 502 "token refresh failed (invalid_response)"
+    (or "(transient)"); the --debug log names the code `other`; TF_TOKEN_ERRDESC is in neither
+    stderr, the log file nor the response."""
+    auth = [("respond_json", 400, {"error": "weird_code_" + TF_TOKEN_ERRDESC, "error_description": TF_TOKEN_ERRDESC})]
+    forms = (TF_TOKEN_ERRDESC, TF_TOKEN_ERRDESC[-32:])
+
+    def argv(rig):
+        rig.log_path = os.path.join(rig.sandbox, "n28.log")
+        return ["--debug", "--log-file", rig.log_path]
+
+    def body(rig):
+        got = rig.ask()
+        problems = gn_answer("request", got, 502, "api_error", "token refresh failed (")
+        if got[2] is not None and not any(k in got[2] for k in ("(invalid_response)", "(transient)")):
+            problems.append("the message %r names neither (invalid_response) nor (transient)" % gi_redact(got[2])[:160])
+        problems += gn_post_problems(rig.auth, 1, [TF_REFRESH_CODEX])
+        rig.proc.close()
+        try:
+            with open(rig.log_path, "r", encoding="utf-8", errors="replace") as fh:
+                logged = fh.read()
+        except OSError as exc:
+            logged = ""
+            problems.append("the --log-file cannot be read: %s" % type(exc).__name__)
+        if not re.search(r"\bother\b", logged):
+            problems.append("the log does not name the refusal's code `other`")
+        for where, text in (("stderr", rig.proc.stderr_text()), ("the log file", logged),
+                            ("the response", gb_text(got[3]))):
+            if any(form in text for form in forms):
+                problems.append("TF_TOKEN_ERRDESC is in %s" % where)
+        return problems, ["auth        : 400 weird_code_<TF_TOKEN_ERRDESC> + error_description"]
+    return gn_run(fixture_root, "n28", auth, gn_up_ok(ctx["lines"]), gn_one, body, argv=argv)
+
+
+# -- N22-N24, N26, N27: in-process ------------------------------------------
+
+def gn_need(mod, names):
+    """One problem naming every symbol of *names* the module does not define (red, never a crash)."""
+    absent = [n for n in names if not hasattr(mod, n)]
+    return ["the module defines no %s (Step 11 not landed)" % ", ".join(absent)] if absent else []
+
+
+def gn_token_body(access, refresh=None):
+    obj = {"access_token": access, "token_type": "Bearer", "expires_in": GN_EXPIRES_IN}
+    if refresh is not None:
+        obj["refresh_token"] = refresh
+    return json.dumps(obj).encode("ascii")
+
+
+class GnPost:
+    """The injected token POST (the _RtTokenStore `post` seam): counts calls, answers
+    answer(index) = (status, body); with *block* call 0 waits on `release` (at most
+    GN_BLOCK_S) after setting `entered`."""
+
+    def __init__(self, answer, block=False):
+        self.answer, self.block = answer, block
+        self.calls = 0
+        self.lock = threading.Lock()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, backend, request, user_agent, track=None):
+        with self.lock:
+            index = self.calls
+            self.calls += 1
+        if self.block and index == 0:
+            self.entered.set()
+            self.release.wait(GN_BLOCK_S)
+        return self.answer(index)
+
+
+def gn_thread(fn):
+    """(thread, box) running *fn*; box["got"] = ("ok", value) or ("exc", exception), box["t"] its end."""
+    box = {}
+
+    def run():
+        try:
+            box["got"] = ("ok", fn())
+        except Exception as exc:  # noqa: BLE001 -- the exception is the finding
+            box["got"] = ("exc", exc)
+        box["t"] = time.monotonic()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, box
+
+
+def gn_call(fn):
+    try:
+        return "ok", fn()
+    except Exception as exc:  # noqa: BLE001 -- the exception is the finding
+        return "exc", exc
+
+
+def gn_raised(label, got, mod, cls, status, etype, needle):
+    """Problems unless *got* is ("exc", mod.<cls>(status, etype, a message holding needle))."""
+    kind, value = got
+    if kind != "exc":
+        return ["%s: returned %s, expected %s(%d, %s)" % (label, type(value).__name__ if kind == "ok" else kind,
+                                                          cls, status, etype)]
+    want = getattr(mod, cls, None)
+    shown = gi_redact(str(getattr(value, "message", value)))[:160]
+    if want is None or not isinstance(value, want) or getattr(value, "status", None) != status \
+            or getattr(value, "err_type", None) != etype or needle not in str(getattr(value, "message", "")):
+        return ["%s: raised %s(%r, %r, %r), expected %s(%d, %s, ...%r...)"
+                % (label, type(value).__name__, getattr(value, "status", None), getattr(value, "err_type", None),
+                   shown, cls, status, etype, needle)]
+    return []
+
+
+def gn_inproc(fixture_root, label, oauths, connect_timeout=None):
+    """(mod, cfg, config path, problems): a private module instance and load_config over a
+    sandbox config of one codex backend per *oauths* item (name -> its oauth object)."""
+    mod = H.load_module_from_path("ph_llm_router_" + label, SERVER)
+    problems = gn_need(mod, ("_RtTokenStore",))
+    sandbox = new_sandbox(fixture_root, label)
+    ca_file = sandbox_ca_file(sandbox)
+    backends = {}
+    for name, oauth in oauths.items():
+        entry = {"kind": "codex", "base_url": GN_INPROC_URL, "auth_base_url": GN_INPROC_URL,
+                 "ca_file": ca_file, "oauth": oauth}
+        if connect_timeout is not None:
+            entry["connect_timeout"] = connect_timeout
+        backends[name] = entry
+    names = list(backends)
+    path = write_config(sandbox, {"auth_token": TF_ROUTER_TOKEN, "backends": backends,
+                                  "routes": {gn_route(n): {"backend": n, "model": GN_MODEL} for n in names},
+                                  "default": {"backend": names[0], "model": GN_MODEL}})
+    return mod, mod.load_config(path), path, problems
+
+
+def gn_n22(fixture_root, ctx):
+    """N22 (H5/S2): a post blocking while it holds the backend lock -> a second credential()
+    raises UpstreamError(503, overloaded_error) after connect_timeout 0.2 + _RT_OAUTH_IDLE_S
+    0.3 (patched) ~ 0.5 s; the first call then completes with the token."""
+    mod, cfg, _path, problems = gn_inproc(fixture_root, "n22", {GN_BACKEND: {"refresh_token": TF_REFRESH_CODEX}},
+                                          connect_timeout=GN_IN_CONNECT_S)
+    if problems:
+        return problems, []
+    mod._RT_OAUTH_IDLE_S = GN_IN_IDLE_S
+    post = GnPost(lambda _i: (200, gn_token_body(TF_ACCESS_CODEX)), block=True)
+    store = mod._RtTokenStore(None, cfg, post=post)
+    backend = cfg.backends[GN_BACKEND]
+    first, box = gn_thread(lambda: store.credential(backend))
+    took = None
+    try:
+        if not post.entered.wait(HTTP_TIMEOUT_S):
+            return ["the first credential() never reached the injected post (%s)" % box.get("got", ("running",))[0]], []
+        t0 = time.monotonic()
+        got = gn_call(lambda: store.credential(backend))
+        took = time.monotonic() - t0
+        problems += gn_raised("the waiter", got, mod, "UpstreamError", 503, "overloaded_error", GN_RETRY)
+        if not GN_BOUND_LO_S <= took <= GN_BOUND_HI_S:
+            problems.append("the waiter gave up after %.2f s, expected %.1f-%.1f s (connect %.1f + idle %.1f)"
+                            % (took, GN_BOUND_LO_S, GN_BOUND_HI_S, GN_IN_CONNECT_S, GN_IN_IDLE_S))
+    finally:
+        post.release.set()
+        first.join(HTTP_TIMEOUT_S)
+    kind, value = box.get("got", ("not finished", None))
+    if kind != "ok" or getattr(value, "access_token", None) != TF_ACCESS_CODEX:
+        problems.append("the first credential() ended %s %s, expected the refreshed token"
+                        % (kind, type(value).__name__))
+    if post.calls != 1:
+        problems.append("the injected post was called %d time(s), expected 1" % post.calls)
+    return problems, ["wait        : %s" % ("%.2f s" % took if took is not None else "not measured")]
+
+
+def gn_n23(fixture_root, ctx):
+    """N23 (H5/S2, fake mono): a post answering 503 -> four concurrent credential() calls make
+    ONE post and all raise 502 "token refresh failed (transient)"; 9.9 s later still one
+    post; 10.1 s later a second."""
+    mod, cfg, _path, problems = gn_inproc(fixture_root, "n23", {GN_BACKEND: {"refresh_token": TF_REFRESH_CODEX}})
+    if problems:
+        return problems, []
+    now = [GN_MONO_BASE]
+    post = GnPost(lambda _i: (503, b"tf n23: the token endpoint is unavailable"))
+    store = mod._RtTokenStore(None, cfg, mono=lambda: now[0], post=post)
+    backend = cfg.backends[GN_BACKEND]
+    runs = [gn_thread(lambda: store.credential(backend)) for _ in range(GN_STORM)]
+    for thread, _box in runs:
+        thread.join(GN_JOIN_S)
+    for i, (_thread, box) in enumerate(runs):
+        problems += gn_raised("caller %d of %d" % (i + 1, GN_STORM), box.get("got", ("not finished", None)), mod,
+                              "UpstreamError", 502, "api_error", GN_TRANSIENT)
+    if post.calls != 1:
+        problems.append("%d concurrent callers made %d post(s), expected 1" % (GN_STORM, post.calls))
+    now[0] = GN_MONO_BASE + GN_CACHE_BELOW_S
+    problems += gn_raised("at +%.1f s" % GN_CACHE_BELOW_S, gn_call(lambda: store.credential(backend)), mod,
+                          "UpstreamError", 502, "api_error", GN_TRANSIENT)
+    if post.calls != 1:
+        problems.append("at +%.1f s: %d post(s) in total, expected still 1" % (GN_CACHE_BELOW_S, post.calls))
+    now[0] = GN_MONO_BASE + GN_CACHE_ABOVE_S
+    problems += gn_raised("at +%.1f s" % GN_CACHE_ABOVE_S, gn_call(lambda: store.credential(backend)), mod,
+                          "UpstreamError", 502, "api_error", GN_TRANSIENT)
+    if post.calls != 2:
+        problems.append("at +%.1f s: %d post(s) in total, expected 2" % (GN_CACHE_ABOVE_S, post.calls))
+    return problems, ["posts       : %d (mono %.1f -> +%.1f -> +%.1f)"
+                      % (post.calls, GN_MONO_BASE, GN_CACHE_BELOW_S, GN_CACHE_ABOVE_S)]
+
+
+def gn_n24(fixture_root, ctx):
+    """N24 (H5/S2): a waiter blocked behind a held backend lock raises ApiError(529,
+    overloaded_error, "router shutting down") within 0.5 s of closing.set(), and never
+    calls the injected post."""
+    mod, cfg, _path, problems = gn_inproc(fixture_root, "n24", {GN_BACKEND: {"refresh_token": TF_REFRESH_CODEX}})
+    if problems:
+        return problems, []
+    closing = threading.Event()
+    post = GnPost(lambda _i: (200, gn_token_body(TF_ACCESS_CODEX)), block=True)
+    store = mod._RtTokenStore(None, cfg, post=post, closing=closing)
+    backend = cfg.backends[GN_BACKEND]
+    first, _first_box = gn_thread(lambda: store.credential(backend))
+    took = None
+    try:
+        if not post.entered.wait(HTTP_TIMEOUT_S):
+            return ["the first credential() never reached the injected post"], []
+        waiter, box = gn_thread(lambda: store.credential(backend))
+        time.sleep(GN_SETTLE_S)
+        if not waiter.is_alive():
+            problems.append("the waiter did not wait behind the held lock (%s)" % box.get("got", ("?",))[0])
+        t0 = time.monotonic()
+        closing.set()
+        waiter.join(GN_CLOSE_S + HTTP_TIMEOUT_S)
+        if "t" in box:
+            took = box["t"] - t0
+        problems += gn_raised("the waiter", box.get("got", ("not finished", None)), mod, "ApiError", 529,
+                              "overloaded_error", GN_SHUTTING)
+        if took is None or took > GN_CLOSE_S:
+            problems.append("the waiter answered %s after closing.set(), expected within %.1f s"
+                            % ("never" if took is None else "%.2f s" % took, GN_CLOSE_S))
+        if post.calls != 1:
+            problems.append("the injected post was called %d time(s), expected 1 (never by the waiter)" % post.calls)
+    finally:
+        post.release.set()
+        first.join(HTTP_TIMEOUT_S)
+    return problems, ["closing     : %s" % ("%.2f s" % took if took is not None else "not measured")]
+
+
+def gn_n26(fixture_root, ctx):
+    """N26 (S5): an adopted disk token holding a space is not adopted (401 re-login, no post,
+    the config byte-identical); an access token whose chatgpt_account_id claim is "\\r\\nx"
+    keeps the seed account_id, which upstream_head sends as chatgpt-account-id; with no seed
+    it is 502 "token refresh failed (invalid_response)"."""
+    seed_b, seed_c = gn_mint_refresh("n26-b"), gn_mint_refresh("n26-c")
+    mod, cfg, path, problems = gn_inproc(fixture_root, "n26", {
+        GN_BACKEND: {}, GN_BACKEND_2: {"refresh_token": seed_b, "account_id": GN_SEED_ACCOUNT},
+        GN_NOSEED: {"refresh_token": seed_c}})
+    if problems:
+        return problems, []
+    bad = tf_jwt({"https://api.openai.com/auth": {"chatgpt_account_id": "\r\nx"}})
+    post = GnPost(lambda _i: (200, gn_token_body(bad)))
+    store = mod._RtTokenStore(path, cfg, post=post)
+    # (a) the disk now holds a refresh token with a space, as a broken writer would leave it.
+    obj = json.loads(gl_bytes(path).decode("utf-8"))
+    obj["backends"][GN_BACKEND]["oauth"] = {"refresh_token": "tf-n26 space-" + secrets.token_hex(16)}
+    write_file(path, json.dumps(obj, indent=2), 0o600)
+    before = gl_bytes(path)
+    problems += gn_raised("disk token with a space", gn_call(lambda: store.credential(cfg.backends[GN_BACKEND])),
+                          mod, "ApiError", 401, "authentication_error", GN_HINT % GN_BACKEND)
+    if post.calls:
+        problems.append("a disk token with a space was POSTed (%d post(s))" % post.calls)
+    if gl_bytes(path) != before:
+        problems.append("the config is not byte-identical after the refused disk token")
+    # (b) a bad account claim with a seed: the seed is the header value.
+    backend_b = cfg.backends[GN_BACKEND_2]
+    kind, cred = gn_call(lambda: store.credential(backend_b))
+    if kind != "ok":
+        problems.append("bad claim with a seed: credential() raised %s: %s"
+                        % (type(cred).__name__, gi_redact(str(cred))[:160]))
+    else:
+        if getattr(cred, "account_id", None) != GN_SEED_ACCOUNT:
+            problems.append("bad claim with a seed: account_id %r, expected the seed %r"
+                            % (getattr(cred, "account_id", None), GN_SEED_ACCOUNT))
+        inbound = mod.InboundRequest(endpoint="messages", requested_model=gn_route(GN_BACKEND_2),
+                                     body={"model": gn_route(GN_BACKEND_2), "max_tokens": 16, "stream": True,
+                                           "messages": [{"role": "user", "content": "tf n26"}]},
+                                     stream=True, route=mod.RouteSpec(name=gn_route(GN_BACKEND_2), backend=GN_BACKEND_2,
+                                                                      model=GN_MODEL, options={}),
+                                     backend=backend_b, client_headers={}, scrub=cfg.scrub)
+        adapter = mod.ADAPTERS.get("codex") or mod.CodexAdapter()
+        _accept, pairs = adapter.upstream_head(inbound, cred)
+        sent = [v for k, v in pairs if k.lower() == "chatgpt-account-id"]
+        if sent != [GN_SEED_ACCOUNT]:
+            problems.append("upstream_head chatgpt-account-id %r, expected [%r]" % (sent, GN_SEED_ACCOUNT))
+        if any("\r" in v or "\n" in v for _k, v in pairs):
+            problems.append("upstream_head carries a CR or LF in a header value")
+    # (c) the same claim with no seed: refused before any upstream request.
+    problems += gn_raised("bad claim, no seed", gn_call(lambda: store.credential(cfg.backends[GN_NOSEED])), mod,
+                          "UpstreamError", 502, "api_error", GN_REFRESH_FAILED)
+    return problems, ["claims      : chatgpt_account_id \"\\r\\nx\"; seed %s on %s, none on %s"
+                      % (GN_SEED_ACCOUNT, GN_BACKEND_2, GN_NOSEED)]
+
+
+def gn_n27(fixture_root, ctx):
+    """N27 (S9): _rt_oauth_spec without auth_base drops the backend's trust inputs
+    (allow_private/allow_loopback False, ca_file/ca_pem None); with auth_base it keeps all
+    four; connect_timeout is inherited in both."""
+    del fixture_root
+    mod = H.load_module_from_path("ph_llm_router_n27", SERVER)
+    problems = gn_need(mod, ("_rt_oauth_spec", "BackendSpec"))
+    if problems:
+        return problems, []
+    backend = gk_backend(mod, "codex", name=GN_BACKEND)._replace(
+        allow_private=True, allow_loopback=True, ca_file="/tf/n27/test-ca.pem", ca_pem="tf n27 pem", connect_timeout=1.7)
+    trust = ("allow_private", "allow_loopback", "ca_file", "ca_pem")
+    url = "https://auth.openai.com/oauth/token"
+    for label, spec_backend, want in (
+            ("no auth_base", backend, (False, False, None, None)),
+            ("auth_base set", backend._replace(auth_base=("https", "127.0.0.1", 8443, "")),
+             tuple(getattr(backend, k) for k in trust))):
+        kind, got = gn_call(lambda: mod._rt_oauth_spec(spec_backend, url))
+        if kind != "ok":
+            problems.append("%s: _rt_oauth_spec raised %s" % (label, type(got).__name__))
+            continue
+        spec, _path = got
+        have = tuple(getattr(spec, k) for k in trust)
+        if have != want:
+            problems.append("%s: %s = %r, expected %r" % (label, "/".join(trust), have, want))
+        if spec.connect_timeout != backend.connect_timeout:
+            problems.append("%s: connect_timeout %r, expected the backend's %r"
+                            % (label, spec.connect_timeout, backend.connect_timeout))
+    return problems, ["backend     : allow_private, allow_loopback, ca_file, ca_pem set; connect_timeout 1.7"]
+
+
+def gn_n33(fixture_root, ctx):
+    """N33 (F40): a `login` lands on disk while a refresh POST of the old grant is in flight.
+    The rotation must NOT be written over it: under the flock the writer sees the disk's
+    refresh token differ from the one the refresh started from, writes nothing, and the store
+    adopts the disk grant (KD-10) and refreshes with it.  The old grant's rotated token never
+    reaches the disk."""
+    del ctx
+    seed, login, rotated = gn_mint_refresh("n33-seed"), gn_mint_refresh("n33-login"), gn_mint_refresh("n33-rot")
+    mod, cfg, path, problems = gn_inproc(fixture_root, "n33", {GN_BACKEND: {"refresh_token": seed}})
+    if problems:
+        return problems, []
+    sent = []
+
+    def post(backend, request, user_agent, track=None):
+        sent.append(request[2] if isinstance(request, tuple) and len(request) == 3 else b"")
+        if len(sent) == 1:
+            # The operator's `login` finishes while this POST of the seed grant is out.
+            obj = json.loads(gl_bytes(path).decode("utf-8"))
+            obj["backends"][GN_BACKEND]["oauth"] = {"refresh_token": login}
+            write_file(path, json.dumps(obj, indent=2), 0o600)
+            return 200, gn_token_body(gn_mint_access(), rotated)
+        return 200, gn_token_body(gn_mint_access())
+
+    store = mod._RtTokenStore(path, cfg, post=post)
+    kind, cred = gn_call(lambda: store.credential(cfg.backends[GN_BACKEND]))
+    if kind != "ok":
+        problems.append("credential() raised %s: %s" % (type(cred).__name__, gi_redact(str(cred))[:160]))
+    disk = gl_bytes(path)
+    try:
+        on_disk = json.loads(disk.decode("utf-8"))["backends"][GN_BACKEND]["oauth"].get("refresh_token")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        on_disk = None
+        problems.append("the config no longer parses to a backends.%s.oauth object" % GN_BACKEND)
+    if on_disk != login:
+        problems.append("the disk refresh_token is %s, expected the login's (it was overwritten by the old grant's "
+                        "rotation)" % ("the rotated one" if on_disk == rotated else "neither the login's nor the rotated one"))
+    if rotated.encode("ascii") in disk:
+        problems.append("the old grant's rotated refresh token reached the disk")
+    if len(sent) != 2 or login.encode("ascii") not in sent[-1]:
+        problems.append("posts %d, the last %s the login's token: expected 2, the second with the adopted login "
+                        "(the adopt path)" % (len(sent), "carrying" if sent and login.encode("ascii") in sent[-1]
+                                               else "not carrying"))
+    state = getattr(store, "_states", {}).get(GN_BACKEND)
+    if getattr(state, "refresh", None) != login:
+        problems.append("the store's refresh token is %s, expected the adopted login's"
+                        % ("the rotated one" if getattr(state, "refresh", None) == rotated else "another one"))
+    return problems, ["race        : login written during refresh POST 1 of %d; disk refresh_token %s"
+                      % (len(sent), "= login" if on_disk == login else "!= login")]
+
+
+GN_FNS = (gn_n1, gn_n2, gn_n3, gn_n4, gn_n5, gn_n6, gn_n7, gn_n8, gn_n9, gn_n10, gn_n11, gn_n12, gn_n13,
+          gn_n14, gn_n15, gn_n16, gn_n17, gn_n18, gn_n19, gn_n20, gn_n21, gn_n22, gn_n23, gn_n24, gn_n25, gn_n26, gn_n27, gn_n28,
+          gn_n29, gn_n30, gn_n31, gn_n32, gn_n33, gn_n34, gn_n35)
+
+
+def group_n(suite, fixture_root):
+    """N. token store (Plan Step 11, codex part): each case starts its own router
+    subprocess in front of two TLS ScriptedPeers -- the auth host (the backend's
+    auth_base_url, trusted through its ca_file and LOOPBACK_DEFAULTS) minting
+    unsigned-JWT access tokens that carry the account claim, and the codex
+    upstream answering the Responses text fixture.  N1-N3 the first refresh,
+    expiry and the eight-request race; N4-N6 the one forced refresh per 401;
+    N7 relogin-class failures (never negative-cached); N8 an openai-oauth
+    refresh_token_reused adopting a newer disk token; N9 two backends
+    persisted; N10-N13 token validation, the inherited SSRF policy, a redirect
+    and a stalled auth host; N14-N17 and N20 the codex wire (header set and
+    order, stream, aggregated JSON, a 2xx with no Content-Type relayed -- on
+    openai-oauth too -- and one with a JSON Content-Type refused, the line
+    caps); N18 the openai-oauth refresh form and its ID-token aud check;
+    N21 a login while running; N25 SIGTERM during a stalled token body; N28 a
+    token error's text kept out of every output.  N22-N24, N26 and N27 run
+    in-process against a private module instance, the token store's `post`,
+    `mono` and `closing` seams injected; N13 serves its rig's config in-process
+    (FastRouter) with the OAuth idle timeout and negative cache patched to
+    milliseconds.  Before Step 11 lands every case FAILS
+    on the 501 a codex request gets or on the missing _RtTokenStore, never
+    crashes the group."""
+    results = {}
+    try:
+        fx, _raw = gm_fixtures()
+        try:
+            mod = H.load_module_from_path("ph_llm_router_n", SERVER)
+        except Exception:  # noqa: BLE001 -- the constants fall back to the plan's values
+            mod = None
+        ctx = {"lines": fx["text"],
+               "idle": float(getattr(mod, "_RT_OAUTH_IDLE_S", GN_IDLE_FALLBACK_S)),
+               "cache": float(getattr(mod, "_RT_OAUTH_FAIL_CACHE_S", GN_FAIL_CACHE_FALLBACK_S)),
+               "drain": float(getattr(mod, "_DRAIN_S", GN_DRAIN_FALLBACK_S)),
+               "sse_line": int(getattr(mod, "_SSE_LINE_LIMIT", GN_SSE_LINE_FALLBACK)),
+               "rs_line": int(getattr(mod, "_RT_RS_SSE_LINE_LIMIT", GN_RS_LINE_FALLBACK))}
+        for cid, fn in zip(GN_CASES, GN_FNS):
+            try:
+                results[cid] = fn(fixture_root, ctx)
+            except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                results[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    else:
+        setup = "case did not run"
+    for cid, nid in zip(GN_CASES, GN_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GN, cid, problems, detail=["case        : " + nid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
+# Group O: login
+# ---------------------------------------------------------------------------
+
+GO = "O. login"
+
+# Plan Step 12, the codex part of the login subcommand; O2, O3 and O10, the openai
+# (SIWC) login, with Plan Step 16 (task-049).  Every declared id is recorded exactly once.
+GO_CASES = (
+    "browser flow: token persisted",     # O1
+    "oai first registration persisted",  # O2
+    "oai no issued client_id: exit 2",   # O3
+    "wrong state 400, then success",     # O4
+    "wrong Host -> 400",                 # O5
+    "bad-request budget: abuse",         # O6
+    "stdin closed: callback works",      # O7
+    "pasted redirect URL succeeds",      # O8
+    "error= wrong state 400; denied",    # O9 (with the paste-thread sub-assertion)
+    "oai wrong nonce: exit 2, no write",  # O10
+    "1455 held -> exit 2, --device",     # O11
+    "device: pending x2, success",       # O12
+    "no secret out; 2nd GET refused",    # O13
+    "--timeout 5: exit 2, no write",     # O14
+    "two logins back to back",           # O15
+    "device --debug: no secret out",     # O16
+)
+GO_IDS = ("O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13", "O14", "O15", "O16")
+
+GO_BACKEND = "tf-codex-o"                   # the codex backend every O login names
+GO_MODEL = "gpt-tf-o"
+GO_UP_URL = "https://127.0.0.1:9"           # base_url: a login never contacts the upstream
+GO_PORT = 1455                              # the codex redirect port (KD-17): bound by the login itself
+GO_HOST = "localhost:1455"                  # the Host a browser following the redirect sends
+GO_BAD_HOST = "tf-o-evil.example:1455"      # O5: a Host outside the allowed set
+GO_CALLBACK = "/auth/callback"
+GO_REDIRECT = "http://localhost:1455/auth/callback"           # the codex row's redirect_uri
+GO_DEVICE_REDIRECT = "https://auth.openai.com/deviceauth/callback"   # the codex row's device_redirect_uri
+GO_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"                  # the codex row's public client id
+# The codex row's endpoint paths; auth_base_url keeps the path and replaces the host (KD-19).
+GO_TOKEN_PATH = "/oauth/token"
+GO_USERCODE_PATH = "/api/accounts/deviceauth/usercode"
+GO_DEVTOKEN_PATH = "/api/accounts/deviceauth/token"
+GO_URL_RE = re.compile(r"https?://[^\s\"'<>]+/oauth/authorize\?[^\s\"'<>]+")
+GO_OK = "login ok: backend %s" % GO_BACKEND
+GO_DENIED = "login failed: denied (access_denied)"
+GO_ABUSE = "login failed: callback_abuse"
+GO_TIMED_OUT = "login failed: callback_timeout"
+GO_DEVICE_HINT = "--device"
+GO_LOGIN_TIMEOUT = 60                       # --timeout of every login that is not O14 (a broken green never hangs 300 s)
+GO_SHORT_TIMEOUT = 5                        # O14: --timeout 5, the range's floor
+GO_SHORT_LO_S = 4.5                         # O14: the exit comes no sooner than this after the start ...
+GO_SHORT_HI_S = 15.0                        # ... and no later than this
+GO_URL_TIMEOUT_S = 10.0                     # the authorize URL (or the user code) must be on stderr within this
+GO_EXIT_TIMEOUT_S = 30.0                    # a login exits within this after its last input
+GO_GET_TIMEOUT_S = 5.0                      # one callback GET round trip
+GO_CONNECT_RETRY_S = 1.0                    # the first GET of a login retries a refused connect this long
+GO_SETTLE_S = 0.5                           # "the login keeps waiting": still running this long after
+GO_CLOSED_SETTLE_S = 0.2                    # O13: the listeners are closed within this after the 200
+GO_BAD_LIMIT_FALLBACK = 16                  # OAUTH_CALLBACK_BAD_LIMIT, when the module lacks it
+GO_INTERVAL = 1                             # O12, O16: the device endpoint's interval
+GO_PENDING = 2                              # O12, O16: pending polls before the grant
+GO_INTERVAL_MIN_S = 0.8                     # O12: consecutive polls are at least this far apart
+GO_BUSY = "port %d is busy on 127.0.0.1: the browser flow cannot bind it here (INFO, not run)" % GO_PORT
+GO_UNHELD = "the test cannot hold port %d on 127.0.0.1 (INFO, not run)" % GO_PORT
+# O2, O3, O10 (Plan Step 16, FR-6): the openai (SIWC) browser login of an openai backend with
+# `oauth: {}` (a first registration).  The row's values are written here, never read from the
+# module.  The redirect is an EPHEMERAL 127.0.0.1:<port> the login binds and prints (never
+# 1455); the test reads the port from the authorize URL's redirect_uri.
+GO_OAI_BACKEND = "tf-openai-o"
+GO_OAI_URL_RE = re.compile(r"https?://[^\s\"'<>]+/api/accounts/authorize\?[^\s\"'<>]+")
+GO_OAI_TOKEN_PATH = "/api/accounts/oauth/token"     # the openai row's token_url path, under auth_base_url
+GO_OAI_REGISTRATION = "dynamic_agent_client"        # the row's registration_client_id: the first authorize
+GO_OAI_RESOURCE = "https://api.openai.com/v1"
+GO_OAI_SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+GO_OAI_NAME_HINT = "llm-router"                     # authorize extra agent_name_hint
+GO_OAI_REDIRECT_RE = re.compile(r"^http://127\.0\.0\.1:([0-9]{1,5})/auth/callback$")
+GO_OAI_HOST_ID_RE = re.compile(r"^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+GO_OAI_OK = "login ok: backend %s" % GO_OAI_BACKEND
+GO_OAI_INCOMPLETE = "incomplete registration (no issued client_id)"   # O3 (Plan Step 16 wording)
+GO_OAI_BAD_NONCE = "login failed: invalid_response (nonce)"           # O10: _oauth_check_id_token's code
+GO_OAI_EXPIRES_IN = 3600
+
+
+class GoBusy(Exception):
+    """A case that cannot run on this host (1455 busy): recorded INFO, never FAIL."""
+
+
+def go_mint_refresh(tag):
+    """A fresh per-login refresh token (the token rule: printable ASCII, no space)."""
+    return "tf-o-%s-refresh-SENTINEL-" % tag + secrets.token_hex(16)
+
+
+def go_mint_device(tag):
+    """The device endpoint's values for one case: three fresh sentinels plus the shown user code."""
+    return {"device_auth_id": "tf-o-%s-devid-SENTINEL-" % tag + secrets.token_hex(16),
+            "user_code": "TFO-%s" % secrets.token_hex(4).upper(),
+            "authorization_code": "tf-o-%s-devcode-SENTINEL-" % tag + secrets.token_hex(16),
+            "code_verifier": "tf-o-%s-devverifier-SENTINEL-" % tag + secrets.token_hex(16)}
+
+
+def go_redact(text, values):
+    """*text* with every global sentinel form and each of *values* replaced."""
+    text = gi_redact(text)
+    for value in values:
+        if value:
+            text = text.replace(value, "<sentinel>")
+    return text
+
+
+def go_path(request):
+    """The target path of one recorded request ("" when the line is malformed)."""
+    parts = (request.get("line") or "").split(" ")
+    return parts[1] if len(parts) >= 2 else ""
+
+
+def go_json(request):
+    """The JSON object of one recorded request body ({} when it is not one)."""
+    try:
+        obj = json.loads((request.get("body") or b"").decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def go_port_free():
+    """True iff 127.0.0.1:1455 can be bound the way the login binds it (SO_REUSEADDR, KD-17)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", GO_PORT))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def go_hold_port():
+    """A live listener on 127.0.0.1:1455 (O11), or None when the test cannot hold it."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", GO_PORT))
+        sock.listen(4)
+        return sock
+    except OSError:
+        sock.close()
+        return None
+
+
+def go_target(*pairs):
+    """A callback request target: /auth/callback?<pairs, in order>."""
+    return GO_CALLBACK + "?" + urllib.parse.urlencode(list(pairs))
+
+
+def go_get(target, host=GO_HOST, retry_s=0.0, timeout=GO_GET_TIMEOUT_S, port=GO_PORT):
+    """Play the browser: one GET of *target* on 127.0.0.1:*port* (1455 by default) with Host *host*.
+
+    Returns (status or None, body, why); a refused connect (after *retry_s* of
+    retries) or a reply with no status line is status None.
+    """
+    deadline = time.monotonic() + retry_s
+    while True:
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+            break
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                return None, b"", "connect: %s" % type(exc).__name__
+            time.sleep(0.05)
+    data = b""
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n"
+                      % (target, host)).encode("ascii"))
+        end = time.monotonic() + timeout
+        while len(data) < 65536 and time.monotonic() < end:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    except OSError as exc:
+        if not data:
+            return None, b"", "exchange: %s" % type(exc).__name__
+    finally:
+        sock.close()
+    head, _sep, body = data.partition(b"\r\n\r\n")
+    parts = head.split(b"\r\n", 1)[0].split(b" ")
+    if len(parts) >= 2 and parts[0].startswith(b"HTTP/1.") and parts[1].isdigit():
+        return int(parts[1]), body, "HTTP %s" % parts[1].decode("ascii")
+    return None, body, "no HTTP status line (%d byte(s))" % len(data)
+
+
+def go_status(label, got, want):
+    """Problems unless the GET result *got* = (status, body, why) has status *want*."""
+    status, _body, why = got
+    if status != want:
+        return ["%s: %s, expected HTTP %d" % (label, why, want)]
+    return []
+
+
+class LoginProc:
+    """One `llm-router.py login` subprocess, its stdout and stderr in files.
+
+    Both files, and any --log-file path, go into LOG_PATHS (as RouterProc's
+    do), so I1's end-of-run sweep covers every login; stdin is a pipe the case
+    may write a pasted redirect line to, or DEVNULL.
+    """
+
+    def __init__(self, sandbox, cfgpath, backend, extra_argv=(), label="login", stdin="pipe"):
+        self.label = label
+        self.stderr_path = os.path.join(sandbox, label + ".stderr")
+        self.stdout_path = os.path.join(sandbox, label + ".stdout")
+        for path in (self.stderr_path, self.stdout_path):
+            WRITES.append(path)
+            LOG_PATHS.append(path)
+        extra = [str(a) for a in extra_argv]
+        self.log_file = None
+        for i, arg in enumerate(extra[:-1]):
+            if arg == "--log-file":
+                self.log_file = extra[i + 1]
+                LOG_PATHS.append(extra[i + 1])
+                WRITES.append(extra[i + 1])
+        argv = [sys.executable, "-B", SERVER, "login", "--config", cfgpath, "--backend", backend] + extra
+        self._err = open(self.stderr_path, "wb")
+        try:
+            self._out = open(self.stdout_path, "wb")
+        except BaseException:
+            self._err.close()
+            raise
+        self._closed = False
+        self.ended = None
+        self.started = time.monotonic()
+        try:
+            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE if stdin == "pipe" else subprocess.DEVNULL,
+                                         stdout=self._out, stderr=self._err, cwd=sandbox, env=H.child_env())
+        except BaseException:
+            self._err.close()
+            self._out.close()
+            raise
+
+    @staticmethod
+    def _read(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except (OSError, TypeError):
+            return ""
+
+    def stderr_text(self):
+        return self._read(self.stderr_path)
+
+    def stdout_text(self):
+        return self._read(self.stdout_path)
+
+    def log_text(self):
+        return self._read(self.log_file) if self.log_file else ""
+
+    def poll(self):
+        rc = self.proc.poll()
+        if rc is not None and self.ended is None:
+            self.ended = time.monotonic()
+        return rc
+
+    def wait_stderr(self, predicate, timeout=GO_URL_TIMEOUT_S):
+        """predicate(stderr) once it is not None, polled; None if the login exited or time ran out first."""
+        deadline = time.monotonic() + timeout
+        while True:
+            rc = self.poll()
+            hit = predicate(self.stderr_text())
+            if hit is not None:
+                return hit
+            if rc is not None or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
+
+    def authorize(self, timeout=GO_URL_TIMEOUT_S, pattern=GO_URL_RE):
+        """The query of the authorize URL (*pattern*) the login printed to stderr, as a dict; None if none came."""
+        def found(text):
+            m = pattern.search(text)
+            if m is None:
+                return None
+            try:
+                return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(m.group(0)).query,
+                                                   keep_blank_values=True))
+            except ValueError:
+                return {}
+        return self.wait_stderr(found, timeout)
+
+    def paste(self, line):
+        """Write one pasted line to the login's stdin; False when the pipe is gone."""
+        try:
+            self.proc.stdin.write(line.encode("ascii") + b"\n")
+            self.proc.stdin.flush()
+            return True
+        except (OSError, ValueError, AttributeError):
+            return False
+
+    def close_stdin(self):
+        try:
+            if self.proc.stdin is not None:
+                self.proc.stdin.close()
+        except OSError:
+            pass
+
+    def wait(self, timeout=GO_EXIT_TIMEOUT_S):
+        """The exit code, or None if the login is still running after *timeout*."""
+        try:
+            rc = self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        if self.ended is None:
+            self.ended = time.monotonic()
+        return rc
+
+    def running(self):
+        return self.poll() is None
+
+    def elapsed(self):
+        return (self.ended if self.ended is not None else time.monotonic()) - self.started
+
+    def close(self):
+        """Close stdin, then SIGTERM -> SIGKILL a login still running; idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        self.close_stdin()
+        try:
+            if self.proc.poll() is None:
+                try:
+                    self.proc.send_signal(signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    self.proc.wait(timeout=KILL_TIMEOUT_S)
+                except subprocess.TimeoutExpired:
+                    try:
+                        self.proc.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+                    try:
+                        self.proc.wait(timeout=KILL_TIMEOUT_S)
+                    except subprocess.TimeoutExpired:
+                        pass
+        finally:
+            for fh in (self._err, self._out):
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+
+
+class GoAuth:
+    """The TLS auth peer of one O case (the backend's auth_base_url): the code exchange
+    answers tokens[i] for its i-th POST; with *device*, the user-code endpoint answers
+    the device values with `interval: 1`, and the poll endpoint answers 403 (pending)
+    *pending* times, then the grant."""
+
+    def __init__(self, tokens, device=None, pending=GO_PENDING):
+        self.tokens = list(tokens)
+        self.device = device
+        self.pending = pending
+        self.lock = threading.Lock()
+        self.exchanges = 0
+        self.polls = 0
+        self.poll_times = []
+        self.peer = ScriptedPeer(script=self.script, tls=True)
+
+    def script(self, _index, request):
+        path = go_path(request)
+        with self.lock:
+            if path == GO_TOKEN_PATH:
+                access, refresh = self.tokens[min(self.exchanges, len(self.tokens) - 1)]
+                self.exchanges += 1
+                return [("respond_json", 200, {"access_token": access, "refresh_token": refresh,
+                                               "id_token": TF_ID_TOKEN, "token_type": "Bearer",
+                                               "expires_in": GN_EXPIRES_IN})]
+            if self.device is not None and path == GO_USERCODE_PATH:
+                return [("respond_json", 200, {"device_auth_id": self.device["device_auth_id"],
+                                               "user_code": self.device["user_code"],
+                                               "interval": GO_INTERVAL})]
+            if self.device is not None and path == GO_DEVTOKEN_PATH:
+                self.poll_times.append(time.monotonic())
+                self.polls += 1
+                if self.polls <= self.pending:
+                    return [("respond_json", 403, {"error": {"code": "deviceauth_authorization_unknown",
+                                                             "message": "tf o: pending"}})]
+                return [("respond_json", 200, {"authorization_code": self.device["authorization_code"],
+                                               "code_verifier": self.device["code_verifier"]})]
+        return [("respond_json", 404, {"error": "tf o: no such auth path"})]
+
+    def requests(self, path=None):
+        reqs = list(self.peer.requests)
+        return reqs if path is None else [r for r in reqs if go_path(r) == path]
+
+
+class GoRig:
+    """One O case: a sandbox, the TLS auth peer, the test CA as the backend's ca_file, a
+    codex backend with `oauth: {}` (never logged in), and the logins the case starts."""
+
+    def __init__(self, fixture_root, label, answers=1, device=None):
+        self.sandbox = new_sandbox(fixture_root, label)
+        self.label = label
+        self.tokens = [(gn_mint_access(), go_mint_refresh("%s-%d" % (label, i + 1))) for i in range(answers)]
+        self.device = device
+        self.extra_secrets = []
+        self.logins = []
+        self.auth = GoAuth(self.tokens, device)
+        try:
+            ca_file = sandbox_ca_file(self.sandbox)
+            cfg = {"auth_token": TF_ROUTER_TOKEN,
+                   "backends": {GO_BACKEND: {"kind": "codex", "base_url": GO_UP_URL,
+                                             "auth_base_url": self.auth.peer.url(),
+                                             "ca_file": ca_file, "oauth": {}}},
+                   "routes": {"claude-" + GO_BACKEND: {"backend": GO_BACKEND, "model": GO_MODEL}},
+                   "default": {"backend": GO_BACKEND, "model": GO_MODEL}}
+            self.cfgpath = write_config(self.sandbox, cfg)
+            self.before = gl_bytes(self.cfgpath)
+            self.before_obj = json.loads(self.before.decode("utf-8"))
+        except BaseException:
+            self.auth.peer.close()
+            raise
+
+    def secrets(self):
+        """Every secret of this case: the tokens, the device sentinels, the code, the ID token."""
+        values = [TF_AUTH_CODE, TF_ID_TOKEN] + list(self.extra_secrets)
+        for access, refresh in self.tokens:
+            values += [access, refresh]
+        if self.device is not None:
+            values += [self.device[k] for k in ("device_auth_id", "authorization_code", "code_verifier")]
+        return values
+
+    def redact(self, text):
+        return go_redact(text, self.secrets())
+
+    def login(self, extra=(), stdin="pipe"):
+        argv = [str(a) for a in extra]
+        if "--timeout" not in argv:
+            argv += ["--timeout", str(GO_LOGIN_TIMEOUT)]
+        proc = LoginProc(self.sandbox, self.cfgpath, GO_BACKEND, argv,
+                         label="login%d" % (len(self.logins) + 1), stdin=stdin)
+        self.logins.append(proc)
+        return proc
+
+    def last_line(self, proc):
+        lines = [line for line in proc.stderr_text().splitlines() if line.strip()]
+        return self.redact(lines[-1])[:160] if lines else "no stderr"
+
+    def started(self, proc):
+        """(authorize-URL query, problems): the browser flow got as far as printing its URL."""
+        query = proc.authorize()
+        if query is None:
+            rc = proc.poll()
+            return None, ["%s printed no authorize URL within %.0f s (%s: %s)"
+                          % (proc.label, GO_URL_TIMEOUT_S,
+                             "still running" if rc is None else "exit %d" % rc, self.last_line(proc))]
+        problems = []
+        if not query.get("state"):
+            problems.append("%s: the authorize URL carries no state" % proc.label)
+        if query.get("redirect_uri") != GO_REDIRECT:
+            problems.append("%s: the authorize URL's redirect_uri is %r, expected %r"
+                            % (proc.label, query.get("redirect_uri"), GO_REDIRECT))
+        if query.get("code_challenge_method") != "S256" or not query.get("code_challenge"):
+            problems.append("%s: the authorize URL carries no S256 code_challenge" % proc.label)
+        if query.get("client_id") != GO_CLIENT_ID:
+            problems.append("%s: the authorize URL's client_id is %r, expected the codex row's"
+                            % (proc.label, query.get("client_id")))
+        return query, problems
+
+    def finish(self, proc, want, needle, timeout=GO_EXIT_TIMEOUT_S):
+        """Problems unless *proc* exits *want* within *timeout* with *needle* on stderr."""
+        rc = proc.wait(timeout)
+        if rc is None:
+            return ["%s did not exit within %.0f s" % (proc.label, timeout)]
+        problems = []
+        if rc != want:
+            problems.append("%s: exit %d, expected %d (%s)" % (proc.label, rc, want, self.last_line(proc)))
+        if needle is not None and needle not in proc.stderr_text():
+            problems.append("%s: stderr does not hold %r (%s)" % (proc.label, needle, self.last_line(proc)))
+        return problems
+
+    def keeps_waiting(self, proc, what):
+        """Problems unless *proc* is still running GO_SETTLE_S after *what*."""
+        time.sleep(GO_SETTLE_S)
+        if proc.running():
+            return []
+        return ["%s exited (%s) after %s, expected it to keep waiting"
+                % (proc.label, "exit %d" % proc.poll(), what)]
+
+    def exchange(self, code, redirect, challenge=None, want=1, index=0):
+        """(problems, code_verifier): the auth peer saw *want* code exchanges, the *index*-th
+        an authorization_code grant carrying *code*, *redirect* and the codex client id,
+        its code_verifier hashing (S256) to *challenge* when one is given."""
+        posts = self.auth.requests(GO_TOKEN_PATH)
+        problems = []
+        if len(posts) != want:
+            problems.append("%d code exchange POST(s) reached the auth peer, expected %d" % (len(posts), want))
+        if index >= len(posts):
+            return problems, None
+        tag = "exchange %d" % (index + 1)
+        req = posts[index]
+        if (req.get("line") or "").split(" ")[:1] != ["POST"]:
+            problems.append("%s: not a POST" % tag)
+        form = gn_form(req)
+        if form.get("grant_type") != "authorization_code":
+            problems.append("%s: grant_type %r, expected authorization_code" % (tag, form.get("grant_type")))
+        if form.get("code") != code:
+            problems.append("%s did not carry the expected authorization code (%s)"
+                            % (tag, "a different one" if form.get("code") else "none"))
+        if form.get("redirect_uri") != redirect:
+            problems.append("%s: redirect_uri %r, expected %r" % (tag, form.get("redirect_uri"), redirect))
+        if form.get("client_id") != GO_CLIENT_ID:
+            problems.append("%s: client_id %r, expected the codex row's" % (tag, form.get("client_id")))
+        verifier = form.get("code_verifier")
+        if not verifier:
+            problems.append("%s carries no code_verifier" % tag)
+        elif challenge is not None:
+            digest = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+            if digest.decode("ascii").rstrip("=") != challenge:
+                problems.append("%s: the code_verifier does not hash (S256) to the URL's code_challenge" % tag)
+        return problems, verifier
+
+    def disk(self, refresh):
+        """Problems unless the config is a 0600 regular file of ours whose backends.<n>.oauth holds
+        *refresh* and the access token's account_id and no access or ID token, every value
+        outside that oauth object unchanged, and no token or code anywhere in the file."""
+        try:
+            st = os.lstat(self.cfgpath)
+            data = gl_bytes(self.cfgpath)
+        except OSError as exc:
+            return ["the config cannot be read: %s" % type(exc).__name__]
+        problems = []
+        if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600 or st.st_uid != os.geteuid():
+            problems.append("the config is mode %o (regular %s, ours %s), expected a 0600 regular file of ours"
+                            % (stat.S_IMODE(st.st_mode), stat.S_ISREG(st.st_mode), st.st_uid == os.geteuid()))
+        try:
+            obj = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            return problems + ["the config does not parse: %s" % type(exc).__name__]
+        try:
+            oauth = obj["backends"][GO_BACKEND]["oauth"]
+        except (KeyError, TypeError):
+            oauth = None
+        if not isinstance(oauth, dict):
+            problems.append("backends.%s.oauth is not an object on disk" % GO_BACKEND)
+        else:
+            if oauth.get("refresh_token") != refresh:
+                problems.append("backends.%s.oauth.refresh_token on disk is not the token the exchange "
+                                "returned (%s)" % (GO_BACKEND, "a different one" if oauth.get("refresh_token")
+                                                   else "none"))
+            if oauth.get("account_id") != TF_ACCOUNT_CODEX:
+                problems.append("backends.%s.oauth.account_id on disk is %r, expected the access token's claim"
+                                % (GO_BACKEND, self.redact(str(oauth.get("account_id")))[:80]))
+            if {"access_token", "id_token"} & set(oauth):
+                problems.append("backends.%s.oauth on disk holds %s"
+                                % (GO_BACKEND, sorted({"access_token", "id_token"} & set(oauth))))
+        if gn_outside(obj, [GO_BACKEND]) != gn_outside(self.before_obj, [GO_BACKEND]):
+            problems.append("a value outside backends.%s.oauth changed in the login's write" % GO_BACKEND)
+        on_disk = [name for name, value in
+                   [("an access token", a) for a, _r in self.tokens] + [("the ID token", TF_ID_TOKEN),
+                                                                       ("the authorization code", TF_AUTH_CODE)]
+                   if value.encode("ascii") in data]
+        if on_disk:
+            problems.append("on disk: %s" % ", ".join(sorted(set(on_disk))))
+        return problems
+
+    def untouched(self):
+        """Problems unless the config is byte-for-byte what the case wrote, still 0600."""
+        try:
+            st = os.lstat(self.cfgpath)
+            data = gl_bytes(self.cfgpath)
+        except OSError as exc:
+            return ["the config cannot be read: %s" % type(exc).__name__]
+        problems = []
+        if data != self.before:
+            problems.append("the config was rewritten (%d -> %d bytes), expected no write"
+                            % (len(self.before), len(data)))
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            problems.append("the config is mode %o, expected 0600 (untouched)" % stat.S_IMODE(st.st_mode))
+        return problems
+
+    def no_exchange(self):
+        posts = self.auth.requests(GO_TOKEN_PATH)
+        return ["%d code exchange POST(s) reached the auth peer, expected none" % len(posts)] if posts else []
+
+    def leaks(self, proc, values, where=("stdout", "stderr")):
+        """Problems naming each (name, value) of *values* found in *proc*'s *where* outputs."""
+        texts = {"stdout": proc.stdout_text(), "stderr": proc.stderr_text(), "log file": proc.log_text()}
+        problems = []
+        for out in where:
+            text = texts[out]
+            for name, value in values:
+                if value and (value in text or urllib.parse.quote(value, safe="") in text):
+                    problems.append("%s: %s is in its %s" % (proc.label, name, out))
+        return problems
+
+    def detail(self):
+        reqs = self.auth.requests()
+        lines = ["auth peer   : %d request(s)%s" % (len(reqs), ": " + ", ".join(go_path(r) for r in reqs)
+                                                     if reqs else "")]
+        for proc in self.logins:
+            rc = proc.poll()
+            lines.append("%-12s: %s after %.1f s; last stderr line: %s"
+                         % (proc.label, "running" if rc is None else "exit %d" % rc, proc.elapsed(),
+                            self.last_line(proc)))
+        return lines
+
+    def close(self):
+        for proc in self.logins:
+            proc.close()
+        self.auth.peer.close()
+
+
+def go_run(fixture_root, label, body, port=True, answers=1, device=None):
+    """Run one O case: *body(rig)* returns (problems, detail).  With *port*, a busy
+    127.0.0.1:1455 makes the case INFO (GoBusy) before anything starts."""
+    if port and not go_port_free():
+        raise GoBusy(GO_BUSY)
+    rig = GoRig(fixture_root, label, answers, device)
+    try:
+        problems, detail = body(rig)
+        return problems, list(detail) + rig.detail()
+    finally:
+        rig.close()
+
+
+def go_browser_ok(rig, proc, code=TF_AUTH_CODE, index=0, want=1):
+    """The O1 flow on a started *proc*: the GET with the printed state gets 200, the login
+    exits 0 with `login ok`, the exchange is right and the config holds the new token."""
+    query, problems = rig.started(proc)
+    if query is None:
+        return problems
+    problems += go_status("the callback GET", go_get(go_target(("code", code), ("state", query.get("state", ""))),
+                                                     retry_s=GO_CONNECT_RETRY_S), 200)
+    problems += rig.finish(proc, 0, GO_OK)
+    problems += rig.exchange(code, GO_REDIRECT, query.get("code_challenge"), want=want, index=index)[0]
+    problems += rig.disk(rig.tokens[index][1])
+    return problems
+
+
+def go_o1(fixture_root, ctx):
+    """O1: the codex browser flow end to end -- the test GETs the printed state's callback with
+    Host localhost:1455; the config gains refresh_token and account_id, 0600, no access token."""
+    def body(rig):
+        return go_browser_ok(rig, rig.login()), ["browser     : GET 127.0.0.1:1455/auth/callback, Host " + GO_HOST]
+    return go_run(fixture_root, "o1", body)
+
+
+def go_o4(fixture_root, ctx):
+    """O4: a wrong state gets 400 and the wait continues; then the right state succeeds."""
+    def body(rig):
+        proc = rig.login()
+        query, problems = rig.started(proc)
+        if query is None:
+            return problems, []
+        wrong = "tf-o4-wrong-" + secrets.token_hex(8)
+        problems += go_status("the wrong-state GET", go_get(go_target(("code", TF_AUTH_CODE), ("state", wrong)),
+                                                            retry_s=GO_CONNECT_RETRY_S), 400)
+        problems += rig.keeps_waiting(proc, "the wrong state")
+        problems += go_status("the right-state GET",
+                              go_get(go_target(("code", TF_AUTH_CODE), ("state", query.get("state", "")))), 200)
+        problems += rig.finish(proc, 0, GO_OK)
+        problems += rig.exchange(TF_AUTH_CODE, GO_REDIRECT, query.get("code_challenge"))[0]
+        problems += rig.disk(rig.tokens[0][1])
+        return problems, []
+    return go_run(fixture_root, "o4", body)
+
+
+def go_o5(fixture_root, ctx):
+    """O5: the right state with a wrong Host gets 400 (the wait continues; the right Host then succeeds)."""
+    def body(rig):
+        proc = rig.login()
+        query, problems = rig.started(proc)
+        if query is None:
+            return problems, []
+        target = go_target(("code", TF_AUTH_CODE), ("state", query.get("state", "")))
+        problems += go_status("the wrong-Host GET", go_get(target, host=GO_BAD_HOST,
+                                                           retry_s=GO_CONNECT_RETRY_S), 400)
+        problems += rig.keeps_waiting(proc, "the wrong Host")
+        problems += go_status("the right-Host GET", go_get(target), 200)
+        problems += rig.finish(proc, 0, GO_OK)
+        problems += rig.exchange(TF_AUTH_CODE, GO_REDIRECT, query.get("code_challenge"))[0]
+        return problems, ["wrong Host  : " + GO_BAD_HOST]
+    return go_run(fixture_root, "o5", body)
+
+
+def go_o6(fixture_root, ctx):
+    """O6: OAUTH_CALLBACK_BAD_LIMIT wrong-state GETs spend the bad-request budget: each gets
+    400, the login exits 2 `callback_abuse`, exchanges nothing and writes nothing."""
+    limit = ctx["bad_limit"]
+
+    def body(rig):
+        proc = rig.login()
+        query, problems = rig.started(proc)
+        if query is None:
+            return problems, []
+        statuses = []
+        for i in range(limit):
+            got = go_get(go_target(("code", TF_AUTH_CODE), ("state", "tf-o6-wrong-%d" % i)),
+                         retry_s=GO_CONNECT_RETRY_S if i == 0 else 0.0)
+            statuses.append(got[0])
+            if got[0] != 400:
+                problems.append("bad GET %d of %d: %s, expected HTTP 400" % (i + 1, limit, got[2]))
+                break
+        problems += rig.finish(proc, 2, GO_ABUSE)
+        problems += rig.no_exchange()
+        problems += rig.untouched()
+        return problems, ["budget      : %d bad GET(s): %s" % (limit, ", ".join(str(s) for s in statuses))]
+    return go_run(fixture_root, "o6", body)
+
+
+def go_o7(fixture_root, ctx):
+    """O7: stdin closed at the start (DEVNULL: the paste thread sees EOF at once) -- the
+    browser callback still succeeds."""
+    def body(rig):
+        return go_browser_ok(rig, rig.login(stdin="devnull")), ["stdin       : DEVNULL"]
+    return go_run(fixture_root, "o7", body)
+
+
+def go_o8(fixture_root, ctx):
+    """O8: the redirect URL pasted on stdin, then stdin closed, completes the login with no GET."""
+    def body(rig):
+        proc = rig.login()
+        query, problems = rig.started(proc)
+        if query is None:
+            return problems, []
+        line = GO_REDIRECT + "?" + urllib.parse.urlencode([("code", TF_AUTH_CODE), ("state", query.get("state", ""))])
+        if not proc.paste(line):
+            problems.append("%s: the pasted line could not be written (stdin gone)" % proc.label)
+        proc.close_stdin()
+        problems += rig.finish(proc, 0, GO_OK)
+        problems += rig.exchange(TF_AUTH_CODE, GO_REDIRECT, query.get("code_challenge"))[0]
+        problems += rig.disk(rig.tokens[0][1])
+        return problems, ["stdin       : the redirect URL, then EOF; no callback GET"]
+    return go_run(fixture_root, "o8", body)
+
+
+def go_o9(fixture_root, ctx):
+    """O9 (F4): a callback `error=access_denied` with a wrong state gets 400 and the login keeps
+    waiting; with the right state it gets the 200 failure page and the login exits 2 naming the
+    code only (never the error_description).  Sub-assertion (R4-L1): a second login whose
+    pasted wrong-state `error=` line is skipped and whose matching one ends it the same way."""
+    errdesc = "tf-o9-errdesc-SENTINEL-" + secrets.token_hex(16)
+
+    def denied(state):
+        return [("error", "access_denied"), ("error_description", errdesc), ("state", state)]
+
+    def body(rig):
+        rig.extra_secrets.append(errdesc)
+        problems = []
+        # Part 1: the browser.
+        proc = rig.login()
+        query, started = rig.started(proc)
+        problems += started
+        if query is not None:
+            problems += go_status("browser: wrong-state error=", go_get(go_target(*denied("tf-o9-wrong")),
+                                                                        retry_s=GO_CONNECT_RETRY_S), 400)
+            problems += rig.keeps_waiting(proc, "a wrong-state error=")
+            got = go_get(go_target(*denied(query.get("state", ""))))
+            problems += go_status("browser: right-state error=", got, 200)
+            if got[0] == 200 and b"Login failed" not in got[1]:
+                problems.append("browser: the right-state error= page is not the fixed failure page")
+            problems += rig.finish(proc, 2, GO_DENIED)
+            problems += rig.leaks(proc, [("the error_description", errdesc)])
+        # Part 2: the paste thread (inside O9, not a case of its own).
+        paste = rig.login()
+        query, started = rig.started(paste)
+        problems += ["paste: " + p for p in started]
+        if query is not None:
+            wrong = GO_REDIRECT + "?" + urllib.parse.urlencode(denied("tf-o9-paste-wrong"))
+            right = GO_REDIRECT + "?" + urllib.parse.urlencode(denied(query.get("state", "")))
+            if not paste.paste(wrong):
+                problems.append("paste: the wrong-state line could not be written (stdin gone)")
+            problems += ["paste: " + p for p in rig.keeps_waiting(paste, "a pasted wrong-state error= line")]
+            if not paste.paste(right):
+                problems.append("paste: the matching line could not be written (stdin gone)")
+            problems += ["paste: " + p for p in rig.finish(paste, 2, GO_DENIED)]
+            problems += ["paste: " + p for p in rig.leaks(paste, [("the error_description", errdesc)])]
+        problems += rig.no_exchange()
+        problems += rig.untouched()
+        return problems, ["parts       : browser error= (wrong, right); pasted error= lines (wrong, right)"]
+    return go_run(fixture_root, "o9", body)
+
+
+def go_o11(fixture_root, ctx):
+    """O11 (KD-17): 1455 held by a live listener of the test -> the login exits 2 with the
+    --device hint, contacts no auth host and writes nothing.  INFO when the test cannot hold it."""
+    holder = go_hold_port()
+    if holder is None:
+        raise GoBusy(GO_UNHELD)
+    try:
+        def body(rig):
+            proc = rig.login()
+            problems = rig.finish(proc, 2, GO_DEVICE_HINT, timeout=REFUSAL_TIMEOUT_S)
+            if rig.auth.requests():
+                problems.append("the refused login contacted the auth peer")
+            problems += rig.untouched()
+            return problems, ["holder      : the test listens on 127.0.0.1:%d" % GO_PORT]
+        return go_run(fixture_root, "o11", body, port=False)
+    finally:
+        holder.close()
+
+
+def go_device_problems(rig, label="device"):
+    """O12/O16: the auth peer saw the user-code POST, PENDING+1 polls carrying the device id
+    and user code at least GO_INTERVAL_MIN_S apart, then the exchange of the polled code and
+    verifier with the device redirect."""
+    dev = rig.device
+    want = [GO_USERCODE_PATH] + [GO_DEVTOKEN_PATH] * (GO_PENDING + 1) + [GO_TOKEN_PATH]
+    got = [go_path(r) for r in rig.auth.requests()]
+    problems = []
+    if got != want:
+        problems.append("%s: the auth peer saw %s, expected %s" % (label, got or "nothing", want))
+    for req in rig.auth.requests(GO_USERCODE_PATH)[:1]:
+        if go_json(req).get("client_id") != GO_CLIENT_ID:
+            problems.append("%s: the user-code POST does not carry the codex client id" % label)
+    for i, req in enumerate(rig.auth.requests(GO_DEVTOKEN_PATH)):
+        obj = go_json(req)
+        if obj.get("device_auth_id") != dev["device_auth_id"] or obj.get("user_code") != dev["user_code"]:
+            problems.append("%s: poll %d does not carry the device_auth_id and user_code" % (label, i + 1))
+    gaps = [b - a for a, b in zip(rig.auth.poll_times, rig.auth.poll_times[1:])]
+    if any(gap < GO_INTERVAL_MIN_S for gap in gaps):
+        problems.append("%s: polls %.2f s apart, expected at least %.1f s (interval %d)"
+                        % (label, min(gaps), GO_INTERVAL_MIN_S, GO_INTERVAL))
+    if got[-1:] == [GO_TOKEN_PATH]:
+        ex, _verifier = rig.exchange(dev["authorization_code"], GO_DEVICE_REDIRECT)
+        problems += ["%s: %s" % (label, p) for p in ex]
+        form = gn_form(rig.auth.requests(GO_TOKEN_PATH)[0])
+        if form.get("code_verifier") != dev["code_verifier"]:
+            problems.append("%s: the exchange did not carry the polled code_verifier" % label)
+    return problems
+
+
+def go_o12(fixture_root, ctx):
+    """O12: `login --device` -- user code, then pending, pending, the grant (interval 1), the
+    exchange; exit 0 and the config holds the new token."""
+    def body(rig):
+        proc = rig.login(["--device"])
+        problems = rig.finish(proc, 0, GO_OK)
+        problems += go_device_problems(rig)
+        problems += rig.disk(rig.tokens[0][1])
+        return problems, ["device      : %d pending poll(s), interval %d" % (GO_PENDING, GO_INTERVAL)]
+    return go_run(fixture_root, "o12", body, port=False, device=go_mint_device("o12"))
+
+
+def go_o13(fixture_root, ctx):
+    """O13: after a browser login no sentinel -- TF_AUTH_CODE, the verifier the auth peer
+    received, the access, refresh and ID tokens -- is in stdout or stderr; and a second GET
+    right after the successful one is refused (the listeners are closed)."""
+    def body(rig):
+        proc = rig.login()
+        query, problems = rig.started(proc)
+        if query is None:
+            return problems, []
+        target = go_target(("code", TF_AUTH_CODE), ("state", query.get("state", "")))
+        problems += go_status("the callback GET", go_get(target, retry_s=GO_CONNECT_RETRY_S), 200)
+        time.sleep(GO_CLOSED_SETTLE_S)
+        second = go_get(target)
+        if second[0] == 200:
+            problems.append("a second GET after the success got HTTP 200, expected it refused")
+        problems += rig.finish(proc, 0, GO_OK)
+        ex, verifier = rig.exchange(TF_AUTH_CODE, GO_REDIRECT, query.get("code_challenge"))
+        problems += ex
+        access, refresh = rig.tokens[0]
+        values = [("TF_AUTH_CODE", TF_AUTH_CODE), ("the code_verifier", verifier), ("the access token", access),
+                  ("the refresh token", refresh), ("the ID token", TF_ID_TOKEN)]
+        if verifier:
+            rig.extra_secrets.append(verifier)
+        problems += rig.leaks(proc, values)
+        return problems, ["second GET  : %s" % second[2]]
+    return go_run(fixture_root, "o13", body)
+
+
+def go_o14(fixture_root, ctx):
+    """O14: `--timeout 5` and no callback -> exit 2 `callback_timeout` after about 5 s, no
+    exchange and no write."""
+    def body(rig):
+        proc = rig.login(["--timeout", str(GO_SHORT_TIMEOUT)])
+        _query, problems = rig.started(proc)
+        problems += rig.finish(proc, 2, GO_TIMED_OUT, timeout=GO_SHORT_HI_S)
+        if proc.ended is not None and proc.elapsed() < GO_SHORT_LO_S:
+            problems.append("%s exited after %.1f s, before its --timeout %d"
+                            % (proc.label, proc.elapsed(), GO_SHORT_TIMEOUT))
+        problems += rig.no_exchange()
+        problems += rig.untouched()
+        return problems, ["timeout     : --timeout %d, no callback" % GO_SHORT_TIMEOUT]
+    return go_run(fixture_root, "o14", body)
+
+
+def go_o15(fixture_root, ctx):
+    """O15 (H3): two codex browser logins back to back -- the second starts the moment the
+    first exits, binds 1455 over the first's TIME_WAIT, completes and rewrites the config
+    with the newer token."""
+    def body(rig):
+        problems = ["login 1: " + p for p in go_browser_ok(rig, rig.login(), want=1, index=0)]
+        if rig.logins[0].poll() is None:
+            return problems, []
+        problems += ["login 2: " + p for p in go_browser_ok(rig, rig.login(), want=2, index=1)]
+        return problems, ["sequence    : login 2 started right after login 1 exited"]
+    return go_run(fixture_root, "o15", body, answers=2)
+
+
+def go_o16(fixture_root, ctx):
+    """O16 (S7): `login --device --debug --log-file` -- the device_auth_id, the polled
+    authorization_code and code_verifier (fresh sentinels) are in neither stdout, stderr nor
+    the log file; the user_code is on stderr, by design."""
+    def body(rig):
+        log_path = os.path.join(rig.sandbox, "login.log")
+        proc = rig.login(["--device", "--debug", "--log-file", log_path])
+        problems = rig.finish(proc, 0, GO_OK)
+        problems += go_device_problems(rig)
+        dev = rig.device
+        values = [("the device_auth_id", dev["device_auth_id"]),
+                  ("the polled authorization_code", dev["authorization_code"]),
+                  ("the polled code_verifier", dev["code_verifier"])]
+        problems += rig.leaks(proc, values, where=("stdout", "stderr", "log file"))
+        if dev["user_code"] not in proc.stderr_text():
+            problems.append("%s: the user_code is not on stderr" % proc.label)
+        return problems, ["log file    : %s" % ("written" if os.path.exists(log_path) else "absent")]
+    return go_run(fixture_root, "o16", body, port=False, device=go_mint_device("o16"))
+
+
+# -- O2, O3, O10: the openai (SIWC) browser login ---------------------------
+
+class GoSiwcAuth:
+    """The TLS auth peer of one openai O case: the code exchange answers the case's tokens,
+    the granted scope and an unsigned ID token minted AT EXCHANGE TIME from `issuer` (the
+    auth base's origin), `aud` and `nonce` -- which the case sets once it has read the
+    authorize URL (O10 sets a wrong nonce)."""
+
+    def __init__(self, access, refresh):
+        self.access, self.refresh = access, refresh
+        self.issuer = self.aud = self.nonce = None
+        self.id_tokens = []
+        self.lock = threading.Lock()
+        self.peer = ScriptedPeer(script=self.script, tls=True)
+
+    def script(self, _index, request):
+        if go_path(request) != GO_OAI_TOKEN_PATH:
+            return [("respond_json", 404, {"error": "tf o: no such auth path"})]
+        with self.lock:
+            claims = {"iss": self.issuer, "aud": self.aud, "exp": int(time.time()) + GO_OAI_EXPIRES_IN}
+            if self.nonce is not None:
+                claims["nonce"] = self.nonce
+            id_token = tf_jwt(claims)
+            self.id_tokens.append(id_token)
+        return [("respond_json", 200, {"access_token": self.access, "refresh_token": self.refresh,
+                                       "id_token": id_token, "token_type": "Bearer",
+                                       "expires_in": GO_OAI_EXPIRES_IN, "scope": GO_OAI_SCOPES})]
+
+    def requests(self, path=None):
+        reqs = list(self.peer.requests)
+        return reqs if path is None else [r for r in reqs if go_path(r) == path]
+
+
+class GoSiwcRig(GoRig):
+    """One openai O case: a sandbox, the SIWC auth peer, the test CA as the backend's
+    ca_file and an openai backend with `oauth: {}` (a first registration); the issued
+    client id the callback carries is minted per case (oaiapp_ + the case label)."""
+
+    def __init__(self, fixture_root, label):      # GoRig.__init__ is not called: it builds the codex config
+        self.sandbox = new_sandbox(fixture_root, label)
+        self.label = label
+        self.issued = "oaiapp_tf-%s-%s" % (label, secrets.token_hex(8))
+        self.tokens = [(gn_mint_access(), go_mint_refresh(label))]
+        self.device = None
+        self.extra_secrets = []
+        self.logins = []
+        self.auth = GoSiwcAuth(*self.tokens[0])
+        try:
+            self.auth.issuer = gn_origin(self.auth.peer.url())
+            self.auth.aud = self.issued
+            ca_file = sandbox_ca_file(self.sandbox)
+            cfg = {"auth_token": TF_ROUTER_TOKEN,
+                   "backends": {GO_OAI_BACKEND: {"kind": "openai", "base_url": GO_UP_URL,
+                                                 "auth_base_url": self.auth.peer.url(),
+                                                 "ca_file": ca_file, "oauth": {}}},
+                   "routes": {"claude-" + GO_OAI_BACKEND: {"backend": GO_OAI_BACKEND, "model": GO_MODEL}},
+                   "default": {"backend": GO_OAI_BACKEND, "model": GO_MODEL}}
+            self.cfgpath = write_config(self.sandbox, cfg)
+            self.before = gl_bytes(self.cfgpath)
+            self.before_obj = json.loads(self.before.decode("utf-8"))
+        except BaseException:
+            self.auth.peer.close()
+            raise
+
+    def secrets(self):
+        return GoRig.secrets(self) + list(self.auth.id_tokens)
+
+    def login(self, extra=(), stdin="pipe"):
+        argv = [str(a) for a in extra]
+        if "--timeout" not in argv:
+            argv += ["--timeout", str(GO_LOGIN_TIMEOUT)]
+        proc = LoginProc(self.sandbox, self.cfgpath, GO_OAI_BACKEND, argv,
+                         label="login%d" % (len(self.logins) + 1), stdin=stdin)
+        self.logins.append(proc)
+        return proc
+
+    def started(self, proc):
+        """(authorize-URL query, redirect port, problems): the openai browser flow printed its URL
+        with the first-registration client id, the row's scope and resource, PKCE S256, a state,
+        a nonce, agent_name_hint and a urn:uuid v4 ext_agent_host_id, redirecting to an
+        ephemeral 127.0.0.1 port."""
+        query = proc.authorize(pattern=GO_OAI_URL_RE)
+        if query is None:
+            rc = proc.poll()
+            return None, None, ["%s printed no openai authorize URL (.../api/accounts/authorize?...) within "
+                                "%.0f s (%s: %s)" % (proc.label, GO_URL_TIMEOUT_S,
+                                                     "still running" if rc is None else "exit %d" % rc,
+                                                     self.last_line(proc))]
+        problems = []
+        want = (("client_id", GO_OAI_REGISTRATION), ("scope", GO_OAI_SCOPES), ("resource", GO_OAI_RESOURCE),
+                ("code_challenge_method", "S256"), ("agent_name_hint", GO_OAI_NAME_HINT))
+        for key, value in want:
+            if query.get(key) != value:
+                problems.append("%s: the authorize URL's %s is %r, expected %r"
+                                % (proc.label, key, query.get(key), value))
+        for key in ("state", "code_challenge", "nonce"):
+            if not query.get(key):
+                problems.append("%s: the authorize URL carries no %s" % (proc.label, key))
+        if not GO_OAI_HOST_ID_RE.match(query.get("ext_agent_host_id") or ""):
+            problems.append("%s: the authorize URL's ext_agent_host_id %r is not a urn:uuid v4"
+                            % (proc.label, query.get("ext_agent_host_id")))
+        match = GO_OAI_REDIRECT_RE.match(query.get("redirect_uri") or "")
+        port = int(match.group(1)) if match else None
+        if port is None:
+            problems.append("%s: the authorize URL's redirect_uri %r, expected http://127.0.0.1:<port>/auth/callback"
+                            % (proc.label, query.get("redirect_uri")))
+        elif not 0 < port <= 65535 or port == GO_PORT:
+            problems.append("%s: the redirect port %d is not an ephemeral one (never %d)" % (proc.label, port, GO_PORT))
+            if not 0 < port <= 65535:
+                port = None
+        return query, port, problems
+
+    @staticmethod
+    def callback(port, *pairs):
+        """Play the browser on the printed redirect: GET /auth/callback?<pairs> with Host 127.0.0.1:<port>."""
+        return go_get(go_target(*pairs), host="127.0.0.1:%d" % port, retry_s=GO_CONNECT_RETRY_S, port=port)
+
+    def exchange(self, code, redirect, challenge=None, want=1, index=0):
+        """Problems unless the auth peer saw *want* code exchanges, the first an authorization_code
+        grant carrying *code*, *redirect*, the ISSUED client id and the row's resource, its
+        code_verifier hashing (S256) to *challenge*."""
+        posts = self.auth.requests(GO_OAI_TOKEN_PATH)
+        problems = []
+        if len(posts) != want:
+            problems.append("%d code exchange POST(s) reached the auth peer, expected %d" % (len(posts), want))
+        if not posts:
+            return problems
+        form = gn_form(posts[0])
+        if form.get("grant_type") != "authorization_code":
+            problems.append("exchange: grant_type %r, expected authorization_code" % (form.get("grant_type"),))
+        if form.get("code") != code:
+            problems.append("exchange did not carry the expected authorization code (%s)"
+                            % ("a different one" if form.get("code") else "none"))
+        if form.get("redirect_uri") != redirect:
+            problems.append("exchange: redirect_uri %r, expected the authorize URL's %r"
+                            % (form.get("redirect_uri"), redirect))
+        if form.get("client_id") != self.issued:
+            problems.append("exchange: client_id %r, expected the issued %r (never %r)"
+                            % (form.get("client_id"), self.issued, GO_OAI_REGISTRATION))
+        if form.get("resource") != GO_OAI_RESOURCE:
+            problems.append("exchange: resource %r, expected %r" % (form.get("resource"), GO_OAI_RESOURCE))
+        verifier = form.get("code_verifier")
+        if not verifier:
+            problems.append("exchange carries no code_verifier")
+        else:
+            self.extra_secrets.append(verifier)
+            digest = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+            if challenge is not None and digest.decode("ascii").rstrip("=") != challenge:
+                problems.append("exchange: the code_verifier does not hash (S256) to the URL's code_challenge")
+        return problems
+
+    def disk(self, host_id):
+        """Problems unless the config is a 0600 regular file of ours whose backends.<n>.oauth holds
+        the exchange's refresh token, the issued client_id, *host_id* and an int expires_at, no
+        access or ID token, every value outside that object unchanged, no token or code in the file."""
+        try:
+            st = os.lstat(self.cfgpath)
+            data = gl_bytes(self.cfgpath)
+        except OSError as exc:
+            return ["the config cannot be read: %s" % type(exc).__name__]
+        problems = []
+        if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600 or st.st_uid != os.geteuid():
+            problems.append("the config is mode %o, expected a 0600 regular file of ours" % stat.S_IMODE(st.st_mode))
+        try:
+            obj = json.loads(data.decode("utf-8"))
+            oauth = obj["backends"][GO_OAI_BACKEND]["oauth"]
+        except (UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
+            return problems + ["backends.%s.oauth cannot be read back: %s" % (GO_OAI_BACKEND, type(exc).__name__)]
+        if not isinstance(oauth, dict):
+            return problems + ["backends.%s.oauth is not an object on disk" % GO_OAI_BACKEND]
+        if oauth.get("refresh_token") != self.tokens[0][1]:
+            problems.append("oauth.refresh_token on disk is not the token the exchange returned (%s)"
+                            % ("a different one" if oauth.get("refresh_token") else "none"))
+        if oauth.get("client_id") != self.issued:
+            problems.append("oauth.client_id on disk is %r, expected the issued %r" % (oauth.get("client_id"), self.issued))
+        if oauth.get("host_id") != host_id or not GO_OAI_HOST_ID_RE.match(str(oauth.get("host_id"))):
+            problems.append("oauth.host_id on disk is %r, expected the authorize URL's ext_agent_host_id %r"
+                            % (oauth.get("host_id"), host_id))
+        expires = oauth.get("expires_at")
+        if isinstance(expires, bool) or not isinstance(expires, int):
+            problems.append("oauth.expires_at on disk is %r, expected an int" % (expires,))
+        if {"access_token", "id_token"} & set(oauth):
+            problems.append("oauth on disk holds %s" % sorted({"access_token", "id_token"} & set(oauth)))
+        if gn_outside(obj, [GO_OAI_BACKEND]) != gn_outside(self.before_obj, [GO_OAI_BACKEND]):
+            problems.append("a value outside backends.%s.oauth changed in the login's write" % GO_OAI_BACKEND)
+        values = [("the access token", self.tokens[0][0]), ("the authorization code", TF_AUTH_CODE)]
+        values += [("an ID token", t) for t in self.auth.id_tokens]
+        on_disk = sorted({name for name, value in values if value.encode("ascii") in data})
+        if on_disk:
+            problems.append("on disk: %s" % ", ".join(on_disk))
+        return problems
+
+    def no_exchange(self):
+        posts = self.auth.requests(GO_OAI_TOKEN_PATH)
+        return ["%d code exchange POST(s) reached the auth peer, expected none" % len(posts)] if posts else []
+
+
+def go_oai_run(fixture_root, label, body):
+    """Run one openai O case on a GoSiwcRig (no 1455 check: the redirect port is ephemeral)."""
+    rig = GoSiwcRig(fixture_root, label)
+    try:
+        problems, detail = body(rig)
+        return problems, list(detail) + rig.detail()
+    finally:
+        rig.close()
+
+
+def go_o2(fixture_root, ctx):
+    """O2 (Plan Step 16): the openai first registration -- the authorize URL carries
+    client_id dynamic_agent_client, resource, nonce, agent_name_hint and ext_agent_host_id
+    and redirects to an ephemeral 127.0.0.1 port; the callback carries the issued oaiapp_
+    client_id; the exchange uses the issued id and resource; the ID token (iss the auth
+    base's origin, aud the issued id, the URL's nonce) passes; the config gains
+    refresh_token, client_id, host_id and expires_at; exit 0."""
+    def body(rig):
+        proc = rig.login()
+        query, port, problems = rig.started(proc)
+        if query is None or port is None:
+            return problems, []
+        with rig.auth.lock:
+            rig.auth.nonce = query.get("nonce")
+        problems += go_status("the callback GET", rig.callback(port, ("code", TF_AUTH_CODE),
+                                                               ("state", query.get("state", "")),
+                                                               ("client_id", rig.issued)), 200)
+        problems += rig.finish(proc, 0, GO_OAI_OK)
+        problems += rig.exchange(TF_AUTH_CODE, query.get("redirect_uri"), query.get("code_challenge"))
+        problems += rig.disk(query.get("ext_agent_host_id"))
+        return problems, ["redirect    : 127.0.0.1:%d (ephemeral); issued %s" % (port, rig.issued)]
+    return go_oai_run(fixture_root, "o2", body)
+
+
+def go_o3(fixture_root, ctx):
+    """O3 (Plan Step 16): a first-registration callback with no issued client_id -> exit 2
+    "incomplete registration (no issued client_id)", no exchange, the config untouched."""
+    def body(rig):
+        proc = rig.login()
+        query, port, problems = rig.started(proc)
+        if query is None or port is None:
+            return problems, []
+        got = rig.callback(port, ("code", TF_AUTH_CODE), ("state", query.get("state", "")))
+        problems += rig.finish(proc, 2, GO_OAI_INCOMPLETE)
+        problems += rig.no_exchange()
+        problems += rig.untouched()
+        return problems, ["callback    : code + state, no client_id (%s)" % got[2]]
+    return go_oai_run(fixture_root, "o3", body)
+
+
+def go_o10(fixture_root, ctx):
+    """O10 (Plan Step 16): the exchange answers an ID token whose nonce is not the authorize
+    URL's -> exit 2 "login failed: invalid_response (nonce)", the config untouched."""
+    def body(rig):
+        proc = rig.login()
+        query, port, problems = rig.started(proc)
+        if query is None or port is None:
+            return problems, []
+        with rig.auth.lock:
+            rig.auth.nonce = "tf-o10-wrong-nonce-" + secrets.token_hex(8)
+        got = rig.callback(port, ("code", TF_AUTH_CODE), ("state", query.get("state", "")), ("client_id", rig.issued))
+        problems += rig.finish(proc, 2, GO_OAI_BAD_NONCE)
+        problems += rig.exchange(TF_AUTH_CODE, query.get("redirect_uri"), query.get("code_challenge"))
+        problems += rig.untouched()
+        return problems, ["id token    : nonce differs from the URL's (callback %s)" % got[2]]
+    return go_oai_run(fixture_root, "o10", body)
+
+
+GO_FNS = (go_o1, go_o2, go_o3, go_o4, go_o5, go_o6, go_o7, go_o8, go_o9, go_o10, go_o11, go_o12, go_o13, go_o14,
+          go_o15, go_o16)
+
+
+def group_o(suite, fixture_root):
+    """O. login (Plan Step 12, codex part): each case runs `llm-router.py login --config
+    <sandbox config> --backend tf-codex-o` as a subprocess against a TLS ScriptedPeer auth
+    host (the backend's auth_base_url, trusted through its ca_file) and plays the browser
+    with raw GETs on 127.0.0.1:1455, the codex row's fixed redirect port, which the login
+    binds itself.  O1, O4-O9 and O13-O15 the browser flow (state, Host, the bad-request
+    budget, stdin closed or pasted, a callback error=, the closed listener, the timeout,
+    two logins back to back); O11 1455 held by the test; O12 and O16 the device flow.  A
+    case that needs 1455 when it is busy (O11: when the test cannot hold it) is INFO.
+    O2, O3 and O10 (Plan Step 16) log an openai backend in through SIWC on the ephemeral
+    127.0.0.1 port its authorize URL names: the first registration, a callback with no
+    issued client_id, an ID token with the wrong nonce.
+    Every login's stdout, stderr and --log-file go into LOG_PATHS for I1.  Before Step 12
+    lands every case FAILS on the argparse refusal of `login`, never crashes the group."""
+    results = {}
+    try:
+        try:
+            mod = H.load_module_from_path("ph_llm_router_o", SERVER)
+        except Exception:  # noqa: BLE001 -- the constants fall back to the plan's values
+            mod = None
+        ctx = {"bad_limit": int(getattr(mod, "OAUTH_CALLBACK_BAD_LIMIT", GO_BAD_LIMIT_FALLBACK))}
+        for cid, fn in zip(GO_CASES, GO_FNS):
+            try:
+                problems, detail = fn(fixture_root, ctx)
+                results[cid] = (problems, detail, None)
+            except GoBusy as exc:
+                results[cid] = ([], [str(exc)], H.INFO)
+            except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                results[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [], None)
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    else:
+        setup = "case did not run"
+    for cid, oid in zip(GO_CASES, GO_IDS):
+        problems, detail, status = results.get(cid, ([setup], [], None))
+        suite.record(GO, cid, problems, status=status, detail=["case        : " + oid] + list(detail))
 
 
 # ---------------------------------------------------------------------------
@@ -7784,6 +15977,15 @@ GI_CASES = (
     "client x-api-key reached no peer",  # I5
     "repr(cfg) shows no secret",         # I6
     "upstream echo -> [redacted]",       # I7
+    "scrub.add: value and every form",   # I8
+    "add seen by a captured scrub",      # I9
+    "past the cap: oldest unpinned out", # I10
+    "pin survives; dedupe to newest",    # I11
+    "JWT: no prefix form, suffix kept",  # I12
+    "access token echo -> [redacted]",   # I13
+    "refresh echo from auth: not out",   # I14
+    "codex+openai session: no leak",     # I15
+    "two backends pin: both kept",       # I16
 )
 
 GI_ROUNDS = 3                    # I4: alternating mistral/passthrough request pairs
@@ -7840,7 +16042,8 @@ GI_MISTRAL_ANSWER = {"id": "tf-cmpl-i", "object": "chat.completion", "created": 
 
 
 def gi_secret_forms():
-    """Every KD-9 form of every sentinel, longest first (for redacting FAIL lines)."""
+    """Every KD-9 form of every sentinel, longest first (for redacting FAIL lines); a
+    JWT-shaped sentinel has no first-8 form (KD-13: it is every JWT's public header)."""
     forms = set()
     for value in SENTINELS:
         raw = value.encode("ascii")
@@ -7851,7 +16054,8 @@ def gi_secret_forms():
             forms.add(text)
             forms.add(text.rstrip("="))
         if len(value) >= 16:
-            forms.add(value[:8])
+            if not tf_is_jwt(value):
+                forms.add(value[:8])
             forms.add(value[-8:])
     return sorted(forms, key=len, reverse=True)
 
@@ -7932,7 +16136,626 @@ def gi_peer_leaks(peer_name, requests, forbidden):
 
 
 GI_SENTINEL_LABELS = (("TF_ROUTER_TOKEN", TF_ROUTER_TOKEN), ("TF_KEY_MISTRAL", TF_KEY_MISTRAL),
-                      ("TF_KEY_PASS", TF_KEY_PASS), ("TF_CLIENT_XKEY", TF_CLIENT_XKEY))
+                      ("TF_KEY_PASS", TF_KEY_PASS), ("TF_CLIENT_XKEY", TF_CLIENT_XKEY),
+                      ("TF_REFRESH_CODEX", TF_REFRESH_CODEX), ("TF_REFRESH_OPENAI", TF_REFRESH_OPENAI),
+                      ("TF_ACCESS_CODEX", TF_ACCESS_CODEX), ("TF_ACCESS_OPENAI", TF_ACCESS_OPENAI),
+                      ("TF_ID_TOKEN", TF_ID_TOKEN), ("TF_AUTH_CODE", TF_AUTH_CODE),
+                      ("TF_KEY_OPENAI", TF_KEY_OPENAI), ("TF_TOKEN_ERRDESC", TF_TOKEN_ERRDESC))
+
+# I8-I12 (Plan Step 4, KD-13): the dynamic scrubber, in process on _rt_make_scrubber,
+# before the live router starts.  Every value is minted fresh and begins and ends with
+# random hex, so no two share a first-8 or last-8 form: a shared form would redact an
+# evicted value through a held one and fake "still redacted".  None of them is ever
+# handed to a router, a peer or a log.
+GI_SCRUB_CAP = 64                # _RT_SCRUB_DYNAMIC_CAP: the unpinned dynamic secrets held
+GI_SCRUB_PIN_FILL = 70           # I11: unpinned adds a pinned value must outlive
+GI_SCRUB_DEDUPE_GAP = 10         # I11: adds between a value and its re-add
+GI_JWT_PREFIX = "eyJhbGci"       # base64url of '{"alg' -- the first 8 chars of every JWT
+GI_JWT_UNRELATED = GI_JWT_PREFIX + "-unrelated"
+
+
+def gi_mint():
+    """A fresh 41-char secret: random hex at both ends, and a '+' so its URL-encoding differs."""
+    return secrets.token_hex(10) + "+" + secrets.token_hex(10)
+
+
+def gi_mint_jwt():
+    """A fresh JWT-shaped secret: an unsigned header, a random payload and a random signature."""
+    def b64(data):
+        return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+    payload = json.dumps({"tf": secrets.token_hex(8)}).encode("ascii")
+    return ".".join((b64(b'{"alg":"none"}'), b64(payload), secrets.token_hex(16)))
+
+
+def gi_forms(value):
+    """[(label, form)]: the six KD-9 forms of *value*, then its first-8 and last-8 forms."""
+    raw = value.encode("ascii")
+    std = base64.b64encode(raw).decode("ascii")
+    safe = base64.urlsafe_b64encode(raw).decode("ascii")
+    return [("value", value), ("URL-encoded", urllib.parse.quote(value, safe="")),
+            ("base64", std), ("base64 unpadded", std.rstrip("=")),
+            ("URL-safe base64", safe), ("URL-safe base64 unpadded", safe.rstrip("=")),
+            ("first 8", value[:8]), ("last 8", value[-8:])]
+
+
+def gi_hidden(scrub, form):
+    """True when scrub() redacts *form* inside a short text."""
+    out = scrub("tf <%s> tf" % form)
+    return form not in out and GI_REDACTED in out
+
+
+def gi_kept(scrub, text):
+    """True when scrub() passes *text* through unchanged."""
+    return scrub(text) == text
+
+
+def gi_scrubber(mod, statics, need):
+    """(scrub, problems): a scrubber over the load-time *statics*, or (None, one red problem)
+    when the module or the scrubber lacks a piece (red, never a crash)."""
+    make = getattr(mod, "_rt_make_scrubber", None)
+    if make is None:
+        return None, ["the module defines no _rt_make_scrubber"]
+    scrub = make(tuple(v.encode("ascii") for v in statics))
+    absent = ["%s()" % n for n in need if not callable(getattr(scrub, n, None))]
+    if absent:
+        return None, ["the scrubber has no %s (Step 4 not landed)" % ", ".join(absent)]
+    return scrub, []
+
+
+def gi_add(scrub, count):
+    """add() *count* fresh unpinned values; returns them, oldest first."""
+    values = [gi_mint() for _ in range(count)]
+    for value in values:
+        scrub.add(value.encode("ascii"))
+    return values
+
+
+def gi_i8(mod):
+    """I8: add(value) redacts the value and every form of it from then on."""
+    static = gi_mint()
+    scrub, problems = gi_scrubber(mod, (static,), ("add",))
+    if scrub is None:
+        return problems, []
+    value = gi_mint()
+    forms = gi_forms(value)
+    early = [label for label, form in forms if gi_hidden(scrub, form)]
+    if early:
+        problems.append("before add() these forms were already redacted: %s (a vacuous pass "
+                        "is refused)" % ", ".join(early))
+    scrub.add(value.encode("ascii"))
+    for label, form in forms:
+        if not gi_hidden(scrub, form):
+            problems.append("after add(): the %s form is not redacted" % label)
+    if not gi_hidden(scrub, static):
+        problems.append("after add(): the load-time secret is no longer redacted")
+    return problems, ["forms       : %s" % ", ".join(label for label, _f in forms)]
+
+
+def gi_i9(mod):
+    """I9: an InboundRequest built with the scrubber BEFORE add() redacts the added value."""
+    scrub, problems = gi_scrubber(mod, (gi_mint(),), ("add",))
+    if scrub is None:
+        return problems, []
+    inbound = gf_inbound(mod, "messages", gf_body([{"role": "user", "content": "tf i9"}]),
+                         gf_route(mod))._replace(scrub=scrub)
+    value = gi_mint()
+    if gi_hidden(inbound.scrub, value):
+        problems.append("the value is redacted before add(): a vacuous pass is refused")
+    scrub.add(value.encode("ascii"))
+    if inbound.scrub is not scrub:
+        problems.append("InboundRequest.scrub is not the scrubber it was built with")
+    if not gi_hidden(inbound.scrub, value):
+        problems.append("the InboundRequest's scrub, captured before add(), does not redact "
+                        "the added value")
+    return problems, ["captured    : InboundRequest(scrub=scrub), then scrub.add(value)"]
+
+
+def gi_i10(mod):
+    """I10: past the cap the OLDEST unpinned value is evicted, never a load-time one."""
+    static = gi_mint()
+    scrub, problems = gi_scrubber(mod, (static,), ("add",))
+    if scrub is None:
+        return problems, []
+    values = gi_add(scrub, GI_SCRUB_CAP + 1)
+    if not gi_kept(scrub, values[0]):
+        problems.append("the first of %d unpinned adds is still redacted: nothing was evicted "
+                        "past the cap of %d" % (len(values), GI_SCRUB_CAP))
+    if not gi_hidden(scrub, values[1]):
+        problems.append("the second add is no longer redacted: more than the oldest was evicted")
+    if not gi_hidden(scrub, values[-1]):
+        problems.append("the newest (add %d) is not redacted" % len(values))
+    if not gi_hidden(scrub, static):
+        problems.append("the load-time secret was evicted")
+    return problems, ["adds        : %d unpinned past a cap of %d, one load-time secret"
+                      % (len(values), GI_SCRUB_CAP)]
+
+
+def gi_i11(mod):
+    """I11: pinned values outlive the cap, a replaced pin becomes evictable, and a re-add
+    moves a value to newest and holds it once."""
+    scrub, problems = gi_scrubber(mod, (), ("add", "pin"))
+    if scrub is None:
+        return problems, []
+    a, r, a2, r2 = gi_mint(), gi_mint(), gi_mint(), gi_mint()
+    scrub.pin("codex", (a.encode("ascii"), r.encode("ascii")))
+    gi_add(scrub, GI_SCRUB_PIN_FILL)
+    for label, value in (("A", a), ("R", r)):
+        if not gi_hidden(scrub, value):
+            problems.append("pinned %s is not redacted after %d unpinned adds"
+                            % (label, GI_SCRUB_PIN_FILL))
+    scrub.pin("codex", (a2.encode("ascii"), r2.encode("ascii")))
+    gi_add(scrub, GI_SCRUB_CAP)
+    for label, value in (("A", a), ("R", r)):
+        if not gi_kept(scrub, value):
+            problems.append("superseded %s is still redacted after %d further adds: the replaced "
+                            "pin never became evictable" % (label, GI_SCRUB_CAP))
+    for label, value in (("A2", a2), ("R2", r2)):
+        if not gi_hidden(scrub, value):
+            problems.append("current pinned %s is not redacted after %d further adds"
+                            % (label, GI_SCRUB_CAP))
+    old = gi_mint()
+    scrub.add(old.encode("ascii"))
+    gi_add(scrub, GI_SCRUB_DEDUPE_GAP)
+    scrub.add(old.encode("ascii"))
+    gi_add(scrub, GI_SCRUB_CAP - 1)
+    if not gi_hidden(scrub, old):
+        problems.append("a re-added value was evicted within the next %d adds: the re-add did "
+                        "not move it to newest" % (GI_SCRUB_CAP - 1))
+    ordered = getattr(scrub, "_ordered", None)
+    if not isinstance(ordered, tuple):
+        problems.append("the scrubber has no _ordered form tuple to count the re-added value in")
+    elif ordered.count(old) != 1:
+        problems.append("the form tuple holds the re-added value %d times, expected once"
+                        % ordered.count(old))
+    return problems, ["pin         : codex (A, R) + %d adds; codex (A2, R2) + %d adds"
+                      % (GI_SCRUB_PIN_FILL, GI_SCRUB_CAP),
+                      "dedupe      : add, %d adds, re-add, %d adds"
+                      % (GI_SCRUB_DEDUPE_GAP, GI_SCRUB_CAP - 1)]
+
+
+def gi_i12_checks(where, scrub, jwt, plain):
+    """Problems of one scrubber holding the JWT-shaped *jwt* and the same-length *plain*."""
+    problems = []
+    if not gi_kept(scrub, GI_JWT_UNRELATED):
+        problems.append("%s: the unrelated text %r was redacted (the JWT kept a prefix form)"
+                        % (where, GI_JWT_UNRELATED))
+    for label, form in (("value", jwt), ("last 8", jwt[-8:])):
+        if not gi_hidden(scrub, form):
+            problems.append("%s: the JWT's %s form is not redacted" % (where, label))
+    for label, form in (("first 8", plain[:8]), ("last 8", plain[-8:])):
+        if not gi_hidden(scrub, form):
+            problems.append("%s: the non-JWT sentinel's %s form is not redacted" % (where, label))
+    return problems
+
+
+def gi_i12(mod):
+    """I12: a JWT-shaped secret gets no first-8 form (it is every JWT's public header) but
+    keeps its last-8 form; a same-length non-JWT secret keeps both.  Checked on the
+    load-time forms and on add()."""
+    jwt = gi_mint_jwt()
+    plain = secrets.token_hex(len(jwt))[:len(jwt)]
+    problems = []
+    if not jwt.startswith(GI_JWT_PREFIX):
+        return ["instrument: the minted JWT does not start with %s" % GI_JWT_PREFIX], []
+    make = getattr(mod, "_rt_make_scrubber", None)
+    if make is None:
+        return ["the module defines no _rt_make_scrubber"], []
+    problems += gi_i12_checks("load-time", make((jwt.encode("ascii"), plain.encode("ascii"))),
+                              jwt, plain)
+    scrub, missing = gi_scrubber(mod, (), ("add",))
+    if scrub is None:
+        problems += missing
+    else:
+        scrub.add(jwt.encode("ascii"))
+        scrub.add(plain.encode("ascii"))
+        problems += gi_i12_checks("add()", scrub, jwt, plain)
+    return problems, ["sentinels   : one JWT-shaped and one non-JWT, both %d chars" % len(jwt)]
+
+
+GI_I16_NAMES = ("_rt_make_scrubber", "_rt_secret_forms", "_RT_SCRUB_LOCK", "_rt_scrub_pin")
+GI_I16_HOLD_S = 0.2              # I16: thread B must still be running this long after it started
+GI_I16_WAIT_S = 5.0              # I16: the seam must fire, and each thread finish, within this
+
+
+def gi_i16(mod):
+    """I16 (NEW-1, KD-13): two backends pinning concurrently lose neither set.
+
+    The seam wraps the module's _rt_secret_forms (looked up at call time by
+    _RtScrubber._grown) so that building backend a's new access token A1 blocks
+    on an Event.  Thread A calls _rt_scrub_pin(scrub, "a", (A1, R1)) and blocks
+    there -- by R3-M1's binding read order it already holds its snapshot of
+    _pins and _dynamic.  Thread B then calls _rt_scrub_pin(scrub, "b", (B1, R2))
+    and must still be running 0.2 s later (it waits on _RT_SCRUB_LOCK).  The
+    Event is set, both finish, and the scrubber must redact all four values.
+    Without the lock B completes first and A's rebind from its stale snapshot
+    drops B's set: red.
+    """
+    absent = [n for n in GI_I16_NAMES if not hasattr(mod, n)]
+    if absent:
+        return ["the module defines no %s (Step 11 not landed)" % ", ".join(absent)], []
+    scrub = mod._rt_make_scrubber(())
+    a1, r1, b1, r2 = gi_mint(), gi_mint(), gi_mint(), gi_mint()
+    hold = a1.encode("ascii")
+    entered, release = threading.Event(), threading.Event()
+    original = mod._rt_secret_forms
+    errors = []
+
+    def seam(raw):
+        if raw == hold and not entered.is_set():
+            entered.set()
+            release.wait(GI_I16_WAIT_S)
+        return original(raw)
+
+    def pin(key, values):
+        try:
+            mod._rt_scrub_pin(scrub, key, tuple(v.encode("ascii") for v in values))
+        except Exception as exc:  # noqa: BLE001 -- the type is the finding
+            errors.append("_rt_scrub_pin(scrub, %r, ...) raised %s" % (key, type(exc).__name__))
+
+    thread_a = threading.Thread(target=pin, args=("a", (a1, r1)), daemon=True)
+    thread_b = threading.Thread(target=pin, args=("b", (b1, r2)), daemon=True)
+    problems, b_waited = [], None
+    mod._rt_secret_forms = seam
+    try:
+        thread_a.start()
+        if not entered.wait(GI_I16_WAIT_S):
+            problems.append("instrument: thread A never built A1's forms through _rt_secret_forms "
+                            "within %.1f s, so the race was not staged (a vacuous pass is refused)"
+                            % GI_I16_WAIT_S)
+        else:
+            thread_b.start()
+            thread_b.join(GI_I16_HOLD_S)
+            b_waited = thread_b.is_alive()
+            if not b_waited:
+                problems.append("thread B's _rt_scrub_pin returned while thread A was still inside "
+                                "its own: the scrubber writers are not serialized by _RT_SCRUB_LOCK")
+    finally:
+        release.set()
+        thread_a.join(GI_I16_WAIT_S)
+        if thread_b.ident is not None:
+            thread_b.join(GI_I16_WAIT_S)
+        mod._rt_secret_forms = original
+    for name, thread in (("A", thread_a), ("B", thread_b)):
+        if thread.is_alive():
+            problems.append("thread %s did not finish within %.1f s of the release" % (name, GI_I16_WAIT_S))
+    problems += errors
+    for label, value in (("A1", a1), ("R1", r1), ("B1", b1), ("R2", r2)):
+        if not gi_hidden(scrub, value):
+            problems.append("after both pins %s is not redacted: one pin lost the other backend's set"
+                            % label)
+    return problems, ["race        : A pins (A1, R1) and blocks in _rt_secret_forms(A1); B pins "
+                      "(B1, R2); B still running after %.1f s: %s" % (GI_I16_HOLD_S, b_waited)]
+
+
+GI_SCRUB_CASES = ((7, gi_i8), (8, gi_i9), (9, gi_i10), (10, gi_i11), (11, gi_i12), (15, gi_i16))
+
+
+def gi_scrub_results():
+    """{case: (problems, detail)} of I8-I12, in process (no router): one module load, every case run."""
+    try:
+        mod = H.load_module_from_path("ph_llm_router_i_scrub", SERVER)
+    except Exception as exc:  # noqa: BLE001
+        why = "cannot import %s: %s" % (os.path.relpath(SERVER, H.REPO_ROOT), type(exc).__name__)
+        return {GI_CASES[i]: ([why], []) for i, _fn in GI_SCRUB_CASES}
+    results = {}
+    for i, fn in GI_SCRUB_CASES:
+        try:
+            results[GI_CASES[i]] = fn(mod)
+        except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+            results[GI_CASES[i]] = (["case raised %s: %s"
+                                     % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+    return results
+
+
+# I13-I15 (Plan Step 17, SC-5): the OAuth sentinels, each case on its own GnRig (group N's
+# TLS auth peer, TLS upstream peer and live router), run after group_i's own router and
+# before I1, so I1's sweep covers their stderr and log files as well.
+GI_I13_ECHO = "tf i13: the bearer %s was rejected"
+GI_I14_ECHO = "tf i14: the refresh token %s was revoked"
+GI_I15_FIXTURE_ENC = "gAAAAABo-tf_m2_reasoning_placeholder_0001+/QrSt_uV=="   # tf_responses_reasoning.sse's
+GI_I15_ENC = "gAAAAABo-tf_i15_" + secrets.token_hex(16) + "+/Ab_Cd=="          # this run's encrypted_content sentinel
+
+
+def gi_leak_forms(value):
+    """[(label, form)] a leak of *value* may take: gi_forms, without a JWT's first-8 form (KD-13)."""
+    return [(label, form) for label, form in gi_forms(value)
+            if not (label == "first 8" and tf_is_jwt(value))]
+
+
+def gi_leaks(where, text, named):
+    """Problems: one per (label, value) of *named* some form of which is in *text* (never the value)."""
+    problems = []
+    for label, value in named:
+        hit = [flabel for flabel, form in gi_leak_forms(value) if form in text]
+        if hit:
+            problems.append("%s carries %s (%s)" % (where, label, ", ".join(hit)))
+    return problems
+
+
+def gi_read(path):
+    """The text of *path*, or None when it cannot be read."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def gi_log_argv(name):
+    """A GnRig argv builder: --debug --log-file <sandbox>/<name>.log, the path kept on the rig."""
+    def argv(rig):
+        rig.log_path = os.path.join(rig.sandbox, name + ".log")
+        return ["--debug", "--log-file", rig.log_path]
+    return argv
+
+
+def gi_outputs(rig, label):
+    """(problems, [(where, text)]): the closed router's stderr and its --log-file, which must exist
+    and be non-empty (a vacuous sweep is refused)."""
+    rig.proc.close()
+    problems, out = [], [("%s stderr" % label, rig.proc.stderr_text())]
+    logged = gi_read(rig.log_path)
+    if logged is None:
+        problems.append("%s: the --log-file was never written (a vacuous pass is refused)" % label)
+    elif not logged.strip():
+        problems.append("%s: the --log-file is empty (a vacuous pass is refused)" % label)
+    else:
+        out.append(("%s log file" % label, logged))
+    return problems, out
+
+
+def gi_i13(fixture_root, ctx):
+    """I13 (KD-9, KD-13): a codex upstream 400 whose message echoes the refreshed access token
+    (TF_ACCESS_CODEX, pinned by the token store) reaches the client as an Anthropic envelope
+    holding [redacted] and no form of the token -- non-stream and stream."""
+    up = [("respond_json", 400, {"error": {"message": GI_I13_ECHO % TF_ACCESS_CODEX,
+                                           "type": "invalid_request_error"}})]
+
+    def body(rig):
+        problems, seen = [], []
+        for stream in (False, True):
+            label = "stream" if stream else "non-stream"
+            status, _etype, msg, data = rig.ask(stream=stream)
+            seen.append("%s=%s" % (label, status))
+            if not isinstance(status, int) or status < 400:
+                problems.append("%s: status %r for an upstream 400" % (label, status))
+            if msg is None:
+                problems.append("%s: the answer is not an Anthropic error envelope: %r"
+                                % (label, gi_redact(gb_text(data))[:120]))
+            elif GI_REDACTED not in msg:
+                problems.append("%s: error.message %r holds no %s" % (label, gi_redact(msg)[:160], GI_REDACTED))
+            problems += gi_leaks("%s answer" % label, gb_text(data), (("TF_ACCESS_CODEX", TF_ACCESS_CODEX),))
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX] * 2:
+            problems.append("upstream bearer(s) %s, expected [A1, A1]: the echoed token was not the one "
+                            "sent (a vacuous pass is refused)" % gn_names(bearers, [("A1", TF_ACCESS_CODEX)]))
+        problems += gn_post_problems(rig.auth, 1, [TF_REFRESH_CODEX])
+        return problems, ["upstream    : 400 echoing A1 = TF_ACCESS_CODEX; answers %s" % ", ".join(seen)]
+    return gn_run(fixture_root, "i13", gn_rotating([(TF_ACCESS_CODEX, secrets.token_hex(24))]),
+                  up, gn_one, body)
+
+
+def gi_i14(fixture_root, ctx):
+    """I14 (S8): the auth peer's refusal echoes the refresh token it was sent -- a codex 400
+    invalid_grant in error_description and an extra field, an openai-oauth 500 text/plain body --
+    and neither token reaches the client, stderr or the --debug --log-file."""
+    named = (("TF_REFRESH_CODEX", TF_REFRESH_CODEX), ("TF_REFRESH_OPENAI", TF_REFRESH_OPENAI))
+    text = (GI_I14_ECHO % TF_REFRESH_OPENAI).encode("ascii")
+    raw = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n"
+           b"Connection: close\r\n\r\n" % len(text)) + text
+
+    def auth(_index, request):
+        token = gn_form(request).get("refresh_token")
+        if token == TF_REFRESH_CODEX:
+            return [("respond_json", 400, {"error": "invalid_grant", "refresh_token": TF_REFRESH_CODEX,
+                                           "error_description": GI_I14_ECHO % TF_REFRESH_CODEX})]
+        if token == TF_REFRESH_OPENAI:
+            return [("respond_raw", raw)]
+        return [("respond_json", 400, {"error": "invalid_grant"})]
+
+    def backends(rig):
+        return {GN_BACKEND: rig.backend(), GN_OAI: gn_oai_backend(rig, TF_REFRESH_OPENAI)}
+
+    def body(rig):
+        problems, seen = [], []
+        for name in (GN_BACKEND, GN_OAI):
+            status, _etype, msg, data = rig.ask(name)
+            seen.append("%s=%s" % (name, status))
+            if not isinstance(status, int) or status < 400:
+                problems.append("%s: status %r for a refused refresh" % (name, status))
+            elif msg is None:
+                problems.append("%s: the answer is not an Anthropic error envelope" % name)
+            problems += gi_leaks("%s answer" % name, gb_text(data), named)
+        posted = {}
+        for request in list(rig.auth.requests):
+            path = ((request.get("line") or "").split(" ") + [""])[1]
+            posted.setdefault(path, []).append(gn_form(request).get("refresh_token"))
+        for path, token, label in ((GN_TOKEN_PATH, TF_REFRESH_CODEX, "codex"),
+                                   (GN_OAI_TOKEN_PATH, TF_REFRESH_OPENAI, "openai")):
+            got = posted.get(path) or []
+            if not got or any(t != token for t in got):
+                problems.append("the auth peer's %s POST(s) to %s did not each carry the seed: nothing was "
+                                "echoed (a vacuous pass is refused)" % (label, path))
+        if rig.up.requests:
+            problems.append("the upstream saw %d request(s): a refused refresh sends none" % len(rig.up.requests))
+        more, outputs = gi_outputs(rig, "i14")
+        problems += more
+        for where, out in outputs:
+            problems += gi_leaks(where, out, named)
+        return problems, ["auth        : codex 400 invalid_grant echoing its seed, openai 500 text/plain "
+                          "echoing its seed; answers %s" % ", ".join(seen),
+                          "swept       : %s" % ", ".join(w for w, _t in outputs)]
+    return gn_run(fixture_root, "i14", auth, None, backends, body, argv=gi_log_argv("i14"))
+
+
+def gi_signatures(events):
+    """Every thinking signature of a parsed Anthropic stream (signature_delta or content_block)."""
+    found = []
+    for _name, obj in events:
+        for part in ((obj or {}).get("delta"), (obj or {}).get("content_block")):
+            if isinstance(part, dict) and isinstance(part.get("signature"), str) and part["signature"]:
+                found.append(part["signature"])
+    return found
+
+
+def gi_i15(fixture_root, ctx):
+    """I15 (SC-5): a full codex and openai-oauth session under --debug --log-file -- the codex
+    seed refresh, a 401 and its forced refresh, a reasoning stream whose signature carries this
+    run's encrypted_content sentinel and a non-stream follow-up that sends it back, then an
+    openai-oauth refresh (with an ID token) and a stream and a non-stream text answer.  No access,
+    refresh or ID token and no auth code is in stderr, the log file or any answer; no peer records
+    a token meant for another; and the encrypted_content sentinel is never in the log."""
+    a2 = gn_mint_access()
+    rot_c, rot_c2, rot_o = secrets.token_hex(24), secrets.token_hex(24), secrets.token_hex(24)
+    box = {}
+    lines = [line.replace(GI_I15_FIXTURE_ENC, GI_I15_ENC) for line in ctx["reasoning"]]
+    sig = GK_SIG_PREFIX + GN_BACKEND + "." + GI_I15_ENC
+
+    def auth(_index, request):
+        token = gn_form(request).get("refresh_token")
+        if token == TF_REFRESH_CODEX:
+            return gn_token_steps(TF_ACCESS_CODEX, rot_c)
+        if token == rot_c:
+            return gn_token_steps(a2, rot_c2)
+        if token == TF_REFRESH_OPENAI:
+            return [("respond_json", 200, {"access_token": TF_ACCESS_OPENAI, "refresh_token": rot_o,
+                                           "id_token": box["id"], "token_type": "Bearer",
+                                           "expires_in": GN_EXPIRES_IN, "scope": GN_OAI_SCOPE})]
+        return [("respond_json", 400, {"error": "invalid_grant"})]
+
+    def up(_index, request):
+        path = ((request.get("line") or "").split(" ") + [""])[1]
+        if path == GN_CODEX_PATH:
+            if gn_bearer(request) == "Bearer " + TF_ACCESS_CODEX:
+                return [GN_UP_401]
+            return gn_up_ok(lines)
+        return gn_up_ok(ctx["lines"])
+
+    def backends(rig):
+        box["id"] = tf_jwt({"iss": gn_origin(rig.auth.url()), "aud": GN_OAI_CLIENT,
+                            "exp": int(time.time()) + GN_EXPIRES_IN})
+        return {GN_BACKEND: rig.backend(), GN_OAI: gn_oai_backend(rig, TF_REFRESH_OPENAI)}
+
+    def stream(rig, req, label, answers):
+        conn, resp, problems = open_stream(rig.client, req)
+        if conn is None:
+            rig.statuses.append("%s refused" % label)
+            return ["%s: %s" % (label, p) for p in problems], []
+        try:
+            read = read_stream(resp)
+        finally:
+            close_stream(conn, resp)
+        rig.statuses.append(200)
+        answers.append(("%s" % label, "\n".join(read["lines"])))
+        events = gn_parsed_events(read)
+        names = gg_names(events)
+        if "error" in names or names[-1:] != ["message_stop"]:
+            problems.append("%s: the stream did not end in message_stop (%s)" % (label, ev_shape(read["events"])))
+        return problems, events
+
+    def plain(rig, req, label, answers):
+        try:
+            status, _h, data = rig.client.post(obj=req)
+        except (OSError, http.client.HTTPException) as exc:
+            status, data = type(exc).__name__, b""
+        rig.statuses.append(status)
+        answers.append((label, gb_text(data)))
+        return gn_answer(label, (status, None, None if status == 200 else gb_text(data), data), 200)
+
+    def body(rig):
+        answers = []
+        first = dict(rig.body(GN_BACKEND, stream=True))
+        problems, events = stream(rig, first, "codex reasoning stream", answers)
+        sigs = gi_signatures(events)
+        if events and sigs != [sig]:
+            problems.append("codex reasoning stream: %d signature(s), expected exactly one lrs1.<backend>."
+                            "<encrypted_content> carrying this run's sentinel" % len(sigs))
+        follow = {"model": gn_route(GN_BACKEND), "max_tokens": 16, "messages": [
+            {"role": "user", "content": "tf i15 one"},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "tf i15 think", "signature": sig},
+                                              {"type": "text", "text": "Hi there, tf m2!"}]},
+            {"role": "user", "content": "tf i15 two"}]}
+        problems += plain(rig, follow, "codex follow-up", answers)
+        problems += stream(rig, rig.body(GN_OAI, stream=True), "openai stream", answers)[0]
+        problems += plain(rig, rig.body(GN_OAI), "openai non-stream", answers)
+
+        tokens = (("TF_ACCESS_CODEX", TF_ACCESS_CODEX), ("A2 (codex, forced refresh)", a2),
+                  ("TF_ACCESS_OPENAI", TF_ACCESS_OPENAI))
+        refresh = (("TF_REFRESH_CODEX", TF_REFRESH_CODEX), ("R2 (codex rotated)", rot_c),
+                   ("R3 (codex rotated twice)", rot_c2), ("TF_REFRESH_OPENAI", TF_REFRESH_OPENAI),
+                   ("R_oai (openai rotated)", rot_o))
+        ids = (("the session's ID token", box["id"]), ("TF_ID_TOKEN", TF_ID_TOKEN), ("TF_AUTH_CODE", TF_AUTH_CODE))
+        named = tokens + refresh + ids
+        for where, text in answers:
+            problems += gi_leaks("the %s answer" % where, text, named)
+
+        codex_refresh = refresh[:3]
+        auth_reqs = list(rig.auth.requests)
+        for request in auth_reqs:
+            path = ((request.get("line") or "").split(" ") + [""])[1]
+            foreign = refresh[3:] if path == GN_TOKEN_PATH else codex_refresh
+            problems += gi_peer_leaks("auth peer (%s)" % path, [request], tokens + ids + foreign)
+        want_posts = [(GN_TOKEN_PATH, TF_REFRESH_CODEX), (GN_TOKEN_PATH, rot_c), (GN_OAI_TOKEN_PATH, TF_REFRESH_OPENAI)]
+        got_posts = [(((r.get("line") or "").split(" ") + [""])[1], gn_form(r).get("refresh_token")) for r in auth_reqs]
+        if got_posts != want_posts:
+            problems.append("the auth peer saw %d POST(s) %s, expected the codex seed, the codex forced refresh "
+                            "with R2, then the openai seed" % (len(got_posts), [p for p, _t in got_posts]))
+        up_reqs = list(rig.up.requests)
+        codex_bearers = []
+        for request in up_reqs:
+            path = ((request.get("line") or "").split(" ") + [""])[1]
+            if path == GN_CODEX_PATH:
+                codex_bearers.append(gn_bearer(request))
+                foreign = tokens[2:]
+            else:
+                foreign = tokens[:2]
+            problems += gi_peer_leaks("upstream (%s)" % path, [request], refresh + ids + foreign)
+        if codex_bearers != ["Bearer " + TF_ACCESS_CODEX, "Bearer " + a2, "Bearer " + a2]:
+            problems.append("codex upstream bearer(s) %s, expected [A1 (401), A2, A2]"
+                            % gn_names(codex_bearers, [("A1", TF_ACCESS_CODEX), ("A2", a2)]))
+        codex_bodies = [r.get("body") or b"" for r in up_reqs
+                        if ((r.get("line") or "").split(" ") + [""])[1] == GN_CODEX_PATH]
+        if len(codex_bodies) != 3 or GI_I15_ENC.encode("ascii") not in codex_bodies[-1]:
+            problems.append("the codex follow-up did not carry this run's encrypted_content back upstream: "
+                            "the session never handled the sentinel (a vacuous pass is refused)")
+        if len(up_reqs) != 5:
+            problems.append("the upstream saw %d request(s), expected 5 (codex 401, codex stream, codex "
+                            "follow-up, openai stream, openai non-stream)" % len(up_reqs))
+
+        more, outputs = gi_outputs(rig, "i15")
+        problems += more
+        enc_core = GI_I15_ENC[len("gAAAAABo-tf_i15_"):][:32]
+        for where, text in outputs:
+            problems += gi_leaks(where, text, named)
+            if GI_I15_ENC in text or enc_core in text:
+                problems.append("%s carries the encrypted_content sentinel" % where)
+        return problems, ["session     : codex seed -> A1, 401 -> forced refresh -> A2, reasoning stream, "
+                          "follow-up with the signature; openai seed -> access + ID token, stream, non-stream",
+                          "swept       : %d answer(s), %d auth and %d upstream request(s), %s"
+                          % (len(answers), len(auth_reqs), len(up_reqs), ", ".join(w for w, _t in outputs))]
+    return gn_run(fixture_root, "i15", auth, up, backends, body, argv=gi_log_argv("i15"))
+
+
+GI_LIVE_OAUTH_CASES = ((12, gi_i13), (13, gi_i14), (14, gi_i15))
+
+
+def gi_oauth_results(fixture_root):
+    """{case: (problems, detail)} of I13-I15, each on its own GnRig."""
+    fx, _raw = gm_fixtures()
+    ctx = {"lines": fx["text"], "reasoning": fx["reasoning"]}
+    if not any(GI_I15_FIXTURE_ENC in line for line in ctx["reasoning"]):
+        ctx["reasoning"] = []
+    results = {}
+    for i, fn in GI_LIVE_OAUTH_CASES:
+        try:
+            if fn is gi_i15 and not ctx["reasoning"]:
+                results[GI_CASES[i]] = (["the reasoning fixture no longer holds %s: the encrypted_content "
+                                         "sentinel cannot be planted" % GI_I15_FIXTURE_ENC], [])
+                continue
+            results[GI_CASES[i]] = fn(fixture_root, ctx)
+        except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+            results[GI_CASES[i]] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+    return results
 
 
 def group_i(suite, fixture_root):
@@ -7946,6 +16769,15 @@ def group_i(suite, fixture_root):
     route serves only I7's mid-stream error.  Every sweep refuses a vacuous pass:
     nothing to sweep is a FAIL (as A12, B17).  I1 runs last, after the router
     has exited, and sweeps every stderr and log file the whole run collected.
+
+    I8-I12 (KD-13) run first, in process on _rt_make_scrubber with no router:
+    add() and its six forms, a captured InboundRequest.scrub seeing an add, the
+    64-value unpinned cap, pin/dedupe, and the JWT-shaped no-prefix rule; I16
+    (NEW-1) stages two backends pinning concurrently through _rt_scrub_pin.
+    I13-I15 (Plan Step 17) each start their own router on a GnRig after this
+    group's router has exited and before I1: an echoed access token scrubbed,
+    an echoed refresh token never relayed, and a full codex + openai-oauth
+    session with no OAuth sentinel anywhere it must not be.
     """
     sandbox = new_sandbox(fixture_root, "secret")
     mpeer = ScriptedPeer(script=gi_mistral_script)
@@ -7953,7 +16785,7 @@ def group_i(suite, fixture_root):
     lpeer = ScriptedPeer(script=[("respond_sse", list(GI_I7_LLAMA_LINES))])
     log_path = os.path.abspath(os.path.join(sandbox, "secret.log"))
     proc = None
-    results = {}
+    results = gi_scrub_results()     # I8-I12: in process, before the live router
     traffic = []                 # (route, status) of the I3-I5 rounds
     routed_ok = []               # (label, body) of every 2xx answer to a routed request
     path_probes = []             # I1: the status of each GI_TOKEN_PATHS probe
@@ -8229,6 +17061,14 @@ def group_i(suite, fixture_root):
         ppeer.close()
         lpeer.close()
 
+    # I13-I15: after the group's router is closed, before I1 sweeps every stderr and log file.
+    try:
+        results.update(gi_oauth_results(fixture_root))
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails I13-I15, never the group
+        why = "the I13-I15 setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+        for i, _fn in GI_LIVE_OAUTH_CASES:
+            results[GI_CASES[i]] = ([why], [])
+
     def i1():
         problems = []
         swept, nonempty = 0, 0
@@ -8283,7 +17123,7 @@ def group_i(suite, fixture_root):
 # ---------------------------------------------------------------------------
 
 # Step 7's in-process half of J: the encoder invariants (J6-J8, J21) and the
-# forward-table check (J12).  Step 12 adds J1-J4, J13 and J15-J19 (GJ_STATIC_CASES,
+# forward-table check (J12); Step 14 adds the reasoning sink methods (J24-J26).  Step 12 adds J1-J4, J13 and J15-J19 (GJ_STATIC_CASES,
 # below) and, in its second part, J5, J9-J11, J14, J20 and J22 (GJ_HYGIENE_CASES).
 GJ_CASES = (
     "encoder closed after error()",      # J6
@@ -8291,13 +17131,146 @@ GJ_CASES = (
     "text then tool: indices 0 and 1",   # J8
     "forward tables vs _NEVER_FORWARD",  # J12
     "lone surrogates escaped, ASCII",    # J21
+    "encoder thinking then text",        # J24
+    "encoder redacted_thinking block",   # J25
+    "collector == folded encoder",       # J26
+    "Responses profile rows pinned",     # J27
+    "SC-4: fourth profile row",          # J28 (translator half)
+    "no access/id token persist key",    # J29
+    "old adapters keep base hooks",      # J30
+    "huge int literal -> ValueError",    # J31
+    "collector joins many deltas once",  # J32
+    "help: token off argv and history",  # J33
 )
 
-GJ_KINDS = ("llamacpp", "mistral", "passthrough")   # J12: KIND_CLASSES must hold all three
+# J33 (F47): the --help example must keep the router token off the curl argv (ps) and
+# out of shell history.  Typed here, never read from the module.
+GJ_HELP_READ = "read -rs ANTHROPIC_AUTH_TOKEN && export ANTHROPIC_AUTH_TOKEN"
+GJ_HELP_CURL = ("printf 'Authorization: Bearer %s\\n' \"$ANTHROPIC_AUTH_TOKEN\" | "
+                "curl -s -H @- http://127.0.0.1:8082/v1/models")
+GJ_HELP_FORBIDDEN = ("-H \"Authorization", "-H 'Authorization", "export ANTHROPIC_AUTH_TOKEN=")
+
+# J28 (Plan Step 17, SC-4, NFR-2): a fourth Responses dialect is one profile row plus a
+# three-line subclass.  The row is written here; its dialect fields equal openai-apikey's,
+# so the copy's translation must equal the real module's openai-apikey translation.
+GJ_TF_PROFILE = "tf-dialect"
+GJ_TF_KIND = "tf"
+GJ_TF_PATH = "/tf/responses"
+GJ_TF_BACKEND = "tf-j28"
+GJ_TF_MODULE = "ph_llm_router_j28"
+GJ_TF_REFERENCE = "openai-apikey"
+GJ_TF_SCOPE = ("translator half only; a new config kind also needs _KINDS, _RT_KIND_AUTH_PROFILES, "
+               "KIND_CLASSES and ADAPTERS entries (NFR-2)")
+GJ_TF_DEF_RE = re.compile(r"^def _rt_responses_profiles\(", re.M)
+GJ_TF_NEXT_DEF_RE = re.compile(r"^(?:def|class) ", re.M)     # the function ends at the next top-level def
+# The rows tuple's close inside _rt_responses_profiles (other row builders share the shape).
+GJ_TF_ANCHOR_RE = re.compile(r"\n([ \t]+)\)\n\1return \{row\.name: row for row in rows\}\n")
+GJ_TF_ROW = ('ResponsesProfile(name="%s", default_base_url="https://tf-dialect.invalid", path="%s", '
+             'oauth_provider="", sampling=True, account_header=False, identity=False, beta="", '
+             'require_event_stream=True, line_limit=line, event_limit=event, tool_shape="function"),'
+             % (GJ_TF_PROFILE, GJ_TF_PATH))
+GJ_TF_CLASS = '\n\nclass _TfAdapter(ResponsesAdapter):\n    kind = "%s"\n' % GJ_TF_KIND
+# J29 (Plan Step 17, FR-6): the access and ID tokens are never on disk.
+GJ_PERSIST_FORBIDDEN = ("access", "id_token")
+
+GJ_KINDS = ("codex", "llamacpp", "mistral", "openai", "passthrough")   # J12: KIND_CLASSES must hold all five
+
+# J27 (Plan Step 5): the _RT_RESPONSES_PROFILES table is the contract -- every field of
+# every row, in the declared field order.  Values are written here, never read from the
+# module, so a drifted row is a finding rather than a new expectation.
+GJ_RS_FIELDS = ("name", "default_base_url", "path", "oauth_provider", "sampling",
+                "account_header", "identity", "beta", "require_event_stream",
+                "line_limit", "event_limit", "tool_shape")
+GJ_RS_LINE = 8 * 1024 * 1024     # _RT_RS_SSE_LINE_LIMIT
+GJ_RS_EVENT = 16 * 1024 * 1024   # _RT_RS_SSE_EVENT_LIMIT
+GJ_RS_PROFILES = {
+    "codex": ("codex", "https://chatgpt.com/backend-api", "/codex/responses", "codex",
+              False, True, True, "responses=experimental", False,
+              GJ_RS_LINE, GJ_RS_EVENT, "function"),
+    # tool_shape "namespace": user decision 2026-10-07 (SIWC preview limitations; K23/K24).
+    "openai-oauth": ("openai-oauth", "https://api.openai.com", "/v1/responses", "openai",
+                     False, False, False, "", False,
+                     GJ_RS_LINE, GJ_RS_EVENT, "namespace"),
+    "openai-apikey": ("openai-apikey", "https://api.openai.com", "/v1/responses", "",
+                      True, False, False, "", True,
+                      GJ_RS_LINE, GJ_RS_EVENT, "function"),
+}
+# J30 (Plan Step 5, L6): the kinds that predate the Responses unit keep the Adapter base hooks.
+GJ_BASE_HOOK_KINDS = ("passthrough", "llamacpp", "mistral")
+GJ_STREAM_POLICY_FIELDS = ("line_limit", "require_event_stream")
 GJ_MESSAGE_ID = "msg_tfj0123456789abcdef01234"
 GJ_MODEL = "claude-tf-j"
 GJ_USAGE = {"output_tokens": 7}
 GJ_TOOL = ("toolu_tfj0123456789abcdef0123", "Read", '{"file_path":"/tf/j"}')
+# J24-J26 (Plan Step 14, KD-4): the three reasoning methods every sink gains.
+GJ_SINK_METHODS = ("thinking", "thinking_end", "redacted_thinking")
+GJ_SIG = "lrs1.tfj.gAAAAABo-tf_j_reasoning_blob=="
+GJ_SIG_TWO = "lrs1.tfj.gAAAAABo-tf_j_redacted_blob=="
+
+
+def gj_sink_missing(mod, cls_name):
+    """One problem naming the reasoning methods *cls_name* lacks (red before Step 14, never a crash)."""
+    cls = getattr(mod, cls_name, None)
+    if cls is None:
+        return ["the module defines no %s" % cls_name]
+    absent = [m for m in GJ_SINK_METHODS if not callable(getattr(cls, m, None))]
+    return ["%s defines no %s (Step 14 not landed)" % (cls_name, ", ".join(absent))] if absent else []
+
+
+def gj_block_start(index, block):
+    return ("content_block_start", {"type": "content_block_start", "index": index, "content_block": block})
+
+
+def gj_block_delta(index, delta):
+    return ("content_block_delta", {"type": "content_block_delta", "index": index, "delta": delta})
+
+
+def gj_block_stop(index):
+    return ("content_block_stop", {"type": "content_block_stop", "index": index})
+
+
+def gj_finish_events(stop_reason="end_turn"):
+    return [("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                               "usage": dict(GJ_USAGE)}),
+            ("message_stop", {"type": "message_stop"})]
+
+
+def gj_fold(events):
+    """The Anthropic message the encoder's *events* describe (J26): each block from its start
+    plus its deltas (thinking_delta and signature_delta joined, input_json parsed), the
+    message_start id and model, the message_delta stop_reason and usage."""
+    message = {"id": None, "type": "message", "role": "assistant", "model": None, "content": [],
+               "stop_reason": None, "stop_sequence": None, "usage": None}
+    json_parts = {}
+    for name, obj in events:
+        if name == "message_start":
+            inner = obj.get("message") or {}
+            message["id"], message["model"] = inner.get("id"), inner.get("model")
+        elif name == "content_block_start":
+            block = dict(obj.get("content_block") or {})
+            if block.get("type") == "tool_use":
+                json_parts[len(message["content"])] = ""
+            message["content"].append(block)
+        elif name == "content_block_delta" and message["content"]:
+            delta, block = obj.get("delta") or {}, message["content"][-1]
+            kind = delta.get("type")
+            if kind == "text_delta":
+                block["text"] = block.get("text", "") + (delta.get("text") or "")
+            elif kind == "thinking_delta":
+                block["thinking"] = block.get("thinking", "") + (delta.get("thinking") or "")
+            elif kind == "signature_delta":
+                block["signature"] = block.get("signature", "") + (delta.get("signature") or "")
+            elif kind == "input_json_delta":
+                json_parts[len(message["content"]) - 1] += delta.get("partial_json") or ""
+        elif name == "message_delta":
+            message["stop_reason"] = (obj.get("delta") or {}).get("stop_reason")
+            message["usage"] = obj.get("usage")
+    for index, text in json_parts.items():
+        try:
+            message["content"][index]["input"] = json.loads(text)
+        except ValueError:
+            message["content"][index]["input"] = None
+    return message
 
 
 def gj_missing(mod, names):
@@ -8356,7 +17329,15 @@ GJ_STATIC_CASES = (
     "control: CORS literal",             # J17 (J3)
     "control: three J4 plants",          # J18 (J4)
     "control: undeclared hand copy",     # J19 (J13)
+    "control: J4a send plants",          # J23 (J4a)
 )
+
+# J1 (Plan Step 8): the scopes allowed to call hmac.compare_digest, each with its
+# exact count -- the bearer check and the OAuth state check.
+GJ_DIGEST_SITES = {"_precheck": 1, "_oauth_state_matches": 1}
+# J4a (Plan Step 8, KD-7): the scopes allowed to call _rt_send, each paired with the
+# one header builder its headers argument must call.
+GJ_SEND_SITES = {"_post": "_rt_upstream_headers", "_rt_oauth_post": "_rt_oauth_headers"}
 
 GJ_ENV_ATTRS = ("environ", "environb", "getenv", "getenvb")
 GJ_PURE_FORBIDDEN = ("socket", "ssl", "http", "select", "time", "threading")   # NFR-8
@@ -8409,8 +17390,9 @@ def gj_scope_text(scope):
 
 def rule_j1(source):
     """J1: the copied front still holds its hardening markers -- _HeaderDeadlineReader
-    defined and used, `headers.defects` read, and hmac.compare_digest called exactly
-    once, inside _precheck (the bearer check is the file's one constant-time compare)."""
+    defined and used, `headers.defects` read, and hmac.compare_digest called only in
+    the GJ_DIGEST_SITES scopes, each exactly its count (the bearer check in _precheck,
+    the OAuth state check in _oauth_state_matches)."""
     tree, found = gj_parse(source)
     if tree is None:
         return found
@@ -8435,13 +17417,19 @@ def rule_j1(source):
     if not defects:
         found.append("headers.defects is never read: a malformed header block is no longer refused")
     digests.sort()
-    if len(digests) != 1:
-        found.append("%d compare_digest call(s) (lines %s), expected exactly one, in _precheck"
-                     % (len(digests), [ln for ln, _s in digests]))
+    sites = ", ".join(GJ_DIGEST_SITES)
+    want = sum(GJ_DIGEST_SITES.values())
+    if len(digests) != want:
+        found.append("%d compare_digest call(s) (lines %s), expected exactly %d, in %s"
+                     % (len(digests), [ln for ln, _s in digests], want, sites))
+    for name, count in GJ_DIGEST_SITES.items():
+        held = sum(1 for _ln, scope in digests if scope == name)
+        if held != count:
+            found.append("compare_digest called %d time(s) in %s(), expected %d" % (held, name, count))
     for lineno, scope in digests:
-        if scope != "_precheck":
-            found.append("%d: compare_digest called in %s, not _precheck"
-                         % (lineno, gj_scope_text(scope)))
+        if scope not in GJ_DIGEST_SITES:
+            found.append("%d: compare_digest called in %s, not one of %s"
+                         % (lineno, gj_scope_text(scope), sites))
     return found
 
 
@@ -8534,9 +17522,10 @@ def gj_banners(source):
 
 
 def rule_j4(source):
-    """J4: (a) every putheader call is inside _rt_send, and _rt_send is called at
-    exactly one site, inside _post, with _rt_upstream_headers(...) as its headers
-    argument; (b) the attribute client_headers is read only inside
+    """J4: (a) every putheader call is inside _rt_send, and _rt_send is called only
+    in the GJ_SEND_SITES scopes, exactly once each, with that scope's paired builder
+    call as its headers argument (_post -> _rt_upstream_headers(...), _rt_oauth_post
+    -> _rt_oauth_headers(...)); (b) the attribute client_headers is read only inside
     _rt_upstream_headers; (c) nothing between the `# Unit 2:` and `# Unit 6:`
     banners references socket, ssl, http, select, time or threading -- and a
     missing, repeated or out-of-order banner is itself a finding."""
@@ -8558,16 +17547,24 @@ def rule_j4(source):
     for lineno, scope in sorted(putheaders, key=lambda p: p[0]):
         if scope != "_rt_send":
             found.append("%d: putheader called in %s, not _rt_send" % (lineno, gj_scope_text(scope)))
-    if len(sends) != 1:
-        found.append("(a) _rt_send is called at %d site(s) (lines %s), expected exactly one, in _post"
-                     % (len(sends), sorted(n.lineno for n, _s in sends)))
-    for node, scope in sends:
-        if scope != "_post":
-            found.append("%d: _rt_send called in %s, not _post" % (node.lineno, gj_scope_text(scope)))
+    sites = ", ".join(GJ_SEND_SITES)
+    if len(sends) != len(GJ_SEND_SITES):
+        found.append("(a) _rt_send is called at %d site(s) (lines %s), expected exactly %d, one each in %s"
+                     % (len(sends), sorted(n.lineno for n, _s in sends), len(GJ_SEND_SITES), sites))
+    for name in GJ_SEND_SITES:
+        held = sum(1 for _n, scope in sends if scope == name)
+        if held != 1:
+            found.append("(a) _rt_send is called %d time(s) in %s(), expected exactly one" % (held, name))
+    for node, scope in sorted(sends, key=lambda s: s[0].lineno):
+        if scope not in GJ_SEND_SITES:
+            found.append("%d: _rt_send called in %s, not one of %s" % (node.lineno, gj_scope_text(scope), sites))
+            continue
+        builder = GJ_SEND_SITES[scope]
         headers = node.args[2] if len(node.args) > 2 else next(
             (kw.value for kw in node.keywords if kw.arg == "headers"), None)
-        if not (isinstance(headers, ast.Call) and gj_callee(headers) == "_rt_upstream_headers"):
-            found.append("%d: _rt_send's headers argument is not _rt_upstream_headers(...)" % node.lineno)
+        if not (isinstance(headers, ast.Call) and gj_callee(headers) == builder):
+            found.append("%d: _rt_send's headers argument in %s() is not %s(...)"
+                         % (node.lineno, scope, builder))
 
     # (b)
     reads_inside = 0
@@ -8659,6 +17656,10 @@ class Handler:
         if self.headers.defects:
             return None
         return hmac.compare_digest(presented, token)
+
+
+def _oauth_state_matches(a, b):
+    return hmac.compare_digest(a, b)
 '''
 GJ_J1_PLANTED = GJ_J1_CLEAN + '''
 
@@ -8725,6 +17726,15 @@ def _rt_send(backend, path, headers, body):
 def _rt_upstream_headers(inbound):
     return list((inbound.client_headers or {}).items())
 
+
+def _rt_oauth_headers(headers, user_agent):
+    return list(headers) + [("User-Agent", user_agent)]
+
+
+def _rt_oauth_post(backend, request, user_agent):
+    url, headers, body = request
+    return _rt_send(backend, url, _rt_oauth_headers(headers, user_agent), body)
+
 # ---------------------------------------------------------------------------
 # Unit 7: HTTP front
 # ---------------------------------------------------------------------------
@@ -8740,6 +17750,12 @@ GJ_J4_PLANTED = GJ_J4_CLEAN.replace(
     "def _log_inbound(inbound):\n    return len(inbound.client_headers)\n\n\n"
     "class Handler:\n    def _probe(self, conn):\n        conn.putheader(\"X-Tf-Probe\", \"1\")\n\n",
 )
+# J23: a third _rt_send scope, and _rt_oauth_post handed the wrong builder.
+GJ_J23_PLANTED = GJ_J4_CLEAN.replace(
+    "    return _rt_send(backend, url, _rt_oauth_headers(headers, user_agent), body)\n",
+    "    return _rt_send(backend, url, _rt_upstream_headers(headers), body)\n\n\n"
+    "def _probe_send(b):\n    return _rt_send(b, \"/x\", _rt_oauth_headers(()), b\"\")\n",
+)
 
 GJ_J19_REASONS = {("llm-router.py", "_tf_declared"): "tf: a declared hand copy"}
 GJ_J19_CLEAN = [("Scripts/llm-router.py", "_tf_declared"),
@@ -8753,7 +17769,7 @@ def gj_j19_checker(rows):
 
 GJ_CONTROLS = {
     "control: 2nd compare_digest": (rule_j1, GJ_J1_CLEAN, GJ_J1_PLANTED,
-                                    ("2 compare_digest call(s)",
+                                    ("3 compare_digest call(s)",
                                      "compare_digest called in _check_key()")),
     "control: HTTPS_PROXY read": (rule_j2, GJ_J2_CLEAN, GJ_J2_PLANTED,
                                   ("environment read of HTTPS_PROXY",
@@ -8766,6 +17782,10 @@ GJ_CONTROLS = {
                                   "unit 5 references 'time'")),
     "control: undeclared hand copy": (gj_j19_checker, GJ_J19_CLEAN, GJ_J19_PLANTED,
                                       ("_tf_undeclared is a hand copy",)),
+    "control: J4a send plants": (rule_j4, GJ_J4_CLEAN, GJ_J23_PLANTED,
+                                 ("_rt_send called in _probe_send(), not one of _post, _rt_oauth_post",
+                                  "_rt_send's headers argument in _rt_oauth_post() is not "
+                                  "_rt_oauth_headers(...)")),
 }
 
 
@@ -8788,7 +17808,7 @@ def gj_control(checker, clean, planted, needles):
 
 
 def group_j_static(suite):
-    """J1-J4 and J13 over the live router, then their planted controls J15-J19."""
+    """J1-J4 and J13 over the live router, then their planted controls J15-J19 and J23."""
     rel = os.path.relpath(SERVER, H.REPO_ROOT)
     results = {}
     try:
@@ -9053,8 +18073,498 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
         return problems, ["_rt_dumps   : %r" % (dumped,),
                           "text()      : %r" % ((text or b"")[-80:],)]
 
+    think_start = {"type": "thinking", "thinking": "", "signature": ""}
+    text_start = {"type": "text", "text": ""}
+    tool_start = {"type": "tool_use", "id": GJ_TOOL[0], "name": GJ_TOOL[1], "input": {}}
+
+    def td(text):
+        return {"type": "thinking_delta", "thinking": text}
+
+    def sd(sig):
+        return {"type": "signature_delta", "signature": sig}
+
+    def xd(text):
+        return {"type": "text_delta", "text": text}
+
+    def scenario(label, calls, want):
+        """(problems, outs): *calls* (each enc -> bytes) after start(3) on a fresh encoder, every
+        output bytes, and the joined events exactly *want*."""
+        enc = encoder()
+        enc.start(3)
+        outs = [call(enc) for call in calls]
+        bad = [i for i, out in enumerate(outs) if not isinstance(out, bytes)]
+        if bad:
+            return ["%s: call %d returned %s, not bytes" % (label, bad[0], type(outs[bad[0]]).__name__)], outs
+        try:
+            events = gj_events(b"".join(outs))
+        except ValueError as exc:
+            return ["%s: malformed encoder output: %s" % (label, exc)], outs
+        if gj_shape(events) != gj_shape(want):
+            return ["%s: events %s, expected %s" % (label, gj_shape(events), gj_shape(want))], outs
+        return ["%s: event %s is %r, expected %r" % (label, gj_shape([w])[0], got[1], w[1])
+                for got, w in zip(events, want) if got != w], outs
+
+    def run_scenarios(table):
+        problems, shown, outs_of = [], [], {}
+        for label, calls, want in table:
+            more, outs = scenario(label, calls, want)
+            problems += more
+            outs_of[label] = outs
+            shown.append("%s: %s" % (label, "ok" if not more else "off"))
+        return problems, shown, outs_of
+
+    def j24():
+        problems = gj_sink_missing(mod, "AnthropicSseEncoder")
+        if problems:
+            return problems, []
+        fin = lambda enc: enc.finish("end_turn", dict(GJ_USAGE))   # noqa: E731 -- a call-table entry
+        table = (
+            ("thinking, thinking_end(''), text",
+             [lambda e: e.thinking("tf j24 a"), lambda e: e.thinking(" b"), lambda e: e.thinking_end(""),
+              lambda e: e.text("tf j24 t"), fin],
+             [gj_block_start(0, think_start), gj_block_delta(0, td("tf j24 a")), gj_block_delta(0, td(" b")),
+              gj_block_stop(0), gj_block_start(1, text_start), gj_block_delta(1, xd("tf j24 t")), gj_block_stop(1)]
+             + gj_finish_events()),
+            ("thinking_end(signature)",
+             [lambda e: e.thinking("tf j24 x"), lambda e: e.thinking_end(GJ_SIG), lambda e: e.text("tf j24 y"), fin],
+             [gj_block_start(0, think_start), gj_block_delta(0, td("tf j24 x")), gj_block_delta(0, sd(GJ_SIG)),
+              gj_block_stop(0), gj_block_start(1, text_start), gj_block_delta(1, xd("tf j24 y")), gj_block_stop(1)]
+             + gj_finish_events()),
+            ("text closes an open thinking block",
+             [lambda e: e.thinking("tf j24 x"), lambda e: e.text("tf j24 y"), fin],
+             [gj_block_start(0, think_start), gj_block_delta(0, td("tf j24 x")), gj_block_stop(0),
+              gj_block_start(1, text_start), gj_block_delta(1, xd("tf j24 y")), gj_block_stop(1)]
+             + gj_finish_events()),
+            ("thinking after text",
+             [lambda e: e.text("tf j24 p"), lambda e: e.thinking("tf j24 q"), lambda e: e.thinking_end(GJ_SIG), fin],
+             [gj_block_start(0, text_start), gj_block_delta(0, xd("tf j24 p")), gj_block_stop(0),
+              gj_block_start(1, think_start), gj_block_delta(1, td("tf j24 q")), gj_block_delta(1, sd(GJ_SIG)),
+              gj_block_stop(1)] + gj_finish_events()),
+            ("tool_block closes thinking",
+             [lambda e: e.thinking("tf j24 x"), lambda e: e.tool_block(*GJ_TOOL), fin],
+             [gj_block_start(0, think_start), gj_block_delta(0, td("tf j24 x")), gj_block_stop(0),
+              gj_block_start(1, tool_start), gj_block_delta(1, {"type": "input_json_delta", "partial_json": GJ_TOOL[2]}),
+              gj_block_stop(1)] + gj_finish_events("tool_use")),
+            ("finish closes thinking",
+             [lambda e: e.thinking("tf j24 x"), fin],
+             [gj_block_start(0, think_start), gj_block_delta(0, td("tf j24 x")), gj_block_stop(0)]
+             + gj_finish_events()),
+            ("thinking_end with nothing open, then text",
+             [lambda e: e.thinking_end(GJ_SIG), lambda e: e.text("tf j24 z"), lambda e: e.thinking_end(GJ_SIG),
+              lambda e: e.text(" more"), fin],
+             [gj_block_start(0, text_start), gj_block_delta(0, xd("tf j24 z")), gj_block_delta(0, xd(" more")),
+              gj_block_stop(0)] + gj_finish_events()))
+        problems, shown, outs = run_scenarios(table)
+        first = outs.get("thinking, thinking_end(''), text") or []
+        if len(first) > 2 and isinstance(first[2], bytes):
+            try:
+                own = gj_events(first[2])
+            except ValueError:
+                own = None
+            if own != [gj_block_stop(0)]:
+                problems.append("thinking_end('') emitted %s, expected exactly content_block_stop[0] "
+                                "(an empty signature emits no signature_delta)" % (gj_shape(own) if own else own,))
+        nothing = outs.get("thinking_end with nothing open, then text") or []
+        for i in (0, 2):
+            if len(nothing) > i and nothing[i] != b"":
+                problems.append("thinking_end with no thinking block open returned %r, expected b\"\"" % (nothing[i][:60],))
+        enc = encoder()
+        enc.start(1)
+        enc.error("api_error", "tf j24 failure")
+        for name, call in (("thinking", lambda: enc.thinking("tf")), ("thinking_end", lambda: enc.thinking_end(GJ_SIG)),
+                           ("redacted_thinking", lambda: enc.redacted_thinking(GJ_SIG))):
+            got = call()
+            if got != b"":
+                problems.append("%s() after error() returned %r, expected b\"\"" % (name, got[:60] if isinstance(got, bytes) else got))
+        return problems, ["scenario    : " + s for s in shown]
+
+    def j25():
+        problems = gj_sink_missing(mod, "AnthropicSseEncoder")
+        if problems:
+            return problems, []
+        fin = lambda enc: enc.finish("end_turn", dict(GJ_USAGE))   # noqa: E731 -- a call-table entry
+        red = {"type": "redacted_thinking", "data": GJ_SIG_TWO}
+        table = (
+            ("text, redacted, text",
+             [lambda e: e.text("tf j25 r"), lambda e: e.redacted_thinking(GJ_SIG_TWO), lambda e: e.text("tf j25 s"), fin],
+             [gj_block_start(0, text_start), gj_block_delta(0, xd("tf j25 r")), gj_block_stop(0),
+              gj_block_start(1, red), gj_block_stop(1),
+              gj_block_start(2, text_start), gj_block_delta(2, xd("tf j25 s")), gj_block_stop(2)] + gj_finish_events()),
+            ("open thinking, then redacted",
+             [lambda e: e.thinking("tf j25 t"), lambda e: e.redacted_thinking(GJ_SIG_TWO), fin],
+             [gj_block_start(0, think_start), gj_block_delta(0, td("tf j25 t")), gj_block_stop(0),
+              gj_block_start(1, red), gj_block_stop(1)] + gj_finish_events()),
+            ("redacted, then tool",
+             [lambda e: e.redacted_thinking(GJ_SIG_TWO), lambda e: e.tool_block(*GJ_TOOL), fin],
+             [gj_block_start(0, red), gj_block_stop(0),
+              gj_block_start(1, tool_start), gj_block_delta(1, {"type": "input_json_delta", "partial_json": GJ_TOOL[2]}),
+              gj_block_stop(1)] + gj_finish_events("tool_use")),
+            ("two redacted in a row",
+             [lambda e: e.redacted_thinking(GJ_SIG_TWO), lambda e: e.redacted_thinking(GJ_SIG), fin],
+             [gj_block_start(0, red), gj_block_stop(0),
+              gj_block_start(1, {"type": "redacted_thinking", "data": GJ_SIG}), gj_block_stop(1)] + gj_finish_events()))
+        problems, shown, outs = run_scenarios(table)
+        own = (outs.get("text, redacted, text") or [None, None])[1]
+        if isinstance(own, bytes):
+            try:
+                own_events = gj_events(own)
+            except ValueError:
+                own_events = None
+            if own_events != [gj_block_stop(0), gj_block_start(1, red), gj_block_stop(1)]:
+                problems.append("redacted_thinking() emitted %s, expected the open block's stop, then one whole "
+                                "block (start, stop; no delta)" % (gj_shape(own_events) if own_events else own_events,))
+        return problems, ["scenario    : " + s for s in shown]
+
+    def j26():
+        problems = gj_sink_missing(mod, "AnthropicSseEncoder") + gj_sink_missing(mod, "_RtMessageCollector")
+        if problems:
+            return problems, []
+        usage = dict(GJ_USAGE)
+        sequence = (("start", (3,)), ("thinking", ("tf j26 a",)), ("thinking", (" b",)), ("thinking_end", (GJ_SIG,)),
+                    ("text", ("tf j26 t",)), ("ping", ()), ("redacted_thinking", (GJ_SIG_TWO,)),
+                    ("thinking", ("tf j26 c",)), ("tool_block", GJ_TOOL), ("thinking_end", (GJ_SIG,)),
+                    ("text", ("tf j26 u",)), ("thinking_end", (GJ_SIG,)), ("finish", ("end_turn", usage)))
+        failing = (("start", (3,)), ("thinking", ("tf j26 x",)), ("redacted_thinking", (GJ_SIG_TWO,)),
+                   ("error", ("api_error", "tf j26 failure")))
+        every = {"start", "text", "thinking", "thinking_end", "redacted_thinking", "tool_block", "finish", "error",
+                 "ping"}
+        used = {name for name, _args in sequence + failing}
+        if used != every:
+            problems.append("the call sequences use %s, expected every sink method %s" % (sorted(used), sorted(every)))
+        want_content = [{"type": "thinking", "thinking": "tf j26 a b", "signature": GJ_SIG},
+                        {"type": "text", "text": "tf j26 t"},
+                        {"type": "redacted_thinking", "data": GJ_SIG_TWO},
+                        {"type": "thinking", "thinking": "tf j26 c", "signature": ""},
+                        {"type": "tool_use", "id": GJ_TOOL[0], "name": GJ_TOOL[1], "input": json.loads(GJ_TOOL[2])},
+                        {"type": "text", "text": "tf j26 u"}]
+        shown = []
+        for label, calls in (("finished", sequence), ("failed", failing)):
+            enc = encoder()
+            col = mod._RtMessageCollector(GJ_MESSAGE_ID, GJ_MODEL)
+            enc_out = b""
+            for name, args in calls:
+                enc_out += getattr(enc, name)(*args)
+                got = getattr(col, name)(*args)
+                if got != b"":
+                    problems.append("%s: collector.%s returned %r, expected b\"\"" % (label, name, got))
+            try:
+                events = gj_events(enc_out)
+            except ValueError as exc:
+                problems.append("%s: malformed encoder output: %s" % (label, exc))
+                continue
+            if getattr(col, "started", None) is not True or getattr(col, "closed", None) is not True:
+                problems.append("%s: collector started/closed %r/%r, expected True/True"
+                                % (label, getattr(col, "started", None), getattr(col, "closed", None)))
+            if label == "failed":
+                if not events or events[-1][0] != "error":
+                    problems.append("failed: the encoder did not end with event: error (%s)" % gj_shape(events))
+                if getattr(col, "failed", None) != ("api_error", "tf j26 failure"):
+                    problems.append("failed: collector.failed %r, expected ('api_error', 'tf j26 failure')"
+                                    % (getattr(col, "failed", None),))
+                shown.append("failed: %s" % gj_shape(events))
+                continue
+            folded = gj_fold(events)
+            if folded["content"] != want_content:
+                problems.append("finished: the folded encoder content %r, expected %r" % (folded["content"], want_content))
+            if folded["stop_reason"] != "tool_use" or folded["usage"] != usage:
+                problems.append("finished: folded stop_reason/usage %r/%r, expected 'tool_use'/%r"
+                                % (folded["stop_reason"], folded["usage"], usage))
+            message = col.message()
+            if message != folded:
+                problems.append("finished: collector.message() %s differs from the folded encoder %s"
+                                % (json.dumps(message)[:240], json.dumps(folded)[:240]))
+            shown.append("finished: %s" % gj_shape(events))
+        return problems, ["sinks       : " + s for s in shown]
+
+    def gj_step5_missing(names):
+        absent = [n for n in names if not hasattr(mod, n)]
+        return ["the module defines no %s (Step 5 not landed)" % ", ".join(absent)] if absent else []
+
+    def j27():
+        problems = gj_step5_missing(("_RT_RESPONSES_PROFILES",))
+        if problems:
+            return problems, []
+        table = mod._RT_RESPONSES_PROFILES
+        names = sorted(table) if isinstance(table, dict) else None
+        if names != sorted(GJ_RS_PROFILES):
+            problems.append("_RT_RESPONSES_PROFILES holds %r, expected exactly %s"
+                            % (names, sorted(GJ_RS_PROFILES)))
+        shown = []
+        for name, want in GJ_RS_PROFILES.items():
+            row = table.get(name) if isinstance(table, dict) else None
+            if row is None:
+                problems.append("%s: no row" % name)
+                continue
+            fields = getattr(row, "_fields", None)
+            if fields != GJ_RS_FIELDS:
+                problems.append("%s: the row's fields are %r, expected %r" % (name, fields, GJ_RS_FIELDS))
+                continue
+            bad = [field for field, got, exp in zip(GJ_RS_FIELDS, row, want)
+                   if type(got) is not type(exp) or got != exp]
+            for field in bad:
+                problems.append("%s.%s is %r, expected %r"
+                                % (name, field, getattr(row, field), want[GJ_RS_FIELDS.index(field)]))
+            shown.append("%s=%s" % (name, "ok" if not bad else "%d field(s) off" % len(bad)))
+        return problems, ["rows        : %s" % (", ".join(shown) or "none"),
+                          "fields      : %d per row, every one asserted" % len(GJ_RS_FIELDS)]
+
+    def j30():
+        problems = gj_step5_missing(("StreamPolicy", "ADAPTERS"))
+        if problems:
+            return problems, []
+        fields = getattr(mod.StreamPolicy, "_fields", None)
+        if fields != GJ_STREAM_POLICY_FIELDS:
+            problems.append("StreamPolicy._fields is %r, expected %r (L6: no second event-limit source)"
+                            % (fields, GJ_STREAM_POLICY_FIELDS))
+        want_policy = mod.StreamPolicy(mod._SSE_LINE_LIMIT, True)
+        inbound = gf_inbound(mod, "messages", gf_body([{"role": "user", "content": "tf j30"}]),
+                             gf_route(mod))
+        shown = []
+        for kind in GJ_BASE_HOOK_KINDS:
+            adapter = mod.ADAPTERS.get(kind)
+            if adapter is None:
+                problems.append("%s: no ADAPTERS entry" % kind)
+                continue
+            missing = [h for h in ("upstream_head", "stream_policy")
+                       if not callable(getattr(adapter, h, None))]
+            if missing:
+                problems.append("%s: no %s hook" % (kind, ", ".join(missing)))
+                continue
+            head = adapter.upstream_head(inbound, None)
+            if head != (None, ()):
+                problems.append("%s.upstream_head -> %r, expected (None, ())" % (kind, head))
+            policy = adapter.stream_policy(inbound)
+            if type(policy) is not mod.StreamPolicy or policy != want_policy:
+                problems.append("%s.stream_policy -> %r, expected StreamPolicy(%d, True)"
+                                % (kind, policy, mod._SSE_LINE_LIMIT))
+            shown.append(kind)
+        return problems, ["kinds       : %s -> (None, ()) and StreamPolicy(_SSE_LINE_LIMIT, True)"
+                          % (", ".join(shown) or "none")]
+
+    def j28_copy():
+        """(copy module, problems): SERVER's text plus the tf-dialect row and _TfAdapter, executed
+        in a fresh module namespace (not __main__: no bind, no write)."""
+        with open(SERVER, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        defs = [m.start() for m in GJ_TF_DEF_RE.finditer(text)]
+        found = GJ_TF_ANCHOR_RE.search(text, defs[0]) if len(defs) == 1 else None
+        nxt = GJ_TF_NEXT_DEF_RE.search(text, defs[0] + 1) if len(defs) == 1 else None
+        if found is None or (nxt is not None and found.start() > nxt.start()):
+            return None, ["_rt_responses_profiles: %d definition(s), and no `)` + `return {row.name: row for row "
+                          "in rows}` close inside it: no place for a fourth row" % len(defs)]
+        indent = found.group(1)
+        patched = (text[:found.start()] + "\n" + indent * 2 + GJ_TF_ROW + text[found.start():]
+                   + GJ_TF_CLASS)
+        copy = types.ModuleType(GJ_TF_MODULE)
+        copy.__file__ = SERVER
+        sys.modules[GJ_TF_MODULE] = copy
+        try:
+            exec(compile(patched, SERVER + " (J28 copy)", "exec"), copy.__dict__)
+        except Exception as exc:  # noqa: BLE001 -- the type is the finding: the row needs another edit
+            return None, ["the copy with the fourth row does not load: %s: %s" % (type(exc).__name__, str(exc)[:200])]
+        finally:
+            sys.modules.pop(GJ_TF_MODULE, None)
+        return copy, []
+
+    def j28_parts(m, profile, kind, stream):
+        body = {"model": GK_ROUTE, "max_tokens": 64, "stream": stream, "temperature": 0.3,
+                "system": "tf j28 system",
+                "tools": [{"name": "Read", "description": "tf j28: read", "input_schema": GK_SCHEMA_READ}],
+                "messages": [{"role": "user", "content": "tf j28 read it"},
+                             {"role": "assistant", "content": [gk_tool_use("toolu_tfj28")]},
+                             {"role": "user", "content": [gk_tool_result("toolu_tfj28", "tf j28 contents")]},
+                             {"role": "user", "content": "tf j28 thanks"}]}
+        route = m.RouteSpec(name=GK_ROUTE, backend=GJ_TF_BACKEND, model=GK_MODEL, options={})
+        backend = m.BackendSpec(name=GJ_TF_BACKEND, kind=kind, scheme="https", host="tf-dialect.invalid",
+                                port=443, base_path="", allow_private=False, allow_loopback=False,
+                                ca_file=None, ca_pem=None, api_key=None, auth_header="authorization",
+                                forward_headers=frozenset(), connect_timeout=5.0, idle_timeout=30.0,
+                                profile=profile)
+        inbound = m.InboundRequest(endpoint="messages", requested_model=GK_ROUTE, body=body, stream=stream,
+                                   route=route, backend=backend, client_headers={}, scrub=lambda text: text)
+        return body, route, inbound
+
+    def j28():
+        problems = gj_step5_missing(("_rt_responses_profiles", "_RT_RESPONSES_PROFILES", "ResponsesAdapter",
+                                     "_rt_rs_translate"))
+        if problems:
+            return problems, ["scope       : " + GJ_TF_SCOPE]
+        copy, problems = j28_copy()
+        if copy is None:
+            return problems, ["scope       : " + GJ_TF_SCOPE]
+        rows = copy._RT_RESPONSES_PROFILES
+        want_rows = sorted(list(GJ_RS_PROFILES) + [GJ_TF_PROFILE])
+        if sorted(rows) != want_rows:
+            problems.append("the copy's _RT_RESPONSES_PROFILES holds %r, expected %r" % (sorted(rows), want_rows))
+        if sorted(mod._RT_RESPONSES_PROFILES) != sorted(GJ_RS_PROFILES):
+            problems.append("the real module's table changed: the copy was not a fresh namespace")
+        cls = getattr(copy, "_TfAdapter", None)
+        if cls is None or getattr(cls, "kind", None) != GJ_TF_KIND or not issubclass(cls, copy.ResponsesAdapter):
+            return problems + ["the copy defines no _TfAdapter(ResponsesAdapter) of kind %r" % GJ_TF_KIND], \
+                ["scope       : " + GJ_TF_SCOPE]
+        if GJ_TF_PROFILE not in rows:
+            return problems, ["scope       : " + GJ_TF_SCOPE]
+        adapter = cls()
+        body, route, inbound = j28_parts(copy, GJ_TF_PROFILE, GJ_TF_KIND, True)
+        path, raw = adapter.upstream_request(inbound)
+        if path != GJ_TF_PATH:
+            problems.append("_TfAdapter.upstream_request -> path %r, expected the row's %r" % (path, GJ_TF_PATH))
+        try:
+            sent = json.loads(raw.decode("utf-8"))
+        except (AttributeError, UnicodeDecodeError, ValueError):
+            sent = None
+        direct, _dropped = copy._rt_rs_translate(ge_clone(body), route, GJ_TF_BACKEND, rows[GJ_TF_PROFILE])
+        if sent != direct:
+            problems.append("_TfAdapter.upstream_request's body differs from _rt_rs_translate over the row")
+        ref_body, ref_route, _ref_inbound = j28_parts(mod, GJ_TF_REFERENCE, "openai", True)
+        reference, _dropped = mod._rt_rs_translate(ref_body, ref_route, GJ_TF_BACKEND,
+                                                   mod._RT_RESPONSES_PROFILES[GJ_TF_REFERENCE])
+        if direct != reference:
+            problems.append("the tf-dialect translation differs from the real module's %s one (same dialect "
+                            "fields): %s vs %s" % (GJ_TF_REFERENCE, json.dumps(direct)[:200],
+                                                   json.dumps(reference)[:200]))
+        if not isinstance(direct, dict) or direct.get("temperature") != 0.3:
+            problems.append("the row's sampling True did not carry temperature into the body")
+        _fx, raw_fx = gm_fixtures()
+        _b, _r, plain = j28_parts(copy, GJ_TF_PROFILE, GJ_TF_KIND, False)
+        status, message = adapter.json_response(plain, 200, raw_fx["text"])
+        want_text = "".join(gm_fx_texts(_fx["text"]))
+        got_text = "".join(b.get("text", "") for b in (message.get("content") or [])
+                           if isinstance(b, dict) and b.get("type") == "text") if isinstance(message, dict) else None
+        if status != 200 or not isinstance(message, dict) or message.get("type") != "message" or got_text != want_text:
+            problems.append("_TfAdapter.json_response over tf_responses_text.sse -> %r %r, expected 200 and the "
+                            "fixture's text %r" % (status, str(message)[:160], want_text))
+        return problems, ["row         : %s (path %s), class _TfAdapter(ResponsesAdapter): kind = %r"
+                          % (GJ_TF_PROFILE, GJ_TF_PATH, GJ_TF_KIND),
+                          "translated  : a request (system, tool, call, result) == %s's; the text fixture "
+                          "-> one message" % GJ_TF_REFERENCE,
+                          "scope       : " + GJ_TF_SCOPE]
+
+    def j29():
+        problems = gj_step5_missing(("_RT_OAUTH_PERSIST_KEYS",))
+        if problems:
+            return problems, []
+        keys = mod._RT_OAUTH_PERSIST_KEYS
+        if not isinstance(keys, tuple) or not keys or not all(isinstance(k, str) for k in keys):
+            return ["_RT_OAUTH_PERSIST_KEYS is %r, expected a non-empty tuple of str" % (keys,)], []
+        if "refresh_token" not in keys:
+            problems.append("_RT_OAUTH_PERSIST_KEYS holds no refresh_token: the check proves nothing "
+                            "(a vacuous pass is refused)")
+        bad = [k for k in keys if any(word in k for word in GJ_PERSIST_FORBIDDEN)]
+        if bad:
+            problems.append("_RT_OAUTH_PERSIST_KEYS persists %r: an access or ID token would reach the disk" % bad)
+        return problems, ["keys        : %s" % ", ".join(keys)]
+
+    def j31():
+        # F9: Python 3.9.6 has no int_max_str_digits and int() is quadratic in a literal's
+        # length, so _rt_loads must bound an integer literal itself; a ValueError is what
+        # every caller's malformed-JSON path already answers (V19).  The interpreter's own
+        # limit (3.11+) is lifted for the call, so the router's bound is what is measured.
+        problems = gj_missing(mod, ("_rt_loads",))
+        if problems:
+            return problems, []
+        shown = []
+        saved = getattr(sys, "get_int_max_str_digits", lambda: None)()
+        try:
+            if saved is not None:
+                sys.set_int_max_str_digits(0)
+            for label, text in (("5000-digit integer", '{"n":' + "9" * 5000 + "}"),
+                                ("5000-digit negative, bytes", b'{"n":-' + b"1" * 5000 + b"}")):
+                try:
+                    got = mod._rt_loads(text)
+                except ValueError as exc:
+                    shown.append("%s -> ValueError (%s)" % (label, type(exc).__name__))
+                else:
+                    problems.append("%s: parsed to a %s, expected ValueError" % (label, type(got.get("n")).__name__))
+        finally:
+            if saved is not None:
+                sys.set_int_max_str_digits(saved)
+        normal = '{"n":123456789012345678901234567890,"m":-7,"f":1.5}'
+        try:
+            got = mod._rt_loads(normal)
+        except Exception as exc:  # noqa: BLE001 -- refusing a normal integer is the defect
+            problems.append("a normal integer was refused: %s" % type(exc).__name__)
+        else:
+            if got != {"n": 123456789012345678901234567890, "m": -7, "f": 1.5}:
+                problems.append("normal numbers parsed as %r" % (got,))
+        return problems, ["refused     : " + s for s in shown] + ["control     : %s parsed" % normal]
+
+    def j32():
+        # F18: `content[-1]["text"] += delta` copies the whole block per delta -- quadratic on
+        # the non-stream path.  The collector must gather a block's deltas and join them once;
+        # the message stays byte-identical.  Functional half: many small deltas, interleaved
+        # kinds, the exact joined content.  Structural half: no augmented assignment to a
+        # subscript anywhere in _RtMessageCollector (the shape of the defect, no timing).
+        problems = gj_sink_missing(mod, "_RtMessageCollector")
+        if problems:
+            return problems, []
+        count = 20000
+        col = mod._RtMessageCollector(GJ_MESSAGE_ID, GJ_MODEL)
+        col.start(3)
+        for i in range(count):
+            col.thinking("t%d," % i)
+        col.thinking_end(GJ_SIG)
+        for i in range(count):
+            col.text("x%d;" % i)
+        col.ping()
+        col.text("")
+        col.tool_block(*GJ_TOOL)
+        for i in range(3):
+            col.thinking("u%d" % i)
+        col.text("tail")
+        col.text(" end")
+        mid = col.message()
+        col.text("+after")
+        col.finish("end_turn", dict(GJ_USAGE))
+        want = [{"type": "thinking", "thinking": "".join("t%d," % i for i in range(count)), "signature": GJ_SIG},
+                {"type": "text", "text": "".join("x%d;" % i for i in range(count))},
+                {"type": "tool_use", "id": GJ_TOOL[0], "name": GJ_TOOL[1], "input": json.loads(GJ_TOOL[2])},
+                {"type": "thinking", "thinking": "u0u1u2", "signature": ""},
+                {"type": "text", "text": "tail end+after"}]
+        got = col.message()
+        if got.get("content") != want:
+            problems.append("content %s, expected %s" % (json.dumps(got.get("content"))[-240:], json.dumps(want)[-240:]))
+        if got.get("stop_reason") != "tool_use":
+            problems.append("stop_reason %r, expected tool_use" % got.get("stop_reason"))
+        if (mid.get("content") or [{}])[-1] != {"type": "text", "text": "tail end+after"}:
+            problems.append("message() taken mid-block then continued: the last block is %r"
+                            % ((mid.get("content") or [None])[-1],))
+        with open(SERVER, "r", encoding="utf-8") as fh:
+            tree, findings = gj_parse(fh.read())
+        problems += findings
+        sites = []
+        for node in ast.walk(tree) if tree is not None else ():
+            if isinstance(node, ast.ClassDef) and node.name == "_RtMessageCollector":
+                sites = [sub.lineno for sub in ast.walk(node)
+                         if isinstance(sub, ast.AugAssign) and isinstance(sub.target, ast.Subscript)]
+        if sites:
+            problems.append("_RtMessageCollector grows a block with `x[k] += ...` at line(s) %s: one copy per "
+                            "delta (F18), expected the deltas joined once" % sites)
+        return problems, ["deltas      : %d thinking + %d text, joined content compared" % (count, count),
+                          "structure   : AugAssign-on-subscript sites %s" % (sites or "none")]
+
+    def j33():
+        # F47: the rendered --help (and the login --help) teaches no form that puts the token on
+        # a command line: no -H "Authorization..." argv, no `export ANTHROPIC_AUTH_TOKEN=<value>`.
+        problems = gj_missing(mod, ("_rt_parser",))
+        if problems:
+            return problems, []
+        texts = {"--help": mod._rt_parser().format_help()}
+        login = getattr(mod, "_RT_LOGIN_HELP_EPILOG", None)
+        if isinstance(login, str):
+            texts["login epilog"] = login
+        for want in (GJ_HELP_READ, GJ_HELP_CURL):
+            if want not in texts["--help"]:
+                problems.append("--help lacks %r" % want)
+        for label, text in sorted(texts.items()):
+            for bad in GJ_HELP_FORBIDDEN:
+                if bad in text:
+                    problems.append("%s carries %r: the token would reach the argv or the shell history" % (label, bad))
+        return problems, ["checked     : %s" % ", ".join(sorted(texts)), "required    : " + GJ_HELP_READ,
+                          "required    : " + GJ_HELP_CURL]
+
     try:
-        for cid, fn in zip(GJ_CASES, (j6, j7, j8, j12, j21)):
+        for cid, fn in zip(GJ_CASES, (j6, j7, j8, j12, j21, j24, j25, j26, j27, j28, j29, j30, j31, j32, j33)):
             try:
                 results[cid] = fn()
             except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
@@ -9469,16 +18979,19 @@ def group_j_hygiene(suite, fixture_root, pyc_before, tree_before):
 # ---------------------------------------------------------------------------
 
 # The groups in run order.  A group whose step has not landed yet is absent
-# from this module and is simply not called.
+# from this module and is simply not called.  K-O run before I and J: I1 sweeps
+# every stderr and log file the run collected, and J9/J10 compare the bytecode
+# and repo snapshots taken at the start, so both must run last.
 GROUP_ORDER = ("group_a", "group_b", "group_c", "group_d", "group_e",
-               "group_f", "group_g", "group_h", "group_i", "group_j")
+               "group_f", "group_g", "group_h", "group_k", "group_l",
+               "group_m", "group_n", "group_o", "group_i", "group_j")
 
 
 def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
                     title="llm-router routes by model and translates at the edge: "
-                          "config, front, outbound, three backend kinds, "
+                          "config, front, outbound, five backend kinds, "
                           "timeouts and secret hygiene against scripted peers",
                     opts=opts, mode="grouped", cid_width=30)
     pyc_before = H.pycache_snapshot()
