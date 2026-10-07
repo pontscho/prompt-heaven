@@ -58,6 +58,7 @@ import ast
 import base64
 import calendar
 import errno
+import fcntl
 import hashlib
 import http.client
 import ipaddress
@@ -12808,10 +12809,12 @@ GN_CASES = (
     "refresh-failure kind escaped",      # N38
     "over-cap 400 body: relayed, no learn",  # N39
     "adopted disk token: load checks",   # N40
+    "SIGTERM before token head: exits",  # N41
+    "SIGTERM in config flock: exits",    # N42
 )
 GN_IDS = ("N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12", "N13",
           "N14", "N15", "N16", "N17", "N18", "N19", "N20", "N21", "N22", "N23", "N24", "N25", "N26", "N27", "N28",
-          "N29", "N30", "N31", "N32", "N33", "N34", "N35", "N36", "N37", "N38", "N39", "N40")
+          "N29", "N30", "N31", "N32", "N33", "N34", "N35", "N36", "N37", "N38", "N39", "N40", "N41", "N42")
 
 GN_BACKEND = "tf-codex-n"                   # the OAuth backend every N case routes to
 GN_BACKEND_2 = "tf-codex-n2"                # N9, N10: a second OAuth backend on the same peers
@@ -12949,6 +12952,10 @@ GN_TERM_SETTLE_S = 0.5                      # after the POST arrived: the head i
 GN_TERM_NEVER = ("pump did not exit", "shutdown drain abandoned")
 GN_STALLED_HEAD = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n"
                    b"Connection: close\r\n\r\n")
+# N41, N42 (R-0083): SIGTERM while a refresh is still inside _rt_send (N41: the auth peer read
+# the POST and never sends a head) or polling the config flock the test holds (N42). Either
+# exits before _DRAIN_S runs out: the drain never has to abandon the handler.
+GN_FLOCK_SETTLE_S = 0.5                     # N42: after the POST was answered, the persist polls the flock
 
 
 def gn_route(name):
@@ -14470,6 +14477,91 @@ def gn_n25(fixture_root, ctx):
                   gn_up_ok(ctx["lines"]), gn_one, body)
 
 
+def gn_term_prompt(rig, drain, settle, want_5xx):
+    """(problems, detail) of one SIGTERM sent *settle* s after the auth peer got the refresh
+    POST: the router exits before *drain* (_DRAIN_S) runs out -- a drain that had to wait the
+    handler out, or abandon it, takes at least *drain* -- the client gets an HTTP answer (a
+    5xx with *want_5xx*), and stderr holds neither GN_TERM_NEVER needle."""
+    box = {}
+
+    def ask():
+        box["got"] = rig.ask(timeout=GN_BODY_STALL_S)
+
+    thread = threading.Thread(target=ask, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + HTTP_TIMEOUT_S
+    while not rig.auth.requests and time.monotonic() < deadline and thread.is_alive():
+        time.sleep(PEER_POLL_S)
+    if not rig.auth.requests:
+        thread.join(HTTP_TIMEOUT_S)
+        got = box.get("got") or ("not finished", None, None, b"")
+        return ["the refresh POST never reached the auth peer (client: %r %s)"
+                % (got[0], gi_redact(got[2] or "")[:120])], []
+    time.sleep(settle)
+    problems = []
+    t0 = time.monotonic()
+    rig.proc.proc.send_signal(signal.SIGTERM)
+    try:
+        rig.proc.proc.wait(timeout=drain + GN_EXIT_SLACK_S)
+        took = time.monotonic() - t0
+        if took >= drain:
+            problems.append("the router took %.2f s to exit after SIGTERM, not under _DRAIN_S = %.1f s: "
+                            "the drain waited the handler out" % (took, drain))
+        took_text = "%.2f s" % took
+    except subprocess.TimeoutExpired:
+        took_text = "still running"
+        problems.append("the router did not exit within _DRAIN_S + %.0f s = %.1f s of SIGTERM"
+                        % (GN_EXIT_SLACK_S, drain + GN_EXIT_SLACK_S))
+    thread.join(HTTP_TIMEOUT_S)
+    got = box.get("got") or ("not finished", None, None, b"")
+    if not isinstance(got[0], int):
+        problems.append("the client got %r, not an HTTP answer: the handler never finished" % (got[0],))
+    elif want_5xx and not 500 <= got[0] <= 599:
+        problems.append("the client got %r, expected a 5xx" % (got[0],))
+    err = rig.proc.stderr_text()
+    for needle in GN_TERM_NEVER:
+        if needle in err:
+            problems.append("stderr holds %r" % needle)
+    return problems, ["shutdown    : SIGTERM %.1f s after the POST; exit after %s; client %r"
+                      % (settle, took_text, got[0])]
+
+
+def gn_n41(fixture_root, ctx):
+    """N41 (R-0083): SIGTERM while a refresh POST waits for its response head (the auth peer
+    read the POST and never answers; _rt_send is still in getresponse) -> the router exits
+    before _DRAIN_S runs out, the client gets a 5xx, and stderr shows no abandoned handler:
+    the token POST's socket is in the shutdown sweep from the connect on, not only for the
+    body read (N25)."""
+    drain = ctx["drain"]
+
+    def body(rig):
+        return gn_term_prompt(rig, drain, GN_TERM_SETTLE_S, True)
+    return gn_run(fixture_root, "n41", [("stall", GN_BODY_STALL_S)], gn_up_ok(ctx["lines"]), gn_one, body)
+
+
+def gn_n42(fixture_root, ctx):
+    """N42 (R-0083): the test holds the config flock; a refresh rotates the token, so its
+    persist polls the flock (_RT_CONFIG_LOCK_WAIT_S, 5 s, outlasts the 3 s drain); SIGTERM
+    meanwhile -> the poll sees `closing` and gives up, the router exits before _DRAIN_S runs
+    out, the client gets an HTTP answer, stderr shows no abandoned handler, and nothing was
+    written to the config."""
+    drain = ctx["drain"]
+    rot = gn_mint_refresh("n42")
+
+    def body(rig):
+        before = gl_bytes(rig.cfgpath)
+        fd = os.open(rig.cfgpath + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            problems, detail = gn_term_prompt(rig, drain, GN_FLOCK_SETTLE_S, False)
+        finally:
+            os.close(fd)
+        if gl_bytes(rig.cfgpath) != before:
+            problems.append("the config changed while the test held its flock")
+        return problems, list(detail) + ["flock       : held by the test from before the request to the exit"]
+    return gn_run(fixture_root, "n42", gn_rotating([(TF_ACCESS_CODEX, rot)]), gn_up_ok(ctx["lines"]), gn_one, body)
+
+
 def gn_n28(fixture_root, ctx):
     """N28 (S8): a refresh answered 400 {"error": "weird_code_<TF_TOKEN_ERRDESC>",
     "error_description": TF_TOKEN_ERRDESC} -> 502 "token refresh failed (invalid_response)"
@@ -15058,7 +15150,8 @@ def gn_n39(fixture_root, ctx):
 
 GN_FNS = (gn_n1, gn_n2, gn_n3, gn_n4, gn_n5, gn_n6, gn_n7, gn_n8, gn_n9, gn_n10, gn_n11, gn_n12, gn_n13,
           gn_n14, gn_n15, gn_n16, gn_n17, gn_n18, gn_n19, gn_n20, gn_n21, gn_n22, gn_n23, gn_n24, gn_n25, gn_n26, gn_n27, gn_n28,
-          gn_n29, gn_n30, gn_n31, gn_n32, gn_n33, gn_n34, gn_n35, gn_n36, gn_n37, gn_n38, gn_n39, gn_n40)
+          gn_n29, gn_n30, gn_n31, gn_n32, gn_n33, gn_n34, gn_n35, gn_n36, gn_n37, gn_n38, gn_n39, gn_n40,
+          gn_n41, gn_n42)
 
 
 def group_n(suite, fixture_root):
@@ -15076,7 +15169,8 @@ def group_n(suite, fixture_root):
     openai-oauth too -- and one with a JSON Content-Type refused, the line
     caps); N18 the openai-oauth refresh form and its ID-token aud check;
     N21 a login while running; N25 SIGTERM during a stalled token body; N28 a
-    token error's text kept out of every output.  N22-N24, N26 and N27 run
+    token error's text kept out of every output; N41 and N42 SIGTERM while a
+    refresh waits for its response head or polls the config flock (R-0083).  N22-N24, N26 and N27 run
     in-process against a private module instance, the token store's `post`,
     `mono` and `closing` seams injected; N13 serves its rig's config in-process
     (FastRouter) with the OAuth idle timeout and negative cache patched to
@@ -17760,6 +17854,7 @@ GJ_STATIC_CASES = (
     "control: three J4 plants",          # J18 (J4)
     "control: undeclared hand copy",     # J19 (J13)
     "control: J4a send plants",          # J23 (J4a)
+    "control: J4a hook plants",          # J36 (J4a, R-0083)
 )
 
 # J1 (Plan Step 8): the scopes allowed to call hmac.compare_digest, each with its
@@ -17768,6 +17863,14 @@ GJ_DIGEST_SITES = {"_precheck": 1, "_oauth_state_matches": 1}
 # J4a (Plan Step 8, KD-7): the scopes allowed to call _rt_send, each paired with the
 # one header builder its headers argument must call.
 GJ_SEND_SITES = {"_post": "_rt_upstream_headers", "_rt_oauth_post": "_rt_oauth_headers"}
+# J4a amended (R-0083): _rt_send takes exactly these parameters; the last, the socket
+# registration hook, is DATA (the shutdown registry) that _rt_send only hands to the
+# connection constructor `cls(...)` -- never called, never given the connection -- so it
+# cannot frame; and only the GJ_SEND_HOOK_SITES scopes pass it.
+GJ_SEND_PARAMS = ("backend", "path", "headers", "body", "track")
+GJ_SEND_HOOK = "track"
+GJ_SEND_HOOK_SITES = ("_rt_oauth_post",)
+GJ_SEND_CONN_CTOR = "cls"
 
 GJ_ENV_ATTRS = ("environ", "environb", "getenv", "getenvb")
 GJ_PURE_FORBIDDEN = ("socket", "ssl", "http", "select", "time", "threading")   # NFR-8
@@ -17955,7 +18058,10 @@ def rule_j4(source):
     """J4: (a) every putheader call is inside _rt_send, and _rt_send is called only
     in the GJ_SEND_SITES scopes, exactly once each, with that scope's paired builder
     call as its headers argument (_post -> _rt_upstream_headers(...), _rt_oauth_post
-    -> _rt_oauth_headers(...)); (b) the attribute client_headers is read only inside
+    -> _rt_oauth_headers(...)); amended for R-0083, _rt_send's parameters are exactly
+    GJ_SEND_PARAMS, its registration hook `track` is used in it only as an argument of
+    the connection constructor cls(...), and only GJ_SEND_HOOK_SITES pass that hook, so
+    the hook is a registry, never a second framing owner; (b) the attribute client_headers is read only inside
     _rt_upstream_headers; (c) nothing between the `# Unit 2:` and `# Unit 6:`
     banners references socket, ssl, http, select, time or threading -- and a
     missing, repeated or out-of-order banner is itself a finding."""
@@ -17995,6 +18101,31 @@ def rule_j4(source):
         if not (isinstance(headers, ast.Call) and gj_callee(headers) == builder):
             found.append("%d: _rt_send's headers argument in %s() is not %s(...)"
                          % (node.lineno, scope, builder))
+        hooked = len(node.args) > len(GJ_SEND_PARAMS) - 1 or any(
+            kw.arg in (GJ_SEND_HOOK, None) for kw in node.keywords)
+        if hooked and scope not in GJ_SEND_HOOK_SITES:
+            found.append("%d: _rt_send in %s() passes the registration hook; only %s may"
+                         % (node.lineno, scope, ", ".join(GJ_SEND_HOOK_SITES)))
+    # (a, R-0083) the registration hook is data handed to the connection constructor only.
+    defs = [n for n, _s in scoped if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_rt_send"]
+    if len(defs) != 1:
+        found.append("(a) _rt_send is defined %d time(s), expected exactly once" % len(defs))
+    for fdef in defs:
+        args = fdef.args
+        names = tuple(a.arg for a in args.posonlyargs + args.args + args.kwonlyargs)
+        if names != GJ_SEND_PARAMS or args.vararg is not None or args.kwarg is not None:
+            found.append("%d: _rt_send's parameters are %s, expected exactly %s"
+                         % (fdef.lineno, list(names) + (["*" + args.vararg.arg] if args.vararg else [])
+                            + (["**" + args.kwarg.arg] if args.kwarg else []), list(GJ_SEND_PARAMS)))
+        handed = set()
+        for call in ast.walk(fdef):
+            if isinstance(call, ast.Call) and gj_is_name(call.func, GJ_SEND_CONN_CTOR):
+                handed.update(id(a) for a in call.args)
+                handed.update(id(kw.value) for kw in call.keywords)
+        for use in ast.walk(fdef):
+            if isinstance(use, ast.Name) and use.id == GJ_SEND_HOOK and id(use) not in handed:
+                found.append("%d: the hook `%s` is used in _rt_send() other than as an argument of the "
+                             "connection constructor %s(...)" % (use.lineno, GJ_SEND_HOOK, GJ_SEND_CONN_CTOR))
 
     # (b)
     reads_inside = 0
@@ -18146,8 +18277,9 @@ def translate(inbound):
 # ---------------------------------------------------------------------------
 # Unit 6: outbound transport
 # ---------------------------------------------------------------------------
-def _rt_send(backend, path, headers, body):
-    conn = backend.connect(time.monotonic())
+def _rt_send(backend, path, headers, body, track=None):
+    cls = backend.connection_class
+    conn = cls(backend, time.monotonic(), track)
     for name, value in headers:
         conn.putheader(name, value)
     return conn
@@ -18161,9 +18293,9 @@ def _rt_oauth_headers(headers, user_agent):
     return list(headers) + [("User-Agent", user_agent)]
 
 
-def _rt_oauth_post(backend, request, user_agent):
+def _rt_oauth_post(backend, request, user_agent, track=None):
     url, headers, body = request
-    return _rt_send(backend, url, _rt_oauth_headers(headers, user_agent), body)
+    return _rt_send(backend, url, _rt_oauth_headers(headers, user_agent), body, track=track)
 
 # ---------------------------------------------------------------------------
 # Unit 7: HTTP front
@@ -18182,9 +18314,21 @@ GJ_J4_PLANTED = GJ_J4_CLEAN.replace(
 )
 # J23: a third _rt_send scope, and _rt_oauth_post handed the wrong builder.
 GJ_J23_PLANTED = GJ_J4_CLEAN.replace(
-    "    return _rt_send(backend, url, _rt_oauth_headers(headers, user_agent), body)\n",
-    "    return _rt_send(backend, url, _rt_upstream_headers(headers), body)\n\n\n"
+    "    return _rt_send(backend, url, _rt_oauth_headers(headers, user_agent), body, track=track)\n",
+    "    return _rt_send(backend, url, _rt_upstream_headers(headers), body, track=track)\n\n\n"
     "def _probe_send(b):\n    return _rt_send(b, \"/x\", _rt_oauth_headers(()), b\"\")\n",
+)
+# J36 (R-0083): the hook turned into a second framing owner -- _rt_send hands it the
+# connection and calls it -- plus a fifth parameter and _post passing the hook.
+GJ_J36_PLANTED = GJ_J4_CLEAN.replace(
+    "def _rt_send(backend, path, headers, body, track=None):\n",
+    "def _rt_send(backend, path, headers, body, track=None, frame=None):\n",
+).replace(
+    "        conn.putheader(name, value)\n    return conn\n",
+    "        conn.putheader(name, value)\n    track(conn)\n    return conn\n",
+).replace(
+    "_rt_upstream_headers(inbound), b\"\")\n",
+    "_rt_upstream_headers(inbound), b\"\", track=self.track)\n",
 )
 
 GJ_J19_REASONS = {("llm-router.py", "_tf_declared"): "tf: a declared hand copy"}
@@ -18216,6 +18360,12 @@ GJ_CONTROLS = {
                                  ("_rt_send called in _probe_send(), not one of _post, _rt_oauth_post",
                                   "_rt_send's headers argument in _rt_oauth_post() is not "
                                   "_rt_oauth_headers(...)")),
+    "control: J4a hook plants": (rule_j4, GJ_J4_CLEAN, GJ_J36_PLANTED,
+                                 ("_rt_send's parameters are ['backend', 'path', 'headers', 'body', 'track', "
+                                  "'frame']",
+                                  "the hook `track` is used in _rt_send() other than as an argument of the "
+                                  "connection constructor cls(...)",
+                                  "_rt_send in _post() passes the registration hook; only _rt_oauth_post may")),
 }
 
 
@@ -18238,7 +18388,7 @@ def gj_control(checker, clean, planted, needles):
 
 
 def group_j_static(suite):
-    """J1-J4 and J13 over the live router, then their planted controls J15-J19 and J23."""
+    """J1-J4 and J13 over the live router, then their planted controls J15-J19, J23 and J36."""
     rel = os.path.relpath(SERVER, H.REPO_ROOT)
     results = {}
     try:

@@ -128,12 +128,16 @@ addendum the limits of the codex/openai kinds, OAuth and Mistral reasoning)
   * The ID token's claims are checked, its signature is not; the OAuth
     provider rows are static (no discovery).
   * Token persistence has windows: a crash or a timed-out refresh after the
-    provider rotated, or a refresh answer that fails its checks (its rotated
-    token is discarded), can need a re-login; a hand edit between the writer's
+    provider rotated, a shutdown while its write waits on the config flock
+    (the wait gives up on `closing`), or a refresh answer that fails its
+    checks (its rotated token is discarded), can need a re-login; a hand edit between the writer's
     re-check and its rename can be lost; the flock serializes the router and
     login only, and non-POSIX is unsupported.
   * The per-backend refresh lock is held across the token POST and the write;
-    a waiter gives up with 503 after connect_timeout + _RT_OAUTH_IDLE_S.
+    a waiter gives up with 503 after connect_timeout + _RT_OAUTH_IDLE_S. A
+    shutdown interrupts a token POST from its connect on; the resolve and the
+    TCP connect themselves are not interruptible (connect_timeout bounds them,
+    and the drain may abandon such a handler).
   * The reasoning signatures (lrs1., lms1.) are plain, not MAC'd; renaming a
     backend loses reasoning continuity.
   * reasoning_effort_map and effort learning are mistral only; learned
@@ -5681,27 +5685,24 @@ def _rt_oauth_headers(headers: Tuple[Tuple[str, str], ...], user_agent: str) -> 
 
 
 def _rt_oauth_post(backend: BackendSpec, request: Tuple[str, Tuple[Tuple[str, str], ...], bytes],
-                   user_agent: str, track: Optional[Tuple[set, threading.Lock]] = None) -> Tuple[int, bytes]:
+                   user_agent: str, track: Optional["_RtTrack"] = None) -> Tuple[int, bytes]:
     """POST one OAuth *request* (url, headers, body) -> (status, body) (KD-7: the second _rt_send site).
 
-    *track* is (srv.inflight, srv.inflight_lock): the raw socket is registered
-    there before the body read, so shutdown unblocks a stalled read (P23); the
-    phase inside _rt_send is not registered. The body is capped at
-    OAUTH_BODY_LIMIT and both the response and the connection are closed here.
+    *track* is (srv.inflight, srv.inflight_lock, srv.closing), handed to
+    _rt_send (R-0083): the socket is registered from the connect on -- the TLS
+    handshake, the request write, the response head and the body read -- so a
+    shutdown unblocks every stalled phase (P23, N25, N41); only the connect
+    itself (and the resolve) runs unregistered, bounded by connect_timeout. The
+    body is capped at OAUTH_BODY_LIMIT and both the response and the connection
+    are closed here, the socket deregistered first.
     """
     url, headers, body = request
     spec, path = _rt_oauth_spec(backend, url)
-    conn, resp = _rt_send(spec, path, _rt_oauth_headers(headers, user_agent), body)
-    raw_sock = getattr(conn, "raw_sock", None) if track is not None else None
+    conn, resp = _rt_send(spec, path, _rt_oauth_headers(headers, user_agent), body, track=track)
     try:
-        if raw_sock is not None and track is not None:
-            with track[1]:
-                track[0].add(raw_sock)
         return resp.status, _rt_read_body(resp, OAUTH_BODY_LIMIT, spec.name)
     finally:
-        if raw_sock is not None and track is not None:
-            with track[1]:
-                track[0].discard(raw_sock)
+        conn.untrack()
         for closer in (resp.close, conn.close):
             try:
                 closer()
@@ -5776,7 +5777,7 @@ class _RtTokenStore:
     def __init__(self, config_path: Optional[str], cfg: RouterConfig, clock: Callable[[], float] = time.time,
                  mono: Callable[[], float] = time.monotonic, post: Optional[Callable[..., Tuple[int, bytes]]] = None,
                  closing: Optional[threading.Event] = None,
-                 track: Optional[Tuple[set, threading.Lock]] = None) -> None:
+                 track: Optional["_RtTrack"] = None) -> None:
         self.config_path = config_path
         self.cfg = cfg
         self.clock = clock
@@ -6053,7 +6054,7 @@ class _RtTokenStore:
         with self.write_lock:
             dfd = _rt_config_dir_check(config_path)     # KD-10 step 0: FIRST, before any lock file exists
             try:
-                fd = _rt_config_lock(config_path, dfd)  # KD-20, step 0a
+                fd = _rt_config_lock(config_path, dfd, self.closing)  # KD-20, step 0a; R-0083
                 try:
                     _rt_config_sweep_temps(config_path, dfd)                      # step 0b
                     self._digest = _rt_config_update_oauth(config_path, dfd, backend.name, backend.kind,
@@ -6319,6 +6320,35 @@ def _rt_open_socket(addresses: Iterable[str], port: int, deadline: float) -> soc
 
 _RT_RECV_BYTES = 65536    # one _rt_read_body read1() call
 
+# The shutdown registry a token POST's socket joins (R-0083): (srv.inflight,
+# srv.inflight_lock, srv.closing). _rt_shutdown sets `closing` BEFORE it sweeps
+# `inflight` under the lock, so a socket added under the lock is either swept or
+# sees `closing` here and is shut down at once -- never missed. shutdown(SHUT_RDWR),
+# never close() (P24): the owner still closes the descriptor.
+_RtTrack = Tuple[set, threading.Lock, threading.Event]
+
+
+def _rt_track_add(track: Optional[_RtTrack], sock: Optional[socket.socket]) -> None:
+    """Register *sock* in *track* (None: no registry, a no-op); once `closing` is set, shut it down."""
+    if track is None or sock is None:
+        return
+    inflight, lock, closing = track
+    with lock:
+        inflight.add(sock)
+        if closing.is_set():
+            try:
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)   # base class, also on an SSLSocket
+            except OSError:
+                pass
+
+
+def _rt_track_discard(track: Optional[_RtTrack], sock: Optional[socket.socket]) -> None:
+    """Deregister *sock* from *track*; a no-op for None or an unregistered socket."""
+    if track is None or sock is None:
+        return
+    with track[1]:
+        track[0].discard(sock)
+
 
 class _RtHttpConnection(http.client.HTTPConnection):
     """A plain-HTTP connection to ONE vetted backend: connect() uses _rt_open_socket, never a resolver.
@@ -6328,20 +6358,30 @@ class _RtHttpConnection(http.client.HTTPConnection):
     idle_timeout (one upstream read), and `raw_sock` keeps the connected
     socket: http.client drops `sock` once a Connection: close response is
     read, and the pump's shutdown(SHUT_RDWR) needs the descriptor (KD-4, P24).
+    *track* (R-0083) is the shutdown registry: the socket joins it as soon as
+    the connect returns and leaves it only through untrack(), which the owner
+    calls -- http.client's own close() on a Connection: close head does not.
     """
 
-    def __init__(self, backend: BackendSpec, addresses: List[str], deadline: float):
+    def __init__(self, backend: BackendSpec, addresses: List[str], deadline: float,
+                 track: Optional[_RtTrack] = None):
         super().__init__(backend.host, backend.port)
         self._backend = backend
         self._addresses = list(addresses)
         self._deadline = deadline
+        self._track = track
         self.raw_sock: Optional[socket.socket] = None
 
     def connect(self) -> None:
         sock = _rt_open_socket(self._addresses, self.port, self._deadline)
+        self.raw_sock = sock
+        _rt_track_add(self._track, sock)
         sock.settimeout(self._backend.idle_timeout)
         self.sock = sock
-        self.raw_sock = sock
+
+    def untrack(self) -> None:
+        """Leave the shutdown registry (R-0083); idempotent."""
+        _rt_track_discard(self._track, self.raw_sock)
 
 
 class _RtHttpsConnection(http.client.HTTPSConnection):
@@ -6355,10 +6395,13 @@ class _RtHttpsConnection(http.client.HTTPSConnection):
     CERT_REQUIRED, check_hostname and the floor are ASSERTED: any miss is an
     UpstreamError 502 before a socket is opened. connect() is _rt_open_socket
     plus the handshake under the same deadline, suppress_ragged_eofs=False;
-    then the idle timeout, and `raw_sock` is the SSLSocket.
+    then the idle timeout, and `raw_sock` is the SSLSocket. *track* as for
+    _RtHttpConnection: the TCP socket joins it before the handshake, so a
+    shutdown interrupts a stalled handshake too, and the SSLSocket replaces it.
     """
 
-    def __init__(self, backend: BackendSpec, addresses: List[str], deadline: float):
+    def __init__(self, backend: BackendSpec, addresses: List[str], deadline: float,
+                 track: Optional[_RtTrack] = None):
         if backend.ca_pem:
             context = ssl.create_default_context(cadata=backend.ca_pem)
         else:
@@ -6380,23 +6423,37 @@ class _RtHttpsConnection(http.client.HTTPSConnection):
         self._rt_context = context
         self._addresses = list(addresses)
         self._deadline = deadline
+        self._track = track
         self.raw_sock: Optional[socket.socket] = None
 
     def connect(self) -> None:
         sock = _rt_open_socket(self._addresses, self.port, self._deadline)
+        tls: Optional[ssl.SSLSocket] = None
         try:
             remaining = self._deadline - time.monotonic()
             if remaining <= 0:
                 raise socket.timeout("the connect deadline passed")
             sock.settimeout(remaining)
+            # wrap_socket detaches `sock` before any handshake, so the SSLSocket is what
+            # joins the registry, and the handshake runs only after it did (R-0083).
             tls = self._rt_context.wrap_socket(sock, server_hostname=self._backend.host,
-                                               suppress_ragged_eofs=False)
+                                               suppress_ragged_eofs=False, do_handshake_on_connect=False)
+            self.raw_sock = tls
+            _rt_track_add(self._track, tls)
+            tls.do_handshake()
         except BaseException:
+            if tls is not None:
+                _rt_track_discard(self._track, tls)
+                self.raw_sock = None
+                tls.close()
             sock.close()
             raise
         tls.settimeout(self._backend.idle_timeout)
         self.sock = tls
-        self.raw_sock = tls
+
+    def untrack(self) -> None:
+        """Leave the shutdown registry (R-0083); idempotent."""
+        _rt_track_discard(self._track, self.raw_sock)
 
 
 def _rt_one_line(text: Any) -> str:
@@ -6451,7 +6508,8 @@ def _rt_upstream_refusal(exc: BaseException, backend_name: str) -> Optional[Upst
 
 
 def _rt_send(backend: BackendSpec, path: str, headers: List[Tuple[str, str]],
-             body: bytes) -> Tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+             body: bytes, track: Optional[_RtTrack] = None) -> Tuple[http.client.HTTPConnection,
+                                                                     http.client.HTTPResponse]:
     """POST `body` to backend.base_path + path -> (conn, resp) with the final response head read.
 
     The ONLY putheader site in the file (J4a) and the single framing owner:
@@ -6466,12 +6524,18 @@ def _rt_send(backend: BackendSpec, path: str, headers: List[Tuple[str, str]],
     Content-Encoding other than identity is a 502. Every failure closes the
     connection and is raised as _rt_upstream_refusal's UpstreamError.
     The caller owns the returned pair and closes both.
+
+    *track* (R-0083, J4a amended) is the shutdown registry, DATA handed only to
+    the connection constructor -- never called, never given the connection --
+    so it frames nothing: the socket joins it as soon as it exists (before a
+    TLS handshake), a failure here leaves it, and on success the caller calls
+    conn.untrack(). Only _rt_oauth_post passes it.
     """
     deadline = time.monotonic() + backend.connect_timeout
     addresses = _rt_resolve(backend, deadline)
-    cls: Type[http.client.HTTPConnection] = (_RtHttpsConnection if backend.scheme == "https"
-                                            else _RtHttpConnection)
-    conn = cls(backend, addresses, deadline)
+    cls: Type[Union[_RtHttpConnection, _RtHttpsConnection]] = (_RtHttpsConnection if backend.scheme == "https"
+                                                               else _RtHttpConnection)
+    conn = cls(backend, addresses, deadline, track)
     resp: Optional[http.client.HTTPResponse] = None
     try:
         conn.putrequest("POST", backend.base_path + path, skip_accept_encoding=True)
@@ -6495,6 +6559,7 @@ def _rt_send(backend: BackendSpec, path: str, headers: List[Tuple[str, str]],
         if resp is not None:
             resp.close()
         conn.close()
+        conn.untrack()
         refusal = _rt_upstream_refusal(exc, backend.name)
         if refusal is None or refusal is exc:
             raise
@@ -6595,10 +6660,12 @@ _RT_CONFIG_LOCK_WAIT_S = 5.0
 _RT_CONFIG_LOCK_POLL_S = 0.05
 
 
-def _rt_config_lock(path: str, dir_fd: int) -> int:
+def _rt_config_lock(path: str, dir_fd: int, closing: Optional[threading.Event] = None) -> int:
     """KD-20: open "<base>.lock" relative to dir_fd (O_RDWR|O_CREAT|O_NOFOLLOW, 0600; OSError ->
     ConfigError "cannot open the config lock"), fstat (regular, euid, & 0o077 == 0),
-    flock(LOCK_EX|LOCK_NB) polled every 0.05 s for _RT_CONFIG_LOCK_WAIT_S; ConfigError on any refusal."""
+    flock(LOCK_EX|LOCK_NB) polled every 0.05 s for _RT_CONFIG_LOCK_WAIT_S; ConfigError on any refusal.
+    *closing* (R-0083, the router's): once set, the poll gives up with a ConfigError at its next
+    turn, so a handler waiting on another process's lock never outlives the shutdown drain."""
     try:
         fd = os.open(os.path.basename(path) + ".lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
                      0o600, dir_fd=dir_fd)
@@ -6620,6 +6687,9 @@ def _rt_config_lock(path: str, dir_fd: int) -> int:
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise ConfigError("--config: another process holds the config lock") from None
+                if closing is not None and closing.is_set():
+                    raise ConfigError("--config: the router is shutting down; the config lock was not "
+                                      "taken") from None
             time.sleep(_RT_CONFIG_LOCK_POLL_S)
     except OSError as exc:
         os.close(fd)
@@ -6814,15 +6884,16 @@ class _RouterHttpServer(ThreadingHTTPServer):
         self.conn_sem = threading.BoundedSemaphore(settings.max_connections)
         self.closing = threading.Event()
         self.loopback = ipaddress.IPv4Address(settings.bind).is_loopback
-        # Raw upstream sockets of live streams (and of a token POST's body
-        # read): shutdown(SHUT_RDWR) unblocks their readers, never close() (P24).
+        # Raw upstream sockets of live streams (and of a token POST, from its
+        # connect on, R-0083): shutdown(SHUT_RDWR) unblocks their readers, never close() (P24).
         self.inflight: set = set()
         self.inflight_lock = threading.Lock()
         # The OAuth token store, bound to this server: its lock waiters see
-        # `closing` (529), its token POSTs register in `inflight` (N25).
+        # `closing` (529), its token POSTs register in `inflight` from the
+        # connect on and its config-flock poll gives up on `closing` (N25, N41, N42).
         self.tokens = tokens if tokens is not None else _RtTokenStore(None, cfg)
         self.tokens.closing = self.closing
-        self.tokens.track = (self.inflight, self.inflight_lock)
+        self.tokens.track = (self.inflight, self.inflight_lock, self.closing)
         # Running handler threads, for the shutdown drain.
         self.active = 0
         self.active_cond = threading.Condition()
