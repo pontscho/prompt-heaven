@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Generated-region drift gate -- groups A-H.
+"""Generated-region drift gate -- groups A-I.
 
 `Scripts/_mcp_brotli.py`, `Scripts/_mcp_chrome.py`,
 `Scripts/_mcp_codesearch.py`, `Scripts/_mcp_concurrency.py`,
-`Scripts/_mcp_json.py`, `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`,
+`Scripts/_mcp_httpfront.py`, `Scripts/_mcp_json.py`,
+`Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`, `Scripts/_mcp_oauth.py`,
 `Scripts/_mcp_paging.py`, `Scripts/_mcp_websearch.py`,
 `Scripts/_mcp_websocket.py` and `Scripts/_mcp_zstd.py` are the canonical
 sources for the helpers the MCP servers share, and
@@ -97,6 +98,10 @@ Groups:
               json parse, and every bare emit on the frame tier, is declared in
               STRICT_JSON_EXCEPTIONS with its reason (ast, against the live
               tree, with a synthetic control first)
+  I. HTTP FRONT: R-0072 -- the two hosts of `_mcp_httpfront.py`: every stdlib
+              override in their front classes is generated or declared in
+              HTTPFRONT_ADAPTATIONS with a reason, and the seams the generated
+              members read are provided (with planted controls)
 
 THE CENSUS IS GATED ON THREE PROPERTIES, NOT ON ITS PROSE. Its consumer is
 `docs/measurements.json`, which hands the argv to `mcp-wiki`'s `measure`: the
@@ -125,12 +130,16 @@ import ast
 import asyncio
 import contextlib
 import hashlib
+import http.server
 import io
 import json
 import logging
 import os
+import socket
 import stat
 import sys
+import time
+import types
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -147,6 +156,7 @@ LSP_SOURCE = H.repo_path("Scripts", "_mcp_lsp.py")
 PAGING_SOURCE = H.repo_path("Scripts", "_mcp_paging.py")
 WEBSOCKET_SOURCE = H.repo_path("Scripts", "_mcp_websocket.py")
 OAUTH_SOURCE = H.repo_path("Scripts", "_mcp_oauth.py")
+HTTPFRONT_SOURCE = H.repo_path("Scripts", "_mcp_httpfront.py")
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
 TARGET = H.repo_path("Scripts", "mcp-purity.py")
 SCRIPTS = H.repo_path("Scripts")
@@ -168,6 +178,7 @@ ZSTD_CANONICAL_NAME = "_mcp_zstd.py"
 WEBSEARCH_CANONICAL_NAME = "_mcp_websearch.py"
 CODESEARCH_CANONICAL_NAME = "_mcp_codesearch.py"
 OAUTH_CANONICAL_NAME = "_mcp_oauth.py"
+HTTPFRONT_CANONICAL_NAME = "_mcp_httpfront.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
@@ -178,7 +189,7 @@ OAUTH_CANONICAL_NAME = "_mcp_oauth.py"
 CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
                    CODESEARCH_CANONICAL_NAME,
                    CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
-                   LOGGING_CANONICAL_NAME,
+                   HTTPFRONT_CANONICAL_NAME, LOGGING_CANONICAL_NAME,
                    LSP_CANONICAL_NAME, OAUTH_CANONICAL_NAME,
                    PAGING_CANONICAL_NAME, WEBSEARCH_CANONICAL_NAME,
                    WEBSOCKET_CANONICAL_NAME, ZSTD_CANONICAL_NAME)
@@ -253,6 +264,47 @@ OAUTH_CORE = ("OAUTH_TOKEN_LIMIT", "OAUTH_BODY_LIMIT", "OAUTH_JWT_LIMIT",
               "_oauth_parse_callback", "_oauth_callback_page",
               "_oauth_callback_verdict")
 
+# The hosts of _mcp_httpfront.py (R-0072, ADR 0029): the server and handler class each takes members into.
+HTTPFRONT_HOSTS = {"mcp-proxy.py": ("_ProxyHttpServer", "_ProxyHttpHandler"),
+                   "llm-router.py": ("_RouterHttpServer", "_RouterHandler")}
+HTTPFRONT_SERVER = ("server_bind", "process_request", "handle_error")
+HTTPFRONT_HANDLER = ("parse_request", "handle_expect_100", "_single_header")
+HTTPFRONT_MODULE = ("_HTTP_STDLIB_REFUSAL_HEADERS", "_http_token_value",
+                    "_http_write_ready_file", "_http_remove_ready_file", "_HeaderDeadlineReader")
+# Every stdlib member a host front class overrides BY HAND, with its measured reason.
+# The override set is computed (dir() of the stdlib base x the class body), never typed;
+# an override neither generated nor listed fails GI1, and so does a row whose override is gone.
+HTTPFRONT_ADAPTATIONS = {
+    ("mcp-proxy.py", "_ProxyHttpServer", "__init__"):
+        "takes (address, handler, settings); sets core and loop for the asyncio bridge",
+    ("mcp-proxy.py", "_ProxyHttpServer", "process_request_thread"):
+        "releases conn_sem in a finally and nothing else",
+    ("mcp-proxy.py", "_ProxyHttpHandler", "setup"):
+        "installs _HeaderDeadlineReader with the header bound as its cap",
+    ("mcp-proxy.py", "_ProxyHttpHandler", "handle_one_request"):
+        "one header bound for every request: the proxy has no pre-auth bound",
+    ("mcp-proxy.py", "_ProxyHttpHandler", "log_message"):
+        "method and path without query, structure only (ADR 0011)",
+    ("mcp-proxy.py", "_ProxyHttpHandler", "send_error"):
+        "fixed body-less refusal through _refuse (R-0069)",
+    ("llm-router.py", "_RouterHttpServer", "__init__"):
+        "takes (addr, settings, cfg, tokens) with the handler fixed; adds inflight, the "
+        "token store, active/active_cond for the drain and the sampling tables",
+    ("llm-router.py", "_RouterHttpServer", "process_request_thread"):
+        "counts active under active_cond for the shutdown drain (KD-4), then releases "
+        "conn_sem in the finally",
+    ("llm-router.py", "_RouterHandler", "setup"):
+        "installs _HeaderDeadlineReader with the socket timeout as its cap (V4) and "
+        "starts every connection unauthenticated (V3)",
+    ("llm-router.py", "_RouterHandler", "handle_one_request"):
+        "a shorter header bound until the connection has authenticated (V3)",
+    ("llm-router.py", "_RouterHandler", "log_message"):
+        "masks an unrouted path and an unhandled method (V21)",
+    ("llm-router.py", "_RouterHandler", "send_error"):
+        "Anthropic envelope with _RT_STDLIB_REFUSAL's fixed text plus the generated "
+        "_HTTP_STDLIB_REFUSAL_HEADERS (B21, D3)",
+}
+
 GA = "A. GATE: live regions match their canonical source"
 GB = "B. CONTRACT: marker spelling, hashing, anchoring, layout, disjointness"
 GC = "C. CONTROL: mutations detected, quoted markers inert, sources not crossed"
@@ -261,6 +313,7 @@ GE = "E. BLOCKS: what each shared block actually does"
 GF = "F. TABS: per-block safety, host detection, space hosts untouched"
 GG = "G. CENSUS: the read path a page renders -- derived, sorted, writes nothing"
 GH = "H. STRICT: peer JSON is parsed and emitted through the strict blocks"
+GI = "I. HTTP FRONT: every stdlib override generated or declared, seams provided"
 
 # The census subjects, mirrored here for the reason CANONICAL_NAMES is: a fifth
 # subject added to the generator and not to this tuple leaves the new one with
@@ -400,12 +453,6 @@ STRICT_JSON_EXCEPTIONS = {
     ("mcp-proxy.py", "load_config", "loads"):
         "the operator's --config / --config-json, refused on any parse error "
         "including ValueError and RecursionError; not a peer's frame",
-    ("mcp-proxy.py", "McpServer._http_write_ready_file", "dump"):
-        "writes {port, pid}, two ints the proxy itself produced, to the "
-        "--ready-file; never a frame",
-    ("mcp-proxy.py", "McpServer._http_remove_ready_file", "loads"):
-        "reads back at most 4096 bytes of the --ready-file to compare a pid; "
-        "any ValueError leaves the file alone; never a frame",
 }
 
 
@@ -525,7 +572,9 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
     The two search sources paid it a sixth time, for `random`, `parse_qs`,
     `urlencode` and `HTMLParser` -- both taken whole, like the Chrome client --
     and then a seventh, for `unicodedata`, when both took a render sanitizer,
-    and an eighth, for `secrets` and `select`, when the OAuth core arrived.
+    and an eighth, for `secrets` and `select`, when the OAuth core arrived,
+    and a ninth time, for `io`, `socketserver` and `Optional`, when the HTTP front
+    arrived.
     """
     return (
         '"""A tab-indented target."""\n'
@@ -536,6 +585,7 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "import hashlib\n"
         "import hmac\n"
         "import http.client\n"
+        "import io\n"
         "import ipaddress\n"
         "import json\n"
         "import logging\n"
@@ -546,6 +596,7 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "import secrets\n"
         "import select\n"
         "import socket\n"
+        "import socketserver\n"
         "import ssl\n"
         "import struct\n"
         "import sys\n"
@@ -554,7 +605,7 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "import urllib.parse\n"
         "import zlib\n"
         "from html.parser import HTMLParser\n"
-        "from typing import Any\n"
+        "from typing import Any, Optional\n"
         "from urllib.parse import parse_qs, urlencode, urlparse\n"
         "from urllib.request import url2pathname\n"
         "\n\n"
@@ -3061,6 +3112,802 @@ def group_hygiene(suite, pyc_before, digests_before):
     ))
 
 
+# --- the HTTP front (R-0072): group E's four blocks, groups A and I ------------
+
+# The exact bytes the generated process_request answers when every slot is taken.
+HTTPFRONT_503 = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+# A synthetic host for GI3: a server and a handler class carrying the REAL
+# in-class marker pairs, whose bodies are rendered from the source at run time
+# (%(server)s / %(handler)s), plus exactly the hand overrides its own rows
+# declare. The checkers must be silent on it; each plant below must be named.
+HTTPFRONT_PIN_CLEAN = (
+    "import socketserver\n"
+    "import sys\n"
+    "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
+    "\n"
+    "log = None\n"
+    "\n\n"
+    "class PinServer(ThreadingHTTPServer):\n"
+    "    front_log = log\n"
+    "\n"
+    "    def __init__(self, address, handler, settings):\n"
+    "        self.settings = settings\n"
+    "        self.conn_sem = None\n"
+    "        super().__init__(address, handler)\n"
+    "\n"
+    "    # BEGIN GENERATED: _mcp_httpfront.py :: server_bind, process_request, handle_error\n"
+    "%(server)s"
+    "    # END GENERATED:\n"
+    "\n"
+    "    def process_request_thread(self, request, client_address):\n"
+    "        try:\n"
+    "            super().process_request_thread(request, client_address)\n"
+    "        finally:\n"
+    "            self.conn_sem.release()\n"
+    "\n\n"
+    "class PinHandler(BaseHTTPRequestHandler):\n"
+    "    timeout = 10.0\n"
+    "\n"
+    "    def setup(self):\n"
+    "        super().setup()\n"
+    "        self._header_reader = None\n"
+    "\n"
+    "    # BEGIN GENERATED: _mcp_httpfront.py :: parse_request, handle_expect_100, _single_header\n"
+    "%(handler)s"
+    "    # END GENERATED:\n"
+    "\n"
+    "    def send_error(self, code, message=None, explain=None):\n"
+    "        self.close_connection = True\n"
+)
+HTTPFRONT_PIN_CLASSES = ("PinServer", "PinHandler")
+HTTPFRONT_PIN_ROWS = {
+    ("pin.py", "PinServer", "__init__"): "control",
+    ("pin.py", "PinServer", "process_request_thread"): "control",
+    ("pin.py", "PinHandler", "setup"): "control",
+    ("pin.py", "PinHandler", "send_error"): "control",
+}
+
+
+def httpfront_raised(cid, exc):
+    """The finding a refusing generator (or a missing source) becomes: never a crash."""
+    return "%s: the generator raised %s: %s" % (cid, type(exc).__name__, str(exc)[:200])
+
+
+def httpfront_render(mod, names):
+    """*names* of the canonical source rendered at a class-body indent."""
+    blocks = mod.load_blocks(mod.CANONICAL_SOURCES[HTTPFRONT_CANONICAL_NAME])
+    return mod.render(HTTPFRONT_CANONICAL_NAME, list(names), blocks, indent="    ")
+
+
+def httpfront_classes(tree):
+    """name -> ClassDef for every class in *tree*, nested ones included."""
+    return {node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+
+
+def httpfront_bindings(body, name):
+    """The nodes of *body* (a statement list) that bind *name* directly."""
+    found = []
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                found.append(node)
+        elif isinstance(node, ast.Assign):
+            if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == name):
+                found.append(node)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                found.append(node)
+    return found
+
+
+def httpfront_in_class(region, cls):
+    """True when *region*'s BEGIN marker lies within *cls*'s lines."""
+    return cls.lineno <= region.begin + 1 <= cls.end_lineno
+
+
+def httpfront_inside(node, region):
+    """True when *node* lies between *region*'s BEGIN and END lines."""
+    return region.begin + 2 <= node.lineno and node.end_lineno <= region.end
+
+
+def httpfront_binding_problems(mod, label, text, sources, members, module_names):
+    """GA's checker: every httpfront name in its region, bound exactly once, inside it.
+
+    *members* maps a class name to the member names its regions must carry;
+    *module_names* are carried by column-0 regions. Raises whatever the
+    generator raises -- the caller records that as a FAIL.
+    """
+    problems = []
+    regions = [r for r in mod.audit_text(label, text, sources)
+               if r.source == HTTPFRONT_CANONICAL_NAME]
+    hand = set(mod.hand_copies_text(label, text, sources))
+    tree = ast.parse(text, filename=label)
+    classes = httpfront_classes(tree)
+    wanted = []
+    for cls_name, names in members.items():
+        cls = classes.get(cls_name)
+        if cls is None:
+            problems.append("%s: no class %s" % (label, cls_name))
+            continue
+        for name in names:
+            wanted.append(name)
+            home = [r for r in regions if name in r.names and httpfront_in_class(r, cls)]
+            elsewhere = [r for r in regions if name in r.names and not httpfront_in_class(r, cls)]
+            if not home:
+                problems.append("%s: %s.%s is in no _mcp_httpfront.py region inside the class%s"
+                                % (label, cls_name, name,
+                                   " (a region at line %d lists it outside)" % (elsewhere[0].begin + 1)
+                                   if elsewhere else ""))
+            bound = httpfront_bindings(cls.body, name)
+            if len(bound) != 1:
+                problems.append("%s: %s bound %d times in %s, expected exactly 1"
+                                % (label, name, len(bound), cls_name))
+            elif home and not httpfront_inside(bound[0], home[0]):
+                problems.append("%s: %s at %d-%d lies outside its region %d-%d"
+                                % (label, name, bound[0].lineno, bound[0].end_lineno,
+                                   home[0].begin + 2, home[0].end))
+    for name in module_names:
+        wanted.append(name)
+        home = [r for r in regions if name in r.names and r.indent == ""]
+        if not home:
+            problems.append("%s: %s is in no column-0 _mcp_httpfront.py region" % (label, name))
+        bound = httpfront_bindings(tree.body, name)
+        if len(bound) != 1:
+            problems.append("%s: %s bound %d times in module, expected exactly 1"
+                            % (label, name, len(bound)))
+        elif home and not httpfront_inside(bound[0], home[0]):
+            problems.append("%s: %s at %d-%d lies outside its region %d-%d"
+                            % (label, name, bound[0].lineno, bound[0].end_lineno,
+                               home[0].begin + 2, home[0].end))
+    problems += ["%s: %s is a hand copy outside every region" % (label, name)
+                 for name in wanted if name in hand]
+    return problems
+
+
+def httpfront_releases_in_finally(func):
+    """True when *func* calls self.conn_sem.release() inside a Try's finalbody."""
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Try):
+            continue
+        for stmt in node.finalbody:
+            for sub in ast.walk(stmt):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "release"
+                        and isinstance(sub.func.value, ast.Attribute)
+                        and sub.func.value.attr == "conn_sem"
+                        and isinstance(sub.func.value.value, ast.Name)
+                        and sub.func.value.value.id == "self"):
+                    return True
+    return False
+
+
+def httpfront_adaptation_problems(mod, label, text, sources, classes, rows):
+    """GI1's checker: every stdlib override generated or declared, no row stale.
+
+    *classes* is (server class, handler class); *rows* is keyed (label, class,
+    member) like HTTPFRONT_ADAPTATIONS. The override set is computed: a
+    FunctionDef in the class body whose name the stdlib base also has.
+    """
+    problems = []
+    regions = [r for r in mod.audit_text(label, text, sources)
+               if r.source == HTTPFRONT_CANONICAL_NAME]
+    tree = ast.parse(text, filename=label)
+    every = httpfront_classes(tree)
+    bases = dict(zip(classes, (http.server.ThreadingHTTPServer,
+                               http.server.BaseHTTPRequestHandler)))
+    for cls_name, base in bases.items():
+        cls = every.get(cls_name)
+        if cls is None:
+            problems.append("%s: no class %s" % (label, cls_name))
+            continue
+        own = [r for r in regions if httpfront_in_class(r, cls)]
+        generated = {name for r in own for name in r.names}
+        defs = [node for node in cls.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        overrides = sorted({node.name for node in defs if hasattr(base, node.name)})
+        hand = {node.name for node in defs
+                if not any(httpfront_inside(node, r) for r in own)}
+        for name in overrides:
+            if name not in generated and (label, cls_name, name) not in rows:
+                problems.append("%s: %s.%s overrides the stdlib by hand and is neither "
+                                "generated nor declared in HTTPFRONT_ADAPTATIONS"
+                                % (label, cls_name, name))
+        for key in sorted(rows):
+            # A row must name a hand def that IS a stdlib override: a hand
+            # helper the base does not have is no adaptation to declare.
+            if (key[0] == label and key[1] == cls_name
+                    and (key[2] not in hand or key[2] not in overrides)):
+                problems.append("%s: %s.%s: declared in HTTPFRONT_ADAPTATIONS, but no such "
+                                "hand override (stale)" % key)
+        if cls_name == classes[0]:
+            thread = [node for node in defs if node.name == "process_request_thread"]
+            if not thread or not httpfront_releases_in_finally(thread[0]):
+                problems.append("%s: %s.process_request_thread does not release conn_sem "
+                                "in a finally" % (label, cls_name))
+    for key in sorted(rows):
+        if key[0] == label and key[1] not in classes:
+            problems.append("%s: %s.%s: declared in HTTPFRONT_ADAPTATIONS, but no such "
+                            "hand override (stale)" % key)
+    for region in regions:
+        if not region.indent:
+            continue
+        holders = [c.name for c in every.values() if httpfront_in_class(region, c)]
+        if not any(name in classes for name in holders):
+            problems.append("%s: a _mcp_httpfront.py region (BEGIN line %d) sits in %s, "
+                            "not in a front class"
+                            % (label, region.begin + 1,
+                               "class %s" % holders[-1] if holders else "no class"))
+    return problems
+
+
+def httpfront_assigns_self(func, attr):
+    """True when *func* assigns self.<attr> anywhere in its body."""
+    for node in ast.walk(func):
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target] if isinstance(node, ast.AnnAssign) else [])
+        for target in targets:
+            if (isinstance(target, ast.Attribute) and target.attr == attr
+                    and isinstance(target.value, ast.Name) and target.value.id == "self"):
+                return True
+    return False
+
+
+def httpfront_seam_problems(label, text, classes):
+    """GI2's checker: the seams the generated members read are provided (presence only)."""
+    problems = []
+    every = httpfront_classes(ast.parse(text, filename=label))
+    server, handler = (every.get(name) for name in classes)
+    for name, cls in zip(classes, (server, handler)):
+        if cls is None:
+            problems.append("%s: no class %s" % (label, name))
+    if server is not None:
+        problems += problem_if(not httpfront_bindings(server.body, "front_log"),
+                               "%s: %s assigns no class-level front_log" % (label, classes[0]))
+        init = [n for n in server.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"]
+        for attr in ("settings", "conn_sem"):
+            if not init or not httpfront_assigns_self(init[0], attr):
+                problems.append("%s: %s.__init__ never assigns self.%s" % (label, classes[0], attr))
+    if handler is not None:
+        problems += problem_if(not httpfront_bindings(handler.body, "timeout"),
+                               "%s: %s assigns no class-level timeout" % (label, classes[1]))
+        setup = [n for n in handler.body if isinstance(n, ast.FunctionDef) and n.name == "setup"]
+        if not setup or not httpfront_assigns_self(setup[0], "_header_reader"):
+            problems.append("%s: %s.setup never assigns self._header_reader" % (label, classes[1]))
+    return problems
+
+
+class _HfRecLog:
+    """A logger that records (level, args) and formats nothing."""
+
+    def __init__(self):
+        self.records = []
+
+    def __getattr__(self, level):
+        if level.startswith("_"):
+            raise AttributeError(level)
+        return lambda *args, **kwargs: self.records.append((level, args))
+
+
+class _HfSem:
+    """A semaphore whose verdict is fixed; it counts what was asked of it."""
+
+    def __init__(self, free):
+        self.free = free
+        self.acquired = 0
+        self.released = 0
+        self.blocking = []
+
+    def acquire(self, blocking=True):
+        self.blocking.append(blocking)
+        if self.free:
+            self.acquired += 1
+        return self.free
+
+    def release(self):
+        self.released += 1
+
+
+def httpfront_exec_class(code, base, socketserver_fake, where):
+    """Exec `class H(Base):` + *code* in a namespace holding no host name (R1)."""
+    ns = {"Base": base, "socketserver": socketserver_fake, "sys": sys, "logging": logging,
+          "__name__": "httpfront_synthetic"}
+    exec(compile("class H(Base):\n" + code, "<httpfront %s>" % where, "exec"), ns)  # noqa: S102
+    return ns["H"]
+
+
+def httpfront_drive_server(text):
+    """Drive the rendered server members against fakes; nothing opens a socket."""
+    problems, detail = [], []
+    bind_calls = []
+
+    class FakeTCPServer:
+        @staticmethod
+        def server_bind(server):
+            bind_calls.append(server)
+            server.server_address = ("127.0.0.1", 4242)
+
+    fake_ss = types.SimpleNamespace(TCPServer=FakeTCPServer)
+
+    class ServerBase:
+        base_raises = False
+
+        def __init__(self):
+            self.base_calls = []
+            self.shut = []
+
+        def process_request(self, request, client_address):
+            self.base_calls.append(client_address)
+            if self.base_raises:
+                raise RuntimeError("the handler thread did not start")
+
+        def shutdown_request(self, request):
+            self.shut.append(request)
+
+    class FakeRequest:
+        def __init__(self):
+            self.sent = []
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+    try:
+        cls = httpfront_exec_class(text, ServerBase, fake_ss, "server")
+    except Exception as exc:  # noqa: BLE001 -- a block that does not define is the finding
+        return ["server members: defining the class raised %s: %s"
+                % (type(exc).__name__, str(exc)[:200])], detail
+
+    def drive(block, fn):
+        try:
+            fn()
+        except NameError as exc:
+            problems.append("%s: NameError %s -- the block reads a name its host "
+                            "does not hand it (R1)" % (block, exc))
+        except Exception as exc:  # noqa: BLE001 -- any other surprise is a finding too
+            problems.append("%s: raised %s: %s" % (block, type(exc).__name__, str(exc)[:200]))
+
+    def bind():
+        inst = cls()
+        inst.server_bind()
+        problems.extend(problem_if(bind_calls != [inst],
+                                   "server_bind: TCPServer.server_bind called %d time(s), "
+                                   "expected once with the instance" % len(bind_calls)))
+        problems.extend(problem_if((getattr(inst, "server_name", None),
+                                    getattr(inst, "server_port", None)) != ("127.0.0.1", 4242),
+                                   "server_bind: server_name/server_port are %r/%r"
+                                   % (getattr(inst, "server_name", None),
+                                      getattr(inst, "server_port", None))))
+
+    def refused():
+        inst = cls()
+        inst.front_log = _HfRecLog()
+        inst.settings = types.SimpleNamespace(max_connections=7)
+        inst.conn_sem = _HfSem(False)
+        request = FakeRequest()
+        inst.process_request(request, ("127.0.0.1", 1))
+        problems.extend(problem_if(request.sent != [HTTPFRONT_503],
+                                   "process_request (full): sent %r, expected one 503" % request.sent))
+        problems.extend(problem_if(inst.shut != [request],
+                                   "process_request (full): shutdown_request calls %r" % inst.shut))
+        problems.extend(problem_if(inst.base_calls,
+                                   "process_request (full): the stdlib process_request still ran"))
+        problems.extend(problem_if(inst.conn_sem.blocking != [False],
+                                   "process_request (full): acquire called with %r, expected "
+                                   "[False]" % inst.conn_sem.blocking))
+        want = [("warning", ("http connection refused: %d connections open", 7))]
+        problems.extend(problem_if(inst.front_log.records != want,
+                                   "process_request (full): logged %r, expected %r"
+                                   % (inst.front_log.records, want)))
+
+    def admitted():
+        inst = cls()
+        inst.front_log = _HfRecLog()
+        inst.conn_sem = _HfSem(True)
+        inst.process_request(FakeRequest(), ("127.0.0.1", 2))
+        problems.extend(problem_if((inst.conn_sem.acquired, inst.conn_sem.released,
+                                    inst.base_calls) != (1, 0, [("127.0.0.1", 2)]),
+                                   "process_request (free): acquired %d, released %d, stdlib "
+                                   "calls %r" % (inst.conn_sem.acquired, inst.conn_sem.released,
+                                                 inst.base_calls)))
+
+    def base_raises():
+        inst = cls()
+        inst.front_log = _HfRecLog()
+        inst.conn_sem = _HfSem(True)
+        inst.base_raises = True
+        try:
+            inst.process_request(FakeRequest(), ("127.0.0.1", 3))
+        except RuntimeError:
+            pass
+        else:
+            problems.append("process_request (stdlib raised): the exception did not propagate")
+        problems.extend(problem_if(inst.conn_sem.released != 1,
+                                   "process_request (stdlib raised): the slot was released %d "
+                                   "time(s), expected 1" % inst.conn_sem.released))
+
+    def failed():
+        inst = cls()
+        inst.front_log = _HfRecLog()
+        try:
+            raise ValueError("TF_SECRET")
+        except ValueError:
+            inst.handle_error(None, ("127.0.0.1", 4))
+        want = [("warning", ("http handler failed: %s", "ValueError"))]
+        problems.extend(problem_if(inst.front_log.records != want,
+                                   "handle_error: logged %r, expected %r"
+                                   % (inst.front_log.records, want)))
+        problems.extend(problem_if("TF_SECRET" in repr(inst.front_log.records),
+                                   "handle_error: the exception's text reached the log (ADR 0011)"))
+
+    drive("server_bind", bind)
+    drive("process_request", refused)
+    drive("process_request", admitted)
+    drive("process_request", base_raises)
+    drive("handle_error", failed)
+    detail.append("server      : server_bind without getfqdn; 503 + one warning when full; "
+                  "slot given back when the stdlib raises; handle_error logs the type only")
+    return problems, detail
+
+
+def httpfront_drive_handler(text):
+    """Drive the rendered handler members against fakes; nothing opens a socket."""
+    problems, detail = [], []
+    sentinel = object()
+
+    class HandlerBase:
+        timeout = 4.5
+
+        def __init__(self):
+            self.sent = []
+
+        def parse_request(self):
+            return sentinel
+
+        def send_response_only(self, *args):
+            self.sent.append(args)
+
+    class FakeConn:
+        def __init__(self):
+            self.timeouts = []
+
+        def settimeout(self, value):
+            self.timeouts.append(value)
+
+    class FakeWfile:
+        def __init__(self):
+            self.written = []
+
+        def write(self, data):
+            self.written.append(data)
+
+    class FakeHeaders:
+        def __init__(self, values):
+            self.values = values
+
+        def get_all(self, name):
+            return self.values
+
+    try:
+        cls = httpfront_exec_class(text, HandlerBase, types.SimpleNamespace(), "handler")
+    except Exception as exc:  # noqa: BLE001 -- a block that does not define is the finding
+        return ["handler members: defining the class raised %s: %s"
+                % (type(exc).__name__, str(exc)[:200])], detail
+
+    def drive(block, fn):
+        try:
+            fn()
+        except NameError as exc:
+            problems.append("%s: NameError %s -- the block reads a name its host "
+                            "does not hand it (R1)" % (block, exc))
+        except Exception as exc:  # noqa: BLE001 -- any other surprise is a finding too
+            problems.append("%s: raised %s: %s" % (block, type(exc).__name__, str(exc)[:200]))
+
+    def parse():
+        inst = cls()
+        inst.connection = FakeConn()
+        inst._header_reader = types.SimpleNamespace(deadline=123.0)
+        got = inst.parse_request()
+        problems.extend(problem_if(got is not sentinel,
+                                   "parse_request: returned %r, not the stdlib's answer" % (got,)))
+        problems.extend(problem_if(inst._header_reader.deadline is not None,
+                                   "parse_request: the header deadline was not reset"))
+        problems.extend(problem_if(inst.connection.timeouts != [cls.timeout],
+                                   "parse_request: settimeout calls %r, expected [%r]"
+                                   % (inst.connection.timeouts, cls.timeout)))
+
+    def expect():
+        inst = cls()
+        inst.wfile = FakeWfile()
+        got = inst.handle_expect_100()
+        problems.extend(problem_if(got is not True,
+                                   "handle_expect_100: returned %r, expected True" % (got,)))
+        problems.extend(problem_if(inst.wfile.written or inst.sent,
+                                   "handle_expect_100: wrote %r / sent %r before any auth"
+                                   % (inst.wfile.written, inst.sent)))
+
+    def single():
+        inst = cls()
+        for values, want in ((None, (True, None)), (["v"], (True, "v")),
+                             (["v", "w"], (False, None))):
+            inst.headers = FakeHeaders(values)
+            got = inst._single_header("X-Probe")
+            problems.extend(problem_if(got != want,
+                                       "_single_header: %r gave %r, expected %r"
+                                       % (values, got, want)))
+
+    drive("parse_request", parse)
+    drive("handle_expect_100", expect)
+    drive("_single_header", single)
+    detail.append("handler     : parse_request ends the header phase at self.timeout; "
+                  "Expect sends nothing; a repeated header is refused")
+    return problems, detail
+
+
+def group_httpfront_blocks(suite, mod):
+    """E. What the HTTP front's blocks do (R-0072): token, deadline, headers, members."""
+    try:
+        src = H.load_module_from_path("mcp_httpfront_under_test", HTTPFRONT_SOURCE)
+        absent = []
+    except (OSError, SyntaxError) as exc:
+        src = None
+        absent = ["the source does not load: %s: %s" % (type(exc).__name__, str(exc)[:200])]
+
+    # The token: the floor and the error class are the CALLER's, and a refusal
+    # never quotes the value.
+    problems = list(absent)
+    if src is not None:
+        token = getattr(src, "_http_token_value", None)
+
+        class Refused(Exception):
+            pass
+
+        good = "".join(chr(0x21 + i) for i in range(32))
+        for what, value in (("short", "tf-short-secret-value"),
+                            ("space", "tf" + "x" * 20 + " " + "y" * 20),
+                            ("DEL", "tf" + "x" * 40 + "\x7f"),
+                            ("non-ASCII", "tf" + "x" * 40 + "é")):
+            try:
+                got = token(value, "--where", 32, Refused)
+            except Refused as exc:
+                problems += problem_if(value in str(exc),
+                                       "%s: the refusal quotes the token value" % what)
+                problems += problem_if("--where" not in str(exc),
+                                       "%s: the refusal does not name where: %r" % (what, str(exc)))
+                problems += problem_if(what == "short" and "32" not in str(exc),
+                                       "short: the refusal does not name min_len: %r" % str(exc))
+                continue
+            except Exception as exc:  # noqa: BLE001 -- the point: the class is the caller's
+                problems.append("%s: raised %s, not the passed error class"
+                                % (what, type(exc).__name__))
+                continue
+            problems.append("%s: accepted, returned %r" % (what, got))
+        try:
+            got = token(good, "--where", 32, Refused)
+            problems += problem_if(got != good.encode("ascii"),
+                                   "32 printable chars: returned %r" % (got,))
+        except Exception as exc:  # noqa: BLE001
+            problems.append("32 printable chars: refused (%s)" % type(exc).__name__)
+        try:
+            token("short", "--where", 32, KeyError)
+            problems.append("error=KeyError: a short value was accepted")
+        except KeyError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            problems.append("error=KeyError: raised %s instead" % type(exc).__name__)
+    suite.record(GE, "httpfront-token-value", problems,
+                 detail=["refused     : short, a space, a DEL, a non-ASCII char -- each "
+                         "through the passed class, the value never quoted"])
+
+    # The header deadline: min(left, cap) per recv, nothing once it has passed.
+    problems = list(absent)
+    if src is not None:
+        class FakeSock:
+            def __init__(self):
+                self.calls = []
+
+            def settimeout(self, value):
+                self.calls.append(("settimeout", value))
+
+            def recv_into(self, buf):
+                self.calls.append(("recv_into", len(buf)))
+                return 0
+
+        def reader_calls(cap, offset):
+            sock = FakeSock()
+            reader = src._HeaderDeadlineReader(sock, cap)
+            if offset is not None:
+                reader.deadline = time.monotonic() + offset
+            try:
+                reader.readinto(bytearray(8))
+            except socket.timeout:
+                return sock.calls, "timeout"
+            return sock.calls, None
+
+        try:
+            calls, raised = reader_calls(0.5, None)
+            problems += problem_if((calls, raised) != ([("recv_into", 8)], None),
+                                   "deadline None: %r %r, expected one plain recv" % (calls, raised))
+            calls, raised = reader_calls(0.5, 100.0)
+            problems += problem_if(calls != [("settimeout", 0.5), ("recv_into", 8)],
+                                   "cap 0.5, 100 s left: %r, expected settimeout(0.5)" % calls)
+            calls, raised = reader_calls(30.0, 100.0)
+            problems += problem_if(calls != [("settimeout", 30.0), ("recv_into", 8)],
+                                   "cap 30, 100 s left: %r, expected settimeout(30.0)" % calls)
+            calls, raised = reader_calls(30.0, 5.0)
+            left = calls[0][1] if calls and calls[0][0] == "settimeout" else None
+            problems += problem_if(left is None or not 4.0 < left <= 5.0 or len(calls) != 2,
+                                   "cap 30, 5 s left: %r, expected settimeout(~5)" % calls)
+            calls, raised = reader_calls(30.0, -1.0)
+            problems += problem_if((calls, raised) != ([], "timeout"),
+                                   "deadline passed: %r %r, expected socket.timeout and no recv"
+                                   % (calls, raised))
+        except Exception as exc:  # noqa: BLE001 -- a broken block fails the case
+            problems.append("the reader raised %s: %s" % (type(exc).__name__, str(exc)[:200]))
+    suite.record(GE, "httpfront-header-deadline", problems,
+                 detail=["recv        : plain with no deadline; min(left, cap) for cap 0.5 "
+                         "and 30; socket.timeout and no recv once passed"])
+
+    problems = list(absent)
+    if src is not None:
+        want = (("X-Content-Type-Options", "nosniff"), ("Cache-Control", "no-store"))
+        got = getattr(src, "_HTTP_STDLIB_REFUSAL_HEADERS", None)
+        problems += problem_if(got != want, "_HTTP_STDLIB_REFUSAL_HEADERS is %r, expected %r"
+                               % (got, want))
+    suite.record(GE, "httpfront-refusal-headers", problems,
+                 detail=["headers     : nosniff, no-store"])
+
+    # The members, rendered INSIDE a class from the canonical text: zero-arg
+    # super() only works there (R2), and a namespace with no host name in it
+    # turns a host-global read into a NameError (R1).
+    problems, detail = [], []
+    try:
+        server_text = httpfront_render(mod, HTTPFRONT_SERVER)
+        handler_text = httpfront_render(mod, HTTPFRONT_HANDLER)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- a refusing generator fails the case
+        problems.append(httpfront_raised("httpfront-in-class-blocks", exc))
+        server_text = handler_text = None
+    if server_text is not None:
+        found, lines = httpfront_drive_server(server_text)
+        problems += found
+        detail += lines
+    if handler_text is not None:
+        found, lines = httpfront_drive_handler(handler_text)
+        problems += found
+        detail += lines
+    suite.record(GE, "httpfront-in-class-blocks", problems, detail=detail)
+
+
+def group_httpfront_pins(suite, mod):
+    """A + I. The HTTP front's two hosts pinned (R-0072): regions, overrides, seams."""
+    texts = {host: (Path(SCRIPTS) / host).read_text(encoding="utf-8")
+             for host in HTTPFRONT_HOSTS}
+
+    # GA: every httpfront name in its region, in the right class or at column 0,
+    # bound exactly once and inside that region -- the census alone cannot see a
+    # hand def beside a region that LISTS the same name (R4).
+    problems, detail = [], []
+    try:
+        sources = mod.load_all_blocks()
+        for host, (server, handler) in sorted(HTTPFRONT_HOSTS.items()):
+            problems += httpfront_binding_problems(
+                mod, host, texts[host], sources,
+                {server: HTTPFRONT_SERVER, handler: HTTPFRONT_HANDLER}, HTTPFRONT_MODULE)
+        detail.append("hosts       : %s" % ", ".join(sorted(HTTPFRONT_HOSTS)))
+        # The two controls, through the same checker over synthetic text.
+        head = "import socketserver\nimport sys\n\n\nclass Ctl(object):\n    x = 1\n\n"
+        listed = httpfront_render(mod, ("parse_request", "handle_expect_100"))
+        hand = ("\n    def _single_header(self, name):\n"
+                "        return True, None\n")
+        ctl_i = (head + "    %s %s :: parse_request, handle_expect_100\n"
+                 % (BEGIN_PREFIX, HTTPFRONT_CANONICAL_NAME)
+                 + listed + "    %s\n" % END_PREFIX + hand)
+        found = httpfront_binding_problems(mod, "ctl_i.py", ctl_i, sources,
+                                           {"Ctl": ("_single_header",)}, ())
+        problems += problem_if(not any("_single_header is a hand copy" in f for f in found),
+                               "control (i): a hand _single_header beside a region that does "
+                               "not list it was not reported as a hand copy: %r" % found)
+        listed = httpfront_render(mod, HTTPFRONT_HANDLER)
+        ctl_ii = (head + "    %s %s :: %s\n" % (BEGIN_PREFIX, HTTPFRONT_CANONICAL_NAME,
+                                                ", ".join(HTTPFRONT_HANDLER))
+                  + listed + "    %s\n" % END_PREFIX + hand)
+        found = httpfront_binding_problems(mod, "ctl_ii.py", ctl_ii, sources,
+                                           {"Ctl": HTTPFRONT_HANDLER}, ())
+        problems += problem_if(not any("_single_header bound 2 times" in f for f in found),
+                               "control (ii): a hand _single_header after a region that lists "
+                               "it was not reported as bound twice: %r" % found)
+        detail.append("controls    : a hand copy beside a region (census path) and a hand "
+                      "duplicate of a listed name (count path) both reported")
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- a refusing generator fails the case
+        problems.append(httpfront_raised("httpfront-in-both-hosts", exc))
+    suite.record(GA, "httpfront-in-both-hosts", problems, detail=detail)
+
+    # GI1: the override set is COMPUTED from the stdlib base and the class body;
+    # the rows say why each hand override is not generated.
+    problems = []
+    try:
+        sources = mod.load_all_blocks()
+        for host, classes in sorted(HTTPFRONT_HOSTS.items()):
+            problems += httpfront_adaptation_problems(mod, host, texts[host], sources,
+                                                      classes, HTTPFRONT_ADAPTATIONS)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- a refusing generator fails the case
+        problems.append(httpfront_raised("httpfront-adaptations-declared", exc))
+    suite.record(GI, "httpfront-adaptations-declared", problems,
+                 detail=["rows        : %d declared hand override(s) across %d host(s)"
+                         % (len(HTTPFRONT_ADAPTATIONS), len(HTTPFRONT_HOSTS))])
+
+    # GI2: presence of the seams the generated members read; their VALUES are
+    # router J40's and proxy K5's.
+    problems = []
+    for host, classes in sorted(HTTPFRONT_HOSTS.items()):
+        try:
+            problems += httpfront_seam_problems(host, texts[host], classes)
+        except SyntaxError as exc:
+            problems.append("%s: cannot be parsed (%s)" % (host, exc))
+    suite.record(GI, "httpfront-seams-provided", problems,
+                 detail=["seams       : front_log, settings, conn_sem (server); timeout, "
+                         "_header_reader (handler)"])
+
+    # GI3: both checkers on a synthetic host first silent, then each plant named.
+    problems, caught = [], []
+    try:
+        sources = mod.load_all_blocks()
+        clean = HTTPFRONT_PIN_CLEAN % {"server": httpfront_render(mod, HTTPFRONT_SERVER),
+                                       "handler": httpfront_render(mod, HTTPFRONT_HANDLER)}
+
+        def judge(text, rows):
+            return (httpfront_adaptation_problems(mod, "pin.py", text, sources,
+                                                  HTTPFRONT_PIN_CLASSES, rows)
+                    + httpfront_seam_problems("pin.py", text, HTTPFRONT_PIN_CLASSES))
+
+        found = judge(clean, HTTPFRONT_PIN_ROWS)
+        problems += problem_if(found, "the clean synthetic host was reported: %r" % found)
+        release = ("        try:\n"
+                   "            super().process_request_thread(request, client_address)\n"
+                   "        finally:\n"
+                   "            self.conn_sem.release()\n")
+        unreleased = ("        super().process_request_thread(request, client_address)\n"
+                      "        self.conn_sem.release()\n")
+        send_error = "        self.close_connection = True\n"
+        plants = (
+            ("an undeclared log_request override", clean, send_error,
+             send_error + "\n    def log_request(self, code=\"-\", size=\"-\"):\n        pass\n",
+             HTTPFRONT_PIN_ROWS, "PinHandler.log_request overrides the stdlib by hand"),
+            ("a stale handle_one_request row", clean, None, None,
+             {**HTTPFRONT_PIN_ROWS, ("pin.py", "PinHandler", "handle_one_request"): "stale"},
+             "PinHandler.handle_one_request: declared in HTTPFRONT_ADAPTATIONS, but no such "
+             "hand override (stale)"),
+            ("a release outside any finally", clean, release, unreleased,
+             HTTPFRONT_PIN_ROWS, "process_request_thread does not release conn_sem in a finally"),
+            ("no front_log", clean, "    front_log = log\n", "",
+             HTTPFRONT_PIN_ROWS, "PinServer assigns no class-level front_log"),
+            # A row must name a stdlib OVERRIDE: a hand helper the stdlib base
+            # does not have is not an adaptation, so its row is stale too.
+            ("a row naming a non-override helper", clean, send_error,
+             send_error + "\n    def _precheck(self):\n        return True\n",
+             {**HTTPFRONT_PIN_ROWS, ("pin.py", "PinHandler", "_precheck"): "not an override"},
+             "PinHandler._precheck: declared in HTTPFRONT_ADAPTATIONS, but no such "
+             "hand override (stale)"),
+        )
+        for what, base, old, new, rows, needle in plants:
+            text = base
+            if old is not None:
+                if old not in base:
+                    problems.append("%s: the plant did not apply" % what)
+                    continue
+                text = base.replace(old, new, 1)
+            found = judge(text, rows)
+            if any(needle in f for f in found):
+                caught.append(what)
+            else:
+                problems.append("%s: not reported (got %r)" % (what, found))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- a refusing generator fails the case
+        problems.append(httpfront_raised("httpfront-pin-controls", exc))
+    suite.record(GI, "httpfront-pin-controls", problems,
+                 detail=["caught      : %s" % ("; ".join(caught) or "nothing"),
+                         "spared      : the clean synthetic host"])
+
+
 def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME, title="generated regions match their canonical source",
@@ -3069,8 +3916,8 @@ def run(opts=None):
     pyc_before = H.pycache_snapshot()
     digests_before = {p: H.sha256_file(p) for p in
                       (SOURCE, CONCURRENCY_SOURCE, LOGGING_SOURCE, LSP_SOURCE,
-                       PAGING_SOURCE, WEBSOCKET_SOURCE, OAUTH_SOURCE, GENERATOR,
-                       TARGET)}
+                       PAGING_SOURCE, WEBSOCKET_SOURCE, OAUTH_SOURCE, HTTPFRONT_SOURCE,
+                       GENERATOR, TARGET)}
 
     mod = H.load_module_from_path("amalgamate_under_test", GENERATOR)
     blocks = H.load_module_from_path("mcp_json_under_test", SOURCE)
@@ -3081,9 +3928,11 @@ def run(opts=None):
     group_contract(suite, mod)
     group_control(suite, mod)
     group_blocks(suite, blocks, lsp, paging, logmod)
+    group_httpfront_blocks(suite, mod)
     group_tabs(suite, mod)
     group_census(suite, mod)
     group_strict(suite, mod)
+    group_httpfront_pins(suite, mod)
     group_hygiene(suite, pyc_before, digests_before)
 
     suite.print_summary()

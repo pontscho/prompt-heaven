@@ -426,7 +426,10 @@ _HTTP_BRIDGE_TIMEOUT_S = 5.0      # bound on every handler-thread wait on the lo
 _HTTP_SINK_PROGRESS_CAP = 1024    # queued progress items per HTTP response; response, markers + sentinel never dropped
 # Extra headers of the stdlib's own refusals (send_error: 400/414/431/501/505),
 # answered fixed and body-less (R-0069).
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_httpfront.py :: _HTTP_STDLIB_REFUSAL_HEADERS
 _HTTP_STDLIB_REFUSAL_HEADERS = (("X-Content-Type-Options", "nosniff"), ("Cache-Control", "no-store"))
+# END GENERATED: 322ef814d1a3
 _SESSION_GONE = object()          # sink marker: the session closed before _http_start ran -> 404
 _REQUEST_STARTED = object()       # sink marker: _http_start created and registered the task
 _BUSY = object()                  # sink marker: --max-inflight reached -> 503 + Connection: close (R-34)
@@ -732,13 +735,18 @@ def _http_token_file(path: str) -> str:
     return raw.decode("latin-1")
 
 
-def _http_token_value(value: str, where: str) -> bytes:
-    """Validate the bearer token and return it as ASCII bytes; refusals never include it."""
-    if len(value) < _TOKEN_MIN_LEN:
-        raise ConfigError(f"{where}: the bearer token must be at least {_TOKEN_MIN_LEN} characters")
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_httpfront.py :: _http_token_value
+def _http_token_value(value: str, where: str, min_len: int, error) -> bytes:
+    """Validate the bearer token and return it as ASCII bytes; refusals never include it.
+
+    *min_len* and the *error* class raised are the host's policy, passed in."""
+    if len(value) < min_len:
+        raise error(f"{where}: the bearer token must be at least {min_len} characters")
     if not all(0x21 <= ord(ch) <= 0x7E for ch in value):
-        raise ConfigError(f"{where}: the bearer token must be printable ASCII with no whitespace")
+        raise error(f"{where}: the bearer token must be printable ASCII with no whitespace")
     return value.encode("ascii")
+# END GENERATED: 352c54a20b22
 
 
 def load_http_settings(args, env_token: Optional[str]) -> HttpSettings:
@@ -763,9 +771,9 @@ def load_http_settings(args, env_token: Optional[str]) -> HttpSettings:
     if args.token_file is None and env_token is None:
         raise ConfigError("HTTP mode requires a bearer token")
     if args.token_file is not None:
-        token = _http_token_value(_http_token_file(args.token_file), "--token-file")
+        token = _http_token_value(_http_token_file(args.token_file), "--token-file", _TOKEN_MIN_LEN, ConfigError)
     else:
-        token = _http_token_value(env_token, _TOKEN_ENV)
+        token = _http_token_value(env_token, _TOKEN_ENV, _TOKEN_MIN_LEN, ConfigError)
 
     if not 0 <= args.port <= 65535:
         raise ConfigError("--port must be between 0 and 65535")
@@ -1949,50 +1957,6 @@ class McpServer:
         self._http_drop(session)
         return True
 
-    def _http_write_ready_file(self, path: str, port: int) -> None:
-        """{"port", "pid"} written 0600 and atomically (.tmp + os.replace)."""
-        tmp = path + ".tmp"
-        try:
-            if os.path.lexists(tmp):
-                os.remove(tmp)
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump({"port": port, "pid": os.getpid()}, fh)
-                    fh.write("\n")
-                os.replace(tmp, path)
-            finally:
-                if os.path.lexists(tmp):
-                    os.remove(tmp)
-        except OSError as exc:
-            raise ConfigError(f"cannot write --ready-file: {exc.strerror or type(exc).__name__}") from None
-
-    @staticmethod
-    def _http_remove_ready_file(path: str) -> None:
-        """On an ordered shutdown, unlink the ready file only while it still holds
-        this process's pid (R-0075, the router's V24).
-
-        Read without following a symlink (O_NOFOLLOW: a link at the path is
-        refused, so neither it nor its target is touched); a file another writer
-        has replaced (another pid, not JSON, unreadable) is left alone. Best
-        effort: never raises; a refusal is logged at DEBUG by type only.
-
-        Declared limits: a replace between the read and the unlink is not seen
-        (the new file is removed); SIGKILL, or any exit that skips the ordered
-        shutdown, leaves the file behind with a dead pid.
-        """
-        try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(fd, "r", encoding="utf-8") as fh:
-                data = json.loads(fh.read(4096))
-            pid = data.get("pid") if isinstance(data, dict) else None
-            if type(pid) is int and pid == os.getpid():
-                os.remove(path)
-            else:
-                log.debug("ready file left: not this pid")
-        except (OSError, ValueError) as exc:
-            log.debug("ready file left: %s", type(exc).__name__)
-
     async def serve_http(self, settings: "HttpSettings", srv: "_ProxyHttpServer") -> None:
         """Serve the bound listener until cancelled, then shut down in order (H1, round 3).
 
@@ -2008,7 +1972,7 @@ class McpServer:
         threading.Thread(target=srv.serve_forever, name="proxy-http", daemon=True).start()
         try:
             if settings.ready_file:
-                self._http_write_ready_file(settings.ready_file, srv.server_port)
+                _http_write_ready_file(settings.ready_file, srv.server_port, ConfigError)
             await asyncio.Event().wait()             # ends only by cancellation
         finally:
             # 1. Refuse new work: _http_start posts None (-> 503); handlers stop waiting.
@@ -2033,7 +1997,7 @@ class McpServer:
             # 4. Remove our ready file (R-0075): only while it holds our pid,
             #    never through a symlink. SIGKILL skips this and leaves it.
             if settings.ready_file:
-                self._http_remove_ready_file(settings.ready_file)
+                _http_remove_ready_file(settings.ready_file, log)
 
     # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
     # BEGIN GENERATED: _mcp_json.py :: _result, _error
@@ -2093,6 +2057,56 @@ def _bounded_sink(q: "queue.Queue") -> Callable[[Any], None]:
     return sink
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_httpfront.py :: _http_write_ready_file, _http_remove_ready_file
+def _http_write_ready_file(path: str, port: int, error) -> None:
+    """{"port", "pid"} written 0600 and atomically (.tmp + os.replace); a failure
+    raises the host's *error* class naming the strerror or the type only."""
+    tmp = path + ".tmp"
+    try:
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"port": port, "pid": os.getpid()}, fh)
+                fh.write("\n")
+            os.replace(tmp, path)
+        finally:
+            if os.path.lexists(tmp):
+                os.remove(tmp)
+    except OSError as exc:
+        raise error(f"cannot write --ready-file: {exc.strerror or type(exc).__name__}") from None
+
+
+def _http_remove_ready_file(path: str, logger) -> None:
+    """On an ordered shutdown, unlink the ready file only while it still holds
+    this process's pid (mcp-proxy's R-0075, the router's V24).
+
+    Read without following a symlink (O_NOFOLLOW: a link at the path is
+    refused, so neither it nor its target is touched); a file another writer
+    has replaced (another pid, not JSON, unreadable) is left alone. Best
+    effort: never raises; a refusal is logged on the host's *logger* at DEBUG
+    by type only.
+
+    Declared limits: a replace between the read and the unlink is not seen
+    (the new file is removed); SIGKILL, or any exit that skips the ordered
+    shutdown, leaves the file behind with a dead pid.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            data = json.loads(fh.read(4096))
+        pid = data.get("pid") if isinstance(data, dict) else None
+        if type(pid) is int and pid == os.getpid():
+            os.remove(path)
+        else:
+            logger.debug("ready file left: not this pid")
+    except (OSError, ValueError) as exc:
+        logger.debug("ready file left: %s", type(exc).__name__)
+# END GENERATED: 1c2c5cd7b652
+
+
 def _stop_http_server(srv: "_ProxyHttpServer") -> None:
     """Stop the listener. Runs on the proxy-http-stop thread, never on the loop:
     shutdown() blocks until serve_forever returns."""
@@ -2107,6 +2121,8 @@ class _ProxyHttpServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
     allow_reuse_address = True
+    # The generated server methods log through this, never the module global (R-0072, PD-3).
+    front_log = log
 
     def __init__(self, address, handler, settings: HttpSettings) -> None:
         # Everything a handler reads is set BEFORE super().__init__, which
@@ -2119,18 +2135,21 @@ class _ProxyHttpServer(ThreadingHTTPServer):
         self.loop: Optional[asyncio.AbstractEventLoop] = None       # set by serve_http
         super().__init__(address, handler)
 
+    # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+    # BEGIN GENERATED: _mcp_httpfront.py :: server_bind, process_request, handle_error
     def server_bind(self) -> None:
         # The stdlib HTTPServer.server_bind does a reverse-DNS getfqdn() the
-        # proxy never uses and that can stall startup (I1).
+        # host never uses and that can stall startup (I1).
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
     def process_request(self, request, client_address) -> None:
+        # The slot taken here is given back by the host's hand-written
+        # process_request_thread, in a finally (tests/test_generated_region.py GI1).
         if not self.conn_sem.acquire(blocking=False):
-            log.warning("http connection refused: %d connections open", self.settings.max_connections)
+            self.front_log.warning("http connection refused: %d connections open", self.settings.max_connections)
             try:
-                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
-                                b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             except OSError:
                 pass
             self.shutdown_request(request)
@@ -2143,32 +2162,37 @@ class _ProxyHttpServer(ThreadingHTTPServer):
             self.conn_sem.release()
             raise
 
+    def handle_error(self, request, client_address) -> None:
+        # Type only: the stdlib traceback's message text can quote request data (ADR 0011).
+        self.front_log.warning("http handler failed: %s", type(sys.exc_info()[1]).__name__)
+    # END GENERATED: 4aa2226407c5
+
     def process_request_thread(self, request, client_address) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
             self.conn_sem.release()
 
-    def handle_error(self, request, client_address) -> None:
-        # Type only: the stdlib traceback's message text can quote request data (ADR 0011).
-        log.warning("http handler failed: %s", type(sys.exc_info()[1]).__name__)
 
-
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_httpfront.py :: _HeaderDeadlineReader
 class _HeaderDeadlineReader(io.RawIOBase):
     """The raw reader under a handler's rfile: enforces a TOTAL header deadline.
 
     While `deadline` (a time.monotonic() value) is set, every recv gets at most
-    the time left until it, and none is attempted once it has passed: a client
-    that trickles one header byte per recv can no longer hold its
-    --max-connections slot past _HTTP_HEADER_TIMEOUT_S in total (F8). The
-    socket.timeout raised is the one the stdlib's handle_one_request already
-    answers by closing the connection. With `deadline` None (the body, after the
-    header phase) it is a plain recv under the socket's own timeout.
+    the time left until it, never more than *cap* seconds, and none is
+    attempted once it has passed: a client that trickles one header byte per
+    recv can no longer hold its --max-connections slot past the host's header
+    bound in total (F8). The socket.timeout raised is the one the stdlib's
+    handle_one_request already answers by closing the connection. A host may
+    set `deadline` again around its body read (the router's _post does, V4).
+    With `deadline` None it is a plain recv under the socket's own timeout.
     """
 
-    def __init__(self, sock: socket.socket) -> None:
+    def __init__(self, sock: socket.socket, cap: float) -> None:
         super().__init__()
         self._sock = sock
+        self._cap = cap
         self.deadline: Optional[float] = None
 
     def readable(self) -> bool:
@@ -2179,8 +2203,9 @@ class _HeaderDeadlineReader(io.RawIOBase):
             left = self.deadline - time.monotonic()
             if left <= 0:
                 raise socket.timeout("header deadline passed")
-            self._sock.settimeout(min(left, _HTTP_HEADER_TIMEOUT_S))
+            self._sock.settimeout(min(left, self._cap))
         return self._sock.recv_into(buf)
+# END GENERATED: b5cec0ec04cb
 
 
 class _ProxyHttpHandler(BaseHTTPRequestHandler):
@@ -2203,7 +2228,8 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
         # header deadline. The stdlib's own is closed at once: an unclosed
         # makefile keeps the socket's fd alive after close_request.
         stock = self.rfile
-        self._header_reader = _HeaderDeadlineReader(self.connection)
+        # the cap is the header bound: this deadline covers the header phase only (F8)
+        self._header_reader = _HeaderDeadlineReader(self.connection, _HTTP_HEADER_TIMEOUT_S)
         self.rfile = io.BufferedReader(self._header_reader, io.DEFAULT_BUFFER_SIZE)
         stock.close()
 
@@ -2217,21 +2243,33 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
         finally:
             self._header_reader.deadline = None
 
+    # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+    # BEGIN GENERATED: _mcp_httpfront.py :: parse_request, handle_expect_100, _single_header
     def parse_request(self) -> bool:
         # The header phase ends here, before any do_* runs: the body read and
         # the SSE stream are never under the header deadline. The per-recv
-        # pre-auth timeout stays until _precheck passes.
+        # pre-auth timeout (the handler's class-level `timeout`, the header
+        # bound) stays until the host's precheck passes.
         try:
             return super().parse_request()
         finally:
             self._header_reader.deadline = None
-            self.connection.settimeout(_HTTP_HEADER_TIMEOUT_S)
+            self.connection.settimeout(self.timeout)
 
     def handle_expect_100(self) -> bool:
-        # Called from parse_request, before any auth: send nothing (R-0076, the
-        # router's V37). _post sends the 100 Continue itself once _precheck and
-        # the media-type and framing checks pass.
+        # Called from parse_request, before any auth: send nothing (mcp-proxy's
+        # R-0076, the router's V37). The host's POST handler sends the 100
+        # Continue itself once its precheck and framing checks pass.
         return True
+
+    def _single_header(self, name: str):
+        """(ok, value) of a header that must appear at most once (ADR 0015:
+        ambiguity is the defect): ok False when it is repeated, value None when absent."""
+        values = self.headers.get_all(name) or []
+        if len(values) > 1:
+            return False, None
+        return True, (values[0] if values else None)
+    # END GENERATED: cc86d6f0648d
 
     def log_message(self, format, *args) -> None:  # noqa: A002 -- stdlib signature
         # Structure only (ADR 0011): never the stdlib's `format % args` text,
@@ -2302,14 +2340,6 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
         """
         self.close_connection = True
         self._refuse(code, _HTTP_STDLIB_REFUSAL_HEADERS)
-
-    def _single_header(self, name: str):
-        """(ok, value) of a header that must appear at most once (ADR 0015:
-        ambiguity is the defect): ok False when it is repeated, value None when absent."""
-        values = self.headers.get_all(name) or []
-        if len(values) > 1:
-            return False, None
-        return True, (values[0] if values else None)
 
     def _precheck(self) -> bool:
         """Checks 0-4 shared by every method: header syntax, path, Host, Origin, bearer.

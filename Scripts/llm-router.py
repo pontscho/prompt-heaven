@@ -441,13 +441,18 @@ def _rt_loads(text: Union[str, bytes]) -> Any:
                       parse_float=_rt_finite_float, parse_int=_rt_bounded_int)
 
 
-def _http_token_value(value: str, where: str) -> bytes:
-    """Validate the bearer token and return it as ASCII bytes; refusals never include it."""
-    if len(value) < _TOKEN_MIN_LEN:
-        raise ConfigError(f"{where}: the bearer token must be at least {_TOKEN_MIN_LEN} characters")
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_httpfront.py :: _http_token_value
+def _http_token_value(value: str, where: str, min_len: int, error) -> bytes:
+    """Validate the bearer token and return it as ASCII bytes; refusals never include it.
+
+    *min_len* and the *error* class raised are the host's policy, passed in."""
+    if len(value) < min_len:
+        raise error(f"{where}: the bearer token must be at least {min_len} characters")
     if not all(0x21 <= ord(ch) <= 0x7E for ch in value):
-        raise ConfigError(f"{where}: the bearer token must be printable ASCII with no whitespace")
+        raise error(f"{where}: the bearer token must be printable ASCII with no whitespace")
     return value.encode("ascii")
+# END GENERATED: 352c54a20b22
 
 
 def _rt_secret_forms(raw: bytes) -> FrozenSet[str]:
@@ -1331,7 +1336,7 @@ def _rt_cfg_token(token: str) -> bytes:
     Every refusal names the generator; none names the value. The throttle-free 401
     leaves entropy to the operator, so the loader refuses the obviously weak."""
     try:
-        token_bytes = _http_token_value(token, "auth_token")
+        token_bytes = _http_token_value(token, "auth_token", _TOKEN_MIN_LEN, ConfigError)
     except ConfigError as exc:
         raise ConfigError(f"{exc} ({_RT_TOKEN_HINT})") from None
     if len(set(token)) < _TOKEN_MIN_DISTINCT:
@@ -6872,8 +6877,11 @@ def _rt_pump(conn: Any, resp: Any, q: _RtByteQueue, stop: threading.Event,
             pass
 
 
-def _rt_write_ready_file(path: str, port: int) -> None:
-    """{"port", "pid"} written 0600 and atomically (.tmp + os.replace)."""
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_httpfront.py :: _http_write_ready_file, _http_remove_ready_file
+def _http_write_ready_file(path: str, port: int, error) -> None:
+    """{"port", "pid"} written 0600 and atomically (.tmp + os.replace); a failure
+    raises the host's *error* class naming the strerror or the type only."""
     tmp = path + ".tmp"
     try:
         if os.path.lexists(tmp):
@@ -6888,14 +6896,22 @@ def _rt_write_ready_file(path: str, port: int) -> None:
             if os.path.lexists(tmp):
                 os.remove(tmp)
     except OSError as exc:
-        raise ConfigError(f"cannot write --ready-file: {exc.strerror or type(exc).__name__}") from None
+        raise error(f"cannot write --ready-file: {exc.strerror or type(exc).__name__}") from None
 
 
-def _rt_remove_ready_file(path: str) -> None:
-    """On shutdown, unlink the ready file only while it still holds this process's pid (V24).
+def _http_remove_ready_file(path: str, logger) -> None:
+    """On an ordered shutdown, unlink the ready file only while it still holds
+    this process's pid (mcp-proxy's R-0075, the router's V24).
 
-    Read without following a symlink; a file another writer has replaced
-    (another pid, not JSON, unreadable) is left alone. Best effort: never raises.
+    Read without following a symlink (O_NOFOLLOW: a link at the path is
+    refused, so neither it nor its target is touched); a file another writer
+    has replaced (another pid, not JSON, unreadable) is left alone. Best
+    effort: never raises; a refusal is logged on the host's *logger* at DEBUG
+    by type only.
+
+    Declared limits: a replace between the read and the unlink is not seen
+    (the new file is removed); SIGKILL, or any exit that skips the ordered
+    shutdown, leaves the file behind with a dead pid.
     """
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -6904,8 +6920,11 @@ def _rt_remove_ready_file(path: str) -> None:
         pid = data.get("pid") if isinstance(data, dict) else None
         if type(pid) is int and pid == os.getpid():
             os.remove(path)
-    except (OSError, ValueError):
-        pass
+        else:
+            logger.debug("ready file left: not this pid")
+    except (OSError, ValueError) as exc:
+        logger.debug("ready file left: %s", type(exc).__name__)
+# END GENERATED: 1c2c5cd7b652
 
 
 class _RouterHttpServer(ThreadingHTTPServer):
@@ -6917,6 +6936,8 @@ class _RouterHttpServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
     allow_reuse_address = True
+    # The generated server methods log through this, never the module global (R-0072, PD-3).
+    front_log = log
 
     def __init__(self, addr: Tuple[str, int], settings: RouterSettings, cfg: RouterConfig,
                  tokens: Optional[_RtTokenStore] = None) -> None:
@@ -6993,18 +7014,21 @@ class _RouterHttpServer(ThreadingHTTPServer):
             self.sampling_noted.add(key)
             return True
 
+    # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+    # BEGIN GENERATED: _mcp_httpfront.py :: server_bind, process_request, handle_error
     def server_bind(self) -> None:
         # The stdlib HTTPServer.server_bind does a reverse-DNS getfqdn() the
-        # router never uses and that can stall startup (I1).
+        # host never uses and that can stall startup (I1).
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
     def process_request(self, request, client_address) -> None:
+        # The slot taken here is given back by the host's hand-written
+        # process_request_thread, in a finally (tests/test_generated_region.py GI1).
         if not self.conn_sem.acquire(blocking=False):
-            log.warning("http connection refused: %d connections open", self.settings.max_connections)
+            self.front_log.warning("http connection refused: %d connections open", self.settings.max_connections)
             try:
-                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
-                                b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             except OSError:
                 pass
             self.shutdown_request(request)
@@ -7017,6 +7041,11 @@ class _RouterHttpServer(ThreadingHTTPServer):
             self.conn_sem.release()
             raise
 
+    def handle_error(self, request, client_address) -> None:
+        # Type only: the stdlib traceback's message text can quote request data (ADR 0011).
+        self.front_log.warning("http handler failed: %s", type(sys.exc_info()[1]).__name__)
+    # END GENERATED: 4aa2226407c5
+
     def process_request_thread(self, request, client_address) -> None:
         with self.active_cond:
             self.active += 1
@@ -7028,29 +7057,26 @@ class _RouterHttpServer(ThreadingHTTPServer):
                 self.active_cond.notify_all()
             self.conn_sem.release()
 
-    def handle_error(self, request, client_address) -> None:
-        # Type only: the stdlib traceback's message text can quote request data (ADR 0011).
-        log.warning("http handler failed: %s", type(sys.exc_info()[1]).__name__)
 
-
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_httpfront.py :: _HeaderDeadlineReader
 class _HeaderDeadlineReader(io.RawIOBase):
     """The raw reader under a handler's rfile: enforces a TOTAL header deadline.
 
     While `deadline` (a time.monotonic() value) is set, every recv gets at most
-    the time left until it, and none is attempted once it has passed: a client
-    that trickles one header byte per recv can no longer hold its
-    --max-connections slot past _HTTP_HEADER_TIMEOUT_S in total (F8), or past
-    _HTTP_PREAUTH_TIMEOUT_S while it has never authenticated (V3). The
-    socket.timeout raised is the one the stdlib's handle_one_request already
-    answers by closing the connection. _post sets it again around the body
-    read (_HTTP_BODY_TIMEOUT_S, V4); one recv never waits past
-    _HTTP_SOCKET_TIMEOUT_S, which the header phase's shorter totals never reach.
+    the time left until it, never more than *cap* seconds, and none is
+    attempted once it has passed: a client that trickles one header byte per
+    recv can no longer hold its --max-connections slot past the host's header
+    bound in total (F8). The socket.timeout raised is the one the stdlib's
+    handle_one_request already answers by closing the connection. A host may
+    set `deadline` again around its body read (the router's _post does, V4).
     With `deadline` None it is a plain recv under the socket's own timeout.
     """
 
-    def __init__(self, sock: socket.socket) -> None:
+    def __init__(self, sock: socket.socket, cap: float) -> None:
         super().__init__()
         self._sock = sock
+        self._cap = cap
         self.deadline: Optional[float] = None
 
     def readable(self) -> bool:
@@ -7061,8 +7087,17 @@ class _HeaderDeadlineReader(io.RawIOBase):
             left = self.deadline - time.monotonic()
             if left <= 0:
                 raise socket.timeout("header deadline passed")
-            self._sock.settimeout(min(left, _HTTP_SOCKET_TIMEOUT_S))
+            self._sock.settimeout(min(left, self._cap))
         return self._sock.recv_into(buf)
+# END GENERATED: b5cec0ec04cb
+
+
+# Extra headers of the stdlib's own refusals (send_error: 400/414/431/501/505),
+# answered fixed and body-less (R-0069).
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_httpfront.py :: _HTTP_STDLIB_REFUSAL_HEADERS
+_HTTP_STDLIB_REFUSAL_HEADERS = (("X-Content-Type-Options", "nosniff"), ("Cache-Control", "no-store"))
+# END GENERATED: 322ef814d1a3
 
 
 # The fixed reason text of every refusal the stdlib raises itself, before any
@@ -7138,7 +7173,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
         # header deadline. The stdlib's own is closed at once: an unclosed
         # makefile keeps the socket's fd alive after close_request (P24).
         stock = self.rfile
-        self._header_reader = _HeaderDeadlineReader(self.connection)
+        # the cap is the socket timeout: _post sets a body-read deadline on this reader too (V4)
+        self._header_reader = _HeaderDeadlineReader(self.connection, _HTTP_SOCKET_TIMEOUT_S)
         self.rfile = io.BufferedReader(self._header_reader, io.DEFAULT_BUFFER_SIZE)
         stock.close()
         # True once a request on this connection passed _precheck (V3).
@@ -7158,20 +7194,33 @@ class _RouterHandler(BaseHTTPRequestHandler):
         finally:
             self._header_reader.deadline = None
 
+    # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+    # BEGIN GENERATED: _mcp_httpfront.py :: parse_request, handle_expect_100, _single_header
     def parse_request(self) -> bool:
         # The header phase ends here, before any do_* runs: the body read and
         # the SSE stream are never under the header deadline. The per-recv
-        # pre-auth timeout stays until _precheck passes.
+        # pre-auth timeout (the handler's class-level `timeout`, the header
+        # bound) stays until the host's precheck passes.
         try:
             return super().parse_request()
         finally:
             self._header_reader.deadline = None
-            self.connection.settimeout(_HTTP_HEADER_TIMEOUT_S)
+            self.connection.settimeout(self.timeout)
 
     def handle_expect_100(self) -> bool:
-        # Called from parse_request, before any auth: send nothing (V37). _post
-        # sends the 100 Continue itself once _precheck and the framing checks pass.
+        # Called from parse_request, before any auth: send nothing (mcp-proxy's
+        # R-0076, the router's V37). The host's POST handler sends the 100
+        # Continue itself once its precheck and framing checks pass.
         return True
+
+    def _single_header(self, name: str):
+        """(ok, value) of a header that must appear at most once (ADR 0015:
+        ambiguity is the defect): ok False when it is repeated, value None when absent."""
+        values = self.headers.get_all(name) or []
+        if len(values) > 1:
+            return False, None
+        return True, (values[0] if values else None)
+    # END GENERATED: cc86d6f0648d
 
     def log_message(self, format, *args) -> None:  # noqa: A002 -- stdlib signature
         # Structure only (ADR 0011): never the stdlib's `format % args` text,
@@ -7233,18 +7282,12 @@ class _RouterHandler(BaseHTTPRequestHandler):
         with a FIXED text: `message` and `explain` are ignored, since they can
         quote the request line or the method (B21). The HTTP/0.9 -> HTTP/1.1
         guard lives in _refuse, which covers these and every do_* refusal.
+        nosniff and no-store are added here, as mcp-proxy's send_error does (D3).
         """
         self.close_connection = True
         self._refuse(code, _STATUS_TO_TYPE.get(code, "invalid_request_error"),
-                     _RT_STDLIB_REFUSAL.get(code, "malformed request"))
-
-    def _single_header(self, name: str):
-        """(ok, value) of a header that must appear at most once (ADR 0015:
-        ambiguity is the defect): ok False when it is repeated, value None when absent."""
-        values = self.headers.get_all(name) or []
-        if len(values) > 1:
-            return False, None
-        return True, (values[0] if values else None)
+                     _RT_STDLIB_REFUSAL.get(code, "malformed request"),
+                     extra_headers=_HTTP_STDLIB_REFUSAL_HEADERS)
 
     def _send_json(self, status: int, obj: Any, extra_headers=()) -> None:
         """One complete compact JSON answer, after the body was read. An
@@ -8419,13 +8462,14 @@ def main() -> None:
 
     if settings.ready_file is not None:
         try:
-            _rt_write_ready_file(settings.ready_file, srv.server_port)
+            _http_write_ready_file(settings.ready_file, srv.server_port, ConfigError)
         except ConfigError as exc:
             srv.server_close()
             _rt_refuse(str(exc))
 
     # serve_forever on its own thread: shutdown() blocks until serve_forever
-    # returns, so it is never called from the serving thread (mcp-proxy.py:1992).
+    # returns, so it is never called from the serving thread (as mcp-proxy's
+    # _stop_http_server does).
     threading.Thread(target=srv.serve_forever, name="rt-serve", daemon=True).start()
     while not stop.is_set():
         stop.wait(_RT_TICK_S)
@@ -8457,7 +8501,7 @@ def _rt_shutdown(srv: _RouterHttpServer) -> None:
     srv.shutdown()
     srv.server_close()
     if srv.settings.ready_file is not None:
-        _rt_remove_ready_file(srv.settings.ready_file)
+        _http_remove_ready_file(srv.settings.ready_file, log)
     for handler in logging.getLogger().handlers + log.handlers:
         try:
             handler.flush()

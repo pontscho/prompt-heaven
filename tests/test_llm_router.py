@@ -480,8 +480,9 @@ def read_sse(resp):
 # loaded module with that constant patched to millisecond scale: the same code
 # path, waited out in milliseconds instead of the production 1-60 s.  Every
 # patched constant is read at run time except the handler's class-level
-# `timeout`, bound to _HTTP_HEADER_TIMEOUT_S at class definition, which is
-# patched with it.  Everything is restored when the rig closes.  The router's
+# `timeout`, bound to _HTTP_HEADER_TIMEOUT_S at class definition and read by
+# `setup` and `parse_request`, which is patched with it.  Everything is
+# restored when the rig closes.  The router's
 # logger goes, at DEBUG (as --debug), to a 0600 file in the sandbox that I1
 # sweeps like a subprocess stderr.  A case that proves a real signal or a real
 # process exit (H4, N25) stays a subprocess at the production constants.
@@ -2365,6 +2366,7 @@ GB_DEEP_DEPTH = 100000           # B18: array nesting far past the interpreter's
 GB_LONG_LINE = 65536 + 64        # B21: the stdlib reads at most 65537 bytes of a request line
 GB_CAP_RETRY_S = 5.0             # B20: the slot must come back within this after the release
 GB_LINE_SENTINEL = "tf-line-SENTINEL-" + secrets.token_hex(8)   # B21: never echoed
+GB_STDLIB_REFUSAL_HEADERS = (("X-Content-Type-Options", "nosniff"), ("Cache-Control", "no-store"))  # B21 (D3)
 GB_TRICKLE_BODY_LEN = 1 << 20    # B23: the declared body, sent one byte per GB_TRICKLE_STEP_S
 # B24: (label, raw JSON text of one extra top-level field) -- each a non-finite number.
 GB_NONFINITE = (("NaN", '"temperature": NaN'), ("Infinity", '"top_p": Infinity'),
@@ -3277,7 +3279,8 @@ def group_b(suite, fixture_root):
                 if not first.startswith("HTTP/1.1 %d" % want):
                     problems.append("%s: status line %r, expected 'HTTP/1.1 %d ...'"
                                     % (label, first[:60], want))
-                problems += gb_refused(label, status, hdrs, body, want)
+                problems += gb_refused(label, status, hdrs, body, want,
+                                       extra_headers=GB_STDLIB_REFUSAL_HEADERS)
                 if status == want and \
                         (hdrs.get("content-type") or "").split(";")[0].strip() != "application/json":
                     problems.append("%s: Content-Type %r, expected application/json"
@@ -3301,7 +3304,7 @@ def group_b(suite, fixture_root):
             return problems, ["refused     : BREW 501, a %d-byte request line 414, FOO/1.1 400 "
                               "(the HTTP/0.9 guard)" % (len(line_q) + GB_LONG_LINE),
                               "each        : HTTP/1.1 status line, envelope, Connection: close, "
-                              "request line not echoed",
+                              "request line not echoed, nosniff, no-store",
                               "HEAD        : 405, Allow: POST, zero body bytes"]
 
         def b22():
@@ -17877,6 +17880,8 @@ GJ_STATIC_CASES = (
     "control: J4a hook plants",          # J36 (J4a, R-0083)
     "kind registry: one table",          # J37 (R-0084)
     "control: kind registry plants",     # J38 (J37)
+    "front policy bound",                # J40 (R-0072)
+    "control: J40 plants",               # J41 (J40)
 )
 
 # J1 (Plan Step 8): the scopes allowed to call hmac.compare_digest, each with its
@@ -18220,6 +18225,113 @@ def rule_j13(rows, reasons):
     return found
 
 
+# J40 (R-0072): the HTTP front's members are shared with mcp-proxy, so the policy
+# they read reaches them injected -- the logger as the server's class-level
+# front_log, the per-recv timeout as the handler's own `timeout`, the reader's cap
+# as a constructor argument -- never as a host global read inside a member (PD-1..PD-7).
+GJ_FRONT_SERVER = "_RouterHttpServer"
+GJ_FRONT_HANDLER = "_RouterHandler"
+GJ_FRONT_CAP = "_HTTP_SOCKET_TIMEOUT_S"
+GJ_FRONT_TIMEOUT = "_HTTP_HEADER_TIMEOUT_S"
+GJ_FRONT_TOKEN_MIN = "_TOKEN_MIN_LEN"     # (f): _http_token_value's 3rd argument
+GJ_FRONT_ERROR = "ConfigError"            # (f): and its 4th
+# (class, the members that must not read it, the host global)
+GJ_FRONT_GLOBAL_READS = ((GJ_FRONT_SERVER, ("server_bind", "process_request", "handle_error"), "log"),
+                         (GJ_FRONT_HANDLER, ("parse_request",), GJ_FRONT_TIMEOUT))
+GJ_FRONT_POLICY_PREFIXES = ("_HTTP_", "_TOKEN_")
+
+
+def gj_class_assign(cls, target, value):
+    """True when the body of ClassDef *cls* holds `target = value` (both bare names)."""
+    return any(isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+               and gj_is_name(stmt.targets[0], target) and gj_is_name(stmt.value, value)
+               for stmt in cls.body)
+
+
+def rule_j40(source):
+    """J40 (R-0072): the front's policy is injected, never read as a host global.
+    (a) _RouterHttpServer holds `front_log = log`; (b) _RouterHandler holds
+    `timeout = _HTTP_HEADER_TIMEOUT_S`; (c) every _HeaderDeadlineReader call passes
+    exactly two positional args, the cap _HTTP_SOCKET_TIMEOUT_S; (d) server_bind,
+    process_request and handle_error read no `log`, parse_request no
+    _HTTP_HEADER_TIMEOUT_S; (e) PD-7: no other class attribute of either class
+    snapshots an _HTTP_* / _TOKEN_* constant at class definition; (f) every
+    _http_token_value call passes exactly four positional args, the 3rd
+    _TOKEN_MIN_LEN and the 4th ConfigError."""
+    tree, found = gj_parse(source)
+    if tree is None:
+        return found
+    classes = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name in (GJ_FRONT_SERVER, GJ_FRONT_HANDLER):
+            classes.setdefault(node.name, node)
+    for name in (GJ_FRONT_SERVER, GJ_FRONT_HANDLER):
+        if name not in classes:
+            found.append("no class %s" % name)
+    server = classes.get(GJ_FRONT_SERVER)
+    handler = classes.get(GJ_FRONT_HANDLER)
+    # (a), (b) -- the two class-level seams.
+    if server is not None and not gj_class_assign(server, "front_log", "log"):
+        found.append("%s: no class-level front_log = log" % GJ_FRONT_SERVER)
+    if handler is not None and not gj_class_assign(handler, "timeout", GJ_FRONT_TIMEOUT):
+        found.append("%s: no class-level timeout = %s" % (GJ_FRONT_HANDLER, GJ_FRONT_TIMEOUT))
+    # (c) -- the reader's cap is a constructor argument, this host's socket timeout.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and gj_is_name(node.func, "_HeaderDeadlineReader"):
+            if len(node.args) != 2 or node.keywords:
+                what = "%d args" % (len(node.args) + len(node.keywords))
+            elif not gj_is_name(node.args[1], GJ_FRONT_CAP):
+                what = ast.dump(node.args[1])
+            else:
+                continue
+            found.append("%d: _HeaderDeadlineReader cap is %s, expected %s" % (node.lineno, what, GJ_FRONT_CAP))
+    # (d) -- no host global read inside a shared member.
+    for cls_name, members, glob in GJ_FRONT_GLOBAL_READS:
+        cls = classes.get(cls_name)
+        if cls is None:
+            continue
+        for stmt in cls.body:
+            if not (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name in members):
+                continue
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Name) and node.id == glob and isinstance(node.ctx, ast.Load):
+                    found.append("%d: %s.%s reads the host global %s" % (node.lineno, cls_name, stmt.name, glob))
+    # (f) -- the token floor and the refusal's error class are the host's, passed in.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and gj_is_name(node.func, "_http_token_value"):
+            if len(node.args) != 4 or node.keywords:
+                what = "%d args" % (len(node.args) + len(node.keywords))
+            elif gj_is_name(node.args[2], GJ_FRONT_TOKEN_MIN) and gj_is_name(node.args[3], GJ_FRONT_ERROR):
+                continue
+            else:
+                what = "%s, %s" % (ast.dump(node.args[2]), ast.dump(node.args[3]))
+            found.append("%d: _http_token_value called with %s, expected %s, %s"
+                         % (node.lineno, what, GJ_FRONT_TOKEN_MIN, GJ_FRONT_ERROR))
+    # (e) -- PD-7: a class attribute is bound once, at class definition, so a rig
+    # patch of the module constant never reaches it; `timeout` alone is patched in step.
+    for cls in (server, handler):
+        if cls is None:
+            continue
+        for stmt in cls.body:
+            if isinstance(stmt, ast.Assign):
+                targets, value = stmt.targets, stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                targets, value = [stmt.target], stmt.value
+            else:
+                continue
+            reads = sorted({node.id for node in ast.walk(value)
+                            if isinstance(node, ast.Name) and node.id.startswith(GJ_FRONT_POLICY_PREFIXES)})
+            if not reads:
+                continue
+            if cls is handler and len(targets) == 1 and gj_is_name(targets[0], "timeout") \
+                    and gj_is_name(value, GJ_FRONT_TIMEOUT):
+                continue
+            shown = ", ".join(ast.unparse(target) for target in targets)
+            found.append("%d: class attribute %s snapshots %s at class definition (PD-7)"
+                         % (stmt.lineno, shown, ", ".join(reads)))
+    return found
+
+
 # The planted negative controls (docs/subsystems/tests.md: "Every scanner suite
 # must carry a negative control").  Each is (checker, clean, planted, needles):
 # the checker over *clean* must report nothing (the plant, not noise, is what
@@ -18485,6 +18597,53 @@ _KINDS = _KINDS + ("tf-extra",)
 '''
 
 
+GJ_J40_CLEAN = '''class _RouterHttpServer:
+    front_log = log
+
+    def server_bind(self):
+        self.server_name, self.server_port = self.server_address[:2]
+
+    def process_request(self, request, client_address):
+        self.front_log.warning("refused: %d open", self.settings.max_connections)
+
+    def handle_error(self, request, client_address):
+        self.front_log.warning("failed: %s", "T")
+
+
+class _RouterHandler:
+    timeout = _HTTP_HEADER_TIMEOUT_S
+
+    def setup(self):
+        self._header_reader = _HeaderDeadlineReader(self.connection, _HTTP_SOCKET_TIMEOUT_S)
+
+    def parse_request(self):
+        self.connection.settimeout(self.timeout)
+
+
+def _rt_cfg_token(token):
+    return _http_token_value(token, "auth_token", _TOKEN_MIN_LEN, ConfigError)
+'''
+# J41: the cap swapped to the header bound, the logger rebound away from the host's,
+# the module global read in handle_error, a second policy class attribute (PD-7),
+# and a literal token floor.
+GJ_J40_PLANTED = GJ_J40_CLEAN.replace(
+    "_HeaderDeadlineReader(self.connection, _HTTP_SOCKET_TIMEOUT_S)",
+    "_HeaderDeadlineReader(self.connection, _HTTP_HEADER_TIMEOUT_S)",
+).replace(
+    "    front_log = log\n",
+    "    front_log = logging.getLogger(\"x\")\n",
+).replace(
+    "        self.front_log.warning(\"failed: %s\", \"T\")\n",
+    "        log.warning(\"failed: %s\", \"T\")\n",
+).replace(
+    "    timeout = _HTTP_HEADER_TIMEOUT_S\n",
+    "    timeout = _HTTP_HEADER_TIMEOUT_S\n    preauth_s = _HTTP_PREAUTH_TIMEOUT_S\n",
+).replace(
+    "_http_token_value(token, \"auth_token\", _TOKEN_MIN_LEN, ConfigError)",
+    "_http_token_value(token, \"auth_token\", 8, ConfigError)",
+)
+
+
 GJ_CONTROLS = {
     "control: 2nd compare_digest": (rule_j1, GJ_J1_CLEAN, GJ_J1_PLANTED,
                                     ("3 compare_digest call(s)",
@@ -18517,6 +18676,12 @@ GJ_CONTROLS = {
                                        "_RT_KIND_AUTH_PROFILES.update() mutates the registry",
                                        "_KINDS is bound 2 time(s), expected exactly once",
                                        "0 module-level _rt_check_kind_table(_RT_KIND_TABLE) call(s)")),
+    "control: J40 plants": (rule_j40, GJ_J40_CLEAN, GJ_J40_PLANTED,
+                            ("_HeaderDeadlineReader cap is",
+                             "no class-level front_log = log",
+                             "handle_error reads the host global log",
+                             "class attribute preauth_s snapshots",
+                             "_http_token_value called with")),
 }
 
 
@@ -18539,7 +18704,8 @@ def gj_control(checker, clean, planted, needles):
 
 
 def group_j_static(suite):
-    """J1-J4, J13 and J37 over the live router, then their planted controls J15-J19, J23, J36 and J38."""
+    """J1-J4, J13, J37 and J40 over the live router, then their planted controls J15-J19, J23, J36,
+    J38 and J41."""
     rel = os.path.relpath(SERVER, H.REPO_ROOT)
     results = {}
     try:
@@ -18596,6 +18762,18 @@ def group_j_static(suite):
                             ["scope       : %s, derived once from %s: %s" % (rel, GJ_REG_TABLE,
                                                                           ", ".join(GJ_REG_DERIVED)),
                              "check       : %s(%s) at module level" % (GJ_REG_CHECK, GJ_REG_TABLE)])
+        except Exception as exc:  # noqa: BLE001 -- a broken rule fails, never aborts the group
+            results[cid] = (["rule raised %s: %s" % (type(exc).__name__, str(exc)[:200])], [])
+
+    # J40 -- the front's injected policy, over the live router (R-0072).
+    if source is not None:
+        cid = "front policy bound"
+        try:
+            results[cid] = (rule_j40(source),
+                            ["scope       : %s: %s, %s, every _HeaderDeadlineReader call"
+                             % (rel, GJ_FRONT_SERVER, GJ_FRONT_HANDLER),
+                             "cap         : %s; per-recv timeout: self.timeout; logger: self.front_log"
+                             % GJ_FRONT_CAP])
         except Exception as exc:  # noqa: BLE001 -- a broken rule fails, never aborts the group
             results[cid] = (["rule raised %s: %s" % (type(exc).__name__, str(exc)[:200])], [])
 

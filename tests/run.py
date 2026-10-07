@@ -451,7 +451,9 @@ SUITES = [
      "generator's census read path -- fleet, sources, per-block hosts and the "
      "hand-copy walk with its declared reasons -- derived, sorted, writes "
      "nothing; and every host parses and emits its peer frames through the "
-     "strict JSON blocks, with every other bare parse declared", 110),
+     "strict JSON blocks, with every other bare parse declared; and the HTTP "
+     "front's two hosts pinned: every stdlib override in their front classes "
+     "generated or declared with a reason", 118),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
@@ -642,7 +644,7 @@ SUITES = [
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
-     "builder declared", 60),
+     "builder declared", 61),
     # TYPED: a fixed case table (A 6, B 9, C 5, E 2).
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
@@ -691,21 +693,24 @@ SUITES = [
     # only after auth = 105; R-0075 added J45, the ready file removed on an
     # ordered shutdown = 106; R-0067/R-0068 added G8 and J46, a NaN /
     # Infinity token or an over-long integer literal answered -32700 on both
-    # fronts = 108), so a count that moves is the alarm, not noise.
+    # fronts = 108; R-0072 added K5, the front's injected policy pinned,
+    # and J47, a weak bearer token refused at start = 110), so a count that
+    # moves is the alarm, not noise.
     ("mcp_proxy", run_mcp_proxy,
      "mcp-proxy, the aggregating relay: config refusals, eager start and "
      "duplicate-tool refusal, id/progress remapping, cancel forwarded with "
      "the child's own id, restart with backoff/budget/disable, framing, "
      "timeout, orphan-free shutdown, static AST rules, sandbox hygiene; "
-     "Streamable HTTP: bearer, Origin/Host, session lifecycle, every "
+     "Streamable HTTP: a weak bearer token refused at start, bearer, "
+     "Origin/Host, session lifecycle, every "
      "tools/call as SSE with keepalive, caps, shutdown with live traffic, "
      "total header deadline, strict headers, deep nesting, malformed "
      "header lines, id-less initialize, request id shape, fixed body-less "
      "stdlib refusals, 100 Continue only after auth, ready file removed "
-     "on shutdown, NaN / over-long numbers refused -32700", 108),
+     "on shutdown, NaN / over-long numbers refused -32700", 110),
     # TYPED: a fixed case table (A 49, B 31, C 14, D 16, E 14, F 25, G 22,
-    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 39, K 26, L 20, M 23, N 42,
-    # O 18 = 382), so a count that moves is the alarm, not noise.
+    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 41, K 26, L 20, M 23, N 42,
+    # O 18 = 384), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
@@ -713,7 +718,7 @@ SUITES = [
      "registry, Mistral translation and stream state machine, the codex "
      "and openai Responses kinds (request translation and stream), OAuth "
      "token store, login and config write-back, timeouts and disconnects "
-     "per kind, secret leaks, static rules, hygiene", 382),
+     "per kind, secret leaks, static rules, hygiene", 384),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

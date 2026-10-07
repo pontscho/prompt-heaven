@@ -38,9 +38,10 @@ The case count is TYPED in run.py's SUITES table: this is a fixed case table,
 so a count that moves is the alarm.  The total below is the expected value; the
 run is authoritative.
 
-Total: 108 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 8, H 1, I 6, J 46, K 4,
+Total: 110 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 8, H 1, I 6, J 47, K 5,
 L 4; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4; R-0069 added
-J43, R-0076 J44, R-0075 J45; R-0067/R-0068 added G8 and J46).
+J43, R-0076 J44, R-0075 J45; R-0067/R-0068 added G8 and J46; R-0072 added K5
+and J47).
 
 Usage:
   python3 tests/test_mcp_proxy.py
@@ -60,7 +61,8 @@ Groups:
                   a NaN / Infinity token or an over-long integer literal
   H  timeout   -- call_timeout cancels the child call
   I  shutdown  -- stdin EOF, grandchild sweep, SIGTERM, the stop ladder
-  J  http      -- refuse-to-start rules, auth, Origin/Host, framing refusals,
+  J  http      -- refuse-to-start rules (incl. a short or whitespace-holding
+                  token), auth, Origin/Host, framing refusals,
                   sessions, SSE vs JSON, disconnect vs cancel, eviction, caps;
                   constant-time bearer and structure-only handler logs (AST),
                   no token / session id in the logs, Origin allowlist,
@@ -71,7 +73,8 @@ Groups:
                   malformed header lines, an id-less initialize, an id that
                   is not a string or integer (initialize and a deep list id),
                   a NaN / Infinity token or an over-long integer literal
-  K  static    -- AST over the proxy source: spawn shape, logging, API floor
+  K  static    -- AST over the proxy source: spawn shape, logging, API floor,
+                  the front's injected policy (K5)
   L  hygiene   -- every write under .claude/tmp, no bytecode, no new repo paths,
                   _log_value marks every cut
 """
@@ -2404,7 +2407,7 @@ def group_i(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
-# J. Streamable HTTP  (J1-J45)
+# J. Streamable HTTP  (J1-J47)
 # ---------------------------------------------------------------------------
 
 READY_TIMEOUT_S = 10.0       # --ready-file must appear within this
@@ -2947,6 +2950,21 @@ def group_j(suite, fixture_root):
                  check_refused(sandbox, "0644", rc, err, ["--token-file"], secret=token),
                  detail=["token file  : mode 0644 (chmod, umask-proof)"])
 
+    # J47 -- a weak token: one character under the 32 floor; a full-length one
+    # holding a space (_http_token_file strips only the one trailing newline, so
+    # the inner space reaches the charset check).  R-0072: the floor and the
+    # error class are now passed in, so this pins what the caller passes.
+    problems = []
+    spaced = new_token()
+    spaced = spaced[:9] + " " + spaced[10:]
+    for label, weak in (("j47-short", new_token()[:31]), ("j47-space", spaced)):
+        sandbox, cfgpath, _good, tok = start_sandbox(label)
+        write_file(tok, weak + "\n")
+        rc, err = refused_http(sandbox, http_argv(sandbox, cfgpath, "--token-file", tok))
+        problems += check_refused(sandbox, label, rc, err, ["--token-file"], secret=weak)
+    suite.record(GJ, "weak token -> rc 2", problems,
+                 detail=["tokens      : 31 chars; 48 chars with a space"])
+
     # J3 -- a non-loopback bind without --allow-remote; IPv6 and a host name;
     # a busy port (bound before any spawn: one line, no .pids).
     sandbox, cfgpath, token, tok = start_sandbox("j3")
@@ -3461,6 +3479,28 @@ class _ProxyHttpHandler:
     def _precheck(self):
         log.debug("auth %s", self.headers.get("Authorization"))
 '''
+# K5 plant-and-detect control (R-0072): a logger rebound away from the host's, the
+# module global read in handle_error and parse_request, the router's cap passed,
+# and a literal token floor.
+K5_PLANT = '''\
+def load_http_settings(token):
+    return _http_token_value(token, "auth_token", 8, ConfigError)
+class _ProxyHttpServer:
+    front_log = logging.getLogger("x")
+    def handle_error(self, request, client_address):
+        log.warning("http handler failed: %s", "T")
+class _ProxyHttpHandler:
+    timeout = _HTTP_HEADER_TIMEOUT_S
+    def setup(self):
+        self._header_reader = _HeaderDeadlineReader(self.connection, _HTTP_SOCKET_TIMEOUT_S)
+    def parse_request(self):
+        self.connection.settimeout(_HTTP_HEADER_TIMEOUT_S)
+'''
+K5_PLANT_NEEDLES = ("no class-level front_log = log",
+                    "_ProxyHttpServer.handle_error reads the host global log",
+                    "_HeaderDeadlineReader cap is",
+                    "_ProxyHttpHandler.parse_request reads the host global _HTTP_HEADER_TIMEOUT_S",
+                    "_http_token_value called with")
 
 
 def _handler_class(tree):
@@ -4563,7 +4603,7 @@ def j45_ready_file(suite, fixture_root, mod, mod_why):
 
 
 # ---------------------------------------------------------------------------
-# K. static AST over Scripts/mcp-proxy.py  (4 cases)
+# K. static AST over Scripts/mcp-proxy.py  (5 cases)
 # ---------------------------------------------------------------------------
 
 # Every ChildClient method that handles child-side wire data, read or written.
@@ -4572,6 +4612,15 @@ K3_SITES = ("_reader_loop", "_on_response", "_reply_to_child", "_die",
 K3_SEED = ("line", "msg", "obj", "data", "payload")   # names seeded as payload (WL.LEAK)
 K4_ASYNCIO = ("timeout", "TaskGroup", "Runner")
 K4_NAMES = ("ExceptionGroup", "BaseExceptionGroup")
+# K5 (R-0072): the front's classes, the reader cap this host passes, and the host
+# globals the shared members must not read: (class, members, global).
+K5_CLASSES = ("_ProxyHttpServer", "_ProxyHttpHandler")
+K5_CAP = "_HTTP_HEADER_TIMEOUT_S"
+K5_TIMEOUT = "_HTTP_HEADER_TIMEOUT_S"
+K5_GLOBAL_READS = (("_ProxyHttpServer", ("server_bind", "process_request", "handle_error"), "log"),
+                   ("_ProxyHttpHandler", ("parse_request",), "_HTTP_HEADER_TIMEOUT_S"))
+K5_TOKEN_MIN = "_TOKEN_MIN_LEN"   # (f): _http_token_value's 3rd argument
+K5_ERROR = "ConfigError"          # (f): and its 4th
 
 
 def _is_name(node, name):
@@ -4644,6 +4693,69 @@ def k4_api_311(tree):
     return sorted(found)
 
 
+def _class_assign(cls, target, value):
+    """True when the body of ClassDef *cls* holds `target = value` (both bare names)."""
+    return any(isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+               and _is_name(stmt.targets[0], target) and _is_name(stmt.value, value)
+               for stmt in cls.body)
+
+
+def k5_front_policy(tree):
+    """[(lineno, what)]: the front's policy reaches the members shared with the
+    llm-router injected (R-0072), never as a host global -- (a) _ProxyHttpServer
+    holds `front_log = log`; (b) _ProxyHttpHandler holds `timeout =
+    _HTTP_HEADER_TIMEOUT_S`; (c) every _HeaderDeadlineReader call passes exactly
+    two positional args, the cap _HTTP_HEADER_TIMEOUT_S; (d) server_bind,
+    process_request and handle_error read no `log`, parse_request no
+    _HTTP_HEADER_TIMEOUT_S; (f) every _http_token_value call passes exactly four
+    positional args, the 3rd _TOKEN_MIN_LEN and the 4th ConfigError.  The
+    router's J40 is the same rule with its names."""
+    found = []
+    classes = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name in K5_CLASSES:
+            classes.setdefault(node.name, node)
+    for name in K5_CLASSES:
+        if name not in classes:
+            found.append((0, "no class %s" % name))
+    server = classes.get("_ProxyHttpServer")
+    handler = classes.get("_ProxyHttpHandler")
+    if server is not None and not _class_assign(server, "front_log", "log"):
+        found.append((server.lineno, "_ProxyHttpServer: no class-level front_log = log"))
+    if handler is not None and not _class_assign(handler, "timeout", K5_TIMEOUT):
+        found.append((handler.lineno, "_ProxyHttpHandler: no class-level timeout = %s" % K5_TIMEOUT))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_name(node.func, "_HeaderDeadlineReader"):
+            if len(node.args) != 2 or node.keywords:
+                what = "%d args" % (len(node.args) + len(node.keywords))
+            elif not _is_name(node.args[1], K5_CAP):
+                what = ast.dump(node.args[1])
+            else:
+                continue
+            found.append((node.lineno, "_HeaderDeadlineReader cap is %s, expected %s" % (what, K5_CAP)))
+    for cls_name, members, glob in K5_GLOBAL_READS:
+        cls = classes.get(cls_name)
+        if cls is None:
+            continue
+        for stmt in cls.body:
+            if not (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name in members):
+                continue
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Name) and node.id == glob and isinstance(node.ctx, ast.Load):
+                    found.append((node.lineno, "%s.%s reads the host global %s" % (cls_name, stmt.name, glob)))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_name(node.func, "_http_token_value"):
+            if len(node.args) != 4 or node.keywords:
+                what = "%d args" % (len(node.args) + len(node.keywords))
+            elif _is_name(node.args[2], K5_TOKEN_MIN) and _is_name(node.args[3], K5_ERROR):
+                continue
+            else:
+                what = "%s, %s" % (ast.dump(node.args[2]), ast.dump(node.args[3]))
+            found.append((node.lineno, "_http_token_value called with %s, expected %s, %s"
+                          % (what, K5_TOKEN_MIN, K5_ERROR)))
+    return sorted(found)
+
+
 def _child_client_methods(tree):
     """{name: FunctionDef} of class ChildClient's methods, or None if no such class."""
     for node in ast.walk(tree):
@@ -4662,9 +4774,10 @@ def group_k(suite):
 
     Static, against the live file.  K3 runs `test_wire_log`'s own taint
     machinery (imported, not copied), so the child-side wire is judged by the
-    same rule as `McpServer.run` / `_write`.  None of the four cases has a
+    same rule as `McpServer.run` / `_write`.  None of K1-K4 has a
     plant-and-detect control (declared): K3's rule is controlled in
-    `test_wire_log` group D, K1/K2/K4 are fixed refusal lists.
+    `test_wire_log` group D, K1/K2/K4 are fixed refusal lists; K5 carries its
+    own plant (K5_PLANT), which must be flagged or the case FAILs.
     """
     rel = os.path.relpath(SERVER, H.REPO_ROOT)
     try:
@@ -4673,7 +4786,8 @@ def group_k(suite):
     except (OSError, SyntaxError) as exc:
         why = ["cannot parse %s: %s: %s" % (rel, type(exc).__name__, exc)]
         for cid in ("no shell, os.system, os.popen", "spawn: stdin, session, limit",
-                    "child-side logs structure only", "no 3.11+ asyncio API"):
+                    "child-side logs structure only", "no 3.11+ asyncio API",
+                    "front policy bound"):
             suite.record(GK, cid, why)
         return
 
@@ -4722,6 +4836,17 @@ def group_k(suite):
                             else " (not checkable on this interpreter)"),
                          "note        : a fixed refusal list, no plant-and-detect "
                          "control (declared)"])
+
+    # K5 -- the front's policy is injected, never read as a host global (R-0072).
+    problems = _findings(k5_front_policy(tree))
+    planted = _findings(k5_front_policy(ast.parse(K5_PLANT)))
+    for needle in K5_PLANT_NEEDLES:
+        if not any(needle in finding for finding in planted):
+            problems.append("the K5 plant was not flagged: %r (findings: %s)" % (needle, planted[:4] or "none"))
+    suite.record(GK, "front policy bound", problems,
+                 detail=["scope       : %s: %s, every _HeaderDeadlineReader call" % (rel, ", ".join(K5_CLASSES)),
+                         "cap         : %s; per-recv timeout: self.timeout; logger: self.front_log" % K5_CAP,
+                         "control     : K5_PLANT flagged %d time(s)" % len(planted)])
 
 
 # ---------------------------------------------------------------------------
