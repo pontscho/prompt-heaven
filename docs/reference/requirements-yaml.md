@@ -8,8 +8,8 @@ sources:
   - requirements.yaml
   - Scripts/task-validator.py
 verified:
-  commit: 575d201
-  date: 2026-10-06
+  commit: 2ef3ef9
+  date: 2026-10-07
 links:
   - scripts
   - skills
@@ -193,7 +193,10 @@ by the mcp-proxy graph (3250 in and 4157 out), whose header states that it is no
 a roadmap item and carries no `roadmap_item` key on purpose `requirements.yaml`.
 The mcp-proxy graph went the same way in `130f392`, replaced by the llm-router
 graph (3538 in and 3243 out), whose header likewise says it is not a roadmap item
-`requirements.yaml`.
+`requirements.yaml`. The llm-router graph went the same way in `2ef3ef9`,
+replaced by the graph for the router's `codex` and `openai` Responses kinds and the
+OAuth canonical source (2930 in and 3549 out), whose header again says it is not a
+roadmap item `requirements.yaml`.
 
 That is the plainest argument for this wiki that the repo makes on its own. Both
 displaced *features* still have readable designs here — [[spec-purity-unification]]

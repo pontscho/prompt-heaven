@@ -7,8 +7,8 @@ description: Standalone Python scripts -- MCP servers and requirements.yaml task
 sources:
   - Scripts
 verified:
-  commit: 575d201
-  date: 2026-10-06
+  commit: 2ef3ef9
+  date: 2026-10-07
 links:
   - overview
   - mcp-proxy
@@ -1062,17 +1062,24 @@ that Claude Code talks to instead of Anthropic, run by path with
 `--config <file>` and reached by pointing `ANTHROPIC_BASE_URL` at its loopback
 port `Scripts/llm-router.py:_rt_parser`. It accepts the Anthropic Messages API,
 routes each request by its exact `model` string, then the config's `default`
-`Scripts/llm-router.py:_rt_route`, and hands it to one of three backend kinds
+`Scripts/llm-router.py:_rt_route`, and hands it to one of the backend kinds
 `Scripts/llm-router.py:KIND_CLASSES`: `passthrough` (an Anthropic-compatible
 upstream, relayed as-is), `llamacpp` (llama-server's own `/v1/messages`, its
-deviations repaired by named quirk rows) and `mistral` (translated to and from
-chat completions). Routing and secrets live in one JSON config that must be a
-regular file owned by the user with mode `0600`, opened without following a
-symlink `Scripts/llm-router.py:_rt_read_config_file`; network settings are flags,
-and there is no inline-config flag because argv is visible in `ps`. Its HTTP
-front is an adapted copy of [[mcp-proxy]]'s rather than a canonical source, and
-its one generated region is the logging block ([[generated-regions]]). The
-command line, the config schema, the per-kind header allow-lists, the security
-rules, the `llm_router` suite and the declared limits are [[llm-router]]; why it
-routes by model and translates at the edge is
+deviations repaired by named quirk rows), `mistral` (translated to and from
+chat completions), and `codex` and `openai`, which speak the OpenAI Responses
+API through one adapter `Scripts/llm-router.py:ResponsesAdapter` driven by a
+profile row `Scripts/llm-router.py:ResponsesProfile` — codex over a ChatGPT
+OAuth login, openai over an API key or OAuth. Routing and secrets live in one
+JSON config that must be a regular file owned by the user with mode `0600`,
+opened without following a symlink
+`Scripts/llm-router.py:_rt_read_config_file`; network settings are flags, and
+there is no inline-config flag because argv is visible in `ps`. An OAuth backend
+is signed in by the `login` subcommand (browser or device flow)
+`Scripts/llm-router.py:_rt_login`, which writes its tokens back into that same
+config. Its HTTP front is an adapted copy of [[mcp-proxy]]'s rather than a
+canonical source, and its generated regions are the logging block and the OAuth
+core from `Scripts/_mcp_oauth.py` ([[generated-regions]]). The
+command line, the config schema and its OAuth write-back, the per-kind header
+allow-lists, the security rules, the `llm_router` suite and the declared limits
+are [[llm-router]]; why it routes by model and translates at the edge is
 [[0028-route-by-model-translate-at-the-edge]].

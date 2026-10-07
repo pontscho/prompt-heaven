@@ -3,15 +3,15 @@ name: llm-router
 type: component
 status: active
 title: llm-router — an Anthropic Messages router for Claude Code
-description: The stdlib-only HTTP server between Claude Code and five kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex or openai adapter, the last two speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
+description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex or openai adapter, the last two speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/llm-router.py
   - Scripts/_mcp_oauth.py
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: 575d201
-  date: 2026-10-06
+  commit: 2ef3ef9
+  date: 2026-10-07
 links:
   - 0028-route-by-model-translate-at-the-edge
   - mcp-proxy
@@ -19,6 +19,7 @@ links:
   - scripts
   - tests
   - generated-regions
+  - security-review-20261007-123500
   - 0011-a-truncated-payload-carries-the-first-cookie
   - 0014-a-canonical-source-is-a-domain
   - 0015-ambiguity-is-the-defect
@@ -613,6 +614,9 @@ ordinary entries until the cap evicts the oldest
 
 ## Security
 
+The code-mode review of the Responses kinds and the OAuth client, and the five
+findings it fixed, is [[security-review-20261007-123500]].
+
 **Inbound.** The bind is an IPv4 literal, loopback by default, and any other
 address needs `--allow-remote`. Each request is checked from its request line
 and headers only, before any body byte is read, in this order: header defects,
@@ -706,7 +710,7 @@ hangs up, per backend kind `tests/test_llm_router.py:group_h`, secret leaks
 `tests/test_llm_router.py:group_i`, static AST rules over the router
 source, the declared hand copies and sandbox hygiene
 `tests/test_llm_router.py:group_j_static` `tests/test_llm_router.py:group_j`
-`tests/test_llm_router.py:group_j_hygiene`, and five groups for the Responses
+`tests/test_llm_router.py:group_j_hygiene`, and the groups for the Responses
 kinds and OAuth: Anthropic-to-Responses request translation
 `tests/test_llm_router.py:group_k`, the config write-back — flock, merge,
 directory-relative rename `tests/test_llm_router.py:group_l`, the Responses
