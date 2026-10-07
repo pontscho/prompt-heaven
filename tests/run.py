@@ -684,8 +684,8 @@ SUITES = [
     # Phase 1, plus group J's 33 HTTP cases = 90; the round-1 review added
     # A13, G6 and J34-J38 = 97; the round-2 review added J39 and J40 = 99;
     # the round-3 review added G7, J41, J42 and L4 = 103; R-0069 added J43,
-    # the stdlib's pre-auth refusals = 104), so a count that moves is the
-    # alarm, not noise.
+    # the stdlib's pre-auth refusals = 104; R-0076 added J44, 100 Continue
+    # only after auth = 105), so a count that moves is the alarm, not noise.
     ("mcp_proxy", run_mcp_proxy,
      "mcp-proxy, the aggregating relay: config refusals, eager start and "
      "duplicate-tool refusal, id/progress remapping, cancel forwarded with "
@@ -695,7 +695,7 @@ SUITES = [
      "tools/call as SSE with keepalive, caps, shutdown with live traffic, "
      "total header deadline, strict headers, deep nesting, malformed "
      "header lines, id-less initialize, request id shape, fixed body-less "
-     "stdlib refusals", 104),
+     "stdlib refusals, 100 Continue only after auth", 105),
     # TYPED: a fixed case table (A 48, B 31, C 14, D 16, E 14, F 25, G 22,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 33, K 25, L 20, M 21, N 35,
     # O 16 = 363), so a count that moves is the alarm, not noise.

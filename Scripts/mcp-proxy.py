@@ -2126,6 +2126,12 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
             self._header_reader.deadline = None
             self.connection.settimeout(_HTTP_HEADER_TIMEOUT_S)
 
+    def handle_expect_100(self) -> bool:
+        # Called from parse_request, before any auth: send nothing (R-0076, the
+        # router's V37). _post sends the 100 Continue itself once _precheck and
+        # the media-type and framing checks pass.
+        return True
+
     def log_message(self, format, *args) -> None:  # noqa: A002 -- stdlib signature
         # Structure only (ADR 0011): never the stdlib's `format % args` text,
         # which can quote the raw request line; never headers, query or body.
@@ -2333,6 +2339,15 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
         if length > settings.max_body:
             self._refuse(413)
             return
+        # 6a. the interim answer handle_expect_100 withheld, now that the bearer,
+        # Origin/Host, media type and framing passed (the stdlib's condition,
+        # minus its timing; R-0076). Any other Expect value is ignored, as the
+        # router does. The version test keeps an HTTP/0.9 head out of it.
+        if (self.headers.get("Expect") or "").strip().lower() == "100-continue" \
+                and self.request_version >= "HTTP/1.1":
+            self.send_response_only(100)
+            self.end_headers()
+            self.wfile.flush()
         # 7. read exactly Content-Length bytes; parse
         raw = self.rfile.read(length) if length else b""
         if len(raw) != length:

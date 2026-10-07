@@ -38,9 +38,9 @@ The case count is TYPED in run.py's SUITES table: this is a fixed case table,
 so a count that moves is the alarm.  The total below is the expected value; the
 run is authoritative.
 
-Total: 104 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 7, H 1, I 6, J 43, K 4,
+Total: 105 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 7, H 1, I 6, J 44, K 4,
 L 4; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4; R-0069 added
-J43).
+J43, R-0076 J44).
 
 Usage:
   python3 tests/test_mcp_proxy.py
@@ -2358,7 +2358,7 @@ def group_i(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
-# J. Streamable HTTP  (J1-J43)
+# J. Streamable HTTP  (J1-J44)
 # ---------------------------------------------------------------------------
 
 READY_TIMEOUT_S = 10.0       # --ready-file must appear within this
@@ -3877,6 +3877,55 @@ def j43_rows(host):
     )
 
 
+J44_INTERIM_WAIT_S = 2.0     # J44: how long the client waits for a 100 before it gives up
+J44_HEAD_RX = re.compile(rb"(?:^|\r\n\r\n)HTTP/1\.[01] ([0-9]{3}) ")
+
+
+def expect_exchange(client, pairs, length, body=None):
+    """(statuses, raw bytes, closed, body sent?) of one POST that carries its
+    head first and its body only after a 100 Continue (when *body* is given).
+    A refusal row passes body None: the body is never sent, so a refusal must
+    come on the head alone. *statuses* is every response head in order."""
+    lines = ["POST %s HTTP/1.1" % client.path, "Host: %s:%d" % (client.host, client.port)]
+    lines += ["%s: %s" % kv for kv in pairs]
+    lines.append("Content-Length: %d" % length)
+    head = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+    data, closed, sent = b"", False, False
+    with socket.create_connection((client.host, client.port), timeout=J_RAW_TIMEOUT_S) as sock:
+        sock.sendall(head)
+        deadline = time.monotonic() + J44_INTERIM_WAIT_S
+        while b"\r\n\r\n" not in data and time.monotonic() < deadline:
+            sock.settimeout(max(0.05, deadline - time.monotonic()))
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                break
+            except ConnectionResetError:
+                closed = True
+                break
+            if not chunk:
+                closed = True
+                break
+            data += chunk
+        if body is not None and not closed and data.startswith(b"HTTP/1.1 100 "):
+            sock.sendall(body)
+            sent = True
+        sock.settimeout(J_RAW_TIMEOUT_S)
+        while not closed:
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                break
+            except ConnectionResetError:
+                closed = True
+                break
+            if not chunk:
+                closed = True
+                break
+            data += chunk
+    return [int(m) for m in J44_HEAD_RX.findall(data)], data, closed, sent
+
+
 def strict_pairs(client, sid=None, version=PROTOCOL_VERSION, extra=()):
     """The SDK's header pairs, plus Connection: close (the raw read then ends at
     the answer) and *extra* pairs appended as-is, so a name may repeat."""
@@ -4099,6 +4148,50 @@ def group_j_strict(suite, fixture_root, mod, mod_why):
         return problems, ["answers     : %s" % "; ".join(got),
                           "after       : initialize %d" % after.status]
 
+    # J44 -- the 100 Continue is sent only after the bearer, Origin/Host, media
+    # type and framing pass, just before the body is read (R-0076): a refused
+    # request gets its final status with no interim 100; an accepted one gets
+    # exactly one, and its body is sent only after it. An Expect value other
+    # than 100-continue is ignored, as the router does: no 100, no 417.
+    def j44(proxy, client):
+        if mod is None:
+            return [mod_why], []
+        body = json.dumps(init_body()).encode("utf-8")
+
+        def pairs(expect, token=True, extra=None):
+            return (list(client.headers(None, PROTOCOL_VERSION, token=token, extra=extra).items())
+                    + [("Connection", "close"), ("Expect", expect)])
+
+        refusals = (
+            ("wrong bearer", pairs("100-continue", token="tf-wrong-" + secrets.token_urlsafe(24)),
+             len(body), 401),
+            ("foreign Origin", pairs("100-continue", extra={"origin": J_EVIL_ORIGIN}), len(body), 403),
+            ("wrong media type", pairs("100-continue", extra={"content-type": "text/plain"}),
+             len(body), 415),
+            ("Content-Length over the cap", pairs("100-continue"), mod._HTTP_BODY_LIMIT + 1, 413),
+        )
+        problems, got = [], []
+        for label, hdrs, length, want in refusals:
+            statuses, data, closed, _sent = expect_exchange(client, hdrs, length)
+            got.append("%s %r" % (label, statuses))
+            if statuses != [want]:
+                problems.append("%s: response heads %r, expected [%d] (no interim 100)"
+                                % (label, statuses, want))
+            if not closed:
+                problems.append("%s: the server did not close the connection" % label)
+        for label, expect in (("100-continue", "100-continue"), ("100-Continue", "100-Continue")):
+            statuses, data, closed, sent = expect_exchange(client, pairs(expect), len(body), body)
+            got.append("accepted, Expect %s %r" % (label, statuses))
+            if statuses != [100, 200] or not sent:
+                problems.append("accepted, Expect %s: response heads %r (body sent after a 100: %s), "
+                                "expected [100, 200]" % (label, statuses, sent))
+        status, _headers, _closed, data = raw_exchange(client, pairs("tf-other"), body)
+        others = [int(m) for m in J44_HEAD_RX.findall(data)]
+        got.append("Expect tf-other %r" % others)
+        if others != [200]:
+            problems.append("Expect tf-other: response heads %r, expected [200]" % others)
+        return problems, ["answers     : %s" % "; ".join(got)]
+
     http_session(suite, fixture_root, "j-strict", [
         ("header trickle cut at deadline", j34),
         ("deep nesting -> 400 -32700", j35),
@@ -4107,6 +4200,7 @@ def group_j_strict(suite, fixture_root, mod, mod_why):
         ("malformed header line refused", j40),
         ("deep list id answered", j42),
         ("stdlib refusals fixed, body-less", j43),
+        ("100 Continue only after auth", j44),
     ], detail=["proxy       : --http --port 0, default caps"])
 
     # J38 -- an initialize refused at the in-flight cap leaves no session behind.
