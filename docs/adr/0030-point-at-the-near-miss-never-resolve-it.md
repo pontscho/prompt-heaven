@@ -246,3 +246,69 @@ Accepted and declared, not gated beyond what is named.
 - **The alias resolvers stay hand-written,** each host's own, as ADR 0015's
   Option 7 left them. The suggestion reads the same tables they read; it does
   not hold them equal.
+
+## Addendum (2026-10-08): The silent hosts refuse an unknown parameter; git keeps its flag channel
+
+Status: decided 2026-10-08 by the user (Zoltán) and implemented in the working tree on top of `f357120`, not yet committed when this addendum was written. Every number below is a count at the moment of the decision; the live counts are in `tests/run.py:SUITES` and in the measured regions of [[generated-regions]].
+
+### Alternative 5 is decided: the silent hosts refuse
+
+The user's decision: a host that drops an unknown parameter must complain, and complain sensibly enough that the model can work out what is wrong. That settles Alternative 5, deferred above, and retires the declared limit that eleven hosts get no parameter suggestion. Of those eleven, nine now refuse: mcp-forge, mcp-jenkins, mcp-tshark, mcp-context7, mcp-lldb, mcp-gdc and the three legacy LSP servers mcp-clangd, mcp-cuda and mcp-lua-lsp. The other two stay outside on purpose: mcp-git (below), and the proxy, which has no tool arguments of its own and relays a child's params verbatim ([[0027-the-proxy-relays-it-never-composes]]).
+
+Each of the nine answers a key its function does not read with `Unknown params for '<fn>': <keys>. Accepted: <list>.` followed by the near-miss pointer, with `isError` set ([[0010-a-handler-failure-must-reach-iserror]]). The sentence is the one the six original refusers already wrote, so a caller reads the fleet one way.
+
+### A second block in the same source
+
+The sentence is a second block of `Scripts/_mcp_dispatch.py`, `_unknown_params_refusal(function, params, accepted, aliases=None)` `Scripts/_mcp_dispatch.py:_unknown_params_refusal`. It sorts the unknown keys and the accepted names, appends `_did_you_mean`'s pointer, and answers an empty string when every key is known, so a host calls it unconditionally and refuses only on a non-empty answer. It answers the source's one question (how a dispatcher answers a name it does not know), so [[0014-a-canonical-source-is-a-domain]]'s test asks for no new source. It reads `_did_you_mean`, so each of its nine hosts names both blocks on one marker.
+
+Each host keeps its own `ACCEPTED_PARAMS` table per function, written by hand: which parameters a function reads is the host's own fact, the same reason the alias resolvers stay hand-written ([[0015-ambiguity-is-the-defect]], Option 7).
+
+The check sits where its answer depends on the table alone, ahead of anything that can wait or fail for another reason:
+
+- mcp-forge, before it reads `project-forge.yaml` `Scripts/mcp-forge.py:handle_forge_call`;
+- mcp-jenkins, on the caller's own keys and before `_apply_project_scope` adds a `job_path`, so a configured project does not turn every call to a function without one into a refusal `Scripts/mcp-jenkins.py:handle_jenkins_call`;
+- mcp-lldb, before the session lock, so a refused call does not queue behind a long `continue` `Scripts/mcp-lldb.py:handle_lldb_call`;
+- mcp-clangd, mcp-cuda and mcp-lua-lsp, before the 90 s auto-init wait and the backend lock `Scripts/mcp-cuda.py:handle_cuda_call` `Scripts/mcp-lua-lsp.py:handle_luals_call`.
+
+Two behaviour changes came with it on the LSP hosts. All three take `relative_path` as an alias of `path`, the spelling their skills document `Scripts/mcp-clangd.py:PARAM_ALIASES`. On mcp-lua-lsp, `luals_find_references`, `luals_symbol_context` and `luals_symbol_change_impact` search the workspace by name and never read `path`, so a `path` there, which used to be dropped, is now refused, and `luals_symbol_change_impact` refuses `call_hierarchy_depth` for the same reason `Scripts/mcp-lua-lsp.py:ACCEPTED_PARAMS`.
+
+### The six original refusers were not migrated
+
+mcp-purity, mcp-postgres, mcp-search, mcp-webfetch, mcp-inspect and mcp-wiki still write the sentence by hand `Scripts/_mcp_smoke_test.py:ORIGINAL_PARAM_REFUSERS`. Their tables and resolvers predate the block and are driven by their own suites; moving them onto it is a separate change with no defect behind it. The smoke gate requires every one of the fifteen refusing hosts to answer a near-miss key with the same leading words, `Unknown params for`, so the two spellings cannot drift apart there without a red row `Scripts/_mcp_smoke_test.py:near_miss_checks`.
+
+### The gate: param_contract
+
+A refusal has one failure mode worse than the silence it replaces: a false refusal of a parameter that works today. The tables are hand-written, so a new suite, `param_contract`, holds them to the code instead of trusting them `tests/test_param_contract.py:check_host`. Per host, five rules, each comparing the table with something else:
+
+- R0 coverage: every callable spelling, aliases included, resolves to a row, and every row names a real function.
+- R1 reads: every key a handler reads, followed by AST through every helper and method the params dict is handed to, is accepted. A miss is the false refusal.
+- R2 no dead entry: every accepted key is read, by the handler or by the dispatcher on its behalf (the reply ceiling; lldb's `offset` for its pageable functions). Accept-and-ignore is the silent drop wearing a table.
+- R3 docs: every parameter the host's skill and its own tool description name for a function is accepted for it, directly or through an alias.
+- R4 aliases: every alias lands on a key some function accepts.
+
+A doc word the reader picks up that is not a parameter is declared per host with its reason, and a declaration the docs stop needing goes stale: forge's `filter` sub-keys `grep`, `grep_context` and `invert_grep`; jenkins' `buildWithParameters`, a REST endpoint; and lua-lsp's `relative_path` on `luals_symbol_context` and `luals_symbol_change_impact`, which its skill documents for `purity_call` and which this server's handlers never read, so it is refused rather than accepted to be ignored `tests/test_param_contract.py:HOSTS`. Group B drives mcp-jenkins in-process with a project scope set and proves the injected `job_path` is never what is judged, with a caller's own unknown key still refused as the control `tests/test_param_contract.py:group_judged_keys`. Group C plants every defect in a synthetic host and requires each rule to fire, and a correct synthetic host to stay silent `tests/test_param_contract.py:group_controls`. 53 cases, typed in `tests/run.py` as 5 rules times 9 hosts plus 1 judged-keys, 5 control and 2 hygiene rows, so a host that learns to refuse without a row moves the count.
+
+The live half is the smoke harness. Each of the nine has a near-miss key row that must be refused with the shared sentence and draw the canonical name, and a documented-call row, spelled as its skill (for tshark, its tool description) spells it, that must not be refused `Scripts/_mcp_smoke_test.py:DOCUMENTED_CALL`. The block itself is unit-tested in group E of `generated_region` and required in group A to be called outside its region by every host that carries it `tests/test_generated_region.py:group_unknown_params_block`: `generated_region` 137 to 140.
+
+### mcp-git keeps its flag channel, with one narrow guard
+
+mcp-git was one of the eleven, and it stays the exception. An unknown key there is not dropped: it is forwarded as `--key[=value]`, a channel its tool description documents `Scripts/mcp-git.py:GIT_CALL_TOOL` and `unknown-key-still-becomes-a-flag` pins. Which options a subcommand takes is git's to judge, and git refuses an unknown one loudly, so the decision's "complain" already holds there.
+
+What the channel could not carry is a key that cannot be an option name at all. The empty key became a bare `--`, git's path separator, so `{"": true, "range": "master..HEAD"}` ran `git log -- master..HEAD` and answered with the empty history of a file named `master..HEAD`: a silent wrong answer, which is what the decision forbids. A key that, once `_` becomes `-` and camelCase is folded, is not lower-case letters, digits and dashes starting with a letter or a digit (optionally followed by `=value`) is now refused before anything spawns, the refusal naming the named params and pointing at the nearest one `Scripts/mcp-git.py:_check_flag_keys`. Meta and positional keys are exempt, as they are in the conversion loop.
+
+### No near miss for a real git subcommand
+
+The behaviour-changes section above recorded `git rebase` drawing `rev-parse` as a loose 0.6 pointer. A real git subcommand that is not on the read-only whitelist is not a typo, and the refusal's own sentence already says what to do with it, so it now gets no pointer: a set of 51 real subcommands suppresses it `Scripts/mcp-git.py:UNEXPOSED_GIT_SUBCOMMANDS`, while a typo of an allowed one keeps it (`stauts` to `status`) `Scripts/mcp-git.py:handle_git_call`. The set is not a security boundary, since the whitelist alone decides what runs, and a suite row holds the two disjoint. Group O of `mcp_git_params` covers both git changes: 299 to 314.
+
+### Declared limits, updated
+
+- **A bare status call is not checked** on any of the nine but mcp-jenkins, which checks its empty call against the `status` row. Forge folds `status` into the empty call, so it is unchecked there too.
+- **The direct-tool path is not checked** on mcp-context7, mcp-lldb and mcp-gdc: a `tools/call` naming a function directly, which `tools/list` does not advertise, reaches the handler without the table `Scripts/mcp-context7.py:McpServer`.
+- **Two spellings of one sentence.** The block on nine hosts, a hand copy on six. They agree on the leading words the smoke gate reads, not byte for byte.
+- **param_contract sees what its readers can follow.** A whole-dict read (`items()`, `**params`) is reported as unboundable rather than guessed, a method name two classes define is not followed, and the doc reader knows the five shapes this fleet's docs use; a parameter documented in a sixth shape is not checked.
+- **The six original refusers' tables are outside param_contract,** driven by their own suites, and have no documented-call row in the smoke harness.
+- **mcp-git still answers a misspelled param through git.** A well-formed but wrong key reaches git as an unknown flag and is refused in git's words, with no near-miss pointer; only a key no option can be spelled from gets the server's own refusal.
+- **The no-pointer subcommand set is a hand list.** A real subcommand missing from it still draws a pointer when one is close enough.
+- **Unchanged:** the 0.6 cutoff stays unmeasured, and the live gate proves one near-miss row per host, plus one documented call on each of the nine.
+
+One correction to the original body, which is append-only and so is not edited: its Status paragraph says the page was not yet committed, "which is why its frontmatter says `draft`: a `verified.commit` cannot vouch for code no commit holds yet." That was true when it was written and became false when `f357120` promoted the page to `active` with `verified.commit` `eb1dd9e`. Where the body and the frontmatter disagree about the page's status, the frontmatter is authoritative.

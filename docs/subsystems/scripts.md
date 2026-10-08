@@ -8,7 +8,7 @@ sources:
   - Scripts
   - Scripts/context-guard.sh
 verified:
-  commit: da3f746
+  commit: 6321251
   date: 2026-10-08
 links:
   - overview
@@ -110,15 +110,52 @@ The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 `purity_call` entry point is recorded in [[0001-purity-server-unification]].
 
 **A refusal of a name the caller sent points at the closest real one.** An
-unknown function, an unknown parameter on a server that refuses one, and the
-proxy's unknown tool each end with ` Did you mean 'X'?` when a real name is
-close enough, and with nothing when none is. The pointer never resolves the
-name: the call is still refused, so `context_chars` is pointed at
-`context_lines` and not answered as one. The sentence comes from one generated
-block, `Scripts/_mcp_dispatch.py:_did_you_mean`, the fleet's canonical source
-for how a dispatcher answers a name it does not know ([[generated-regions]]).
-Why it points and never aliases, and its declared limits, are in
-[[0030-point-at-the-near-miss-never-resolve-it]].
+unknown function, an unknown parameter, and the proxy's unknown tool each end
+with ` Did you mean 'X'?` when a real name is close enough, and with nothing
+when none is. The pointer never resolves the name: the call is still refused,
+so `context_chars` is pointed at `context_lines` and not answered as one. The
+sentence comes from one generated block, `Scripts/_mcp_dispatch.py:_did_you_mean`,
+the fleet's canonical source for how a dispatcher answers a name it does not
+know ([[generated-regions]]). Why it points and never aliases, and its declared
+limits, are in [[0030-point-at-the-near-miss-never-resolve-it]].
+
+**An unknown parameter key is refused, never dropped.** Every server with a
+function layer but `mcp-git` (below) answers a key its function does not read with `Unknown params
+for '<fn>': <keys>. Accepted: <names>.` and the pointer, flagged `isError`. On
+the servers that learned this later (forge, jenkins, tshark, context7, lldb,
+gdc and the three legacy LSP servers) the sentence is the second generated
+block, `Scripts/_mcp_dispatch.py:_unknown_params_refusal`, read against a hand
+`ACCEPTED_PARAMS` table per function; the servers that refused first still
+write it by hand. The check is a pure function of the params and the table, so
+it runs before anything that can wait or fail for another reason: before forge
+reads its config `Scripts/mcp-forge.py:handle_forge_call`, before jenkins
+injects its project-scope `job_path` (so the injected key is never what is
+judged) `Scripts/mcp-jenkins.py:handle_jenkins_call`, before lldb takes the
+session lock `Scripts/mcp-lldb.py:handle_lldb_call`, and before the legacy LSP
+servers' auto-init wait and backend lock
+`Scripts/mcp-lua-lsp.py:handle_luals_call`. A bare status call is not checked
+(jenkins checks its empty call as `status`), and neither is the direct-tool
+path on context7, lldb and gdc, which only `<name>_call` routes through. The
+legacy LSP servers took `relative_path` as an alias of `path`, the spelling
+their skills document `Scripts/mcp-clangd.py:PARAM_ALIASES`; lua-lsp's
+`luals_find_references`, `luals_symbol_context` and
+`luals_symbol_change_impact` never read a `path` and now refuse one rather than
+ignore it `Scripts/mcp-lua-lsp.py:ACCEPTED_PARAMS`. Every table is held to
+what its handlers read and its documentation names by `param_contract`
+([[tests]]).
+
+`mcp-git` keeps its documented flag channel instead: a key it does not know
+is forwarded as `--key[=value]`, so a misspelled param reaches git as an
+unknown flag and git refuses it `Scripts/mcp-git.py:GIT_CALL_TOOL`. What it
+refuses itself is a key no git option can be spelled from (empty, a leading
+dash, a space), because the empty key became a bare `--` and turned
+`{"": true, "range": "master..HEAD"}` into `git log -- master..HEAD`, the empty
+history of a file `Scripts/mcp-git.py:_check_flag_keys`. Its subcommand refusal
+offers no near miss for a real git subcommand it does not expose (`rebase`
+used to draw `rev-parse`), while a typo of an allowed one keeps it
+`Scripts/mcp-git.py:UNEXPOSED_GIT_SUBCOMMANDS`. The proxy has no params of its
+own to check: it relays a child tool's params verbatim
+([[0027-the-proxy-relays-it-never-composes]]).
 
 That shared read loop used to await the handler on the same line of control that
 later awaits `sys.stdin.readline`, so one slow call made the server deaf to every

@@ -22,7 +22,7 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: eb1dd9e
+  commit: 6321251
   date: 2026-10-08
 links:
   - scripts
@@ -40,6 +40,7 @@ links:
   - llm-router
   - 0030-point-at-the-near-miss-never-resolve-it
   - 0029-the-http-front-is-a-domain
+  - 0027-the-proxy-relays-it-never-composes
 ---
 
 # Generated regions
@@ -139,17 +140,18 @@ scanner, which is the rule that lets a page document the marker it also carries
 <!-- BEGIN MEASURED: generated-region-census -->
 - MCP servers matching `Scripts/mcp-*.py`: 17, of which 17 carry at least one generated region
 - live generated regions in them: 173
-- block instances those regions emit: 786
-- distinct canonical blocks named on a marker: 300, out of the 359 defined by the 14 canonical sources
+- block instances those regions emit: 795
+- distinct canonical blocks named on a marker: 301, out of the 360 defined by the 14 canonical sources
 
-Regions by how many blocks one marker names: 93 name 1 block; 35 name 2 blocks; 19 name 3 blocks; 1 name 6 blocks; 8 name 7 blocks; 8 name 8 blocks; 1 name 18 blocks; 1 name 19 blocks; 2 name 21 blocks; 2 name 25 blocks; 1 name 37 blocks; 2 name 137 blocks.
+Regions by how many blocks one marker names: 84 name 1 block; 44 name 2 blocks; 19 name 3 blocks; 1 name 6 blocks; 8 name 7 blocks; 8 name 8 blocks; 1 name 18 blocks; 1 name 19 blocks; 2 name 21 blocks; 2 name 25 blocks; 1 name 37 blocks; 2 name 137 blocks.
 
-The 80 region(s) that name more than one block, by the list written on the marker:
+The 89 region(s) that name more than one block, by the list written on the marker:
 
 | Blocks named on one marker | Regions |
 |---|---|
 | `_LOG_VALUE_WIDTH`, `_LOG_KEYS_SHOWN`, `_log_value` | 17 |
 | `_result`, `_error` | 16 |
+| `_did_you_mean`, `_unknown_params_refusal` | 9 |
 | `JSON_INT_LITERAL_LIMIT`, `_json_no_constant`, `_json_finite_float`, `_json_bounded_int`, `_strict_loads`, `_strict_dumps`, `_json_error_window` | 8 |
 | `JSON_INT_LITERAL_LIMIT`, `_json_no_constant`, `_json_finite_float`, `_json_bounded_int`, `_strict_loads`, `_strict_dumps`, `_json_error_window`, `_ensure_dict` | 8 |
 | `DEFAULT_MAX_ANSWER_CHARS`, `_max_answer_chars` | 6 |
@@ -170,7 +172,7 @@ The 80 region(s) that name more than one block, by the list written on the marke
 Generated into every one of the 17 servers: `JSON_INT_LITERAL_LIMIT`, `_LOG_KEYS_SHOWN`, `_LOG_VALUE_WIDTH`, `_configure_logging`, `_did_you_mean`, `_json_bounded_int`, `_json_finite_float`, `_json_no_constant`, `_log_value`, `_strict_dumps`, `_strict_loads`.
 Generated into every server but `Scripts/mcp-proxy.py`: `_json_error_window`.
 Generated into every server but `Scripts/mcp-webfetch.py`: `_error`, `_result`.
-<!-- END MEASURED: bed31ae21a08 -->
+<!-- END MEASURED: ed94e54089f7 -->
 
 A single region may name several blocks, and that is the whole of the gap between
 the region count and the block-instance count.
@@ -222,7 +224,7 @@ decides when a sixth source is warranted are
 | `Scripts/_mcp_codesearch.py` | how a code query becomes code results from grep.app — the request, the JSON answer and its HTML snippet, the block signal, and the rendered markdown |
 | `Scripts/_mcp_chrome.py` | how a client makes the bytes a server receives indistinguishable from what Chrome sends — the ClientHello, the h2 preface and HEADERS blocks, the HTTP/1.1 request head — and how it survives what a hostile server sends back |
 | `Scripts/_mcp_concurrency.py` | how many tool calls a server runs at once |
-| `Scripts/_mcp_dispatch.py` | how a tool's dispatcher answers a name it does not know -- the near-miss pointer (`Did you mean 'X'?`) appended to an unknown-function, unknown-parameter or (on the proxy) unknown-tool refusal |
+| `Scripts/_mcp_dispatch.py` | how a tool's dispatcher answers a name it does not know -- the near-miss pointer (`Did you mean 'X'?`) appended to an unknown-function, unknown-parameter or (on the proxy) unknown-tool refusal, and the unknown-parameter refusal sentence itself |
 | `Scripts/_mcp_httpfront.py` | how a stdlib `http.server` listener takes a connection and gets it through the header phase safely — connection admission, the total header deadline, request-line hardening — plus the ready file a supervisor waits on and the bearer token value it compares against |
 | `Scripts/_mcp_json.py` | JSON-RPC envelopes, wire-value coercion, strict JSON parsing and emitting for a peer's frames, JSON error reporting |
 | `Scripts/_mcp_logging.py` | how a server CONFIGURES logging — level, sink, file mode — and how a peer-chosen structural value is written into a log line |
@@ -358,27 +360,44 @@ stays hand-written and is declared row by row in
 The decision, the adaptation table, the policy seams and the declared limits
 are [[0029-the-http-front-is-a-domain]].
 
-`Scripts/_mcp_dispatch.py` is the fourteenth. It holds one block,
-`_did_you_mean`, generated into every server (the fleet census above lists it
+`Scripts/_mcp_dispatch.py` is the fourteenth. Its first block,
+`_did_you_mean`, is generated into every server (the fleet census above lists it
 among the blocks that reach all of them): a refusal of a name a caller
 sent ends with the closest real name, by `difflib.get_close_matches` at
 `mcp-forge`'s cutoff of 0.6, and with nothing when no name is that close
-`Scripts/_mcp_dispatch.py:_did_you_mean`. The JSON source was the nearest home
+`Scripts/_mcp_dispatch.py:_did_you_mean`. Its second block,
+`_unknown_params_refusal`, is the unknown-parameter refusal itself: the
+`Unknown params for '<fn>': <keys>. Accepted: <names>.` sentence followed by
+that pointer, empty when every key is known so a host calls it unconditionally
+`Scripts/_mcp_dispatch.py:_unknown_params_refusal`. It reads `_did_you_mean`,
+so a host spells both on one marker. Its hosts are the servers that learned to
+refuse an unknown key later, each with its own `ACCEPTED_PARAMS` table per
+function; the `canonical-block-hosts` table below names them. The hosts that
+refused one first still write the same sentence by hand. The JSON source was the nearest home
 and the wrong question: it owns how a frame is enveloped and parsed and how a
 wire VALUE is coerced, and a suggestion is about the caller's NAMES and reads
 no JSON. None of the other sources is about names at all, so under
 [[0014-a-canonical-source-is-a-domain]]'s rule a second domain in any of them
-would make it a shelf. The block takes the host's tables as arguments, so it
-has no free name but `difflib`; that is what lets it be generated where the
-alias resolvers it sits beside cannot ([[0015-ambiguity-is-the-defect]],
-Option 7). A suggestion never resolves: `context_chars` is pointed at
-`context_lines` and still refused. The hosts that refuse an unknown parameter
-take the pointer there too, and they are exactly the rows of
+would make it a shelf. Both blocks take the host's tables as arguments, so
+neither has a free name but `difflib` and, for the refusal, the co-listed
+`_did_you_mean`; that is what lets them be generated where the alias resolvers
+they sit beside cannot ([[0015-ambiguity-is-the-defect]], Option 7). The
+accepted-name tables stay hand-written for the same reason: which parameters a
+function reads is the host's own fact, and `tests/test_param_contract.py` holds
+each table to the keys its handlers read and its documentation names. A
+suggestion never resolves: `context_chars` is pointed at `context_lines` and
+still refused. The hosts that refuse an unknown parameter take the pointer
+there too, and they are exactly the rows of
 `Scripts/_mcp_smoke_test.py:NEAR_MISS_PARAM`, whose coverage row derives the
-set from each host's source; every other host ignores an unknown key, so there
-is no refusal to append it to. The behaviour is unit-tested in group E and the
-call sites are driven live by `Scripts/_mcp_smoke_test.py:near_miss_checks`.
-The decision, the alternatives rejected and the declared limits are
+set from each host's source. Two servers stay outside it on purpose:
+`mcp-git`, where an unknown key becomes a `--key[=value]` git flag by design,
+so it refuses only a key no git option can be spelled from
+`Scripts/mcp-git.py:_check_flag_keys`; and the proxy, which relays a child
+tool's params verbatim and has none of its own
+([[0027-the-proxy-relays-it-never-composes]]). The behaviour is unit-tested in
+group E and the call sites are driven live by
+`Scripts/_mcp_smoke_test.py:near_miss_checks`. The decision, the alternatives
+rejected and the declared limits are
 [[0030-point-at-the-near-miss-never-resolve-it]].
 
 That column is the half no command can print: a domain is a decision about what a
@@ -396,7 +415,7 @@ answer, and the one thing this page must not let a generator answer for them.
 | `Scripts/_mcp_chrome.py` | 137 | `CHROME_PROFILE`, `CH_DEFAULT_DECODE_CAP`, `CH_HPACK_TABLE_BYTES`, `CH_MAX_BODY_BYTES`, `CH_MAX_CONTENT_CODINGS`, `CH_MAX_COOKIES`, `CH_MAX_COOKIES_PER_DOMAIN`, `CH_MAX_COOKIE_BYTES`, `CH_MAX_FRAME_BYTES`, `CH_MAX_H1_CHUNK_LINE_BYTES`, `CH_MAX_H1_HEADERS`, `CH_MAX_H1_HEAD_BYTES`, `CH_MAX_H2_CONTINUATION_FRAMES`, `CH_MAX_H2_CONTROL_FRAMES`, `CH_MAX_H2_EMPTY_FRAMES`, `CH_MAX_HANDSHAKE_BYTES`, `CH_MAX_HEADER_BLOCK_BYTES`, `CH_MAX_HEADER_LIST_BYTES`, `CH_MAX_HPACK_INT`, `CH_MAX_HPACK_INT_CONTINUATIONS`, `CH_MAX_KEY_UPDATES`, `CH_MAX_PLAINTEXT_BYTES`, `CH_MAX_RECORD_BYTES`, `CH_MAX_REDIRECTS`, `ChromeBodyTooLarge`, `ChromeClientError`, `ChromeTls12Error`, `_CH_AES_TABLES`, `_CH_ALERT_NAMES`, `_CH_BAD_PORTS`, `_CH_EE_FORBIDDEN`, `_CH_FINGERPRINT_NAMES`, `_CH_FINGERPRINT_PREFIXES`, `_CH_FRAMING_NAMES`, `_CH_FRAMING_PREFIXES`, `_CH_H2_ERROR_NAMES`, `_CH_HPACK_STATIC`, `_CH_HRR_RANDOM`, `_CH_HUFFMAN`, `_CH_HUFFMAN_DECODE`, `_CH_KEY_SHARE_BYTES`, `_CH_P256_B`, `_CH_P256_GX`, `_CH_P256_GY`, `_CH_P256_N`, `_CH_P256_P`, `_CH_PUBLIC_SUFFIXES`, `_CH_REDIRECT_CODES`, `_CH_SERVER_SHARE_BYTES`, `_CH_SITE_RANK`, `_CH_TCHAR_SYMBOLS`, `_CH_TLS13_SUITES`, `_CH_TRANSLATION_PREFIXES`, `_CH_X25519_A24`, `_CH_X25519_P`, `_ChAesGcm`, `_ChChaCha20Poly1305`, `_ChCookieJar`, `_ChDeadlineSocket`, `_ChFallbackConnection`, `_ChH1Connection`, `_ChH2Connection`, `_ChHandshakeReader`, `_ChHeaders`, `_ChHpackDecoder`, `_ChHpackEncoder`, `_ChMlKem768`, `_ChReader`, `_ChRecordCipher`, `_ChRecordReader`, `_ChResponse`, `_ChSession`, `_ChTls`, `_ChTlsStream`, `_ch_address_refused`, `_ch_aes_tables`, `_ch_alert_name`, `_ch_check_caller_headers`, `_ch_client_hello`, `_ch_cookie_crumbs`, `_ch_cookie_date`, `_ch_decode_body`, `_ch_derive_secret`, `_ch_draw`, `_ch_embedded_ipv4`, `_ch_grease`, `_ch_h2_frame`, `_ch_header_pairs`, `_ch_hello_extensions`, `_ch_hello_wire`, `_ch_hkdf_expand`, `_ch_hkdf_expand_label`, `_ch_hkdf_extract`, `_ch_hpack_decode_int`, `_ch_hpack_decode_string`, `_ch_hpack_int`, `_ch_hpack_static`, `_ch_hpack_string`, `_ch_huffman_decode`, `_ch_huffman_decode_table`, `_ch_huffman_encode`, `_ch_huffman_size`, `_ch_huffman_table`, `_ch_idna_encode`, `_ch_is_ip_host`, `_ch_is_public_suffix`, `_ch_key_share_entry`, `_ch_key_share_new`, `_ch_key_share_secret`, `_ch_leading_digits`, `_ch_open_socket`, `_ch_origin_of`, `_ch_origin_text`, `_ch_p256_add`, `_ch_p256_double`, `_ch_p256_keypair`, `_ch_p256_mul`, `_ch_p256_shared`, `_ch_parse_server_hello`, `_ch_permutation`, `_ch_profile_headers`, `_ch_public_only_policy`, `_ch_referer_for`, `_ch_sec_fetch_site`, `_ch_session_new`, `_ch_site_of`, `_ch_sni_name`, `_ch_split_url`, `_ch_traffic_cipher`, `_ch_transport_error`, `_ch_unvetted_policy`, `_ch_vec`, `_ch_x25519`, `_ch_x25519_cswap`, `_ch_x25519_keypair`, `_ch_zlib_decode`, `_chrome_profile` |
 | `Scripts/_mcp_codesearch.py` | 19 | `EXT_TO_LANG`, `_CODE_LINE_SEPARATORS`, `_SnippetParser`, `_body_is_json`, `_code_clean`, `_code_fence`, `_code_field`, `_code_line`, `_ext_to_lang`, `_grep_app_blocked`, `_grep_hits`, `_grep_str`, `build_github_url`, `detect_language`, `extract_code_from_snippet`, `format_code_results`, `parse_grep_results`, `search_github`, `warmup_code_session` |
 | `Scripts/_mcp_concurrency.py` | 1 | `MAX_INFLIGHT_REQUESTS` |
-| `Scripts/_mcp_dispatch.py` | 1 | `_did_you_mean` |
+| `Scripts/_mcp_dispatch.py` | 2 | `_did_you_mean`, `_unknown_params_refusal` |
 | `Scripts/_mcp_httpfront.py` | 11 | `_HTTP_STDLIB_REFUSAL_HEADERS`, `_HeaderDeadlineReader`, `_http_remove_ready_file`, `_http_token_value`, `_http_write_ready_file`, `_single_header`, `handle_error`, `handle_expect_100`, `parse_request`, `process_request`, `server_bind` |
 | `Scripts/_mcp_json.py` | 12 | `JSON_INT_LITERAL_LIMIT`, `_bool_param`, `_ensure_dict`, `_error`, `_int_param`, `_json_bounded_int`, `_json_error_window`, `_json_finite_float`, `_json_no_constant`, `_result`, `_strict_dumps`, `_strict_loads` |
 | `Scripts/_mcp_logging.py` | 4 | `_LOG_KEYS_SHOWN`, `_LOG_VALUE_WIDTH`, `_configure_logging`, `_log_value` |
@@ -407,8 +426,8 @@ answer, and the one thing this page must not let a generator answer for them.
 | `Scripts/_mcp_websocket.py` | 22 | `WS_MAX_FRAME_BYTES`, `WS_MAX_HANDSHAKE_BYTES`, `WS_MAX_MESSAGE_BYTES`, `WebSocketError`, `_WsConnection`, `_ws_assemble`, `_ws_connect`, `_ws_control_reply`, `_ws_encode_frame`, `_ws_handshake_request`, `_ws_handshake_split`, `_ws_handshake_verify`, `_ws_mask`, `_ws_parse_frame`, `_ws_parse_url`, `_ws_recv`, `_ws_send`, `_ws_step`, `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send` |
 | `Scripts/_mcp_zstd.py` | 25 | `ZSTD_DIRS_LINUX`, `ZSTD_DIRS_MACOS`, `ZSTD_FILES_LINUX`, `ZSTD_FILES_MACOS`, `ZSTD_MAX_CHUNK_BYTES`, `ZSTD_SONAMES_LINUX`, `ZSTD_SONAMES_MACOS`, `ZSTD_WINDOW_LOG_MAX`, `_ZSTD_D_WINDOW_LOG_MAX`, `_ZSTD_FRAME_MAGIC`, `_ZSTD_SKIPPABLE_TAIL`, `_ZSTD_STATE`, `_ZSTD_SYMBOLS`, `_ZstdInBuffer`, `_ZstdOutBuffer`, `_zstd_attempts`, `_zstd_cdll`, `_zstd_check_magic`, `_zstd_configure`, `_zstd_decompress`, `_zstd_error`, `_zstd_exists`, `_zstd_find_library`, `_zstd_load`, `_zstd_platform` |
 
-14 canonical sources define 359 blocks between them, and no name is defined by two of them.
-<!-- END MEASURED: 7fbff8b05e7b -->
+14 canonical sources define 360 blocks between them, and no name is defined by two of them.
+<!-- END MEASURED: 83c87e3a9727 -->
 
 Its closing line is the disjointness the suite gates as a check rather than a
 count. The paging row read `5` until the edit that added the logging row: the
@@ -440,9 +459,9 @@ through `_strict_loads`, a host that takes `_ensure_dict` spells all eight on on
 marker — the six, then `_json_error_window, _ensure_dict`. `Scripts/mcp-proxy.py`,
 which carries no `_json_error_window`, took the six as a new region of their own,
 and routes its child reader and its HTTP front through them as well as its
-stdio loop ([[mcp-proxy]]). All 17 servers carry
-the six and route their frame parse and frame emit through them — and, where
-they have them, a stringified `arguments` and the `_resolve_aliases` params. Their bound and refusal style mirror
+stdio loop ([[mcp-proxy]]). Every server carries the six (the fleet census
+above lists them among the blocks generated into every one) and routes its
+frame parse and frame emit through them — and, where it has them, a stringified `arguments` and the `_resolve_aliases` params. Their bound and refusal style mirror
 `_rt_loads` in the router and `_oauth_json_object` in the OAuth source, which
 were written first and stay their own.
 
@@ -459,8 +478,8 @@ It reads its two bounds, `_LOG_VALUE_WIDTH` and `_LOG_KEYS_SHOWN`, so every host
 spells `_LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value` on one marker — the one
 marker in the fleet that puts two constants side by side, which the renderer
 accepts with two blank lines between them `Scripts/amalgamate.py:render`. It is
-generated into all 17 servers and the router, and the three hand copies are
-gone.
+generated into every server and the router (the `canonical-block-hosts` table
+below names each file), and the three hand copies are gone.
 
 Which files each of those blocks actually reaches is the other half of the
 picture, and the generator counts that too `Scripts/amalgamate.py:census_hosts`:
@@ -481,6 +500,7 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `all 19 blocks (whole source)` | `Scripts/_mcp_codesearch.py` | 2 | `Scripts/mcp-search.py`, `Scripts/search_github.py` |
 | `MAX_INFLIGHT_REQUESTS` | `Scripts/_mcp_concurrency.py` | 10 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_did_you_mean` | `Scripts/_mcp_dispatch.py` | 17 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_unknown_params_refusal` | `Scripts/_mcp_dispatch.py` | 9 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-tshark.py` |
 | `_HTTP_STDLIB_REFUSAL_HEADERS` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
 | `_HeaderDeadlineReader` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
 | `_http_remove_ready_file` | `Scripts/_mcp_httpfront.py` | 2 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
@@ -602,8 +622,8 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 0 | no host |
 | `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 4 | `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 
-20 hosts scanned; 359 canonical blocks, of which 355 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
-<!-- END MEASURED: f1f2e2c800e9 -->
+20 hosts scanned; 360 canonical blocks, of which 356 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
+<!-- END MEASURED: f75302507a68 -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
