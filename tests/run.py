@@ -198,6 +198,10 @@ def run_forge_dispatch(opts):
     return run_python_suite("test_forge_dispatch", opts)
 
 
+def run_param_contract(opts):
+    return run_python_suite("test_param_contract", opts)
+
+
 def run_py_deps(opts):
     return run_python_suite("test_py_deps", opts)
 
@@ -307,7 +311,9 @@ SUITES = [
      "filtered by its own repo's .gitignore",
      230),
     ("mcp_git_params", run_mcp_git_params,
-     "mcp-git named params -> git argv, offline", 299),
+     "mcp-git named params -> git argv, offline; a real unexposed subcommand "
+     "refused with no near-miss pointer, a key no git option can be spelled "
+     "from refused", 314),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,
@@ -459,7 +465,8 @@ SUITES = [
      "strict JSON blocks, with every other bare parse declared; and the HTTP "
      "front's two hosts pinned: every stdlib override in their front classes "
      "generated or declared with a reason; and the near-miss suggestion "
-     "generated into, and called by, every server", 137),
+     "generated into, and called by, every server; and the unknown-params "
+     "refusal unit-tested and called by every host that carries it", 140),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
@@ -644,6 +651,18 @@ SUITES = [
      "forge_call dispatch: `status` answers exactly what the empty call "
      "answers on all four of its paths, each with a control proving the "
      "fixture took it, and is advertised wherever the function list is", 13),
+    # TYPED: 5 rules x 9 hosts + 1 judged-keys + 5 control + 2 hygiene. A
+    # host that learns to refuse an unknown parameter without a row here IS
+    # the defect, so a count that moves when that roster moves is the alarm
+    # working.
+    ("param_contract", run_param_contract,
+     "the accepted-parameter tables of the nine hosts that learned to refuse "
+     "an unknown key: every callable function has a row, every key a handler "
+     "reads (followed through its helpers, by AST) is accepted, nothing "
+     "accepted goes unread, every parameter the host's skill and tool "
+     "description name is accepted, every alias lands on an accepted key, "
+     "and jenkins' injected project-scope job_path is never what is judged "
+     "-- each rule proven to fire on a planted defect", 53),
     ("py_deps", run_py_deps,
      "pure Python 3.9 + stdlib: every non-stdlib import allowlisted and "
      "find_spec-guarded (never except ImportError), no removed stdlib module, "

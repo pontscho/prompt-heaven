@@ -511,10 +511,12 @@ NEAR_MISS_TOOL = {
 # near-miss key, and the canonical name the suggestion must carry. A host is in
 # this table iff its source carries the refusal sentence (PARAM_REFUSAL_MARK);
 # the coverage row derives that from the source, so a host that learns to refuse
-# a parameter cannot join the fleet without a probe. The other hosts have no
-# unknown-parameter refusal to append a suggestion to -- they ignore an unknown
-# key (or, on mcp-git, turn it into a flag by design) -- and that is a policy a
-# suggestion cannot add.
+# a parameter cannot join the fleet without a probe. Fifteen hosts refuse one
+# now. mcp-git turns an unknown key into a `--key[=value]` git flag by design
+# (its tool description documents that channel), so it has no unknown-name
+# refusal to probe -- it refuses only a key no git option can be spelled from,
+# in its own words, gated offline by tests/test_mcp_git_params.py. The proxy
+# relays a child tool's params verbatim (ADR 0027): they are the child's.
 #
 # mcp-purity's row is the case that motivated the change: `context_chars` must
 # be pointed at `context_lines`, and must NOT become an alias of it -- a
@@ -531,7 +533,51 @@ NEAR_MISS_PARAM = {
     "mcp-webfetch.py": ("fetch",          {"urll": "x"},       "url"),
     "mcp-inspect.py":  ("processes",      {"filterr": "x"},    "filter"),
     "mcp-wiki.py":     ("search",         {"queryy": "x"},     "query"),
+    # The nine that learned to refuse one later (ADR 0030's deferred
+    # Alternative 5, decided by the user). Each row is answered BEFORE the
+    # handler runs -- forge before it reads its config, the LSP hosts before
+    # the auto-init wait and the backend lock -- so none needs a config, a
+    # network, a debugger, a browser or a language server.
+    # Not `targetz`: that one is nearer `target` (also accepted) than `targets`.
+    "mcp-forge.py":    ("build",          {"targets": ["x"], "ncpuu": 2}, "ncpu"),
+    "mcp-jenkins.py":  ("get_build_log",  {"job_path": "x", "max_line": 5}, "max_lines"),
+    "mcp-tshark.py":   ("analyze",        {"file": "/nonexistent.pcap", "hed_limit": 5}, "head_limit"),
+    "mcp-context7.py": ("context7_query_docs", {"library_id": "/x/y", "queryy": "x"}, "query"),
+    "mcp-lldb.py":     ("lldb_backtrace", {"session_id": "x", "limt": 3}, "limit"),
+    "mcp-gdc.py":      ("navigate",       {"urll": "about:blank"}, "url"),
+    "mcp-clangd.py":   ("clangd_find_definition", {"symbol_nam": "x"}, "symbol_name"),
+    "mcp-cuda.py":     ("cuda_find_definition",   {"symbol_nam": "x"}, "symbol_name"),
+    "mcp-lua-lsp.py":  ("luals_find_definition",  {"symbol_nam": "x"}, "symbol_name"),
 }
+
+# The false-refusal half: per newly refusing host, a call spelled exactly as the
+# host's documentation spells it (its skill, or for tshark the tool description)
+# must NOT be answered "Unknown params". It may fail for its own reasons -- no
+# config, no session, no network, no binary -- which is why the assertion reads
+# the refusal token and never the flag. The six original refusing hosts carry no
+# row: their accepted tables predate this harness row and are each driven by
+# their own suites (purity_file_ops, inspect_validate, mcp_search, wiki_recall,
+# webfetch_roots), and a documented webfetch or search call here would dial out.
+DOCUMENTED_CALL = {
+    "mcp-forge.py":    ("list",           {"kind": "test", "max_answer_chars": 500}),
+    "mcp-jenkins.py":  ("get_build_log",  {"job_path": "my/job/master", "build_number": 42,
+                                           "offset": 500, "max_lines": 500}),
+    "mcp-tshark.py":   ("analyze",        {"file": "/nonexistent.pcap", "display_filter": "tcp",
+                                           "head_limit": 5, "offset": 2, "max_answer_chars": 100}),
+    "mcp-context7.py": ("context7_query_docs", {"library_id": "", "query": "useEffect cleanup",
+                                                "max_answer_chars": 100}),
+    "mcp-lldb.py":     ("lldb_backtrace", {"session_id": "nope", "full": False, "limit": 10,
+                                           "offset": 0, "max_answer_chars": 100}),
+    "mcp-gdc.py":      ("select_page",    {"target_id": "", "max_answer_chars": 100}),
+    "mcp-clangd.py":   ("clangd_find_definition", {"symbol_name": "x", "path": "a.c",
+                                                   "context_lines": 2}),
+    "mcp-cuda.py":     ("cuda_find_definition",   {"symbol_name": "x", "path": "a.cu",
+                                                   "context_lines": 2}),
+    "mcp-lua-lsp.py":  ("luals_find_definition",  {"symbol_name": "x", "path": "a.lua",
+                                                   "context_lines": 2}),
+}
+ORIGINAL_PARAM_REFUSERS = ("mcp-purity.py", "mcp-postgres.py", "mcp-search.py",
+                           "mcp-webfetch.py", "mcp-inspect.py", "mcp-wiki.py")
 
 
 def near_miss_checks(srv, cfg, checks):
@@ -547,10 +593,14 @@ def near_miss_checks(srv, cfg, checks):
         would satisfy the positive half.
 
       PARAM -- on every host that refuses an unknown parameter, a near-miss key
-        is refused and the CANONICAL name is suggested.
+        is refused with the shared sentence and the CANONICAL name is
+        suggested; and on every host that learned to refuse one later, a call
+        spelled as its documentation spells it is NOT refused (DOCUMENTED_CALL)
+        -- the false refusal is the main risk of a refusal, so it is probed live.
 
       COVERAGE -- every host has a function (or, for the relay, a tool) row,
-        and has a parameter row iff its source carries the refusal sentence.
+        has a parameter row iff its source carries the refusal sentence, and
+        has a documented-call row iff it is one of the later refusers.
     """
     name = cfg["file"]
     tool = cfg["tool"]
@@ -610,6 +660,30 @@ def near_miss_checks(srv, cfg, checks):
             "near-miss param -> isError True + canonical suggestion",
             is_error is True and SUGGEST_FORMAT % right in text,
             "isError=%r; text=%r" % (is_error, text[-200:])))
+        # The pointer alone would pass on a host that suggested without
+        # refusing; the refusal sentence is the half the caller acts on.
+        checks.append(check(
+            "near-miss param -> refused with the shared sentence",
+            is_error is True and PARAM_REFUSAL_MARK in text,
+            "isError=%r; text=%r" % (is_error, text[:200])))
+
+    documented = DOCUMENTED_CALL.get(name)
+    checks.append(check(
+        "documented-call row iff a later param refuser",
+        (documented is not None)
+        == (param_row is not None and name not in ORIGINAL_PARAM_REFUSERS),
+        "documented row=%r param row=%r original=%r"
+        % (documented is not None, param_row is not None,
+           name in ORIGINAL_PARAM_REFUSERS)))
+    if documented is not None:
+        function, params = documented
+        is_error, text, resp = _dispatch_call(srv, 25, tool, {
+            "function": function, "params": params})
+        checks.append(check(
+            "documented call -> not refused as an unknown param",
+            is_error is not None and PARAM_REFUSAL_MARK not in text,
+            "isError=%r; text=%r; envelope=%s"
+            % (is_error, text[:200], json.dumps(resp)[:160])))
 
 
 def _available_names(text):

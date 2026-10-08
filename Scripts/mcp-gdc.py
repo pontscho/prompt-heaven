@@ -2048,7 +2048,7 @@ def _cap_text(text: str, max_chars: int) -> str:
 # --- Dispatcher ---
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _unknown_params_refusal
 def _did_you_mean(words, candidates, aliases=None):
     """Return " Did you mean 'X'?" for the closest real name, or "".
 
@@ -2090,7 +2090,32 @@ def _did_you_mean(words, candidates, aliases=None):
     if len(words) == 1:
         return " Did you mean '%s'?" % pairs[0][1]
     return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
-# END GENERATED: dbc5a3370235
+
+
+def _unknown_params_refusal(function, params, accepted, aliases=None):
+    """Return the refusal for the keys of `params` not in `accepted`, or "".
+
+    The sentence is the one the six hosts that refused an unknown parameter
+    first already wrote by hand -- "Unknown params for '<fn>': <keys>.
+    Accepted: <names>." -- followed by `_did_you_mean`'s pointer, so a caller
+    reads the fleet one way. `function` is the canonical name the caller's
+    spelling resolved to, `params` the call's params AFTER alias resolution,
+    `accepted` the canonical names that function reads, and `aliases` the
+    alias table the host's resolver read, so a near miss of an alias is
+    answered with the canonical spelling. Both lists are sorted, so the
+    answer depends on the sets, never on wire order.
+
+    An empty string means every key is known, so a host calls this
+    unconditionally and refuses only on a non-empty answer. It never
+    resolves: a near miss is pointed at, and the call is still refused.
+    """
+    unknown = sorted(str(key) for key in params if key not in accepted)
+    if not unknown:
+        return ""
+    offered = ", ".join(sorted(accepted)) or "(none)"
+    head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
+    return head + _did_you_mean(unknown, accepted, aliases)
+# END GENERATED: 7b6f3ce0b3db
 
 
 async def handle_gdc_call(mgr: GdcManager, args: dict) -> Any:
@@ -2119,6 +2144,14 @@ async def handle_gdc_call(mgr: GdcManager, args: dict) -> Any:
         available = ", ".join(callable_names)
         hint = _did_you_mean(function, callable_names)
         return {"error": f"Unknown function: '{function}'. Available: {available}{hint}"}
+
+    # An unknown key is refused, not dropped: `urll` used to navigate to
+    # nothing. An alias (execute_js, open_pages) is checked against the row of
+    # the function it shares a handler with.
+    canonical = _CANONICAL_BY_HANDLER[handler]
+    refusal = _unknown_params_refusal(canonical, params, ACCEPTED_PARAMS[canonical])
+    if refusal:
+        return {"error": refusal}
 
     # Returned as-is, failure shape included. tools/list advertises only
     # gdc_call, so in practice EVERY call arrives here — if this pass-through
@@ -2209,6 +2242,55 @@ ALL_HANDLERS = {
     "clear_field":                  handle_clear_field,
     "find_element":                 handle_find_element,
 }
+
+# The params each function's handler reads, gdc_call's path. An unknown key is
+# REFUSED (handle_gdc_call) rather than dropped. Every page-scoped function
+# reads `target_id` through _resolve_session, and every reply is ceilinged by
+# _answer_ceiling, so `max_answer_chars` is in every row. take_screenshot reads
+# both `save_path` and `savePath` (and `path`) itself; there is no alias table
+# here. Held to the handlers' actual reads -- set_cookie's loop over its six
+# optional attribute names included -- and to the skill by
+# tests/test_param_contract.py.
+_PAGE = frozenset({"target_id", "max_answer_chars"})
+ACCEPTED_PARAMS: Dict[str, frozenset] = {
+    "gdc_status":             frozenset({"max_answer_chars"}),
+    "list_pages":             frozenset({"max_answer_chars"}),
+    "select_page":            _PAGE,
+    "new_page":               frozenset({"url", "max_answer_chars"}),
+    "close_page":             _PAGE,
+    "navigate":               _PAGE | {"url", "action"},
+    "wait_for":               _PAGE | {"text", "timeout"},
+    "click":                  _PAGE | {"selector"},
+    "click_at":               _PAGE | {"x", "y"},
+    "type_text":              _PAGE | {"text"},
+    "fill":                   _PAGE | {"selector", "value"},
+    "press_key":              _PAGE | {"key"},
+    "handle_dialog":          _PAGE | {"accept", "prompt_text"},
+    "resize_page":            _PAGE | {"width", "height"},
+    "scroll":                 _PAGE | {"x", "y", "delta_x", "delta_y"},
+    "take_screenshot":        _PAGE | {"format", "quality", "full_page", "save_path",
+                                       "savePath", "path"},
+    "evaluate":               _PAGE | {"expression"},
+    "list_console_messages":  _PAGE | {"level"},
+    "take_snapshot":          _PAGE,
+    "list_network_requests":  _PAGE | {"type", "limit"},
+    "get_network_request":    _PAGE | {"request_id"},
+    "emulate":                _PAGE | {"viewport", "user_agent", "network"},
+    "hover":                  _PAGE | {"selector", "x", "y"},
+    "get_cookies":            _PAGE | {"url"},
+    # The six optional cookie attributes are copied through by a loop over
+    # their names, which is why they read like nothing in a grep.
+    "set_cookie":             _PAGE | {"name", "value", "url", "domain", "path",
+                                       "httpOnly", "secure", "expires"},
+    "wait_for_selector":      _PAGE | {"selector", "timeout", "visible"},
+    "get_html":               _PAGE | {"selector"},
+    "select_option":          _PAGE | {"selector", "value", "label"},
+    "inject_script":          _PAGE | {"expression", "world"},
+    "remove_injected_script": _PAGE | {"identifier"},
+    "clear_field":            _PAGE | {"selector"},
+    "find_element":           _PAGE | {"selector"},
+}
+_CANONICAL_BY_HANDLER = {ALL_HANDLERS[name]: name for name in ACCEPTED_PARAMS}
 
 TOOL_DESCRIPTIONS: Dict[str, str] = {
     # Meta

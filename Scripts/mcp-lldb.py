@@ -1186,7 +1186,7 @@ async def _run_locked(mgr: SessionManager, handler, args: dict) -> ToolResult:
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _unknown_params_refusal
 def _did_you_mean(words, candidates, aliases=None):
     """Return " Did you mean 'X'?" for the closest real name, or "".
 
@@ -1228,7 +1228,32 @@ def _did_you_mean(words, candidates, aliases=None):
     if len(words) == 1:
         return " Did you mean '%s'?" % pairs[0][1]
     return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
-# END GENERATED: dbc5a3370235
+
+
+def _unknown_params_refusal(function, params, accepted, aliases=None):
+    """Return the refusal for the keys of `params` not in `accepted`, or "".
+
+    The sentence is the one the six hosts that refused an unknown parameter
+    first already wrote by hand -- "Unknown params for '<fn>': <keys>.
+    Accepted: <names>." -- followed by `_did_you_mean`'s pointer, so a caller
+    reads the fleet one way. `function` is the canonical name the caller's
+    spelling resolved to, `params` the call's params AFTER alias resolution,
+    `accepted` the canonical names that function reads, and `aliases` the
+    alias table the host's resolver read, so a near miss of an alias is
+    answered with the canonical spelling. Both lists are sorted, so the
+    answer depends on the sets, never on wire order.
+
+    An empty string means every key is known, so a host calls this
+    unconditionally and refuses only on a non-empty answer. It never
+    resolves: a near miss is pointed at, and the call is still refused.
+    """
+    unknown = sorted(str(key) for key in params if key not in accepted)
+    if not unknown:
+        return ""
+    offered = ", ".join(sorted(accepted)) or "(none)"
+    head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
+    return head + _did_you_mean(unknown, accepted, aliases)
+# END GENERATED: 7b6f3ce0b3db
 
 
 async def handle_lldb_call(mgr: SessionManager, args: dict) -> ToolResult:
@@ -1256,6 +1281,13 @@ async def handle_lldb_call(mgr: SessionManager, args: dict) -> ToolResult:
         available = ", ".join(callable_names)
         hint = _did_you_mean(function, callable_names)
         return {"error": f"Unknown function: '{function}'. Available: {available}{hint}"}
+
+    # An unknown key is refused before the session lock is taken: the answer
+    # depends on the table alone, and a refused call must not queue behind a
+    # 60s `continue` on the session it names.
+    refusal = _unknown_params_refusal(function, params, ACCEPTED_PARAMS[function])
+    if refusal:
+        return {"error": refusal}
 
     # The ceiling is imposed HERE, at the one point every function passes
     # through, so the per-function head/tail decision lives in one auditable
@@ -1411,6 +1443,51 @@ CAP_POLICY = {
     "lldb_finish":            (BIAS_TAIL, False),
     "lldb_attach":            (BIAS_TAIL, False),
     "lldb_kill":              (BIAS_TAIL, False),
+}
+
+
+# The params each function's handler reads. An unknown key is REFUSED
+# (handle_lldb_call) rather than dropped: `limt` used to print the whole stack.
+# Two keys are added from the dispatcher's side rather than typed per row:
+# `max_answer_chars`, because _apply_cap ceilings every reply, and `offset`,
+# exactly where CAP_POLICY marks the function line-pageable -- a function that
+# cannot resume must not accept a resume index. Held to the handlers' actual
+# reads and to the skill by tests/test_param_contract.py.
+_HANDLER_PARAMS = {
+    "lldb_mcp_status":        (),
+    "lldb_start":             ("lldb_path", "working_dir"),
+    "lldb_load":              ("session_id", "program", "arguments"),
+    "lldb_command":           ("session_id", "command"),
+    "lldb_terminate":         ("session_id",),
+    "lldb_list_sessions":     (),
+    "lldb_attach":            ("session_id", "pid"),
+    "lldb_load_core":         ("session_id", "program", "core_path"),
+    "lldb_set_breakpoint":    ("session_id", "location", "condition"),
+    "lldb_continue":          ("session_id",),
+    "lldb_step":              ("session_id", "instructions"),
+    "lldb_next":              ("session_id", "instructions"),
+    "lldb_finish":            ("session_id",),
+    "lldb_backtrace":         ("session_id", "full", "limit"),
+    "lldb_print":             ("session_id", "expression"),
+    "lldb_examine":           ("session_id", "expression", "format", "count"),
+    "lldb_info_registers":    ("session_id", "register"),
+    "lldb_watchpoint":        ("session_id", "expression", "watch_type"),
+    "lldb_frame_info":        ("session_id", "frame_index"),
+    "lldb_run":               ("session_id",),
+    "lldb_kill":              ("session_id",),
+    "lldb_thread_list":       ("session_id",),
+    "lldb_thread_select":     ("session_id", "thread_index"),
+    "lldb_breakpoint_list":   ("session_id",),
+    "lldb_breakpoint_delete": ("session_id", "breakpoint_id"),
+    "lldb_expression":        ("session_id", "expression"),
+    "lldb_process_info":      ("session_id",),
+    "lldb_disassemble":       ("session_id", "location", "count"),
+    "lldb_help":              ("session_id", "command"),
+}
+ACCEPTED_PARAMS = {
+    name: frozenset(keys) | {"max_answer_chars"}
+    | ({"offset"} if CAP_POLICY.get(name, (BIAS_HEAD, False))[1] else set())
+    for name, keys in _HANDLER_PARAMS.items()
 }
 
 

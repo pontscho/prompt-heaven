@@ -313,6 +313,24 @@ FILTERED_SUBCOMMANDS: Dict[str, Callable[[List[str]], None]] = {
     "worktree": validate_worktree,
 }
 
+# Real git subcommands git_call does not expose -- the mutating porcelain and
+# plumbing a caller is told to run through Bash, plus a few that are not on
+# the whitelist for other reasons (interactive, external tools). Used ONLY to
+# keep a near-miss pointer off their refusal: a real subcommand is never a
+# typo. Not a security boundary -- the whitelist above is the only thing that
+# decides what runs, and tests/test_mcp_git_params.py holds this set disjoint
+# from it.
+UNEXPOSED_GIT_SUBCOMMANDS = frozenset({
+    "add", "am", "archive", "bisect", "bundle", "checkout", "cherry",
+    "cherry-pick", "citool", "clean", "clone", "commit", "commit-graph",
+    "commit-tree", "difftool", "filter-branch", "format-patch", "fsck", "gc",
+    "gui", "init", "maintenance", "merge", "mergetool", "mktag", "mktree", "mv",
+    "notes", "pack-refs", "prune", "pull", "push", "range-diff", "read-tree",
+    "rebase", "replace", "repack", "request-pull", "rerere", "reset", "restore",
+    "revert", "rm", "send-email", "sparse-checkout", "submodule", "switch",
+    "symbolic-ref", "update-index", "update-ref", "write-tree",
+})
+
 SUBCOMMAND_DESCRIPTIONS = {
     "status":         "Working tree status",
     "log":            "Commit history",
@@ -996,6 +1014,51 @@ def _check_repository(value: str, key: str) -> None:
     _check_not_option(value, key, "a remote name or URL", "origin")
 
 
+# What a forwarded key must look like once `_` became `-`: a git long-option
+# name (letters, digits and dashes, starting with a letter or a digit -- git's
+# own `--3way` starts with one), optionally followed by `=value`, which already
+# worked (`{"pretty=oneline": true}` -> `--pretty=oneline`) and still does.
+_FLAG_KEY_RE = re.compile(r"[a-z0-9][a-z0-9-]*(?:=.*)?", re.DOTALL)
+
+
+def _check_flag_keys(params: dict) -> None:
+    """Refuse a key the flag channel would forward but no git option is spelled as.
+
+    The channel itself is the documented feature (GIT_CALL_TOOL: "ANY OTHER key
+    is forwarded verbatim as --key[=value]") and is not narrowed: which options
+    a subcommand takes is git's to judge, and it does so loudly. What this
+    refuses is only a key that cannot be an option NAME at all. Those never
+    worked, and one of them failed silently: the empty key became a bare `--`,
+    git's path separator, so `{"": true, "range": "master..HEAD"}` ran
+    `git log -- master..HEAD` and answered with the empty history of a FILE
+    named master..HEAD. A leading dash (`---n=5`) or a space (`--max count=3`)
+    only drew git's own `unknown option` -- now the refusal names the key and
+    points at the named params instead.
+
+    Meta and positional keys never reach the flag branch, so they are exempt
+    here exactly as they are in the conversion loop.
+    """
+    bad = []
+    for key, value in params.items():
+        snake = _camel_to_snake(key) if isinstance(key, str) else key
+        if snake in _META_KEYS or (snake in _POSITIONAL_KEYS and not isinstance(value, bool)):
+            continue
+        if not isinstance(snake, str) or not _FLAG_KEY_RE.fullmatch(snake.replace("_", "-")):
+            bad.append(key)
+    if not bad:
+        return
+    named = sorted(_META_KEYS | _POSITIONAL_KEYS)
+    raise ValueError(
+        "params key %s cannot name a git option. git_call forwards a key it "
+        "does not know as `--<key>[=value]`, and a git option name is letters, "
+        "digits and dashes (`_` becomes `-`, camelCase is folded), so this key "
+        "could only reach git as a broken flag -- an empty key would become "
+        "the `--` path separator. Named params: %s."
+        % (", ".join(repr(k) for k in sorted(bad, key=str)), ", ".join(named))
+        + _did_you_mean([k for k in bad if isinstance(k, str)], named)
+    )
+
+
 def _semantic_params_to_args(params: dict) -> Tuple[List[str], List[str]]:
     """Convert semantic parameter names to CLI args.
 
@@ -1042,8 +1105,10 @@ def _semantic_params_to_args(params: dict) -> Tuple[List[str], List[str]]:
     global scope costs no working behaviour. It is documented in GIT_CALL_TOOL
     instead.
 
-    Raises ValueError on a rejected revision / repository value.
+    Raises ValueError on a rejected revision / repository value, and on a key
+    no git option can be spelled from (_check_flag_keys).
     """
+    _check_flag_keys(params)
     flags: List[str] = []
     repos: List[str] = []
     revisions: List[str] = []
@@ -1452,10 +1517,13 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     elif function in FILTERED_SUBCOMMANDS:
         validator = FILTERED_SUBCOMMANDS[function]
     else:
-        # Suggested only from the whitelist: a near miss of an allowed
-        # subcommand is the typo worth naming; the sentence above already
-        # covers a real git subcommand this server does not expose.
-        hint = _did_you_mean(function, set(SAFE_SUBCOMMANDS) | set(FILTERED_SUBCOMMANDS))
+        # Suggested only from the whitelist, and never for a REAL git
+        # subcommand this server does not expose: that word is not a typo, the
+        # sentence below already says what to do with it, and a pointer from
+        # the whitelist would only be a loose match (`rebase` drew
+        # `rev-parse`). A typo of an allowed one keeps its pointer.
+        hint = ("" if function in UNEXPOSED_GIT_SUBCOMMANDS else
+                _did_you_mean(function, set(SAFE_SUBCOMMANDS) | set(FILTERED_SUBCOMMANDS)))
         return {"error": (
             f"git subcommand '{function}' is not on the read-only whitelist. "
             "git_call does not expose it (this does not mean it mutates); "
@@ -1708,7 +1776,9 @@ GIT_CALL_TOOL = {
         "  - camelCase is normalized: maxCount, revRange, extraArgs all reach\n"
         "    the same slot as their snake_case spelling.\n"
         "  - ANY OTHER key is forwarded verbatim as `--key[=value]`, so an\n"
-        "    invented or misspelled param name reaches git as an unknown flag.\n\n"
+        "    invented or misspelled param name reaches git as an unknown flag.\n"
+        "    A key no git option can be spelled from (empty, a leading '-',\n"
+        "    a space) is refused instead.\n\n"
         "Examples:\n"
         "  function=\"log\", params={\"args\":[\"--oneline\",\"-20\"]}\n"
         "  function=\"log\", params={\"range\":\"master..HEAD\",\"stat\":true}\n"

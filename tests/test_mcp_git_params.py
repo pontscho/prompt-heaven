@@ -88,6 +88,12 @@ Coverage by group:
      between a typo and a confusing git error.  The security boundary is a case
      of its own: a new spelling must reach the dual-use validators exactly like
      `args` does, or it is a filter bypass rather than a convenience.
+  O  what a refusal points at: a REAL git subcommand that is not on the
+     whitelist (rebase, commit, push ...) is refused with no near-miss pointer,
+     while a typo of an allowed one (stauts) keeps it; and the flag channel's
+     one hole -- a key no git option can be spelled from (the empty key became
+     a bare `--` and turned the range behind it into a path) -- refused with
+     the named params pointed at, the valid forms pinned as the control.
 
 Three layers, deliberately, because each sees something the others cannot:
   exact rendering (F)  pins the policy; catches every class
@@ -1624,6 +1630,56 @@ def run(opts=None):
               note="`arguments` is a plausible guess that was deliberately NOT "
                    "claimed; recorded so the boundary of the set is visible "
                    "rather than assumed")
+
+        # ============ O: what a refusal points at, and a key no flag can be ============
+        # A real git subcommand that is simply not on the read-only whitelist
+        # is not a typo, and the refusal's own sentence already says what to do
+        # (use Bash) -- so no near-miss pointer: `rebase` used to draw
+        # `rev-parse`, a loose 0.6 match ADR 0030 recorded as a declared limit.
+        # A genuine typo of an allowed one keeps its pointer.
+        for word in ("rebase", "commit", "checkout", "push", "cherry-pick", "reset"):
+            check(suite, drv, "O", "real-unexposed-%s-no-suggestion" % word, word, {},
+                  error="not on the read-only whitelist", must_not=("Did you mean",),
+                  note="a real git subcommand, refused by the sentence alone")
+        check(suite, drv, "O", "typo-stauts-keeps-suggestion", "stauts", {},
+              error="not on the read-only whitelist", must=("Did you mean 'status'?",),
+              note="the control: the pointer survives for a word that IS a typo")
+        check(suite, drv, "O", "typo-shortog-keeps-suggestion", "shortog", {},
+              error="not on the read-only whitelist", must=("Did you mean 'shortlog'?",))
+        allowed = set(drv.mod.SAFE_SUBCOMMANDS) | set(drv.mod.FILTERED_SUBCOMMANDS)
+        unexposed = set(getattr(drv.mod, "UNEXPOSED_GIT_SUBCOMMANDS", ()))
+        suite.record("O", "unexposed-set-disjoint-from-whitelist",
+                     ([] if unexposed else ["no UNEXPOSED_GIT_SUBCOMMANDS set"])
+                     + (["on both the whitelist and the no-suggestion set: %s"
+                         % sorted(unexposed & allowed)] if unexposed & allowed else []),
+                     detail=["%d real subcommand(s) refused without a pointer" % len(unexposed)])
+
+        # The flag channel is a documented feature (GIT_CALL_TOOL: "ANY OTHER
+        # key is forwarded verbatim as --key[=value]") and stays one. What it
+        # cannot carry is a key no git option can be spelled from: the empty
+        # key became a bare `--`, git's path separator, which silently turned
+        # the range behind it into a pathspec (an empty answer to a real
+        # question); a leading dash became `---n=5`; a space a broken option.
+        # Those are refused, unspawned, with the named params pointed at.
+        check(suite, drv, "O", "empty-key-refused-not-a-separator", "log",
+              {"": True, "range": "master..HEAD"}, error="cannot name a git option",
+              note="was: git log -- master..HEAD -- the range read as a PATH")
+        check(suite, drv, "O", "dash-key-refused-with-pointer", "log",
+              {"-range": "master..HEAD"}, error="cannot name a git option",
+              must=("Did you mean 'range'?",), note="was: git log ---range=master..HEAD")
+        check(suite, drv, "O", "space-key-refused", "log", {"max count": 3},
+              error="cannot name a git option", note="was: git log '--max count=3'")
+        check(suite, drv, "O", "valid-forms-still-flags", "log",
+              {"max_count": 3, "word-diff": "color", "stat": True},
+              argv=["git", "log", "--max-count=3", "--word-diff=color", "--stat"],
+              note="the control: snake, dashed and bare-boolean keys are flags as before")
+        check(suite, drv, "O", "key-with-value-suffix-still-flag", "log",
+              {"pretty=oneline": True}, argv=["git", "log", "--pretty=oneline"],
+              note="a valid option name followed by `=value` worked and still does")
+        check(suite, drv, "O", "digit-led-option-still-flag", "apply",
+              {"check": True, "3way": True, "path": "x.patch"},
+              argv=["git", "apply", "--check", "--3way", "--", "x.patch"],
+              note="git's own --3way starts with a digit")
 
         # R-0043: a cancel may kill a READ-ONLY git child, never a MUTATING one
         # (a stash killed mid-way can leave index.lock or a half-applied stash).

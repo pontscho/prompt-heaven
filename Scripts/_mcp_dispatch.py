@@ -11,6 +11,15 @@ accepted names. A caller -- usually a model -- that misspells either gets a
 refusal listing what exists, and nothing pointing at the entry it almost typed.
 `_did_you_mean` appends that pointer: " Did you mean 'X'?".
 
+`_unknown_params_refusal` is the refusal itself for an unknown PARAMETER, the
+sentence the first six refusing hosts wrote by hand, so the hosts that learned
+to refuse one later (forge, jenkins, tshark, context7, lldb, gdc and the three
+legacy LSP servers) render the same words from one block instead of nine more
+hand copies. It reads `_did_you_mean`, so a region that names it names both.
+Each host keeps its own accepted-name table: which parameters a function
+reads is the host's own fact, and `tests/test_param_contract.py` holds every
+table to the keys its handlers actually read and its documentation names.
+
 **Why a fourteenth source and not a block in an existing one.** ADR 0014's rule
 is the test: a new source is warranted when no existing one can hold the block
 without becoming a shelf. `_mcp_json.py` is the nearest, and it is the wrong
@@ -97,3 +106,28 @@ def _did_you_mean(words, candidates, aliases=None):
     if len(words) == 1:
         return " Did you mean '%s'?" % pairs[0][1]
     return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
+
+
+def _unknown_params_refusal(function, params, accepted, aliases=None):
+    """Return the refusal for the keys of `params` not in `accepted`, or "".
+
+    The sentence is the one the six hosts that refused an unknown parameter
+    first already wrote by hand -- "Unknown params for '<fn>': <keys>.
+    Accepted: <names>." -- followed by `_did_you_mean`'s pointer, so a caller
+    reads the fleet one way. `function` is the canonical name the caller's
+    spelling resolved to, `params` the call's params AFTER alias resolution,
+    `accepted` the canonical names that function reads, and `aliases` the
+    alias table the host's resolver read, so a near miss of an alias is
+    answered with the canonical spelling. Both lists are sorted, so the
+    answer depends on the sets, never on wire order.
+
+    An empty string means every key is known, so a host calls this
+    unconditionally and refuses only on a non-empty answer. It never
+    resolves: a near miss is pointed at, and the call is still refused.
+    """
+    unknown = sorted(str(key) for key in params if key not in accepted)
+    if not unknown:
+        return ""
+    offered = ", ".join(sorted(accepted)) or "(none)"
+    head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
+    return head + _did_you_mean(unknown, accepted, aliases)

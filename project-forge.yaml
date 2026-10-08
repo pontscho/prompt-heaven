@@ -308,6 +308,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP'
 
+  param_contract:
+    description: "The accepted-parameter tables (ACCEPTED_PARAMS) of the nine hosts that learned to refuse an unknown param key -- forge, jenkins, tshark, context7, lldb, gdc, clangd, cuda, lua-lsp -- each imported in-process and read by AST: every callable function (aliases included) has a row; every key a handler reads, followed through every helper and method the params dict is handed to, is accepted (a miss is a false refusal); nothing accepted goes unread (accept-and-ignore); every param the host's skill and its own tool description name is accepted for that function; every alias lands on an accepted key. A control group plants each defect in a synthetic host. Starts no server, writes nothing."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py param_contract
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|PROBLEM'
+
   py_deps:
     description: "The ADR 0024 dependency gate: every Python file under Scripts/, ClaudeCode/ and tests/ plus the extensionless sbx is pure Python 3.9 + stdlib. AST-read imports (plain, from, function-local, and __import__/import_module with a literal name) whose top-level name is neither embedded 3.9 stdlib nor a repo module must be on the allowlist (yaml, tomli; tomllib as newer-than-3.9 stdlib) and preceded by an importlib.util.find_spec('<name>') literal, never wrapped in except ImportError; Scripts/mcp-webfetch.py's bs4/markdownify are a declared, temporary, per-NAME exception. No import of a stdlib module removed after 3.9. Every file parses with ast.parse(feature_version=(3, 9)) -- SYNTAX ONLY. Every ctypes library name (CDLL/PyDLL/cdll.LoadLibrary/find_library literals and lib-named elements of top-level *SONAMES*/*FILES* tuples) reduces to a stem declared in SYSTEM_LIBS (brotlidec, zstd), CDLL(None) listed as the process's own namespace, no stale declaration. The new sources (Scripts/_mcp_chrome.py, _mcp_brotli.py, _mcp_zstd.py, chrome_capture.py, mcp-proxy.py, llm-router.py, _mcp_oauth.py, _mcp_httpfront.py) use none of a listed set of 3.10+ stdlib APIs (bit_count, zip/map strict=, to_bytes/from_bytes without explicit length and byteorder, bisect key=, itertools.pairwise, create_connection all_errors=, hashlib.file_digest, VERIFY_X509_PARTIAL_CHAIN, X | Y annotations); an absent listed file is INFO. 3.10+ API use elsewhere, and any API off that list, remains a declared blind spot. The embedded 3.9 stdlib table is cross-checked against sys.stdlib_module_names on 3.10+. The stdlib Bing parser in search_duckduckgo.py is pinned to the fields lxml produced on tests/files/html/tf_bing_serp.html. A control group plants each defect in turn, including a re-import of a browser-impersonation library that left the allowlist. Starts nothing, writes only its .claude/tmp sandbox."
     requires: [syntax]

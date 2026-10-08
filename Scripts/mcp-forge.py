@@ -1791,7 +1791,7 @@ def _cap_text(text: str, max_chars: int, bias: str = "head") -> str:
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _unknown_params_refusal
 def _did_you_mean(words, candidates, aliases=None):
 	"""Return " Did you mean 'X'?" for the closest real name, or "".
 
@@ -1833,13 +1833,58 @@ def _did_you_mean(words, candidates, aliases=None):
 	if len(words) == 1:
 		return " Did you mean '%s'?" % pairs[0][1]
 	return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
-# END GENERATED: 02da9987746c
+
+
+def _unknown_params_refusal(function, params, accepted, aliases=None):
+	"""Return the refusal for the keys of `params` not in `accepted`, or "".
+
+	The sentence is the one the six hosts that refused an unknown parameter
+	first already wrote by hand -- "Unknown params for '<fn>': <keys>.
+	Accepted: <names>." -- followed by `_did_you_mean`'s pointer, so a caller
+	reads the fleet one way. `function` is the canonical name the caller's
+	spelling resolved to, `params` the call's params AFTER alias resolution,
+	`accepted` the canonical names that function reads, and `aliases` the
+	alias table the host's resolver read, so a near miss of an alias is
+	answered with the canonical spelling. Both lists are sorted, so the
+	answer depends on the sets, never on wire order.
+
+	An empty string means every key is known, so a host calls this
+	unconditionally and refuses only on a non-empty answer. It never
+	resolves: a near miss is pointed at, and the call is still refused.
+	"""
+	unknown = sorted(str(key) for key in params if key not in accepted)
+	if not unknown:
+		return ""
+	offered = ", ".join(sorted(accepted)) or "(none)"
+	head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
+	return head + _did_you_mean(unknown, accepted, aliases)
+# END GENERATED: 6d7fefe3d00b
 
 
 # Every name the dispatcher below routes, in the order its error lists them.
 # `status` is folded to "" before anything reads it, so it is not routed and is
 # listed (and suggested) as the spelling of the empty call.
 FORGE_FUNCTIONS = ("list", "describe", "validate", "build", "test", "clean")
+
+# The params each function reads, canonical names (post PARAM_ALIASES). An
+# unknown key is REFUSED rather than dropped: `targetz` used to build nothing
+# and say so in a voice that sounded like success. `max_answer_chars` is in
+# every row because the ceiling is applied to every reply (_answer_ceiling).
+# The empty call (status) reads no params and is not checked. Held to the
+# handlers' actual reads and to the skill by tests/test_param_contract.py.
+_RUN_PARAMS = frozenset({
+	"targets", "target", "env", "filter", "ncpu", "timeout", "cwd",
+	"max_answer_chars",
+})
+ACCEPTED_PARAMS = {
+	"list":     frozenset({"kind", "max_answer_chars"}),
+	# Without a target, describe falls back to `list`, which reads `kind`.
+	"describe": frozenset({"target", "kind", "max_answer_chars"}),
+	"validate": frozenset({"path", "max_answer_chars"}),
+	"build":    _RUN_PARAMS,
+	"test":     _RUN_PARAMS | {"auto_build"},
+	"clean":    _RUN_PARAMS,
+}
 
 
 def _unknown_function_error(function: str) -> dict:
@@ -1877,6 +1922,11 @@ def handle_forge_call(arguments: dict,
 	# broken project-forge.yaml it never got as far as using.
 	if function and function not in FORGE_FUNCTIONS:
 		return _unknown_function_error(function)
+	# An unknown param is answered here too, for the same reason: the answer
+	# depends on the table alone, never on the config.
+	refusal = _unknown_params_refusal(function, params, ACCEPTED_PARAMS[function], PARAM_ALIASES) if function else ""
+	if refusal:
+		return {"error": refusal}
 
 	# Load config (except for validate which loads its own)
 	cfg: Dict[str, Any] = {}

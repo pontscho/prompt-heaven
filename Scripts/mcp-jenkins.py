@@ -2687,6 +2687,35 @@ _CANONICAL_FUNCTIONS = {
 }
 _ALIAS_TARGETS = set(HANDLERS.keys()) - _CANONICAL_FUNCTIONS
 
+# The params each canonical function reads, canonical names (post
+# PARAM_ALIASES). An unknown key is REFUSED rather than dropped. Every row
+# carries `max_answer_chars`, because _finish applies the ceiling to every
+# reply. An alias spelling of a function resolves to its row through the
+# handler it shares (_CANONICAL_BY_HANDLER). Held to the handlers' actual reads
+# and to the skill by tests/test_param_contract.py.
+ACCEPTED_PARAMS: Dict[str, frozenset] = {
+    name: frozenset(keys) | {"max_answer_chars"} for name, keys in {
+        "status": {"test", "probe"},
+        "get_job_info": {"job_path", "recent_builds_limit"},
+        "get_build_status": {"job_path", "build_number"},
+        "get_build_log": {"job_path", "build_number", "mode", "stage_id", "stage_name",
+                          "start_line", "offset", "max_lines"},
+        "start_build": {"job_path", "parameters", "delay_sec"},
+        "get_queue_item": {"queue_url", "wait", "timeout_sec"},
+        "download_artifact": {"job_path", "artifact_path", "build_number", "return_type"},
+        "list_jobs": {"job_path", "recursive", "filter", "max_depth", "max_rows", "offset"},
+        "cancel_build": {"job_path", "build_number", "mode"},
+        "get_test_report": {"job_path", "build_number", "only_failed", "max_cases",
+                            "include_stack", "offset"},
+        "replay_build": {"job_path", "build_number", "main_script"},
+        "run_and_wait": {"job_path", "parameters", "delay_sec", "timeout_sec",
+                         "poll_interval_sec", "log_tail"},
+        "inspect_build": {"job_path", "build_number", "log_tail", "include_tests",
+                          "recent_builds_limit"},
+    }.items()
+}
+_CANONICAL_BY_HANDLER = {HANDLERS[name]: name for name in _CANONICAL_FUNCTIONS}
+
 
 # ---------------------------------------------------------------------------
 # Dispatcher
@@ -2711,7 +2740,7 @@ def _finish(result: dict, params: dict) -> dict:
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _unknown_params_refusal
 def _did_you_mean(words, candidates, aliases=None):
     """Return " Did you mean 'X'?" for the closest real name, or "".
 
@@ -2753,7 +2782,32 @@ def _did_you_mean(words, candidates, aliases=None):
     if len(words) == 1:
         return " Did you mean '%s'?" % pairs[0][1]
     return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
-# END GENERATED: dbc5a3370235
+
+
+def _unknown_params_refusal(function, params, accepted, aliases=None):
+    """Return the refusal for the keys of `params` not in `accepted`, or "".
+
+    The sentence is the one the six hosts that refused an unknown parameter
+    first already wrote by hand -- "Unknown params for '<fn>': <keys>.
+    Accepted: <names>." -- followed by `_did_you_mean`'s pointer, so a caller
+    reads the fleet one way. `function` is the canonical name the caller's
+    spelling resolved to, `params` the call's params AFTER alias resolution,
+    `accepted` the canonical names that function reads, and `aliases` the
+    alias table the host's resolver read, so a near miss of an alias is
+    answered with the canonical spelling. Both lists are sorted, so the
+    answer depends on the sets, never on wire order.
+
+    An empty string means every key is known, so a host calls this
+    unconditionally and refuses only on a non-empty answer. It never
+    resolves: a near miss is pointed at, and the call is still refused.
+    """
+    unknown = sorted(str(key) for key in params if key not in accepted)
+    if not unknown:
+        return ""
+    offered = ", ".join(sorted(accepted)) or "(none)"
+    head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
+    return head + _did_you_mean(unknown, accepted, aliases)
+# END GENERATED: 7b6f3ce0b3db
 
 
 def handle_jenkins_call(arguments: dict) -> dict:
@@ -2763,6 +2817,19 @@ def handle_jenkins_call(arguments: dict) -> dict:
         params = _resolve_aliases(params_in)
     except ValueError as exc:
         return _finish(_err(str(exc)), {})
+    # An unknown key is refused HERE, on the caller's own keys and BEFORE
+    # _apply_project_scope: with a project configured that function ADDS a
+    # `job_path`, and judging the injected key would refuse every call to a
+    # function that takes none (get_queue_item, status). The empty call is
+    # handle_status, so it is checked as `status`. An unknown function is left
+    # to its own answer below.
+    handler = HANDLERS.get(function) if function else handle_status
+    if handler is not None:
+        canonical = _CANONICAL_BY_HANDLER[handler]
+        refusal = _unknown_params_refusal(canonical, params, ACCEPTED_PARAMS[canonical],
+                                          PARAM_ALIASES)
+        if refusal:
+            return _finish(_err(refusal), params)
     params = _apply_project_scope(params)
 
     if not function:

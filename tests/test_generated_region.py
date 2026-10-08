@@ -2272,6 +2272,10 @@ def group_tabs(suite, mod):
     # through `_strict_loads`, which is why its marker above carries the run too.
     for name in STRICT_NAMES:
         paired[name] = ", ".join(STRICT_NAMES)
+    # The unknown-params refusal appends `_did_you_mean`'s pointer, so it is
+    # rendered inside the marker its hosts spell -- one of them, mcp-forge, a
+    # tab host.
+    paired[REFUSAL_BLOCK] = "%s, %s" % (DISPATCH_BLOCK, REFUSAL_BLOCK)
     # Every websocket block, inside the one marker shape its hosts spell: the
     # core, plus the block itself when it is a wrapper.
     for name in sources.get(WEBSOCKET_CANONICAL_NAME, {}):
@@ -4239,6 +4243,98 @@ def group_dispatch_blocks(suite, mod):
             problems.append("%s: hosts %s but never calls it" % (path.name, DISPATCH_BLOCK))
     suite.record(GA, "did-you-mean-in-every-server", problems,
                  detail=["%d server(s) walked" % len(servers)])
+
+    group_unknown_params_block(suite, mod)
+
+
+# The refusal sentence the second dispatch block renders. Spelled here for the
+# reason DISPATCH_ONE is: it is the wording the six older hosts already wrote by
+# hand ("Unknown params for '<fn>': <keys>. Accepted: <list>."), and the smoke
+# gate's PARAM_REFUSAL_MARK reads its first three words off the wire.
+REFUSAL_BLOCK = "_unknown_params_refusal"
+REFUSAL_HEAD = "Unknown params for '%s': %s. Accepted: %s."
+
+
+def group_unknown_params_block(suite, mod):
+    """E. What `_unknown_params_refusal` says, and A. that every host carrying
+    it calls it -- a refusal nobody calls is dead code the drift gate would
+    faithfully prove a dozen files agree on."""
+    try:
+        src = H.load_module_from_path("mcp_dispatch_refusal_under_test", DISPATCH_SOURCE)
+        refuse = getattr(src, REFUSAL_BLOCK)
+        absent = []
+    except (OSError, SyntaxError, AttributeError) as exc:
+        refuse = None
+        absent = ["the source does not load or lacks %s: %s: %s"
+                  % (REFUSAL_BLOCK, type(exc).__name__, str(exc)[:200])]
+
+    def cases(rows):
+        problems = list(absent)
+        if refuse is None:
+            return problems
+        for args, want in rows:
+            try:
+                got = refuse(*args)
+            except Exception as exc:  # noqa: BLE001 -- a raise is the finding
+                problems.append("%r raised %s: %s" % (args, type(exc).__name__, exc))
+                continue
+            if got != want:
+                problems.append("%r gave %r, wanted %r" % (args, got, want))
+        return problems
+
+    accepted = {"limit", "query", "max_answer_chars"}
+    # The sentence: the function, the unknown keys sorted, the accepted names
+    # sorted, then the near-miss pointer -- and nothing at all when every key
+    # is known, so a host can call it unconditionally.
+    suite.record(GE, "upr-refuses-and-points", cases([
+        (("web", {"limitt": 1}, accepted),
+         REFUSAL_HEAD % ("web", "limitt", "limit, max_answer_chars, query")
+         + DISPATCH_ONE % "limit"),
+        (("web", {"zz": 1, "limitt": 1, "queryy": 2}, accepted),
+         REFUSAL_HEAD % ("web", "limitt, queryy, zz", "limit, max_answer_chars, query")
+         + " Did you mean 'limit' for 'limitt', 'query' for 'queryy'?"),
+        (("web", {"qxqxqxqx": 1}, accepted),
+         REFUSAL_HEAD % ("web", "qxqxqxqx", "limit, max_answer_chars, query")),
+        (("status", {"x": 1}, frozenset()),
+         REFUSAL_HEAD % ("status", "x", "(none)")),
+    ]))
+
+    # Silence when nothing is unknown, and the alias table is the one the
+    # suggestion reads: an alias is matched, its canonical name is suggested.
+    suite.record(GE, "upr-silent-when-known-alias-names-canonical", cases([
+        (("web", {}, accepted), ""),
+        (("web", {"limit": 1, "query": "x"}, accepted), ""),
+        # `qq` is far from `query` but one edit from the alias `qqq`: matched
+        # through the alias, answered with the canonical spelling.
+        (("web", {"qq": "x"}, {"query"}, {"qqq": "query"}),
+         REFUSAL_HEAD % ("web", "qq", "query") + DISPATCH_ONE % "query"),
+    ]))
+
+    problems = []
+    try:
+        sources = mod.load_all_blocks()
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- recorded, not raised
+        sources = None
+        problems.append("the generator's block maps do not load: %s" % exc)
+    hosts = []
+    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)) if sources is not None else []:
+        text = path.read_text(encoding="utf-8")
+        try:
+            regions = mod.audit_text(path.name, text, sources)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            problems.append("%s: does not audit: %s" % (path.name, exc))
+            continue
+        if not any(r.source == DISPATCH_CANONICAL_NAME and REFUSAL_BLOCK in r.names
+                   for r in regions):
+            continue
+        hosts.append(path.name)
+        if "%s(" % REFUSAL_BLOCK not in outside_regions(mod, path.name, text, sources):
+            problems.append("%s: hosts %s but never calls it" % (path.name, REFUSAL_BLOCK))
+    problems += problem_if(not hosts and sources is not None,
+                           "no server hosts %s, so this row would pass on nothing"
+                           % REFUSAL_BLOCK)
+    suite.record(GA, "unknown-params-refusal-hosted-is-called", problems,
+                 detail=["hosts: %s" % (", ".join(hosts) or "none")])
 
 
 def run(opts=None):

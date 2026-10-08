@@ -40,6 +40,10 @@ PARAM_ALIASES = {
     "file": "path",
     "file_path": "path",
     "filepath": "path",
+    # The spelling of the skill this server's tool description points at
+    # (p:mcp-luals, which documents purity_call's canonical `relative_path`).
+    # Silently dropped until unknown keys were refused; now it is read.
+    "relative_path": "path",
     "symbol": "symbol_name",
     "name": "symbol_name",
     "col": "character",
@@ -1849,6 +1853,34 @@ FUNCTION_ALIASES = {
     "luals_diagnostic":               "luals_diagnostics",
 }
 
+# The params each function's handler reads, canonical names (post
+# PARAM_ALIASES). An unknown key is REFUSED (handle_luals_call) rather than
+# dropped, before the auto-init wait and the backend lock, so a misspelling is
+# answered without a working lua-language-server. Note what three rows lack:
+# luals_find_references, luals_symbol_context and luals_symbol_change_impact
+# search the workspace by name and never read `path` (nor does the last read
+# `call_hierarchy_depth`), so a `path` there -- which used to be dropped and
+# change nothing -- is now refused rather than pretended to. Held to the
+# handlers' actual reads and to the docs by tests/test_param_contract.py.
+_POSITION = frozenset({"path", "line", "character"})
+ACCEPTED_PARAMS = {
+    "luals_init":                    frozenset({"project_root", "luals_path", "config_path"}),
+    "luals_find_definition":         frozenset({"symbol_name", "path", "context_lines"}),
+    "luals_find_definition_at":      _POSITION | {"context_lines"},
+    "luals_find_type_definition_at": _POSITION | {"context_lines"},
+    "luals_find_references":         frozenset({"symbol_name", "max_results", "context_lines",
+                                                "include_text_fallback"}),
+    "luals_find_implementations_at": _POSITION | {"context_lines"},
+    "luals_workspace_symbols":       frozenset({"query", "limit", "strict"}),
+    "luals_document_outline":        frozenset({"path"}),
+    "luals_symbol_context":          frozenset({"symbol_name", "max_references",
+                                                "context_lines"}),
+    "luals_inlay_hints":             frozenset({"path", "start_line", "end_line", "limit"}),
+    "luals_symbol_change_impact":    frozenset({"symbol_name", "max_references"}),
+    "luals_hover":                   _POSITION,
+    "luals_diagnostics":             frozenset({"path", "timeout"}),
+}
+
 
 # ============================================================
 # MCP dispatcher
@@ -1877,7 +1909,7 @@ class _ErrorText(str):
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _unknown_params_refusal
 def _did_you_mean(words, candidates, aliases=None):
     """Return " Did you mean 'X'?" for the closest real name, or "".
 
@@ -1919,7 +1951,32 @@ def _did_you_mean(words, candidates, aliases=None):
     if len(words) == 1:
         return " Did you mean '%s'?" % pairs[0][1]
     return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
-# END GENERATED: dbc5a3370235
+
+
+def _unknown_params_refusal(function, params, accepted, aliases=None):
+    """Return the refusal for the keys of `params` not in `accepted`, or "".
+
+    The sentence is the one the six hosts that refused an unknown parameter
+    first already wrote by hand -- "Unknown params for '<fn>': <keys>.
+    Accepted: <names>." -- followed by `_did_you_mean`'s pointer, so a caller
+    reads the fleet one way. `function` is the canonical name the caller's
+    spelling resolved to, `params` the call's params AFTER alias resolution,
+    `accepted` the canonical names that function reads, and `aliases` the
+    alias table the host's resolver read, so a near miss of an alias is
+    answered with the canonical spelling. Both lists are sorted, so the
+    answer depends on the sets, never on wire order.
+
+    An empty string means every key is known, so a host calls this
+    unconditionally and refuses only on a non-empty answer. It never
+    resolves: a near miss is pointed at, and the call is still refused.
+    """
+    unknown = sorted(str(key) for key in params if key not in accepted)
+    if not unknown:
+        return ""
+    offered = ", ".join(sorted(accepted)) or "(none)"
+    head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
+    return head + _did_you_mean(unknown, accepted, aliases)
+# END GENERATED: 7b6f3ce0b3db
 
 
 async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) -> str:
@@ -1964,6 +2021,16 @@ async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) ->
         params = _resolve_aliases(params)
     except ValueError as e:
         return _serialize(function, {"error": str(e)})
+
+    # An unknown key is refused for the same reason and in the same place:
+    # the answer is a pure function of the params and this table, so it must
+    # not wait for a backend. An unknown function has no row and is answered
+    # below.
+    accepted = ACCEPTED_PARAMS.get(function)
+    if accepted is not None:
+        refusal = _unknown_params_refusal(function, params, accepted, PARAM_ALIASES)
+        if refusal:
+            return _serialize(function, {"error": refusal})
 
     # If auto-init is in progress and the client isn't ready yet, wait for it.
     # This stays BEFORE _hold_backend and must: _auto_init holds the backend

@@ -681,7 +681,7 @@ async def handle_context7_query_docs(args: dict) -> Union[str, dict]:
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _unknown_params_refusal
 def _did_you_mean(words, candidates, aliases=None):
     """Return " Did you mean 'X'?" for the closest real name, or "".
 
@@ -723,7 +723,32 @@ def _did_you_mean(words, candidates, aliases=None):
     if len(words) == 1:
         return " Did you mean '%s'?" % pairs[0][1]
     return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
-# END GENERATED: dbc5a3370235
+
+
+def _unknown_params_refusal(function, params, accepted, aliases=None):
+    """Return the refusal for the keys of `params` not in `accepted`, or "".
+
+    The sentence is the one the six hosts that refused an unknown parameter
+    first already wrote by hand -- "Unknown params for '<fn>': <keys>.
+    Accepted: <names>." -- followed by `_did_you_mean`'s pointer, so a caller
+    reads the fleet one way. `function` is the canonical name the caller's
+    spelling resolved to, `params` the call's params AFTER alias resolution,
+    `accepted` the canonical names that function reads, and `aliases` the
+    alias table the host's resolver read, so a near miss of an alias is
+    answered with the canonical spelling. Both lists are sorted, so the
+    answer depends on the sets, never on wire order.
+
+    An empty string means every key is known, so a host calls this
+    unconditionally and refuses only on a non-empty answer. It never
+    resolves: a near miss is pointed at, and the call is still refused.
+    """
+    unknown = sorted(str(key) for key in params if key not in accepted)
+    if not unknown:
+        return ""
+    offered = ", ".join(sorted(accepted)) or "(none)"
+    head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
+    return head + _did_you_mean(unknown, accepted, aliases)
+# END GENERATED: 7b6f3ce0b3db
 
 
 async def handle_context7_call(args: dict) -> Union[str, dict]:
@@ -755,6 +780,13 @@ async def handle_context7_call(args: dict) -> Union[str, dict]:
         available = ", ".join(callable_names)
         hint = _did_you_mean(function, callable_names)
         return {"error": f"Unknown function: '{function}'. Available: {available}{hint}"}
+
+    # An unknown key is refused, not dropped: `queryy` used to reach upstream as
+    # an empty query and come back as "'query' parameter is required", which
+    # names the right word but never the wrong one the caller actually sent.
+    refusal = _unknown_params_refusal(function, params, ACCEPTED_PARAMS[function])
+    if refusal:
+        return {"error": refusal}
 
     # Passed through as returned, shape included: an inner handler's
     # {"error": ...} has to stay a dict all the way to the wrap, or the flag is
@@ -798,6 +830,18 @@ ALL_HANDLERS = {
     "context7_call":               handle_context7_call,
     "context7_resolve_library_id": handle_context7_resolve_library_id,
     "context7_query_docs":         handle_context7_query_docs,
+}
+
+# The params each function reached through context7_call reads. An unknown key
+# is REFUSED (handle_context7_call) rather than dropped. `max_answer_chars` is
+# read by the two functions that cap an upstream payload; `offset` only by the
+# one whose payload has records to page. Held to the handlers' actual reads and
+# to the skill by tests/test_param_contract.py.
+ACCEPTED_PARAMS = {
+    "context7_status":             frozenset(),
+    "context7_resolve_library_id": frozenset({"query", "library_name", "max_answer_chars",
+                                              "offset"}),
+    "context7_query_docs":         frozenset({"library_id", "query", "max_answer_chars"}),
 }
 
 
