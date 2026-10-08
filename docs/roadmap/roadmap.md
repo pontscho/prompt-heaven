@@ -31,6 +31,13 @@ WIP now: 0 of 3. Archive: 70 closed items (61 done, 9 dropped).
 | inbox | R-0086 | idea  | llm-router: keep the OAuth refresh token in the OS keychain instead of the 0600 config              | yes   |
 | inbox | R-0087 | idea  | llm-router: effort learning and an effort field on the req line for the Responses kinds             | yes   |
 | inbox | R-0088 | idea  | llm-router: put the non-stream dropped_thinking count on the req line                               | yes   |
+| inbox | R-0089 | idea  | Port llm-router's pre-auth header bound (V3) to mcp-proxy's HTTP front                              | yes   |
+| inbox | R-0090 | idea  | mcp-proxy has no distinct-character bearer token floor                                              | yes   |
+| inbox | R-0091 | idea  | llm-router drops to the 10 s header timeout after parse_request before authentication               | yes   |
+| inbox | R-0092 | idea  | STRICT_JSON_EXCEPTIONS peers still parse unbounded ints and NaN on 3.9.6                            | yes   |
+| inbox | R-0093 | idea  | Extend llm-router's F26 hardening to the chat-completions and Mistral kinds                         | yes   |
+| inbox | R-0094 | idea  | wiki_call verify does not resolve dotted Class.method anchors                                       | yes   |
+| inbox | R-0095 | idea  | llm-router shutdown: resolve, TCP connect and non-stream upstream calls are not interruptible       | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -338,3 +345,109 @@ The work: a channel from the adapter's non-stream response path back to the hand
 ### Log
 
 - 2026-10-07 new->unset: proposed by task-060 (docs extras 2026-10-07)
+
+## R-0089 · Port llm-router's pre-auth header bound (V3) to mcp-proxy's HTTP front
+
+state: idea
+horizon: unset
+origin: docs/adr/0029-the-http-front-is-a-domain.md#declared-limits
+blocked_by: []
+severity: low
+tags: [hardening, http-front, mcp-proxy]
+
+The proxy's handle_one_request applies one header bound (10 s) to every request; the router applies a shorter one (_HTTP_PREAUTH_TIMEOUT_S, 5 s) until the connection has authenticated, so an unauthenticated peer holds a --max-connections slot for less time (a mitigation only: a peer that reconnects can still keep every slot busy). R-0072 lifted only what was identical in the two fronts, so handle_one_request and setup stay declared adaptations in tests/test_generated_region.py HTTPFRONT_ADAPTATIONS, and R-0072 closed with P9, P10 and P12-P14 of ADR 0028's copy table (and the rest of P7/P8) still declared adaptations. Porting the bound is a behaviour change to the proxy, not part of a lift: it needs an authenticated flag set by the proxy's _precheck, a new proxy constant, a red-first proxy case, and a decision whether handle_one_request and setup then become canonical members. Also recorded as the proxy's missing V3 pre-auth bound in the S061 security triage residuals.
+
+### Log
+
+- 2026-10-08 new->unset: proposed by p:minion-mason
+
+## R-0090 · mcp-proxy has no distinct-character bearer token floor
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:proxy-token-distinct-floor
+blocked_by: []
+severity: low
+tags: [auth, hardening, mcp-proxy]
+
+The router refuses a bearer token of fewer than _TOKEN_MIN_DISTINCT (8) distinct characters (checked in _rt_cfg_token around the generated _http_token_value call), so a 32-character run of one letter is refused there (V1) and accepted by mcp-proxy, whose only floor is the generated _http_token_value's length (_TOKEN_MIN_LEN, 32) and printable-ASCII charset. R-0072 kept the token policy host-side on purpose (min_len and error are arguments, pinned by router J40(f) and proxy K5(f)), so the distinct-character check stayed a router-only hand check. Open: add the same floor to the proxy's two token callers (--token-file and MCP_PROXY_TOKEN) with a red-first J47-style case, or move the check into the canonical source as a further argument. Found during R-0072 (ADR 0029 declared limits).
+
+### Log
+
+- 2026-10-08 new->unset: proposed by p:minion-mason
+
+## R-0091 · llm-router drops to the 10 s header timeout after parse_request before authentication
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:router-post-parse-preauth-timeout
+blocked_by: []
+severity: low
+tags: [hardening, http-front, llm-router]
+
+Pre-existing, observed during R-0072 and not changed by it. The router's handle_one_request arms the 5 s pre-auth bound (_HTTP_PREAUTH_TIMEOUT_S) for the header phase of a connection that has not authenticated, but the generated parse_request then sets the per-recv socket timeout to self.timeout, the 10 s header bound, before _precheck runs. Its comment speaks of the per-recv pre-auth timeout staying until the host's precheck passes; that is true in the proxy, whose pre-auth timeout is the header bound, and reads wrongly in the router. The body read runs under its own total deadline once the checks pass, and whether any socket read happens between parse_request and the precheck verdict was not measured, so the practical exposure is unknown and may be nil. Open: decide whether the router should restore its pre-auth timeout after parse_request (a hand hook, per the PD-7 rule of ADR 0029, since parse_request is generated) or whether the comment should be reworded in the canonical source; either needs a red-first router case.
+
+### Log
+
+- 2026-10-08 new->unset: proposed by p:minion-mason
+
+## R-0092 · STRICT_JSON_EXCEPTIONS peers still parse unbounded ints and NaN on 3.9.6
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:strict-json-exception-peers
+blocked_by: []
+severity: low
+tags: [fleet, hardening, json]
+
+R-0067/R-0068 (d4a241b) made the MCP wire strict: NaN/Infinity and integers longer than JSON_INT_LITERAL_LIMIT (4300 digits) are refused by the generated _strict_loads in all 17 servers and the proxy. The generated_region group H declares 21 STRICT_JSON_EXCEPTIONS -- parse sites that read a peer other than the MCP client: LSP bodies, the context7 and jenkins HTTP responses, the gdc CDP socket, inspect's _v_json. On Python 3.9.6 those sites still use plain json.loads, which accepts NaN and parses an integer literal of any length (3.9.6 predates the int-to-str digit limit), so a hostile or broken peer can still cost quadratic CPU or inject a non-finite number. Open: decide per exception whether it should move to _strict_loads, and gate the decision red first. Residual of the S061 security triage of d4a241b.
+
+### Log
+
+- 2026-10-08 new->unset: proposed by p:minion-inspector-security-officer
+
+## R-0093 · Extend llm-router's F26 hardening to the chat-completions and Mistral kinds
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:router-f26-chat-mistral
+blocked_by: []
+severity: low
+tags: [hardening, llm-router]
+
+R-0085 batch 2 (225466c) shipped F26 for the Responses kinds (codex, openai) only; the builder left the chat-completions path and the Mistral adapter uncovered, and that choice was accepted overnight as an agent decision. Open: apply the same rule to the remaining kinds with a red-first router case per kind, or declare why they do not need it.
+
+### Log
+
+- 2026-10-08 new->unset: proposed by p:minion-builder
+
+## R-0094 · wiki_call verify does not resolve dotted Class.method anchors
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:wiki-verify-dotted-anchors
+blocked_by: []
+severity: low
+tags: [wiki]
+
+The verify symbol matcher looks up a path:symbol anchor as a bare name, so an anchor naming a method as Class.method is never found and is reported as a frozen advisory although the method exists. Observed on ADR 0028 during R-0072: two false advisories, for _RouterHandler.send_error and _RouterHandler._rt_client_gone. Open: resolve a dotted symbol as a member of the named class (Python first), with a red-first wiki case.
+
+### Log
+
+- 2026-10-08 new->unset: proposed by Safranek
+
+## R-0095 · llm-router shutdown: resolve, TCP connect and non-stream upstream calls are not interruptible
+
+state: idea
+horizon: unset
+origin: user:2026-10-07:router-shutdown-interrupt-remainder
+blocked_by: []
+follows: R-0083
+severity: low
+tags: [llm-router, shutdown]
+
+R-0083 (0267c3b) made a token POST inside _rt_send interruptible on shutdown: the TLS socket is registered before the handshake and the flock poll gives up. Two gaps remain: the name resolution and the TCP connect happen before the socket is registered, so a shutdown during a slow resolve or connect waits for its timeout; and non-stream upstream calls are still not interruptible. Open: register earlier (or connect through a socket the shutdown path can close) and cover the non-stream path, each with a red-first case.
+
+### Log
+
+- 2026-10-08 new->unset: proposed by p:minion-builder
