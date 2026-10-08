@@ -135,7 +135,12 @@ def _configure_logging(debug, log_file):
 # file, and the call's _SEARCH_DEADLINE_SECS budget enforced on every reply.
 # Past it the child is killed and the caller gets an error (isError) naming
 # the budget, the file and regex:false. Literal mode (regex:false) stays
-# in-process: an re.escape()d pattern has nothing to backtrack over.
+# in-process: an re.escape()d pattern has nothing to backtrack over -- and so
+# does a regex-mode pattern holding no metacharacter at all (_is_plain_literal),
+# which as a regex matches exactly its own characters. Because the deadline is
+# one budget for the whole CALL, an overrun inside the child blames the pattern
+# only when that one file used _BACKTRACK_BUDGET_SHARE of it; otherwise the
+# error names the total budget and the number of files scanned.
 #
 # replace_content's mode:"regex" uses the same worker (op `r`/`R`): the match
 # count and the substitution both run in the child against
@@ -147,8 +152,57 @@ def _configure_logging(debug, log_file):
 # remaining residual; its own comment carries it.
 
 _MAX_REGEX_LEN = 1000          # caller-supplied pattern length ceiling
-_SEARCH_DEADLINE_SECS = 5.0    # wall-clock budget for multi-file scan loops
+_SEARCH_DEADLINE_SECS = 5.0    # wall-clock budget for ONE WHOLE search call
 _REPLACE_DEADLINE_SECS = 5.0   # wall-clock budget for replace_content's regex
+
+# The clock the search deadline and _RegexWorker read. A module attribute, not
+# a bare time.monotonic call, only so a test can swap it for a fake clock and
+# make a budget overrun deterministic; nothing else ever rebinds it.
+_search_clock = time.monotonic
+
+# When the shared deadline expires INSIDE the worker, the overrun is blamed on
+# catastrophic backtracking only if the file in flight had by itself used at
+# least this share of the budget. Half, because the two causes separate there:
+# a linear regex over the largest file the scan admits (max_file_size, 10 MB)
+# answers in well under a second, so a single file reaching 2.5 s is
+# backtracking for practical purposes -- while a file that has been in flight
+# for a fraction of a second when a 5 s deadline expires was merely the LAST
+# of a walk too wide for the budget, and blaming its pattern sends the caller
+# to rewrite a regex that was never the problem. Below the share the TOTAL
+# budget is named instead. The declared blind spot: a backtracking file that
+# starts after more than half the budget is already spent is reported as a
+# total-budget overrun -- still true, and the in-flight time it states shows it.
+_BACKTRACK_BUDGET_SHARE = 0.5
+
+# Every character Python's re gives a meaning to OUTSIDE a character class.
+# Written out rather than derived from re.escape, whose escape set is a
+# different, wider set (it escapes `-`, `/`, ` `, `#`, `&`, `~` and more, and
+# the set has changed between versions) -- none of which is special at the top
+# level of a pattern. `#` and whitespace matter only under re.VERBOSE, which a
+# caller can switch on only with `(?x)`, and `(` is in the set.
+_REGEX_METACHARS = frozenset(".^$*+?{}[]()|\\")
+
+
+def _is_plain_literal(pattern: str) -> bool:
+    """True if *pattern* holds no regex metacharacter, i.e. as a regex it
+    matches exactly its own characters and cannot backtrack."""
+    return not any(c in _REGEX_METACHARS for c in pattern)
+
+
+def _search_budget_message(files_done: int, budget: float,
+                           in_flight: Optional[Tuple[str, float]] = None) -> str:
+    """search_for_pattern's TOTAL-budget overrun: the walk was too wide."""
+    where = ""
+    if in_flight is not None:
+        where = (f"; the file in flight ({in_flight[0]}) had used only "
+                 f"{in_flight[1]:.1f}s of it")
+    return (
+        f"search exceeded its total time budget ({budget:.0f}s for the whole "
+        f"call, every file together) after scanning {files_done} file(s)"
+        f"{where}. No single file was slow: the walk is too wide for one call. "
+        "Narrow relative_path, or filter with paths_include_glob / "
+        "paths_exclude_glob (or restrict_search_to_code_files)."
+    )
 
 
 def _check_regex_len(pattern: str, param_name: str = "pattern") -> None:
@@ -263,18 +317,29 @@ class _RegexWorker:
     close() is idempotent and is what the handler's ExitStack runs.
     replace_content drives it too (substitute()): *budget*, *task* and
     *way_out* only change what the overrun error says and the child's CPU
-    backstop; the defaults are search_for_pattern's."""
+    backstop; the defaults are search_for_pattern's.
+
+    *deadline* is the CALL's, shared by every file. *total_budget_message*,
+    when given, is how an overrun is reported if the file in flight had used
+    less than _BACKTRACK_BUDGET_SHARE of the budget by itself: called with
+    (where, seconds that file was in flight), it returns the total-budget text.
+    Without it (replace_content: one text per call) every overrun blames the
+    pattern, as before."""
 
     def __init__(self, pattern_str: str, deadline: float,
                  budget: float = _SEARCH_DEADLINE_SECS,
                  task: str = "search",
                  way_out: str = ", narrow relative_path, or pass regex:false "
-                                "for a literal search") -> None:
+                                "for a literal search",
+                 total_budget_message: Optional[Callable[[str, float], str]] = None,
+                 ) -> None:
         self._pattern = pattern_str
         self._deadline = deadline
         self._budget = budget
         self._task = task
         self._way_out = way_out
+        self._total_budget_message = total_budget_message
+        self._asked_at = 0.0
         self._proc: Optional[subprocess.Popen] = None
         self._sel: Optional[selectors.BaseSelector] = None
         self._closed = False
@@ -308,9 +373,16 @@ class _RegexWorker:
         buf = bytearray()
         fd = self._proc.stdout.fileno()
         while len(buf) < n:
-            remaining = self._deadline - time.monotonic()
+            now = _search_clock()
+            remaining = self._deadline - now
             if remaining <= 0 or not self._sel.select(remaining):
+                if remaining > 0:
+                    now = _search_clock()
                 self.close()
+                in_flight = now - self._asked_at
+                if (self._total_budget_message is not None
+                        and in_flight < self._budget * _BACKTRACK_BUDGET_SHARE):
+                    raise ValueError(self._total_budget_message(where, in_flight))
                 raise ValueError(
                     f"{self._task} exceeded time budget ({self._budget:.0f}s) "
                     f"while matching the regex against {where}: the pattern may "
@@ -327,6 +399,9 @@ class _RegexWorker:
 
     def _ask(self, op: bytes, lines: List[str], where: str,
              prefix: bytes = b"") -> Any:
+        # Read BEFORE the spawn, so a first file's in-flight time includes the
+        # child's start-up: a pattern that overruns on file one is still blamed.
+        self._asked_at = _search_clock()
         if self._proc is None:
             self._start()
         self._send(op + prefix
@@ -512,11 +587,18 @@ PARAM_ALIASES_BY_FUNC: Dict[str, Dict[str, str]] = {
     # `max_results` is the semantic handlers' cap, and the global `max` row
     # sends callers there; the three file-layer searches cap with `head_limit`,
     # so the same word re-points here instead of dying as an unknown param.
-    # `count` is NOT re-pointed: next to output_mode "count" it is ambiguous.
+    # `count` IS re-pointed too: left on the global row it was refused as an
+    # unknown `max_results` -- a key the caller never wrote. Beside output_mode
+    # "count" it is still a row cap (head_limit), never a mode. `max_matches`
+    # and `limit` (no global row) are the other grep-taught spellings. Any two
+    # of these, or one beside head_limit, is ADR 0015's ambiguity error.
     "search_for_pattern": {
         "query": "substring_pattern",
         "max_results": "head_limit",
         "max": "head_limit",
+        "count": "head_limit",
+        "max_matches": "head_limit",
+        "limit": "head_limit",
     },
 }
 
@@ -1204,6 +1286,47 @@ def _ignore_skips(match_on: str, rel: str, patterns: List[str]) -> bool:
     if _ignore_exempt(rel):
         return False
     return _is_ignored(match_on, patterns) or _ignore_inherited(rel, patterns)
+
+
+def _is_nested_repo(path: str) -> bool:
+    """True if directory *path* is the top of a git repository of its own.
+
+    A `.git` DIRECTORY is a clone; a `.git` FILE (`gitdir: ...`) is a worktree
+    or a submodule -- the case the `.git`-named prune never saw, so search used
+    to walk `.claude/worktrees/<name>/` in full. lexists, so a dangling `.git`
+    symlink still counts: it is a repository marker either way.
+    """
+    return os.path.lexists(os.path.join(path, ".git"))
+
+
+def _git_toplevel(start: str) -> Optional[str]:
+    """The nearest directory at or above *start* holding a `.git` file or
+    directory, or None. Pure filesystem: no git binary, no config read."""
+    cur = start if os.path.isdir(start) else os.path.dirname(start)
+    while True:
+        if _is_nested_repo(cur):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def _foreign_ignore_context(root: str, skip_ignored: bool) -> Tuple[List[str], str]:
+    """(patterns, base) for a search root OUTSIDE the project root.
+
+    The project's .gitignore says nothing about another repository, so it is
+    not applied there; the searched tree's OWN git toplevel's root .gitignore
+    is, with every path measured from that toplevel -- the same limited
+    semantics (_ignore_skips) the project's gets, `.claude/tmp` exemption and
+    inherited-ignore rule included. No toplevel: no patterns at all.
+    """
+    if not skip_ignored:
+        return [], root
+    top = _git_toplevel(root)
+    if top is None:
+        return [], root
+    return _parse_gitignore(os.path.join(top, ".gitignore")), top
 
 
 # ---------------------------------------------------------------------------
@@ -2241,9 +2364,31 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
     # multi-file scan is bounded even when no per-line match fires. Those checks
     # run BETWEEN matches; the matcher enforces the same deadline DURING one
     # (a regex runs in a killable child, see the ReDoS guard).
-    _deadline = time.monotonic() + _SEARCH_DEADLINE_SECS
-    matcher = (_InProcessMatcher(pattern) if literal
-               else _RegexWorker(pattern_str, _deadline))
+    #
+    # The deadline is ONE budget for the WHOLE call, every file together, so an
+    # overrun is usually a walk too wide rather than a slow pattern: the error
+    # says which (see _search_budget_message / _BACKTRACK_BUDGET_SHARE) and how
+    # many files were scanned before it.
+    _budget = _SEARCH_DEADLINE_SECS
+    _deadline = _search_clock() + _budget
+    files_scanned = 0
+
+    def _over_budget() -> ValueError:
+        return ValueError(_search_budget_message(files_scanned, _budget))
+
+    # The literal fast path: a regex-mode pattern holding no metacharacter (the
+    # common case -- `release/ngs-`, an identifier) matches exactly its own
+    # characters and cannot backtrack, so it needs no killable child. It runs
+    # in-process on the SAME compiled pattern, through _InProcessMatcher, which
+    # mirrors the child line for line -- so the rows are byte-identical and
+    # only the per-file pipe round trip (and the ~60 ms spawn) is saved.
+    if literal or _is_plain_literal(pattern_str):
+        matcher = _InProcessMatcher(pattern)
+    else:
+        matcher = _RegexWorker(
+            pattern_str, _deadline, budget=_budget,
+            total_budget_message=lambda where, used: _search_budget_message(
+                files_scanned, _budget, (where, used)))
     cleanup.callback(matcher.close)
 
     def _walk_roots():
@@ -2264,41 +2409,60 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
 
         With one root this yields precisely what `os.walk(root)` yielded before,
         in the same order — the scalar case is unchanged, not merely equivalent.
+
+        ``patterns``/``ign_base`` are the root's ignore rules and the directory
+        their paths are measured from: the project's .gitignore and the project
+        root for an in-root root; for an out-of-root one, the .gitignore of the
+        searched tree's OWN git toplevel and that toplevel (see
+        _foreign_ignore_context) -- the project's rules say nothing about
+        another repository.
         """
         for root in search_roots:
             bound = (project_root
                      if _path_within_root(pathlib.Path(root), project_root)
                      else root)
+            if bound == project_root:
+                patterns, ign_base = ignore_patterns, project_root
+            else:
+                patterns, ign_base = _foreign_ignore_context(root, skip_ignored)
             if os.path.isfile(root):
-                yield (True, bound, os.path.dirname(root), [],
-                       [os.path.basename(root)])
+                yield (True, bound, patterns, ign_base, os.path.dirname(root),
+                       [], [os.path.basename(root)])
             else:
                 for dirpath_, dirnames_, filenames_ in os.walk(root):
-                    yield False, bound, dirpath_, dirnames_, filenames_
+                    yield (False, bound, patterns, ign_base, dirpath_,
+                           dirnames_, filenames_)
 
-    for search_single_file, bound, dirpath, dirnames, filenames in _walk_roots():
+    for (search_single_file, bound, patterns, ign_base, dirpath, dirnames,
+         filenames) in _walk_roots():
         if not search_single_file:
             dirnames[:] = [d for d in dirnames if d != ".git"]
             if skip_ignored:
-                dir_rel = os.path.relpath(dirpath, project_root)
+                # Another repository below the search root -- a git worktree
+                # or submodule (a `.git` FILE) or a nested clone (a `.git`
+                # directory) -- is not this tree's content. Only CHILDREN are
+                # pruned here, so the search root itself is always walked,
+                # even when it is such a repository.
+                dirnames[:] = [d for d in dirnames
+                               if not _is_nested_repo(os.path.join(dirpath, d))]
+                dir_rel = os.path.relpath(dirpath, ign_base)
                 dirnames[:] = [
                     d for d in dirnames
-                    if not _ignore_skips(d, os.path.join(dir_rel, d), ignore_patterns)
+                    if not _ignore_skips(d, os.path.join(dir_rel, d), patterns)
                 ]
         for name in filenames:
             full = os.path.join(dirpath, name)
             file_rel = os.path.relpath(full, project_root)
 
             if (not search_single_file and skip_ignored
-                    and _ignore_skips(name, file_rel, ignore_patterns)):
+                    and _ignore_skips(name, file_rel if ign_base == project_root
+                                      else os.path.relpath(full, ign_base),
+                                      patterns)):
                 continue
 
             # Deadline check between files
-            if time.monotonic() > _deadline:
-                raise ValueError(
-                    f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
-                    "use a more specific path or pattern"
-                )
+            if _search_clock() > _deadline:
+                raise _over_budget()
 
             # F6 fix / CWE-22: re-contain walked path via realpath so a regular-
             # file symlink that resolves outside the root it was walked under is
@@ -2362,11 +2526,8 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
                     fh.close()
                 hit_lines = matcher.search_lines(lines, file_rel)
                 for i, line in enumerate(lines):
-                    if i % 256 == 0 and time.monotonic() > _deadline:
-                        raise ValueError(
-                            f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
-                            "use a more specific path or pattern"
-                        )
+                    if i % 256 == 0 and _search_clock() > _deadline:
+                        raise _over_budget()
                     if i in hit_lines:
                         file_hit_count += 1
                         total_match_count += 1
@@ -2404,11 +2565,8 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
                 else:
                     hit_lines = matcher.search_lines(lines, file_rel)
                 for i, line in enumerate(lines):
-                    if i % 256 == 0 and time.monotonic() > _deadline:
-                        raise ValueError(
-                            f"search exceeded time budget ({_SEARCH_DEADLINE_SECS:.0f}s); "
-                            "use a more specific path or pattern"
-                        )
+                    if i % 256 == 0 and _search_clock() > _deadline:
+                        raise _over_budget()
                     if only_matching:
                         hits = found.get(i)
                         if not hits:
@@ -2449,6 +2607,7 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
                                 truncated = True
                                 break
 
+            files_scanned += 1                  # for the budget message only
             if file_hit_count > 0:
                 file_matches[file_rel] = file_hit_count
 
@@ -6814,6 +6973,10 @@ PURITY_CALL_TOOL = {
         "by default; pass regex:false for a literal match (`size(` needs no escaping) - use it when\n"
         "you want text, not a symbol. only_matching:true (rg -o) makes each match its own\n"
         "`path:line: <match>` row; content mode only, refused beside context lines.\n"
+        "Its row cap head_limit also answers to max_results/max/count/max_matches/limit.\n"
+        "It skips, like an ignored dir, any dir BELOW the search root holding a `.git`\n"
+        "file or dir (worktree, submodule, nested clone); no_ignore:true searches them.\n"
+        "A root outside the project is filtered by ITS OWN repo's root .gitignore.\n"
         "The former standalone clangd_call / cuda_call /\n"
         "luals_call TOOLS are retired and unregistered - they do not exist in any\n"
         "session, and purity_call is the only entry point. Their legacy\n"

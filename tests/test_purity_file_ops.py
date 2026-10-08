@@ -84,6 +84,8 @@ Groups:
   D  the parameter contract: aliases (function and param, global and
      per-function -- `max_results`/`max` capping the three listings like
      `head_limit`, refused beside it, and left alone in `symbol`;
+     `count`/`max_matches`/`limit` capping search the same way, `count` no
+     longer refused as an unknown `max_results` it never was;
      `paths_include`/`paths_exclude` filtering like their `*_glob` params and
      refused beside them or beside `exclude`), the
      inverted `no_ignore` spelling, tolerated no-ops,
@@ -136,6 +138,14 @@ Groups:
      group P bound, leaves the file's bytes untouched, and the server still
      replaces afterwards; backrefs, zero-length matches, the zero / one / many
      answers, a bad group reference and literal mode as controls
+  R  a regex:true pattern with NO metacharacter is matched in-process, its
+     answer byte-identical to the worker's; a TOTAL-budget overrun says so,
+     with the file count and the way out, and backtracking is blamed only
+     when the file in flight alone used half the budget (clock seam swapped)
+  S  a directory below the search root holding a `.git` file or directory
+     (worktree, submodule, nested clone) is skipped unless the filter is off,
+     the root itself never; an out-of-root root takes its ignore rules from
+     its OWN git toplevel's .gitignore, paths measured from that toplevel
 """
 
 import os
@@ -908,7 +918,20 @@ def group_d(suite, drv, drv_lit):
              {"file_mask": "*.txt"}, "max", found_paths),
             ("max_results-caps-list_dir-like-head_limit", "list_dir",
              {"relative_path": ".", "recursive": True, "show_hidden": True},
-             "max_results", listing_paths)):
+             "max_results", listing_paths),
+            # `count` used to fall through to the GLOBAL `count` -> max_results
+            # row and die as "Unknown params: max_results" -- a key the caller
+            # never wrote.  `max_matches` and `limit` are the other two words a
+            # grep-taught caller reaches for; neither had any row at all.
+            ("count-caps-search-like-head_limit", "search",
+             {"substring_pattern": NEEDLE, "skip_ignored_files": False},
+             "count", search_row_paths),
+            ("max_matches-caps-search-like-head_limit", "search",
+             {"substring_pattern": NEEDLE, "skip_ignored_files": False},
+             "max_matches", search_row_paths),
+            ("limit-caps-search-like-head_limit", "search",
+             {"substring_pattern": NEEDLE, "skip_ignored_files": False},
+             "limit", search_row_paths)):
         _, full_text = drv.call(function, base)
         _, canon_text = drv.call(function, dict(base, head_limit=cap))
         is_error, text = drv.call(function, dict(base, **{alias: cap}))
@@ -941,6 +964,24 @@ def group_d(suite, drv, drv_lit):
         must_say=["ambiguous", "max_results", "head_limit"],
         must_not_say=["unknown params"],
         detail=["both set head_limit: a collision, not a precedence question"])
+    # The re-pointed `count` and the two new words land on head_limit too, so
+    # they collide the same way -- with the canonical name and with each other.
+    # `max_results` must not be named: that was the defect's whole symptom.
+    record_error(
+        suite, "D", "count-and-head_limit-ambiguous", drv, "search",
+        {"substring_pattern": NEEDLE, "count": 1, "head_limit": 1},
+        must_say=["ambiguous", "'count'", "head_limit"],
+        must_not_say=["unknown params", "max_results"],
+        detail=["`count` now resolves to head_limit in search, so beside",
+                "head_limit it is ADR 0015's collision, named by the keys",
+                "the caller actually wrote"])
+    record_error(
+        suite, "D", "limit-and-max_matches-ambiguous", drv, "search",
+        {"substring_pattern": NEEDLE, "limit": 1, "max_matches": 1},
+        must_say=["ambiguous", "'limit'", "'max_matches'", "head_limit"],
+        must_not_say=["unknown params"],
+        detail=["two ALIASES of head_limit collide just as an alias and the",
+                "canonical name do"])
 
     # `paths_include` / `paths_exclude` -> the *_glob params, GLOBAL rows beside
     # `include`/`exclude`.  The reported call was search_for_pattern with
@@ -999,9 +1040,9 @@ def group_d(suite, drv, drv_lit):
         must_not_say=["unknown params"],
         detail=["two ALIASES of one canonical param collide just the same"])
     # CONTROL: the per-function rows must not leak into the semantic layer,
-    # where `max_results` is canonical and `max` must still reach it.
+    # where `max_results` is canonical and `max` / `count` must still reach it.
     problems, replies = [], []
-    for key in ("max_results", "max"):
+    for key in ("max_results", "max", "count"):
         is_error, text = drv.call("symbol", {"query": NEEDLE, key: 1})
         low = text.lower()
         replies.append("%s: %s" % (key, text.strip()[:120]))
@@ -2915,6 +2956,357 @@ def group_q(suite, drv, root):
 
 
 # ---------------------------------------------------------------------------
+# Group R -- the literal fast path and the honest budget message
+#
+# The reported call: `substring_pattern: "release/ngs-"` over a large out-of-
+# root tree answered "the pattern may backtrack catastrophically", blaming
+# whichever file happened to be in flight when the call's ONE total 5 s budget
+# ran out.  Two separate defects, both gated here, in-process (the clock seam
+# `_search_clock` and the matcher class are module attributes, so a row can
+# swap them without a server child):
+#
+#   1. a pattern holding NO regex metacharacter is a literal, so it is matched
+#      in-process like regex:false -- no child, no pipe round trip per file --
+#      and its answer must be BYTE-IDENTICAL to the worker's (rows R2-R4);
+#   2. a total-budget overrun says so, with the file count and the way out;
+#      backtracking is blamed only when the file in flight alone used a large
+#      share of the budget (rows R5-R8).
+# ---------------------------------------------------------------------------
+
+FP_FILES = (
+    ("rel.txt", "branch release/ngs-1.2 here\nno match\n"
+                "release/ngs- twice release/ngs-\n"),
+    ("dash.txt", "a-b/c %s\n" % NEEDLE),
+    ("uni.txt", "été release/ngs-é\nlast release/ngs-"),
+)
+FP_CRLF = ("crlf.txt", b"release/ngs-x\r\nfoo\r\nform\x0crelease/ngs-\r\n")
+FP_MANY = 30                                # files under many/ (budget rows)
+
+
+def make_fastpath_fixture(ws, subdir):
+    """Group R's tree, REALPATH'd for the same reason group G's is."""
+    ws.subdir(subdir)
+    for rel, body in FP_FILES:
+        ws.write_text(os.path.join(subdir, rel), body)
+    ws.write_bytes(os.path.join(subdir, FP_CRLF[0]), FP_CRLF[1])
+    for i in range(FP_MANY):
+        ws.write_text(os.path.join(subdir, "many", "f%02d.txt" % i), LINE)
+    return os.path.realpath(ws.join(subdir))
+
+
+class StepClock:
+    """A monotonic clock that advances *step* seconds on every read."""
+
+    def __init__(self, start=0.0, step=0.5):
+        self.now, self.step = start - step, step
+
+    def __call__(self):
+        self.now += self.step
+        return self.now
+
+
+class SeqClock:
+    """A clock answering *values* in order, then the last one forever."""
+
+    def __init__(self, values):
+        self.values = list(values)
+
+    def __call__(self):
+        return self.values.pop(0) if len(self.values) > 1 else self.values[0]
+
+
+def _budget_raise(fn):
+    """(exception or None, text) of calling *fn*."""
+    try:
+        return None, handler_text(fn())
+    except Exception as exc:                                     # noqa: BLE001
+        return exc, "%s: %s" % (type(exc).__name__, exc)
+
+
+def group_r(suite, root):
+    mod = H.load_module_from_path("mcp_purity_fastpath", SERVER)
+    search = mod.handle_search_for_pattern
+    real_worker = mod._RegexWorker
+    spawned = []
+
+    class RecordingWorker(real_worker):
+        def _start(self):
+            spawned.append(self._pattern)
+            super()._start()
+
+    mod._RegexWorker = RecordingWorker
+
+    # -- R1: the metacharacter set, spelled out --------------------------------
+    plain = ("release/ngs-", "a-b/c", "foo bar", "été", "x#y", "a,b",
+             "<tag>", "k=v;", "NEEDLE_ALPHA", "~/'\"%&!@")
+    meta = tuple("a%sb" % c for c in ".^$*+?{}[]()|\\")
+    pred = getattr(mod, "_is_plain_literal", None)
+    problems = []
+    if pred is None:
+        problems.append("Scripts/mcp-purity.py has no _is_plain_literal")
+    else:
+        problems += ["%r judged a regex, it is a literal" % p
+                     for p in plain if not pred(p)]
+        problems += ["%r judged a literal, it holds a metacharacter" % p
+                     for p in meta if pred(p)]
+    suite.record("R", "metachar-set-unit", problems,
+                 detail=["`-`, `/`, space, `#`, `,` are literal at the top level",
+                         "of a pattern (re.escape escapes several of them, which",
+                         "is why the set is not derived from it); every one of",
+                         ". ^ $ * + ? { } [ ] ( ) | \\ makes a regex"])
+
+    # -- R2/R3: which matcher runs ---------------------------------------------
+    del spawned[:]
+    exc, text = _budget_raise(lambda: search(
+        {"substring_pattern": "release/ngs-"}, root))
+    problems = ["raised %s" % exc] if exc else []
+    if spawned:
+        problems.append("a regex worker child was spawned for a plain literal")
+    if not search_paths(text):
+        problems.append("no rows at all: the fast path matched nothing")
+    suite.record("R", "plain-literal-no-worker", problems,
+                 detail=["regex:true (the default) with no metacharacter: the",
+                         "pattern is matched in-process, like regex:false",
+                         "worker spawns: %d | rows: %s"
+                         % (len(spawned), sorted(search_paths(text)))],
+                 text=text, showable=True)
+    del spawned[:]
+    exc, text = _budget_raise(lambda: search(
+        {"substring_pattern": "release/ngs-.+"}, root))
+    suite.record("R", "metachar-pattern-uses-worker",
+                 (["raised %s" % exc] if exc else [])
+                 + ([] if spawned else ["no worker spawned for a real regex"]),
+                 detail=["CONTROL: a pattern holding `.` and `+` still runs in",
+                         "the killable child (the ReDoS guard is untouched)"],
+                 text=text, showable=True)
+
+    # -- R4: byte-identical answers --------------------------------------------
+    problems, compared = [], 0
+    for pat in ("release/ngs-", "a-b/c", "é", NEEDLE):
+        for mode in ({}, {"output_mode": "count"},
+                     {"output_mode": "files_with_matches"},
+                     {"only_matching": True}, {"context_lines": 1},
+                     {"head_limit": 2, "offset": 1}):
+            params = dict(mode, substring_pattern=pat)
+            del spawned[:]
+            exc_f, fast = _budget_raise(lambda: search(dict(params), root))
+            fast_spawned = len(spawned)
+            orig = getattr(mod, "_is_plain_literal", None)
+            mod._is_plain_literal = lambda s: False
+            try:
+                del spawned[:]
+                exc_w, slow = _budget_raise(lambda: search(dict(params), root))
+            finally:
+                if orig is not None:
+                    mod._is_plain_literal = orig
+                else:
+                    del mod._is_plain_literal
+            compared += 1
+            if exc_f or exc_w:
+                problems.append("%r %s raised: %s / %s" % (pat, mode, exc_f, exc_w))
+            elif fast_spawned:
+                problems.append("%r %s: the fast path spawned a worker"
+                                % (pat, mode))
+            elif not spawned:
+                problems.append("%r %s: VACUOUS -- the forced-worker run spawned "
+                                "nothing" % (pat, mode))
+            elif fast != slow:
+                problems.append("%r %s differ:\n  fast  : %r\n  worker: %r"
+                                % (pat, mode, fast[:300], slow[:300]))
+    suite.record("R", "fast-path-identical-to-worker", problems[:8],
+                 detail=["%d pattern x mode pairs, each run twice: once on the"
+                         % compared,
+                         "fast path, once with _is_plain_literal forced False",
+                         "so the SAME pattern goes through the child -- CRLF,",
+                         "form feed, non-ASCII, a last line with no newline,",
+                         "context, count, files, only_matching and paging"])
+
+    # -- R5/R6: a total-budget overrun over many files --------------------------
+    rx_files = re.compile(r"after (?:scanning )?(\d+) file\(s\)")
+    for cid, pat, label in (
+            ("budget-total-literal-many-files", NEEDLE, "fast path"),
+            ("budget-total-regex-many-files", "NEEDLE_A.PHA", "regex worker")):
+        clock = StepClock(0.0, 0.5)
+        orig_clock = getattr(mod, "_search_clock", None)
+        mod._search_clock = clock
+        try:
+            exc, text = _budget_raise(lambda: search(
+                {"substring_pattern": pat, "relative_path": "many"}, root))
+        finally:
+            if orig_clock is not None:
+                mod._search_clock = orig_clock
+        low = str(exc).lower() if exc else ""
+        problems = []
+        if orig_clock is None:
+            problems.append("Scripts/mcp-purity.py has no _search_clock seam")
+        if not isinstance(exc, ValueError):
+            problems.append("expected ValueError, got %s" % (text[:200],))
+        else:
+            for token in ("total", "time budget", "relative_path",
+                          "paths_include_glob"):
+                if token not in low:
+                    problems.append("message does not mention %r" % token)
+            if "backtrack" in low:
+                problems.append("message blames backtracking for a WIDE walk")
+            m = rx_files.search(low)
+            if not m:
+                problems.append("message does not say after how many files")
+            elif not 0 < int(m.group(1)) < FP_MANY:
+                problems.append("file count %s is not inside 1..%d"
+                                % (m.group(1), FP_MANY - 1))
+        suite.record("R", cid, problems,
+                     detail=["%s, a clock advancing 0.5 s per read over %d"
+                             % (label, FP_MANY),
+                             "files: the budget runs out mid-walk with no file",
+                             "slow, so the honest cause is the WIDTH of the walk",
+                             "reply: %s" % text[:300]],
+                     text=text, showable=True)
+
+    # -- R7/R8: the worker's own overrun, classified by the in-flight share -----
+    for cid, values, want_backtrack in (
+            ("budget-worker-short-inflight-total", [4.9, 5.1], False),
+            ("budget-worker-long-inflight-backtrack", [1.0, 5.1], True)):
+        orig_clock = getattr(mod, "_search_clock", None)
+        mod._search_clock = SeqClock(values)
+        worker = None
+        try:
+            try:
+                worker = real_worker(
+                    "x+", 5.0, budget=5.0,
+                    total_budget_message=lambda where, used:
+                        mod._search_budget_message(3, 5.0, (where, used)))
+                exc, text = _budget_raise(
+                    lambda: worker.search_lines(["xxx\n"], "f.txt"))
+            except Exception as e:                               # noqa: BLE001
+                exc, text = e, "%s: %s" % (type(e).__name__, e)
+        finally:
+            if worker is not None:
+                worker.close()
+            if orig_clock is not None:
+                mod._search_clock = orig_clock
+        low = str(exc).lower() if exc else ""
+        problems = []
+        if not isinstance(exc, ValueError):
+            problems.append("expected ValueError, got %s" % text[:200])
+        elif want_backtrack:
+            for token in ("backtrack", "regex:false", "f.txt"):
+                if token not in low:
+                    problems.append("message does not mention %r" % token)
+        else:
+            if "backtrack" in low:
+                problems.append("blamed backtracking for a file that had used "
+                                "0.2 s of a 5 s budget")
+            for token in ("total", "after scanning 3 file(s)"):
+                if token not in low:
+                    problems.append("message does not mention %r" % token)
+        suite.record("R", cid, problems,
+                     detail=["file sent at t=%.1f, deadline 5.0 noticed at t=%.1f"
+                             % (values[0], values[1]),
+                             "in flight %.1f s of a 5 s budget -> %s"
+                             % (values[1] - values[0],
+                                "backtracking blamed" if want_backtrack
+                                else "the TOTAL budget named"),
+                             "reply: %s" % text[:300]],
+                     text=text, showable=True)
+
+    mod._RegexWorker = real_worker
+
+
+# ---------------------------------------------------------------------------
+# Group S -- nested repositories and a foreign tree's own .gitignore
+#
+# The reported call searched `<other repo>/.claude` from a session rooted in a
+# different project.  The walk descended into `.claude/worktrees/<name>/` -- a
+# git worktree, whose `.git` is a FILE, so the `.git`-named prune never fired --
+# and the other repo's .gitignore was never read, because only the PROJECT
+# root's is.  Now a directory BELOW the search root holding a `.git` file or
+# directory is skipped unless the ignore filter is off, and an out-of-root
+# search root takes its ignore rules from its OWN git toplevel, paths measured
+# from there.
+# ---------------------------------------------------------------------------
+
+NS_GITIGNORE = ("projonly",)
+NS_FILES = ("top.txt", "plain/x.txt", "projonly/p.txt", "wt/inner.txt",
+            "wt/deeper/d.txt", "sub/inner.txt")
+NS_GITFILES = ("wt/.git", "wt/deeper/.git")       # worktree-style .git FILES
+NS_GITDIR = "sub/.git/HEAD"                       # a submodule/clone .git DIR
+FG_GITIGNORE = ("gen", "*.log", ".claude")
+FG_FILES = ("src/keep.txt", "src/x.log", "gen/out.txt", "projonly/f.txt",
+            ".claude/tmp/t.txt", ".claude/other/o.txt", "vendor/lib/v.txt")
+
+
+def make_nested_fixture(ws, proj, foreign):
+    """Group S's project root and its out-of-root sibling, both REALPATH'd."""
+    ws.subdir(proj)
+    ws.write_text(os.path.join(proj, ".gitignore"),
+                  "\n".join(NS_GITIGNORE) + "\n")
+    for rel in NS_FILES:
+        ws.write_text(os.path.join(proj, rel), LINE)
+    for rel in NS_GITFILES:
+        ws.write_text(os.path.join(proj, rel), "gitdir: /nonexistent\n")
+    ws.write_text(os.path.join(proj, NS_GITDIR), "ref: refs/heads/main\n")
+    ws.subdir(foreign)
+    ws.write_text(os.path.join(foreign, ".git", "HEAD"), "ref: refs/heads/main\n")
+    ws.write_text(os.path.join(foreign, ".gitignore"),
+                  "\n".join(FG_GITIGNORE) + "\n")
+    for rel in FG_FILES:
+        ws.write_text(os.path.join(foreign, rel), LINE)
+    ws.write_text(os.path.join(foreign, "vendor", "lib", ".git"),
+                  "gitdir: /nonexistent\n")
+    return os.path.realpath(ws.join(proj)), os.path.realpath(ws.join(foreign))
+
+
+def group_s(suite, drv, foreign_root):
+    rec = lambda cid, params, must, must_not, detail: record_polarity(  # noqa: E731
+        suite, "S", cid, drv, "search_for_pattern",
+        dict(params, substring_pattern=NEEDLE), must=must, must_not=must_not,
+        detail=detail)
+    nested = ["wt/inner.txt", "wt/deeper/d.txt", "sub/inner.txt"]
+
+    rec("nested-repos-skipped-by-default", {},
+        ["top.txt", "plain/x.txt"], nested + ["projonly/p.txt"],
+        ["`wt/` holds a `.git` FILE (a worktree), `sub/` a `.git` DIRECTORY",
+         "(a submodule or clone): both are another repository, skipped"])
+    rec("no_ignore-true-reaches-nested-repos", {"no_ignore": True},
+        ["top.txt", "plain/x.txt", "projonly/p.txt"] + nested, [],
+        ["no_ignore=true turns the skip off with the rest of the filter"])
+    rec("skip_ignored_files-false-reaches-nested", {"skip_ignored_files": False},
+        nested, [],
+        ["the canonical spelling of the same opt-out"])
+    rec("nested-repo-as-root-is-searched", {"relative_path": "wt"},
+        ["wt/inner.txt"], ["wt/deeper/d.txt"],
+        ["the search ROOT is never pruned, even though it holds a `.git`;",
+         "a nested repo BELOW it still is"])
+    rec("nested-root-no_ignore-reaches-deeper",
+        {"relative_path": "wt", "no_ignore": True},
+        ["wt/inner.txt", "wt/deeper/d.txt"], [],
+        ["CONTROL: the deeper file exists and is reachable"])
+
+    up = os.path.join("..", os.path.basename(foreign_root))
+    fg = lambda rel: os.path.join(up, rel)                         # noqa: E731
+    rec("foreign-root-own-gitignore", {"relative_path": foreign_root},
+        [fg("src/keep.txt"), fg("projonly/f.txt"), fg(".claude/tmp/t.txt")],
+        [fg("src/x.log"), fg("gen/out.txt"), fg(".claude/other/o.txt"),
+         fg("vendor/lib/v.txt")],
+        ["an out-of-root root takes its ignore rules from ITS OWN git",
+         "toplevel (`gen`, `*.log`, `.claude`), not from the project's",
+         "(`projonly`, which must NOT hide the foreign `projonly/f.txt`);",
+         "the nested repo `vendor/lib` (a `.git` file) is skipped too"])
+    rec("foreign-subdir-root-measured-from-toplevel",
+        {"relative_path": os.path.join(foreign_root, ".claude")},
+        [fg(".claude/tmp/t.txt")], [fg(".claude/other/o.txt")],
+        ["rooted at the foreign `.claude` -- the reported call's shape: the",
+         "paths are measured from the foreign TOPLEVEL, so `.claude/other`",
+         "inherits the `.claude` ignore and `.claude/tmp` stays exempt;",
+         "measured from the search root, `other/` would have leaked"])
+    rec("foreign-root-no_ignore-reaches-all",
+        {"relative_path": foreign_root, "no_ignore": True},
+        [fg(r) for r in FG_FILES], [],
+        ["ANTI-VACUITY CONTROL: every foreign file the rows above hide",
+         "exists and is reachable with the filter off"])
+
+
+# ---------------------------------------------------------------------------
 # Group F -- hygiene
 # ---------------------------------------------------------------------------
 
@@ -3082,9 +3474,34 @@ def run(opts=None):
         finally:
             drv_rq.close()
 
+        # Group R is in-process (it swaps the clock seam and the matcher).
+        fastpath_root = make_fastpath_fixture(ws, "fastpath")
+        suite.note("      fixture (R)   : %s  no .gitignore, files=%s + "
+                   "many/ x%d" % (fastpath_root,
+                                  [rel for rel, _ in FP_FILES] + [FP_CRLF[0]],
+                                  FP_MANY))
+        group_r(suite, fastpath_root)
+
+        # Group S: a project root holding nested repos, and a foreign git tree
+        # beside it with its own .gitignore.
+        nested_root, foreign_root = make_nested_fixture(ws, "nestproj",
+                                                        "foreign")
+        suite.note("      fixture (S)   : %s  .gitignore=%s, nested .git at %s"
+                   % (nested_root, list(NS_GITIGNORE),
+                      list(NS_GITFILES) + [os.path.dirname(NS_GITDIR)]))
+        suite.note("      fixture (S fg): %s  own .git + .gitignore=%s"
+                   % (foreign_root, list(FG_GITIGNORE)))
+        drv_ns = Driver(nested_root)
+        try:
+            group_s(suite, drv_ns, foreign_root)
+            stderr_bytes += len(drv_ns.stderr_text)
+        finally:
+            drv_ns.close()
+
         workspaces = [basename_root, pathshaped_root, glob_root, multi_root,
                       read_root, git_root, outside_root, literal_root,
-                      onlymatch_root, class_root, redos_root, replace_root]
+                      onlymatch_root, class_root, redos_root, replace_root,
+                      fastpath_root, nested_root, foreign_root]
         group_f(suite, before, pyc_before, workspaces, stderr_bytes)
 
     suite.print_summary()

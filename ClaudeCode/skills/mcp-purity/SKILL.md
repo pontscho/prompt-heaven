@@ -175,12 +175,36 @@ Existing content at `line` shifts down. Does not replace.
 |`paths_include_glob`|string or list of strings|no|""|Glob to include files — matches the project-relative **path** OR the basename, and `**/` = any depth **including zero**, so `tests/**/*.py` also matches `tests/foo.py`. A **list** keeps a file matching **any** element. Brace alternation refused, in every element|
 |`paths_exclude_glob`|string or list of strings|no|""|Glob to exclude files — same matching rules; a **list** drops a file matching **any** element (`["build/**","vendor/**"]`). `[]` = no filter; a non-string or empty element is an **error**|
 |`relative_path`|string|no|""|Restrict to a subdirectory **or a single file**. A path that does not exist is an **error** (`Path does not exist`), never `0 match(es)`; so is one at or inside `.git`|
-|`skip_ignored_files`|bool|no|true|Skip gitignored files — except `.claude/tmp`, never skipped. `no_ignore` (ripgrep's spelling) is its **inverse**; passing both with opposite meanings is refused|
+|`skip_ignored_files`|bool|no|true|Skip gitignored files — except `.claude/tmp`, never skipped — **and nested repositories** (see below). `no_ignore` (ripgrep's spelling) is its **inverse**; passing both with opposite meanings is refused|
+|`head_limit`|int|no|0|Max rows; 0 = all. Aliases here: `max_results`, `max`, `count`, `max_matches`, `limit` (any two of them, or one beside `head_limit`, is refused as ambiguous)|
 |`max_answer_chars`|int|no|-1|Character limit|
 
 ```json
 {"f":"search_for_pattern","p":{"substring_pattern":"TODO|FIXME","context_lines_after":1,"paths_include_glob":"**/*.py"}}
 ```
+
+**Nested repositories are skipped.** With the ignore filter on (the default), a
+directory *below* the search root that holds a `.git` file or directory — a git
+worktree (`.claude/worktrees/<name>/`), a submodule, a nested clone — is pruned
+like an ignored one: it is another repository, not this tree's content. The
+search root itself is always walked, even when it is such a repository.
+`no_ignore: true` (or `skip_ignored_files: false`) searches them.
+
+**An out-of-root search root is filtered by its own repository's
+`.gitignore`.** When `relative_path` lies outside the project root, the server
+walks up from it to the nearest directory holding `.git` (file or directory) and
+applies *that* toplevel's root `.gitignore`, paths measured from that toplevel,
+with the same limited semantics as the project's (bare-name patterns, the
+`.claude/tmp` exemption, inherited ignores). The project's own `.gitignore` is
+not applied there; with no `.git` above the root, nothing is filtered.
+
+**Speed and the time budget.** A pattern with no regex metacharacter
+(`. ^ $ * + ? { } [ ] ( ) | \`) — e.g. `release/ngs-` or an identifier — is
+matched in-process, exactly as the regex would match it, with no worker child.
+The 5 s budget is for the **whole call**; an overrun names the total budget and
+how many files were scanned, and suggests narrowing `relative_path` or adding
+`paths_include_glob` / `paths_exclude_glob`. Catastrophic backtracking is blamed
+only when the one file in flight used at least half the budget by itself.
 
 `regex: true` is the default and a no-op. `regex: false` is a **literal** search:
 the pattern is `re.escape`d, and the regex-mode rewrite of `\|` to `|` (which
@@ -244,7 +268,8 @@ canonical name is what error messages reference.
 | `replace_lines`     | `new_content` | `content` |
 | `insert_at_line`    | `new_content` | `content` |
 | `search_for_pattern` | `query` | `substring_pattern` *(global table cannot carry it — `symbol` owns `query` as its own canonical param)* |
-| `search_for_pattern`, `find_file`, `list_dir` | `max_results`, `max` | `head_limit` *(the global `max` row targets the semantic handlers' `max_results`, which these three do not take; `count` is NOT aliased here — beside `output_mode: "count"` it is ambiguous. Passing both an alias and `head_limit` is refused as ambiguous)* |
+| `search_for_pattern`, `find_file`, `list_dir` | `max_results`, `max` | `head_limit` *(the global `max` row targets the semantic handlers' `max_results`, which these three do not take. Passing both an alias and `head_limit` is refused as ambiguous)* |
+| `search_for_pattern` | `count`, `max_matches`, `limit` | `head_limit` *(`count` is a row cap here even beside `output_mode: "count"`, never a mode; left on the global row it was refused as an unknown `max_results`, a key the caller never wrote)* |
 | `list_dir`          | `long_format` | `long`   |
 | `list_dir`          | `pattern` | `filter` *(the global `substring_pattern` target is not a `list_dir` param at all, so the global row would only ever produce a rejection)* |
 
@@ -275,7 +300,7 @@ All errors return `{"error":"message"}` in the tool response with `isError: true
 - Path escapes project root (sandbox violation)
 - File/directory not found
 - Invalid regex pattern
-- Search time budget exceeded (5 s per call) — a `search_for_pattern` regex runs in a killable child, so a catastrophically backtracking pattern such as `(a+)+$` is stopped and reported rather than hanging the server; simplify it or pass `regex: false`
+- Search time budget exceeded (5 s per **call**, all files together) — usually the walk is too wide: the error says so, with the number of files scanned; narrow `relative_path` or add `paths_include_glob` / `paths_exclude_glob`. A `search_for_pattern` regex runs in a killable child, so a catastrophically backtracking pattern such as `(a+)+$` is stopped and reported rather than hanging the server; that message (blaming the pattern) appears only when one file alone used half the budget — simplify the pattern or pass `regex: false`
 - Multiple occurrences when `allow_multiple_occurrences` is false
 
 ## Security
@@ -334,4 +359,4 @@ The legacy function names still work through `purity_call` (registered as direct
 | `*_diagnostics` | `diagnostics` |
 | `*_init` | (no-op — backend inits lazily) |
 
-The `_at` variants fold onto their non-`_at` counterpart (position vs name is auto-detected from the params). Param aliases folded in from clangd: `symbol`→`symbol_name`, `col`/`column`/`char`→`character`, `max`/`count`→`max_results` (in `search_for_pattern`/`find_file`/`list_dir`, `max` and `max_results` fold onto `head_limit` instead), `depth`→`call_hierarchy_depth`. The path key is `relative_path` (purity's canonical), with `path`/`file`/`file_path` accepted as aliases.
+The `_at` variants fold onto their non-`_at` counterpart (position vs name is auto-detected from the params). Param aliases folded in from clangd: `symbol`→`symbol_name`, `col`/`column`/`char`→`character`, `max`/`count`→`max_results` (in `search_for_pattern`/`find_file`/`list_dir`, `max` and `max_results` fold onto `head_limit` instead, and so do `count`, `max_matches` and `limit` in `search_for_pattern`), `depth`→`call_hierarchy_depth`. The path key is `relative_path` (purity's canonical), with `path`/`file`/`file_path` accepted as aliases.

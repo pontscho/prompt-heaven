@@ -299,8 +299,13 @@ SUITES = [
      "refused beside count/files_with_matches/context, "
      "find_file's path-style character classes, and a catastrophic "
      "search regex bounded by the call's time budget, and replace_content's "
-     "regex mode bounded the same way, the file left untouched on overrun",
-     209),
+     "regex mode bounded the same way, the file left untouched on overrun, "
+     "`count`/`max_matches`/`limit` as head_limit in search, a metachar-free "
+     "regex matched in-process byte-identical to the worker, a total-budget "
+     "overrun named as such (backtracking blamed only for a slow file), "
+     "nested repos below the search root skipped, and an out-of-root root "
+     "filtered by its own repo's .gitignore",
+     230),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline", 299),
     ("name_existence", run_name_existence,
