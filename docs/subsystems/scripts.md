@@ -3,7 +3,7 @@ name: scripts
 type: subsystem
 status: active
 title: Scripts & MCP Servers
-description: Standalone Python scripts -- MCP servers and requirements.yaml task utilities.
+description: The standalone scripts in Scripts/ -- the MCP servers and the canonical sources their generated regions come from, the llm-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, and the shell scripts behind restartable sessions.
 sources:
   - Scripts
   - Scripts/context-guard.sh
