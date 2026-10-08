@@ -36,8 +36,9 @@ Coverage by group:
   Q  the param gate, live: an unknown key is refused on EVERY function (isError,
      function and key named); every key a function reads -- or-chain aliases,
      `timeout`, `max_answer_chars` -- passes the gate; a pinned format
-     validator refuses `format`/`fmt` instead of overriding it
-  R  the accepted table cannot drift: every registry function has a row and no
+     validator refuses `format`/`fmt` instead of overriding it; `versions`
+     takes tools | tool | name | names and refuses two at once (ADR 0015)
+  Rthe accepted table cannot drift: every registry function has a row and no
      row names a missing one, and each row EQUALS the keys the handler reads,
      extracted from the server source by ast (helpers that receive `p`
      followed), with the pinned validators' format/fmt the one exclusion
@@ -1011,7 +1012,10 @@ def run(opts=None):
             "limits": {"pid": 1},
             "services": {"filter": "ssh", "name": "ssh", "user": False,
                          "limit": 3},
-            "versions": {"tools": ["git"], "tool": "git", "name": "git"},
+            # all four spellings in one call is the ADR 0015 collision, refused
+            # PAST the gate -- which is all an accepts-* row asserts
+            "versions": {"tools": ["git"], "tool": "git", "name": "git",
+                         "names": ["git"]},
             "hash": dict(hash_all, algo="md5", algorithm="md5"),
             "sha256": dict(hash_all, algo="sha256", algorithm="sha256"),
             "md5": dict(hash_all, algo="md5", algorithm="md5"),
@@ -1048,6 +1052,45 @@ def run(opts=None):
         case(suite, cli, "Q", "alias-names-canonical", "ps",
              {"pattern": "node"}, want_error=True,
              must=["Unknown params for 'processes'"])
+
+        # `versions` takes four spellings of one list -- tools (canonical),
+        # tool, name, names.  `names` used to be refused by the gate; the other
+        # three were an or-chain where wire position picked the winner.  Per
+        # ADR 0015 two or more of them in one call is an ERROR naming the
+        # spellings sorted and the canonical one, presence-based (the same value
+        # twice is refused too), and it reaches the caller as isError (0010).
+        case(suite, cli, "Q", "versions-names-accepted", "toolchain",
+             {"names": ["git"]},
+             must=["git"], must_not=["Unknown params", "conflicting"])
+        case(suite, cli, "Q", "versions-names-string", "versions",
+             {"names": "git"},
+             must=["git"], must_not=["Unknown params", "conflicting"])
+        t1 = case(suite, cli, "Q", "versions-tools-names-refused", "versions",
+                  {"tools": ["git"], "names": ["git"]}, want_error=True,
+                  must=["names, tools", "'tools'"],
+                  must_not=["Unknown params"])
+        t2 = case(suite, cli, "Q", "versions-names-tools-refused", "versions",
+                  {"names": ["git"], "tools": ["git"]}, want_error=True,
+                  must=["names, tools", "'tools'"])
+        suite.record("Q", "versions-collision-order-independent",
+                     [] if t1 and t1 == t2 else
+                     ["key order changed the reply: %r vs %r" % (t1, t2)],
+                     text=t1)
+        case(suite, cli, "Q", "versions-tool-name-refused", "versions",
+             {"tool": "git", "name": "node"}, want_error=True,
+             must=["name, tool", "'tools'"])
+        case(suite, cli, "Q", "versions-all-four-refused", "versions",
+             {"tool": "git", "names": "git", "name": "git", "tools": "git"},
+             want_error=True, must=["name, names, tool, tools", "'tools'"])
+        # the description is how a caller learns the spellings exist at all;
+        # matched as one phrase, because `tools` is also a FUNCTION alias of
+        # versions and that line's `_(aliases: ...)_` must not satisfy this
+        _, status = cli.call_tool("", {})
+        vline = row_for(status, "`versions`")
+        suite.record("Q", "versions-description-spellings",
+                     [] if "params: tools | tool | name | names" in vline else
+                     ["versions line lacks the spellings: %r" % vline],
+                     text=vline)
 
         cli.close()
 

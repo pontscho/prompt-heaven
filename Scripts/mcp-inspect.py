@@ -1338,7 +1338,18 @@ _VERSION_TOOLS: Dict[str, Optional[List[str]]] = {
 
 
 def h_versions(p: dict) -> str:
-    req = p.get("tools") or p.get("tool") or p.get("name")
+    # Four spellings of one list, `tools` canonical.  Two or more in one call
+    # is refused rather than resolved (ADR 0015): the or-chain this replaced
+    # let wire position pick the winner.  Presence-based, so the same value
+    # sent twice is refused too, and the spellings are sorted so the message
+    # does not depend on key order.
+    given = {k: p[k] for k in ("tools", "tool", "name", "names") if k in p}
+    if len(given) > 1:
+        raise ValueError(
+            "conflicting spellings of 'tools': " + ", ".join(sorted(given))
+            + " — 'tool', 'name' and 'names' are aliases of 'tools'; pass one."
+        )
+    req = next(iter(given.values()), None)
     explicit = bool(req)
     if explicit:
         names = (list(req) if isinstance(req, list)
@@ -2260,7 +2271,7 @@ HANDLERS: Dict[str, Tuple[Any, str]] = {
     "pstree":      (h_pstree, "Process hierarchy as a tree (params: pid, depth, limit)"),
     "limits":      (h_limits, "Resource limits / rlimits (params: pid — per-PID on Linux only)"),
     "services":    (h_services, "launchctl/systemctl services (params: filter, user, limit)"),
-    "versions":    (h_versions, "Versions of allow-listed tools (params: tools)"),
+    "versions":    (h_versions, "Versions of allow-listed tools (params: tools | tool | name | names — one spelling per call, two at once is refused)"),
     "hash":        (h_hash, "File digest (params: path | paths [req], algo (alias algorithm)=sha256|sha512|sha384|sha224|sha1|md5|blake2b|blake2s, expect, max_mb, recursive, max_files=1000)"),
     "sha256":      (h_sha256, "SHA-256 of a file or files (params: path | paths [req], expect, max_mb, recursive, max_files)"),
     "md5":         (h_md5, "MD5 of a file or files (params: path | paths [req], expect, max_mb, recursive, max_files)"),
@@ -2358,7 +2369,7 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "pstree":      _COMMON_PARAMS | {"pid", "depth", "limit"},
     "limits":      _COMMON_PARAMS | {"pid"},
     "services":    _COMMON_PARAMS | {"filter", "name", "user", "limit"},
-    "versions":    _COMMON_PARAMS | {"tools", "tool", "name"},
+    "versions":    _COMMON_PARAMS | {"tools", "tool", "name", "names"},
     "hash":        _COMMON_PARAMS | _HASH_PARAMS,
     "sha256":      _COMMON_PARAMS | _HASH_PARAMS,
     "md5":         _COMMON_PARAMS | _HASH_PARAMS,
@@ -2510,7 +2521,8 @@ INSPECT_CALL_TOOL = {
         "  pstree (tree)         params: pid, depth, limit — parent/child process tree\n"
         "  limits (ulimit)       params: pid (per-PID on Linux only)\n"
         "  services (launchctl)  params: filter, user, limit\n"
-        "  versions (toolchain)  params: tools — allow-listed binaries only\n"
+        "  versions (toolchain)  params: tools (aliases tool, name, names; two "
+        "at once is refused) — allow-listed binaries only\n"
         "  sha256 (shasum)       params: path | paths [required], expect, "
         "max_mb, recursive, max_files\n"
         "  md5 (md5sum)          params: path | paths [required], expect, "
