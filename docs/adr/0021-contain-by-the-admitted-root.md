@@ -130,3 +130,43 @@ caller with `isError` set through the existing path
 ([[0010-a-handler-failure-must-reach-iserror]]). All of this is pinned in-process by
 group G `tests/test_purity_file_ops.py:group_g`, for the reason 0017 recorded:
 over the wire, a refusal and an empty match can render alike.
+
+## Addendum (2026-10-08): the ignore rules follow the admitted root too (da3f746)
+
+The decision above re-anchored containment to the root a call was given. The
+ignore filter was still anchored to the project root, and `da3f746` moved it the
+same way. The body above stays as written on its date.
+
+**An out-of-root search root is filtered by its own repository's `.gitignore`,
+not the project's.** Before `da3f746`, an out-of-root root that this ADR made
+searchable was filtered by the project's `.gitignore`, with every path measured
+from the project root. The project's rules say nothing about another
+repository: they could hide a foreign file that happens to share a name with a
+project-ignored path, and the foreign repository's own ignored directories were
+walked in full. Now the rules come from the searched tree's own git toplevel,
+the nearest directory at or above the root that holds a `.git` file or
+directory `Scripts/mcp-purity.py:_git_toplevel`. Paths are measured from that
+toplevel with the same limited semantics as the project's rules, the
+`.claude/tmp` exemption and the inherited-ignore rule included
+`Scripts/mcp-purity.py:_foreign_ignore_context`. A root with no toplevel above
+it gets no patterns. An in-root root is unchanged.
+
+Two alternatives were rejected:
+
+1. **Measure from the search root, not the toplevel.** This was rejected by
+   measurement, on the shape of the call that was reported: a search rooted at
+   another repository's `.claude`. Measured from the search root, `other/` no
+   longer matches that repository's `.claude` line and leaks back in.
+   `tests/test_purity_file_ops.py:group_s` pins the toplevel-relative answer in
+   `foreign-subdir-root-measured-from-toplevel`.
+2. **Apply no ignore rules to an out-of-root root.** This was rejected because
+   it walks a foreign repository's build output and worktrees in full, which is
+   the cost the reported call paid. Applying no rules stays the answer only
+   when no toplevel exists.
+
+A related default shipped in the same commit, and it is not part of this
+decision's containment rule: a directory below the search root that holds a
+`.git` file or directory (a worktree, a submodule or a nested clone) is now
+skipped as part of the ignore filter `Scripts/mcp-purity.py:_is_nested_repo`.
+`no_ignore: true` reaches it. Group S pins both rules, with a `no_ignore`
+control that reaches every hidden file. The living text is in [[scripts]].

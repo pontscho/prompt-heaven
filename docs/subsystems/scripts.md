@@ -8,7 +8,7 @@ sources:
   - Scripts
   - Scripts/context-guard.sh
 verified:
-  commit: 19c3fc5
+  commit: da3f746
   date: 2026-10-08
 links:
   - overview
@@ -35,6 +35,7 @@ links:
   - 0024-pure-python-39-and-the-stdlib
   - 0026-speak-chrome-from-the-stdlib-verify-by-default
   - 0029-the-http-front-is-a-domain
+  - 0030-point-at-the-near-miss-never-resolve-it
 ---
 
 # Scripts & MCP Servers
@@ -107,6 +108,17 @@ tool of its own but relays its children's tools under their own names
 HTTP instead of stdio `Scripts/mcp-proxy.py:serve_http`.
 The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 `purity_call` entry point is recorded in [[0001-purity-server-unification]].
+
+**A refusal of a name the caller sent points at the closest real one.** An
+unknown function, an unknown parameter on a server that refuses one, and the
+proxy's unknown tool each end with ` Did you mean 'X'?` when a real name is
+close enough, and with nothing when none is. The pointer never resolves the
+name: the call is still refused, so `context_chars` is pointed at
+`context_lines` and not answered as one. The sentence comes from one generated
+block, `Scripts/_mcp_dispatch.py:_did_you_mean`, the fleet's canonical source
+for how a dispatcher answers a name it does not know ([[generated-regions]]).
+Why it points and never aliases, and its declared limits, are in
+[[0030-point-at-the-near-miss-never-resolve-it]].
 
 That shared read loop used to await the handler on the same line of control that
 later awaits `sys.stdin.readline`, so one slow call made the server deaf to every
@@ -512,6 +524,36 @@ count. The suite records that basename asymmetry as an explicit limitation rathe
 than a guarantee, carrying one pattern of each shape in a single fixture
 `tests/test_purity_file_ops.py`.
 
+**Another repository below the search root is not this tree's content.**
+`search_for_pattern` skips, as it skips an ignored directory, every directory
+below the search root that holds a `.git` file or directory
+`Scripts/mcp-purity.py:_is_nested_repo`: a `.git` directory is a nested clone,
+and a `.git` file is a worktree or a submodule. The `.git` file is the case the
+old prune missed. It removed only directories named `.git`, so a search over a
+`.claude` directory walked every `.claude/worktrees/<name>/` checkout in full,
+which is the reported call that started this. The skip is part of the ignore
+filter, so `no_ignore: true` or `skip_ignored_files: false` reaches those
+directories again. Only children are pruned, so a search rooted at such a
+repository still walks it, and a nested repository below that root is still
+skipped.
+
+**An out-of-root search root is filtered by its own repository's ignore rules,
+not the project's.** The project's `.gitignore` says nothing about another
+repository, so it is not applied there. The rules of the searched tree's own
+git toplevel are applied instead: the nearest directory at or above the root
+that holds a `.git` `Scripts/mcp-purity.py:_git_toplevel`. Paths are measured
+from that toplevel, with the same limited semantics, the `.claude/tmp`
+exemption and the inherited-ignore rule
+`Scripts/mcp-purity.py:_foreign_ignore_context`. Measuring from the toplevel
+and not from the search root is what keeps a search rooted at the foreign
+`.claude` honest: measured from the search root, `other/` would no longer match
+that repository's `.claude` line, and the ignored directory would leak back in.
+A root with no toplevel above it gets no patterns at all. Both rules are pinned
+by `tests/test_purity_file_ops.py:group_s`, which ends on a `no_ignore` control
+proving that every file the other rows hide exists and can be reached. This is
+the same move [[0021-contain-by-the-admitted-root]] made for containment, now
+made for ignore rules: they are measured against the root the call was given.
+
 `search_for_pattern` also accepts the ripgrep-style flags callers reach for, and
 none of them is ever silently ignored
 `Scripts/mcp-purity.py:handle_search_for_pattern`. `regex:false` is a real
@@ -542,8 +584,14 @@ global when every handler can honour it; the two escapes are *owned elsewhere* a
 *does not exist here*. `max_results` / `max` take the second escape: globally they
 name the semantic handlers' cap, but `search_for_pattern`, `find_file` and
 `list_dir` cap with `head_limit`, so there they re-point instead of dying as
-unknown params — while `count` is deliberately not re-pointed, because beside
-`output_mode: count` it would be ambiguous. `paths_include` / `paths_exclude` are
+unknown params. In `search_for_pattern` three grep-taught words join them:
+`count`, `max_matches` and `limit` are `head_limit` too
+`Scripts/mcp-purity.py:PARAM_ALIASES_BY_FUNC`. `count` used to be left out on
+the argument that beside `output_mode: count` it would be ambiguous, and the
+cost of leaving it out was worse: the global row sent it on as `max_results`,
+so the caller was refused for a key it never wrote. Beside `output_mode: count`
+it is still a row cap, never a mode, and any two of these spellings in one call,
+or one beside `head_limit`, is the ambiguity error. `paths_include` / `paths_exclude` are
 plain global aliases of the two `*_glob` filters `Scripts/mcp-purity.py:PARAM_ALIASES`,
 and sending an alias beside its canonical name is refused like any other collision
 `Scripts/mcp-purity.py:_resolve_aliases` [[0015-ambiguity-is-the-defect]]. The contract is pinned by the
@@ -614,6 +662,27 @@ was never built. The decision, the refusal that was implemented first and
 overruled, the gate-removal rejected beside it, and the symlink back into the
 project that an out-of-root search drops on purpose are frozen in
 [[0021-contain-by-the-admitted-root]].
+
+**The search's time budget is one budget for the whole call, and its overrun
+says which kind it was.** A caller regex runs in a killable child interpreter,
+because CPython's `re` cannot be interrupted, and the call's deadline
+`Scripts/mcp-purity.py:_SEARCH_DEADLINE_SECS` bounds the walk and every match
+together. An overrun is therefore usually a walk too wide for one call, not a
+slow pattern, and the old message blamed the pattern either way. The
+total-budget message now names the budget as the whole call's, says after how
+many files it ran out, and points at narrowing `relative_path` or the globs
+`Scripts/mcp-purity.py:_search_budget_message`. Catastrophic backtracking is
+blamed only when the file in flight had used at least
+`Scripts/mcp-purity.py:_BACKTRACK_BUDGET_SHARE` of the budget by itself; that
+file's own time is quoted either way. Its declared blind spot is in that
+constant's comment: a backtracking file that starts after more than half the
+budget is spent is reported as a total-budget overrun, which is still true.
+A regex-mode pattern holding no metacharacter (`release/ngs-`, an identifier)
+matches exactly its own characters and cannot backtrack, so it skips the child
+and runs in-process on the same compiled pattern
+`Scripts/mcp-purity.py:_is_plain_literal`. The rows are byte-identical to the
+child's, and `tests/test_purity_file_ops.py:group_r` proves it by running each
+pattern and mode pair both ways.
 
 The two globs, `paths_include_glob` and `paths_exclude_glob`, take a **string or
 a list of strings** `Scripts/mcp-purity.py:_glob_list`. The list is what a
@@ -950,7 +1019,8 @@ at the top of this page.
 - No `function` answers the status text: the function list and the searches each
   endpoint has served, with no transport line `Scripts/mcp-search.py:_status_text`.
   An unknown function answers the one-line `Unknown function: X. Available: code, web`
-  that `name_existence` parses. Unknown params are refused, and so is an alias
+  that `name_existence` parses; a near-miss suggestion may follow the list, and
+  it carries no comma, so it never enters the parsed inventory. Unknown params are refused, and so is an alias
   set beside its canonical name `Scripts/mcp-search.py:_resolve_aliases`
   ([[0015-ambiguity-is-the-defect]]).
 

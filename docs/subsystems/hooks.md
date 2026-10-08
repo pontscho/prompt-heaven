@@ -7,7 +7,7 @@ description: Claude Code hooks in ClaudeCode/hooks -- post-edit formatters and l
 sources:
   - ClaudeCode/hooks
 verified:
-  commit: 5d030cd
+  commit: da3f746
   date: 2026-10-08
 links:
   - overview
@@ -42,6 +42,25 @@ identity).
 Not in this directory: `Scripts/context-guard.sh` is also a Claude Code hook
 (PreToolUse and PostToolUse, for restartable sessions), but it lives in
 `Scripts/` and is documented on [[scripts]].
+
+## Declared limits
+
+`mcp-first-guard.py` is a routing steer, not a security boundary: it fails open
+on any error, and by its own account every limit it has misses in the allow
+direction `ClaudeCode/hooks/mcp-first-guard.py:MAX_DEPTH`. The one a user meets
+first:
+
+- **A shell reserved word hides the primary command.** `primary()` peels only
+  group openers (`(`, `{`), leading `VAR=val` assignments and the wrapper
+  commands in `SKIP_WRAPPERS`; it carries no keyword list
+  `ClaudeCode/hooks/mcp-first-guard.py:primary`. A statement that begins with
+  `if`, `then`, `else`, `elif`, `while`, `until`, `do` or `!`, or with a `case`
+  arm, therefore reports the keyword as its primary command and is allowed:
+  `for f in x; do head -c 10 "$f"; done` passes, while `true; head file` is
+  denied. `for` itself hides nothing, because its body starts at `do`; `time`
+  is in `SKIP_WRAPPERS` and `{` is peeled, so those two are seen through
+  `ClaudeCode/hooks/mcp-first-guard.py:SKIP_WRAPPERS`. Documented rather than
+  fixed, by decision.
 
 ## The complex one
 
