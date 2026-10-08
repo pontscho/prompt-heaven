@@ -3235,6 +3235,19 @@ def _rt_ms_tool_key(key: Union[int, str]) -> Tuple[int, Union[int, str]]:
     return (0, key) if isinstance(key, int) else (1, key)
 
 
+_RT_UNOFFERED_TOOL = "backend returned a call to a tool that was not offered"
+
+
+def _rt_offered_tools(inbound: InboundRequest) -> FrozenSet[str]:
+    """F26: the tool names *inbound* offered. A translated tool call (mistral, codex, openai)
+    naming any other is the backend's protocol violation, refused as _RT_UNOFFERED_TOOL --
+    the name is never echoed. passthrough and llamacpp relay the backend's own Anthropic
+    tool_use blocks and never mint one, so the rule is not theirs (R-0093)."""
+    tools = inbound.body.get("tools") if isinstance(inbound.body, dict) else None
+    return frozenset(tool["name"] for tool in (tools if isinstance(tools, list) else ())
+                     if isinstance(tool, dict) and isinstance(tool.get("name"), str))
+
+
 class _RtMsContent:
     """A chat-completions `content` (a str, or a list of typed chunks, in a stream delta or a
     whole message) fed into one sink -- an AnthropicSseEncoder or an _RtMessageCollector, so
@@ -3316,6 +3329,7 @@ class MistralStreamTranslator:
         self.usage: Dict[str, Any] = {}
         self.seen_chunk = False
         self.request_dropped = dropped
+        self.offered = _rt_offered_tools(inbound)   # F26: a call naming another tool is refused
 
     @property
     def dropped_thinking(self) -> int:
@@ -3422,6 +3436,8 @@ class MistralStreamTranslator:
         tool = self.tools.setdefault(key, {"id": "", "name": "", "args": []})
         for field, value in (("id", item.get("id")), ("name", function.get("name"))):
             if isinstance(value, str) and value:
+                if field == "name" and value not in self.offered:
+                    return _RT_UNOFFERED_TOOL       # F26: refused before it is buffered
                 if not tool[field]:
                     # The stored id and name count against the arguments' cap (V33).
                     self.args_bytes += len(value.encode("utf-8", "surrogatepass"))
@@ -3649,10 +3665,13 @@ class MistralAdapter(Adapter):
         parts.close()
         content: List[dict] = collector.message()["content"]
         tool_calls = message.get("tool_calls")
+        offered = _rt_offered_tools(inbound)
         for call in tool_calls if isinstance(tool_calls, list) else ():
             block = _rt_ms_tool_use(call)
             if block is None:
                 return 502, _rt_error_body("api_error", "backend returned malformed tool arguments")
+            if block["name"] not in offered:     # F26; the name is not echoed
+                return 502, _rt_error_body("api_error", _RT_UNOFFERED_TOOL)
             content.append(block)
         if any(block["type"] == "tool_use" for block in content):
             stop_reason = "tool_use"
@@ -4255,10 +4274,7 @@ class ResponsesStreamTranslator:
         self.ignored_events = 0         # unknown event types (debug only)
         self.error_status: Optional[int] = None   # an upstream error code's mapped status (json_response)
         # F26: the tool names this request offered; a function_call naming any other is refused.
-        tools = inbound.body.get("tools") if isinstance(inbound.body, dict) else None
-        self.offered: FrozenSet[str] = frozenset(
-            tool["name"] for tool in (tools if isinstance(tools, list) else ())
-            if isinstance(tool, dict) and isinstance(tool.get("name"), str))
+        self.offered: FrozenSet[str] = _rt_offered_tools(inbound)
 
     @property
     def started(self) -> bool:
@@ -4415,7 +4431,7 @@ class ResponsesStreamTranslator:
         if not isinstance(name, str) or not name:
             return self.fail("api_error", "backend returned a tool call without a name")
         if name not in self.offered:     # F26; the name is not echoed
-            return self.fail("api_error", "backend returned a call to a tool that was not offered")
+            return self.fail("api_error", _RT_UNOFFERED_TOOL)
         if not isinstance(call_id, str) or not call_id:
             return self.fail("api_error", "backend returned a tool call without an id")
         return self.sink.tool_block(_rt_rs_anthropic_id(call_id), name, args_json)
@@ -5738,10 +5754,10 @@ def _rt_oauth_post(backend: BackendSpec, request: Tuple[str, Tuple[Tuple[str, st
     """POST one OAuth *request* (url, headers, body) -> (status, body) (KD-7: the second _rt_send site).
 
     *track* is (srv.inflight, srv.inflight_lock, srv.closing), handed to
-    _rt_send (R-0083): the socket is registered from the connect on -- the TLS
-    handshake, the request write, the response head and the body read -- so a
-    shutdown unblocks every stalled phase (P23, N25, N41); only the connect
-    itself (and the resolve) runs unregistered, bounded by connect_timeout. The
+    _rt_send (R-0083): the socket is registered from before its connect on --
+    the connect (R-0095), the TLS handshake, the request write, the response
+    head and the body read -- so a shutdown unblocks every stalled phase (P23,
+    N25, N41); a stalled resolve is given up within one _RT_TICK_S. The
     body is capped at OAUTH_BODY_LIMIT and both the response and the connection
     are closed here, the socket deregistered first.
     """
@@ -6255,7 +6271,8 @@ def _rt_getaddrinfo(host: str, port: int) -> List[Any]:
     return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
 
 
-def _rt_resolve(backend: BackendSpec, deadline: Optional[float] = None) -> List[str]:
+def _rt_resolve(backend: BackendSpec, deadline: Optional[float] = None,
+                track: Optional["_RtTrack"] = None) -> List[str]:
     """The backend's host resolved ONCE and every address vetted -> the ordered address list.
 
     Called for every connect (no cache). _rt_getaddrinfo runs on a daemon
@@ -6263,7 +6280,11 @@ def _rt_resolve(backend: BackendSpec, deadline: Optional[float] = None) -> List[
     `deadline` (default: connect_timeout from now) -- the same deadline
     _rt_open_socket and the TLS handshake then use (V9). A resolver that has
     not answered by then is 504 "backend timed out: ..."; its thread is
-    abandoned and ends when the OS resolver gives up. Each address must
+    abandoned and ends when the OS resolver gives up. With a shutdown
+    registry *track* (R-0095) the join runs in _RT_TICK_S slices and gives up
+    once `closing` is set (529 "router shutting down", the thread abandoned
+    the same way): getaddrinfo itself cannot be interrupted, so a shutdown
+    waits at most one tick for a stalled resolve, never connect_timeout. Each address must
     pass _ch_address_refused (public only) unless `allow_private`, in which
     case _rt_private_policy_refused with the backend's `allow_loopback`. ANY
     refused address refuses the whole hop: UpstreamError 502 "backend
@@ -6288,7 +6309,12 @@ def _rt_resolve(backend: BackendSpec, deadline: Optional[float] = None) -> List[
 
     resolver = threading.Thread(target=resolve, name="rt-resolve", daemon=True)
     resolver.start()
-    resolver.join(max(0.0, deadline - time.monotonic()))
+    while resolver.is_alive():
+        _rt_track_check(track)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        resolver.join(left if track is None else min(left, _RT_TICK_S))
     if resolver.is_alive():
         raise UpstreamError(504, "api_error", "backend timed out: %s did not resolve before the connect deadline"
                             % where)
@@ -6316,7 +6342,8 @@ def _rt_resolve(backend: BackendSpec, deadline: Optional[float] = None) -> List[
     return addresses
 
 
-def _rt_open_socket(addresses: Iterable[str], port: int, deadline: float) -> socket.socket:
+def _rt_open_socket(addresses: Iterable[str], port: int, deadline: float,
+                    track: Optional["_RtTrack"] = None) -> socket.socket:
     """A TCP socket connected to the first of `addresses` that accepts, all under ONE deadline.
 
     _ch_open_socket's logic, raising UpstreamError: each address (an IP
@@ -6328,6 +6355,13 @@ def _rt_open_socket(addresses: Iterable[str], port: int, deadline: float) -> soc
     `*_PROXY`). Refusals: the deadline passing, or every address timing out,
     is 504 "backend timed out ..."; an empty list or any other failure of
     every address is 502 "connect: ...".
+
+    *track* (R-0095): each socket joins the shutdown registry BEFORE its
+    connect, so the sweep's shutdown(SHUT_RDWR) wakes a stalled connect
+    (measured on Darwin 23: the connect returns at once, reporting success);
+    `closing` is checked before each address and after the connect returns,
+    and is the 529 "router shutting down". A returned socket is still
+    registered; a failed one was deregistered and closed.
     """
     addrs = list(addresses or ())
     if not addrs:
@@ -6335,6 +6369,7 @@ def _rt_open_socket(addresses: Iterable[str], port: int, deadline: float) -> soc
     last = None
     timed_out = True
     for tried, addr in enumerate(addrs):
+        _rt_track_check(track)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise UpstreamError(504, "api_error", "backend timed out: connect deadline passed after %d of %d addresses"
@@ -6352,7 +6387,9 @@ def _rt_open_socket(addresses: Iterable[str], port: int, deadline: float) -> soc
         try:
             sock = socket.socket(family, socket.SOCK_STREAM)
             sock.settimeout(remaining)
+            _rt_track_add(track, sock)          # R-0095: registered before the connect
             sock.connect((addr, port))
+            _rt_track_check(track)              # a shutdown may have woken the connect
             return sock
         except socket.timeout:
             last = "%s: timed out" % addr
@@ -6360,6 +6397,12 @@ def _rt_open_socket(addresses: Iterable[str], port: int, deadline: float) -> soc
             lines = str(exc).splitlines()
             last = "%s: %s" % (addr, lines[0][:120] if lines else type(exc).__name__)
             timed_out = False
+        except BaseException:
+            _rt_track_discard(track, sock)
+            if sock is not None:
+                sock.close()
+            raise
+        _rt_track_discard(track, sock)
         if sock is not None:
             sock.close()
     if timed_out:
@@ -6399,32 +6442,40 @@ def _rt_track_discard(track: Optional[_RtTrack], sock: Optional[socket.socket]) 
         track[0].discard(sock)
 
 
-class _RtHttpConnection(http.client.HTTPConnection):
-    """A plain-HTTP connection to ONE vetted backend: connect() uses _rt_open_socket, never a resolver.
+_RT_SHUTTING_DOWN = "router shutting down"
 
-    `addresses` is _rt_resolve's list and `deadline` the absolute monotonic()
-    connect deadline. After connect the socket's timeout is the backend's
-    idle_timeout (one upstream read), and `raw_sock` keeps the connected
-    socket: http.client drops `sock` once a Connection: close response is
-    read, and the pump's shutdown(SHUT_RDWR) needs the descriptor (KD-4, P24).
-    *track* (R-0083) is the shutdown registry: the socket joins it as soon as
-    the connect returns and leaves it only through untrack(), which the owner
-    calls -- http.client's own close() on a Connection: close head does not.
+
+def _rt_track_check(track: Optional[_RtTrack]) -> None:
+    """529 "router shutting down" once *track*'s `closing` is set (R-0095); a no-op without a registry."""
+    if track is not None and track[2].is_set():
+        raise UpstreamError(529, "overloaded_error", _RT_SHUTTING_DOWN)
+
+
+class _RtHttpConnection(http.client.HTTPConnection):
+    """A plain-HTTP connection to ONE vetted backend: connect() is _rt_resolve, then _rt_open_socket.
+
+    `deadline` is the absolute monotonic() connect deadline the resolve and
+    the connect share (V9). After connect the socket's timeout is the
+    backend's idle_timeout (one upstream read), and `raw_sock` keeps the
+    connected socket: http.client drops `sock` once a Connection: close
+    response is read, and the pump's shutdown(SHUT_RDWR) needs the
+    descriptor (KD-4, P24). *track* (R-0083, R-0095) is the shutdown
+    registry: the resolve gives up on `closing`, the socket joins it before
+    its connect and leaves it only through untrack(), which the owner calls
+    -- http.client's own close() on a Connection: close head does not.
     """
 
-    def __init__(self, backend: BackendSpec, addresses: List[str], deadline: float,
-                 track: Optional[_RtTrack] = None):
+    def __init__(self, backend: BackendSpec, deadline: float, track: Optional[_RtTrack] = None):
         super().__init__(backend.host, backend.port)
         self._backend = backend
-        self._addresses = list(addresses)
         self._deadline = deadline
         self._track = track
         self.raw_sock: Optional[socket.socket] = None
 
     def connect(self) -> None:
-        sock = _rt_open_socket(self._addresses, self.port, self._deadline)
+        addresses = _rt_resolve(self._backend, self._deadline, self._track)
+        sock = _rt_open_socket(addresses, self.port, self._deadline, self._track)
         self.raw_sock = sock
-        _rt_track_add(self._track, sock)
         sock.settimeout(self._backend.idle_timeout)
         self.sock = sock
 
@@ -6442,15 +6493,15 @@ class _RtHttpsConnection(http.client.HTTPSConnection):
     MINIMUM_SUPPORTED) and OP_IGNORE_UNEXPECTED_EOF is cleared, so a ragged
     EOF stays an error and a truncated upstream is detected (D12). Then
     CERT_REQUIRED, check_hostname and the floor are ASSERTED: any miss is an
-    UpstreamError 502 before a socket is opened. connect() is _rt_open_socket
-    plus the handshake under the same deadline, suppress_ragged_eofs=False;
-    then the idle timeout, and `raw_sock` is the SSLSocket. *track* as for
-    _RtHttpConnection: the TCP socket joins it before the handshake, so a
-    shutdown interrupts a stalled handshake too, and the SSLSocket replaces it.
+    UpstreamError 502 before a socket is opened. connect() is _rt_resolve and
+    _rt_open_socket plus the handshake under the same deadline,
+    suppress_ragged_eofs=False; then the idle timeout, and `raw_sock` is the
+    SSLSocket. *track* as for _RtHttpConnection: the TCP socket joins it
+    before its connect, the SSLSocket replaces it before the handshake, so a
+    shutdown interrupts a stalled connect or handshake too.
     """
 
-    def __init__(self, backend: BackendSpec, addresses: List[str], deadline: float,
-                 track: Optional[_RtTrack] = None):
+    def __init__(self, backend: BackendSpec, deadline: float, track: Optional[_RtTrack] = None):
         if backend.ca_pem:
             context = ssl.create_default_context(cadata=backend.ca_pem)
         else:
@@ -6470,27 +6521,30 @@ class _RtHttpsConnection(http.client.HTTPSConnection):
         super().__init__(backend.host, backend.port, context=context)
         self._backend = backend
         self._rt_context = context
-        self._addresses = list(addresses)
         self._deadline = deadline
         self._track = track
         self.raw_sock: Optional[socket.socket] = None
 
     def connect(self) -> None:
-        sock = _rt_open_socket(self._addresses, self.port, self._deadline)
+        addresses = _rt_resolve(self._backend, self._deadline, self._track)
+        sock = _rt_open_socket(addresses, self.port, self._deadline, self._track)   # registered
         tls: Optional[ssl.SSLSocket] = None
         try:
             remaining = self._deadline - time.monotonic()
             if remaining <= 0:
                 raise socket.timeout("the connect deadline passed")
             sock.settimeout(remaining)
-            # wrap_socket detaches `sock` before any handshake, so the SSLSocket is what
-            # joins the registry, and the handshake runs only after it did (R-0083).
+            # wrap_socket detaches `sock` before any handshake, so the SSLSocket replaces it
+            # in the registry -- added first, so it is never absent -- and the handshake
+            # runs only after it did (R-0083).
             tls = self._rt_context.wrap_socket(sock, server_hostname=self._backend.host,
                                                suppress_ragged_eofs=False, do_handshake_on_connect=False)
             self.raw_sock = tls
             _rt_track_add(self._track, tls)
+            _rt_track_discard(self._track, sock)
             tls.do_handshake()
         except BaseException:
+            _rt_track_discard(self._track, sock)
             if tls is not None:
                 _rt_track_discard(self._track, tls)
                 self.raw_sock = None
@@ -6567,8 +6621,9 @@ def _rt_send(backend: BackendSpec, path: str, headers: List[Tuple[str, str]],
     putheader one by one, so http.client's injection check is a second line
     of defence; then `Accept-Encoding: identity` and `Content-Length:
     str(len(body))` are added HERE, after them (endheaders(body) never adds a
-    Content-Length; C3). The host is resolved and vetted per call, under the
-    same connect deadline as the connect and the TLS handshake (V9). No
+    Content-Length; C3). The host is resolved and vetted per call, by the
+    connection's connect() (R-0095), under the same connect deadline as the
+    connect and the TLS handshake (V9). No
     redirect is followed (a 3xx is a 502), an interim 1xx is a 502, and a
     Content-Encoding other than identity is a 502. Every failure closes the
     connection and is raised as _rt_upstream_refusal's UpstreamError.
@@ -6576,15 +6631,15 @@ def _rt_send(backend: BackendSpec, path: str, headers: List[Tuple[str, str]],
 
     *track* (R-0083, J4a amended) is the shutdown registry, DATA handed only to
     the connection constructor -- never called, never given the connection --
-    so it frames nothing: the socket joins it as soon as it exists (before a
-    TLS handshake), a failure here leaves it, and on success the caller calls
-    conn.untrack(). Only _rt_oauth_post passes it.
+    so it frames nothing: the resolve gives up on its `closing`, the socket
+    joins it before its connect (and before a TLS handshake), a failure here
+    leaves it, and on success the caller calls conn.untrack(). Both send
+    sites pass it (R-0095: _post, as R-0083's _rt_oauth_post).
     """
     deadline = time.monotonic() + backend.connect_timeout
-    addresses = _rt_resolve(backend, deadline)
     cls: Type[Union[_RtHttpConnection, _RtHttpsConnection]] = (_RtHttpsConnection if backend.scheme == "https"
                                                                else _RtHttpConnection)
-    conn = cls(backend, addresses, deadline, track)
+    conn = cls(backend, deadline, track)
     resp: Optional[http.client.HTTPResponse] = None
     try:
         conn.putrequest("POST", backend.base_path + path, skip_accept_encoding=True)
@@ -6949,16 +7004,18 @@ class _RouterHttpServer(ThreadingHTTPServer):
         self.conn_sem = threading.BoundedSemaphore(settings.max_connections)
         self.closing = threading.Event()
         self.loopback = ipaddress.IPv4Address(settings.bind).is_loopback
-        # Raw upstream sockets of live streams (and of a token POST, from its
-        # connect on, R-0083): shutdown(SHUT_RDWR) unblocks their readers, never close() (P24).
+        # Raw upstream sockets, every one from its connect on -- a model call's
+        # (R-0095) and a token POST's (R-0083): shutdown(SHUT_RDWR) unblocks a
+        # connect or a read, never close() (P24). `track` is the registry _rt_send takes.
         self.inflight: set = set()
         self.inflight_lock = threading.Lock()
+        self.track: _RtTrack = (self.inflight, self.inflight_lock, self.closing)
         # The OAuth token store, bound to this server: its lock waiters see
         # `closing` (529), its token POSTs register in `inflight` from the
         # connect on and its config-flock poll gives up on `closing` (N25, N41, N42).
         self.tokens = tokens if tokens is not None else _RtTokenStore(None, cfg)
         self.tokens.closing = self.closing
-        self.tokens.track = (self.inflight, self.inflight_lock, self.closing)
+        self.tokens.track = self.track
         # Running handler threads, for the shutdown drain.
         self.active = 0
         self.active_cond = threading.Condition()
@@ -7504,6 +7561,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
         rec["in"] = length
         inbound: Optional[InboundRequest] = None
         adapter: Optional[Adapter] = None
+        sent: Any = None                 # the last upstream connection: untracked in finally (R-0095)
         try:
             inbound = _rt_parse_inbound(endpoint, body, self.headers, srv.cfg)
             backend = inbound.backend
@@ -7549,11 +7607,15 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 if tokens is not None and tokens.handles(backend):
                     cred = tokens.credential(backend, stale=cred if refresh else None)
                 rec["up_t0"] = time.monotonic()
+                # R-0095: the socket is in the shutdown sweep from its connect on; every
+                # path that closes conn below (or the finally) also untracks it.
                 conn, resp = _rt_send(inbound.backend, path,
                                       _rt_upstream_headers(inbound, adapter.upstream_head(inbound, cred), cred),
-                                      up_body)
+                                      up_body, track=srv.track)
+                sent = conn
                 refresh = False
                 if not rec["refreshed"] and cred is not None and resp.status == 401:
+                    conn.untrack()
                     for closer in (resp.close, conn.close):   # the 401 body is discarded unread
                         try:
                             closer()
@@ -7602,6 +7664,12 @@ class _RouterHandler(BaseHTTPRequestHandler):
             if self._rt_head_sent:       # never after the SSE head: _relay_stream answers in-band
                 self.close_connection = True
                 return
+            if isinstance(exc, UpstreamError) and srv.closing.is_set():
+                # R-0095: the shutdown sweep cut this upstream call (connect, head or body):
+                # whatever the transport saw, the answer is the router's own 529.
+                self.close_connection = True
+                self._send_json(529, _rt_error_body("overloaded_error", _RT_SHUTTING_DOWN))
+                return
             self._send_json(exc.status, _rt_error_body(exc.err_type, exc.message))
         except OSError:
             raise                        # a client write: do_POST's disconnect
@@ -7618,6 +7686,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
             pending = getattr(adapter, "_pending", None)
             if inbound is not None and isinstance(pending, dict):
                 pending.pop(id(inbound), None)
+            if sent is not None:
+                sent.untrack()           # idempotent: the relay paths untracked it already
 
     def _rt_sampling_inbound(self, inbound: InboundRequest, learned: FrozenSet[str]) -> InboundRequest:
         """*inbound* carrying *learned* as its sampling_drop; a route override that is dropped
@@ -7648,6 +7718,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
             retry_after = (resp.getheader("Retry-After") or "").strip()
             up_body = _rt_read_body(resp, _UPSTREAM_BODY_LIMIT, inbound.backend.name)
         finally:
+            conn.untrack()               # R-0095: out of the shutdown sweep before the close
             for closer in (resp.close, conn.close):
                 try:
                     closer()
@@ -8483,7 +8554,9 @@ def _rt_shutdown(srv: _RouterHttpServer) -> None:
     # 1. A POST accepted from here on gets 529; a streaming handler picks
     #    "router shutting down" on its next tick.
     srv.closing.set()
-    # 2. Unblock every live pump with a raw shutdown, never close() (P24, KD-4).
+    # 2. Unblock every registered upstream socket -- a live pump's, and any model
+    #    call or token POST still connecting, waiting for its head or reading its
+    #    body (R-0083, R-0095) -- with a raw shutdown, never close() (P24, KD-4).
     with srv.inflight_lock:
         for sock in list(srv.inflight):
             try:

@@ -3704,6 +3704,8 @@ GC_CASES = (
     "private policy: v4 and mapped",     # C12
     "private policy: v6 link/multi",     # C13
     "loopback needs allow_loopback",     # C14
+    "shutdown wakes connect, resolve",   # C15
+    "shutdown wakes a non-stream call",  # C16
 )
 
 GC_BACKEND = "tfc"
@@ -3731,6 +3733,18 @@ GC_CONNECT_SLACK_S = 2.0         # C9: the failure must land within connect_time
 GC_FILL_LIMIT = 256              # C9: at most this many filler connects into a listen(0) backlog
 GC_FILL_PROBE_S = 0.2            # C9: a filler connect still pending after this means the backlog is full
 GC_RESOLVE_HOLD_S = 10.0         # C9 (V9): the stalled resolver answers after this, unless released
+# C15/C16 (R-0095): an in-process router (FastRouter) shut down by _rt_shutdown while one
+# request is stuck upstream.  The handler must finish before the drain runs out: a drain
+# that waited the handler out, or abandoned it, takes at least _DRAIN_S.
+GC_SHUT_DRAIN_S = 1.5            # _DRAIN_S (3 s), patched
+GC_SHUT_CONNECT_S = 8            # the backend's connect_timeout: outlasts the drain
+GC_SHUT_IDLE_S = 30              # the backend's idle_timeout: outlasts the drain
+GC_SHUT_SETTLE_S = 0.4           # from the stall being reached to the shutdown
+GC_SHUT_WAIT_S = 5.0             # the stall (a peer request, a resolver call) must be reached within this
+GC_SHUT_STALL_S = 60.0           # a C16 peer stalls this long (never reached)
+GC_SHUT_HEAD = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n"
+                b"Connection: close\r\n\r\n")
+GC_SHUT_ROUTE = "claude-tf-c"
 
 GC_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
 GC_NO_PROXY_VARS = ("NO_PROXY", "no_proxy")
@@ -3886,6 +3900,55 @@ def gc_full_backlog():
             sock.close()
         raise
     return lsock, fillers, full
+
+
+def gc_shutdown(mod, sandbox, stem, entry, reached, stream=False):
+    """(problems, detail) of one R-0095 shutdown: an in-process router (FastRouter, _DRAIN_S
+    patched to GC_SHUT_DRAIN_S) with one mistral backend *entry*; a client POST on a thread;
+    once *reached()* holds (the request is stuck upstream) and GC_SHUT_SETTLE_S more passed,
+    _rt_shutdown runs.  It must return before the drain runs out -- the handler finished, it
+    was neither waited out nor abandoned -- and the client must get a 5xx answer."""
+    cfg = {"auth_token": TF_ROUTER_TOKEN, "backends": {GC_BACKEND: entry},
+           "routes": {GC_SHUT_ROUTE: {"backend": GC_BACKEND, "model": "tf-model"}}}
+    cfgpath = write_config(sandbox, cfg, filename="c-%s.json" % stem)
+    body = {"model": GC_SHUT_ROUTE, "max_tokens": 16, "stream": stream,
+            "messages": [{"role": "user", "content": "tf %s" % stem}]}
+    patch = (("_DRAIN_S", GC_SHUT_DRAIN_S), ("_RT_TICK_S", FAST_TICK_S))
+    box = {}
+    with FastRouter(mod, None, sandbox, cfgpath, patch, label=stem) as rig:
+        if rig.client is None:
+            return [rig.why], []
+
+        def ask():
+            try:
+                box["got"] = rig.client.post(obj=body, timeout=GC_SHUT_STALL_S)
+            except Exception as exc:  # noqa: BLE001 -- the type is the finding
+                box["got"] = exc
+
+        thread = threading.Thread(target=ask, name="tf-c-shut", daemon=True)
+        thread.start()
+        deadline = time.monotonic() + GC_SHUT_WAIT_S
+        while not reached() and time.monotonic() < deadline and thread.is_alive():
+            time.sleep(PEER_POLL_S)
+        if not reached():
+            thread.join(HTTP_TIMEOUT_S)
+            return ["the request never reached its stall (client: %r)" % (box.get("got"),)], []
+        time.sleep(GC_SHUT_SETTLE_S)
+        t0 = time.monotonic()
+        mod._rt_shutdown(rig.srv)
+        took = time.monotonic() - t0
+        thread.join(HTTP_TIMEOUT_S)
+    problems = []
+    if took >= GC_SHUT_DRAIN_S:
+        problems.append("_rt_shutdown took %.2f s, not under _DRAIN_S = %.1f s: the drain waited the "
+                        "handler out or abandoned it" % (took, GC_SHUT_DRAIN_S))
+    got = box.get("got")
+    status = got[0] if isinstance(got, tuple) else None
+    if not (isinstance(status, int) and 500 <= status <= 599):
+        problems.append("the client got %s, expected a 5xx answer"
+                        % (status if status is not None else type(got).__name__))
+    return problems, ["shutdown    : %.2f s after the stall; _rt_shutdown returned after %.2f s; client %s"
+                      % (GC_SHUT_SETTLE_S, took, status if status is not None else type(got).__name__)]
 
 
 def gc_vet(mod, base, addr, needle):
@@ -4331,12 +4394,82 @@ def group_c(suite, fixture_root):
         return problems, ["off         : %s" % gc_outcome(res_off),
                           "on          : %s" % gc_outcome(res_on)]
 
+    def c15():
+        # R-0095 (a): a shutdown while the upstream connect stalls (a full listen(0) backlog)
+        # or while the resolver stalls (the _rt_getaddrinfo seam) -- both with a
+        # connect_timeout that outlasts the drain -- ends the request at once.
+        problems = gc_missing(mod, GC_SEND + ("_rt_shutdown",))
+        if problems:
+            return problems, []
+        detail = []
+        lsock, fillers, full = gc_full_backlog()
+        try:
+            if full:
+                got, shown = gc_shutdown(mod, sandbox, "c15-connect",
+                                         gc_entry("http://127.0.0.1:%d" % lsock.getsockname()[1],
+                                                  connect_timeout=GC_SHUT_CONNECT_S, **private),
+                                         lambda: True)
+                problems += ["connect: " + p for p in got]
+                detail += ["connect     : " + s for s in shown]
+            else:
+                detail.append("connect     : the kernel completes connects into a full backlog here; "
+                              "the stalled connect is unprovable (not run)")
+        finally:
+            for sock in fillers + [lsock]:
+                sock.close()
+        real = getattr(mod, "_rt_getaddrinfo", None)
+        if not callable(real):
+            return problems + ["the module defines no _rt_getaddrinfo seam"], detail
+        release = threading.Event()
+        calls = []
+
+        def stalled(host, port):
+            calls.append(host)
+            release.wait(GC_RESOLVE_HOLD_S)
+            return real(host, port)
+
+        with ScriptedPeer(script=GC_OK_SCRIPT) as peer:
+            mod._rt_getaddrinfo = stalled
+            try:
+                got, shown = gc_shutdown(mod, sandbox, "c15-resolve",
+                                         gc_entry(peer.url(), connect_timeout=GC_SHUT_CONNECT_S, **private),
+                                         lambda: bool(calls))
+            finally:
+                mod._rt_getaddrinfo = real
+                release.set()
+        problems += ["resolve: " + p for p in got] + gc_untouched("the peer behind the stalled resolver", peer)
+        detail += ["resolve     : " + s for s in shown]
+        if not full and not problems:
+            return [], detail, H.INFO
+        return problems, detail
+
+    def c16():
+        # R-0095 (b): a shutdown while a non-stream call waits for its response head, or reads
+        # a body that never comes, ends it at once (as N41 does for a token POST); so does a
+        # stream request still waiting for its head.
+        problems = gc_missing(mod, GC_SEND + ("_rt_shutdown",))
+        if problems:
+            return problems, []
+        detail = []
+        for label, script, stream in (("non-stream, no head", [("stall", GC_SHUT_STALL_S)], False),
+                                      ("non-stream, body stalls",
+                                       [("respond_raw", GC_SHUT_HEAD), ("stall", GC_SHUT_STALL_S)], False),
+                                      ("stream, no head", [("stall", GC_SHUT_STALL_S)], True)):
+            with ScriptedPeer(script=script) as peer:
+                got, shown = gc_shutdown(mod, sandbox, "c16-%d" % len(detail),
+                                         gc_entry(peer.url(), idle_timeout=GC_SHUT_IDLE_S, **private),
+                                         lambda: bool(peer.requests), stream=stream)
+            problems += ["%s: %s" % (label, p) for p in got]
+            detail += ["%-11s : %s" % (label[:11], s) for s in shown]
+        return problems, detail
+
     try:
         cases = [(GC_CASES[0], c1), (GC_CASES[1], c2), (GC_CASES[2], c3), (GC_CASES[3], c4),
                  (GC_CASES[4], c5), (GC_CASES[5], c6), (GC_CASES[6], c7), (GC_CASES[7], c8),
                  (GC_CASES[8], c9), (GC_CASES[9], c10), (GC_CASES[10], c11),
                  (GC_CASES[11], policy_case("c12", GC_PRIVATE_V4)),
-                 (GC_CASES[12], policy_case("c13", GC_PRIVATE_V6)), (GC_CASES[13], c14)]
+                 (GC_CASES[12], policy_case("c13", GC_PRIVATE_V6)), (GC_CASES[13], c14),
+                 (GC_CASES[14], c15), (GC_CASES[15], c16)]
         for cid, fn in cases:
             try:
                 results[cid] = fn()
@@ -7360,6 +7493,7 @@ GG_CASES = (
     "empty deltas ignored",              # G20
     "thinking then a tool call",         # G21
     "non-stream thinking + text",        # G22
+    "unoffered tool -> error",           # G23
 )
 GG_LIVE = (14, 17)                          # GG_CASES[14:17] (G15-G17) run against the live rig
 
@@ -7378,6 +7512,10 @@ GG_TOOL_COUNT_FALLBACK = 128                # G12 (V33): _RT_BUFFERED_TOOL_COUNT
 GG_FRAGMENT = 256 * 1024                    # G12: one argument fragment of the over-cap streams
 GG_LEAK_BOUND = 65536                       # G12: client bytes of a refused over-cap stream stay under this
 GG_PAD = "tfpadpadpad"                      # G6: the value of every unknown "p" key
+# G23 (F26, R-0093): the tools gg_inbound offers -- every name the G fixtures and inline
+# chunks call -- and one it never offers.
+GG_OFFERED = ("Read", "Bash", "Write")
+GG_UNOFFERED = "tf_unoffered_g23"
 # G1-G3 and G15 replay synthetic fixtures (tests/files/llm_router/README.md) until M5 runs.
 GG_DEFENSIVE = "provenance  : defensive, not observed (synthetic fixture, pending M5)"
 GG_FIXTURES = {"text": "tf_mistral_stream_text.sse", "tool": "tf_mistral_stream_tool.sse",
@@ -7515,9 +7653,11 @@ def gg_fx_usage(chunks):
 
 def gg_inbound(mod, stream=True, model=GG_ROUTE):
     """A mistral InboundRequest built in-process, scrubbing with the router's own KD-9
-    scrubber over the suite's sentinels (G10 asserts the error text is scrubbed)."""
+    scrubber over the suite's sentinels (G10 asserts the error text is scrubbed).  It offers
+    the GG_OFFERED tools, as a request that gets a tool call does (G23, F26)."""
     body = {"model": model, "max_tokens": 256, "stream": stream,
-            "messages": [{"role": "user", "content": "tf g"}]}
+            "messages": [{"role": "user", "content": "tf g"}],
+            "tools": [{"name": n, "input_schema": {"type": "object"}} for n in GG_OFFERED]}
     scrub, _why = ge_scrubber(mod)
     return mod.InboundRequest(endpoint="messages", requested_model=model, body=body, stream=stream,
                               route=mod.RouteSpec(name=model, backend=GF_BACKEND, model=GF_MODEL, options={}),
@@ -8681,7 +8821,74 @@ def group_g(suite, fixture_root):
             shown.append("%s -> %s" % (label, [b.get("type") for b in obj.get("content") or []]))
         return problems, ["mapping     : " + s for s in shown]
 
-    fns = (g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13, g14, g15, g16, g17, g18, g19, g20, g21, g22)
+    def g23():
+        # F26 (R-0093), M22's rule on the chat-completions kind: a tool call naming a tool the
+        # request did not offer (gg_inbound offers GG_OFFERED) is the backend's protocol
+        # violation, answered as the other tool-call refusals are -- one error event on the
+        # stream, 502 api_error on the non-stream path; no tool_use block, the name not echoed.
+        problems, shown = [], []
+        name = GG_UNOFFERED.encode("ascii")
+        bad = ms_lines(MS_ROLE, ms_text("tf g23"),
+                       ms_tools(ms_tool(0, '{"x":1}', "tfToolG23", GG_UNOFFERED)),
+                       ms_stop("tool_calls", ms_usage(4, 4)))
+        run, more = drive(bad)
+        if run is None:
+            return more, []
+        problems += gg_wellformed("unoffered tool", run) + gg_failed("unoffered tool", run)
+        if any(b["type"] == "tool_use" for b in gg_blocks(run["events"])):
+            problems.append("stream: a tool_use block was emitted for the unoffered tool")
+        msg = gg_error_message(run["events"])
+        if not (isinstance(msg, str) and "not offered" in msg):
+            problems.append("stream: error message %r, expected one saying 'not offered'" % (gi_redact(str(msg))[:120],))
+        if name in run["out"]:
+            problems.append("stream: the unoffered name reached the client")
+        shown.append("stream     -> %s" % ev_shape(run["events"]))
+        # The same call next to an offered one: the whole answer is refused, not half of it.
+        mixed = ms_lines(MS_ROLE, ms_tools(ms_tool(0, '{"x":1}', "tfToolG23a", "Read")),
+                         ms_tools(ms_tool(1, '{"x":2}', "tfToolG23b", GG_UNOFFERED)),
+                         ms_stop("tool_calls", ms_usage(4, 4)))
+        run, more = drive(mixed)
+        if run is None:
+            return more, []
+        problems += gg_wellformed("offered + unoffered", run) + gg_failed("offered + unoffered", run)
+        if any(b["type"] == "tool_use" for b in gg_blocks(run["events"])) or name in run["out"]:
+            problems.append("offered + unoffered: a tool_use block or the unoffered name reached the client")
+        shown.append("mixed      -> %s" % ev_shape(run["events"]))
+        # The non-stream path: MistralAdapter.json_response.
+        adapter, why = (getattr(mod, "ADAPTERS", None) or {}).get("mistral"), None
+        if adapter is None:
+            adapter, why = gf_adapter(mod, "json_response")
+        if adapter is None:
+            return problems + [why], ["unoffered   : " + s for s in shown]
+        body = json.dumps(ms_answer({"role": "assistant", "content": "tf g23",
+                                     "tool_calls": [{"id": "tfToolG23", "type": "function",
+                                                     "function": {"name": GG_UNOFFERED, "arguments": '{"x":1}'}}]},
+                                    "tool_calls", ms_usage(4, 4))).encode("utf-8")
+        got = adapter.json_response(gg_inbound(mod, stream=False), 200, body)
+        if not (isinstance(got, tuple) and len(got) == 2 and isinstance(got[1], dict)):
+            problems.append("non-stream: json_response returned %r" % type(got).__name__)
+        else:
+            status, obj = got
+            err = obj.get("error") if isinstance(obj.get("error"), dict) else {}
+            if status != 502 or obj.get("type") != "error" or err.get("type") != "api_error" \
+                    or "not offered" not in str(err.get("message")):
+                problems.append("non-stream: %r %s, expected 502 api_error saying 'not offered'"
+                                % (status, gi_redact(json.dumps(obj))[:200]))
+            if GG_UNOFFERED in json.dumps(obj):
+                problems.append("non-stream: the unoffered name reached the client")
+            shown.append("non-stream -> %r" % status)
+        # Control: the same stream calling an offered tool completes with its tool_use.
+        ok = ms_lines(MS_ROLE, ms_text("tf g23"), ms_tools(ms_tool(0, '{"x":1}', "tfToolG23", "Read")),
+                      ms_stop("tool_calls", ms_usage(4, 4)))
+        run, more = drive(ok)
+        if run is None:
+            return more, []
+        problems += gg_wellformed("control: offered tool", run) + gg_complete("control: offered tool", run, "tool_use")
+        shown.append("control    -> %s" % ev_shape(run["events"]))
+        return problems, ["unoffered   : " + s for s in shown]
+
+    fns = (g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13, g14, g15, g16, g17, g18, g19, g20, g21, g22,
+           g23)
     lo, hi = GG_LIVE
     try:
         for cid, fn in zip(GG_CASES[:lo] + GG_CASES[hi:], fns[:lo] + fns[hi:]):
@@ -8891,9 +9098,15 @@ def h_case_ids(kind):
     return tuple("%s: %s" % (tag, title) for title in H_TITLES)
 
 
-def h_body(stream=True):
-    return {"model": H_ROUTE, "max_tokens": 64, "stream": stream,
+def h_body(stream=True, **extra):
+    body = {"model": H_ROUTE, "max_tokens": 64, "stream": stream,
             "messages": [{"role": "user", "content": "tf h"}]}
+    body.update(extra)
+    return body
+
+
+# H8/H9 stream a call to Read: the request offers it (F26, R-0093).
+H_TOOLS = [{"name": "Read", "input_schema": {"type": "object"}}]
 
 
 def h_config(entry):
@@ -9353,7 +9566,7 @@ def h8(fixture_root, mod, mod_why):
                   idle_timeout=H_LONG_IDLE_S) as rig:
         if rig.client is None:
             return [rig.why], []
-        conn, resp, problems = open_stream(rig.client, h_body())
+        conn, resp, problems = open_stream(rig.client, h_body(tools=H_TOOLS))
         if problems:
             return problems, []
         t0 = time.monotonic()
@@ -9410,7 +9623,7 @@ def h9(fixture_root, mod, mod_why):
                   idle_timeout=H_LONG_IDLE_S) as rig:
         if rig.client is None:
             return [rig.why], []
-        conn, resp, problems = open_stream(rig.client, h_body())
+        conn, resp, problems = open_stream(rig.client, h_body(tools=H_TOOLS))
         if problems:
             return problems, []
         try:
@@ -17893,10 +18106,11 @@ GJ_SEND_SITES = {"_post": "_rt_upstream_headers", "_rt_oauth_post": "_rt_oauth_h
 # J4a amended (R-0083): _rt_send takes exactly these parameters; the last, the socket
 # registration hook, is DATA (the shutdown registry) that _rt_send only hands to the
 # connection constructor `cls(...)` -- never called, never given the connection -- so it
-# cannot frame; and only the GJ_SEND_HOOK_SITES scopes pass it.
+# cannot frame.  Amended again (R-0095): EVERY send site passes it, so every upstream
+# socket -- a model call as well as a token POST -- is in the shutdown sweep from its
+# connect on.
 GJ_SEND_PARAMS = ("backend", "path", "headers", "body", "track")
 GJ_SEND_HOOK = "track"
-GJ_SEND_HOOK_SITES = ("_rt_oauth_post",)
 GJ_SEND_CONN_CTOR = "cls"
 
 GJ_ENV_ATTRS = ("environ", "environb", "getenv", "getenvb")
@@ -18086,9 +18300,9 @@ def rule_j4(source):
     in the GJ_SEND_SITES scopes, exactly once each, with that scope's paired builder
     call as its headers argument (_post -> _rt_upstream_headers(...), _rt_oauth_post
     -> _rt_oauth_headers(...)); amended for R-0083, _rt_send's parameters are exactly
-    GJ_SEND_PARAMS, its registration hook `track` is used in it only as an argument of
-    the connection constructor cls(...), and only GJ_SEND_HOOK_SITES pass that hook, so
-    the hook is a registry, never a second framing owner; (b) the attribute client_headers is read only inside
+    GJ_SEND_PARAMS and its registration hook `track` is used in it only as an argument of
+    the connection constructor cls(...), so the hook is a registry, never a second framing
+    owner; amended for R-0095, every send site passes that hook; (b) the attribute client_headers is read only inside
     _rt_upstream_headers; (c) nothing between the `# Unit 2:` and `# Unit 6:`
     banners references socket, ssl, http, select, time or threading -- and a
     missing, repeated or out-of-order banner is itself a finding."""
@@ -18130,9 +18344,9 @@ def rule_j4(source):
                          % (node.lineno, scope, builder))
         hooked = len(node.args) > len(GJ_SEND_PARAMS) - 1 or any(
             kw.arg in (GJ_SEND_HOOK, None) for kw in node.keywords)
-        if hooked and scope not in GJ_SEND_HOOK_SITES:
-            found.append("%d: _rt_send in %s() passes the registration hook; only %s may"
-                         % (node.lineno, scope, ", ".join(GJ_SEND_HOOK_SITES)))
+        if not hooked:
+            found.append("%d: _rt_send in %s() does not pass the registration hook; every send "
+                         "joins the shutdown registry (R-0095)" % (node.lineno, scope))
     # (a, R-0083) the registration hook is data handed to the connection constructor only.
     defs = [n for n, _s in scoped if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_rt_send"]
     if len(defs) != 1:
@@ -18436,7 +18650,7 @@ def _rt_oauth_post(backend, request, user_agent, track=None):
 # ---------------------------------------------------------------------------
 class Handler:
     def _post(self, inbound):
-        return _rt_send(inbound.backend, "/v1/messages", _rt_upstream_headers(inbound), b"")
+        return _rt_send(inbound.backend, "/v1/messages", _rt_upstream_headers(inbound), b"", track=self.track)
 '''
 GJ_J4_PLANTED = GJ_J4_CLEAN.replace(
     "def translate(inbound):\n    return inbound\n",
@@ -18453,7 +18667,7 @@ GJ_J23_PLANTED = GJ_J4_CLEAN.replace(
     "def _probe_send(b):\n    return _rt_send(b, \"/x\", _rt_oauth_headers(()), b\"\")\n",
 )
 # J36 (R-0083): the hook turned into a second framing owner -- _rt_send hands it the
-# connection and calls it -- plus a fifth parameter and _post passing the hook.
+# connection and calls it -- plus a fifth parameter and (R-0095) _post NOT passing the hook.
 GJ_J36_PLANTED = GJ_J4_CLEAN.replace(
     "def _rt_send(backend, path, headers, body, track=None):\n",
     "def _rt_send(backend, path, headers, body, track=None, frame=None):\n",
@@ -18461,8 +18675,8 @@ GJ_J36_PLANTED = GJ_J4_CLEAN.replace(
     "        conn.putheader(name, value)\n    return conn\n",
     "        conn.putheader(name, value)\n    track(conn)\n    return conn\n",
 ).replace(
-    "_rt_upstream_headers(inbound), b\"\")\n",
     "_rt_upstream_headers(inbound), b\"\", track=self.track)\n",
+    "_rt_upstream_headers(inbound), b\"\")\n",
 )
 
 GJ_J19_REASONS = {("llm-router.py", "_tf_declared"): "tf: a declared hand copy"}
@@ -18668,7 +18882,7 @@ GJ_CONTROLS = {
                                   "'frame']",
                                   "the hook `track` is used in _rt_send() other than as an argument of the "
                                   "connection constructor cls(...)",
-                                  "_rt_send in _post() passes the registration hook; only _rt_oauth_post may")),
+                                  "_rt_send in _post() does not pass the registration hook")),
     "control: kind registry plants": (rule_j37, GJ_J38_CLEAN, GJ_J38_PLANTED,
                                       ("KIND_CLASSES is a hand-written literal",
                                        "RESERVED_KINDS names 'tf-extra' by hand",

@@ -711,9 +711,9 @@ SUITES = [
      "header lines, id-less initialize, request id shape, fixed body-less "
      "stdlib refusals, 100 Continue only after auth, ready file removed "
      "on shutdown, NaN / over-long numbers refused -32700", 112),
-    # TYPED: a fixed case table (A 49, B 31, C 14, D 16, E 14, F 25, G 22,
+    # TYPED: a fixed case table (A 49, B 31, C 16, D 16, E 14, F 25, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 41, K 26, L 20, M 23, N 42,
-    # O 18 = 384), so a count that moves is the alarm, not noise.
+    # O 18 = 387), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
@@ -721,7 +721,7 @@ SUITES = [
      "registry, Mistral translation and stream state machine, the codex "
      "and openai Responses kinds (request translation and stream), OAuth "
      "token store, login and config write-back, timeouts and disconnects "
-     "per kind, secret leaks, static rules, hygiene", 384),
+     "per kind, secret leaks, static rules, hygiene", 387),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]
