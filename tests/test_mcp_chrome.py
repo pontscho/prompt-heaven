@@ -7283,15 +7283,25 @@ def cap_identity_problems(host):
     return problems, ["create_session(): (transport, max_bytes, wire limit) %r == SEARCH_MAX_BYTES -- never the 64 MiB fallback" % (seen,)]
 
 
-def oversized_run(host, peer, warmup, path, ctype, runner):
-    """runner() over the h2 peer, `path` answering F32_CAP + 1 bytes: (_ch_session_new calls, stderr lines, peer requests, runner's value).
+# The oversized rows swap the host's SEARCH_MAX_BYTES down to this and send
+# OVERSIZED_CAP + 1 bytes. At the real 2 MiB the body crosses the pure-Python TLS
+# decrypt (~0.5 MiB/s floor) and, under fleet CPU load, the host's own per-call
+# deadline fired first ("timeout: read timed out"), so the row measured the
+# machine rather than the cap. The 2 MiB value itself is pinned by the
+# create-session cap-identity rows, which never send a body.
+OVERSIZED_CAP = 64 * 1024
 
-    create_session() runs for real (Chrome path, the public-only policy); the
-    row only maps the sentinel address to the peer.
+
+def oversized_run(host, peer, warmup, path, ctype, runner, cap=OVERSIZED_CAP):
+    """runner() over the h2 peer with host.SEARCH_MAX_BYTES swapped to `cap`, `path` answering cap + 1 bytes: (_ch_session_new calls, stderr lines, peer requests, runner's value).
+
+    create_session() runs for real (Chrome path, the public-only policy) and
+    reads SEARCH_MAX_BYTES at call time, so the swapped cap is the session's
+    max_bytes; the row only maps the sentinel address to the peer.
     """
     if warmup is not None:
         peer.plan[warmup] = (200, [("content-type", HTML_TYPE)], b"<html>home</html>")
-    peer.plan[path] = (200, [("content-type", ctype)], b"x" * (F32_CAP + 1))
+    peer.plan[path] = (200, [("content-type", ctype)], b"x" * (cap + 1))
     original_new = host._ch_session_new
     news, gai = [], []
 
@@ -7302,7 +7312,7 @@ def oversized_run(host, peer, warmup, path, ctype, runner):
     err = io.StringIO()
     mark = peer.mark()
     try:
-        with Swapped((host, "_ch_session_new", session_new), (host, "_ch_open_socket", pm), (host, "random", NoWait),
+        with Swapped((host, "SEARCH_MAX_BYTES", cap), (host, "_ch_session_new", session_new), (host, "_ch_open_socket", pm), (host, "random", NoWait),
                      (socket, "getaddrinfo", answering_resolver(gai, [GH_SENTINEL_ADDR])), (sys, "stderr", err)):
             got = runner()
     finally:
@@ -7311,12 +7321,12 @@ def oversized_run(host, peer, warmup, path, ctype, runner):
     return news, err.getvalue().splitlines(), seen, got
 
 
-def oversized_problems(host, run, prefix, requests):
-    """Not a block: one Chrome session with max_bytes == SEARCH_MAX_BYTES, one error line naming the cap, no results, no label."""
+def oversized_problems(run, prefix, requests, cap=OVERSIZED_CAP):
+    """Not a block: one Chrome session with max_bytes == the swapped SEARCH_MAX_BYTES (`cap`), one error line naming it, no results, no label."""
     news, lines, seen, (sections, has) = run
-    want_line = "body: exceeds %d bytes" % host.SEARCH_MAX_BYTES
+    want_line = "body: exceeds %d bytes" % cap
     got_requests = [(q["method"], q["path"]) for q in seen]
-    return (problem_if(news != [("chrome", host.SEARCH_MAX_BYTES)], "_ch_session_new calls (transport, max_bytes) %r, wanted one chrome session with max_bytes == SEARCH_MAX_BYTES (%d); a second one is a re-issue or a Bing switch" % (news, host.SEARCH_MAX_BYTES))
+    return (problem_if(news != [("chrome", cap)], "_ch_session_new calls (transport, max_bytes) %r, wanted one chrome session with max_bytes == the swapped SEARCH_MAX_BYTES (%d); a second one is a re-issue or a Bing switch" % (news, cap))
             + problem_if(len(lines) != 1 or not lines[0].startswith(prefix) or want_line not in lines[0], "stderr %r, wanted one line starting %r naming %r" % (lines, prefix, want_line))
             + problem_if(has or any(LABEL_MARK in sec for sec in sections), "results %r" % (sections[:1],))
             + problem_if(got_requests != requests, "the peer saw %r, wanted %r" % (got_requests, requests)))
@@ -7331,7 +7341,7 @@ def gh_cap_rows(suite, host, peer):
 
     def oversized():
         run = oversized_run(host, peer, "/", GH_API_PATH, "application/json", lambda: host._run_github(["x"]))
-        return oversized_problems(host, run, "  [grep.app error: ", [("GET", "/"), ("GET", "/api/search?q=x")]), ["a grep.app answer of %d bytes (cap + 1) -> ChromeBodyTooLarge reported as %r, [] and no second attempt: a too-large body is a transport failure, never a block (D16 M2)" % (F32_CAP + 1, (run[1] or [None])[0])]
+        return oversized_problems(run, "  [grep.app error: ", [("GET", "/"), ("GET", "/api/search?q=x")]), ["SEARCH_MAX_BYTES swapped to %d: a grep.app answer of %d bytes (cap + 1) -> ChromeBodyTooLarge reported as %r, [] and no second attempt: a too-large body is a transport failure, never a block (D16 M2)" % (OVERSIZED_CAP, OVERSIZED_CAP + 1, (run[1] or [None])[0])]
     run_row(suite, GM, "github-oversized-body-is-a-transport-failure-not-a-block-f32", oversized, src + "; D16 M2")
 
 
@@ -7345,7 +7355,7 @@ def ddg_cap_rows(suite, host, peer):
     def oversized():
         # The warm-up GET shares /lite/ with the POST, so it is oversized too and only swallowed.
         run = oversized_run(host, peer, None, DDG_PATH, HTML_TYPE, lambda: host._run_ddg_with_bing_fallback(["test"]))
-        return oversized_problems(host, run, "  [DDG error: ", [("GET", DDG_PATH), ("POST", DDG_PATH)]), ["a DDG answer of %d bytes (cap + 1) -> %r, [], no second attempt and no switch to Bing: a too-large body is a transport failure, never a block (D16 M2)" % (F32_CAP + 1, (run[1] or [None])[0])]
+        return oversized_problems(run, "  [DDG error: ", [("GET", DDG_PATH), ("POST", DDG_PATH)]), ["SEARCH_MAX_BYTES swapped to %d: a DDG answer of %d bytes (cap + 1) -> %r, [], no second attempt and no switch to Bing: a too-large body is a transport failure, never a block (D16 M2)" % (OVERSIZED_CAP, OVERSIZED_CAP + 1, (run[1] or [None])[0])]
     run_row(suite, GM, "ddg-oversized-body-is-a-transport-failure-not-a-block-f32", oversized, src + "; D16 M2")
 
     def once():
