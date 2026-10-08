@@ -33,6 +33,7 @@ import contextlib
 import contextvars
 import fnmatch
 import glob as glob_mod
+import difflib
 import json
 import logging
 import os
@@ -6824,6 +6825,52 @@ def _unknown_params(params: dict, accepted: set) -> list:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+def _did_you_mean(words, candidates, aliases=None):
+    """Return " Did you mean 'X'?" for the closest real name, or "".
+
+    `words` is the one name a caller sent (a function) or a list of them (the
+    unknown parameter keys of one call). `candidates` are the names actually on
+    offer -- the callable functions, or the parameters this function accepts.
+    `aliases` maps an alias to its canonical name: an alias of an offered name
+    may be MATCHED, and the canonical name is what is suggested, so a near miss
+    of an alias still points at the spelling the documentation uses. An alias
+    whose canonical is not on offer is not a candidate.
+
+    Only the server's own names are ever rendered for a single word; with
+    several words each suggestion says which key it answers. A word that is
+    not a string, is empty, is already a candidate, or resembles nothing gets
+    no suggestion -- silence is half the contract, since a guess appended to
+    every refusal would teach a caller to ignore it. The pool is sorted, so the
+    answer depends on the sets, never on the order a table was written in.
+    """
+    if isinstance(words, str):
+        words = [words]
+    if not isinstance(words, (list, tuple)):
+        return ""
+    names = sorted(set(name for name in candidates if isinstance(name, str)))
+    table = aliases if isinstance(aliases, dict) else {}
+    extra = set(key for key, value in table.items() if isinstance(key, str) and value in names)
+    pool = sorted(set(names) | extra)
+    pairs = []
+    for word in words:
+        if not isinstance(word, str) or not word or word in pool:
+            continue
+        found = difflib.get_close_matches(word, pool, n=1, cutoff=0.6)
+        if not found:
+            continue
+        name = found[0] if found[0] in names else table[found[0]]
+        if (word, name) not in pairs:
+            pairs.append((word, name))
+    if not pairs:
+        return ""
+    if len(words) == 1:
+        return " Did you mean '%s'?" % pairs[0][1]
+    return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
+# END GENERATED: dbc5a3370235
+
+
 async def handle_purity_call(arguments: dict, project_root: str, strict: bool = False) -> dict:
     """Route a purity_call invocation to the appropriate handler.
 
@@ -6857,7 +6904,8 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     handler = HANDLERS.get(function)
     if not handler:
         func_list = ", ".join(sorted(HANDLERS.keys()))
-        return {"error": f"Unknown function: {_sanitize_log(function)}. Available: {func_list}"}
+        hint = _did_you_mean(function, HANDLERS, FUNCTION_ALIASES)
+        return {"error": f"Unknown function: {_sanitize_log(function)}. Available: {func_list}{hint}"}
 
     # Reject unknown params up-front. Without this, an unrecognized key (a
     # grep-style `paths`/`-n`/`-i`) is silently dropped and the handler runs with
@@ -6868,9 +6916,16 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     if accepted is not None:
         unknown = _unknown_params(params, accepted)
         if unknown:
+            # A near miss is POINTED at the canonical name, never resolved to
+            # it: `context_chars` is told about `context_lines` and still
+            # refused, because a character count is not a line count. The
+            # alias table is the effective one _resolve_aliases reads.
+            aliases = dict(PARAM_ALIASES)
+            aliases.update(PARAM_ALIASES_BY_FUNC.get(canonical_func, {}))
             return {"error": (
                 f"Unknown params for '{canonical_func}': {', '.join(unknown)}."
                 f" Accepted: {', '.join(sorted(accepted))}."
+                + _did_you_mean(unknown, accepted, aliases)
             )}
 
     # Non-destructive handlers may reach outside the project root; destructive

@@ -75,7 +75,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 # into Scripts/ to a generation source, and a region naming it would read as
 # legitimate as any other. Adding a source is a deliberate edit here.
 CANONICAL_NAMES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_codesearch.py",
-                   "_mcp_concurrency.py", "_mcp_httpfront.py", "_mcp_json.py",
+                   "_mcp_concurrency.py", "_mcp_dispatch.py",
+                   "_mcp_httpfront.py", "_mcp_json.py",
                    "_mcp_logging.py",
                    "_mcp_lsp.py", "_mcp_oauth.py", "_mcp_paging.py",
                    "_mcp_websearch.py", "_mcp_websocket.py", "_mcp_zstd.py")

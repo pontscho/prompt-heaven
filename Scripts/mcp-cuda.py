@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import contextvars
 import glob as glob_mod
+import difflib
 import json
 import logging
 import os
@@ -2242,6 +2243,52 @@ class _ErrorText(str):
     __slots__ = ()
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+def _did_you_mean(words, candidates, aliases=None):
+    """Return " Did you mean 'X'?" for the closest real name, or "".
+
+    `words` is the one name a caller sent (a function) or a list of them (the
+    unknown parameter keys of one call). `candidates` are the names actually on
+    offer -- the callable functions, or the parameters this function accepts.
+    `aliases` maps an alias to its canonical name: an alias of an offered name
+    may be MATCHED, and the canonical name is what is suggested, so a near miss
+    of an alias still points at the spelling the documentation uses. An alias
+    whose canonical is not on offer is not a candidate.
+
+    Only the server's own names are ever rendered for a single word; with
+    several words each suggestion says which key it answers. A word that is
+    not a string, is empty, is already a candidate, or resembles nothing gets
+    no suggestion -- silence is half the contract, since a guess appended to
+    every refusal would teach a caller to ignore it. The pool is sorted, so the
+    answer depends on the sets, never on the order a table was written in.
+    """
+    if isinstance(words, str):
+        words = [words]
+    if not isinstance(words, (list, tuple)):
+        return ""
+    names = sorted(set(name for name in candidates if isinstance(name, str)))
+    table = aliases if isinstance(aliases, dict) else {}
+    extra = set(key for key, value in table.items() if isinstance(key, str) and value in names)
+    pool = sorted(set(names) | extra)
+    pairs = []
+    for word in words:
+        if not isinstance(word, str) or not word or word in pool:
+            continue
+        found = difflib.get_close_matches(word, pool, n=1, cutoff=0.6)
+        if not found:
+            continue
+        name = found[0] if found[0] in names else table[found[0]]
+        if (word, name) not in pairs:
+            pairs.append((word, name))
+    if not pairs:
+        return ""
+    if len(words) == 1:
+        return " Did you mean '%s'?" % pairs[0][1]
+    return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
+# END GENERATED: dbc5a3370235
+
+
 async def handle_cuda_call(args: dict, server: Optional["McpServer"] = None) -> str:
     function = args.get("function", "")
     raw_params = args.get("params") or {}
@@ -2281,7 +2328,8 @@ async def handle_cuda_call(args: dict, server: Optional["McpServer"] = None) -> 
     handler = ALL_HANDLERS.get(function)
     if handler is None:
         available = ", ".join(sorted(ALL_HANDLERS.keys()))
-        return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}"})
+        hint = _did_you_mean(function, ALL_HANDLERS)
+        return _serialize("", {"error": f"Unknown function: '{function}'. Available: {available}{hint}"})
 
     # The auto-init gate runs BEFORE the backend lock is taken, and must: the
     # init task holds that same lock for its whole cold start, so waiting for it

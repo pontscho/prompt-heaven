@@ -26,6 +26,7 @@ Usage:
 import os
 import re
 import sys
+import difflib
 import json
 import logging
 import asyncio
@@ -679,6 +680,52 @@ async def handle_context7_query_docs(args: dict) -> Union[str, dict]:
     return _cap_text(text, cap)
 
 
+# Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+def _did_you_mean(words, candidates, aliases=None):
+    """Return " Did you mean 'X'?" for the closest real name, or "".
+
+    `words` is the one name a caller sent (a function) or a list of them (the
+    unknown parameter keys of one call). `candidates` are the names actually on
+    offer -- the callable functions, or the parameters this function accepts.
+    `aliases` maps an alias to its canonical name: an alias of an offered name
+    may be MATCHED, and the canonical name is what is suggested, so a near miss
+    of an alias still points at the spelling the documentation uses. An alias
+    whose canonical is not on offer is not a candidate.
+
+    Only the server's own names are ever rendered for a single word; with
+    several words each suggestion says which key it answers. A word that is
+    not a string, is empty, is already a candidate, or resembles nothing gets
+    no suggestion -- silence is half the contract, since a guess appended to
+    every refusal would teach a caller to ignore it. The pool is sorted, so the
+    answer depends on the sets, never on the order a table was written in.
+    """
+    if isinstance(words, str):
+        words = [words]
+    if not isinstance(words, (list, tuple)):
+        return ""
+    names = sorted(set(name for name in candidates if isinstance(name, str)))
+    table = aliases if isinstance(aliases, dict) else {}
+    extra = set(key for key, value in table.items() if isinstance(key, str) and value in names)
+    pool = sorted(set(names) | extra)
+    pairs = []
+    for word in words:
+        if not isinstance(word, str) or not word or word in pool:
+            continue
+        found = difflib.get_close_matches(word, pool, n=1, cutoff=0.6)
+        if not found:
+            continue
+        name = found[0] if found[0] in names else table[found[0]]
+        if (word, name) not in pairs:
+            pairs.append((word, name))
+    if not pairs:
+        return ""
+    if len(words) == 1:
+        return " Did you mean '%s'?" % pairs[0][1]
+    return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
+# END GENERATED: dbc5a3370235
+
+
 async def handle_context7_call(args: dict) -> Union[str, dict]:
     """Dispatcher: call any Context7 tool by name."""
     function = args.get("function", "")
@@ -702,8 +749,12 @@ async def handle_context7_call(args: dict) -> Union[str, dict]:
 
     handler = ALL_HANDLERS.get(function)
     if handler is None:
-        available = ", ".join(sorted(ALL_HANDLERS.keys()))
-        return {"error": f"Unknown function: '{function}'. Available: {available}"}
+        # Only what a caller can CALL: `context7_call` is in the table for the
+        # direct-tool path, and is refused above as a recursion here.
+        callable_names = sorted(n for n in ALL_HANDLERS if n != "context7_call")
+        available = ", ".join(callable_names)
+        hint = _did_you_mean(function, callable_names)
+        return {"error": f"Unknown function: '{function}'. Available: {available}{hint}"}
 
     # Passed through as returned, shape included: an inner handler's
     # {"error": ...} has to stay a dict all the way to the wrap, or the flag is

@@ -26,6 +26,16 @@ that the convergence patch guarantees:
   * aliased params       -> a canonical parameter name and one of its own
                            aliases in the SAME call is refused, never silently
                            decided by wire position (see alias_collision_checks)
+  * near-miss name       -> a function (the proxy: a tool) one typo away from a
+                           real one, and on every host that refuses unknown
+                           params a near-miss key, is answered "Did you mean
+                           '<real>'?"; a name resembling nothing is not (see
+                           near_miss_checks)
+  * gdc open_pages       -> dispatches as list_pages, and the unknown-function
+                           list offers no uncallable gdc_call (see
+                           gdc_open_pages_checks); context7's and lldb's
+                           lists offer no uncallable context7_call / lldb_call
+                           either (see uncallable_dispatcher_checks)
   * tshark ceiling       -> max_answer_chars is canonical, max_output_chars a
                            kept alias of it (see tshark_ceiling_param_checks)
   * notifications/       -> an unknown, finished, bool, float or malformed
@@ -445,6 +455,221 @@ def alias_collision_checks(srv, cfg, checks):
         "one spelling -> no collision error (control)",
         COLLISION_TOKEN not in text,
         "isError=%r; text=%r" % (is_error, text[:180])))
+
+
+# The sentence every host's near-miss suggestion ends with. It is rendered by
+# ONE generated block, `_did_you_mean` from Scripts/_mcp_dispatch.py, so the
+# wording is the contract here exactly as COLLISION_TOKEN's is above: the flag
+# alone would pass on the refusal that was already there before any suggestion.
+SUGGEST_FORMAT = "Did you mean '%s'?"
+SUGGEST_TOKEN = "Did you mean"
+
+# A name that resembles NOTHING any host serves, for the controls. Not the
+# `__no_such_function__` the envelope probe uses: under forge's 0.6 cutoff that
+# one scores 0.67 against mcp-postgres's `call_function` (they share
+# `_function`), so on that host it is a near miss and draws a suggestion -- the
+# control measured that the first time it ran.
+FAR_MISS = "qxqxqxqx"
+
+# Per host: a function name a short edit away from a real one, and the name the
+# suggestion must carry. Probe DATA, hand-written for the reason ALIAS_COLLISION
+# is: deriving the near miss from each host's handler table would re-implement
+# eleven table shapes inside a harness whose subject is live JSON-RPC. Every row
+# is answered from the host's own tables -- no database, browser, debugger,
+# language server or network -- and mcp-forge answers it before it reads its
+# config, so the /tmp it runs against needs none.
+#
+# mcp-gdc's row is deliberately NOT `open_pages`: that is a real alias of
+# list_pages, and gdc_open_pages_checks below proves it dispatches.
+NEAR_MISS_FUNCTION = {
+    "mcp-forge.py":    ("buidl",                  "build"),
+    "mcp-git.py":      ("stauts",                 "status"),
+    "mcp-purity.py":   ("serch_for_pattern",      "search_for_pattern"),
+    "mcp-jenkins.py":  ("get_build_logg",         "get_build_log"),
+    "mcp-tshark.py":   ("analyzee",               "analyze"),
+    "mcp-webfetch.py": ("fetchh",                 "fetch"),
+    "mcp-search.py":   ("webb",                   "web"),
+    "mcp-context7.py": ("context7_query_doc",     "context7_query_docs"),
+    "mcp-lldb.py":     ("lldb_backtrac",          "lldb_backtrace"),
+    "mcp-gdc.py":      ("list_page",              "list_pages"),
+    "mcp-lua-lsp.py":  ("luals_find_definitio",   "luals_find_definition"),
+    "mcp-clangd.py":   ("clangd_find_definitio",  "clangd_find_definition"),
+    "mcp-cuda.py":     ("cuda_find_definitio",    "cuda_find_definition"),
+    "mcp-postgres.py": ("list_tabels",            "list_tables"),
+    "mcp-wiki.py":     ("serach",                 "search"),
+    "mcp-inspect.py":  ("processs",               "processes"),
+}
+
+# mcp-proxy.py has no `function` layer at all: it relays a tools/call to the
+# child that owns the tool (ADR 0027). Its one name-lookup refusal is the
+# unknown TOOL, a JSON-RPC -32602, so its near miss is a tool name.
+NEAR_MISS_TOOL = {
+    "mcp-proxy.py":    ("tf_stub_cal",            "tf_stub_call"),
+}
+
+# Per host that REFUSES an unknown parameter: a function, params carrying one
+# near-miss key, and the canonical name the suggestion must carry. A host is in
+# this table iff its source carries the refusal sentence (PARAM_REFUSAL_MARK);
+# the coverage row derives that from the source, so a host that learns to refuse
+# a parameter cannot join the fleet without a probe. The other hosts have no
+# unknown-parameter refusal to append a suggestion to -- they ignore an unknown
+# key (or, on mcp-git, turn it into a flag by design) -- and that is a policy a
+# suggestion cannot add.
+#
+# mcp-purity's row is the case that motivated the change: `context_chars` must
+# be pointed at `context_lines`, and must NOT become an alias of it -- a
+# character count and a line count are different requests.
+# mcp-postgres reports unknown params only beside a handler's own failure, so
+# its row omits the required `sql` to reach that path without a database.
+PARAM_REFUSAL_MARK = "Unknown params for"
+NEAR_MISS_PARAM = {
+    "mcp-purity.py":   ("search_for_pattern",
+                        {"substring_pattern": "x", "context_chars": 2},
+                        "context_lines"),
+    "mcp-postgres.py": ("query",          {"max_rowz": 1},     "max_rows"),
+    "mcp-search.py":   ("web",            {"limitt": 1},       "limit"),
+    "mcp-webfetch.py": ("fetch",          {"urll": "x"},       "url"),
+    "mcp-inspect.py":  ("processes",      {"filterr": "x"},    "filter"),
+    "mcp-wiki.py":     ("search",         {"queryy": "x"},     "query"),
+}
+
+
+def near_miss_checks(srv, cfg, checks):
+    """A name one typo away from a real one must be answered with that name.
+
+    Four halves:
+
+      FUNCTION -- the near-miss function is refused (isError True) AND the
+        reply names the real one in the shared sentence. The flag alone would
+        pass on the refusal every host already gave.
+
+      CONTROL -- FAR_MISS, which resembles nothing, gets NO suggestion. Without this a host that appended a guess to every refusal
+        would satisfy the positive half.
+
+      PARAM -- on every host that refuses an unknown parameter, a near-miss key
+        is refused and the CANONICAL name is suggested.
+
+      COVERAGE -- every host has a function (or, for the relay, a tool) row,
+        and has a parameter row iff its source carries the refusal sentence.
+    """
+    name = cfg["file"]
+    tool = cfg["tool"]
+    fn_row = NEAR_MISS_FUNCTION.get(name)
+    tool_row = NEAR_MISS_TOOL.get(name)
+    param_row = NEAR_MISS_PARAM.get(name)
+
+    with open(os.path.join(SCRIPT_DIR, name), encoding="utf-8") as fh:
+        refuses_params = PARAM_REFUSAL_MARK in fh.read()
+    checks.append(check(
+        "near-miss rows cover this host",
+        (fn_row is not None) != (tool_row is not None)
+        and refuses_params == (param_row is not None),
+        "function row=%r tool row=%r; refuses params=%r param row=%r"
+        % (fn_row is not None, tool_row is not None, refuses_params,
+           param_row is not None)))
+
+    if tool_row is not None:
+        wrong, right = tool_row
+        srv.send({"jsonrpc": "2.0", "id": 20, "method": "tools/call",
+                  "params": {"name": wrong, "arguments": {}}})
+        resp = srv.read() or {}
+        message = (resp.get("error") or {}).get("message", "")
+        checks.append(check(
+            "near-miss tool -> suggestion",
+            SUGGEST_FORMAT % right in message,
+            "reply=%s" % json.dumps(resp)[:220]))
+        srv.send({"jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                  "params": {"name": FAR_MISS, "arguments": {}}})
+        resp = srv.read() or {}
+        message = (resp.get("error") or {}).get("message", "")
+        checks.append(check(
+            "far-miss tool -> no suggestion (control)",
+            bool(message) and SUGGEST_TOKEN not in message,
+            "reply=%s" % json.dumps(resp)[:220]))
+
+    if fn_row is not None:
+        wrong, right = fn_row
+        is_error, text, _resp = _dispatch_call(srv, 22, tool, {
+            "function": wrong, "params": {}})
+        checks.append(check(
+            "near-miss function -> isError True + suggestion",
+            is_error is True and SUGGEST_FORMAT % right in text,
+            "isError=%r; text=%r" % (is_error, text[-200:])))
+        is_error, text, _resp = _dispatch_call(srv, 23, tool, {
+            "function": FAR_MISS, "params": {}})
+        checks.append(check(
+            "far-miss function -> no suggestion (control)",
+            is_error is True and SUGGEST_TOKEN not in text,
+            "isError=%r; text=%r" % (is_error, text[-200:])))
+
+    if param_row is not None:
+        function, params, right = param_row
+        is_error, text, _resp = _dispatch_call(srv, 24, tool, {
+            "function": function, "params": params})
+        checks.append(check(
+            "near-miss param -> isError True + canonical suggestion",
+            is_error is True and SUGGEST_FORMAT % right in text,
+            "isError=%r; text=%r" % (is_error, text[-200:])))
+
+
+def _available_names(text):
+    """The comma-separated names after `Available: `, up to the first quote."""
+    tail = text.split("Available: ", 1)[-1] if "Available: " in text else ""
+    tail = tail.split("'", 1)[0].split("\n", 1)[0]
+    return {chunk.strip().rstrip(".").split(" ")[0]
+            for chunk in tail.split(",") if chunk.strip()}
+
+
+def gdc_open_pages_checks(srv, checks):
+    """mcp-gdc: `open_pages` is a real alias of list_pages, and the
+    unknown-function reply lists only names a caller can call.
+
+    `open_pages` is the name another Chrome DevTools server gives the same
+    function, and a caller who knows that one reached for it here and was
+    refused. It is an ALL_HANDLERS entry exactly as `execute_js` is, so the
+    probe asserts it DISPATCHES and answers as list_pages does: no Chrome is
+    needed, because both answers are compared rather than either one pinned.
+
+    `gdc_call` was listed as available while the dispatcher refuses it as a
+    recursion, so the list offered a name that can never be called.
+    """
+    is_error, text, _resp = _dispatch_call(srv, 30, "gdc_call", {
+        "function": "list_pages", "params": {}})
+    alias_error, alias_text, _resp = _dispatch_call(srv, 31, "gdc_call", {
+        "function": "open_pages", "params": {}})
+    checks.append(check(
+        "gdc: open_pages dispatches as list_pages",
+        "Unknown function" not in alias_text and alias_error == is_error,
+        "list_pages isError=%r; open_pages isError=%r text=%r"
+        % (is_error, alias_error, alias_text[:160])))
+
+    _is_error, text, _resp = _dispatch_call(srv, 32, "gdc_call", {
+        "function": "__no_such_function__", "params": {}})
+    names = _available_names(text)
+    checks.append(check(
+        "gdc: Available lists no uncallable gdc_call",
+        bool(names) and "gdc_call" not in names and "open_pages" in names,
+        "names=%s" % sorted(names)))
+
+
+# Dispatchers whose own tool name is an ALL_HANDLERS entry (for the direct-tool
+# path) and is refused as a recursion when named as a `function`. gdc's row
+# is gdc_open_pages_checks above; these two had the same defect.
+RECURSION_REFUSING_DISPATCHERS = ("context7_call", "lldb_call")
+
+
+def uncallable_dispatcher_checks(srv, tool, checks):
+    """The unknown-function reply's Available list names only what a caller
+    can call: never the dispatcher's own name, which it refuses as a
+    recursion. The control asserts the list is non-empty, so a reply that
+    lost the list entirely cannot pass by omission."""
+    _is_error, text, _resp = _dispatch_call(srv, 33, tool, {
+        "function": "__no_such_function__", "params": {}})
+    names = _available_names(text)
+    checks.append(check(
+        "%s: Available lists no uncallable %s" % (tool.split("_", 1)[0], tool),
+        bool(names) and tool not in names,
+        "names=%s" % sorted(names)))
 
 
 def _purity_call(srv, call_id, function, params=None):
@@ -1209,6 +1434,18 @@ def run_server(cfg):
         #    decided by wire position -- plus the coverage half, which runs on
         #    every server including the five with no resolver.
         alias_collision_checks(srv, cfg, checks)
+
+        # 8b. a name one typo away from a real function / tool / parameter is
+        #     answered with the real name, every server (the shared
+        #     `_did_you_mean` block from Scripts/_mcp_dispatch.py).
+        near_miss_checks(srv, cfg, checks)
+
+        # 8c. gdc-only: `open_pages` is a real alias of list_pages, and the
+        #     unknown-function reply offers no uncallable name.
+        if cfg["tool"] == "gdc_call":
+            gdc_open_pages_checks(srv, checks)
+        if cfg["tool"] in RECURSION_REFUSING_DISPATCHERS:
+            uncallable_dispatcher_checks(srv, cfg["tool"], checks)
 
         # 9. purity-only: semantic dispatch + alias-routing checks (Phase 0, D2)
         if cfg["tool"] == "purity_call":

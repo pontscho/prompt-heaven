@@ -3,7 +3,7 @@
 
 `Scripts/_mcp_brotli.py`, `Scripts/_mcp_chrome.py`,
 `Scripts/_mcp_codesearch.py`, `Scripts/_mcp_concurrency.py`,
-`Scripts/_mcp_httpfront.py`, `Scripts/_mcp_json.py`,
+`Scripts/_mcp_dispatch.py`, `Scripts/_mcp_httpfront.py`, `Scripts/_mcp_json.py`,
 `Scripts/_mcp_logging.py`, `Scripts/_mcp_lsp.py`, `Scripts/_mcp_oauth.py`,
 `Scripts/_mcp_paging.py`, `Scripts/_mcp_websearch.py`,
 `Scripts/_mcp_websocket.py` and `Scripts/_mcp_zstd.py` are the canonical
@@ -160,7 +160,8 @@ PAGING_SOURCE = H.repo_path("Scripts", "_mcp_paging.py")
 WEBSOCKET_SOURCE = H.repo_path("Scripts", "_mcp_websocket.py")
 OAUTH_SOURCE = H.repo_path("Scripts", "_mcp_oauth.py")
 HTTPFRONT_SOURCE = H.repo_path("Scripts", "_mcp_httpfront.py")
-GENERATOR = H.repo_path("Scripts", "amalgamate.py")
+DISPATCH_SOURCE = H.repo_path("Scripts", "_mcp_dispatch.py")
+GENERATOR =H.repo_path("Scripts", "amalgamate.py")
 TARGET = H.repo_path("Scripts", "mcp-purity.py")
 SCRIPTS = H.repo_path("Scripts")
 
@@ -182,6 +183,7 @@ WEBSEARCH_CANONICAL_NAME = "_mcp_websearch.py"
 CODESEARCH_CANONICAL_NAME = "_mcp_codesearch.py"
 OAUTH_CANONICAL_NAME = "_mcp_oauth.py"
 HTTPFRONT_CANONICAL_NAME = "_mcp_httpfront.py"
+DISPATCH_CANONICAL_NAME = "_mcp_dispatch.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
@@ -192,6 +194,7 @@ HTTPFRONT_CANONICAL_NAME = "_mcp_httpfront.py"
 CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
                    CODESEARCH_CANONICAL_NAME,
                    CANONICAL_NAME, CONCURRENCY_CANONICAL_NAME,
+                   DISPATCH_CANONICAL_NAME,
                    HTTPFRONT_CANONICAL_NAME, LOGGING_CANONICAL_NAME,
                    LSP_CANONICAL_NAME, OAUTH_CANONICAL_NAME,
                    PAGING_CANONICAL_NAME, WEBSEARCH_CANONICAL_NAME,
@@ -563,7 +566,8 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
     and then a seventh, for `unicodedata`, when both took a render sanitizer,
     and an eighth, for `secrets` and `select`, when the OAuth core arrived,
     and a ninth time, for `io`, `socketserver` and `Optional`, when the HTTP front
-    arrived.
+    arrived, and a tenth, for `difflib`, when the dispatch source's near-miss
+    suggestion arrived.
     """
     return (
         '"""A tab-indented target."""\n'
@@ -571,6 +575,7 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "import base64\n"
         "import codecs\n"
         "import ctypes.util\n"
+        "import difflib\n"
         "import hashlib\n"
         "import hmac\n"
         "import http.client\n"
@@ -4120,6 +4125,122 @@ def group_httpfront_pins(suite, mod):
                          "spared      : the clean synthetic host"])
 
 
+# --- the dispatch source: the near-miss suggestion -----------------------------
+
+# The sentence the block renders, spelled here rather than read off the module
+# for the reason the markers are: it is what every host's caller reads, and the
+# smoke gate (Scripts/_mcp_smoke_test.py:near_miss_checks) asserts the same words
+# on the wire.
+DISPATCH_BLOCK = "_did_you_mean"
+DISPATCH_ONE = " Did you mean '%s'?"
+
+
+def group_dispatch_blocks(suite, mod):
+    """E. What `_did_you_mean` does, and A. that every server carries and calls it."""
+    try:
+        src = H.load_module_from_path("mcp_dispatch_under_test", DISPATCH_SOURCE)
+        dym = getattr(src, DISPATCH_BLOCK)
+        absent = []
+    except (OSError, SyntaxError, AttributeError) as exc:
+        dym = None
+        absent = ["the source does not load: %s: %s" % (type(exc).__name__, str(exc)[:200])]
+
+    def cases(rows):
+        problems = list(absent)
+        if dym is None:
+            return problems
+        for args, want in rows:
+            try:
+                got = dym(*args)
+            except Exception as exc:  # noqa: BLE001 -- a raise is the finding
+                problems.append("%r raised %s: %s" % (args, type(exc).__name__, exc))
+                continue
+            if got != want:
+                problems.append("%r gave %r, wanted %r" % (args, got, want))
+        return problems
+
+    # The motivating case first: a character count is not a line count, so
+    # `context_chars` is POINTED at `context_lines` -- never made an alias of it.
+    purity_like = ["substring_pattern", "context_lines", "context_lines_before",
+                   "context_lines_after", "relative_path", "head_limit", "offset"]
+    suite.record(GE, "dym-near-miss-suggests", cases([
+        (("buidl", ["list", "build", "test", "clean"]), DISPATCH_ONE % "build"),
+        (("context_chars", purity_like), DISPATCH_ONE % "context_lines"),
+        (("stauts", {"status": 1, "log": 1}), DISPATCH_ONE % "status"),
+    ]))
+
+    # Silence is half the contract: a suggestion on every refusal would teach a
+    # caller to ignore it.
+    suite.record(GE, "dym-far-miss-is-silent", cases([
+        (("__no_such_function__", ["build", "test"]), ""),
+        (("build", ["build", "test"]), ""),
+        (("", ["build"]), ""),
+        ((None, ["build"]), ""),
+        ((7, ["build"]), ""),
+        (("buidl", []), ""),
+        (("buidl", [None, 3, "test"]), ""),
+    ]))
+
+    # An alias may be MATCHED, but the canonical name is what is suggested; an
+    # alias whose canonical is not on offer is not a candidate at all.
+    suite.record(GE, "dym-alias-names-canonical", cases([
+        (("contxt", ["context_lines", "substring_pattern"],
+          {"context": "context_lines"}), DISPATCH_ONE % "context_lines"),
+        (("contxt", ["substring_pattern"], {"context": "context_lines"}), ""),
+        (("buidl", ["build"], None), DISPATCH_ONE % "build"),
+        (("buidl", ["build"], ["not", "a", "dict"]), DISPATCH_ONE % "build"),
+    ]))
+
+    # Several unknown keys: each suggestion says which key it answers, and a key
+    # with no near miss is left out rather than guessed at.
+    suite.record(GE, "dym-several-words", cases([
+        ((["limitt", "queryy"], ["limit", "query"]),
+         " Did you mean 'limit' for 'limitt', 'query' for 'queryy'?"),
+        ((["limitt", "__zz__"], ["limit", "query"]),
+         " Did you mean 'limit' for 'limitt'?"),
+        ((["limitt"], ["limit", "query"]), DISPATCH_ONE % "limit"),
+        ((["__zz__", "__yy__"], ["limit"]), ""),
+    ]))
+
+    # The answer is a function of the SETS, not of the order a table was written
+    # in: two equally close candidates resolve the same way both ways round.
+    problems = list(absent)
+    if dym is not None:
+        forward = dym("abc", ["abd", "abe", "zzz"])
+        backward = dym("abc", ["zzz", "abe", "abd"])
+        problems += problem_if(forward != backward or not forward,
+                               "order changed the answer: %r vs %r" % (forward, backward))
+    suite.record(GE, "dym-order-independent", problems)
+
+    # Every server carries the block GENERATED and calls it from outside the
+    # region -- a region nobody calls is dead code the drift gate would
+    # faithfully prove N files agree on.
+    problems = []
+    try:
+        sources = mod.load_all_blocks()
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- recorded, not raised
+        sources = None
+        problems.append("the generator's block maps do not load: %s" % exc)
+    servers = sorted(Path(SCRIPTS).glob(TARGET_GLOB))
+    for path in servers if sources is not None else []:
+        text = path.read_text(encoding="utf-8")
+        try:
+            regions = mod.audit_text(path.name, text, sources)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            problems.append("%s: does not audit: %s" % (path.name, exc))
+            continue
+        hosted = any(r.source == DISPATCH_CANONICAL_NAME and DISPATCH_BLOCK in r.names
+                     for r in regions)
+        if not hosted:
+            problems.append("%s: no %s region names %s"
+                            % (path.name, DISPATCH_CANONICAL_NAME, DISPATCH_BLOCK))
+            continue
+        if "%s(" % DISPATCH_BLOCK not in outside_regions(mod, path.name, text, sources):
+            problems.append("%s: hosts %s but never calls it" % (path.name, DISPATCH_BLOCK))
+    suite.record(GA, "did-you-mean-in-every-server", problems,
+                 detail=["%d server(s) walked" % len(servers)])
+
+
 def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME, title="generated regions match their canonical source",
@@ -4129,7 +4250,7 @@ def run(opts=None):
     digests_before = {p: H.sha256_file(p) for p in
                       (SOURCE, CONCURRENCY_SOURCE, LOGGING_SOURCE, LSP_SOURCE,
                        PAGING_SOURCE, WEBSOCKET_SOURCE, OAUTH_SOURCE, HTTPFRONT_SOURCE,
-                       GENERATOR, TARGET)}
+                       DISPATCH_SOURCE, GENERATOR, TARGET)}
 
     mod = H.load_module_from_path("amalgamate_under_test", GENERATOR)
     blocks = H.load_module_from_path("mcp_json_under_test", SOURCE)
@@ -4141,6 +4262,7 @@ def run(opts=None):
     group_control(suite, mod)
     group_blocks(suite, blocks, lsp, paging, logmod)
     group_httpfront_blocks(suite, mod)
+    group_dispatch_blocks(suite, mod)
     group_tabs(suite, mod)
     group_census(suite, mod)
     group_strict(suite, mod)
