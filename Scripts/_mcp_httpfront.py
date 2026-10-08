@@ -205,8 +205,13 @@ def handle_error(self, request, client_address) -> None:
 def parse_request(self) -> bool:
     # The header phase ends here, before any do_* runs: the body read and
     # the SSE stream are never under the header deadline. The per-recv
-    # pre-auth timeout (the handler's class-level `timeout`, the header
-    # bound) stays until the host's precheck passes.
+    # timeout becomes the handler's class-level `timeout` (the header
+    # bound) until the host's precheck passes -- longer than the router's
+    # pre-auth header bound. Harmless: no socket read happens between
+    # here and the precheck verdict (the precheck reads only the parsed
+    # request line and headers), so the only socket operation under it
+    # before authentication is a refusal's own write, the first on the
+    # connection (measured, R-0091).
     try:
         return super().parse_request()
     finally:

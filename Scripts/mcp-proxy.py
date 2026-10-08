@@ -2275,8 +2275,13 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
     def parse_request(self) -> bool:
         # The header phase ends here, before any do_* runs: the body read and
         # the SSE stream are never under the header deadline. The per-recv
-        # pre-auth timeout (the handler's class-level `timeout`, the header
-        # bound) stays until the host's precheck passes.
+        # timeout becomes the handler's class-level `timeout` (the header
+        # bound) until the host's precheck passes -- longer than the router's
+        # pre-auth header bound. Harmless: no socket read happens between
+        # here and the precheck verdict (the precheck reads only the parsed
+        # request line and headers), so the only socket operation under it
+        # before authentication is a refusal's own write, the first on the
+        # connection (measured, R-0091).
         try:
             return super().parse_request()
         finally:
@@ -2296,7 +2301,7 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
         if len(values) > 1:
             return False, None
         return True, (values[0] if values else None)
-    # END GENERATED: cc86d6f0648d
+    # END GENERATED: e4eaaa5ee6d4
 
     def log_message(self, format, *args) -> None:  # noqa: A002 -- stdlib signature
         # Structure only (ADR 0011): never the stdlib's `format % args` text,
