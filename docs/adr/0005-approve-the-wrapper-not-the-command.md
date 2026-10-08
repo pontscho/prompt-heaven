@@ -289,3 +289,21 @@ Without `--net`, `/tmp`, `/run` and `/var/snap` look empty inside the sandbox; t
 - Any other non-standard socket location.
 
 User decisions, 2026-10-02: fix it; mask `/var/snap`; refuse a cwd under `/run` (and `/var/snap`); the `/tmp` subtree is the declared limit.
+
+## Addendum (2026-10-08): the gate's accepted flag set grew a bare --seccomp (95f5692, R-0003)
+
+The Decision's list of what `is_clean_sbx` requires names the one flag it refuses (`--net`) but not the flags it lets through, and the last Consequences bullet says no flag sets `scope.seccomp`. Both stopped describing the gate in 95f5692. The 2026-09-29 addendum records the change in one sentence; this one records it as a change to the gate.
+
+### What the gate accepts now
+
+Before the first bare `--`, `ClaudeCode/hooks/sbx-gate.py:is_clean_sbx` auto-allows exactly these sbx flags: `--ro`, `--seccomp`, `--dry-run`, `--write DIR` and `--write=DIR`, every scope still contained in the project root. `--net` still returns to the prompt, and any other token before `--` is still the hard prompt (R12b).
+
+Only the exact bare token `--seccomp` is accepted. `--seccomp=<value>` is not recognized and falls to the hard prompt, because the helper's argparse `store_true` refuses the equals-form and the gate must never accept more than argparse does (M-B). This is the same rule `--dry-run` already follows.
+
+### Why auto-allowing it keeps the Decision's guarantee
+
+`--seccomp` only narrows. It adds a syscall allowlist to a run the gate would already allow, and it never widens a scope or opens the network: `--seccomp --net` and `--seccomp --write /etc` still prompt. Where the helper cannot honour the flag, it runs nothing. In `ClaudeCode/skills/sandbox-run/scripts/sbx:main`, `--seccomp` makes `ClaudeCode/skills/sandbox-run/scripts/sbx:_seccomp_fd` build the program before the builder runs. On anything but Linux x86_64 (macOS included, since Seatbelt has no seccomp) `ClaudeCode/skills/sandbox-run/scripts/sbx:_seccomp_refuse` writes one stderr line and exits 3. A gate `allow` can therefore never turn into an unfiltered run of a command that asked for the filter. Fail-to-prompt on the gate side and fail-closed on the helper side both still hold.
+
+### Tests
+
+`tests/test_sbx_gate.py:_run_whitebox` gained five rows in 95f5692 (sbx_gate 94 -> 99). Auto-allowed: `--seccomp -- true` and `--seccomp --write . -- touch f`. Prompted: `--seccomp=1` (R12b), `--seccomp --net` (R11) and `--seccomp --write /etc` (R12).
