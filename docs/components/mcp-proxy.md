@@ -10,8 +10,8 @@ sources:
   - tests/test_mcp_proxy.py
   - tests/files/mcp_proxy/tf_stub_child.py
 verified:
-  commit: d3fca9e
-  date: 2026-10-07
+  commit: bf17f0c
+  date: 2026-10-08
 links:
   - 0027-the-proxy-relays-it-never-composes
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
@@ -186,8 +186,11 @@ you, with no group or other permission bits `Scripts/mcp-proxy.py:_http_token_fi
 — or `MCP_PROXY_TOKEN`, which `main()` pops from the environment before anything
 is spawned, so no child inherits it `Scripts/mcp-proxy.py:main`. The token must
 be at least `Scripts/mcp-proxy.py:_TOKEN_MIN_LEN` printable ASCII characters
-`Scripts/_mcp_httpfront.py:_http_token_value`, is compared in constant time, and is
-never logged. HTTP mode refuses `--config-json`, since argv is visible in `ps`
+`Scripts/_mcp_httpfront.py:_http_token_value` and hold at least
+`Scripts/mcp-proxy.py:_TOKEN_MIN_DISTINCT` (8) distinct characters, the router's
+floor (R-0090), checked by the host wrapper both token sources go through
+`Scripts/mcp-proxy.py:_http_token_checked`, so 32 copies of one letter refuse
+the start; it is compared in constant time, and is never logged. HTTP mode refuses `--config-json`, since argv is visible in `ps`
 `Scripts/mcp-proxy.py:_http_cli_defaults`.
 
 **Every request, before its body.** A malformed header line, a wrong path, a
@@ -196,8 +199,16 @@ never logged. HTTP mode refuses `--config-json`, since argv is visible in `ps`
 bearer are each refused before anything is read
 `Scripts/mcp-proxy.py:_precheck`. The request line and headers must arrive
 within `Scripts/mcp-proxy.py:_HTTP_HEADER_TIMEOUT_S` **in total**, each `recv`
-getting only the time left `Scripts/mcp-proxy.py:_HeaderDeadlineReader`, and the
-per-recv timeout stays that short until the bearer check passes. `Content-Type`
+getting only the time left `Scripts/mcp-proxy.py:_HeaderDeadlineReader`. Until a
+request on the connection has passed the bearer check that total is the shorter
+`Scripts/mcp-proxy.py:_HTTP_PREAUTH_TIMEOUT_S`, the router's pre-auth bound
+(R-0089), so an unauthenticated peer gives its `--max-connections` slot back
+sooner; an authenticated keep-alive connection gets the header bound for each
+later request `Scripts/mcp-proxy.py:handle_one_request`. That is a mitigation
+only: a peer that reconnects can still keep every slot busy. After the headers
+are parsed the per-recv timeout is the header bound until the bearer check
+passes, which no read uses, because the check reads only the parsed head
+`Scripts/_mcp_httpfront.py:parse_request` (measured, R-0091). `Content-Type`
 must be exactly `application/json` (a `;` parameter aside); a repeated
 `Content-Type`, `Mcp-Session-Id` or `MCP-Protocol-Version` header is refused;
 chunked bodies and batches are refused; an `initialize` without an id is
@@ -292,8 +303,8 @@ of the proxy meets first:
   keep children busy until they finish or hit their call timeout.
 - There is no TLS: with `--allow-remote` the bearer travels in plaintext, so a
   non-loopback bind belongs on a VPN interface, never a public one. There is no
-  failed-auth throttling, and the token is checked by length and charset, never
-  by entropy.
+  failed-auth throttling, and the token is checked by length, charset and
+  distinct characters, never by entropy.
 - One token is one principal: sessions are not bound to the token that opened
   them.
 - Child-side and HTTP logging are outside the fleet's wire-log gate; they are

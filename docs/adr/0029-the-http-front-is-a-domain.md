@@ -449,3 +449,27 @@ limits above leave open -- the proxy's pre-auth bound, the proxy's
 distinct-character token floor, and the router's post-`parse_request` per-recv
 timeout -- are proposed as roadmap candidates for the user's approval
 ([[0022-a-someday-maybe-is-a-roadmap-item]]), not added.
+
+## Addendum (2026-10-08): R-0089, R-0090 and R-0091: the three open limits closed
+
+The page closes by naming three pieces of work its declared limits leave open: the proxy's pre-auth bound, the proxy's distinct-character token floor, and the router's post-`parse_request` per-recv timeout. All three were closed on 2026-10-08. The body above stays as written on its date.
+
+### R-0089: the proxy has the router's pre-auth header bound (`681e648`, proxy J48)
+
+The declared limit "The proxy has no pre-auth header bound" no longer holds. The proxy now has its own `_HTTP_PREAUTH_TIMEOUT_S` (5 s) `Scripts/mcp-proxy.py:_HTTP_PREAUTH_TIMEOUT_S`. Its hand-written `setup` starts every connection unauthenticated, `_precheck` marks the connection authenticated once the bearer compare passes, and `handle_one_request` arms the shorter bound as the total header deadline and the per-recv timeout of every request until then; an authenticated keep-alive connection gets the header bound for each later request `Scripts/mcp-proxy.py:handle_one_request`. It is a mitigation only, as in the router: a peer that reconnects can still keep every `--max-connections` slot busy.
+
+- In the table under "Where each policy reaches a generated block", the proxy's cell in the pre-auth header bound row is now `_HTTP_PREAUTH_TIMEOUT_S`, not none.
+- `handle_one_request` and `setup` did not become canonical members. They stay hand-written declared adaptations, and their two rows in `tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS` now give the R-0089 reasons.
+- The limit "The proxy's reader cap of 10 s is a provable no-op" still holds: the deadline is now 5 s or 10 s, and the time left never exceeds the cap.
+
+### R-0090: the proxy has the distinct-character token floor (`681e648`, proxy J49)
+
+The second half of the token-policy limit no longer holds: the proxy refuses a bearer token of fewer than `_TOKEN_MIN_DISTINCT` (8) distinct characters `Scripts/mcp-proxy.py:_TOKEN_MIN_DISTINCT`, so a 32-character run of one letter is now refused by both hosts. The check stays host-side, as in the router. It was not moved into the canonical source as a further argument. A host wrapper, `Scripts/mcp-proxy.py:_http_token_checked`, calls the generated `_http_token_value` with `_TOKEN_MIN_LEN` and `ConfigError` as bare names, as clause (f) of K5 requires, and then counts the distinct characters. Both token sources, `--token-file` and `MCP_PROXY_TOKEN`, go through it `Scripts/mcp-proxy.py:load_http_settings`.
+
+`mcp_proxy` went from 110 to 112 cases: J48 for R-0089, J49 for R-0090.
+
+### R-0091: the post-parse per-recv timeout, measured (`a0e2d27`)
+
+The last limit, the "pre-existing observation", is settled without a behaviour change. After `parse_request`, a router connection that has not authenticated still runs at the 10 s header timeout and not the 5 s pre-auth one, but no socket read happens between the parsed head and the precheck verdict: the precheck reads only the parsed request line and headers. Before authentication, the only socket operation under that timeout is a refusal's own write, the first write on the connection. The exposure the observation feared is therefore nil, and no hand hook was added under PD-7.
+
+The canonical comment was reworded `Scripts/_mcp_httpfront.py:parse_request`. It no longer calls the post-parse timeout "the per-recv pre-auth timeout". It says that the timeout becomes the header bound until the host's precheck passes, that this is longer than the router's pre-auth header bound, and that this is harmless, and why. The in-class region `parse_request, handle_expect_100, _single_header` moved from `cc86d6f0648d` (the digest table above) to `e4eaaa5ee6d4` in both hosts. The commit changes only the comment and adds no test case: the measurement is recorded in the comment, not gated.

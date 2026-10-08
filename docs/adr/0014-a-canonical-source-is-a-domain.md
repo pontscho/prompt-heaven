@@ -284,3 +284,34 @@ Under the rule above, a source that would hold a second domain is not cheaper th
 ### The price
 
 One line in each of the two registries, as this page says it should be. No `WHOLE_SOURCES` entry and no `*_CORE` mirror: no block of the source names another, so each of its six regions per host refreshes on its own.
+
+## Addendum (2026-10-08): R-0092: the strict-JSON blocks now parse peer bytes that are not MCP frames
+
+The 2026-10-07 addendum placed the six strict-JSON blocks in `Scripts/_mcp_json.py`, whose docstring was widened to "strict JSON parsing and emitting for a peer's frames". On 2026-10-08, `86e1928` (R-0092) gave those blocks thirteen new call sites in seven hosts. None of them reads an MCP frame:
+
+- the four LSP servers' `read_lsp_message`, which reads an LSP child's `Content-Length` body;
+- context7's two upstream HTTP bodies;
+- jenkins' `_read_response`;
+- gdc's two Chrome `/json` bodies and its CDP websocket message;
+- the three reads of a user project's `compile_commands.json` in cuda and purity, a file a cloned repository controls byte for byte.
+
+Each site now calls the `_strict_loads` its host already carried, for example `Scripts/mcp-jenkins.py:_read_response`. A refusal lands in the branch the site already had for an unparseable body.
+
+### What this does and does not change on this page
+
+- **No block was added and no source changed.** The commit touches only the hosts and the tests, so no placement question arose. The rule above is not exercised: a new caller of an existing block is not a new block.
+- **The source docstring was not widened again.** "For a peer's frames" now undersells the blocks' use: they answer how JSON from a peer is parsed strictly, whatever the peer speaks. That is the same question, so it is the same domain, and no second source is warranted. The wording is noted here and left as it is.
+- **One hook is used on its own.** `mcp-inspect`'s `_v_json` stays lax on purpose, because it reports the stdlib parser's own verdict and so accepts `NaN`. It now passes the generated `_json_bounded_int` as `parse_int` without `_strict_loads`, so an integer literal over `JSON_INT_LITERAL_LIMIT` characters is a FAIL row at its line and column `Scripts/mcp-inspect.py:_v_json`.
+
+### The register of exclusions
+
+`tests/test_generated_region.py:STRICT_JSON_EXCEPTIONS` went from 19 rows to 6, and none of the 6 is a peer's bytes:
+
+- `_v_json`, lax but bounded;
+- purity's private regex worker;
+- tshark's saved config;
+- webfetch's cache;
+- wiki's `docs/measurements.json`;
+- the proxy operator's config.
+
+Group H no longer only reads the thirteen converted sites; it drives them. Each one gets a finite, a `NaN` and an over-long-integer body, with 3.11+'s digit limit lifted so that the lax code cannot pass on the interpreter's own refusal `tests/test_generated_region.py:group_strict_sites`. `generated_region` went from 118 to 131 cases, and `inspect_validate` from 269 to 272. [[generated-regions]] carries the current description.

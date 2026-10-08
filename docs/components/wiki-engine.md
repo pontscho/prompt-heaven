@@ -9,8 +9,8 @@ sources:
   - ClaudeCode/skills/wiki
   - ClaudeCode/agents/minion-librarian.md
 verified:
-  commit: 35f4a89
-  date: 2026-09-16
+  commit: bf17f0c
+  date: 2026-10-08
 links:
   - scripts
   - skills
@@ -51,13 +51,32 @@ factual claim about code carries an anchor a later lint pass can re-check.
 
 `search`, `source_to_pages`, `get_page`, `list`, `freshness`, `reindex`,
 `stats`, `verify` and `measure` `Scripts/mcp-wiki.py:HANDLERS`. `verify` checks
-every page's anchors and measured regions and reports what gates; `measure`
+every page's anchors, `[[slug]]` wikilinks and measured regions and reports what
+gates — a dead `sources:` path, a dead body anchor, a dead wikilink, a
+measured-region defect `Scripts/mcp-wiki.py:GATING_CLASSES` — except that a
+frozen record (an accepted ADR, a deprecated page, a roadmap page) reports its
+dead body anchors and wikilinks as advisories `Scripts/mcp-wiki.py:frozen_record`; `measure`
 renders the measured regions from `docs/measurements.json`, and writes only when
 asked to (ADR [[0019-only-gate-on-what-you-can-prove]]). `source_to_pages` is the reverse lookup from a changed source file to
 the pages that document it (used by `ingest`). Search ranking is BM25F:
 per-field weighted pseudo-TF with per-field length normalization, a single
 global saturation, and global IDF, with prefix token matching and tunable
 `k1`/`b` `Scripts/mcp-wiki.py:_fn_search`.
+
+**How `verify` resolves a `path:symbol` anchor.** In a `.py` file a bare symbol
+resolves on a `def`, a `class` or a single-target assignment at any
+indentation; in a `.md` file, on a heading carrying it; in any other file only
+on a whole-word mention, which is reported separately as a weak pass (it proves
+the file names the symbol, not that it defines it)
+`Scripts/mcp-wiki.py:_symbol_defined`. A **dotted** Python symbol such as
+`Class.method` or `Outer.Inner.name` is a member path, never a bare name
+(R-0094): the file is parsed with `ast`, the first component must be a class
+anywhere in it, and each next one a member of the previous class's body — a
+`def`, a `class`, an assigned or annotated name, or a `self.<name>` assigned in
+one of its methods; an `if` / `try` / `with` in the class body is looked
+through, a method's own locals are not `Scripts/mcp-wiki.py:_py_member_defined`.
+A file the interpreter cannot parse falls back to the last component under the
+bare-name rule and is reported weak, never as a proven member.
 
 ## One scope, one rule: `path_prefix`
 

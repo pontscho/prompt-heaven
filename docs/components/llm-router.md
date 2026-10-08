@@ -11,8 +11,8 @@ sources:
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: d3fca9e
-  date: 2026-10-07
+  commit: bf17f0c
+  date: 2026-10-08
 links:
   - 0028-route-by-model-translate-at-the-edge
   - mcp-proxy
@@ -230,11 +230,18 @@ as one `llm-router: <msg>` line on stderr that names the flag or field and the
 rule, never the value `Scripts/llm-router.py:_rt_refuse`.
 
 **The ordered shutdown.** A POST accepted from then on gets a 529 and a live
-stream gets one `event: error` "router shutting down"; every live upstream
-socket is shut down — a token POST's included, which is registered from its
-connect on, before the TLS handshake, so a stalled handshake, request write or
-response head is interrupted too `Scripts/llm-router.py:_rt_track_add`, and a
-token write waiting on the config flock gives up, keeping the token in memory
+stream gets one `event: error` "router shutting down"; every registered upstream
+socket is shut down. Since R-0095 that is every upstream socket, a model call's
+as well as a token POST's: each joins the registry before its TCP connect
+`Scripts/llm-router.py:_rt_open_socket`, the TLS socket replaces it before the
+handshake, and the resolve gives up within one `Scripts/llm-router.py:_RT_TICK_S`
+`Scripts/llm-router.py:_rt_resolve`, so a stalled resolve, connect, handshake,
+request write, response head or body read is interrupted
+`Scripts/llm-router.py:_rt_track_add`. A model call so cut before its SSE head
+— a non-stream call at any point, a stream still waiting for its head — is
+answered 529 "router shutting down", whatever error the transport saw
+`Scripts/llm-router.py:_RT_SHUTTING_DOWN`. A token write waiting on the config
+flock gives up, keeping the token in memory
 with one WARNING `Scripts/llm-router.py:_rt_config_lock`; running handlers are drained for at most
 `Scripts/llm-router.py:_DRAIN_S`; then the listener closes, the ready file is
 removed if it still holds this process's pid, and the log handlers are flushed
@@ -567,8 +574,15 @@ asked for a stream; a non-stream client request runs the same translator into a
 message collector over the whole answer `Scripts/llm-router.py:_RtMessageCollector`.
 A function call naming a tool the request did not offer is refused like a
 malformed one — a 502, or one `event: error` on a stream — and the name is not
-echoed `Scripts/llm-router.py:ResponsesStreamTranslator`; the chat-completions
-(mistral) translator has no such check.
+echoed `Scripts/llm-router.py:ResponsesStreamTranslator`. The mistral
+translator applies the same rule (F26, R-0093) to its streamed tool-call deltas
+before one is buffered and to a non-stream answer's `tool_calls`, so one
+unoffered call refuses the whole answer, offered calls beside it included; the
+offered set and the refusal text are shared
+`Scripts/llm-router.py:_rt_offered_tools`
+`Scripts/llm-router.py:_RT_UNOFFERED_TOOL`. passthrough and llamacpp are
+exempt by declaration: they relay the backend's own Anthropic `tool_use` blocks
+and never mint one.
 Responses streams get their own bounds: a line up to
 `Scripts/llm-router.py:_RT_RS_SSE_LINE_LIMIT` (8 MiB), an event up to
 `Scripts/llm-router.py:_RT_RS_SSE_EVENT_LIMIT` (16 MiB).
@@ -664,7 +678,11 @@ constant time — then the router token appearing anywhere other than the one
 within `Scripts/llm-router.py:_HTTP_PREAUTH_TIMEOUT_S` (5 s) in total while
 the connection has never authenticated, and within
 `Scripts/llm-router.py:_HTTP_HEADER_TIMEOUT_S` (10 s) once it has
-`Scripts/llm-router.py:handle_one_request`; the body, once the checks pass,
+`Scripts/llm-router.py:handle_one_request`. Between the parsed head and the
+bearer verdict the per-recv timeout is the 10 s header bound, not the 5 s one;
+no socket read happens there, because the precheck reads only the parsed
+request line and headers (measured, R-0091;
+`Scripts/_mcp_httpfront.py:parse_request`). The body, once the checks pass,
 within `Scripts/llm-router.py:_HTTP_BODY_TIMEOUT_S` (60 s) in total
 `Scripts/llm-router.py:_HeaderDeadlineReader`. An `Expect: 100-continue` gets
 its `100 Continue` only after the bearer and the framing checks pass, never
@@ -688,8 +706,9 @@ the metadata addresses that are not link-local (`fd00:ec2::254`,
 `Scripts/llm-router.py:_RT_PRIVATE_REFUSED_NETS`, link-local
 (`169.254.169.254` included), multicast, unspecified and reserved stay refused,
 and loopback needs `allow_loopback` as well
-`Scripts/llm-router.py:_rt_private_policy_refused`. The resolver runs on a
-daemon thread under the backend's `connect_timeout`, and the socket connects
+`Scripts/llm-router.py:_rt_private_policy_refused`. The resolve runs inside the
+connection's `connect()`, on a daemon thread under the backend's
+`connect_timeout` `Scripts/llm-router.py:_RtHttpConnection`, and the socket connects
 to the vetted literals and finishes the TLS handshake under what remains of
 that one deadline, reading no proxy variable
 `Scripts/llm-router.py:_rt_open_socket`. A redirect, an interim 1xx and a
@@ -739,10 +758,13 @@ config loader, the pure translators and a static pass. Its forge target is
 `llm_router` (`python3 tests/run.py llm_router`). The groups follow the shape:
 config refusals and defaults `tests/test_llm_router.py:group_a`, the front
 `tests/test_llm_router.py:group_b`, outbound — SSRF policy, verified TLS
-against the test CA, upstream refusals `tests/test_llm_router.py:group_c`,
+against the test CA, upstream refusals, and a shutdown cutting a stalled
+resolve, a stalled connect or a model call still waiting for its answer
+(R-0095) `tests/test_llm_router.py:group_c`,
 passthrough `tests/test_llm_router.py:group_d`, the llama.cpp quirk rows
 `tests/test_llm_router.py:group_e`, Mistral request translation
-`tests/test_llm_router.py:group_f`, the Mistral stream
+`tests/test_llm_router.py:group_f`, the Mistral stream, including the
+unoffered-tool refusal on the stream and the non-stream path (F26, R-0093)
 `tests/test_llm_router.py:group_g`, idle deadlines, the drain and a client that
 hangs up, per backend kind `tests/test_llm_router.py:group_h`, secret leaks
 `tests/test_llm_router.py:group_i`, static AST rules over the router
@@ -848,7 +870,13 @@ read before relying on one of them. In brief:
 - **`GET /v1/models` does not paginate.** `limit`, `before_id` and `after_id`
   are accepted and ignored: the whole list comes back with `has_more` false,
   and every entry's `created_at` is the router's start time, not a model's.
-- **The shutdown drain does not cover a non-stream relay** in flight at SIGTERM.
+- **A stalled resolve is given up, not interrupted.** `getaddrinfo` cannot be
+  cut, so a shutdown waits up to one `Scripts/llm-router.py:_RT_TICK_S` for a
+  stalled resolve and leaves its thread running, as above. That a
+  `shutdown(SHUT_RDWR)` wakes a stalled TCP connect was measured on Darwin 23
+  only; router case C15 runs its connect half only where the kernel leaves a
+  connect into a full backlog pending; elsewhere that half is skipped and the
+  case, its resolve half still run, reports INFO.
 - **The llama.cpp quirk references are unverified;** the issue numbers came
   from the feature brief.
 - **The codex kind impersonates another client.** It sends the omp client's
@@ -870,11 +898,8 @@ read before relying on one of them. In brief:
   directory-relative file operations gets no write-back at all.
 - **The refresh lock is held across the token POST and the write**, so a waiter
   can give up with 503 while the holder is still legitimately writing. A
-  shutdown interrupts a token POST from its connect on, but not the resolve
-  and the TCP connect themselves: those are bounded by `connect_timeout`, and
-  the drain abandons a handler still in them after
-  `Scripts/llm-router.py:_DRAIN_S`. Non-stream upstream calls are unchanged
-  by this (the bullet on the drain above).
+  shutdown interrupts a token POST, like every upstream call, from before its
+  connect on (the ordered shutdown above).
 - **The scrubber keeps a bounded number of superseded tokens**
   (`Scripts/llm-router.py:_RT_SCRUB_DYNAMIC_CAP`, 64); current ones are pinned
   and never evicted.

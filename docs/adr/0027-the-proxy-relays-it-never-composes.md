@@ -506,3 +506,26 @@ The R-0067/R-0068 addendum says `tests/test_generated_region.py:STRICT_JSON_EXCE
 ### Counts
 
 `mcp_proxy` went from 108 to 110 cases: K5 "front policy bound" pins the injected policy (`front_log`, the handler's `timeout`, the reader's cap, the token floor passed to `_http_token_value`) with its own plant, and J47 "weak token -> rc 2" refuses a 31-character token and a token holding a space at start. The proxy still has no pre-auth header bound and no distinct-character token floor; both are declared limits of ADR 0029 and staged as roadmap candidates.
+
+## Addendum (2026-10-08): R-0089 and R-0090: the pre-auth header bound and the distinct-character token floor
+
+Two behaviour changes reached the proxy's HTTP front on 2026-10-08 in `681e648`. Both port a rule the llm-router already enforced ([[0028-route-by-model-translate-at-the-edge]]), and each was a declared limit of [[0029-the-http-front-is-a-domain]]. The body above and its addenda stay as written on their dates.
+
+### R-0089: a shorter header bound until the connection authenticates (J48)
+
+A connection on which no request has yet passed the bearer check must deliver its request line and headers within `_HTTP_PREAUTH_TIMEOUT_S` (5 s) in total, and the per-recv timeout is that bound too `Scripts/mcp-proxy.py:_HTTP_PREAUTH_TIMEOUT_S`. Once `_precheck` passes, later requests on the keep-alive connection get the 10 s header bound as before `Scripts/mcp-proxy.py:handle_one_request`. An unauthenticated peer therefore holds its `--max-connections` slot for half the time. This is a mitigation only: a peer that reconnects can still keep every slot busy. The module docstring's declared limit on the header phase says so.
+
+### R-0090: a distinct-character floor on the bearer token (J49)
+
+A token must also hold at least `_TOKEN_MIN_DISTINCT` (8) distinct characters, from either source, or HTTP mode refuses to start (rc 2) `Scripts/mcp-proxy.py:_http_token_checked`. The module docstring's limit now reads that token strength is checked by length, charset and distinct characters only, never by entropy. The `--token-file` help says the same.
+
+### What this supersedes
+
+- The R-0072 addendum lists `handle_one_request` as kept by hand for "one header bound for every request". It is still kept by hand, as a declared adaptation of `tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS`, but it now applies two bounds. `setup` is still kept by hand too, and now also starts every connection unauthenticated.
+- The same addendum's last sentence, "The proxy still has no pre-auth header bound and no distinct-character token floor", no longer holds.
+
+On the same day `a0e2d27` (R-0091) reworded the comment of the proxy's generated `parse_request`, with no behaviour change. In the proxy the post-parse per-recv timeout is the header bound, and no socket read happens before the precheck verdict.
+
+### Counts
+
+`mcp_proxy` went from 110 to 112 cases: J48, a header trickle cut at the pre-auth bound before authentication while an authenticated keep-alive keeps the header bound, and J49, a token with too few distinct characters refused from either source.

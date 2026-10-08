@@ -21,8 +21,8 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: d3fca9e
-  date: 2026-10-07
+  commit: bf17f0c
+  date: 2026-10-08
 links:
   - scripts
   - tests
@@ -917,17 +917,28 @@ server to carry the six strict-JSON blocks and to call `_strict_loads` and
 is a row in `tests/test_generated_region.py:STRICT_JSON_EXCEPTIONS`, keyed by
 host, enclosing function and json attribute, with the reason it is not a peer's
 MCP frame, and a row whose site has gone fails `strict-exceptions-not-stale`.
-The rows are of two kinds. Some are not peer input at all — a checked-in or
-self-written file, the operator's config, purity's private regex worker. The
-proxy's own ready file needs no row any more: since R-0072 its read and write
-are the generated `_http_write_ready_file` / `_http_remove_ready_file`, and a
-bare json call inside a generated region is spared. The others are peer bytes declared **out of scope rather
-than safe**: an LSP child's `Content-Length` body in the four LSP servers, the
-upstream HTTP bodies `mcp-context7`, `mcp-jenkins` and `mcp-gdc` read, gdc's CDP
-websocket messages, and `mcp-inspect`'s `_v_json`, which reports what the stdlib
-parser accepts and would change its verdict if it were strict. R-0067 and
-R-0068 cover the MCP frame tier; these are recorded by name as the next
-candidates. Group E pins what the new blocks do once, on the canonical modules:
+R-0092 emptied the table of peer bytes: the thirteen peer sites R-0067 and
+R-0068 had left declared out of scope — an LSP child's `Content-Length` body in
+the four LSP servers, the upstream HTTP bodies `mcp-context7` (two sites),
+`mcp-jenkins` and `mcp-gdc` (two sites) read, gdc's CDP websocket messages, and
+the user project's `compile_commands.json` that cuda and purity read (three
+sites; a cloned repository controls it byte for byte) — now parse through
+`_strict_loads`, and each one is DRIVEN in-process with a finite, a `NaN` and
+an over-long-integer body, the run lifting 3.11+'s own digit limit so the lax
+code cannot pass on the interpreter's refusal
+`tests/test_generated_region.py:STRICT_SITES`
+`tests/test_generated_region.py:group_strict_sites`. Six rows remain, each with
+its reason. Five are not peer input at all — a checked-in or self-written file
+(wiki's `docs/measurements.json`, tshark's saved config, webfetch's cache), the
+proxy operator's config, purity's private regex worker. The sixth is
+`mcp-inspect`'s `_v_json`, whose job is to report the stdlib parser's own
+verdict, so it stays lax on purpose (`NaN` is still OK there) but bounded: an
+integer literal over `JSON_INT_LITERAL_LIMIT` characters is refused before
+`int()` sees it and reported as a FAIL row at the literal's line and column
+`Scripts/mcp-inspect.py:_v_json`. The proxy's own ready file needs no row any
+more: since R-0072 its read and write are the generated
+`_http_write_ready_file` / `_http_remove_ready_file`, and a bare json call
+inside a generated region is spared. Group E pins what the new blocks do once, on the canonical modules:
 the strict pair's refusals, the position each refusal reports and the
 4300-character bound, and `_log_value`'s escaping, bound and cut marker. Which
 wire-log fields must go through `_log_value` is gated by `tests/test_wire_log.py`,
@@ -973,12 +984,11 @@ rename that orphaned every region already written into a server.
   invisible to the census and to `--check` alike `Scripts/amalgamate.py`. The
   committer is trusted here, as for every other line of the host (security
   review 20261001-082224, F43).
-- **Strict JSON covers the MCP frame tier only.** The security triage of
-  `d4a241b` found no new vulnerability and left two residuals. The peer bytes
-  `STRICT_JSON_EXCEPTIONS` declares out of scope — the LSP child bodies, the
-  context7 and jenkins upstream HTTP bodies, gdc's CDP messages, and
-  `mcp-inspect`'s `_v_json` — still parse unbounded integer literals and `NaN`
-  on Python 3.9.6. And `_strict_loads` deliberately does not convert a
+- **A deep-nesting `RecursionError` is the host's to catch.** The security
+  triage of `d4a241b` left two residuals. The first, peer bytes parsed laxly
+  outside the MCP frame tier, was closed by R-0092 (above); what stays lax is
+  declared in `STRICT_JSON_EXCEPTIONS`, and `_v_json` is lax but bounded. The
+  second stands: `_strict_loads` deliberately does not convert a
   `RecursionError`: a host that answers deep nesting catches it itself, and 16
   stdio hosts still do not catch it at the frame parse, on the ground that
   their stdin parent is trusted.

@@ -1226,3 +1226,49 @@ The router did not take the six strict-JSON blocks that `d4a241b` (R-0067, R-006
 ### Anchor superseded
 
 Deviation 29 anchors `Scripts/llm-router.py:_rt_remove_ready_file`. That anchor no longer resolves: the function is now `_http_remove_ready_file`, generated from `Scripts/_mcp_httpfront.py:_http_remove_ready_file` into the router. The original line stays as written. This is the only ADR anchor the lift breaks: ADR 0027's `Scripts/mcp-proxy.py:_HeaderDeadlineReader` still resolves, this page's `Scripts/llm-router.py:_rt_cfg_token` is unchanged, and row P17 names `_rt_write_ready_file` / `_rt_remove_ready_file` in a table cell without a path, which is not an anchor.
+
+## Addendum (2026-10-08): R-0093 and R-0095: F26 on mistral and every upstream call interruptible on shutdown; R-0091 measured; two dead anchors
+
+Two roadmap items closed on 2026-10-08 in `51eced1`, and `a0e2d27` settled a third. Each narrows or closes something recorded above. The body and the earlier addenda stay as written on their dates.
+
+### R-0093: F26 covers the chat-completions kind
+
+The R-0085 addendum's "Chat-completions (mistral) is not covered" no longer holds. A Mistral tool call naming a tool the request did not offer is refused with the text the Responses kinds already used `Scripts/llm-router.py:_RT_UNOFFERED_TOOL`, and the name is not echoed:
+
+- On a stream, the call is refused before it is buffered, as one error event `Scripts/llm-router.py:MistralStreamTranslator`.
+- On the non-stream path, it is a 502 `api_error` `Scripts/llm-router.py:MistralAdapter`.
+- One unoffered call refuses the whole answer, including any offered call beside it.
+
+The offered set is computed once for all three translating kinds, and the Responses translator now uses the same helper `Scripts/llm-router.py:_rt_offered_tools`. passthrough and llamacpp are declared exempt in that helper's docstring: they relay the backend's own Anthropic `tool_use` blocks and never mint one. This is a behaviour change for mistral. An answer that calls a tool the client never offered was relayed before; now it is an error. Router cases H8 and H9, whose streams call `Read`, now offer it.
+
+### R-0095: resolve, connect and every model call are interruptible on shutdown
+
+Limit 6 as narrowed in the R-0083 addendum, and the body's declared limit "The shutdown drain does not cover JSON relays", are closed except for the one piece below that cannot be interrupted.
+
+- **The resolve moved into `connect()`** of both connection classes, whose constructors no longer take an address list `Scripts/llm-router.py:_RtHttpConnection`. With the shutdown registry, the resolver thread is joined in `_RT_TICK_S` slices and the call gives up once `closing` is set `Scripts/llm-router.py:_rt_resolve`. `getaddrinfo` itself cannot be interrupted, so a shutdown waits at most one tick for a stalled resolve, never `connect_timeout`. The resolver thread is abandoned as before.
+- **Each socket is registered before its TCP connect** `Scripts/llm-router.py:_rt_open_socket`. `closing` is checked before each address and after the connect returns, and a failed socket is deregistered and closed. The TLS socket is added to the registry before the TCP socket leaves it, so the connection is never missing from the registry.
+- **Both send sites pass the hook.** `_post` hands `srv.track` to `_rt_send` as R-0083's `_rt_oauth_post` already did `Scripts/llm-router.py:_RouterHttpServer`. Every path that closes the connection untracks it first, and the handler's `finally` untracks the last one, which is idempotent.
+- **The sweep in `_rt_shutdown`** now reaches a model call that is connecting, waiting for its head or reading its body, not only a live pump `Scripts/llm-router.py:_rt_shutdown`.
+
+Three behaviour changes follow:
+
+1. A non-stream call in flight at SIGTERM is cut at once and answered 529 "router shutting down". Before, it blocked for up to `idle_timeout` and was abandoned when the `_DRAIN_S` drain ended.
+2. A stream request still waiting for its upstream head is answered 529 the same way. Before, only a live pump was registered.
+3. Any `UpstreamError` raised while `closing` is set and before the SSE head is relabelled 529 "router shutting down" `Scripts/llm-router.py:_RT_SHUTTING_DOWN`, whatever the transport reported: a 502 connect error or a 504 timeout caused by the sweep is no longer shown to the client as a backend fault.
+
+**J4a is amended a third time, and inverted.** R-0083's rule allowed only `_rt_oauth_post` to pass the registration hook. The rule now requires every `_rt_send` site to pass it. The allowed-site list is gone, and J36's planted control now plants `_post` *not* passing the hook `tests/test_llm_router.py:rule_j4`. The hook is still data handed only to `cls(...)`.
+
+**Not measured on Linux.** That `shutdown(SHUT_RDWR)` wakes a stalled TCP connect was measured on Darwin 23 only; the connect returns at once, reporting success, and the post-connect check catches it. Case C15 runs its connect half only where the kernel leaves a connect into a full `listen(0)` backlog pending. Elsewhere that half is skipped and the case reports INFO, with its resolve half still run.
+
+The flock bullet of narrowed limit 6 stands: a rotated token whose write was waiting on the config flock is kept in memory only and lost with the process. `llm_router` went from 384 to 387 cases: C15 and C16 (group C 14 -> 16) and G23 (group G 22 -> 23).
+
+### R-0091: the router's post-parse per-recv timeout (`a0e2d27`)
+
+When a router connection that has not authenticated leaves the generated `parse_request`, its per-recv timeout is the 10 s header bound, not the 5 s pre-auth bound. Measured: no socket read happens between the parsed head and the precheck verdict, so the 5 s bound still covers every pre-auth read. The comment was reworded in the canonical source, and the behaviour is unchanged. The decision record is the 2026-10-08 addendum of [[0029-the-http-front-is-a-domain]].
+
+### Two anchors on this page no longer resolve
+
+- Deviation 29's anchor to the router's `_rt_remove_ready_file` is dead. The R-0072 addendum above already records this: the function is the generated `_http_remove_ready_file` `Scripts/_mcp_httpfront.py:_http_remove_ready_file`.
+- The codex/openai addendum names its plan as feature-implementation-plan.md at the docs root. That file is no longer in the tree: the path is the `/p:feature-plan` slot ([[layer-contract]]), and the OAuth plan has been moved out of `docs/`. The red-first record that addendum quotes was never committed either.
+
+Neither line is edited. A dead body anchor on an accepted ADR is an advisory, not a gate ([[0019-only-gate-on-what-you-can-prove]]).
