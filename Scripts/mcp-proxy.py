@@ -191,13 +191,17 @@ Declared limits (accepted, not gated)
   * The header phase -- request line plus headers, of every request on a
     keep-alive connection -- has a TOTAL deadline of _HTTP_HEADER_TIMEOUT_S
     (each recv gets only the time left), so a header trickle is cut there.
+    While no request on the connection has passed the bearer check the total
+    deadline is the shorter _HTTP_PREAUTH_TIMEOUT_S (R-0089), so an
+    unauthenticated peer gives its --max-connections slot back sooner -- a
+    mitigation only: a peer that reconnects can still keep every slot busy.
     Until the bearer check passes the timeout is also per recv; a slow body
     after auth is bounded per recv only (_HTTP_SOCKET_TIMEOUT_S).
   * There is no failed-auth throttling: a wrong bearer costs one 401 and a
     reconnect, bounded only by --max-connections, and each refusal writes one
     WARNING line, so log volume grows with an unauthenticated peer's request
-    rate. Token strength is checked by length and charset only
-    (_TOKEN_MIN_LEN), never by entropy.
+    rate. Token strength is checked by length, charset and distinct
+    characters only (_TOKEN_MIN_LEN, _TOKEN_MIN_DISTINCT), never by entropy.
   * The Host check (DNS-rebinding defence) runs only on a loopback bind; with
     --allow-remote the bearer token, plus Origin when sent, is the control.
   * No TLS: with --allow-remote the bearer travels in plaintext, so a
@@ -420,6 +424,9 @@ _HTTP_INFLIGHT_CAP = 32           # default --max-inflight: HTTP request tasks a
 _HTTP_INFLIGHT_RANGE = (1, 1024)  # accepted --max-inflight values (load_http_settings)
 _HTTP_SESSION_IDLE_S = 86400.0    # default --session-idle
 _HTTP_HEADER_TIMEOUT_S = 10.0     # TOTAL bound on one request line + headers, and per-recv until auth (NFR-4)
+# TOTAL header bound while the connection has never authenticated (R-0089, the
+# router's V3): an unauthenticated socket gives its slot back sooner; never above the header bound.
+_HTTP_PREAUTH_TIMEOUT_S = 5.0
 _HTTP_SOCKET_TIMEOUT_S = 30.0     # per-recv socket timeout after auth
 _HTTP_KEEPALIVE_S = 15.0          # SSE ": keepalive" comment interval while a tools/call waits
 _HTTP_BRIDGE_TIMEOUT_S = 5.0      # bound on every handler-thread wait on the loop (H1, round 3)
@@ -434,6 +441,7 @@ _SESSION_GONE = object()          # sink marker: the session closed before _http
 _REQUEST_STARTED = object()       # sink marker: _http_start created and registered the task
 _BUSY = object()                  # sink marker: --max-inflight reached -> 503 + Connection: close (R-34)
 _TOKEN_MIN_LEN = 32               # minimum bearer token length (characters)
+_TOKEN_MIN_DISTINCT = 8           # minimum distinct characters in the bearer token (R-0090, the router's V1)
 _ASSUMED_HEADER_VERSION = "2025-03-26"  # MCP-Protocol-Version assumed when the header is absent
 
 
@@ -749,6 +757,18 @@ def _http_token_value(value: str, where: str, min_len: int, error) -> bytes:
 # END GENERATED: 352c54a20b22
 
 
+def _http_token_checked(value: str, where: str) -> bytes:
+    """The bearer token as ASCII bytes: the generated _http_token_value's length
+    and charset rules, then at least _TOKEN_MIN_DISTINCT distinct characters
+    (R-0090, the router's V1: 32 x "a" is long, not secret). Host-side policy,
+    like the floor and the error class passed in. Refusals never include it."""
+    token = _http_token_value(value, where, _TOKEN_MIN_LEN, ConfigError)
+    if len(set(value)) < _TOKEN_MIN_DISTINCT:
+        raise ConfigError(f"{where}: the bearer token must hold at least {_TOKEN_MIN_DISTINCT} "
+                          "distinct characters")
+    return token
+
+
 def load_http_settings(args, env_token: Optional[str]) -> HttpSettings:
     """Validate the --http flags and the bearer token into HttpSettings (refuse-to-start rules).
 
@@ -771,9 +791,9 @@ def load_http_settings(args, env_token: Optional[str]) -> HttpSettings:
     if args.token_file is None and env_token is None:
         raise ConfigError("HTTP mode requires a bearer token")
     if args.token_file is not None:
-        token = _http_token_value(_http_token_file(args.token_file), "--token-file", _TOKEN_MIN_LEN, ConfigError)
+        token = _http_token_checked(_http_token_file(args.token_file), "--token-file")
     else:
-        token = _http_token_value(env_token, _TOKEN_ENV, _TOKEN_MIN_LEN, ConfigError)
+        token = _http_token_checked(env_token, _TOKEN_ENV)
 
     if not 0 <= args.port <= 65535:
         raise ConfigError("--port must be between 0 and 65535")
@@ -2232,12 +2252,19 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
         self._header_reader = _HeaderDeadlineReader(self.connection, _HTTP_HEADER_TIMEOUT_S)
         self.rfile = io.BufferedReader(self._header_reader, io.DEFAULT_BUFFER_SIZE)
         stock.close()
+        # True once a request on this connection passed _precheck (R-0089, the router's V3).
+        self._authed = False
 
     def handle_one_request(self) -> None:
         # Every keep-alive request starts in the header phase again: request
-        # line + headers within _HTTP_HEADER_TIMEOUT_S in TOTAL (F8).
-        self._header_reader.deadline = time.monotonic() + _HTTP_HEADER_TIMEOUT_S
-        self.connection.settimeout(_HTTP_HEADER_TIMEOUT_S)
+        # line + headers within _HTTP_HEADER_TIMEOUT_S in TOTAL (F8). A
+        # connection that never authenticated gets _HTTP_PREAUTH_TIMEOUT_S
+        # (R-0089, the router's V3): it holds a --max-connections slot for less
+        # time. A mitigation only -- a peer that reconnects can still keep every
+        # slot busy.
+        bound = _HTTP_HEADER_TIMEOUT_S if self._authed else _HTTP_PREAUTH_TIMEOUT_S
+        self._header_reader.deadline = time.monotonic() + bound
+        self.connection.settimeout(bound)
         try:
             super().handle_one_request()
         finally:
@@ -2378,6 +2405,7 @@ class _ProxyHttpHandler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(presented, settings.token):
             self._refuse(401, [("WWW-Authenticate", "Bearer")])
             return False
+        self._authed = True
         self.connection.settimeout(_HTTP_SOCKET_TIMEOUT_S)
         return True
 
@@ -2827,7 +2855,8 @@ def main() -> None:
                       help="Allow a non-loopback --bind (a VPN interface; never a public one)")
     http.add_argument("--token-file", default=None,
                       help="Bearer token file (recommended source; owned by you, mode 0600, >= "
-                           f"{_TOKEN_MIN_LEN} printable ASCII chars). {_TOKEN_ENV} is the alternative, "
+                           f"{_TOKEN_MIN_LEN} printable ASCII chars, >= {_TOKEN_MIN_DISTINCT} of them "
+                           f"distinct). {_TOKEN_ENV} is the alternative, "
                            "but the environment is readable in /proc/<pid>/environ")
     http.add_argument("--allowed-origin", action="append", default=None,
                       help="Allowed Origin header, exact scheme://host[:port] (repeatable)")

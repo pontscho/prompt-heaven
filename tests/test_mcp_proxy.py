@@ -38,10 +38,10 @@ The case count is TYPED in run.py's SUITES table: this is a fixed case table,
 so a count that moves is the alarm.  The total below is the expected value; the
 run is authoritative.
 
-Total: 110 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 8, H 1, I 6, J 47, K 5,
+Total: 112 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 8, H 1, I 6, J 49, K 5,
 L 4; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4; R-0069 added
 J43, R-0076 J44, R-0075 J45; R-0067/R-0068 added G8 and J46; R-0072 added K5
-and J47).
+and J47; R-0089 added J48, R-0090 J49).
 
 Usage:
   python3 tests/test_mcp_proxy.py
@@ -2808,6 +2808,80 @@ def call_body(rid, function, params=None, token=None):
     return rpc_body("tools/call", p, rid)
 
 
+J49_ALPHABET = "abcdefghijklmnopqrstuvwxyz"   # J49: the distinct characters a weak token cycles
+
+
+def j49_weak(distinct, length=48):
+    """A *length*-character token cycling exactly *distinct* distinct letters."""
+    return (J49_ALPHABET[:distinct] * length)[:length]
+
+
+def j49_args(token_file=None):
+    """The argparse namespace load_http_settings reads, every value valid."""
+    return types.SimpleNamespace(
+        bind="127.0.0.1", allow_remote=False, token_file=token_file, port=0,
+        http_path="/mcp", allowed_origin=None, max_body_bytes=1, max_sessions=1,
+        max_connections=1, max_inflight=1, session_idle=1.0, ready_file=None)
+
+
+def j49_token_floor(suite, fixture_root, start_sandbox):
+    """J49 (R-0090): the distinct-character floor on --token-file and MCP_PROXY_TOKEN."""
+    problems, lines = [], []
+    # Live: a refused start from each source (rc 2, one line naming the source
+    # and the rule, the token never on stderr, no child spawned).
+    for label, weak, via_file in (("j49-file", j49_weak(2), True),
+                                  ("j49-env", j49_weak(1), False)):
+        sandbox, cfgpath, _good, tok = start_sandbox(label)
+        if via_file:
+            write_file(tok, weak + "\n")
+            rc, err = refused_http(sandbox, http_argv(sandbox, cfgpath, "--token-file", tok))
+            needles = ["--token-file", "distinct"]
+        else:
+            rc, err = refused_http(sandbox, http_argv(sandbox, cfgpath), {TOKEN_ENV: weak})
+            needles = [TOKEN_ENV, "distinct"]
+        problems += check_refused(sandbox, label, rc, err, needles, secret=weak)
+    lines.append("live        : --token-file 48 chars of 2 letters; %s 48 x 'a'" % TOKEN_ENV)
+    # In-process: the boundary against the live constant, from both sources.
+    try:
+        mod = H.load_module_from_path("ph_proxy_j49", SERVER)
+    except Exception as exc:  # noqa: BLE001 -- an import failure is the finding
+        suite.record(GJ, "token distinct floor -> rc 2",
+                     problems + ["cannot import the proxy: %s: %s" % (type(exc).__name__, exc)],
+                     detail=lines)
+        return
+    floor = getattr(mod, "_TOKEN_MIN_DISTINCT", None)
+    if not isinstance(floor, int) or isinstance(floor, bool) or not 1 < floor <= len(J49_ALPHABET):
+        problems.append("_TOKEN_MIN_DISTINCT is %r, expected an int in 2..%d"
+                        % (floor, len(J49_ALPHABET)))
+    else:
+        sandbox = new_sandbox(fixture_root, "j49-bound")
+        for distinct, accept in ((floor - 1, False), (floor, True)):
+            weak = j49_weak(distinct, max(mod._TOKEN_MIN_LEN, floor))
+            tok = write_file(os.path.join(sandbox, "tok%d" % distinct), weak + "\n")
+            for where, args, env_token in (("--token-file", j49_args(tok), None),
+                                           (TOKEN_ENV, j49_args(), weak)):
+                label = "%s, %d distinct" % (where, distinct)
+                try:
+                    got = mod.load_http_settings(args, env_token)
+                except mod.ConfigError as exc:
+                    text = str(exc)
+                    if accept:
+                        problems.append("%s: refused (%s), expected accepted" % (label, text))
+                    elif where not in text or "distinct" not in text:
+                        problems.append("%s: refusal %r does not name %r and 'distinct'"
+                                        % (label, text, where))
+                    if weak in text:
+                        problems.append("%s: the refusal quotes the token" % label)
+                    continue
+                if not accept:
+                    problems.append("%s: accepted, expected a ConfigError" % label)
+                elif got.token != weak.encode("ascii"):
+                    problems.append("%s: settings token is not the token given" % label)
+        lines.append("boundary    : %d distinct refused, %d accepted, both sources "
+                     "(in-process, _TOKEN_MIN_DISTINCT %d)" % (floor - 1, floor, floor))
+    suite.record(GJ, "token distinct floor -> rc 2", problems, detail=lines)
+
+
 def http_init(client):
     """(problems, sid): initialize, then notifications/initialized on the new session."""
     reply = client.send(init_body())
@@ -2964,6 +3038,12 @@ def group_j(suite, fixture_root):
         problems += check_refused(sandbox, label, rc, err, ["--token-file"], secret=weak)
     suite.record(GJ, "weak token -> rc 2", problems,
                  detail=["tokens      : 31 chars; 48 chars with a space"])
+
+    # J49 -- R-0090: a long token of too few distinct characters (the router's
+    # V1 floor, _TOKEN_MIN_DISTINCT) is refused from BOTH sources at start; the
+    # boundary (one under the floor refused, the floor itself accepted) is
+    # pinned in-process through load_http_settings against the live constant.
+    j49_token_floor(suite, fixture_root, start_sandbox)
 
     # J3 -- a non-loopback bind without --allow-remote; IPv6 and a host name;
     # a busy port (bound before any spawn: one line, no .pids).
@@ -3933,6 +4013,9 @@ def group_j_hardening(suite, fixture_root):
 
 J_TRICKLE_STEP_S = 1.0       # J34: one header byte per this, far under the per-recv timeout
 J_TRICKLE_SLACK_S = 3.0      # J34: the cut must land within _HTTP_HEADER_TIMEOUT_S + this
+J48_SLACK_S = 2.0            # J48: the pre-auth cut must land within _HTTP_PREAUTH_TIMEOUT_S + this
+J48_OVER_S = 1.5             # J48: the authenticated keep-alive idles this far past the pre-auth bound ...
+J48_UNDER_S = 2.0            # J48: ... and at least this far under the header bound
 J_ORPHAN_TRIES = 3           # J38: initializes refused at the in-flight cap
 J_DEEP_ID_BAND = 16          # J42: depths swept below the deepest id that still parses
 J43_MARK = b"<script>TFMARK"  # J43: client text the stdlib would quote into its error page
@@ -4321,6 +4404,82 @@ def group_j_strict(suite, fixture_root, mod, mod_why):
     ], detail=["proxy       : --http --port 0, default caps",
                "env         : PYTHONINTMAXSTRDIGITS=0 (3.9.6 has no digit limit)"],
        extra_env=NUMBER_ENV)
+
+    # J48 -- R-0089, the router's V3: a connection that has never passed
+    # _precheck has the shorter pre-auth header bound, so a header trickle is
+    # cut there and not at the header bound; once a request on the connection
+    # authenticated, a keep-alive idle past the pre-auth bound is still served.
+    def j48(proxy, client):
+        if mod is None:
+            return [mod_why], []
+        header = mod._HTTP_HEADER_TIMEOUT_S
+        bound = getattr(mod, "_HTTP_PREAUTH_TIMEOUT_S", None)
+        if not isinstance(bound, (int, float)) or isinstance(bound, bool):
+            return ["the proxy has no numeric _HTTP_PREAUTH_TIMEOUT_S (got %r)" % (bound,)], []
+        if not 0 < bound + J48_SLACK_S < header:
+            return ["_HTTP_PREAUTH_TIMEOUT_S %g + slack %g is not under _HTTP_HEADER_TIMEOUT_S %g: "
+                    "the cut cannot tell the two bounds apart" % (bound, J48_SLACK_S, header)], []
+        problems, sent, closed = [], 0, False
+        sock = socket.create_connection((client.host, client.port), timeout=J_RAW_TIMEOUT_S)
+        t0 = time.monotonic()
+        try:
+            sock.sendall(J_PARTIAL_LINE)
+            while time.monotonic() - t0 < bound + J48_SLACK_S:
+                try:
+                    sock.sendall(b"X")
+                    sent += 1
+                except OSError:
+                    closed = True
+                    break
+                closed, _data = socket_closed_by_peer(
+                    sock, min(time.monotonic() + J_TRICKLE_STEP_S, t0 + bound + J48_SLACK_S))
+                if closed:
+                    break
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        took = time.monotonic() - t0
+        if not closed:
+            problems.append("an unauthenticated header trickle (1 byte / %gs) still open after "
+                            "%.1fs (pre-auth bound %gs, header bound %gs)"
+                            % (J_TRICKLE_STEP_S, took, bound, header))
+        # Control: the authenticated keep-alive connection is under the header bound.
+        idle = min(bound + J48_OVER_S, header - J48_UNDER_S)
+        got, sid = http_init(client)
+        problems += got
+        statuses = []
+        if not got:
+            conn = client.connect()
+            try:
+                for n in range(2):
+                    if n:
+                        time.sleep(idle)
+                    conn.request("POST", client.path,
+                                 body=json.dumps(rpc_body("ping", {}, 480 + n)).encode("utf-8"),
+                                 headers=client.headers(sid, PROTOCOL_VERSION))
+                    resp = conn.getresponse()
+                    data = resp.read()
+                    statuses.append(resp.status)
+                    if resp.status != 200 or b'"result"' not in data:
+                        problems.append("keep-alive ping %d: status %d %r" % (n, resp.status, data[:80]))
+                    if resp.will_close:
+                        problems.append("keep-alive ping %d: the server closed the connection "
+                                        "(the case needs it kept)" % n)
+                        break
+            except (OSError, http.client.HTTPException) as exc:
+                problems.append("an authenticated keep-alive connection idle %.1fs was cut (%s): "
+                                "it got the pre-auth bound" % (idle, type(exc).__name__))
+            finally:
+                conn.close()
+        return problems, ["trickle     : %d byte(s), closed %s after %.1fs (pre-auth %gs + slack "
+                          "%gs, header %gs)" % (sent, closed, took, bound, J48_SLACK_S, header),
+                          "keep-alive  : authenticated, idle %.1fs, pings %r" % (idle, statuses)]
+
+    http_session(suite, fixture_root, "j-preauth-bound", [
+        ("pre-auth header bound until auth", j48),
+    ], detail=["proxy       : --http --port 0, default caps"])
 
     # J38 -- an initialize refused at the in-flight cap leaves no session behind.
     def j38(proxy, client):

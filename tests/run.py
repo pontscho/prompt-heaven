@@ -694,20 +694,23 @@ SUITES = [
     # ordered shutdown = 106; R-0067/R-0068 added G8 and J46, a NaN /
     # Infinity token or an over-long integer literal answered -32700 on both
     # fronts = 108; R-0072 added K5, the front's injected policy pinned,
-    # and J47, a weak bearer token refused at start = 110), so a count that
-    # moves is the alarm, not noise.
+    # and J47, a weak bearer token refused at start = 110; R-0089 added J48,
+    # the shorter pre-auth header bound until auth = 111; R-0090 added J49,
+    # the distinct-character token floor on both sources = 112), so a count
+    # that moves is the alarm, not noise.
     ("mcp_proxy", run_mcp_proxy,
      "mcp-proxy, the aggregating relay: config refusals, eager start and "
      "duplicate-tool refusal, id/progress remapping, cancel forwarded with "
      "the child's own id, restart with backoff/budget/disable, framing, "
      "timeout, orphan-free shutdown, static AST rules, sandbox hygiene; "
-     "Streamable HTTP: a weak bearer token refused at start, bearer, "
-     "Origin/Host, session lifecycle, every "
+     "Streamable HTTP: a weak or low-distinct bearer token refused at "
+     "start, bearer, Origin/Host, session lifecycle, every "
      "tools/call as SSE with keepalive, caps, shutdown with live traffic, "
-     "total header deadline, strict headers, deep nesting, malformed "
+     "total header deadline and the shorter pre-auth one, strict headers, "
+     "deep nesting, malformed "
      "header lines, id-less initialize, request id shape, fixed body-less "
      "stdlib refusals, 100 Continue only after auth, ready file removed "
-     "on shutdown, NaN / over-long numbers refused -32700", 110),
+     "on shutdown, NaN / over-long numbers refused -32700", 112),
     # TYPED: a fixed case table (A 49, B 31, C 14, D 16, E 14, F 25, G 22,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 41, K 26, L 20, M 23, N 42,
     # O 18 = 384), so a count that moves is the alarm, not noise.
