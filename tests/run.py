@@ -265,7 +265,7 @@ def run_smoke(opts):
 #     Adding or retiring a server would trip a typed count for no defect.
 SUITES = [
     ("inspect_validate", run_inspect_validate,
-     "mcp-inspect VALIDATION family", 269),
+     "mcp-inspect VALIDATION family", 272),
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 381),
     ("sbx_gate", run_sbx_gate,
@@ -453,7 +453,7 @@ SUITES = [
      "nothing; and every host parses and emits its peer frames through the "
      "strict JSON blocks, with every other bare parse declared; and the HTTP "
      "front's two hosts pinned: every stdlib override in their front classes "
-     "generated or declared with a reason", 118),
+     "generated or declared with a reason", 131),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "

@@ -523,8 +523,9 @@ def _prepare_compile_commands(project_root: str, cuda_path: str,
         cc_path = os.path.join(d, "compile_commands.json")
         if os.path.isfile(cc_path):
             try:
+                # Strict (R-0092): a cloned repository controls this file.
                 with open(cc_path, "r", encoding="utf-8") as f:
-                    original_entries = json.load(f)
+                    original_entries = _strict_loads(f.read())
                 original = cc_path
                 log.debug(f"Found compile_commands.json: {cc_path}")
                 break
@@ -645,8 +646,10 @@ async def read_lsp_message(reader: asyncio.StreamReader) -> Optional[dict]:
     except (asyncio.IncompleteReadError, Exception):
         return None
 
+    # Strict (R-0092): the child's body is peer bytes, so NaN and an over-long
+    # integer literal are refused like any unparseable body -- the read ends.
     try:
-        return json.loads(body_bytes.decode("utf-8"))
+        return _strict_loads(body_bytes.decode("utf-8"))
     except json.JSONDecodeError:
         return None
 
@@ -1632,8 +1635,9 @@ async def handle_init(args: dict) -> Any:
     for d in [compile_commands_dir, os.path.join(project_root, "build"), project_root]:
         if d and os.path.isfile(os.path.join(d, "compile_commands.json")):
             try:
+                # Strict (R-0092): a cloned repository controls this file.
                 with open(os.path.join(d, "compile_commands.json")) as f:
-                    cc_entries = json.load(f)
+                    cc_entries = _strict_loads(f.read())
                 break
             except Exception:
                 pass

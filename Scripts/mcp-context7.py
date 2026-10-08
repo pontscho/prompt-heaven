@@ -556,7 +556,7 @@ def _format_search_results(results: list, offset: int = 0,
 
 def _parse_error_response(status: int, body: str, api_key: Optional[str]) -> str:
     try:
-        data = json.loads(body)
+        data = _strict_loads(body)  # upstream's body: NaN / long int refused (R-0092)
         if data.get("message"):
             return data["message"]
     except Exception:
@@ -615,7 +615,7 @@ async def handle_context7_resolve_library_id(args: dict) -> Union[str, dict]:
 
     try:
         raw = await _api_get("/v2/libs/search", {"query": query, "libraryName": library_name}, API_KEY)
-        data = json.loads(raw)
+        data = _strict_loads(raw)  # upstream's body: NaN / long int refused (R-0092)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         return {"error": _cap_text(_parse_error_response(e.code, body, API_KEY), cap)}

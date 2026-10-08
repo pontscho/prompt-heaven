@@ -764,6 +764,19 @@ def run(opts=None):
         case(suite, cli, "N", "json-50k-nesting", "json",
              {"content": "[" * 50000 + "]" * 50000},
              must=["FAIL", "RecursionError"])
+        # R-0092: the JSON validator stays the stdlib's verdict (NaN is still
+        # OK) but bounds an integer literal, so a 3.9.6 host -- no int-digit
+        # limit -- cannot be made to spend quadratic CPU on one.  The refusal
+        # is a FAIL row with the literal's line:col, not a crashed validator;
+        # 4300 characters is the last length accepted.
+        case(suite, cli, "N", "json-long-int-bounded", "json",
+             {"content": "[" + "1" * 5000 + "]"},
+             must=["FAIL", "integer literal of 5000 characters exceeds 4300", "1:2"],
+             must_not=["validator error"])
+        case(suite, cli, "N", "json-long-int-at-bound-ok", "json",
+             {"content": "[" + "1" * 4300 + "]"}, must=["OK", "**PASSED**"])
+        case(suite, cli, "N", "json-nan-still-stdlib-verdict", "json",
+             {"content": "[NaN, Infinity]"}, must=["OK", "**PASSED**"])
         case(suite, cli, "N", "py-5k-nesting", "python",
              {"content": "x = " + "(" * 5000 + "1" + ")" * 5000},
              must=["FAIL", "nested parentheses"])

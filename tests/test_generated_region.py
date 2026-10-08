@@ -97,7 +97,10 @@ Groups:
               routes its frame read and write through them; every other bare
               json parse, and every bare emit on the frame tier, is declared in
               STRICT_JSON_EXCEPTIONS with its reason (ast, against the live
-              tree, with a synthetic control first)
+              tree, with a synthetic control first); and the thirteen peer
+              sites R-0092 made strict (LSP bodies, upstream HTTP, CDP, a
+              project's compile_commands.json) each DRIVEN in-process with a
+              finite, a NaN and an over-long-int body, writing nothing
   I. HTTP FRONT: R-0072 -- the two hosts of `_mcp_httpfront.py`: every stdlib
               override in their front classes is generated or declared in
               HTTPFRONT_ADAPTATIONS with a reason, and the seams the generated
@@ -280,9 +283,11 @@ HTTPFRONT_ADAPTATIONS = {
     ("mcp-proxy.py", "_ProxyHttpServer", "process_request_thread"):
         "releases conn_sem in a finally and nothing else",
     ("mcp-proxy.py", "_ProxyHttpHandler", "setup"):
-        "installs _HeaderDeadlineReader with the header bound as its cap",
+        "installs _HeaderDeadlineReader with the header bound as its cap and "
+        "starts every connection unauthenticated (R-0089)",
     ("mcp-proxy.py", "_ProxyHttpHandler", "handle_one_request"):
-        "one header bound for every request: the proxy has no pre-auth bound",
+        "a shorter header bound until the connection has authenticated (R-0089, "
+        "the router's V3)",
     ("mcp-proxy.py", "_ProxyHttpHandler", "log_message"):
         "method and path without query, structure only (ADR 0011)",
     ("mcp-proxy.py", "_ProxyHttpHandler", "send_error"):
@@ -408,42 +413,26 @@ WHOLE_FILE_FRAME_HOSTS = ("mcp-proxy.py",)
 # whose site has gone fails `strict-exceptions-not-stale`, so the table cannot
 # outlive what it excuses.
 #
-# Two families are declared OUT OF SCOPE rather than safe: an upstream service's
-# HTTP body (context7, jenkins, Chrome's /json endpoints) and a non-MCP child's
-# stream (an LSP server's Content-Length body, Chrome's CDP websocket). Both are
-# peer bytes, and the quadratic int parse reaches them on 3.9.6 too; R-0067 and
-# R-0068 scope the MCP frame tier, so these are recorded here, by name, as the
-# next candidates instead of being widened silently into this change.
-_UPSTREAM = ("out of scope (R-0067/R-0068 cover MCP frames): an upstream "
-             "service's HTTP body, not a peer's MCP frame")
-_LSP_CHILD = ("out of scope (R-0067/R-0068 cover MCP frames): the LSP child's "
-              "Content-Length body, not a peer's MCP frame")
+# R-0092 closed the two families R-0067/R-0068 had recorded here as the next
+# candidates -- an upstream service's HTTP body (context7, jenkins, Chrome's
+# /json endpoints) and a non-MCP child's stream (an LSP server's Content-Length
+# body, Chrome's CDP websocket) -- plus the user project's compile_commands.json,
+# which a cloned repository controls byte for byte. All thirteen sites now parse
+# through `_strict_loads`, and STRICT_SITES below drives each one. What is left
+# is a parse whose bytes this server wrote itself, a file the operator or the
+# repository owns, and the one validator whose job is to report the stdlib's
+# own verdict -- each with its reason.
 STRICT_JSON_EXCEPTIONS = {
-    ("mcp-clangd.py", "read_lsp_message", "loads"): _LSP_CHILD,
-    ("mcp-cuda.py", "read_lsp_message", "loads"): _LSP_CHILD,
-    ("mcp-lua-lsp.py", "read_lsp_message", "loads"): _LSP_CHILD,
-    ("mcp-purity.py", "read_lsp_message", "loads"): _LSP_CHILD,
-    ("mcp-context7.py", "_parse_error_response", "loads"): _UPSTREAM,
-    ("mcp-context7.py", "handle_context7_resolve_library_id", "loads"): _UPSTREAM,
-    ("mcp-jenkins.py", "_read_response", "loads"): _UPSTREAM,
-    ("mcp-gdc.py", "GdcManager.get_targets", "loads"): _UPSTREAM,
-    ("mcp-gdc.py", "handle_new_page", "loads"): _UPSTREAM,
-    ("mcp-gdc.py", "CdpSession._recv_loop", "loads"):
-        "out of scope (R-0067/R-0068 cover MCP frames): Chrome's CDP websocket "
-        "message, not a peer's MCP frame",
     ("mcp-inspect.py", "_v_json", "loads"):
         "the `validate` tool's verdict on a user's file: it reports what the "
-        "stdlib parser accepts, and making it strict would change the verdict, "
-        "not harden a frame",
+        "stdlib parser accepts (NaN included), so it stays lax on purpose -- "
+        "but BOUNDED (R-0092): parse_int=_json_bounded_int refuses an integer "
+        "literal over JSON_INT_LITERAL_LIMIT characters as a FAIL row with its "
+        "line:col, the verdict 3.11+ CPython's own digit limit gives, so a "
+        "hostile file cannot cost quadratic CPU on 3.9.6",
     ("mcp-purity.py", "_RegexWorker._ask", "loads"):
         "the server's own regex worker subprocess answering on a private "
         "length-prefixed pipe the server spawned; not a peer",
-    ("mcp-cuda.py", "_prepare_compile_commands", "load"):
-        "a compile_commands.json in the user's project, read as a build input",
-    ("mcp-purity.py", "_prepare_compile_commands", "load"):
-        "a compile_commands.json in the user's project, read as a build input",
-    ("mcp-cuda.py", "handle_init", "load"):
-        "a compile_commands.json in the user's project, read as a build input",
     ("mcp-tshark.py", "handle_config", "load"):
         "the server's own saved-config file, written by this server",
     ("mcp-webfetch.py", "_cache_load", "load"):
@@ -3092,6 +3081,229 @@ def group_strict(suite, mod):
     suite.record(GH, "strict-exceptions-not-stale", stale,
                  detail=stale or ["%d declared row(s), each still excusing a live site"
                                   % len(STRICT_JSON_EXCEPTIONS)])
+
+    group_strict_sites(suite)
+
+
+# R-0092: the thirteen peer sites that left STRICT_JSON_EXCEPTIONS, each DRIVEN
+# rather than read. The ast gate above proves a site no longer spells a bare
+# json.loads; only a run proves the bytes are refused, and that a refusal lands
+# in the branch the site already had for an unparseable body. Every site is fed
+# one template three times: with a finite value (the control -- a site that
+# refused everything would pass both refusals), with NaN, and with an integer
+# literal STRICT_SITE_LONG_INT characters long. The run sits inside
+# int_digits_unlimited(), so a 3.11+ interpreter parses that literal the way
+# 3.9.6 does instead of refusing it with its own ValueError -- which some of
+# these sites would have caught, making the lax code look strict.
+STRICT_SITE_VALUES = (("finite", "1"), ("nan", "NaN"), ("long-int", "1" * 5000))
+STRICT_SITE_WANT = {"finite": "accepted", "nan": "refused", "long-int": "refused"}
+STRICT_SITE_ROOT = "/ph-r0092-no-such-project"
+
+
+@contextlib.contextmanager
+def patched(mod, **attrs):
+    """Set module attributes for the duration; restore (or delete) them after."""
+    missing = object()
+    saved = {name: getattr(mod, name, missing) for name in attrs}
+    for name, value in attrs.items():
+        setattr(mod, name, value)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is missing:
+                delattr(mod, name)
+            else:
+                setattr(mod, name, value)
+
+
+class _FakeResp:
+    """A urlopen() result: a context manager whose read() returns the body."""
+
+    def __init__(self, raw):
+        self.raw = raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, *size):
+        return self.raw
+
+
+def _fake_fs(files):
+    """(open, os) stand-ins over a dict, so a compile_commands site writes nothing.
+
+    A host's module globals shadow the builtins, so `open` set on the module is
+    the one its functions call; the `os` stand-in carries only what the three
+    compile_commands sites reach, and a write lands in a StringIO.
+    """
+    def fake_open(path, mode="r", *args, **kwargs):
+        if "w" in mode:
+            return io.StringIO()
+        if path not in files:
+            raise FileNotFoundError(path)
+        return io.StringIO(files[path])
+    path = types.SimpleNamespace(join=os.path.join, dirname=os.path.dirname,
+                                 isfile=lambda p: p in files)
+    return fake_open, types.SimpleNamespace(path=path, makedirs=lambda *a, **k: None)
+
+
+def _site_lsp(mod, body):
+    async def go():
+        reader = asyncio.StreamReader()
+        raw = body.encode("utf-8")
+        reader.feed_data(b"Content-Length: %d\r\n\r\n" % len(raw) + raw)
+        reader.feed_eof()
+        return await mod.read_lsp_message(reader)
+    return "refused" if asyncio.run(go()) is None else "accepted"
+
+
+def _site_context7_error(mod, body):
+    got = mod._parse_error_response(500, body, None)
+    if got == "upstream said no":
+        return "accepted"
+    return "refused" if got.startswith("Request failed with status 500") else got
+
+
+def _site_context7_resolve(mod, body):
+    async def api_get(path, params, api_key=None):
+        return body
+    with patched(mod, _api_get=api_get):
+        got = asyncio.run(mod.handle_context7_resolve_library_id(
+            {"query": "q", "library_name": "l"}))
+    if got == "No libraries found matching the provided name.":
+        return "accepted"
+    if isinstance(got, dict) and str(got.get("error", "")).startswith("Error searching libraries"):
+        return "refused"
+    return got
+
+
+def _site_jenkins(mod, body):
+    resp = types.SimpleNamespace(status=200, headers={},
+                                 read=lambda n: body.encode("utf-8"))
+    got = mod._read_response(resp, "json").body
+    if isinstance(got, dict):
+        return "accepted"
+    return "refused" if got == body else got
+
+
+def _site_gdc_targets(mod, body):
+    with patched(mod.urllib.request, urlopen=lambda *a, **k: _FakeResp(body.encode())):
+        try:
+            got = mod.GdcManager("http://127.0.0.1:9").get_targets()
+        except RuntimeError as exc:
+            return "refused" if "Cannot reach Chrome" in str(exc) else repr(exc)
+    return "accepted" if isinstance(got, list) else got
+
+
+def _site_gdc_new_page(mod, body):
+    with patched(mod.urllib.request, urlopen=lambda *a, **k: _FakeResp(body.encode())):
+        got = asyncio.run(mod.handle_new_page(mod.GdcManager("http://127.0.0.1:9"),
+                                              {"url": "about:blank"}))
+    if isinstance(got, str) and got.startswith("New page created: T1"):
+        return "accepted"
+    if isinstance(got, dict) and str(got.get("error", "")).startswith("Failed to create page"):
+        return "refused"
+    return got
+
+
+def _site_gdc_recv(mod, body):
+    async def go():
+        session = mod.CdpSession("T1", "ws://127.0.0.1:9/devtools/page/T1")
+        fut = asyncio.get_running_loop().create_future()
+        session._pending[1] = fut
+        session._connected = True
+        queue = [body, None]
+
+        async def recv(conn):
+            return queue.pop(0)
+        with patched(mod, _ws_recv=recv):
+            await session._recv_loop()
+        return fut
+    fut = asyncio.run(go())
+    exc = fut.exception()
+    if exc is None:
+        return "accepted"
+    return "refused" if isinstance(exc, ConnectionError) else repr(exc)
+
+
+def _site_prepare_cc(mod, body):
+    seen = []
+    fake_open, fake_os = _fake_fs({STRICT_SITE_ROOT + "/build/compile_commands.json": body})
+    with patched(mod, open=fake_open, os=fake_os,
+                 _path_within_root=lambda *a, **k: True,
+                 _translate_compile_commands=lambda *a, **k: seen.append("read") or [],
+                 _generate_minimal_compile_commands=lambda *a, **k: seen.append("minimal") or []):
+        mod._prepare_compile_commands(STRICT_SITE_ROOT, "/sdk", "sm_86")
+    return {("read",): "accepted", ("minimal",): "refused"}.get(tuple(seen), seen)
+
+
+def _site_cuda_init(mod, body):
+    seen = []
+
+    def has_cuda_sources(root, entries):
+        seen.append(entries)
+        return False
+    fake_open, fake_os = _fake_fs({STRICT_SITE_ROOT + "/build/compile_commands.json": body})
+    with patched(mod, open=fake_open, os=fake_os, _client=None,
+                 _find_cuda_sdk=lambda *a, **k: "/sdk",
+                 _has_cuda_sources=has_cuda_sources):
+        asyncio.run(mod.handle_init({"project_root": STRICT_SITE_ROOT}))
+    if len(seen) != 1:
+        return seen
+    return "refused" if seen[0] is None else "accepted"
+
+
+_LSP_BODY = '{"jsonrpc": "2.0", "id": 1, "result": {"v": %s}}'
+_CC_BODY = '[{"directory": "/d", "file": "a.cu", "command": "nvcc a.cu", "n": %s}]'
+
+# (host, site, driver, template). `_prepare_compile_commands` in purity has a
+# realpath containment guard the cuda copy lacks; the stand-in answers it True,
+# and the cuda module simply never reads that attribute.
+STRICT_SITES = (
+    ("mcp-clangd.py", "read_lsp_message", _site_lsp, _LSP_BODY),
+    ("mcp-cuda.py", "read_lsp_message", _site_lsp, _LSP_BODY),
+    ("mcp-lua-lsp.py", "read_lsp_message", _site_lsp, _LSP_BODY),
+    ("mcp-purity.py", "read_lsp_message", _site_lsp, _LSP_BODY),
+    ("mcp-context7.py", "_parse_error_response", _site_context7_error,
+     '{"message": "upstream said no", "code": %s}'),
+    ("mcp-context7.py", "handle_context7_resolve_library_id", _site_context7_resolve,
+     '{"results": [], "total": %s}'),
+    ("mcp-jenkins.py", "_read_response", _site_jenkins, '{"number": %s}'),
+    ("mcp-gdc.py", "GdcManager.get_targets", _site_gdc_targets,
+     '[{"id": "T1", "pid": %s}]'),
+    ("mcp-gdc.py", "handle_new_page", _site_gdc_new_page, '{"id": "T1", "n": %s}'),
+    ("mcp-gdc.py", "CdpSession._recv_loop", _site_gdc_recv, _LSP_BODY),
+    ("mcp-cuda.py", "_prepare_compile_commands", _site_prepare_cc, _CC_BODY),
+    ("mcp-purity.py", "_prepare_compile_commands", _site_prepare_cc, _CC_BODY),
+    ("mcp-cuda.py", "handle_init", _site_cuda_init, _CC_BODY),
+)
+
+
+def group_strict_sites(suite):
+    """H, continued: each R-0092 site accepts a finite body and refuses NaN and a long int."""
+    modules = {}
+    for host, site, driver, template in STRICT_SITES:
+        problems, outcomes = [], {}
+        try:
+            if host not in modules:
+                modules[host] = H.load_module_from_path(
+                    "strict_site_" + host[:-3].replace("-", "_"), os.path.join(SCRIPTS, host))
+            mod = modules[host]
+            with int_digits_unlimited():
+                for kind, value in STRICT_SITE_VALUES:
+                    outcomes[kind] = driver(mod, template % value)
+        except Exception as exc:  # a crash is a red row, not a dead suite
+            problems.append("raised %s: %s" % (type(exc).__name__, exc))
+        for kind, want in sorted(STRICT_SITE_WANT.items()):
+            if kind in outcomes and outcomes[kind] != want:
+                problems.append("%s body: %r, expected %s" % (kind, outcomes[kind], want))
+        suite.record(GH, "strict-site-%s-%s" % (host[:-3], site), problems,
+                     detail=["%s: %s" % (k, v) for k, v in outcomes.items()]
+                     or ["no outcome recorded"])
 
 
 def group_hygiene(suite, pyc_before, digests_before):

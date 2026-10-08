@@ -297,8 +297,10 @@ async def read_lsp_message(reader: asyncio.StreamReader) -> Optional[dict]:
     except (asyncio.IncompleteReadError, Exception):
         return None
 
+    # Strict (R-0092): the child's body is peer bytes, so NaN and an over-long
+    # integer literal are refused like any unparseable body -- the read ends.
     try:
-        return json.loads(body_bytes.decode("utf-8"))
+        return _strict_loads(body_bytes.decode("utf-8"))
     except json.JSONDecodeError:
         return None
 

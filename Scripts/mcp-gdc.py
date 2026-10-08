@@ -783,8 +783,10 @@ class CdpSession:
                     log.debug(f"CDP connection closed: {self.target_id}")
                     break
 
+                # Strict (R-0092): Chrome never sends NaN or a 4300-digit
+                # number, so one that does is dropped like any non-JSON text.
                 try:
-                    msg = json.loads(text)
+                    msg = _strict_loads(text)
                 except json.JSONDecodeError:
                     continue
 
@@ -855,7 +857,7 @@ class GdcManager:
         url = f"{self.browser_url}/json"
         try:
             with urllib.request.urlopen(url, timeout=5) as resp:
-                return json.loads(resp.read().decode())
+                return _strict_loads(resp.read().decode())  # R-0092
         except Exception as e:
             raise RuntimeError(f"Cannot reach Chrome at {self.browser_url}: {e}")
 
@@ -1048,7 +1050,7 @@ async def handle_new_page(mgr: GdcManager, args: dict) -> Any:
         create_url = f"{mgr.browser_url}/json/new?{encoded_url}"
         req = urllib.request.Request(create_url, method="PUT")
         with urllib.request.urlopen(req, timeout=10) as resp:
-            target = json.loads(resp.read().decode())
+            target = _strict_loads(resp.read().decode())  # R-0092
         target_id = target.get("id")
         mgr.selected_id = target_id
         return f"New page created: {target_id}\nURL: {url}"

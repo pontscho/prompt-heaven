@@ -1631,10 +1631,20 @@ def _v_json(data: bytes, name: str) -> _VResult:
         text = _v_decode(data)
     except UnicodeDecodeError as exc:
         return _v_fail(f"not valid UTF-8: {exc}")
+    # The verdict stays the stdlib's (NaN and Infinity are OK here, on purpose)
+    # with one bound (R-0092): an integer literal over JSON_INT_LITERAL_LIMIT
+    # characters is refused before int() sees it, so a hostile file cannot cost
+    # quadratic CPU on 3.9.6 -- the same verdict 3.11+ CPython's own digit limit
+    # gives, reported as a FAIL at the literal rather than as a crashed validator.
     try:
-        json.loads(text)
+        json.loads(text, parse_int=_json_bounded_int)
     except json.JSONDecodeError as exc:
         return _v_fail(exc.msg, exc.lineno, exc.colno)
+    except ValueError as exc:
+        if len(exc.args) != 2 or not isinstance(exc.args[1], str):
+            raise
+        err = json.JSONDecodeError(exc.args[0], text, max(0, text.find(exc.args[1])))
+        return _v_fail(err.msg, err.lineno, err.colno)
     return _v_ok("valid JSON")
 
 

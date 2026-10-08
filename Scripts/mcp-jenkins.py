@@ -617,8 +617,10 @@ def _read_response(resp, response_type: str) -> HttpResult:
     # response_type == "json"
     if not text:
         return HttpResult(status, headers, {}, raw, truncated)
+    # Strict (R-0092): a NaN or an over-long integer literal is refused like any
+    # body that is not JSON, so it falls back to the text a caller already copes with.
     try:
-        return HttpResult(status, headers, json.loads(text), raw, truncated)
+        return HttpResult(status, headers, _strict_loads(text), raw, truncated)
     except json.JSONDecodeError:
         return HttpResult(status, headers, text, raw, truncated)
 
