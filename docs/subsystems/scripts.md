@@ -6,8 +6,9 @@ title: Scripts & MCP Servers
 description: Standalone Python scripts -- MCP servers and requirements.yaml task utilities.
 sources:
   - Scripts
+  - Scripts/context-guard.sh
 verified:
-  commit: bf17f0c
+  commit: 19c3fc5
   date: 2026-10-08
 links:
   - overview
@@ -38,10 +39,11 @@ links:
 
 # Scripts & MCP Servers
 
-`Scripts/` holds standalone Python 3.9+ scripts: the MCP servers, the canonical
+`Scripts/` holds standalone scripts, Python 3.9+ unless named otherwise: the MCP servers, the canonical
 sources their shared helpers are generated from `Scripts/amalgamate.py`, the
-`requirements.yaml` task utilities, the search tools, and one HTTP server that is
-not an MCP server, the LLM router ("LLM router" below). The servers share that
+`requirements.yaml` task utilities, the search tools, one HTTP server that is
+not an MCP server, the LLM router ("LLM router" below), and the shell scripts
+behind a restartable session ("Restartable sessions" below). The servers share that
 plumbing by generation rather than import; the canonical sources, the
 rules deciding what may be a shared block, and the copies deliberately left in
 place are [[generated-regions]].
@@ -1090,3 +1092,59 @@ command line, the config schema and its OAuth write-back, the per-kind header
 allow-lists, the security rules, the `llm_router` suite and the declared limits
 are [[llm-router]]; why it routes by model and translates at the edge is
 [[0028-route-by-model-translate-at-the-edge]].
+
+## Restartable sessions: `context-guard.sh` and `loop-restart.sh`
+
+Shell scripts, not Python, let a long session checkpoint itself and come
+back in a fresh process when its context fills. `Scripts/claude-loop.sh` runs a
+Claude Code session in a loop through the `safranek` launcher, exports `CLAUDE_LOOP_PID` (its own pid) and
+`CLAUDE_LOOP_FLAG`, and starts a new round only when the flag file exists after
+the process ends; every round's prompt resumes from the newest checkpoint session
+`Scripts/claude-loop.sh`. `Scripts/context-guard.sh` is the Claude Code hook that
+decides *when*, and `Scripts/loop-restart.sh` is what the model runs to end the
+round.
+
+**The guard is inert outside the loop.** It exits silently unless
+`CLAUDE_LOOP_PID` is set, so registering it in a normal session costs one
+`exit 0` per tool call `Scripts/context-guard.sh`. Its header asks for two
+registrations, PostToolUse and PreToolUse, and it tells them apart by the hook
+input's `hook_event_name`; it parses that input with `jq`
+`Scripts/context-guard.sh`.
+
+**What it measures (PostToolUse).** Main session only: any hook input carrying an
+`agent_id` exits at once, so a subagent's tool calls are never measured. It reads
+the tail of the session transcript named by `transcript_path`, takes the last
+`assistant` entry that is not a sidechain and carries `message.usage`, and sums
+`input_tokens`, `cache_creation_input_tokens` and `cache_read_input_tokens` into
+the current context size. That is compared with `CLAUDE_CTX_LIMIT`, default
+`300000` `Scripts/context-guard.sh` (the same default `Scripts/claude-loop.sh`
+prints at the start of each round). The transcript JSONL and its `usage` field are
+an undocumented internal format, which the script's header says in so many words
+`Scripts/context-guard.sh`. Nothing latches: once over the limit, every later tool
+call in the main session repeats the message.
+
+**What it injects.** Over the limit, it returns a PostToolUse `additionalContext`
+headed `CONTEXT GUARD (main session only; subagents and forks ignore this)` with
+the measured size and the limit, and an ordered instruction: finish the current
+atomic step; wait until every background minion and subagent the session launched
+has finished and reported, never checkpointing or restarting while one runs, and
+capture their results in the checkpoint; do not wait on background shell tasks,
+but stop one that never exits on its own (a server, watcher, `tail`, a command
+waiting for input) with `TaskStop` and record the command and output file of any
+other in the checkpoint; then run the `p:checkpoint` skill; then run
+`~/.claude/scripts/loop-restart.sh` `Scripts/context-guard.sh`.
+
+**What it refuses (PreToolUse).** When a subagent issues a command that names
+`loop-restart.sh`, the guard exits `2` with a stderr reason, so the tool call is
+blocked: only the main session may end the process `Scripts/context-guard.sh`. The
+main session's own call passes, and so does any command from a session not
+under the loop.
+
+**Its partner.** `Scripts/loop-restart.sh` refuses to run without
+`CLAUDE_LOOP_PID`, walks up the process tree from its parent to the process whose
+parent is the loop, touches `CLAUDE_LOOP_FLAG` when it is set, and sends that
+process `SIGTERM` `Scripts/loop-restart.sh`. The flag is what turns the exit into
+a restart rather than the end of the loop, which is why a plain `/exit` or Ctrl-C
+stops `Scripts/claude-loop.sh` instead of restarting it. The guard's PreToolUse
+refusal exists because a subagent running `loop-restart.sh` would find the same
+ancestor and kill the main session mid-step.

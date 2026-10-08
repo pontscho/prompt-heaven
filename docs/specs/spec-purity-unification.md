@@ -1,9 +1,9 @@
 ---
 name: spec-purity-unification
 type: spec
-status: active
+status: deprecated
 title: 'Implementation Plan: Unify mcp-clangd + mcp-cuda into mcp-purity (Phase 0)'
-description: Phase 0 implementation plan for folding clangd + cuda into mcp-purity behind purity_call. Decision recorded in adr 0001.
+description: SHIPPED in 4e19a5c (2026-06-18) and kept as a record rather than a live plan — Phase 0 of folding clangd + cuda into mcp-purity behind purity_call, an abstract LSP backend interface with one clangd-family backend, the semantic function family and the legacy aliases. Its path:line anchors are not maintained; the decision lives in ADR 0001.
 sources:
   - Scripts/mcp-purity.py
   - Scripts/mcp-purity.py:LspBackend
@@ -27,6 +27,17 @@ links:
 
 # Implementation Plan: Unify `mcp-clangd` + `mcp-cuda` into `mcp-purity` (Phase 0 — the skeleton)
 
+> **SHIPPED, AND NOT MAINTAINED. Read this as a record, not as instructions.**
+> The plan was executed in `4e19a5c` (2026-06-18), the commit that introduced
+> `ClangdClient` into `Scripts/mcp-purity.py`; Phase 1 followed in `75d3d26`
+> ([[spec-purity-luals-phase1]]). The decision is recorded in
+> [[0001-purity-server-unification]], and the living WHAT/HOW is the [[scripts]]
+> page and `ClaudeCode/skills/mcp-purity/SKILL.md`. The sentence below calling this
+> page the living WHAT/HOW was true when it was written and is not any more. Where
+> this text and the tree disagree -- including its statements that Phase 2 has not
+> started, which `ab8b441` and `171ef42` contradict -- the code and ADR 0001 are
+> right and this page is not. Its path:line anchors are left as they were written.
+>
 > The decision, alternatives, and consequences behind this plan are recorded in the ADR: [[0001-purity-server-unification]]. This page is the living WHAT/HOW.
 
 ## Requirements Summary

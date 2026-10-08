@@ -1,9 +1,9 @@
 ---
 name: spec-purity-luals-phase1
 type: spec
-status: active
+status: deprecated
 title: 'Phase 1: luals as the second LSP backend behind purity_call'
-description: How lua-language-server was folded in behind the unchanged purity_call entry point via a BaseLspClient extraction and a per-language divergence layer, plus the security-hardening pass that shipped with it.
+description: SHIPPED in 75d3d26 (2026-06-19) and kept as a record rather than a live plan — how lua-language-server was folded in behind the unchanged purity_call entry point via a BaseLspClient extraction and a per-language divergence layer, plus the security-hardening pass that shipped with it. Its path:line anchors are not maintained; the decision lives in ADR 0001.
 sources:
   - Scripts/mcp-purity.py
   - Scripts/mcp-purity.py:BaseLspClient
@@ -30,6 +30,15 @@ links:
 ---
 
 # Phase 1: `luals` as the second LSP backend
+
+> **SHIPPED, AND NOT MAINTAINED. Read this as a record, not as instructions.**
+> The fold was executed in `75d3d26` (2026-06-19), the commit that introduced
+> `LuaLsClient` and `_resolve_lsp_binary` into `Scripts/mcp-purity.py`. The decision
+> is recorded in [[0001-purity-server-unification]], and the living WHAT/HOW is the
+> [[scripts]] page and `ClaudeCode/skills/mcp-purity/SKILL.md`. Where this text and
+> the tree disagree -- including its closing statement that Phase 2 remains
+> unstarted, which `ab8b441` and `171ef42` contradict -- the code and ADR 0001 are
+> right and this page is not. Its path:line anchors are left as they were written.
 
 Phase 0 built a backend abstraction with exactly one implementation, so its
 "luals-ready" claim was untested by construction. Phase 1 is that test: it folds
