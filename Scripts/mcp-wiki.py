@@ -67,6 +67,7 @@ Call `wiki_call` with no `function` to print the function list.
 """
 
 import argparse
+import ast
 import asyncio
 import contextvars
 import hashlib
@@ -1745,6 +1746,15 @@ def measure_apply(abs_root: str, relpath: str, rows: List[dict]) -> None:
 #     exactly the kind of anchor this mechanism exists to stop trusting.
 #   * For a `.py` file a symbol resolves on a def / class / single-target
 #     assignment at any indentation. For a `.md` file, on a heading carrying it.
+#   * A DOTTED `.py` symbol (`Class.method`, `Outer.Inner.name`) is a MEMBER
+#     path, never a bare name (R-0094): the file is parsed with `ast`, the first
+#     component must be a class anywhere in it, and each next component a member
+#     of the previous class's body -- a def, a class, an assigned or annotated
+#     name, or a `self.<name>` assigned in one of its methods; an `if` / `try` /
+#     `with` in the body is looked through, a method's own locals are not. A
+#     file this interpreter cannot parse falls back to the last component under
+#     the bare-name rule and is reported WEAK, because a name found anywhere in
+#     the file is a mention of the member, not proof of it.
 #   * For EVERY OTHER extension the fallback is a whole-word occurrence, which
 #     proves the file MENTIONS the symbol and NOT that it defines it. Those are
 #     counted separately and reported as `by mention only`, so the report never
@@ -1824,10 +1834,98 @@ def prose_wikilinks(body: str) -> List[str]:
     return out
 
 
+# The rules `_resolve_anchor` reports as WEAK: a pass that proves the file names
+# the symbol, never that it defines it. See the matcher notes.
+_WEAK_RULES = ("mention", "member by name only")
+
+# Statements inside a class body that open no scope of their own, so a def or an
+# assignment under them is still a member of the class.
+_PY_TRANSPARENT = (ast.If, ast.Try, ast.With, ast.AsyncWith)
+
+
+def _py_body_members(stmts) -> Iterator[Tuple[str, Any]]:
+    """(name, node) for every member a class body defines, see the notes."""
+    for node in stmts:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            yield node.name, node
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    yield target.id, node
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                yield node.target.id, node
+        elif isinstance(node, _PY_TRANSPARENT):
+            for field in ("body", "orelse", "finalbody"):
+                yield from _py_body_members(getattr(node, field, None) or [])
+            for handler in getattr(node, "handlers", None) or []:
+                yield from _py_body_members(handler.body)
+
+
+def _py_self_attributes(cls) -> set:
+    """Every `self.<name>` assigned in a method of class node *cls*."""
+    out = set()
+    for _name, node in _py_body_members(cls.body):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for sub in ast.walk(node):
+            targets: list = []
+            if isinstance(sub, ast.Assign):
+                targets = sub.targets
+            elif isinstance(sub, (ast.AnnAssign, ast.AugAssign)):
+                targets = [sub.target]
+            for target in targets:
+                if (isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"):
+                    out.add(target.attr)
+    return out
+
+
+def _py_member_defined(text: str, symbol: str) -> Tuple[bool, str]:
+    """Does *text* define the dotted member path *symbol*? See the notes."""
+    parts = symbol.split(".")
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        found, _rule = _symbol_defined("member.py", text, parts[-1])
+        if found:
+            return True, "member by name only (the file does not parse: %s)" \
+                % type(exc).__name__
+        return False, ("the file does not parse and defines no %r anywhere"
+                       % parts[-1])
+    scopes = [n for n in ast.walk(tree)
+              if isinstance(n, ast.ClassDef) and n.name == parts[0]]
+    if not scopes:
+        return False, "no class %r" % parts[0]
+    for depth, part in enumerate(parts[1:], start=1):
+        owner = ".".join(parts[:depth])
+        last = depth == len(parts) - 1
+        found_nodes = []
+        for cls in scopes:
+            members = [node for name, node in _py_body_members(cls.body)
+                       if name == part]
+            if not members and last and part in _py_self_attributes(cls):
+                return True, "member"
+            found_nodes += members
+        if not found_nodes:
+            return False, "class %r defines no member %r" % (owner, part)
+        if last:
+            return True, "member"
+        scopes = [n for n in found_nodes if isinstance(n, ast.ClassDef)]
+        if not scopes:
+            return False, "%s.%s is not a class, so it has no member %r" % (
+                owner, part, parts[depth + 1])
+    return True, "member"
+
+
 def _symbol_defined(path: str, text: str, symbol: str) -> Tuple[bool, str]:
     """Does *text* define *symbol*, and by which rule? See the matcher notes."""
     word = re.escape(symbol)
     ext = os.path.splitext(path)[1].lower()
+    if ext in (".py", ".pyi") and "." in symbol:
+        return _py_member_defined(text, symbol)
     if ext in (".py", ".pyi"):
         for pattern, rule in (
                 (r"^[ \t]*(?:async[ \t]+)?def[ \t]+%s\b" % word, "def"),
@@ -1873,7 +1971,7 @@ def _resolve_anchor(anchor: str, repo: str, cache: dict) -> Tuple[str, str]:
     found, rule = _symbol_defined(path, text, symbol)
     if not found:
         return "missing-symbol", "%s: %s" % (path, rule)
-    return ("weak" if rule == "mention" else "ok"), rule
+    return ("weak" if rule.startswith(_WEAK_RULES) else "ok"), rule
 
 
 def frozen_record(fm) -> str:

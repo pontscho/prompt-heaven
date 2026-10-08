@@ -299,7 +299,11 @@ Coverage by group:
      DISCOVERED split is the load-bearing half: a `sources:` entry is checked as
      written, while a body span must begin at a real repo-root entry to be an
      anchor at all -- measured on the real corpus, that one rule took the finding
-     count from 30 to 4, and 26 of the 30 were sentences, not claims.  Finally
+     count from 30 to 4, and 26 of the 30 were sentences, not claims.  A
+     dotted Python symbol (`Class.method`, `Outer.Inner.name`) resolves only as
+     a member of the class it names (R-0094), and the rows that must stay
+     dead name things defined elsewhere in the file, so a bare-name fallback
+     cannot pass; an unparsable file degrades to WEAK.  Finally
      the renamed vocabulary: `gating` counts what `verify` PROVES, on a fixture
      where that number differs from the old `stale + orphaned-source +
      unverified` sum, and git lag becomes an `advisory:` line that says in those
@@ -2878,6 +2882,68 @@ R_BODY_ANCHORS = [
     ("_resolve_anchor", "not-an-anchor"),     # a bare identifier
 ]
 
+# A DOTTED Python symbol (R-0094): `path:Class.member` names a member OF THAT
+# CLASS, so it resolves only inside the class body -- never as a bare name, which
+# both failed every real method anchor (ADR 0028's `_RouterHandler.send_error`)
+# and, read the other way, would pass a module-level `method` for any class.
+# Most rows of the "must fail" half name something that DOES exist in the file
+# somewhere else, so a matcher that falls back to the bare name goes red there.
+R_SRC_MEMBERS = "src/members.py"
+R_SRC_UNPARSED = "src/unparsed.py"
+R_MEMBERS_TEXT = "\n".join([
+    "class Outer:",
+    "    LIMIT = 3",
+    "    label: str = 'x'",
+    "",
+    "    def method(self):",
+    "        self.seen = True",
+    "",
+    "        def local_helper():",
+    "            return 1",
+    "        return local_helper",
+    "",
+    "    async def amethod(self):",
+    "        return None",
+    "",
+    "    class Inner:",
+    "        def name(self):",
+    "            return 1",
+    "",
+    "    if True:",
+    "        def guarded(self):",
+    "            return 2",
+    "",
+    "",
+    "def method():",
+    "    return 0",
+    "",
+    "",
+    "def free_function():",
+    "    return method()",
+    ""])
+# Syntax this interpreter cannot parse, so the class body cannot be found: the
+# member falls back to its bare name and is reported WEAK, never as a proof.
+R_UNPARSED_TEXT = "class Broken:\n    def member(self):\n        pass\n\ndef (:\n"
+R_DOTTED_ANCHORS = [
+    ("%s:Outer.method" % R_SRC_MEMBERS, "ok"),
+    ("%s:Outer.amethod" % R_SRC_MEMBERS, "ok"),
+    ("%s:Outer.LIMIT" % R_SRC_MEMBERS, "ok"),
+    ("%s:Outer.label" % R_SRC_MEMBERS, "ok"),
+    ("%s:Outer.seen" % R_SRC_MEMBERS, "ok"),            # self.<name> in a method
+    ("%s:Outer.guarded" % R_SRC_MEMBERS, "ok"),         # under an `if` in the body
+    ("%s:Outer.Inner" % R_SRC_MEMBERS, "ok"),
+    ("%s:Outer.Inner.name" % R_SRC_MEMBERS, "ok"),
+    ("%s:method" % R_SRC_MEMBERS, "ok"),                # undotted: unchanged
+    ("%s:Outer.absent" % R_SRC_MEMBERS, "missing-symbol"),
+    ("%s:Outer.free_function" % R_SRC_MEMBERS, "missing-symbol"),  # module level
+    ("%s:Outer.local_helper" % R_SRC_MEMBERS, "missing-symbol"),   # a local
+    ("%s:Outer.Inner.method" % R_SRC_MEMBERS, "missing-symbol"),   # Outer's
+    ("%s:Absent.method" % R_SRC_MEMBERS, "missing-symbol"),
+    ("%s:free_function.method" % R_SRC_MEMBERS, "missing-symbol"),  # not a class
+    ("%s:Broken.member" % R_SRC_UNPARSED, "weak"),
+    ("%s:Broken.absent" % R_SRC_UNPARSED, "missing-symbol"),
+]
+
 # The `sources:` half of the DECLARED-vs-DISCOVERED split.  R_SRC_ELSEWHERE has
 # the same shape as the body's `nowhere/gone.py` and the opposite fate: a
 # frontmatter entry is a CLAIM and is checked as written, a body span is a guess
@@ -3048,6 +3114,8 @@ def build_region_fixture(work):
     work.write_text(R_SRC_REAL, "\n".join([
         "R_CONST = 1", "", "", "def real_function():", "    return R_CONST",
         "", "", "class RealClass:", "    pass", ""]))
+    work.write_text(R_SRC_MEMBERS, R_MEMBERS_TEXT)
+    work.write_text(R_SRC_UNPARSED, R_UNPARSED_TEXT)
     work.write_text(R_SRC_LUA, "local function lua_thing()\nend\n")
     work.write_text(R_MD_REAL, "# Notes\n\n## %s\n\nBody.\n" % R_MD_HEADING)
     return os.path.realpath(work.path)
@@ -9714,6 +9782,29 @@ def run(opts=None):
                                          "never that it defines it"),
                              _d("line ref", "path:12-20 resolves the FILE and "
                                             "does not check the range")]
+                            + ["        " + r for r in rows])
+
+        # ---- a dotted Python symbol is a member of the class it names --------
+        problems, rows = [], []
+        for span, want in R_DOTTED_ANCHORS:
+            kind, reason = rmod._resolve_anchor(span, rroot, anchor_cache)
+            rows.append("%-34s %-16s %s" % (span, kind, reason))
+            if kind != want:
+                problems.append("%r resolved %r, want %r (%s)"
+                                % (span, kind, want, reason))
+        suite.record("R", "a-dotted-symbol-is-a-class-member", problems,
+                     detail=[_d("py", "Outer.Inner.name walks the class bodies; "
+                                      "each member is a def / class / "
+                                      "assignment / self.<name> of THAT class"),
+                             _d("refused", "a module-level name, a method's "
+                                           "local, another class's member, "
+                                           "and a function as the container"),
+                             _d("unparsed", "a file the interpreter cannot "
+                                            "parse resolves the last component "
+                                            "by bare name and is WEAK"),
+                             _d("why", "R-0094: ADR 0028's "
+                                       "`_RouterHandler.send_error` read as "
+                                       "dead although the method exists")]
                             + ["        " + r for r in rows])
 
         # ---- DECLARED vs DISCOVERED ------------------------------------------
