@@ -434,6 +434,21 @@ def _run_whitebox(suite, gate, ws):
          "%s --seccomp -- true" % wrapper, repo_real),
         ("<WRAPPER> --seccomp --write . -- touch f (combines with a scope)",
          "%s --seccomp --write . -- touch f" % wrapper, repo_real),
+        # Controls for the round-2 security rows in group M: each pins the
+        # NARROW form that must stay auto-allowed, so a gate that merely
+        # prompts for everything cannot pass those rows.
+        # G1: a TAB is one of the two separators bash splits on.
+        ("G1-ctl tab-separated words still split ([ \\t]+)",
+         "%s\t--write\t.\t--\ttouch f" % wrapper, repo_real),
+        # G3: a `~/` prefix is the one tilde form bash and expanduser agree on.
+        ("G3-ctl target argv `~/x` (tilde-slash prefix) still allowed",
+         "%s -- ls ~/x" % wrapper, repo_real),
+        # R1: --rlimit-core 0 is the one core value that only narrows.
+        ("R1-ctl --rlimit-core 0 (no core dumps)",
+         "%s --rlimit-core 0 -- true" % wrapper, repo_real),
+        # R2: an ABSOLUTE nproc at sbx's default stays allowed.
+        ("R2-ctl --rlimit-nproc 512 (absolute, at the default)",
+         "%s --rlimit-nproc 512 -- true" % wrapper, repo_real),
     ]
     for name, cmd, cwd in autoallow:
         ok, reason = _clean(gate, cmd, cwd, wrapper_real)
@@ -478,6 +493,86 @@ def _run_whitebox(suite, gate, ws):
          "%s --seccomp --net -- curl x" % wrapper, repo_real),
         ("R12 --seccomp --write /etc (seccomp does not rescue a scope)",
          "%s --seccomp --write /etc -- touch x" % wrapper, repo_real),
+        # G1 (security review 20261011, CWE-436): str.split() also splits on
+        # \f \v \r \x1c-\x1f \x85 \xa0 U+2000.. which bash does NOT. The gate
+        # saw a phantom bare `--` and never reached --net, while sbx received
+        # `X=1<FF>--` as ONE word and then --net: a no-prompt network run.
+        ("G1 --env X=1<FF>-- --net (phantom -- via form feed)",
+         "%s --clean-env --env X=1\x0c-- --net -- /usr/bin/curl" % wrapper,
+         repo_real),
+        ("G1 --write .<FF>-- --net (phantom -- via form feed)",
+         "%s --write .\x0c-- --net -- /usr/bin/curl" % wrapper, repo_real),
+        ("G1 --env X=1<VT>-- --net (vertical tab)",
+         "%s --clean-env --env X=1\x0b-- --net -- /usr/bin/curl" % wrapper,
+         repo_real),
+        ("G1 --env X=1<NBSP>-- --net (U+00A0)",
+         "%s --clean-env --env X=1\xa0-- --net -- /usr/bin/curl" % wrapper,
+         repo_real),
+        ("G1 --env X=1<EMSP>-- --net (U+2003)",
+         ("%s --clean-env --env X=1" + chr(0x2003) + "-- --net -- /usr/bin/curl")
+         % wrapper,
+         repo_real),
+        ("G1 --env X=1<CR>-- --net (carriage return)",
+         "%s --clean-env --env X=1\r-- --net -- /usr/bin/curl" % wrapper,
+         repo_real),
+        ("G1 leading <FF> before the wrapper (strip() ate it, bash does not)",
+         "\x0c%s -- echo hi" % wrapper, repo_real),
+        # G2 (CWE-20): `[` `]` are glob characters bash expands and the gate
+        # took literally -- `[x]` names a nonexistent, "contained" <cwd>/[x]
+        # while bash hands sbx whatever `x` matches (a planted symlink to /).
+        ("G2 --write [x] (bracket glob)",
+         "%s --write [x] -- /bin/true" % wrapper, repo_real),
+        ("G2 --env A=[x] (bracket glob in a value)",
+         "%s --clean-env --env A=[x] -- /bin/true" % wrapper, repo_real),
+        ("G2 --write=[x] (bracket glob, equals-form)",
+         "%s --write=[x] -- /bin/true" % wrapper, repo_real),
+        # G3 (CWE-22): expanduser leaves `~+` / `~-` / `~user` literal, so the
+        # gate resolved <cwd>/~+/.. == <cwd> (contained) while bash expands
+        # ~+ to $PWD and sbx opens $PWD/.. -- the project's parent, writable.
+        ("G3 --write ~+/.. (bash: $PWD/..)",
+         "%s --write ~+/.. -- touch f" % wrapper, repo_real),
+        ("G3 --write ~- (bash: $OLDPWD)",
+         "%s --write ~- -- touch f" % wrapper, repo_real),
+        ("G3 --write ~root/x (bash: ~root's home)",
+         "%s --write ~root/x -- touch f" % wrapper, repo_real),
+        ("G3 --write=~+ (equals-form)",
+         "%s --write=~+ -- touch f" % wrapper, repo_real),
+        ("G3 --write ./~+/.. (tilde not at the token start)",
+         "%s --write ./~+/.. -- touch f" % wrapper, repo_real),
+        # R1 (CWE-269): a non-zero --rlimit-core enables kernel core dumps
+        # outside every write scope; only 0 narrows.
+        ("R1 --rlimit-core 1 (non-zero core prompts)",
+         "%s --rlimit-core 1 -- true" % wrapper, repo_real),
+        ("R1 --rlimit-core=1048576 (non-zero core, equals-form)",
+         "%s --rlimit-core=1048576 -- true" % wrapper, repo_real),
+        # R2 (CWE-770): `+N` is headroom over the CURRENT process count, so
+        # it can exceed sbx's absolute 512 default; only absolute N narrows.
+        ("R2 --rlimit-nproc +64 (headroom form prompts)",
+         "%s --rlimit-nproc +64 -- true" % wrapper, repo_real),
+        ("R2 --rlimit-nproc=+1 (headroom form, equals-form)",
+         "%s --rlimit-nproc=+1 -- true" % wrapper, repo_real),
+        # H1 (round 3, CWE-41): with no .git the project root IS the cwd, so
+        # from `/` or `/var` a `--write .` was "contained" -- and its bind
+        # buries the socket tmpfs (host sockets writable + connectable). sbx
+        # refuses it; the gate must not auto-allow it. Control: N `--write .`.
+        ("H1 cwd=/ --write . (the whole filesystem)",
+         "%s --write . -- true" % wrapper, "/"),
+        ("H1 cwd=/var --write . (ancestor of /var/run)",
+         "%s --write . -- true" % wrapper, "/var"),
+        ("H1 cwd=/ --write=/tmp (a socket directory itself)",
+         "%s --write=/tmp -- true" % wrapper, "/"),
+        ("H1 cwd=/ --write /var/run/.. (a /run-ancestor spelling)",
+         "%s --write /var/run/.. -- true" % wrapper, "/"),
+        # R2 (round 3, CWE-41): a scope UNDER /run, /var/run or /var/snap
+        # (/run/user/<uid>: D-Bus, ssh-agent, gpg-agent). With no .git the
+        # project root IS such a cwd, so `--write .` was "contained"; sbx
+        # refuses it (exit 2), the gate must prompt. Under /tmp is not here.
+        ("R2 cwd=/run/user/1000 --write . (under /run)",
+         "%s --write . -- true" % wrapper, "/run/user/1000"),
+        ("R2 cwd=/var/run/user --write . (under /var/run)",
+         "%s --write . -- true" % wrapper, "/var/run/user"),
+        ("R2 cwd=/var/snap/lxd --write=sub (under /var/snap)",
+         "%s --write=sub -- true" % wrapper, "/var/snap/lxd"),
     ]
     for name, cmd, cwd in flag_prompt:
         ok, reason = _clean(gate, cmd, cwd, wrapper_real)

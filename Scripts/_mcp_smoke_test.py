@@ -134,7 +134,53 @@ SERVERS = [
     # the proxy exits 1 before initialize, and the harness reports SKIP, not FAIL.
     {"file": "mcp-proxy.py",    "tool": "tf_stub_call",
      "args": ["--project-root", "/tmp", "--config-json", _PROXY_SMOKE_CONFIG], "registered": False},
+    # mcp-sandbox.py needs a config FILE, and a checked-in one would carry a host
+    # path, so its row names a placeholder instead: every launch path replaces
+    # SANDBOX_CONFIG_TOKEN with a file it generates at runtime from the ONE pure
+    # text helper _sandbox_smoke_config_text below, written through that path's
+    # own write record (this harness: run_server; the footprint and
+    # name_existence suites: their recorded write_text). One /bin/bash
+    # interpreter keeps startup well inside READ_TIMEOUT (measured 0.94 s
+    # median), so the row needs no per-entry timeout. Like mcp-search, both new
+    # hosts refuse the forced-exc probe's non-object params as -32602 before
+    # any handler runs; the catch-all stays gated by tests/test_handler_crash.py.
+    {"file": "mcp-sandbox.py",  "tool": "sandbox_call",
+     "args": ["--config", "{sandbox_config}"], "registered": False,
+     "forced_exc_code": -32602},
+    # mcp-skill.py with no skill root serves an empty index: no placeholder.
+    {"file": "mcp-skill.py",    "tool": "skill_call",    "args": [], "registered": False,
+     "forced_exc_code": -32602},
 ]
+
+# The argv token a launch path replaces with a generated mcp-sandbox config.
+SANDBOX_CONFIG_TOKEN = "{sandbox_config}"
+_SANDBOX_SBX = os.path.join(_REPO_DIR, "ClaudeCode", "skills", "sandbox-run", "scripts", "sbx")
+
+
+def _sandbox_smoke_config_text(work_root):
+    """The mcp-sandbox smoke config as TEXT, for a runner whose work root is
+    *work_root*. Pure: it writes nothing, so each launch path writes it through
+    its own recorded write path (and makes it 0600: the runner refuses a group-
+    or world-writable config). One interpreter, /bin/bash, and the limits the
+    mcp_sandbox suite's own config template uses."""
+    return json.dumps({
+        "version": 1,
+        "sbx": _SANDBOX_SBX,
+        "work_root": work_root,
+        "seccomp": "auto",
+        "log_content": False,
+        "interpreters": {"bash": {"path": "/bin/bash"}},
+        "limits": {
+            "timeout_ms": 30000, "max_timeout_ms": 120000,
+            "as_budget_bytes": 1073741824, "as_mode": "baseline",
+            "nproc_headroom": 64, "fsize_bytes": 16777216, "nofile": 256,
+            "stdout_bytes": 65536, "stderr_bytes": 65536,
+            "max_files": 64, "max_files_bytes": 4194304,
+            "max_out_files": 16, "max_out_bytes": 1048576,
+            "max_stdin_bytes": 1048576, "max_args": 64, "max_arg_chars": 4096,
+            "max_concurrent": 2, "min_free_bytes": 1073741824,
+        },
+    }, indent=2) + "\n"
 
 READ_TIMEOUT = 8.0  # seconds to wait for a single response line
 
@@ -498,6 +544,8 @@ NEAR_MISS_FUNCTION = {
     "mcp-postgres.py": ("list_tabels",            "list_tables"),
     "mcp-wiki.py":     ("serach",                 "search"),
     "mcp-inspect.py":  ("processs",               "processes"),
+    "mcp-sandbox.py":  ("run_scrip",              "run_script"),
+    "mcp-skill.py":    ("lod",                    "load"),
 }
 
 # mcp-proxy.py has no `function` layer at all: it relays a tools/call to the
@@ -511,7 +559,7 @@ NEAR_MISS_TOOL = {
 # near-miss key, and the canonical name the suggestion must carry. A host is in
 # this table iff its source carries the refusal sentence (PARAM_REFUSAL_MARK);
 # the coverage row derives that from the source, so a host that learns to refuse
-# a parameter cannot join the fleet without a probe. Fifteen hosts refuse one
+# a parameter cannot join the fleet without a probe. Seventeen hosts refuse one
 # now. mcp-git turns an unknown key into a `--key[=value]` git flag by design
 # (its tool description documents that channel), so it has no unknown-name
 # refusal to probe -- it refuses only a key no git option can be spelled from,
@@ -548,6 +596,9 @@ NEAR_MISS_PARAM = {
     "mcp-clangd.py":   ("clangd_find_definition", {"symbol_nam": "x"}, "symbol_name"),
     "mcp-cuda.py":     ("cuda_find_definition",   {"symbol_nam": "x"}, "symbol_name"),
     "mcp-lua-lsp.py":  ("luals_find_definition",  {"symbol_nam": "x"}, "symbol_name"),
+    # The two runners refuse an unknown key before any run or skill lookup.
+    "mcp-sandbox.py":  ("run_script",     {"entri": "x"},      "entry"),
+    "mcp-skill.py":    ("load",           {"name": "x", "fiel": "x"}, "file"),
 }
 
 # The false-refusal half: per newly refusing host, a call spelled exactly as the
@@ -575,6 +626,8 @@ DOCUMENTED_CALL = {
                                                    "context_lines": 2}),
     "mcp-lua-lsp.py":  ("luals_find_definition",  {"symbol_name": "x", "path": "a.lua",
                                                    "context_lines": 2}),
+    "mcp-sandbox.py":  ("capabilities",   {}),
+    "mcp-skill.py":    ("list",           {}),
 }
 ORIGINAL_PARAM_REFUSERS = ("mcp-purity.py", "mcp-postgres.py", "mcp-search.py",
                            "mcp-webfetch.py", "mcp-inspect.py", "mcp-wiki.py")
@@ -1430,7 +1483,33 @@ def inflight_kill_probe(checks, which="forge"):
 
 
 def run_server(cfg):
-    """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}."""
+    """Return (status, checks) where status in {PASS, FAIL, SKIP, ERROR}.
+
+    A row whose args carry SANDBOX_CONFIG_TOKEN is launched against a config
+    generated here, in a mkdtemp under the repo's .claude/tmp that also holds
+    the runner's work root, and removed with it after the row.
+    """
+    if SANDBOX_CONFIG_TOKEN not in cfg["args"]:
+        return _run_server_checks(cfg)
+    import tempfile
+    tmp_root = os.path.join(os.path.dirname(SCRIPT_DIR), ".claude", "tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    base = tempfile.mkdtemp(prefix="sandbox_smoke_", dir=tmp_root)
+    try:
+        cfg_path = os.path.join(base, "sandbox.json")
+        fd = os.open(cfg_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(_sandbox_smoke_config_text(os.path.join(base, "work")))
+        launched = dict(cfg)
+        launched["args"] = [cfg_path if arg == SANDBOX_CONFIG_TOKEN else arg
+                            for arg in cfg["args"]]
+        return _run_server_checks(launched)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _run_server_checks(cfg):
+    """run_server's body for one launchable row (no placeholder left)."""
     srv = Server(cfg)
     srv.start()
     checks = []

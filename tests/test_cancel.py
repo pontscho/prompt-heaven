@@ -232,12 +232,23 @@ FLEET = {
     "mcp-purity.py":   (LSP_CANCEL, "semantic calls: $/cancelRequest to "
                                     "clangd/luals; file ops on the default "
                                     "pool stay reply-only"),
+    "mcp-sandbox.py":  (KILL,       "every sbx spawn (the run, the VSZ probe, "
+                                    "--version, the self-test) goes through "
+                                    "_spawn_sbx, which adopts the Popen; the "
+                                    "target pgid from --status-fd is adopted "
+                                    "too and killed by the run thread if sbx "
+                                    "dies; /bin/ps goes through the adopting "
+                                    "_run_child; the workdir is removed (or "
+                                    "quarantined) in the finally"),
     "mcp-tshark.py":   (KILL,       "each request's tshark run is adopted and "
                                     "its process group killed on cancel; the "
                                     "capture child is a session (KILL_EXEMPT)"),
     "mcp-search.py":   (REPLY_ONLY, "the search runs to completion in its "
                                     "worker thread, possibly holding an endpoint "
                                     "lock (the drain-on-shutdown reason)"),
+    "mcp-skill.py":    (REPLY_ONLY, "the runner HTTP call runs to its own "
+                                    "deadline in the worker thread; hanging "
+                                    "up is a roadmap item"),
     "mcp-webfetch.py": (REPLY_ONLY, "the fetch runs to completion in its worker "
                                     "thread (the drain-on-shutdown reason)"),
     "mcp-wiki.py":     (KILL,       "_measure_run's child is adopted and its "
@@ -246,10 +257,10 @@ FLEET = {
 }
 
 DECLARED_TASK = 3
-DECLARED_KILL = 5
+DECLARED_KILL = 6
 DECLARED_LSP_CANCEL = 4
 DECLARED_PG_CANCEL = 1
-DECLARED_REPLY_ONLY = 4
+DECLARED_REPLY_ONLY = 5
 
 # A `kill` server's spawn sites a cancel does NOT reach, by (file, enclosing
 # function), each with the reason it may outlive the request that spawned it.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`Scripts/mcp-proxy.py` relays, it never composes (A-L).
+"""`Scripts/mcp-proxy.py` relays, it never composes (A-M).
 
 WHAT IS GATED
 -------------
@@ -38,10 +38,11 @@ The case count is TYPED in run.py's SUITES table: this is a fixed case table,
 so a count that moves is the alarm.  The total below is the expected value; the
 run is authoritative.
 
-Total: 112 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 8, H 1, I 6, J 49, K 5,
-L 4; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4; R-0069 added
-J43, R-0076 J44, R-0075 J45; R-0067/R-0068 added G8 and J46; R-0072 added K5
-and J47; R-0089 added J48, R-0090 J49).
+Total: 123 cases (A 13, B 7, C 6, D 4, E 4, F 5, G 8, H 1, I 6, J 49, K 5,
+L 4, M 11; the round-1/2/3 reviews added A13, G6, G7, J34-J42 and L4; R-0069
+added J43, R-0076 J44, R-0075 J45; R-0067/R-0068 added G8 and J46; R-0072
+added K5 and J47; R-0089 added J48, R-0090 J49; the relist work added group M,
+M1-M11).  Group M runs before group L, the hygiene snapshot.
 
 Usage:
   python3 tests/test_mcp_proxy.py
@@ -75,6 +76,11 @@ Groups:
                   a NaN / Infinity token or an over-long integer literal
   K  static    -- AST over the proxy source: spawn shape, logging, API floor,
                   the front's injected policy (K5)
+  M  relist    -- the opt-in per-child "relist": bool-only key, default off
+                  byte-identical, descriptions refresh, a changed name set
+                  disables, a failing relist serves stale and is bounded by
+                  the min interval, coalescing, the HTTP front, restart,
+                  the relist task cancelled on stop
   L  hygiene   -- every write under .claude/tmp, no bytecode, no new repo paths,
                   _log_value marks every cut
 """
@@ -124,6 +130,7 @@ GI = "I. shutdown"
 GJ = "J. Streamable HTTP"
 GK = "K. static AST over the proxy"
 GL = "L. hygiene"
+GM = "M. relist"
 
 FIXTURE_BASE = H.repo_path(".claude", "tmp", "test_mcp_proxy")
 WRITES = []
@@ -2816,10 +2823,11 @@ def j49_weak(distinct, length=48):
     return (J49_ALPHABET[:distinct] * length)[:length]
 
 
-def j49_args(token_file=None):
+def j49_args(token_file=None, require_token_file=False):
     """The argparse namespace load_http_settings reads, every value valid."""
     return types.SimpleNamespace(
-        bind="127.0.0.1", allow_remote=False, token_file=token_file, port=0,
+        bind="127.0.0.1", allow_remote=False, token_file=token_file,
+        require_token_file=require_token_file, port=0,
         http_path="/mcp", allowed_origin=None, max_body_bytes=1, max_sessions=1,
         max_connections=1, max_inflight=1, session_idle=1.0, ready_file=None)
 
@@ -2880,6 +2888,64 @@ def j49_token_floor(suite, fixture_root, start_sandbox):
         lines.append("boundary    : %d distinct refused, %d accepted, both sources "
                      "(in-process, _TOKEN_MIN_DISTINCT %d)" % (floor - 1, floor, floor))
     suite.record(GJ, "token distinct floor -> rc 2", problems, detail=lines)
+
+
+def j50_require_token_file(suite, fixture_root, start_sandbox):
+    """J50 (T2): --require-token-file refuses MCP_PROXY_TOKEN, even beside
+    --token-file, and needs --token-file and --http; without the flag the
+    environment source is unchanged."""
+    problems, lines = [], []
+    flag = "--require-token-file"
+    # Live: every refused shape is rc 2, one `mcp-proxy:` line naming the
+    # rule, the env token never on stderr, no child spawned.
+    sandbox, cfgpath, _token, tok = start_sandbox("j50")
+    env_token = new_token()
+    for label, argv, env, needles in (
+            ("flag + --token-file + env", http_argv(sandbox, cfgpath, flag, "--token-file", tok),
+             {TOKEN_ENV: env_token}, [flag, TOKEN_ENV]),
+            ("flag + env only", http_argv(sandbox, cfgpath, flag),
+             {TOKEN_ENV: env_token}, [flag, TOKEN_ENV]),
+            ("flag without --token-file", http_argv(sandbox, cfgpath, flag),
+             None, [flag, "--token-file"]),
+            ("flag without --http",
+             [sys.executable, "-B", SERVER, "--project-root", sandbox, "--config", cfgpath,
+              flag], None, [flag, "--http"])):
+        rc, err = refused_http(sandbox, argv, env)
+        problems += check_refused(sandbox, label, rc, err, needles, secret=env_token)
+    lines.append("live        : flag+file+env, flag+env, flag alone, flag without --http")
+    # In-process: the accepted shapes, and the default left as it was.
+    try:
+        mod = H.load_module_from_path("ph_proxy_j50", SERVER)
+    except Exception as exc:  # noqa: BLE001 -- an import failure is the finding
+        suite.record(GJ, "--require-token-file refuses the env token -> rc 2",
+                     problems + ["cannot import the proxy: %s: %s" % (type(exc).__name__, exc)],
+                     detail=lines)
+        return
+    file_token = new_token()
+    path = write_file(os.path.join(sandbox, "tok-j50"), file_token + "\n")
+    for label, args, env, want in (
+            ("flag + --token-file", j49_args(path, True), None, file_token),
+            ("flag + --token-file + env", j49_args(path, True), env_token, None),
+            ("no flag, env only (default unchanged)", j49_args(), env_token, env_token)):
+        try:
+            got = mod.load_http_settings(args, env)
+        except mod.ConfigError as exc:
+            if want is not None:
+                problems.append("%s: refused (%s), expected accepted" % (label, exc))
+            elif flag not in str(exc) or TOKEN_ENV not in str(exc):
+                problems.append("%s: refusal %r does not name %s and %s"
+                                % (label, str(exc), flag, TOKEN_ENV))
+            if env_token in str(exc):
+                problems.append("%s: the refusal quotes the token" % label)
+            continue
+        if want is None:
+            problems.append("%s: accepted, expected a ConfigError" % label)
+        elif got.token != want.encode("ascii"):
+            problems.append("%s: settings token is not the expected source's" % label)
+    lines.append("in-process  : flag+file accepted, flag+file+env refused, "
+                 "env without the flag accepted")
+    suite.record(GJ, "--require-token-file refuses the env token -> rc 2", problems,
+                 detail=lines)
 
 
 def http_init(client):
@@ -3044,6 +3110,10 @@ def group_j(suite, fixture_root):
     # boundary (one under the floor refused, the floor itself accepted) is
     # pinned in-process through load_http_settings against the live constant.
     j49_token_floor(suite, fixture_root, start_sandbox)
+
+    # J50 -- T2: --require-token-file pins the bearer source to the file; a set
+    # MCP_PROXY_TOKEN refuses the start, even beside --token-file.
+    j50_require_token_file(suite, fixture_root, start_sandbox)
 
     # J3 -- a non-loopback bind without --allow-remote; IPv6 and a host name;
     # a busy port (bound before any spawn: one line, no .pids).
@@ -5009,6 +5079,540 @@ def group_k(suite):
 
 
 # ---------------------------------------------------------------------------
+# M. relist  (11 cases)
+# ---------------------------------------------------------------------------
+
+M_INTERVAL_FALLBACK_S = 1.0  # used only while the module declares no _RELIST_MIN_INTERVAL_S
+M_INTERVAL_SLACK_S = 0.5     # M2, M3, M8, M9: a list this long past the min interval relists
+M_STALE_REPLY_S = 1.0        # M10: a tools/list during the restart is answered within this
+M_COALESCE_DELAY_S = 1.5     # M7: --list-delay keeping the first relist in flight
+M_STOP_DELAY_S = 2.0         # M11: --list-delay of the listing in flight at shutdown
+M_INIT_DELAY_S = 2.0         # M10: --init-delay keeping the restart in progress
+M_RELIST_GONE = "tool set changed on relist"
+
+
+def m_desc(n):
+    """The --desc-counter description of a stub's n-th tools/list answer."""
+    return "tf stub tool (list #%d)" % n
+
+
+def m_lists(state_dir, tool0=STUB_DEFAULT_TOOL, pid=None):
+    """How many tools/list requests the stub recorded (only *pid*'s, if given)."""
+    return sum(1 for e in read_events(state_dir, tool0)
+               if e.get("method") == "tools/list" and (pid is None or e.get("pid") == pid))
+
+
+def m_wait_lists(state_dir, n, tool0=STUB_DEFAULT_TOOL, timeout=EVENT_TIMEOUT_S):
+    """True once the stub recorded at least *n* tools/list requests, polled."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if m_lists(state_dir, tool0) >= n:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def m_listing(proxy, rid, timeout=REPLY_TIMEOUT_S):
+    """(problems, tools, serialized result) of one upstream tools/list over stdio."""
+    proxy.request("tools/list", {}, rid)
+    reply = proxy.wait_id(rid, timeout)
+    if reply is None:
+        return ["tools/list %r: no reply; stderr: %s" % (rid, stderr_tail(proxy))], None, None
+    result = reply.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        return ["tools/list %r: not a listing: %r" % (rid, reply)], None, None
+    return [], result["tools"], json.dumps(result)
+
+
+def m_desc_of(tools, name):
+    """The description *tools* gives tool *name*, or None if it is not listed."""
+    for tool in tools or []:
+        if isinstance(tool, dict) and tool.get("name") == name:
+            return tool.get("description")
+    return None
+
+
+def m_live(fixture_root, label, make_children, body, top=None):
+    """`live_case` without the record: (problems, detail) of one live proxy."""
+    sandbox = new_sandbox(fixture_root, label)
+    children = make_children(sandbox)
+    cfgpath = write_config(sandbox, children, **(top or {}))
+    problems, lines = [], []
+    proxy = None
+    try:
+        proxy = ProxyProc(sandbox, cfgpath, label=label)
+        got_problems, got_detail = body(proxy)
+        problems += got_problems
+        lines += got_detail
+    except Exception as exc:  # noqa: BLE001 -- any raise is the case's finding
+        problems.append("case raised %s: %s" % (type(exc).__name__, exc))
+    finally:
+        if proxy is not None:
+            proxy.close()
+        problems += reap_stubs(sandbox, children)
+    return problems, lines
+
+
+def group_m(suite, fixture_root):
+    """M. the opt-in per-child "relist": a fresh child tools/list, name set frozen.
+
+    Runs BEFORE group L (the hygiene snapshot must see every fixture write).
+    The stub's --desc-counter makes every listing carry its per-process
+    tools/list count, so a refreshed description is the observable, and the
+    stub's events.jsonl counts the child listings a relist caused.  Every
+    delay is <= 2 s; the min interval and the stop bound are read from the
+    module.
+    """
+    cids = ("relist-non-bool-refused",                 # M1
+            "relist-default-off-descriptions-frozen",  # M2
+            "relist-description-refreshes",            # M3
+            "relist-off-byte-identical-listing",       # M4
+            "relist-name-set-change-disables",         # M5
+            "relist-failure-serves-stale",             # M6
+            "relist-coalesced",                        # M7
+            "relist-min-interval",                     # M8
+            "relist-over-http-front",                  # M9
+            "relist-during-restart-serves-stale",      # M10
+            "relist-task-cancelled-on-stop")           # M11
+    try:
+        mod = H.load_module_from_path("ph_proxy_m", SERVER)
+    except Exception as exc:  # noqa: BLE001 -- an import failure fails the group
+        for cid in cids:
+            suite.record(GM, cid, ["cannot import %s: %s: %s"
+                                   % (os.path.relpath(SERVER, H.REPO_ROOT),
+                                      type(exc).__name__, exc)])
+        return
+    declared = getattr(mod, "_RELIST_MIN_INTERVAL_S", None)
+    if isinstance(declared, (int, float)) and not isinstance(declared, bool) and declared > 0:
+        interval = float(declared)
+        interval_line = "interval    : _RELIST_MIN_INTERVAL_S = %g (from the module)" % interval
+    else:
+        interval = M_INTERVAL_FALLBACK_S
+        interval_line = ("interval    : the module declares no _RELIST_MIN_INTERVAL_S "
+                         "(%r); %g s assumed" % (declared, interval))
+    past = interval + M_INTERVAL_SLACK_S
+    tool = STUB_DEFAULT_TOOL
+
+    # M1 -- a non-bool relist is refused naming the key and the rule; true,
+    # false and an omitted key load, and the spec carries the value.
+    sandbox = new_sandbox(fixture_root, "m1")
+    problems = []
+
+    def load(**keys):
+        return mod.load_config(None, inline_config([stub_child("alpha", **keys)]), sandbox)
+
+    for value in ("yes", 1, None):
+        problems += refused(mod, lambda v=value: load(relist=v),
+                            ["child 'alpha'", "relist must be a boolean"],
+                            "relist=%r" % (value,))
+    for keys, want in (({"relist": True}, True), ({"relist": False}, False), ({}, False)):
+        label = "relist=%r" % keys["relist"] if keys else "relist omitted"
+        try:
+            got = getattr(load(**keys).children[0], "relist", "<no relist field>")
+        except Exception as exc:  # noqa: BLE001
+            problems.append("control: %s refused: %s: %s" % (label, type(exc).__name__, exc))
+            continue
+        if got is not want:
+            problems.append("control: %s loaded ChildSpec.relist %r, expected %r"
+                            % (label, got, want))
+    suite.record(GM, cids[0], problems,
+                 detail=["refused     : \"yes\", 1, null (in-process load_config)",
+                         "accepted    : true, false, omitted -> ChildSpec.relist"])
+
+    # M2 -- relist omitted: the description stays the startup listing's and the
+    # child sees one tools/list; a relist sibling is the control.
+    def m2(proxy):
+        problems = started(proxy)
+        if problems:
+            return problems, []
+        got1, tools1, _s1 = m_listing(proxy, "tf-m2-1")
+        time.sleep(past)
+        got2, tools2, _s2 = m_listing(proxy, "tf-m2-2")
+        problems += got1 + got2
+        if got1 or got2:
+            return problems, []
+        frozen = (m_desc_of(tools1, "tf_frozen_call"), m_desc_of(tools2, "tf_frozen_call"))
+        fresh = (m_desc_of(tools1, "tf_fresh_call"), m_desc_of(tools2, "tf_fresh_call"))
+        if frozen != (m_desc(1), m_desc(1)):
+            problems.append("relist-off child descriptions %r, expected both %r"
+                            % (frozen, m_desc(1)))
+        n_frozen = m_lists(proxy.sandbox, "tf_frozen_call")
+        if n_frozen != 1:
+            problems.append("relist-off child saw %d tools/list, expected 1" % n_frozen)
+        if fresh[0] == fresh[1]:
+            problems.append("control: the relist sibling's description did not refresh: %r"
+                            % (fresh,))
+        return problems, ["frozen      : %r, %d child tools/list" % (frozen, n_frozen),
+                          "control     : relist sibling %r" % (fresh,)]
+
+    live_case(suite, GM, cids[1], fixture_root, "m2",
+              lambda sb: [
+                  stub_child("frozen", "--tool", "tf_frozen_call", "--desc-counter",
+                             "--state-dir", sb),
+                  stub_child("fresh", "--tool", "tf_fresh_call", "--desc-counter",
+                             "--state-dir", sb, relist=True),
+              ], m2,
+              detail=[interval_line, "lists       : two, %g s apart" % past])
+
+    # M3 -- relist on: each upstream tools/list carries the child's latest listing.
+    def m3(proxy):
+        problems = started(proxy)
+        if problems:
+            return problems, []
+        got1, tools1, _s1 = m_listing(proxy, "tf-m3-1")
+        n1 = m_lists(proxy.sandbox)
+        time.sleep(past)
+        got2, tools2, _s2 = m_listing(proxy, "tf-m3-2")
+        n2 = m_lists(proxy.sandbox)
+        problems += got1 + got2
+        if got1 or got2:
+            return problems, []
+        d1, d2 = m_desc_of(tools1, tool), m_desc_of(tools2, tool)
+        if d1 != m_desc(n1):
+            problems.append("first list: description %r, the child's latest is %r" % (d1, m_desc(n1)))
+        if d2 != m_desc(n2):
+            problems.append("second list: description %r, the child's latest is %r" % (d2, m_desc(n2)))
+        if d1 == d2:
+            problems.append("the description did not refresh across the min interval: %r" % d1)
+        return problems, ["descriptions: %r -> %r" % (d1, d2),
+                          "child lists : %d -> %d" % (n1, n2)]
+
+    live_case(suite, GM, cids[2], fixture_root, "m3",
+              lambda sb: [stub_child("alpha", "--desc-counter", "--state-dir", sb,
+                                     relist=True)], m3,
+              detail=[interval_line])
+
+    # M4 -- relist omitted and relist false give the same listing, byte for byte,
+    # on every call, equal to the child's own; no relist reaches the child.
+    own = stub_listing("--tool", "tf_alpha_call")
+    serials = []
+    problems = []
+    lines = []
+
+    def m4_body(variant):
+        def body(proxy):
+            problems = started(proxy)
+            if problems:
+                return problems, []
+            got1, tools1, s1 = m_listing(proxy, "tf-m4-1")
+            time.sleep(past)
+            got2, _tools2, s2 = m_listing(proxy, "tf-m4-2")
+            problems += got1 + got2
+            if got1 or got2:
+                return problems, []
+            serials.extend((s1, s2))
+            if own is None:
+                problems.append("control: the stub's own listing could not be read")
+            elif json.dumps(tools1, sort_keys=True) != json.dumps(own, sort_keys=True):
+                problems.append("%s: the listing differs from the stub's own" % variant)
+            n = m_lists(proxy.sandbox, "tf_alpha_call")
+            if n != 1:
+                problems.append("%s: the child saw %d tools/list, expected 1" % (variant, n))
+            return problems, ["%-11s : %d bytes x2, %d child tools/list" % (variant, len(s1), n)]
+        return body
+
+    for variant, keys in (("omitted", {}), ("false", {"relist": False})):
+        got, got_lines = m_live(
+            fixture_root, "m4-" + variant,
+            lambda sb, k=keys: [stub_child("alpha", "--tool", "tf_alpha_call",
+                                           "--state-dir", sb, **k)],
+            m4_body(variant))
+        problems += got
+        lines += got_lines
+    if len(serials) == 4 and len(set(serials)) != 1:
+        problems.append("the four serialized listings differ (%d distinct)" % len(set(serials)))
+    elif len(serials) != 4 and not problems:
+        problems.append("only %d listing(s) captured, expected 4" % len(serials))
+    suite.record(GM, cids[3], problems,
+                 detail=["compare     : json.dumps(result) of 2 lists x {omitted, false}",
+                         interval_line] + lines)
+
+    # M5 -- a relist whose NAME SET changed disables that child (the restart
+    # path's rule); its call quotes the reason, the sibling still answers.
+    def m5(proxy):
+        problems = started(proxy)
+        if problems:
+            return problems, []
+        alpha_pids = read_pids(proxy.sandbox, "tf_alpha_call")
+        write_file(os.path.join(proxy.sandbox, "tf-toolset.txt"),
+                   "tf_alpha_call\ntf_extra_call\n")
+        got, _tools, _s = m_listing(proxy, "tf-m5-list")
+        problems += got
+        proxy.call(501, "tf_alpha_call", "tf_echo", {"x": 1})
+        reply = proxy.wait_id(501)
+        text = tool_text(reply) if reply is not None else ""
+        if reply is None:
+            problems.append("the call to the relisted child got no reply")
+        elif not is_error_result(reply) or M_RELIST_GONE not in text:
+            problems.append("expected isError quoting %r, got %r" % (M_RELIST_GONE, reply))
+        proxy.call(502, "tf_beta_call", "tf_echo", {"x": 2})
+        other = proxy.wait_id(502)
+        if other is None or is_error_result(other) or "error" in other:
+            problems.append("sibling 'beta' did not answer cleanly: %r" % (other,))
+        alive = [pid for pid in alpha_pids if not pid_dead(pid)]
+        if proxy.poll() is None and alive:
+            problems.append("the disabled child's pid(s) %r still alive" % alive)
+        return problems, ["isError     : %s" % text,
+                          "toolset     : rewritten to add tf_extra_call before the list"]
+
+    live_case(suite, GM, cids[4], fixture_root, "m5",
+              lambda sb: [
+                  stub_child("alpha", "--tool", "tf_alpha_call", "--state-dir", sb,
+                             "--toolset-file", os.path.join(sb, "tf-toolset.txt"),
+                             "--toolset-reread", relist=True),
+                  stub_child("beta", "--tool", "tf_beta_call", "--state-dir", sb),
+              ], m5)
+
+    # M6 -- a failing relist serves the last good listing and stays bounded:
+    # a second upstream list within the min interval of the failed ATTEMPT
+    # causes no second child tools/list (R4:L3).
+    def m6(proxy):
+        problems = started(proxy)
+        if problems:
+            return problems, []
+        t0 = time.monotonic()
+        got1, tools1, _s1 = m_listing(proxy, "tf-m6-1")
+        n1 = m_lists(proxy.sandbox)
+        got2, tools2, _s2 = m_listing(proxy, "tf-m6-2")
+        sent2 = time.monotonic() - t0
+        n2 = m_lists(proxy.sandbox)
+        problems += got1 + got2
+        if got1 or got2:
+            return problems, []
+        if sent2 >= interval:
+            problems.append("harness: the second list took %.2fs, past the %g s interval"
+                            % (sent2, interval))
+        if n1 != 2:
+            problems.append("first list: the child saw %d tools/list, expected 2 "
+                            "(startup + one failed relist)" % n1)
+        if n2 != n1:
+            problems.append("second list within the interval: %d -> %d child tools/list, "
+                            "expected no new one" % (n1, n2))
+        descs = (m_desc_of(tools1, tool), m_desc_of(tools2, tool))
+        if descs != (m_desc(1), m_desc(1)):
+            problems.append("descriptions %r, expected the stale %r" % (descs, m_desc(1)))
+        proxy.call(601, tool, "tf_echo", {"x": 1})
+        reply = proxy.wait_id(601)
+        if reply is None or is_error_result(reply) or "error" in reply:
+            problems.append("the child is not callable after a failed relist: %r" % (reply,))
+        if "relist failed" not in proxy.stderr_text():
+            problems.append("stderr does not log 'relist failed': %s" % stderr_tail(proxy))
+        return problems, ["child lists : %d after list 1, %d after list 2 (%.2fs later)"
+                          % (n1, n2, sent2),
+                          "descriptions: %r" % (descs,)]
+
+    live_case(suite, GM, cids[5], fixture_root, "m6",
+              lambda sb: [stub_child("alpha", "--desc-counter", "--list-error-after", 1,
+                                     "--state-dir", sb, relist=True)], m6,
+              detail=["stub        : --list-error-after 1 (every relist fails)", interval_line])
+
+    # M7 -- two upstream lists while one relist is in flight: one child tools/list.
+    def m7(proxy):
+        problems = started(proxy)
+        if problems:
+            return problems, []
+        proxy.request("tools/list", {}, "tf-m7-1")
+        if not m_wait_lists(proxy.sandbox, 2):
+            return ["the first upstream list caused no child tools/list within %gs"
+                    % EVENT_TIMEOUT_S], []
+        proxy.request("tools/list", {}, "tf-m7-2")
+        proxy.request("tools/list", {}, "tf-m7-3")
+        descs = []
+        for rid in ("tf-m7-1", "tf-m7-2", "tf-m7-3"):
+            reply = proxy.wait_id(rid)
+            result = reply.get("result") if isinstance(reply, dict) else None
+            if not isinstance(result, dict):
+                problems.append("%s: not a listing: %r" % (rid, reply))
+                descs.append(None)
+                continue
+            descs.append(m_desc_of(result.get("tools"), tool))
+        n = m_lists(proxy.sandbox)
+        if n != 2:
+            problems.append("the child saw %d tools/list, expected 2 (startup + one relist)" % n)
+        if descs[0] != m_desc(2):
+            problems.append("the relisting call's description %r, expected %r"
+                            % (descs[0], m_desc(2)))
+        return problems, ["child lists : %d" % n, "descriptions: %r" % (descs,)]
+
+    live_case(suite, GM, cids[6], fixture_root, "m7",
+              lambda sb: [stub_child("alpha", "--desc-counter", "--list-delay",
+                                     M_COALESCE_DELAY_S, "--state-dir", sb, relist=True)], m7,
+              detail=["stub        : --list-delay %g (the relist stays in flight)"
+                      % M_COALESCE_DELAY_S])
+
+    # M8 -- within the min interval the cache is served; past it, a fresh relist.
+    def m8(proxy):
+        problems = [] if declared == interval else \
+            ["the module declares no _RELIST_MIN_INTERVAL_S (got %r)" % (declared,)]
+        start = started(proxy)
+        if start:
+            return problems + start, []
+        got1, tools1, _s1 = m_listing(proxy, "tf-m8-1")
+        n1 = m_lists(proxy.sandbox)
+        got2, tools2, _s2 = m_listing(proxy, "tf-m8-2")
+        n2 = m_lists(proxy.sandbox)
+        time.sleep(past)
+        got3, tools3, _s3 = m_listing(proxy, "tf-m8-3")
+        n3 = m_lists(proxy.sandbox)
+        problems += got1 + got2 + got3
+        if got1 or got2 or got3:
+            return problems, []
+        descs = tuple(m_desc_of(t, tool) for t in (tools1, tools2, tools3))
+        if n1 < 2:
+            problems.append("the first list caused no relist (%d child tools/list)" % n1)
+        if n2 != n1:
+            problems.append("a list within the interval re-listed: %d -> %d" % (n1, n2))
+        if n3 != n1 + 1:
+            problems.append("a list %g s later: %d -> %d child tools/list, expected one more"
+                            % (past, n1, n3))
+        if descs != (m_desc(n1), m_desc(n1), m_desc(n3)):
+            problems.append("descriptions %r, expected %r"
+                            % (descs, (m_desc(n1), m_desc(n1), m_desc(n3))))
+        return problems, ["child lists : %d, %d, %d" % (n1, n2, n3),
+                          "descriptions: %r" % (descs,)]
+
+    live_case(suite, GM, cids[7], fixture_root, "m8",
+              lambda sb: [stub_child("alpha", "--desc-counter", "--state-dir", sb,
+                                     relist=True)], m8,
+              detail=[interval_line])
+
+    # M9 -- the relist runs behind the Streamable HTTP front too.
+    sandbox = new_sandbox(fixture_root, "m9")
+    children = [stub_child("alpha", "--desc-counter", "--state-dir", sandbox, relist=True)]
+    cfgpath = write_config(sandbox, children)
+    problems, lines = [], [interval_line]
+    hproxy = None
+    try:
+        hproxy = HttpProxy(sandbox, cfgpath, label="m9")
+        if hproxy.wait_ready() is None:
+            problems.append("no ready file within %gs (rc=%r); stderr: %s"
+                            % (READY_TIMEOUT_S, hproxy.proc.poll(), stderr_tail(hproxy)))
+        else:
+            client = hproxy.client()
+            got, sid = http_init(client)
+            problems += got
+            descs, counts = [], []
+            for i, rid in enumerate((901, 902)):
+                if got:
+                    break
+                if i:
+                    time.sleep(past)
+                reply = client.send(rpc_body("tools/list", {}, rid), sid=sid,
+                                    version=PROTOCOL_VERSION)
+                tools = ((reply.json() or {}).get("result") or {}).get("tools")
+                if reply.status != 200 or not isinstance(tools, list):
+                    problems.append("tools/list %d: status %d, body %r"
+                                    % (rid, reply.status, reply.body[:200]))
+                    break
+                descs.append(m_desc_of(tools, tool))
+                counts.append(m_lists(sandbox))
+            if len(descs) == 2:
+                for d, n in zip(descs, counts):
+                    if d != m_desc(n):
+                        problems.append("description %r, the child's latest is %r" % (d, m_desc(n)))
+                if descs[0] == descs[1]:
+                    problems.append("the description did not refresh over HTTP: %r" % descs[0])
+            lines.append("descriptions: %r, child lists %r" % (descs, counts))
+    except Exception as exc:  # noqa: BLE001 -- any raise is the finding
+        problems.append("case raised %s: %s" % (type(exc).__name__, exc))
+    finally:
+        if hproxy is not None:
+            rc = hproxy.close()
+            if rc != 0:
+                problems.append("proxy exit code %r after SIGTERM, expected 0" % rc)
+        problems += reap_stubs(sandbox, children)
+    suite.record(GM, cids[8], problems, detail=lines)
+
+    # M10 -- a list while the child restarts is answered at once from the last
+    # listing; once the restart is up, the next list relists the NEW process.
+    def m10(proxy):
+        problems = started(proxy)
+        if problems:
+            return problems, []
+        got1, tools1, _s1 = m_listing(proxy, "tf-m10-1")
+        if got1:
+            return got1, []
+        before = m_desc_of(tools1, tool)
+        got, _reply = crash_mid_call(proxy, 1001)
+        if got:
+            return got, []
+        t0 = time.monotonic()
+        got2, tools2, _s2 = m_listing(proxy, "tf-m10-2")
+        elapsed = time.monotonic() - t0
+        if got2:
+            return got2, []
+        during = m_desc_of(tools2, tool)
+        if elapsed > M_STALE_REPLY_S:
+            problems.append("the list during the restart took %.2fs, bound %gs"
+                            % (elapsed, M_STALE_REPLY_S))
+        if during != before:
+            problems.append("during the restart: description %r, expected the last %r"
+                            % (during, before))
+        ok, last, calls = poll_call(
+            proxy, _Rids(1002), tool, "tf_pid", {},
+            lambda r: not is_error_result(r) and tool_text(r).isdigit(), RESTART_POLL_S)
+        if ok is None:
+            return problems + ["no successful tf_pid within %gs (%d calls); last %r"
+                               % (RESTART_POLL_S, calls, last)], []
+        new_pid = int(tool_text(ok))
+        time.sleep(past)
+        got3, tools3, _s3 = m_listing(proxy, "tf-m10-3")
+        if got3:
+            return problems + got3, []
+        after = m_desc_of(tools3, tool)
+        n_new = m_lists(proxy.sandbox, pid=new_pid)
+        if n_new < 2:
+            problems.append("the restarted child (pid %d) saw %d tools/list, expected a relist"
+                            % (new_pid, n_new))
+        if after != m_desc(n_new):
+            problems.append("after the restart: description %r, the new child's latest is %r"
+                            % (after, m_desc(n_new)))
+        return problems, ["descriptions: %r -> %r (during, %.3fs) -> %r"
+                          % (before, during, elapsed, after),
+                          "new pid     : %d, %d child tools/list" % (new_pid, n_new)]
+
+    live_case(suite, GM, cids[9], fixture_root, "m10",
+              lambda sb: [stub_child("alpha", "--desc-counter", "--init-delay", M_INIT_DELAY_S,
+                                     "--state-dir", sb, relist=True)], m10,
+              detail=["stub        : --init-delay %g (the restart stays in progress)"
+                      % M_INIT_DELAY_S])
+
+    # M11 -- shutdown while a relist is in flight: the proxy exits within
+    # _STOP_WAIT_S, no task is destroyed pending, no child is left (C-L7).
+    stop_wait = mod._STOP_WAIT_S
+
+    def m11(proxy):
+        problems = started(proxy)
+        if problems:
+            return problems, []
+        pids = read_pids(proxy.sandbox)
+        proxy.request("tools/list", {}, "tf-m11")
+        if not m_wait_lists(proxy.sandbox, 2):
+            return ["the upstream list caused no child tools/list within %gs"
+                    % EVENT_TIMEOUT_S], []
+        t0 = time.monotonic()
+        proxy.close_stdin()
+        rc = proxy.wait(stop_wait)
+        elapsed = time.monotonic() - t0
+        if rc is None:
+            problems.append("still running %gs (_STOP_WAIT_S) after stdin closed" % stop_wait)
+        if "Task was destroyed but it is pending" in proxy.stderr_text():
+            problems.append("stderr: 'Task was destroyed but it is pending': %s"
+                            % stderr_tail(proxy))
+        alive = [pid for pid in pids if not pid_dead(pid)]
+        if alive:
+            problems.append("child pid(s) %r alive after the proxy exited" % alive)
+        return problems, ["exit        : rc %r in %.2fs (bound _STOP_WAIT_S %g)"
+                          % (rc, elapsed, stop_wait)]
+
+    live_case(suite, GM, cids[10], fixture_root, "m11",
+              lambda sb: [stub_child("alpha", "--list-delay", M_STOP_DELAY_S,
+                                     "--state-dir", sb, relist=True)], m11,
+              detail=["stub        : --list-delay %g, stdin closed mid-relist" % M_STOP_DELAY_S])
+
+
+# ---------------------------------------------------------------------------
 # L. hygiene  (4 cases)
 # ---------------------------------------------------------------------------
 
@@ -5096,6 +5700,7 @@ def run(opts=None):
         group_i(suite, fixture_root)
         group_j(suite, fixture_root)
         group_k(suite)
+        group_m(suite, fixture_root)
         group_l(suite, fixture_root, pyc_before, tree_before)
     finally:
         if opts.keep:

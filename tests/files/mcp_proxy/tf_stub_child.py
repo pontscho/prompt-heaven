@@ -39,6 +39,19 @@ CLI flags
 --crash-after-init-count N  on ``initialize``, if c >= N: exit 3, no answer.
 --init-delay S              on ``initialize``, if c >= 1: sleep S seconds on the
                             main thread before answering.
+--desc-counter              every tool's description is ``tf stub tool (list
+                            #N)``, N = this process's ``tools/list`` count.
+--toolset-reread            re-read ``--toolset-file`` at every ``tools/list``
+                            (a missing or empty file keeps the current names).
+--list-error-after N        answer JSON-RPC error {-32000, "tf list error"} to
+                            every ``tools/list`` after the first N (so N = 1
+                            serves the startup listing and fails every relist).
+--list-delay S              sleep S seconds on the main thread before answering
+                            every ``tools/list`` after this process's first.
+
+The ``tools/list`` count (n) is per PROCESS: it counts list REQUESTS (a paged
+listing's follow-up pages too) since this process started, under the state
+lock -- unlike c, which counts prior process starts from the ``.pids`` file.
 
 Tool functions (``arguments = {"function": ..., "params": {...}}``)
 -------------------------------------------------------------------
@@ -107,6 +120,8 @@ class TfState:
                 self.tools = names
         self.events_path = None
         self.prior = 0
+        # Per-process tools/list request count (never state.prior, R3:L6).
+        self.list_count = 0
         if args.state_dir:
             self.events_path = os.path.join(args.state_dir, self.tool0 + ".events.jsonl")
             pids_path = os.path.join(args.state_dir, self.tool0 + ".pids")
@@ -285,10 +300,34 @@ def tf_call_tool(state, req_id, params):
                 % (fn, ", ".join(TF_FUNCTIONS)), True)
 
 
+def tf_reread_toolset(state):
+    """--toolset-reread: refresh the tool names from --toolset-file, if any."""
+    path = state.args.toolset_file
+    if not path or not os.path.isfile(path):
+        return
+    with open(path, "r", encoding="utf-8") as fh:
+        names = [ln.strip() for ln in fh if ln.strip()]
+    if names:
+        with tf_state_lock:
+            state.tools = names
+
+
 def tf_list_tools(state, req_id, params):
+    args = state.args
+    with tf_state_lock:
+        state.list_count += 1
+        count = state.list_count
+    if args.list_delay and count >= 2:
+        time.sleep(args.list_delay)
+    if args.list_error_after is not None and count > args.list_error_after:
+        tf_error(req_id, -32000, "tf list error")
+        return
+    if args.toolset_reread:
+        tf_reread_toolset(state)
     tools = [{
         "name": name,
-        "description": "tf stub tool %s" % name,
+        "description": ("tf stub tool (list #%d)" % count if args.desc_counter
+                        else "tf stub tool %s" % name),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -376,6 +415,10 @@ def tf_parse_args(argv):
     ap.add_argument("--toolset-file", default=None)
     ap.add_argument("--crash-after-init-count", type=int, default=None)
     ap.add_argument("--init-delay", type=float, default=0.0)
+    ap.add_argument("--desc-counter", action="store_true")
+    ap.add_argument("--toolset-reread", action="store_true")
+    ap.add_argument("--list-error-after", type=int, default=None)
+    ap.add_argument("--list-delay", type=float, default=0.0)
     return ap.parse_args(argv)
 
 

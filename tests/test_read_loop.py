@@ -165,7 +165,7 @@ FIXTURE_BASE = H.repo_path(".claude", "tmp", "test_read_loop")
 WRITES = []
 
 # ---------------------------------------------------------------------------
-# THE DECLARED TABLE -- check this against docs/adr/0008's per-server table.
+# THE DECLARED TABLE -- check this against docs/adr/0008's per-server table and its addenda.
 # ---------------------------------------------------------------------------
 # server file -> (reader_prefix, dispatch, worker_prefix, worker_reach, note)
 #
@@ -217,7 +217,12 @@ FLEET = {
     "mcp-purity.py":   ("purity-stdin",   "coroutine", None,             None,
                         "coroutine handlers; sync file ops park on the DEFAULT "
                         "pool on purpose (:5810) -- safe now the reader is not there"),
-    "mcp-tshark.py":   ("tshark-stdin",   "pool",      "tshark-call",    "arg",
+    "mcp-sandbox.py":  ("sandbox-stdin",  "pool",      "sandbox-call",   "arg",
+                        "blocking sbx runs need a thread; the run slots are the only shared state"),
+    "mcp-skill.py":    ("skill-stdin",    "pool",      "skill-call",     "arg",
+                        "blocking file reads and the runner HTTP call need a thread; "
+                        "the index cache has one lock"),
+    "mcp-tshark.py":  ("tshark-stdin",   "pool",      "tshark-call",    "arg",
                         "registry + config locks"),
     "mcp-search.py":   ("search-stdin",   "pool",      "search-call",    "arg",
                         "blocking stdlib Chrome searches need a thread; every "
@@ -231,7 +236,7 @@ FLEET = {
 
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_POOL = 9
+DECLARED_POOL = 11
 DECLARED_COROUTINE = 8
 
 # Both spellings create a task.  Gating one would fail a correct refactor.

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "sbx": {sbx},
+  "work_root": {work_root},
+  "seccomp": "auto",
+  "log_content": false,
+  "interpreters": {interpreters},
+  "limits": {
+    "timeout_ms": 30000, "max_timeout_ms": 120000,
+    "as_budget_bytes": 1073741824, "as_mode": "baseline",
+    "nproc_headroom": 64, "fsize_bytes": 16777216, "nofile": 256,
+    "stdout_bytes": 65536, "stderr_bytes": 65536,
+    "max_files": 64, "max_files_bytes": 4194304,
+    "max_out_files": 16, "max_out_bytes": 1048576,
+    "max_stdin_bytes": 1048576, "max_args": 64, "max_arg_chars": 4096,
+    "max_concurrent": 2, "min_free_bytes": 1073741824
+  }
+}

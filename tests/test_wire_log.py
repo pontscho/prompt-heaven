@@ -304,7 +304,12 @@ WIRE = {
     "mcp-purity.py":   (OUT, FULL,
                         "the canonical form both sites are gated against "
                         "(McpServer.run inbound, McpServer._write outbound)"),
-    "mcp-tshark.py":   (OUT, FULL,
+    "mcp-sandbox.py":  (OUT, FULL,
+                        "sandbox_call dispatcher; replies carry script output"),
+    "mcp-skill.py":    (OUT, FULL,
+                        "skill_call dispatcher; replies carry skill bodies and "
+                        "sanitized script output"),
+    "mcp-tshark.py":  (OUT, FULL,
                         "tshark_call dispatcher; replies carry packet bytes"),
     "mcp-search.py":   (OUT, FULL,
                         "search_call dispatcher; requests carry the caller's "
@@ -318,7 +323,7 @@ WIRE = {
 
 # Declared totals, so a silent re-classification of one row trips a case rather
 # than sliding through as "the table matches the table".
-DECLARED_FULL = 14
+DECLARED_FULL = 16
 DECLARED_MINIMAL = 1
 DECLARED_SILENT = 2
 

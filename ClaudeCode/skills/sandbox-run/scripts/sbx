@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 sbx -- run a command inside an OS sandbox (default-deny writes, no network).
-Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] -- <cmd> [args...]
+Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] [restricted-mode flags]
+           -- <cmd> [args...]
 
 Everything after the FIRST bare `--` is the target command. It is handed to
 os.execvp as argv LIST ELEMENTS, never through a shell, so it can never inject
@@ -32,14 +33,25 @@ Python 3, standard library only.
 from __future__ import annotations
 
 import argparse
+import errno
+import json
 import os
+import re
 import resource
+import select
 import shutil
+import signal
+import stat
 import struct
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
-USAGE = "Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] -- <cmd> [args...]"
+USAGE = ("Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] "
+         "[--restrict-reads [--read PATH]... [--exec PATH]...] "
+         "[--clean-env [--env KEY=VALUE]...] [--timeout S [--status-fd FD]] "
+         "[--rlimit-{as,cpu,nproc,fsize,nofile,core} N] -- <cmd> [args...]")
 
 # R-0061: the standard directories of pathname AF_UNIX sockets (docker, the D-Bus
 # system and session buses, gpg-agent, ssh-agent, tmux, X11). A socket is a
@@ -50,6 +62,19 @@ USAGE = "Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] -- <cmd> [args..
 # daemons' sockets (lxd: root-equivalent for the lxd group). Snap binaries live
 # under /snap, which stays visible.
 SOCKET_DIRS = ("/run", "/tmp", "/var/snap")
+# The directories a restricted `--read` / `--exec` may not RESOLVE into (P2,
+# CWE-41): SOCKET_DIRS plus /var/run. /var/run is a symlink to /run, so bwrap's
+# tmpfs over /run already hides it and it is NOT mounted again (the mount list
+# above stays the legacy argv) -- it is listed here because a spelling check
+# alone let `--read /var/run/docker.sock` bind the host socket past the tmpfs.
+# socket_read_refusal() checks every hop and the realpath against this list.
+SOCKET_REFUSED_DIRS = SOCKET_DIRS + ("/var/run",)
+# The socket directories a write scope, a ~/.claude carve-out or a shadow
+# re-bind target may not lie UNDER either (round-3 R1/R2): a bind below /run is
+# /run/user/<uid> -- D-Bus, ssh-agent, gpg-agent. /tmp is left out on purpose,
+# like a cwd under it: a scope or a repo checkout under /tmp is common, and the
+# sockets a bind there re-exposes are only those inside the bound subtree.
+SOCKET_UNDER_REFUSED_DIRS = ("/run", "/var/run", "/var/snap")
 
 
 @dataclass
@@ -105,6 +130,36 @@ class Scope:
                    read-only when it lies under /tmp, which the socket mask would
                    otherwise bury, and refuses it under /run or /var/snap (Linux
                    only).
+
+    Restricted mode (ADR 0031) -- every field below defaults to the legacy
+    behaviour, so a Scope built without them yields byte-identical builder
+    output (sbx_restrict:D4):
+      restrict_reads
+                   OFF-by-default read restriction, set only by
+                   `--restrict-reads`: reads become an allowlist instead of
+                   `(allow file-read* (subpath "/"))`.
+      read_rules   the resolved read allowlist as `(spelling, kind, link_value)`
+                   triples, kind in {"symlink", "dir", "file"}; the spelling is
+                   kept (normpath only, never realpath'd) and resolved by the
+                   one resolver called from main().
+      meta_literals
+                   the ancestor directories that get a LITERAL
+                   file-read-metadata allow (never a global metadata rule).
+      exec_rules   the process-exec allowlist as `(spelling, is_dir)` pairs.
+      linux_base   the bwrap base filesystem of restricted mode, in argv order:
+                   `("ro-bind", path)` or `("symlink", value, path)`.
+      env          the child environment: None = inherit (legacy); a dict =
+                   `--clean-env` plus the validated `--env KEY=VALUE` pairs.
+                   Values are NEVER printed, only keys.
+      timeout      supervised-mode wall clock in seconds (`--timeout`); None =
+                   unsupervised execvp (legacy).
+      status_fd    the inheritable fd (>= 3) the supervisor writes its status
+                   record to (`--status-fd`, requires `--timeout`).
+      limits       the strict requested rlimits as `(name, value)` pairs, e.g.
+                   `("RLIMIT_AS", int)`; a refused setrlimit fails closed.
+      nproc_headroom
+                   the `--rlimit-nproc +N` form: N processes above the uid's
+                   current count, resolved in main(); None when not used.
     """
     writes: list
     net: bool
@@ -118,6 +173,16 @@ class Scope:
     seccomp_fd: int = None
     file_mask_fds: tuple = None
     cwd: str = None
+    restrict_reads: bool = False
+    read_rules: tuple = ()
+    meta_literals: tuple = ()
+    exec_rules: tuple = ()
+    linux_base: tuple = ()
+    env: dict = None
+    timeout: float = None
+    status_fd: int = None
+    limits: tuple = ()
+    nproc_headroom: int = None
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +198,101 @@ class Scope:
 # The registry and the two builder stubs are PURE module-level definitions (no
 # I/O at import, M3). Detection itself (_detect_engine) performs a shutil.which
 # read only when CALLED from main() behind the __main__ guard -- never at import.
+
+# Restricted Seatbelt: the depth cap's level count and the regex metacharacters
+# a write-scope spelling may still carry after the _INJECT_CHARS floor (quotes,
+# parens, backslash and newline never get this far; "(", ")" and "\" are listed
+# anyway so the escape does not depend on that floor).
+_DEPTH_CAP_LEVELS = 100
+_SBPL_REGEX_META = frozenset("\\.^$*+?{}[]|()")
+
+
+def _depth_cap_regex(scope):
+    """The write scope's canonical spelling as an SBPL regex prefix: every regex
+    metacharacter (\\ . ^ $ * + ? { } [ ] | ( )) backslash-escaped, so the
+    depth cap anchors on exactly this directory. Pure."""
+    return "".join("\\" + ch if ch in _SBPL_REGEX_META else ch for ch in scope)
+
+
+def _sbpl_path(path):
+    """The ONE point every path interpolated into an SBPL string literal passes
+    (P1, CWE-74) -> `path` unchanged, or ValueError (exit 3, nothing run).
+
+    An SBPL string is delimited by `"` and escapes with `\\`, so a path carrying
+    either -- or a control character -- could close the literal and append a
+    rule of its own (`a"))(allow file-write* (regex #"^"))...` = write anywhere).
+    The flag values are floored upstream (canonicalize, canonicalize_read, the
+    cwd floor in main), but the deny set, the scratch scope and the metadata
+    ancestors are DERIVED paths ($HOME, the cwd's ancestors, symlink targets),
+    so the builder refuses rather than trusting every producer. Refusal, never
+    escaping: a refused run is visible, a mis-escaped rule is not. Pure."""
+    if not isinstance(path, str) or any(ch in _INJECT_CHARS for ch in path):
+        raise ValueError(
+            "refusing to build the Seatbelt profile: the path %r contains an "
+            "SBPL string metacharacter (one of \" ' ( ) \\ or a control "
+            "character)" % (path,))
+    return path
+
+
+def _seatbelt_restricted_head(scope):
+    """The allowlist head of the restricted Seatbelt profile (ADR 0031): every
+    rule before the write block, in the order _seatbelt_argv documents. Pure.
+
+    A request with nothing to filter exec on (a bare command name, no --exec,
+    an inherited env) is refused with ValueError (exit 3): an unfiltered
+    (allow process-exec) is exactly what restricted mode removes, and an
+    empty filter list is not valid SBPL."""
+    argv0 = scope.argv[0] if scope.argv else None
+    first = [p for p, is_dir in scope.exec_rules if p == argv0 and not is_dir]
+    files = [p for p, is_dir in scope.exec_rules
+             if not is_dir and p != argv0]
+    dirs = [p for p, is_dir in scope.exec_rules if is_dir]
+    exec_filters = ['(literal "%s")' % _sbpl_path(p) for p in first]
+    # the KD-5 trampoline: a clean env is applied by `/usr/bin/env -i`
+    if scope.env is not None and "/usr/bin/env" not in first + files:
+        exec_filters.append('(literal "/usr/bin/env")')
+    exec_filters += ['(literal "%s")' % _sbpl_path(p) for p in files]
+    exec_filters += ['(subpath "%s")' % _sbpl_path(p) for p in dirs]
+    if not exec_filters:
+        raise ValueError(
+            "--restrict-reads: no process-exec filter (a bare command name, no "
+            "--exec, an inherited env); refusing an unfiltered exec allow")
+    lines = [
+        "(version 1)",
+        "(deny default)",
+        # exec is FILTERED; Seatbelt matches the REALPATH (M0:3)
+        "(allow process-exec %s)" % " ".join(exec_filters),
+        "(allow process-fork)",
+        # same-sandbox, not self: `kill $!` of a background job (M0:2)
+        "(allow signal (target same-sandbox))",
+        # node's V8 aborts without it (M0:6)
+        "(allow sysctl-read)",
+        # readdir of "/" only -- never a subpath "/" read
+        '(allow file-read-data (literal "/"))',
+    ]
+    # path lookup stats every component: a LITERAL per ancestor, never a global
+    # metadata rule (the filesystem's shape would become an oracle)
+    if scope.meta_literals:
+        lines.append("(allow file-read-metadata %s)" % " ".join(
+            '(literal "%s")' % _sbpl_path(p) for p in scope.meta_literals))
+    # a bare-name PATH lookup stats <dir>/<name>, and an exec allow is not a
+    # metadata allow -- so the exec dirs get metadata ONLY when the target env
+    # can carry PATH (M0:4)
+    if dirs and (scope.env is None or "PATH" in scope.env):
+        lines.append("(allow file-read-metadata %s)" % " ".join(
+            '(subpath "%s")' % _sbpl_path(p) for p in dirs))
+    # the read spellings, never resolved (KD-14): a symlink or a file is a
+    # LITERAL (a symlinked parent dir of an exec hop chain is READ here, never
+    # exec), a directory a subpath
+    literals = [p for p, kind, _value in scope.read_rules if kind != "dir"]
+    subpaths = [p for p, kind, _value in scope.read_rules if kind == "dir"]
+    if literals:
+        lines.append("(allow file-read* %s)" % " ".join(
+            '(literal "%s")' % _sbpl_path(p) for p in literals))
+    if subpaths:
+        lines.append("(allow file-read* %s)" % " ".join(
+            '(subpath "%s")' % _sbpl_path(p) for p in subpaths))
+    return lines
 
 
 def _seatbelt_argv(scope):
@@ -181,45 +341,101 @@ def _seatbelt_argv(scope):
     unchanged: without --net the (deny network*) line is emitted as before, on top of
     a default that already denies.
 
-    Pure: no I/O. Because canonicalize (task-003) already rejected quotes, parens,
-    backslash and newline, every embedded path is a safe SBPL string literal -- do
-    NOT re-quote or re-escape. The pre-resolved deny set (as (path, is_dir) pairs;
+    Pure: no I/O. Every embedded path passes _sbpl_path, the ONE refusal point
+    for a quote, paren, backslash or control character (ValueError, exit 3) --
+    the flag values were floored upstream too, but the derived paths (the deny
+    set, the scratch scope under the cwd, the ancestors) were not (P1). Never
+    escape instead of refusing. The pre-resolved deny set (as (path, is_dir) pairs;
     this builder uses the bit only to ORDER a file mask after the carve-outs) and
     carve-out set are read
     off scope.secret_paths / scope.carveouts, both resolved ONCE in main(), keeping
     this builder side-effect-free.
+
+    Restricted mode (scope.restrict_reads, ADR 0031) swaps the permissive head
+    and the write block for an allowlist, keeping every DENY after every ALLOW:
+      (version 1) / (deny default) / ONE filtered (allow process-exec ...) -- the
+      argv0 spelling literal, (literal "/usr/bin/env") when the env is clean (the
+      KD-5 trampoline), each --exec FILE literal, each --exec DIR subpath; the
+      filter matches REALPATHS (M0:3), so the argv0 spelling is inert and the
+      CALLER passes every realpath as --exec; sbx never resolves one (KD-14) /
+      (allow process-fork) / (allow signal (target same-sandbox)) -- (target
+      self) breaks `kill $!` (M0:2) / (allow sysctl-read) -- V8 aborts without it
+      (M0:6) / (allow file-read-data (literal "/")) / ONE metadata rule with a
+      LITERAL per ancestor (never a global metadata rule) / the exec DIRS'
+      metadata as subpaths ONLY when the target env can carry PATH (a bare-name
+      lookup stats <dir>/<name>; an exec allow is not a metadata allow, M0:4) /
+      ONE file-read* rule of the symlink and file spellings as LITERALS (a
+      symlinked parent dir is a READ literal, never an exec one) / ONE
+      file-read* rule of the dir spellings as subpaths / UNLESS --ro: ONE read
+      rule over the write scopes, the write-allow loop, ONE (deny
+      file-write-acl ...) over the same scopes (never file-write-flags: it
+      breaks copy2's chflags, M0:8) and per scope the 100-level depth cap / its
+      OWN (allow file-read* file-write* (literal "/dev/null")) (M0:5) / the
+      secret denies as above, with NO carve-outs (a carve-out is a read grant).
     """
-    lines = [
-        "(version 1)",
-        "(deny default)",
-        # the minimal ops a normal program needs to start and run
-        "(allow process-exec)",
-        "(allow process-fork)",
-        "(allow signal (target self))",
-        "(allow sysctl-read)",
-        # permissive reads; secrets are carved back out LAST, below
-        '(allow file-read* (subpath "/"))',
-    ]
+    restricted = scope.restrict_reads
+    if restricted:
+        lines = _seatbelt_restricted_head(scope)
+    else:
+        lines = [
+            "(version 1)",
+            "(deny default)",
+            # the minimal ops a normal program needs to start and run
+            "(allow process-exec)",
+            "(allow process-fork)",
+            "(allow signal (target self))",
+            "(allow sysctl-read)",
+            # permissive reads; secrets are carved back out LAST, below
+            '(allow file-read* (subpath "/"))',
+        ]
     # per writable scope: allow writes -- UNLESS --ro, which emits NO write SCOPE at
     # all so even the scratch default is denied (R21).
     if not scope.ro:
+        if restricted and scope.writes:
+            # the write scopes are readable too: the allowlist above grants no
+            # read under them
+            lines.append("(allow file-read* %s)" % " ".join(
+                '(subpath "%s")' % _sbpl_path(path) for path in scope.writes))
         for path in scope.writes:
-            lines.append('(allow file-write* (subpath "%s"))' % path)
-    # The one write-allow --ro keeps: the /dev/null sink, as a LITERAL (nothing else
-    # in /dev). Under (deny default) it was not writable, so os.open("/dev/null",
-    # O_WRONLY|O_RDWR) failed EPERM -- and with it every subprocess spawned with
-    # stdin=DEVNULL, which opens it O_RDWR (measured: every git-calling function of
-    # an MCP child under `sbx --write .`). bwrap's fresh /dev keeps /dev/null
-    # writable even under --ro, so this is parity, not a widening: a sink can
-    # neither persist nor exfiltrate. No deny below names a path covering it.
-    lines.append('(allow file-write* (literal "/dev/null"))')
+            lines.append('(allow file-write* (subpath "%s"))' % _sbpl_path(path))
+        if restricted and scope.writes:
+            # an ACL entry would outlive the run and widen the owner's own
+            # access; ONLY file-write-acl -- file-write-flags breaks
+            # shutil.copy2/copytree (the owner clears uchg with lchflags(0)),
+            # and mode/xattr stay legal (R2:S-H1b, M0:8)
+            lines.append("(deny file-write-acl %s)" % " ".join(
+                '(subpath "%s")' % _sbpl_path(path) for path in scope.writes))
+            # the depth cap: no create at level 101 below a write scope, so a
+            # tree too deep for the cleanup to walk cannot be built in place.
+            # The group is written out LITERALLY 100 times -- a {100}
+            # quantifier compiles and silently never matches (M0:9).
+            # Rename-chaining is NOT bounded by it (KD-18 flatten, M0:14).
+            for path in scope.writes:
+                lines.append('(deny file-write-create (regex #"^%s/%s"))'
+                             % (_depth_cap_regex(_sbpl_path(path)),
+                                "[^/]+/" * _DEPTH_CAP_LEVELS))
+    if restricted:
+        # Restricted mode emits its OWN /dev/null rule, read AND write: bash's
+        # background jobs and node's uv_loop_init open it, and the allowlist
+        # grants no read of it otherwise (M0:5). Never the legacy line below.
+        lines.append('(allow file-read* file-write* (literal "/dev/null"))')
+    else:
+        # The one write-allow --ro keeps: the /dev/null sink, as a LITERAL
+        # (nothing else in /dev). Under (deny default) it was not writable, so
+        # os.open("/dev/null", O_WRONLY|O_RDWR) failed EPERM -- and with it every
+        # subprocess spawned with stdin=DEVNULL, which opens it O_RDWR (measured:
+        # every git-calling function of an MCP child under `sbx --write .`).
+        # bwrap's fresh /dev keeps /dev/null writable even under --ro, so this is
+        # parity, not a widening: a sink can neither persist nor exfiltrate. No
+        # deny below names a path covering it.
+        lines.append('(allow file-write* (literal "/dev/null"))')
     # LAST, so last-match-wins makes them win over the permissive read-allow: deny
     # BOTH read and write for every DIRECTORY secret, even inside an allowed write
     # scope (R16, R17, R22, R22b). The per-FILE secrets (the .git/config masks) are
     # emitted separately, AFTER the carve-outs -- see below.
     for secret, is_dir in scope.secret_paths or ():
         if is_dir:
-            lines.append('(deny file-read* (subpath "%s"))' % secret)
+            lines.append('(deny file-read* (subpath "%s"))' % _sbpl_path(secret))
             lines.append('(deny file-write* (subpath "%s"))' % secret)
     # AFTER the directory secrets, so last-match-wins hands READ back for these named
     # subtrees of an otherwise-denied secret (this repo's own tooling under
@@ -227,9 +443,10 @@ def _seatbelt_argv(scope):
     # write-deny above is untouched and everything NOT named here (projects,
     # settings*.json, .credentials.json, todos, history.jsonl, and anything added
     # under ~/.claude later) stays hidden: the carve-out is fail-closed by
-    # enumeration.
-    for path in scope.carveouts or ():
-        lines.append('(allow file-read* (subpath "%s"))' % path)
+    # enumeration. Restricted mode emits NONE: a carve-out is a READ grant, and
+    # restricted reads are an allowlist (FR-1).
+    for path in () if restricted else scope.carveouts or ():
+        lines.append('(allow file-read* (subpath "%s"))' % _sbpl_path(path))
     # AFTER the carve-outs: the per-FILE secrets (every ancestor .git/config). A
     # carve-out is a SUBTREE read-allow, so on a copy-deployed install -- where
     # ~/.claude/skills holds real directories, not symlinks into a repo -- a git
@@ -240,7 +457,7 @@ def _seatbelt_argv(scope):
     # meant to keep shut.
     for secret, is_dir in scope.secret_paths or ():
         if not is_dir:
-            lines.append('(deny file-read* (subpath "%s"))' % secret)
+            lines.append('(deny file-read* (subpath "%s"))' % _sbpl_path(secret))
             lines.append('(deny file-write* (subpath "%s"))' % secret)
     # THE LAST file rules, and every one of them is a DENY: the write-only shadow
     # set. ~/.claude is denied under the spelling `~/.claude`, but on a host where
@@ -254,7 +471,7 @@ def _seatbelt_argv(scope):
     # deny is emitted, because the targets are the plugin tree and the repo itself,
     # which must stay readable (that is what carveouts above is for).
     for path in scope.shadow_write_denies or ():
-        lines.append('(deny file-write* (subpath "%s"))' % path)
+        lines.append('(deny file-write* (subpath "%s"))' % _sbpl_path(path))
     # Network: EXPLICIT in both directions. (deny default) at the top already denies
     # the network, so merely omitting (deny network*) under --net left the flag inert
     # on macOS -- only (allow network*) actually grants it (R18).
@@ -288,7 +505,8 @@ def _bwrap_argv(scope):
       carve-out or a shadow subtree stays masked (ADR 0007; itself read-only, so
       the shadows' write-deny still stands) / --remount-ro per masked socket dir /
       --unshare-pid --unshare-ipc + --proc /proc / --unshare-net UNLESS scope.net
-      (R18) / --new-session / --die-with-parent / the `--` end-of-options
+      (R18) / --new-session / --die-with-parent / --clearenv + --setenv K V per
+      sorted key when scope.env is a dict (--clean-env) / the `--` end-of-options
       terminator / then *scope.argv.
 
     Mount ORDER is load-bearing in every direction here: bwrap applies filesystem
@@ -323,15 +541,47 @@ def _bwrap_argv(scope):
     file-mask fds ride in as numbers. The deny set and the carve-out set are
     read off scope.secret_paths / scope.carveouts (both resolved ONCE in main()), so
     this builder is side-effect-free.
+
+    Restricted mode (scope.restrict_reads, ADR 0031) starts from an EMPTY root:
+    no `--ro-bind / /`; the scope.linux_base entries instead (--ro-bind p p, or
+    --symlink <value> p for a usr-merge link) / per read rule
+    NOT covered by a base bind: a symlink -> --symlink <value> <spelling>, a dir
+    or file -> --ro-bind <spelling> <spelling>; a read under /run, /var/snap or
+    /tmp is refused (ValueError) -- the socket tmpfs would bury it and
+    re-binding it would reopen the daemons / the same --dev, then the socket
+    tmpfs sequence, AFTER the reads, so an ancestor read (`--read /`) buries
+    neither the fresh /dev (H2) nor the socket tmpfs (P2 residual) /
+    writes and secret masks as above / NO carve-outs / a shadow re-bind ONLY
+    for a target inside a write scope -- outside one, on an empty root, it would
+    be a READ grant (C-H4) / file masks / --proc and the namespaces, plus
+    --unshare-uts --hostname sbx and --unshare-cgroup-try / --new-session
+    --die-with-parent / --clearenv + --setenv K V per sorted key when scope.env
+    is a dict / --chdir <cwd> / seccomp / `--` / *scope.argv.
     """
-    argv = ["bwrap", "--ro-bind", "/", "/"]
+    restricted = scope.restrict_reads
+    if restricted:
+        # the base filesystem only (the system trees and the loader's /etc
+        # entries); a usr-merge link is re-created as a link, never followed
+        argv = ["bwrap"]
+        for entry in scope.linux_base:
+            if entry[0] == "symlink":
+                argv += ["--symlink", entry[1], entry[2]]
+            else:
+                argv += ["--ro-bind", entry[1], entry[1]]
+    else:
+        argv = ["bwrap", "--ro-bind", "/", "/"]
     # A fresh minimal /dev (null, zero, full, random, urandom, tty, pts): every bind
     # but --dev-bind is nodev, so the host /dev imported by `--ro-bind / /` is
     # EACCES on every node (measured: `git --version` rc 128 on /dev/null).
     # --remount-ro makes the tmpfs read-only (no new files in /dev, /dev/shm); it is
     # not recursive, so the device nodes and the private devpts stay writable,
-    # which leaves no persistent state. FIRST, so no later mount under /dev is buried.
-    argv += ["--dev", "/dev", "--remount-ro", "/dev"]
+    # which leaves no persistent state. Legacy: FIRST, so no later mount under
+    # /dev is buried (byte-identical argv, D4). Restricted: AFTER the read binds
+    # (below), so a read covering /dev (`--read /`, `--read /dev`) cannot ro-bind
+    # the host /dev -- /dev/shm, /dev/mqueue -- over it (round-3 H2).
+    dev = ["--dev", "/dev", "--remount-ro", "/dev"]
+    if not restricted:
+        argv += dev
     # R-0061: without --net, an EMPTY tmpfs over each pathname-socket directory --
     # BEFORE every bind and mask, so a --write scope, a secret mask or a carve-out
     # under one of them lands on top and wins. A cwd under /tmp is re-bound
@@ -342,15 +592,49 @@ def _bwrap_argv(scope):
     # -> D-Bus, gpg-agent). --net skips all of this: it reopens unix sockets on
     # macOS too, and /etc/resolv.conf points into /run on systemd-resolved hosts.
     sockets = () if scope.net else SOCKET_DIRS
-    for d in sockets:
-        argv += ["--tmpfs", d]
-    for d in sockets:
-        if scope.cwd and scope.cwd.startswith(d + "/"):
-            if d != "/tmp":
+
+    def _socket_mounts():
+        out = []
+        for d in sockets:
+            out += ["--tmpfs", d]
+        for d in sockets:
+            if scope.cwd and scope.cwd.startswith(d + "/"):
+                if d != "/tmp":
+                    raise ValueError(
+                        "refusing to run from %r: it lies under %s, whose sockets "
+                        "a re-bind would reopen; run sbx from elsewhere"
+                        % (scope.cwd, d))
+                out += ["--ro-bind", scope.cwd, scope.cwd]
+        return out
+    # Legacy: the socket tmpfs right after /dev (byte-identical argv, D4).
+    if not restricted:
+        argv += _socket_mounts()
+    # Restricted: the read allowlist, BEFORE the socket tmpfs and the writable
+    # binds (so a write scope over a read wins). A read that is an ANCESTOR of
+    # a socket directory (`--read /`, `--read /var`) would otherwise bury the
+    # tmpfs and re-expose /run/docker.sock, D-Bus, lxd -- restricted wider than
+    # legacy (P2 residual). A read UNDER a socket directory is refused here
+    # (and by socket_read_refusal), so the tmpfs after it hides no granted
+    # path. A spelling under a base bind is already visible and is not mounted
+    # again. The spelling is the DEST and the SOURCE alike -- never realpath'd
+    # (KD-14).
+    if restricted:
+        bound = [entry[-1] for entry in scope.linux_base]
+        for path, kind, value in scope.read_rules:
+            if any(_covered(path, d) for d in SOCKET_DIRS):
                 raise ValueError(
-                    "refusing to run from %r: it lies under %s, whose sockets a "
-                    "re-bind would reopen; run sbx from elsewhere" % (scope.cwd, d))
-            argv += ["--ro-bind", scope.cwd, scope.cwd]
+                    "refusing --read %r: it lies under a socket directory "
+                    "(/run, /tmp, /var/snap) the sandbox hides" % (path,))
+            if any(_covered(path, b) for b in bound):
+                continue
+            if kind == "symlink":
+                argv += ["--symlink", value, path]
+            else:
+                argv += ["--ro-bind", path, path]
+        # the fresh /dev and the socket tmpfs AFTER every base and read bind:
+        # no read overlays either (H2, P2 residual)
+        argv += dev
+        argv += _socket_mounts()
     # per writable scope: read-write bind -- UNLESS --ro, which emits NO writable
     # bind at all so even the scratch default is denied (R21).
     if not scope.ro:
@@ -380,8 +664,9 @@ def _bwrap_argv(scope):
     # exactly the wanted semantics: readable, NOT writable, so ~/.claude keeps its
     # write-deny and every unnamed path under it stays masked (fail-closed by
     # enumeration). Each carve-out EXISTS (carveout_paths() filters), so bwrap never
-    # has to mkdir a mountpoint under the read-only root.
-    for path in scope.carveouts or ():
+    # has to mkdir a mountpoint under the read-only root. Restricted mode binds
+    # NONE: a carve-out is a READ grant, and restricted reads are an allowlist.
+    for path in () if restricted else scope.carveouts or ():
         argv += ["--ro-bind", path, path]
     # per shadow target: re-bind the path ONTO ITSELF read-only, after the carve-outs
     # so the later mount wins over the writable --bind above. ~/.claude is masked
@@ -392,8 +677,12 @@ def _bwrap_argv(scope):
     # here: still READABLE (unlike --tmpfs, which would bury the repo and the plugin
     # tree the carve-out just reopened), no longer WRITABLE. Each target EXISTS
     # (shadow_write_denies() filters), so bwrap never has to mkdir a mountpoint under
-    # the read-only root.
+    # the read-only root. Restricted mode re-binds ONLY a target inside a write
+    # scope: outside one there is no writable spelling to revoke, and on the
+    # empty root the re-bind would be a READ grant (C-H4 = S-H1).
     for path in scope.shadow_write_denies or ():
+        if restricted and not any(_covered(path, w) for w in scope.writes):
+            continue
         argv += ["--ro-bind", path, path]
     # per FILE secret (every ancestor .git/config): the empty-file mask, LAST of the
     # binds -- after the carve-outs AND the shadow re-mounts. Both are subtree binds
@@ -430,9 +719,25 @@ def _bwrap_argv(scope):
     # network unshared by default; --net omits this (R18).
     if not scope.net:
         argv.append("--unshare-net")
+    # Restricted: the host name and the cgroup view are the host's otherwise
+    # (-try: a kernel without cgroup namespaces still runs).
+    if restricted:
+        argv += ["--unshare-uts", "--hostname", "sbx", "--unshare-cgroup-try"]
     # setsid(): no controlling tty, so /dev/tty is ENXIO and TIOCSTI cannot inject.
     argv.append("--new-session")
     argv.append("--die-with-parent")
+    # a clean env (--clean-env, restricted or not -- FR-4): bwrap clears it and
+    # sets each validated pair, sorted so the argv is deterministic (values
+    # never reach a log, only argv). bwrap itself is exec'd with {} (C-M7), so
+    # these flags are the ONLY way the --env pairs reach the target; env None
+    # (inherit) emits nothing and keeps the legacy argv byte-identical (D4).
+    if scope.env is not None:
+        argv.append("--clearenv")
+        for key in sorted(scope.env):
+            argv += ["--setenv", key, scope.env[key]]
+    # the empty root has no host cwd to inherit
+    if restricted and scope.cwd:
+        argv += ["--chdir", scope.cwd]
     # seccomp: the OFF-by-default syscall filter (locked decision 8 / NFR-9, R-0003),
     # set only by `--seccomp`. bwrap reads a compiled classic-BPF program from the
     # fd and installs it in the target right before exec. The fd was opened and
@@ -450,6 +755,12 @@ def _bwrap_argv(scope):
     argv.append("--")             # end-of-options terminator (bubblewrap honors "--")
     argv += scope.argv
     return argv
+
+
+def _covered(path, bound):
+    """True when `path` is `bound` or lies below it -- separator-safe
+    (os.path.commonpath, like inside_project): /wx is NOT under /w. Pure."""
+    return os.path.commonpath([path, bound]) == bound
 
 
 # platform key (a sys.platform PREFIX) -> pure argv builder (KD-3, NFR-2). The
@@ -521,12 +832,38 @@ def _split_argv(argv):
     return argv, None
 
 
+class _SbxArgumentParser(argparse.ArgumentParser):
+    """argparse with one change: an "unrecognized arguments" error names only
+    the FLAG part of each stray token, never a value. argparse echoes the raw
+    tokens, so a mistyped `--envv KEY=secret` or `--foo=secret` would otherwise
+    put an environment value on stderr (sbx_restrict:D2 -- env values stay off
+    stderr on EVERY path, parser errors included)."""
+
+    _UNRECOGNIZED = "unrecognized arguments: "
+
+    def error(self, message):
+        if message.startswith(self._UNRECOGNIZED):
+            names = [tok.split("=", 1)[0]
+                     for tok in message[len(self._UNRECOGNIZED):].split(" ")
+                     if tok.startswith("-")]
+            message = "unrecognized arguments (values not echoed): %s" % (
+                " ".join(names) or "<positional>",)
+        super().error(message)
+
+
 def _build_parser():
-    """The sbx flag grammar (everything LEFT of the first bare `--`)."""
-    p = argparse.ArgumentParser(
+    """The sbx flag grammar (everything LEFT of the first bare `--`).
+
+    allow_abbrev=False (C-L1): an abbreviation such as `--restrict`, `--rlimit-a`
+    or `--dry` would otherwise silently resolve to a full flag the gate never
+    saw; it is now a usage error (exit 2). Every new value is type=str and is
+    validated by sbx's own parse_* functions, never by argparse coercion.
+    """
+    p = _SbxArgumentParser(
         prog="sbx",
         usage=USAGE,
         description="Run <cmd> inside an OS sandbox (default-deny writes, no network).",
+        allow_abbrev=False,
     )
     p.add_argument("--write", action="append", default=[], metavar="DIR",
                    help="add a writable scope (repeatable); '.' opts into the repo")
@@ -539,6 +876,36 @@ def _build_parser():
                         "anything else); refused on any other platform")
     p.add_argument("--dry-run", action="store_true",
                    help="print the resolved plan and exit WITHOUT running anything")
+    # Restricted mode (ADR 0031).
+    p.add_argument("--restrict-reads", action="store_true",
+                   help="restrict reads to an allowlist (system base + --read + "
+                        "write scopes) and filter process-exec")
+    p.add_argument("--read", action="append", default=[], metavar="PATH",
+                   type=str, help="add an absolute readable path (repeatable; "
+                                  "requires --restrict-reads)")
+    p.add_argument("--exec", action="append", default=[], metavar="PATH",
+                   type=str, help="add an absolute exec-able path (repeatable; "
+                                  "requires --restrict-reads)")
+    p.add_argument("--clean-env", action="store_true",
+                   help="start the target with an empty environment plus --env")
+    p.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                   type=str, help="set one environment variable (repeatable; "
+                                  "requires --clean-env); sbx never prints a "
+                                  "value, but values travel in the sandbox "
+                                  "engine's argv and are visible in the "
+                                  "process list -- pass no secret here")
+    p.add_argument("--timeout", metavar="SECONDS", type=str,
+                   help="supervise the target and kill it after SECONDS")
+    p.add_argument("--status-fd", metavar="FD", type=str,
+                   help="write the supervisor status record to FD (>= 3; "
+                        "requires --timeout)")
+    for name in ("as", "cpu", "nproc", "fsize", "nofile", "core"):
+        p.add_argument("--rlimit-" + name, metavar="N", type=str,
+                       help="strict RLIMIT_%s (decimal; refused, not skipped, "
+                            "when the kernel rejects it)%s"
+                            % (name.upper(),
+                               "; '+N' = N above the uid's current count"
+                               if name == "nproc" else ""))
     return p
 
 
@@ -738,10 +1105,11 @@ def shadow_write_denies():
     configuration -- hooks, MCP servers, skill scripts -- that a sandboxed command
     has no business rewriting.
 
-    No injection filter is applied to the resolved targets, deliberately. If one ever
-    contained an SBPL metacharacter, sandbox-exec would refuse to parse the profile
-    and sbx would fail to start -- fail-CLOSED. Dropping the entry instead would be
-    fail-open: a silently missing deny.
+    No injection filter is applied to the resolved targets HERE, deliberately: if
+    one ever contains an SBPL metacharacter, the Seatbelt builder's _sbpl_path
+    refuses the whole profile (exit 3) -- fail-CLOSED. (Trusting sandbox-exec to
+    reject the parse was wrong: a crafted name parses as extra rules, P1.)
+    Dropping the entry instead would be fail-open: a silently missing deny.
 
     Import-side-effect-free (M3): the listdir/lstat/realpath reads happen only when
     CALLED, never at import, and nothing is mutated. All of this set's I/O lives
@@ -772,25 +1140,162 @@ def shadow_write_denies():
 # The R14 injection floor: a raw-or-resolved scope carrying any of these could
 # break out of the SBPL profile string or the bwrap argv, so canonicalize refuses
 # it fail-closed. (The gate rejects the same class upstream via its METACHARS.)
-_INJECT_CHARS = frozenset("\"'()\\\n")
+# Every C0 control character and DEL are in the class too (P1): newline was the
+# only one listed, yet a tab or a carriage return is just as foreign to a path
+# and a profile string. _sbpl_path applies the same class at the builder.
+_INJECT_CHARS = frozenset("\"'()\\") | frozenset(
+    chr(code) for code in list(range(0x20)) + [0x7f])
+
+
+def _tilde_ok(word):
+    """G3 mirror of the gate's _tilde_ok: is every "~" in `word` one bash and
+    os.path.expanduser read alike? Only a bare "~" or a leading "~/" qualifies;
+    expanduser leaves "~+", "~-" and "~user" literal while bash expands them
+    ($PWD, $OLDPWD, a home), so a "~" anywhere else is refused, never reasoned
+    about. resolve_scope itself stays byte-identical to the gate's (P8)."""
+    if "~" not in word:
+        return True
+    return word == "~" or (word.startswith("~/") and "~" not in word[1:])
 
 
 def canonicalize(dir_arg, cwd=None):
     """Resolve a `--write` scope via the shared KD-7 resolve_scope, then REJECT
     (fail-closed, sys.exit non-zero) any raw OR resolved path containing " ' ( )
-    backslash or a newline (R14 / NFR-4). Performs NO makedirs. `cwd` defaults to
+    backslash or a control character (R14 / NFR-4, P1), and any "~" other than
+    a bare "~" or a leading "~/" (G3). Performs NO makedirs. `cwd` defaults to
     os.getcwd() so the pure layer can be exercised with a single argument.
     """
     if cwd is None:
         cwd = os.getcwd()
+    if not _tilde_ok(dir_arg):
+        sys.stderr.write(
+            "sbx: error: refusing --write scope %r: a '~' is accepted only as "
+            "a bare '~' or a leading '~/' (G3)\n" % (dir_arg,))
+        sys.exit(2)
     resolved = resolve_scope(dir_arg, cwd)
     for candidate in (dir_arg, resolved):
         if any(ch in _INJECT_CHARS for ch in candidate):
             sys.stderr.write(
                 "sbx: error: refusing --write scope %r: it contains a shell/SBPL "
-                "metacharacter (one of \" ' ( ) \\ newline)\n" % (dir_arg,))
+                "metacharacter (one of \" ' ( ) \\ or a control character)\n"
+                % (dir_arg,))
             sys.exit(2)
+    reason = socket_write_refusal(resolved) or socket_under_refusal(resolved)
+    if reason is not None:
+        sys.stderr.write("sbx: error: refusing --write scope %r: %s\n"
+                         % (dir_arg, reason))
+        sys.exit(2)
     return resolved
+
+
+def socket_write_refusal(path):
+    """Round-3 H1: may `path` be a WRITE scope? -> None, or the refusal reason.
+
+    A write scope is bound `--bind w w` AFTER the socket tmpfs, so one that is
+    EQUAL TO or an ANCESTOR of a socket directory (`/`, `/var`, `/run`, `/tmp`)
+    buries the tmpfs and leaves every host pathname socket writable and
+    connectable. With cwd `/` (project_root falls back to the cwd when there is
+    no .git) `--write .` is exactly that. `path` as spelled and as realpath'd is
+    compared against each SOCKET_REFUSED_DIRS entry as spelled and as
+    realpath'd (darwin: /var -> /private/var). Platform-neutral, so darwin
+    refuses it too. A scope UNDER a socket directory (`--write /tmp/x`) is NOT
+    refused here: it buries nothing above it and is an explicit, narrow grant.
+    I/O: realpath only."""
+    forms = {os.path.normpath(path), os.path.realpath(path)}
+    for d in SOCKET_REFUSED_DIRS:
+        for sock in {d, os.path.realpath(d)}:
+            for w in forms:
+                if _covered(sock, w):
+                    return ("it is %sthe socket directory %s, and a write "
+                            "bind there would bury the tmpfs that hides the "
+                            "host sockets"
+                            % ("" if sock == w else "an ancestor of ", sock))
+    return None
+
+
+def socket_under_refusal(path):
+    """Round-3 R2: does `path` lie strictly UNDER /run, /var/run or /var/snap?
+    -> None, or the refusal reason. A bind there is ordered after the socket
+    tmpfs and re-exposes the daemons below it (/run/user/<uid>: D-Bus,
+    ssh-agent, gpg-agent), the reason a cwd there is refused too. `path` as
+    spelled and as realpath'd against each SOCKET_UNDER_REFUSED_DIRS entry as
+    spelled and as realpath'd; EQUAL is socket_write_refusal's case. Not /tmp
+    (see SOCKET_UNDER_REFUSED_DIRS). I/O: realpath only."""
+    forms = {os.path.normpath(path), os.path.realpath(path)}
+    for d in SOCKET_UNDER_REFUSED_DIRS:
+        for sock in {d, os.path.realpath(d)}:
+            for p in forms:
+                if p != sock and _covered(p, sock):
+                    return ("it lies under the socket directory %s, whose "
+                            "sockets (D-Bus, ssh-agent, gpg-agent) a bind "
+                            "there would re-expose" % sock)
+    return None
+
+
+def socket_bind_refusal(carveouts, shadows):
+    """Round-3 R1: may every ~/.claude carve-out and shadow re-bind target be
+    bound? -> None, or one refusal reason. Both are ro-bound AFTER the socket
+    tmpfs (legacy bwrap), and a carve-out is expanduser'd only, so bwrap
+    follows its source link: one that IS, is an ancestor of, or lies under a
+    socket directory re-exposes the host sockets. The caller REFUSES (exit 3)
+    -- dropping the entry would silently lose the deny for that spelling.
+    Applied on both OSes and in both modes (the same lists feed Seatbelt).
+    I/O: realpath only."""
+    for kind, paths in (("carve-out", carveouts or ()),
+                        ("shadow re-bind target", shadows or ())):
+        for path in paths:
+            reason = socket_write_refusal(path) or socket_under_refusal(path)
+            if reason is not None:
+                return ("the ~/.claude %s %r (realpath %r): %s"
+                        % (kind, path, os.path.realpath(path), reason))
+    return None
+
+
+def floor_cwd(cwd):
+    """The P1 cwd floor, applied ONCE in main() before any scope is computed:
+    the working directory, AND its realpath, must carry no _INJECT_CHARS
+    character -> `cwd` unchanged, else one stderr line and exit 3 (nothing is
+    resolved or run).
+
+    The cwd feeds the profile without passing through any flag check: its
+    ancestors become the restricted metadata LITERALS, <cwd>/.claude/tmp is the
+    default write SUBPATH in both modes, and every ancestor's .git/config is a
+    deny -- so a directory named `a"))(allow file-write* (regex #"^"))...` was a
+    write-anywhere rule. _sbpl_path refuses at the builder as well; this floor
+    also covers --dry-run, which builds no profile."""
+    for candidate in (cwd, os.path.realpath(cwd)):
+        if any(ch in _INJECT_CHARS for ch in candidate):
+            sys.stderr.write(
+                "sbx: error: refusing to run from the working directory %r: it "
+                "contains a shell/SBPL metacharacter (one of \" ' ( ) \\ or a "
+                "control character); run sbx from elsewhere\n" % (cwd,))
+            sys.exit(3)
+    return cwd
+
+
+def canonicalize_read(path_arg):
+    """Canonicalize one `--read` / `--exec` spelling (restricted mode, ADR 0031):
+    ABSOLUTE required (no cwd join, no `~` expansion -- the caller passes what it
+    means), the same R14 injection floor as canonicalize (P2), then
+    os.path.normpath ONLY. NEVER realpath (KD-14): the spelling IS the rule --
+    a symlink stays a literal carrying its link value, and the caller passes
+    every hop it needs. A refusal is one stderr line and exit 2.
+
+    Pure: no filesystem access at all; existence is the resolver's job.
+    """
+    if not isinstance(path_arg, str) or not path_arg.startswith("/"):
+        _usage_error("refusing read/exec path %r: it must be absolute"
+                     % (path_arg,))
+    if any(ch in _INJECT_CHARS for ch in path_arg):
+        _usage_error("refusing read/exec path %r: it contains a shell/SBPL "
+                     "metacharacter (one of \" ' ( ) \\ or a control "
+                     "character)" % (path_arg,))
+    path = os.path.normpath(path_arg)
+    # POSIX normpath keeps a leading "//" (implementation-defined root); it names
+    # the same directory as "/" on both supported OSes, so spell it "/".
+    if path.startswith("//"):
+        path = "/" + path.lstrip("/")
+    return path
 
 
 def scratch_scope(cwd):
@@ -807,17 +1312,413 @@ def compute_writes(raw_writes, ro, cwd):
     set (no scratch); with no `--write` the sole scope is the scratch default;
     otherwise each `--write DIR` is canonicalize()'d (KD-7 resolution + R14
     injection reject). NO makedirs here -- the pure layer only NAMES scopes (M3).
+    The scratch default is cwd-derived, so a <cwd>/.claude/tmp planted as a
+    symlink to `/` or `/var` would bury the socket tmpfs too (round-3 H1): it
+    is refused like a hostile cwd, one stderr line and exit 3.
     """
     if ro:
         return []
     if not raw_writes:
-        return [scratch_scope(cwd)]
+        scratch = scratch_scope(cwd)
+        reason = socket_write_refusal(scratch) or socket_under_refusal(scratch)
+        if reason is not None:
+            sys.stderr.write("sbx: error: refusing to run from %r: the default "
+                             "scratch scope %r: %s\n" % (cwd, scratch, reason))
+            sys.exit(3)
+        return [scratch]
     return [canonicalize(d, cwd) for d in raw_writes]
 
 
+# ---------------------------------------------------------------------------
+# Restricted mode: pure value parsers and validators (ADR 0031, plan Step 2).
+#
+# Every new flag value arrives as type=str and is validated HERE, with
+# re.fullmatch over explicit ASCII classes (never str.isdigit, never int()/
+# float() coercion of an unvalidated string). A refusal is one `sbx: error:`
+# line through _usage_error (exit 2); the one exception is the cwd rule of
+# validate_restricted, which is a containment refusal (exit 3). No function here
+# touches the filesystem -- resolve_reads / linux_base_reads below are the only
+# readers, called from main() only (P1). An --env VALUE is never echoed on any
+# path (sbx_restrict:D2): a refusal names the key or the entry's position.
+
+_ENV_KEY_RE = r"[A-Za-z_][A-Za-z0-9_]{0,127}"
+_ENV_REFUSED_PREFIXES = ("LD_", "DYLD_")
+_ENV_MAX_ENTRIES = 64
+_ENV_MAX_VALUE_CHARS = 32768
+
+_DECIMAL_RE = r"[0-9]{1,20}"
+_NPROC_PLUS_RE = r"\+[0-9]{1,5}"
+_TIMEOUT_RE = r"[0-9]{1,6}(\.[0-9]{1,3})?"
+_STATUS_FD_RE = r"[0-9]{1,4}"
+_TIMEOUT_MAX_S = 86400
+
+_READ_CAP = 256
+_EXEC_CAP = 32
+
+# (flag suffix, resource name, minimum, maximum) -- the strict --rlimit-* table.
+_RLIMIT_SPECS = (
+    ("as", "RLIMIT_AS", 64 * 1024 ** 2, 2 ** 62),
+    ("cpu", "RLIMIT_CPU", 1, 86400),
+    ("nproc", "RLIMIT_NPROC", 1, 1000000),
+    ("fsize", "RLIMIT_FSIZE", 0, 2 ** 62),
+    ("nofile", "RLIMIT_NOFILE", 3, 1048576),
+    ("core", "RLIMIT_CORE", 0, 2 ** 62),
+)
+_NPROC_HEADROOM_MAX = 4096
+
+
+def parse_env(raw, clean):
+    """`--env KEY=VALUE` entries -> the exact target environment (a dict), or
+    None when `--clean-env` was not given (inherit, the legacy behaviour).
+
+    `--env` without `--clean-env` is refused: a pair on top of an inherited
+    environment would silently mix the two. Keys follow `_ENV_KEY_RE` (so no key
+    can start with `-` -- the darwin `/usr/bin/env -i` trampoline, KD-5); the
+    LD_ and DYLD_ prefixes are refused (loader injection); a duplicate key is
+    refused rather than last-wins; a value carries no NUL and at most 32768
+    characters; at most 64 entries. Values are NEVER echoed (D2).
+    """
+    raw = list(raw or ())
+    if not clean:
+        if raw:
+            _usage_error("--env requires --clean-env")
+        return None
+    if len(raw) > _ENV_MAX_ENTRIES:
+        _usage_error("too many --env entries (%d > %d)"
+                     % (len(raw), _ENV_MAX_ENTRIES))
+    env = {}
+    for index, spec in enumerate(raw, 1):
+        key, sep, value = spec.partition("=")
+        if not sep or not re.fullmatch(_ENV_KEY_RE, key, re.ASCII):
+            _usage_error("--env entry #%d: the key must match ^%s$ and be "
+                         "followed by '=' (value not echoed)"
+                         % (index, _ENV_KEY_RE))
+        if key.startswith(_ENV_REFUSED_PREFIXES):
+            _usage_error("--env %s: the LD_ and DYLD_ prefixes are refused "
+                         "(loader injection)" % (key,))
+        if key in env:
+            _usage_error("--env %s: duplicate key" % (key,))
+        if "\x00" in value:
+            _usage_error("--env %s: the value contains a NUL (value not "
+                         "echoed)" % (key,))
+        if len(value) > _ENV_MAX_VALUE_CHARS:
+            _usage_error("--env %s: the value exceeds %d characters"
+                         % (key, _ENV_MAX_VALUE_CHARS))
+        env[key] = value
+    return env
+
+
+def parse_limits(args):
+    """The strict `--rlimit-*` flags -> (limits, nproc_headroom).
+
+    `limits` is a tuple of `(resource name, int)` pairs in the fixed
+    `_RLIMIT_SPECS` order, one per flag given. Each value is plain decimal
+    (`^[0-9]{1,20}$`) inside its range: AS >= 64 MiB, CPU 1..86400, NPROC
+    1..1000000, FSIZE 0..2**62, NOFILE 3..1048576, CORE 0..2**62. NPROC also
+    takes `+N` (`^\\+[0-9]{1,5}$`, 1..4096): N processes ABOVE the uid's
+    current count, returned as `nproc_headroom` and resolved to an absolute in
+    the supervisor -- it never yields an RLIMIT_NPROC pair here.
+    """
+    limits = []
+    headroom = None
+    for suffix, name, low, high in _RLIMIT_SPECS:
+        raw = getattr(args, "rlimit_" + suffix, None)
+        if raw is None:
+            continue
+        flag = "--rlimit-" + suffix
+        if suffix == "nproc" and re.fullmatch(_NPROC_PLUS_RE, raw, re.ASCII):
+            value = int(raw[1:])
+            if not 1 <= value <= _NPROC_HEADROOM_MAX:
+                _usage_error("%s %r: the +N headroom must be 1..%d"
+                             % (flag, raw, _NPROC_HEADROOM_MAX))
+            headroom = value
+            continue
+        if not re.fullmatch(_DECIMAL_RE, raw, re.ASCII):
+            _usage_error("%s %r: not a plain decimal integer" % (flag, raw[:32]))
+        value = int(raw)
+        if not low <= value <= high:
+            _usage_error("%s %s: out of range %d..%d" % (flag, raw, low, high))
+        limits.append((name, value))
+    return tuple(limits), headroom
+
+
+def parse_timeout(raw):
+    """`--timeout SECONDS` -> float, or None when absent. Decimal with at most
+    three fraction digits (`^[0-9]{1,6}(\\.[0-9]{1,3})?$`, so no sign, exponent,
+    `nan` or `inf`), and 0 < t <= 86400."""
+    if raw is None:
+        return None
+    if not re.fullmatch(_TIMEOUT_RE, raw, re.ASCII):
+        _usage_error("--timeout %r: not a decimal number of seconds" % (raw[:32],))
+    value = float(raw)
+    if not 0 < value <= _TIMEOUT_MAX_S:
+        _usage_error("--timeout %s: must be > 0 and <= %d"
+                     % (raw, _TIMEOUT_MAX_S))
+    return value
+
+
+def parse_status_fd(raw, timeout):
+    """`--status-fd FD` -> int, or None when absent. Requires `--timeout` (only
+    the supervisor writes a status record); `^[0-9]{1,4}$` and >= 3 (0-2 are
+    the target's stdio)."""
+    if raw is None:
+        return None
+    if timeout is None:
+        _usage_error("--status-fd requires --timeout")
+    if not re.fullmatch(_STATUS_FD_RE, raw, re.ASCII):
+        _usage_error("--status-fd %r: not a decimal fd number" % (raw[:32],))
+    value = int(raw)
+    if value < 3:
+        _usage_error("--status-fd %d: must be >= 3 (0-2 are the target's stdio)"
+                     % (value,))
+    return value
+
+
+def metadata_ancestors(paths):
+    """Every PROPER ancestor (including "/") of every absolute path given --
+    the read spellings, write scopes, exec paths and the cwd -- deduplicated
+    and sorted. These become LITERAL file-read-metadata allows: path lookup
+    needs to stat each component, and a global metadata rule would make the
+    whole filesystem's shape an oracle (sbx_restrict:E4). A non-absolute entry
+    (a bare argv0 name) has no ancestors and is skipped. Pure."""
+    found = set()
+    for path in paths or ():
+        if not isinstance(path, str) or not path.startswith("/"):
+            continue
+        cur = os.path.normpath(path)
+        while True:
+            parent = os.path.dirname(cur)
+            if parent == cur:            # reached "/"
+                break
+            found.add(parent)
+            cur = parent
+    return tuple(sorted(found))
+
+
+def validate_restricted(args, argv0, cwd, writes):
+    """The cross-flag rules of restricted mode, applied after parsing:
+      * `--read` / `--exec` without `--restrict-reads` -> exit 2 (a read grant
+        is meaningless on the read-anywhere baseline, and silently so);
+      * `--restrict-reads` with `--net` -> exit 2 (restricted mode is the
+        no-network runner mode);
+      * with `--clean-env`, argv0 must be ABSOLUTE (nothing in an empty env can
+        resolve a bare name) -> exit 2; on darwin it must not contain `=`,
+        because the `/usr/bin/env -i K=V ... <argv0>` trampoline would read it
+        as one more assignment (KD-5) -> exit 2;
+      * restricted mode needs the cwd INSIDE a write scope or a `--read` scope
+        (the target could not even stat its own working directory otherwise)
+        -> one stderr line, exit 3.
+    Pure: `writes` is the already-canonicalized write set; the `--read`
+    spellings are canonicalized here with canonicalize_read (no I/O)."""
+    if (args.read or args.exec) and not args.restrict_reads:
+        _usage_error("--read and --exec require --restrict-reads")
+    if args.restrict_reads and args.net:
+        _usage_error("--restrict-reads cannot be combined with --net")
+    if args.clean_env:
+        if not argv0.startswith("/"):
+            _usage_error("--clean-env requires an absolute command path "
+                         "(got %r)" % (argv0,))
+        if sys.platform == "darwin" and "=" in argv0:
+            _usage_error("--clean-env: the command path must not contain '=' "
+                         "(the env -i trampoline would read it as an assignment)")
+    if not args.restrict_reads:
+        return
+    here = os.path.normpath(cwd)
+    scopes = list(writes or ()) + [canonicalize_read(p) for p in args.read]
+    for scope in scopes:
+        if inside_project(here, os.path.normpath(scope)):
+            return
+    sys.stderr.write(
+        "sbx: error: --restrict-reads: the working directory %r is inside no "
+        "write or read scope; refusing to run (fail-closed)\n" % (cwd,))
+    sys.exit(3)
+
+
+# ---------------------------------------------------------------------------
+# Restricted mode: the I/O resolvers (P1). Like secret_paths, these are the
+# ONLY places restricted mode touches the filesystem, and they run only from
+# main() and only when a restricted flag asks for them -- a legacy invocation
+# calls neither. The builders consume their pure tuples.
+
+# bwrap's restricted base filesystem: the system trees (a usr-merge symlink is
+# re-created as a symlink, never followed) and the few /etc entries the dynamic
+# loader, TLS and the clock need.
+_LINUX_BASE_DIRS = ("/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin")
+_LINUX_BASE_ETC = ("/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+                   "/etc/localtime", "/etc/ssl/certs", "/etc/alternatives")
+
+
+_SYMLINK_HOPS_MAX = 40        # the kernel's own MAXSYMLINKS order of magnitude
+
+
+def socket_read_refusal(spelling):
+    """P2 (CWE-41): may the `--read` / `--exec` `spelling` be granted? -> None,
+    or the refusal reason.
+
+    The bwrap builder refused a spelling under a socket directory, but on the
+    SPELLING only: a symlink elsewhere pointing at /run, or `/var/run/...` (a
+    symlink to /run that was not in the list), was ro-bound past the tmpfs --
+    and a read-only bind does not stop connect() on a socket (the host docker
+    socket). So, platform-neutral: every hop of the spelling's symlink chain
+    is checked as spelled AND as realpath'd, then the final realpath, against
+    SOCKET_REFUSED_DIRS, and a target that IS a socket (S_ISSOCK) is refused
+    wherever it lives. A chain longer than _SYMLINK_HOPS_MAX hops is refused.
+
+    I/O (lstat / readlink / realpath / stat), called from resolve_reads only.
+    On darwin the realpath of a system path is /private/..., so this refuses
+    only what is spelled into the list or is a socket -- Seatbelt's (deny
+    network*) already denies unix-socket connect there; the check is the same
+    code on both OSes so it is gated on both."""
+    def _under(path):
+        return any(_covered(path, d) for d in SOCKET_REFUSED_DIRS)
+
+    def _why(path):
+        return ("%r resolves under a socket directory (%s) the sandbox hides "
+                "(via %r)" % (spelling, ", ".join(SOCKET_REFUSED_DIRS), path))
+
+    cur = spelling
+    for _hop in range(_SYMLINK_HOPS_MAX):
+        for path in (os.path.normpath(cur), os.path.realpath(cur)):
+            if _under(path):
+                return _why(path)
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            break                         # a dangling hop: the realpath below
+        if not stat.S_ISLNK(st.st_mode):
+            break
+        cur = os.path.join(os.path.dirname(cur), os.readlink(cur))
+    else:
+        return "%r: more than %d symlink hops" % (spelling, _SYMLINK_HOPS_MAX)
+    real = os.path.realpath(spelling)
+    if _under(real):
+        return _why(real)
+    try:
+        if stat.S_ISSOCK(os.stat(real).st_mode):
+            return "%r resolves to a socket (%r)" % (spelling, real)
+    except OSError:
+        pass                              # nothing there: no socket to reach
+    return None
+
+
+def resolve_reads(reads, execs, argv0):
+    """Classify every `--read` and `--exec` spelling -> (read_rules, exec_rules).
+
+    Each `--read` spelling is canonicalize_read()'d (absolute, injection floor,
+    normpath, NEVER realpath -- KD-14) and `os.lstat`ed, so the link itself is
+    classified, not its target: a symlink -> `(p, "symlink", os.readlink(p))`
+    (a LITERAL, with the link value the bwrap builder re-creates), a directory
+    -> `(p, "dir", None)` (a subpath), anything else -> `(p, "file", None)`.
+    A missing or unreadable spelling is refused (exit 2) -- a grant of nothing
+    is a caller bug. No chain is walked into the RULES: the caller passes every
+    hop it needs. The chain IS walked for one check only (P2): a read or exec
+    spelling that resolves -- at any hop or finally -- under a socket directory,
+    or to a socket, is refused (exit 2, socket_read_refusal); the rule keeps
+    the spelling either way.
+
+    `exec_rules` is the argv0 spelling (when absolute; a bare name has no path
+    the filter could match) followed by each `--exec` entry as
+    `(spelling, is_dir)`; an `--exec` entry must exist too. Caps: at most 256
+    reads and 32 execs (exit 2). Duplicates collapse to their first spelling.
+    """
+    reads = list(reads or ())
+    execs = list(execs or ())
+    if len(reads) > _READ_CAP:
+        _usage_error("too many --read entries (%d > %d)" % (len(reads), _READ_CAP))
+    if len(execs) > _EXEC_CAP:
+        _usage_error("too many --exec entries (%d > %d)" % (len(execs), _EXEC_CAP))
+
+    def _lstat(path, flag):
+        try:
+            st = os.lstat(path)
+        except OSError as exc:
+            _usage_error("%s %r: %s" % (flag, path, exc.strerror or exc))
+        reason = socket_read_refusal(path)   # P2: every hop + the realpath
+        if reason is not None:
+            _usage_error("refusing %s %s" % (flag, reason))
+        return st
+
+    read_rules, seen = [], set()
+    for raw in reads:
+        path = canonicalize_read(raw)
+        if path in seen:
+            continue
+        seen.add(path)
+        st = _lstat(path, "--read")
+        if stat.S_ISLNK(st.st_mode):
+            read_rules.append((path, "symlink", os.readlink(path)))
+        elif stat.S_ISDIR(st.st_mode):
+            read_rules.append((path, "dir", None))
+        else:
+            read_rules.append((path, "file", None))
+
+    exec_rules, seen = [], set()
+    if argv0.startswith("/"):
+        if any(ch in _INJECT_CHARS for ch in argv0):
+            _usage_error("refusing command path %r: it contains a shell/SBPL "
+                         "metacharacter (one of \" ' ( ) \\ or a control "
+                         "character)" % (argv0,))
+        exec_rules.append((argv0, False))
+        seen.add(argv0)
+    for raw in execs:
+        path = canonicalize_read(raw)
+        if path in seen:
+            continue
+        seen.add(path)
+        _lstat(path, "--exec")
+        # the type bit only (a usr-merged /bin is a symlink to a directory);
+        # the spelling itself is kept, never resolved (KD-14)
+        exec_rules.append((path, os.path.isdir(path)))
+    return tuple(read_rules), tuple(exec_rules)
+
+
+def linux_base_reads():
+    """The bwrap base filesystem of restricted mode, in argv order (Linux only).
+
+    For each of /usr, /lib, /lib64, /lib32, /bin, /sbin: a symlink (usr-merge)
+    -> `("symlink", os.readlink(p), p)`, a directory -> `("ro-bind", p)`,
+    absent -> skipped. Then the /etc set (ld.so.cache, ld.so.conf,
+    ld.so.conf.d, localtime, ssl/certs, alternatives), existence-filtered the
+    same way (a symlinked entry such as /etc/localtime is re-created as a
+    symlink, never followed) and skipped when a base bind already covers its
+    spelling. bwrap cannot mkdir a mountpoint for a missing source, so the
+    filter is what keeps the argv valid on every distribution.
+    """
+    entries, bound = [], []
+    for path in _LINUX_BASE_DIRS + _LINUX_BASE_ETC:
+        if any(inside_project(path, b) for b in bound):
+            continue
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            entries.append(("symlink", os.readlink(path), path))
+        elif path in _LINUX_BASE_DIRS and not stat.S_ISDIR(st.st_mode):
+            continue
+        else:
+            entries.append(("ro-bind", path))
+            bound.append(path)
+    return tuple(entries)
+
+
+def _restricted_flags_given(args):
+    """True when ANY restricted-mode flag is on the command line. A legacy
+    invocation (none) keeps the exact pre-ADR-0031 call sequence in main()."""
+    if (args.restrict_reads or args.read or args.exec or args.clean_env
+            or args.env or args.timeout is not None
+            or args.status_fd is not None):
+        return True
+    return any(getattr(args, "rlimit_" + suffix, None) is not None
+               for suffix, _name, _low, _high in _RLIMIT_SPECS)
+
+
 def _format_plan(scope):
-    """Human-readable dump of the resolved Scope for --dry-run."""
-    return "\n".join([
+    """Human-readable dump of the resolved Scope for --dry-run. The restricted
+    fields are appended only when a restricted flag set them, so a legacy plan
+    is unchanged; the environment is shown as its KEYS only -- a value is never
+    printed (sbx_restrict:D2)."""
+    lines = [
         "sbx plan -- resolved request (no child executed)",
         "  engine      : %r" % (scope.engine,),
         "  writes      : %r" % (scope.writes,),
@@ -828,7 +1729,25 @@ def _format_plan(scope):
         "  carveouts   : %r" % (scope.carveouts,),
         "  shadow_write_denies: %r" % (scope.shadow_write_denies,),
         "  seccomp     : %r" % (scope.seccomp,),
-    ])
+    ]
+    if (scope.restrict_reads or scope.read_rules or scope.exec_rules
+            or scope.env is not None or scope.timeout is not None
+            or scope.status_fd is not None or scope.limits
+            or scope.nproc_headroom is not None):
+        env_keys = None if scope.env is None else sorted(scope.env)
+        lines += [
+            "  restrict_reads: %r" % (scope.restrict_reads,),
+            "  read_rules  : %r" % (scope.read_rules,),
+            "  meta_literals: %r" % (scope.meta_literals,),
+            "  exec_rules  : %r" % (scope.exec_rules,),
+            "  linux_base  : %r" % (scope.linux_base,),
+            "  env (keys only; values never printed): %r" % (env_keys,),
+            "  timeout     : %r" % (scope.timeout,),
+            "  status_fd   : %r" % (scope.status_fd,),
+            "  limits      : %r" % (scope.limits,),
+            "  nproc_headroom: %r" % (scope.nproc_headroom,),
+        ]
+    return "\n".join(lines)
 
 
 def _usage_error(msg):
@@ -1196,6 +2115,460 @@ def _apply_rlimits():
         pass
 
 
+# ---------------------------------------------------------------------------
+# Restricted mode: strict rlimits, the exec triple and the supervisor (ADR 0031,
+# plan Step 4). Nothing here runs at import; every function is called from
+# main() only, and only when a restricted flag asks for it -- a legacy
+# invocation reaches none of them (sbx_gate row Q, _main_in).
+
+def uid_process_count(uid):
+    """The number of processes whose REAL uid is `uid` -- the base of the
+    `--rlimit-nproc +N` form (RLIMIT_NPROC counts every process of the uid,
+    not only this run's). I/O, called from the supervisor or the non-fork
+    path only when +N was given.
+
+    Linux scans /proc/[0-9]*/status for the `Uid:` line (a pid that vanished
+    mid-scan is ignored); macOS runs `/bin/ps -A -o ruid=` with an empty
+    environment and counts the lines equal to `uid` (sbx is not an MCP server,
+    so subprocess.run is fine here). A failure RAISES (OSError, ValueError or
+    subprocess.SubprocessError); the caller turns it into exit 3."""
+    want = str(int(uid))
+    if sys.platform == "darwin":
+        proc = subprocess.run(["/bin/ps", "-A", "-o", "ruid="], env={},
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=5)
+        if proc.returncode != 0:
+            raise OSError("/bin/ps exited %d" % proc.returncode)
+        return sum(1 for line in proc.stdout.decode("ascii", "replace").split()
+                   if line == want)
+    count = 0
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/status" % name) as fh:
+                for line in fh:
+                    if line.startswith("Uid:"):
+                        fields = line.split()
+                        count += len(fields) > 1 and fields[1] == want
+                        break
+        except OSError:
+            continue                      # the pid exited during the scan
+    return count
+
+
+def _resolve_limits(scope):
+    """scope.limits plus the `--rlimit-nproc +N` pair resolved against the
+    uid's CURRENT process count -> (limits, refusal). The count is taken only
+    when +N was given; a count failure is a refusal (exit 3), never a skip."""
+    limits = tuple(scope.limits or ())
+    if scope.nproc_headroom is None:
+        return limits, None
+    try:
+        count = uid_process_count(os.getuid())
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return limits, ("cannot count the uid's processes for --rlimit-nproc "
+                        "+%d (%s)" % (scope.nproc_headroom, type(exc).__name__))
+    return limits + (("RLIMIT_NPROC", count + scope.nproc_headroom),), None
+
+
+def _strict_rlimits(limits):
+    """Apply each requested `(name, value)` limit with soft == hard -> None, or
+    the refusal reason of the FIRST limit that cannot be applied.
+
+    The STRICT counterpart of _apply_rlimits (P6), which swallows a refusal by
+    design: a limit the CALLER asked for is a contract, so a value above the
+    finite hard limit is refused (never clamped, KD-3) and a setrlimit the
+    kernel rejects is refused too -- the caller then runs NOTHING (exit 3).
+    soft == hard, so the target can neither raise the soft limit back up nor
+    the hard one. A strict limit only ever NARROWS (R1, CWE-269): a value above
+    the current finite SOFT limit is refused too -- setrlimit(value, value)
+    would otherwise RAISE it (a non-zero --rlimit-core over an inherited soft 0
+    turned kernel core dumps on, outside every write scope). Runs in the
+    supervised child after fork, or in sbx itself right before the exec in
+    non-fork mode, AFTER _apply_rlimits."""
+    for name, value in limits or ():
+        which = getattr(resource, name, None)
+        if which is None:
+            return "setrlimit %s refused (unsupported on this platform)" % name
+        try:
+            soft, hard = resource.getrlimit(which)
+        except (ValueError, OSError) as exc:
+            return "setrlimit %s refused (%s)" % (name, type(exc).__name__)
+        if hard != resource.RLIM_INFINITY and value > hard:
+            return ("setrlimit %s refused (%d is above the hard limit %d)"
+                    % (name, value, hard))
+        if soft != resource.RLIM_INFINITY and value > soft:
+            return ("setrlimit %s refused (%d is above the current soft limit "
+                    "%d; a strict limit never raises one)" % (name, value, soft))
+        try:
+            resource.setrlimit(which, (value, value))
+        except (ValueError, OSError) as exc:
+            return "setrlimit %s refused (%s)" % (name, type(exc).__name__)
+    return None
+
+
+def _prepare_exec(scope):
+    """The exec triple `(engine_path, argv, env)` shared by the supervised
+    fork path and the non-fork path (KD-5). Builds the argv with the
+    platform's pure builder; a builder refusal raises ValueError (exit 3).
+
+    `env` is None when the environment is inherited (scope.env is None): the
+    argv is then exactly the builder's, and main()'s legacy branch keeps its
+    literal execvp (sbx_seccomp's _Stubbed and sbx_gate's _main_in replace
+    exactly that call). With `--clean-env` the ENGINE gets an EMPTY
+    environment on both platforms (C-M7 = S-M1) -- nothing of sbx's own env
+    reaches sandbox-exec or bwrap -- and the target's env travels in the argv:
+    on darwin the target part after the profile becomes `/usr/bin/env -i
+    K=V... <argv0> <args>` (keys sorted; the profile exec-allows
+    /usr/bin/env, and validate_restricted refused an argv0 containing `=`),
+    on linux the builder already emitted `--clearenv --setenv K V`."""
+    builder, engine_path = _detect_engine()
+    argv = builder(scope)
+    if scope.env is None:
+        return engine_path, argv, None
+    if _platform_key(sys.platform) == "darwin":
+        pairs = ["%s=%s" % (key, scope.env[key]) for key in sorted(scope.env)]
+        argv = argv[:3] + ["/usr/bin/env", "-i"] + pairs + list(scope.argv)
+    return engine_path, argv, {}
+
+
+def _exec_clean(engine_path, argv):
+    """The non-fork `--clean-env` exec: the engine by its ABSOLUTE path with
+    an empty environment. Returns only on failure (exit 3, nothing ran)."""
+    try:
+        os.execve(engine_path, argv, {})
+    except OSError as exc:
+        sys.stderr.write(
+            "sbx: error: failed to exec sandbox engine %r: %s\n" % (argv[0], exc))
+        return 3
+    return 0  # unreachable: execve either replaced the image or raised above
+
+
+# The supervisor's signals: trapped in sbx (a flag the wait loop polls), reset
+# to SIG_DFL in the child before anything else.
+_TRAPPED_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+_STATUS_LINE_MAX = 512        # KD-1: one status line, '\n' included
+_SETUP_MSG_MAX = 4096         # the child's setup-error message, read capped
+_WAITID_POLL_S = 0.02         # linux: the waitid WNOHANG poll period
+_KQ_POLL_S = 0.1              # darwin: the trapped-signal check period
+
+
+def _write_status(fd, obj):
+    """One status record on the --status-fd: compact JSON + '\\n', at most
+    512 bytes, written with an os.write loop. No fd -> nothing. A write
+    failure (EPIPE: the reader went away) is ignored -- the record is advisory
+    and a failed write must never abandon a live process group.
+
+    A long refusal reason is HALVED until the ENCODED line fits (M1): a
+    character json-escapes to as many as six bytes (a control character is
+    \\u00XX), so one cut of the reason's characters could still overflow, and
+    the encoded bytes are never sliced -- that dropped the closing `}\\n` and
+    the reader lost the terminal record. A record that cannot fit even
+    without its reason is not written at all, never written broken."""
+    if fd is None:
+        return
+
+    def _encode(record):
+        return (json.dumps(record, separators=(",", ":")) + "\n").encode("ascii")
+    data = _encode(obj)
+    while len(data) > _STATUS_LINE_MAX and isinstance(obj.get("reason"), str) \
+            and obj["reason"]:
+        obj = dict(obj, reason=obj["reason"][:len(obj["reason"]) // 2])
+        data = _encode(obj)
+    if len(data) > _STATUS_LINE_MAX:
+        return
+    view = memoryview(data)
+    while view:
+        try:
+            view = view[os.write(fd, view):]
+        except OSError:
+            return
+
+
+def _exit_record(start, outcome, code, sig, reason=None):
+    obj = {"sbx": 1, "event": "exit", "outcome": outcome, "code": code,
+           "signal": sig,
+           "durationMs": max(0, int((time.monotonic() - start) * 1000))}
+    if reason is not None:
+        obj["reason"] = reason
+    return obj
+
+
+def _refused(fd, start, reason):
+    """A fail-closed refusal: one `sbx: error:` stderr line, one `exit`
+    record with outcome `refused` (no `spawned` before it), exit 3."""
+    sys.stderr.write("sbx: error: %s\n" % reason)
+    _write_status(fd, _exit_record(start, "refused", 3, None, reason))
+    return 3
+
+
+def _wait_exit_unreaped(pid, deadline, kq=None, flag=None):
+    """Wait until child `pid` EXITS without reaping it (KD-2) -> True, or
+    False when `deadline` (time.monotonic) passes or `flag` (the supervisor's
+    trapped-signal list) becomes non-empty first.
+
+    Not reaping is the point: a zombie leader keeps its pid -- and so its
+    process group id -- reserved, so _sweep can SIGKILL the group's
+    background stragglers BEFORE the waitpid that frees the id (kill before
+    reap). Neither branch reaps.
+
+    The branch is selected by sys.platform, NEVER by hasattr(os, ...) on
+    waitid: Python >= 3.13 exposes os.waitid on darwin too (M0:1).
+      darwin  a kqueue EVFILT_PROC / NOTE_EXIT event, registered with
+              nevents == 0 -- an already-exited (zombie) child then raises
+              ESRCH, the ONE shape caught, which means exited-unreaped (with
+              nevents >= 1 the kernel would answer an EV_ERROR event
+              instead, M0:1) -- then polled at most 100 ms at a time so the
+              flag is seen. `kq` is the caller's kqueue (None: one is made
+              here and closed in the finally).
+      linux   os.waitid(P_PID, pid, WEXITED | WNOWAIT | WNOHANG) every 20 ms.
+    """
+    if sys.platform == "darwin":
+        assert hasattr(select, "kqueue"), "darwin without kqueue"
+        own = kq is None
+        if own:
+            kq = select.kqueue()
+        try:
+            event = select.kevent(
+                pid, filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT)
+            try:
+                kq.control([event], 0, 0)
+            except OSError as exc:
+                if exc.errno != errno.ESRCH:
+                    raise
+                return True               # already exited, still unreaped
+            while True:
+                if flag:
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                if kq.control(None, 1, min(remaining, _KQ_POLL_S)):
+                    return True
+        finally:
+            if own:
+                kq.close()
+    while True:
+        try:
+            info = os.waitid(os.P_PID, pid,
+                             os.WEXITED | os.WNOWAIT | os.WNOHANG)
+        except ChildProcessError:
+            return True
+        if info is not None:
+            return True
+        if flag:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_WAITID_POLL_S)
+
+
+def _sweep(pid, kill_leader=False):
+    """Kill the whole process group `pid` leads, THEN reap the leader ->
+    its waitpid status. ESRCH (group gone) and EPERM (macOS's answer for a
+    zombie-only group, M0:1) are ignored. `kill_leader` also SIGKILLs the
+    leader by pid (linux: bwrap, whose --new-session put the target in a
+    group of its own; its death tears the pid namespace down)."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError as exc:
+        if exc.errno not in (errno.ESRCH, errno.EPERM):
+            raise
+    if kill_leader:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return os.waitpid(pid, 0)[1]
+
+
+def _supervised_child(scope, r, w, engine_path, argv, env, limits):
+    """The forked child of _supervise. NEVER returns: it execs the engine or
+    reports its setup failure on `w` and _exit(127)s."""
+    try:
+        # FIRST: the target must not inherit the supervisor's Python handlers
+        for sig in _TRAPPED_SIGNALS:
+            signal.signal(sig, signal.SIG_DFL)
+        os.close(r)
+        if scope.status_fd is not None:
+            os.close(scope.status_fd)     # never inherited by the target (T8)
+        os.setsid()                       # pid == pgid == sid: killpg reaches all
+        _apply_rlimits()                  # P6: best-effort, the unrequested ones
+        reason = _strict_rlimits(limits)
+        if reason is None:
+            try:
+                os.execve(engine_path, argv,
+                          os.environ if env is None else env)
+            except OSError as exc:
+                reason = "failed to exec sandbox engine %r: %s" % (argv[0], exc)
+        os.write(w, reason.encode("utf-8", "replace")[:_SETUP_MSG_MAX])
+    except BaseException as exc:          # noqa: BLE001 -- never return to the parent's code
+        try:
+            os.write(w, ("supervised child setup failed (%s)"
+                         % type(exc).__name__).encode("ascii"))
+        except BaseException:             # noqa: BLE001
+            pass
+    finally:
+        os._exit(127)
+
+
+def _read_setup(r):
+    """The child's setup-error channel, read to EOF (capped): empty = the
+    engine was exec'd (the CLOEXEC write end closed), else the reason."""
+    data = b""
+    while True:
+        chunk = os.read(r, 4096)
+        if not chunk:
+            return data
+        if len(data) < _SETUP_MSG_MAX:
+            data += chunk
+
+
+def _supervise(scope, engine_path, argv, env):
+    """The supervised fork path (`--timeout`, KD-1/KD-2) -> sbx's exit code.
+
+      1. a CLOEXEC setup-error pipe;
+      2. the `--rlimit-nproc +N` pair resolved against the uid's count;
+      3. SIGTERM/SIGINT/SIGHUP trapped BEFORE fork (R2:L3), so a signal that
+         lands between the fork and the `spawned` record is never lost;
+      4. fork; the child resets the handlers, closes the read end and the
+         status fd, setsid()s, applies the rlimits (strict ones refused, not
+         skipped) and execve()s the engine -- or reports why not on the pipe;
+      5. a non-empty pipe -> reap, one `refused` exit record, no `spawned`,
+         one stderr line, exit 3;
+      6. `spawned` {pid, pgid} (pgid == pid: the child is a session leader);
+      7. wait for the exit WITHOUT reaping, then kill the group, then reap
+         (_wait_exit_unreaped + _sweep); the deadline or a trapped signal
+         kills the group instead;
+      8. the terminal `exit` record; the saved handlers restored.
+    Exit codes: the target's code when it exited, 128 + N when it was killed
+    by signal N (or sbx itself got N), 124 on the wall-clock timeout, 3 on a
+    refusal."""
+    start = time.monotonic()
+    fd = scope.status_fd
+    limits, reason = _resolve_limits(scope)
+    if reason is not None:
+        return _refused(fd, start, reason)
+    trapped = []
+
+    def _on_signal(signum, _frame):
+        if not trapped:
+            trapped.append(signum)
+
+    saved = {}
+    r = w = pid = None
+    reaped = False
+    try:
+        r, w = os.pipe()
+        for sig in _TRAPPED_SIGNALS:
+            saved[sig] = signal.signal(sig, _on_signal)
+        try:
+            pid = os.fork()
+        except OSError as exc:
+            return _refused(fd, start, "cannot fork the supervised child (%s)"
+                            % type(exc).__name__)
+        if pid == 0:
+            _supervised_child(scope, r, w, engine_path, argv, env, limits)
+        os.close(w)
+        w = None
+        setup = _read_setup(r)
+        os.close(r)
+        r = None
+        if setup:
+            os.waitpid(pid, 0)
+            reaped = True
+            return _refused(fd, start, setup.decode("utf-8", "replace")
+                            .replace("\n", " ").strip())
+        _write_status(fd, {"sbx": 1, "event": "spawned", "pid": pid,
+                           "pgid": pid})
+        deadline = time.monotonic() + scope.timeout
+        linux = _platform_key(sys.platform) == "linux"
+        if _wait_exit_unreaped(pid, deadline, flag=trapped):
+            status = _sweep(pid)
+            reaped = True
+            if os.WIFSIGNALED(status):
+                sig = os.WTERMSIG(status)
+                _write_status(fd, _exit_record(start, "signaled", None, sig))
+                return 128 + sig
+            code = os.WEXITSTATUS(status)  # no WUNTRACED: exited or signaled
+            _write_status(fd, _exit_record(start, "exited", code, None))
+            return code
+        _sweep(pid, kill_leader=linux)
+        reaped = True
+        if trapped:
+            sig = trapped[0]
+            sys.stderr.write("sbx: signal %d received; process group killed\n"
+                             % sig)
+            _write_status(fd, _exit_record(start, "signaled", None, sig))
+            return 128 + sig
+        sys.stderr.write("sbx: timeout: wall-clock limit of %gs reached; "
+                         "process group killed\n" % scope.timeout)
+        _write_status(fd, _exit_record(start, "timeout", None,
+                                       int(signal.SIGKILL)))
+        return 124
+    finally:
+        for end in (r, w):
+            if end is not None:
+                os.close(end)
+        if pid and not reaped:            # an unexpected error: never orphan
+            try:
+                _sweep(pid, kill_leader=True)
+            except OSError:
+                pass
+        for sig, old in saved.items():
+            signal.signal(sig, signal.SIG_DFL if old is None else old)
+
+
+def _restricted_scope(args, target, cwd):
+    """Build the Scope for an invocation that carries ANY restricted-mode flag
+    (ADR 0031). Order: the pure value parsers, the cross-flag validator, then
+    -- only under --restrict-reads -- the I/O resolvers (resolve_reads, plus
+    linux_base_reads on Linux) and the metadata ancestors. Every refusal exits
+    here (2 usage, 3 containment), before anything is built or run.
+
+    Restricted mode passes carveouts=(): the ~/.claude carve-outs are READ
+    grants, and restricted reads are an allowlist (FR-1)."""
+    writes = compute_writes(args.write, args.ro, cwd)   # KD-7 + R14 + --ro (R21)
+    env = parse_env(args.env, args.clean_env)
+    limits, nproc_headroom = parse_limits(args)
+    timeout = parse_timeout(args.timeout)
+    status_fd = parse_status_fd(args.status_fd, timeout)
+    validate_restricted(args, target[0], cwd, writes)
+
+    read_rules, exec_rules, meta, base = (), (), (), ()
+    if args.restrict_reads:
+        read_rules, exec_rules = resolve_reads(args.read, args.exec, target[0])
+        meta = metadata_ancestors(
+            [rule[0] for rule in read_rules] + list(writes)
+            + [rule[0] for rule in exec_rules] + [cwd])
+        if _platform_key(sys.platform) == "linux":
+            base = linux_base_reads()
+    return Scope(
+        writes=writes,
+        net=args.net,
+        ro=args.ro,
+        argv=target,
+        secret_paths=secret_paths(cwd),
+        carveouts=() if args.restrict_reads else carveout_paths(),
+        shadow_write_denies=shadow_write_denies(),
+        seccomp=args.seccomp,
+        cwd=cwd,
+        restrict_reads=args.restrict_reads,
+        read_rules=read_rules,
+        meta_literals=meta,
+        exec_rules=exec_rules,
+        linux_base=base,
+        env=env,
+        timeout=timeout,
+        status_fd=status_fd,
+        limits=limits,
+        nproc_headroom=nproc_headroom,
+    )
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
@@ -1208,19 +2581,35 @@ def main(argv=None):
 
     args = _build_parser().parse_args(left)
 
-    cwd = os.getcwd()
-    scope = Scope(
-        writes=compute_writes(args.write, args.ro, cwd),   # KD-7 + R14 + --ro (R21)
-        net=args.net,
-        ro=args.ro,
-        argv=target,
-        secret_paths=secret_paths(cwd),   # M-A / sec-MED-2 ancestor-.git deny set
-        carveouts=carveout_paths(),       # read-ONLY holes in the ~/.claude deny
-        # write-ONLY deny on the OTHER spelling of ~/.claude's symlinked-out trees
-        shadow_write_denies=shadow_write_denies(),
-        seccomp=args.seccomp,             # OFF unless --seccomp (R-0003)
-        cwd=cwd,                          # re-bound if under a socket dir (R-0061)
-    )
+    # P1: the cwd (and its realpath) is floored ONCE, before any scope is
+    # computed from it, in both modes -- exit 3 and nothing resolved or run.
+    cwd = floor_cwd(os.getcwd())
+    # Restricted mode (ADR 0031) only when a new flag asks for it; a legacy
+    # invocation keeps the exact call sequence below (sbx_gate row Q).
+    restricted = _restricted_flags_given(args)
+    if restricted:
+        scope = _restricted_scope(args, target, cwd)
+    else:
+        scope = Scope(
+            writes=compute_writes(args.write, args.ro, cwd),   # KD-7 + R14 + --ro (R21)
+            net=args.net,
+            ro=args.ro,
+            argv=target,
+            secret_paths=secret_paths(cwd),   # M-A / sec-MED-2 ancestor-.git deny set
+            carveouts=carveout_paths(),       # read-ONLY holes in the ~/.claude deny
+            # write-ONLY deny on the OTHER spelling of ~/.claude's symlinked-out trees
+            shadow_write_denies=shadow_write_denies(),
+            seccomp=args.seccomp,             # OFF unless --seccomp (R-0003)
+            cwd=cwd,                          # re-bound if under a socket dir (R-0061)
+        )
+
+    # Round-3 R1: a carve-out or shadow target that is, contains or lies under
+    # a socket directory is refused (exit 3) in both modes, --dry-run included,
+    # before anything is planned or run -- never dropped.
+    reason = socket_bind_refusal(scope.carveouts, scope.shadow_write_denies)
+    if reason is not None:
+        sys.stderr.write("sbx: error: refusing to run: %s\n" % reason)
+        sys.exit(3)
 
     # --dry-run previews the resolved plan and runs NOTHING. Engine resolution
     # here is best-effort DISPLAY only and NEVER fail-closes -- a preview must
@@ -1232,6 +2621,15 @@ def main(argv=None):
             scope.engine = shutil.which(ENGINE_BINARY[key])
         print(_format_plan(scope))
         return 0
+
+    # --status-fd: the supervisor writes its records there, so the fd must be
+    # open NOW -- a usage error (exit 2) before anything is resolved or run.
+    if scope.status_fd is not None:
+        try:
+            os.fstat(scope.status_fd)
+        except OSError:
+            _usage_error("--status-fd %d: not an open file descriptor"
+                         % (scope.status_fd,))
 
     # Real path: FAIL-CLOSED platform + sandbox-binary detection FIRST (task-002,
     # KD-3, NFR-1, R20). On an unknown platform or a missing sandbox binary this
@@ -1254,12 +2652,20 @@ def main(argv=None):
     # platform's pure builder (task-004 Seatbelt / task-005 bwrap). argv is a
     # LIST: the target cmd/args are argv ELEMENTS, never a shell string, so they
     # can never inject into the profile (NFR-4). A builder refusal (ValueError) is
-    # one stderr line and exit 3 -- nothing is run.
-    try:
-        argv = builder(scope)
-    except ValueError as exc:
-        sys.stderr.write("sbx: error: %s\n" % exc)
-        return 3
+    # one stderr line and exit 3 -- nothing is run. Restricted mode builds the
+    # whole exec triple (engine path, argv, engine env) through _prepare_exec,
+    # which also lays the darwin `/usr/bin/env -i` clean-env trampoline (KD-5).
+    if restricted:
+        try:
+            engine_path, argv, env = _prepare_exec(scope)
+        except ValueError as exc:
+            return _refused(scope.status_fd, time.monotonic(), str(exc))
+    else:
+        try:
+            argv = builder(scope)
+        except ValueError as exc:
+            sys.stderr.write("sbx: error: %s\n" % exc)
+            return 3
 
     # Create ONLY the default scratch scope, and only when it is actually in the
     # writable set (no flags -> [<cwd>/.claude/tmp]; --ro -> [] so nothing is
@@ -1270,11 +2676,29 @@ def main(argv=None):
     if scratch in scope.writes:
         os.makedirs(scratch, exist_ok=True)
 
+    # --timeout: the supervised fork path (KD-1/KD-2). The child applies the
+    # rlimits itself, after fork and before its exec of the engine.
+    if scope.timeout is not None:
+        return _supervise(scope, engine_path, argv, env)
+
     # *** ORDERING IS LOAD-BEARING (KD-4): setrlimit BEFORE os.execvp. ***
     # os.execvp replaces this process image but keeps the SAME PID, and resource
     # limits SURVIVE exec, so the sandboxed target inherits every limit set here.
     # After execvp this code never runs -- so the limits MUST be set first.
     _apply_rlimits()
+
+    # Restricted, non-fork: the STRICT limits on top (soft == hard; a refusal is
+    # exit 3 and nothing runs), then the clean-env exec with an EMPTY engine
+    # environment when --clean-env asked for one.
+    if restricted:
+        limits, reason = _resolve_limits(scope)
+        if reason is None:
+            reason = _strict_rlimits(limits)
+        if reason is not None:
+            sys.stderr.write("sbx: error: %s\n" % reason)
+            return 3
+        if env is not None:
+            return _exec_clean(engine_path, argv)
 
     # The FIRST and ONLY point at which sbx runs a child. os.execvp REPLACES this
     # process with the sandbox engine -- no fork/waitpid wrapper -- so the

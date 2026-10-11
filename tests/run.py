@@ -90,6 +90,10 @@ def run_sbx_seccomp(opts):
     return run_python_suite("test_sbx_seccomp", opts)
 
 
+def run_sbx_restrict(opts):
+    return run_python_suite("test_sbx_restrict", opts)
+
+
 def run_purity_lsp(opts):
     return run_python_suite("test_purity_lsp", opts)
 
@@ -222,6 +226,14 @@ def run_mcp_proxy(opts):
     return run_python_suite("test_mcp_proxy", opts)
 
 
+def run_mcp_sandbox(opts):
+    return run_python_suite("test_mcp_sandbox", opts)
+
+
+def run_mcp_skill(opts):
+    return run_python_suite("test_mcp_skill", opts)
+
+
 def run_llm_router(opts):
     return run_python_suite("test_llm_router", opts)
 
@@ -273,7 +285,7 @@ SUITES = [
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 381),
     ("sbx_gate", run_sbx_gate,
-     "sbx PreToolUse grant-only gate", 105),
+     "sbx PreToolUse grant-only gate", 135),
     # TYPED: a fixed case table.  The one Linux-only row per group C and D is
     # recorded as INFO on any other host rather than omitted, so the count is
     # the same on macOS and on Linux.
@@ -284,6 +296,24 @@ SUITES = [
      "ioctl and clone entries, clone3 ENOSYS -- the pure `--seccomp N` argv "
      "wiring, the fail-closed refusal off Linux x86_64, and the live prctl "
      "probe on Linux", 33),
+    # TYPED: a fixed case table (A 15, B 8, C 4, D 4, E 10, F 11, U 9, V 8,
+    # T 7, L 12, S 16, X 14) -- the Step 2 rows, the Step 3 Seatbelt and bwrap
+    # goldens (F11, IMPL:025: --clean-env without --restrict-reads keeps
+    # bwrap's --clearenv/--setenv), the Step 4 supervisor / strict-rlimit /
+    # clean-env rows, the Step 6 live restricted-Seatbelt rows (L12 the
+    # depth cap, M0:9; IMPL:029), the Step 5 gate-grammar rows and the
+    # security-review round-1 rows (X: P1 cwd/builder SBPL injection, P2
+    # socket reads, R1 soft rlimits, M1 status record, G3 tilde, P4 help;
+    # round 3: H1 socket-burying write scopes, H2 the restricted fresh /dev,
+    # R1 socket-dir carve-out/shadow targets, R2 write scopes under /run;
+    # all pure or in-process). A live row that cannot run here (the other
+    # OS, or a nested sandbox per the P23 control) is recorded INFO, never
+    # omitted, and L7 is INFO by declaration, so the count is the same on
+    # macOS and on Linux.
+    ("sbx_restrict", run_sbx_restrict,
+     "sbx restricted mode: reads, exec filter, clean env, supervised timeout, "
+     "strict rlimits, live restricted Seatbelt, gate grammar, security "
+     "review round 1", 118),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 155),
     ("purity_file_ops", run_purity_file_ops,
@@ -579,7 +609,7 @@ SUITES = [
     ("read_loop", run_read_loop,
      "every MCP server's read loop carries ADR 0008's shape: a single-thread "
      "reader executor no handler can take, and one task per message -- with "
-     "the pool/coroutine split declared per server rather than inferred", 51),
+     "the pool/coroutine split declared per server rather than inferred", 55),
     # TYPED for read_loop's reason: a server that appears without a declared
     # reclaim class is the defect, so a moved count is the alarm working.  The
     # two per-server groups make it 2N + a fixed tail.
@@ -590,7 +620,7 @@ SUITES = [
      "never cancellable, a dispatch target that lets the CancelledError "
      "through, and what a cancel reclaims declared per server and MEASURED "
      "for the kill, lsp-cancel and pg-cancel classes -- the PostgreSQL "
-     "CancelRequest and its drain driven against a loopback fake server", 88),
+     "CancelRequest and its drain driven against a loopback fake server", 92),
     # TYPED for read_loop's reason above, not mcp_footprint's: a server that
     # appears without a declared row is the defect, so a moved count is the
     # alarm working.  The two per-server groups make it 2N + a fixed tail.
@@ -601,17 +631,17 @@ SUITES = [
      "every peer-chosen method, id, tool name and key logged through the "
      "generated _log_value (CWE-117), "
      "and MCP_SKELETON.md's own sample lifted by script and gated the same way",
-     64),
-    # TYPED for the same reason as the two above.  The count is 26 declared
-    # sites + 17 servers + 4 roster + 11 control + 4 hygiene: the site total is
-    # 17 layer-W plus 9 layer-D, so a server that gains or loses a catch-all
+     68),
+    # TYPED for the same reason as the two above.  The count is 30 declared
+    # sites + 19 servers + 4 roster + 11 control + 4 hygiene: the site total is
+    # 19 layer-W plus 11 layer-D, so a server that gains or loses a catch-all
     # moves it, which is the alarm working.
     ("handler_crash", run_handler_crash,
      "every MCP server's tool-handler catch-all leaves a traceback at a level "
      "the default WARNING configuration emits -- at BOTH site layers, the "
      "McpServer wrap and the module-level dispatcher, each declared per server "
      "rather than inferred, with the format string required to be a literal so "
-     "a payload cannot be interpolated into a log that IS written", 62),
+     "a payload cannot be interpolated into a log that IS written", 68),
     # TYPED for the same reason again.  The count is 6 escapers + 6 rendered
     # rows + 1 coupling + 3 unpadded + 2 documented + 2 structure + 1 jenkins
     # two-space + 1 jenkins newline + 4 roster + 12 control + 4 hygiene (the
@@ -632,7 +662,7 @@ SUITES = [
      "declared unpadded charges no row for another row's width, a jenkins "
      "two-space cell is measured not to forge against the aligned reader, "
      "and a CR/LF in a jenkins cell is escaped so it cannot end its row", 42),
-    # TYPED for the same reason again.  The count is 3 clauses x 17 servers +
+    # TYPED for the same reason again.  The count is 3 clauses x 19 servers +
     # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
     # being analysed IS the defect here, so a count that moves when the fleet
     # moves is the alarm working.  The control group is the large one on
@@ -646,7 +676,7 @@ SUITES = [
      "handshake structurally cannot see, since a server inlining the RIGHT "
      "string is indistinguishable on the wire from one reading the constant, "
      "with the fleet's agreement asserted BETWEEN the files so the suite "
-     "never holds a copy of the number it polices", 77),
+     "never holds a copy of the number it polices", 83),
     ("forge_dispatch", run_forge_dispatch,
      "forge_call dispatch: `status` answers exactly what the empty call "
      "answers on all four of its paths, each with a control proving the "
@@ -669,7 +699,7 @@ SUITES = [
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
-     "builder declared", 61),
+     "builder declared", 63),
     # TYPED: a fixed case table (A 6, B 9, C 5, E 2).
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
@@ -721,8 +751,10 @@ SUITES = [
     # fronts = 108; R-0072 added K5, the front's injected policy pinned,
     # and J47, a weak bearer token refused at start = 110; R-0089 added J48,
     # the shorter pre-auth header bound until auth = 111; R-0090 added J49,
-    # the distinct-character token floor on both sources = 112), so a count
-    # that moves is the alarm, not noise.
+    # the distinct-character token floor on both sources = 112; the relist
+    # work added group M, M1-M11 = 123; the security round 1 -> 2 added
+    # J50, --require-token-file refusing MCP_PROXY_TOKEN, run RED first =
+    # 124), so a count that moves is the alarm, not noise.
     ("mcp_proxy", run_mcp_proxy,
      "mcp-proxy, the aggregating relay: config refusals, eager start and "
      "duplicate-tool refusal, id/progress remapping, cancel forwarded with "
@@ -735,7 +767,117 @@ SUITES = [
      "deep nesting, malformed "
      "header lines, id-less initialize, request id shape, fixed body-less "
      "stdlib refusals, 100 Continue only after auth, ready file removed "
-     "on shutdown, NaN / over-long numbers refused -32700", 112),
+     "on shutdown, NaN / over-long numbers refused -32700; the opt-in "
+     "per-child relist (bool-only, default off byte-identical, name set "
+     "frozen, stale on failure, coalesced, min interval, cancelled on "
+     "stop)", 124),
+    # TYPED: a fixed case table (A 11, B 23, C 22, D 4, E 34, F 9, G 13,
+    # H 24, I 11 = 151), the rows of plan Steps 7-13, so a count that moves
+    # is the alarm, not noise.  F9 (validation round 1) drives layer D live
+    # through McpServer.run() -- the smoke probe answers -32602 now and no
+    # longer reaches the catch-all.  E (Step 13, the spec's acceptance escape
+    # suite E1-E18 plus the risk rows E19-E34) is live, NOT red first (the
+    # code exists): every row is INFO off macOS and under a nested Seatbelt
+    # (P23) -- counted, never omitted.  D (Step 11, pure argv golden) is written RED
+    # (build_sbx_argv is missing) and turns green with Step 11; I (Step 11,
+    # live runs) and G (Step 12, startup plans / refresh) are written RED
+    # (the engine and plan machinery are missing, checked before any runner
+    # starts) and turn green with Step 12; the I and G live rows are INFO
+    # off macOS and under a nested Seatbelt (P23) -- counted, never omitted.
+    # The C rows are written RED (validate_run_params is
+    # missing) and turn green with the Step 9 implementation.  The H rows
+    # (H19 added by M0:9: the flatten remover on a rename-chained 2079-level
+    # tree in a NOFILE-256 child) are written RED (the Step 10 workdir and
+    # remover functions are missing); H1-H14, H17 and H19 turn green with
+    # Step 10, H15, H16 and H18 (run_one + RunnerState/PlanCache) in Step 12;
+    # H14 is INFO off darwin and H15/H16 INFO off macOS or under a nested
+    # Seatbelt -- counted, never omitted.
+    # F6 is live and recorded INFO under a nested Seatbelt (P23), never
+    # omitted; B18 is the one live Mach-O row (the host's Homebrew python3)
+    # and is INFO off macOS or without a keg -- counted, never omitted.  The
+    # B rows are written RED (the Mach-O reader is missing) and turn green
+    # with the Step 8 implementation.
+    # EXPECTED FAILING from Step 7 through Step 11 on exactly the rows
+    # recorded RED (F5, F6, then H15, H16, H18, D1-D4 until Step 11,
+    # I1-I11, G1-G13), green from Step 12.  Security round 1 added B21-B23
+    # (the closure's rpath stack, keg walk and plan deadline bounded) and
+    # H20-H24 (out/ listing and remover listing bounded, darwin fallbacks
+    # fd-relative only, the survivor sweep, the out/ path cap) and A11 (the
+    # worst-case reply serialized through the real tool-result path stays in
+    # 16 MiB: 13 chars per byte, not 12), all written RED; H22/H23 are INFO
+    # off darwin -- counted, never omitted.
+    ("mcp_sandbox", run_mcp_sandbox,
+     "mcp-sandbox, the sandboxed script runner: the one JSON config file "
+     "(unknown keys at the top and in limits, every numeric range at its "
+     "edges, the interpreter-name enum, the config file's mode and symlink "
+     "rules, sbx absolute and not world-writable, the worst-case response "
+     "bound at exactly 16 MiB, as_mode absolute refused on darwin), the "
+     "stdlib Mach-O reader on synthetic thin/fat images (every header bound "
+     "refused as MachOError, @rpath/@loader_path/@executable_path, weak vs "
+     "strong missing, cycles, system paths, the image cap, the framework "
+     "launcher, the targeted keg scan capped at 512, the live python3 "
+     "closure), run_script parameter validation (every relative-path rule, "
+     "the NFD+casefold collision and file-vs-dir prefix keys, the file "
+     "count, the running decoded total, strict base64, timeoutMs int-not-"
+     "bool and clamped, entry in files, args, stdin bytes, an unknown member "
+     "with did-you-mean -- each invalid_params naming the member, never the "
+     "value), the "
+     "sandbox_call surface (one tool, did-you-mean, unknown params, "
+     "non-object params -32602, the capabilities shape, capabilities during "
+     "two runs, layer D internal + log.exception in-process and through "
+     "McpServer.run(), the unflagged status reply) and the workdir lifecycle (0700 hex workdir, O_EXCL|O_NOFOLLOW "
+     "materialisation, out/ collection skipping symlinks, hard links and "
+     "FIFOs, the free-space precheck, the startup sweep's name rule and "
+     "shared deadline, the flatten remover against chmod 000/0500/0100, "
+     "uchg, deny ACEs and rename-chained deep trees, the quarantine and its "
+     "degraded cap), the sbx argv golden (darwin, linux + seccomp, the "
+     "absolute entry, the runner's two-key environment to sbx), live runs "
+     "(hello in python3/bash/node, a non-zero exit, the UTF-8 cut, invalid "
+     "UTF-8, stdin, out/ files, cancel, an sbx refusal, an engine failure "
+     "after spawned) and startup plans (every refused start, the AS limit, "
+     "liveVerified, refresh on a re-pointed hop, a refresh failure, a "
+     "refresh inside its slot, a cancel during a refresh) and the escape "
+     "suite (reads, stat, writes, network, fork/CPU/output/memory bombs, "
+     "out/ links and FIFOs, the exact env, hostile workdirs, busy, fds, tty, "
+     "planted execs, signals, a forged status, rlimits, another process's "
+     "environment, setuid, sbx killed mid-run -- each beside a positive "
+     "control) and the security-round-1 bounds (rpath stack, keg walk "
+     "dirs/depth/entries, the closure's plan deadline, out/ and remover "
+     "listings, fd-relative darwin fallbacks, the survivor sweep, the out/ "
+     "path cap, the worst-case reply serialized within 16 MiB)", 151),
+    # TYPED: a fixed case table (A 5, B 10, C 6, D 8, E 3, F 14, G 4, H 6,
+    # I 12, J 13, K 2 = 83), the rows of plan Steps 16, 17 and 18 (J1 is live:
+    # INFO off macOS and under a nested Seatbelt, counted either way), so a
+    # count that moves is the alarm, not noise.  K (validation round 1) is
+    # layer D in-process (K1) and through McpServer.run() (K2) -- the smoke
+    # probe answers -32602 now and no longer reaches the catch-all.  The
+    # security round 1 -> 2 added B9, B10 (K3), I12 (M2), J11 (K4), J12 (M2)
+    # and J13 (O2), each run RED first = 83.
+    ("mcp_skill", run_mcp_skill,
+     "mcp-skill, the read-only skill loader: startup flags (no roots, a "
+     "group-writable root, the runner URL/token pair, the --max-description "
+     "range, one tool), the exact skills.json schema with tier errors and "
+     "per-entry reasons, the four-line SKILL.md frontmatter, the rendered "
+     "description (preamble, [private] shadowing, sorted lines, UTF-16 "
+     "units, the over-ceiling refusal naming both tier sums while tools/list "
+     "still succeeds, the name enum, the stat-keyed cache), the tier-root "
+     "dir rules (symlink or non-directory invalid, the root never listed), "
+     "load's file hygiene (dotdot, absolute, nested, uppercase, symlink, "
+     "hardlink, FIFO, symlinked subdir, over-cap, binary, a dir swapped "
+     "between operations), the nonce frame and the sanitized body, the "
+     "validate report shape, the sanitizer hand copy's text and "
+     "behaviour parity with Scripts/_mcp_websearch.py, the runner HTTP "
+     "client (loopback-only http URL, token file rules re-read per run and "
+     "never logged, no redirect, the 16 MiB + 64 KiB answer cap, SSE "
+     "keepalive, one "
+     "retry on 404, the session DELETEd on shutdown) and run (end to end "
+     "through the real sandbox, unlisted and private scripts refused, "
+     "interpreter from the index, refs sent, symlinks refused, hostile output "
+     "sanitized and framed, busy passed through, an over-cap body refused "
+     "before sending, the smaller serialized encoding per file) and a "
+     "handler crash (layer D internal + log.exception, in-process and "
+     "through McpServer.run())",
+     83),
     # TYPED: a fixed case table (A 49, B 31, C 16, D 16, E 14, F 25, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 41, K 26, L 20, M 23, N 42,
     # O 18 = 387), so a count that moves is the alarm, not noise.

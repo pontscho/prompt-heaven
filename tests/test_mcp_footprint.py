@@ -342,7 +342,7 @@ def tok(chars):
     return round(chars / 4)
 
 
-def probe_argv(path, args, sandbox, prefix):
+def probe_argv(path, args, sandbox, prefix, smoke):
     """Child command line for one server: recorded, `-B`, sandbox-rooted.
 
     `prefix` comes from the launch table's own `launch_prefix(cfg, ("-B",))`:
@@ -361,16 +361,30 @@ def probe_argv(path, args, sandbox, prefix):
         REWRITTEN to the fixture sandbox, so no probed child is pointed at the
         shared system temp dir.  The sandbox holds a minimal
         `project-forge.yaml`, which is also what makes mcp-forge answer.
+
+    A `{sandbox_config}` token (`smoke.SANDBOX_CONFIG_TOKEN`, mcp-sandbox's
+    row) is replaced by a config generated from the launch table's one pure
+    text helper and written through this module's recorded `write_text` into
+    the sandbox, then made 0600 (the runner refuses a group-writable config,
+    and `write_text` honours the umask); the runner's work root lives beside it.
     """
     argv = list(prefix) + [path] + list(args)
     for idx, token in enumerate(argv[:-1]):
         if token == "--project-root":
             argv[idx + 1] = sandbox
+    if smoke.SANDBOX_CONFIG_TOKEN in argv:
+        config_dir = os.path.join(sandbox, "sandbox-config")
+        cfg_path = write_text(
+            os.path.join(config_dir, "sandbox.json"),
+            smoke._sandbox_smoke_config_text(os.path.join(config_dir, "work")))
+        os.chmod(cfg_path, 0o600)
+        argv = [cfg_path if token == smoke.SANDBOX_CONFIG_TOKEN else token
+                for token in argv]
     CHILD_ARGV.append(list(argv))
     return argv
 
 
-def measure_server(cfg, sandbox, prefix):
+def measure_server(cfg, sandbox, prefix, smoke):
     """Spawn one server, hand-shake, measure `tools/list`, then probe once.
 
     Never raises.  A missing file, an immediate death, a closed stdin or a
@@ -384,7 +398,7 @@ def measure_server(cfg, sandbox, prefix):
         return foot
 
     os.makedirs(sandbox, exist_ok=True)
-    argv = probe_argv(path, cfg["args"], sandbox, prefix)
+    argv = probe_argv(path, cfg["args"], sandbox, prefix, smoke)
     client = None
     try:
         try:
@@ -2442,7 +2456,7 @@ def run(opts=None):
         write_text(os.path.join(sandbox, "project-forge.yaml"), "version: 1\n")
 
         feet = [measure_server(cfg, sandbox,
-                               smoke.launch_prefix(cfg, ("-B",)))
+                               smoke.launch_prefix(cfg, ("-B",)), smoke)
                 for cfg in servers]
         feet_by_file = {f.file: f for f in feet}
         live = [f for f in feet if f.registered]

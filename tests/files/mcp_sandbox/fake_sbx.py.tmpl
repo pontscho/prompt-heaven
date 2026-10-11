@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""fake_sbx -- the pass-through fixture sbx for tests/test_mcp_sandbox.py.
+
+A fixture, not project code (tests/files/README.md: every symbol starts with
+``tf``).  Stdlib only, Python 3.9.  This file is a TEMPLATE: the suite renders
+it into ``.claude/tmp/test_mcp_sandbox/<run>/fake_sbx`` (mode 0700, owned by
+the euid, so the runner's ``_check_owned_file`` accepts it) after replacing
+exactly two tokens, each with ``repr()`` of an absolute path string:
+
+  @REAL_SBX@     the real sbx (ClaudeCode/skills/sandbox-run/scripts/sbx)
+  @TRIGGER_DIR@  the directory the suite drops trigger files into
+
+and names the rendered file as ``sbx`` in that row's config.  The runner
+launches it exactly as it launches sbx: ``[sys.executable, "-I", "-B", <this>,
+...]``.
+
+Why a pass-through and not a stub: the runner refuses to start unless EVERY
+startup spawn (VSZ probe, ``--version``, self-test of each interpreter) succeeds
+through ``cfg.sbx``, so a fixture that always failed would never reach a run.
+It parses only what it needs -- the ``--status-fd N`` value and the target argv
+after the first bare ``--`` -- and decides by the BASENAME of the target's entry
+path (the first absolute element after the interpreter; the VSZ probe and
+``--version`` carry none):
+
+  default            os.execv the real sbx with this process's argv unchanged.
+                     The status fd survives the exec: the runner passed it with
+                     pass_fds, so it is inheritable, not CLOEXEC.
+  i11-engine-fail.sh (mcp_sandbox:I11, KD-16) start /bin/sleep 0.2 in its own
+                     session, write the ``spawned`` status line, write
+                     ``sandbox-exec: profile error`` to stderr, wait for the
+                     sleep, write the terminal ``exit`` line (outcome exited,
+                     code 1) and exit 1 -- what the real sbx reports when the
+                     engine fails AFTER ``spawned``.
+  sbx-self-test      (the runner's _SELF_TEST_NAME; mcp_sandbox:G12, G13) while
+                     ``<trigger dir>/block-selftest`` exists, poll every 50 ms
+                     (bounded at 30 s), then the default pass-through -- this is
+                     how a row holds a refresh inside its self-test.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+TF_REAL_SBX = @REAL_SBX@
+TF_TRIGGER_DIR = @TRIGGER_DIR@
+
+TF_I11_ENTRY = "i11-engine-fail.sh"
+TF_SELF_TEST_ENTRY = "sbx-self-test"
+TF_BLOCK_SELFTEST = "block-selftest"
+TF_POLL_S = 0.05
+TF_BLOCK_BOUND_S = 30.0
+
+
+def tf_split(argv):
+    """(left, target) at the FIRST bare ``--``; target None when absent."""
+    for i, tok in enumerate(argv):
+        if tok == "--":
+            return argv[:i], argv[i + 1:]
+    return argv, None
+
+
+def tf_status_fd(left):
+    """The ``--status-fd N`` value, or None (absent or not a decimal)."""
+    for i, tok in enumerate(left[:-1]):
+        if tok == "--status-fd" and left[i + 1].isdigit():
+            return int(left[i + 1])
+    return None
+
+
+def tf_entry(target):
+    """Basename of the entry: the first absolute element after argv[0]."""
+    for tok in (target or [])[1:]:
+        if tok.startswith("/"):
+            return os.path.basename(tok)
+    return None
+
+
+def tf_status(fd, obj):
+    """One status line on fd N; a closed or absent fd writes nothing."""
+    if fd is None:
+        return
+    line = (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
+    try:
+        os.write(fd, line)
+    except OSError:
+        pass
+
+
+def tf_pass_through():
+    """Replace this process with the real sbx, argv unchanged."""
+    argv = [sys.executable, "-I", "-B", TF_REAL_SBX] + sys.argv[1:]
+    os.execv(sys.executable, argv)
+
+
+def tf_engine_fail(fd):
+    """I11: an engine failure AFTER `spawned` (KD-16) -- exit 1, declared."""
+    started = time.monotonic()
+    child = subprocess.Popen(["/bin/sleep", "0.2"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    tf_status(fd, {"sbx": 1, "event": "spawned", "pid": child.pid,
+                   "pgid": child.pid})
+    sys.stderr.write("sandbox-exec: profile error\n")
+    sys.stderr.flush()
+    child.wait()
+    tf_status(fd, {"sbx": 1, "event": "exit", "outcome": "exited",
+                   "code": 1, "signal": None,
+                   "durationMs": int((time.monotonic() - started) * 1000)})
+    return 1
+
+
+def tf_hold_self_test():
+    """G12/G13: hold while the trigger file exists, bounded at 30 s."""
+    trigger = os.path.join(TF_TRIGGER_DIR, TF_BLOCK_SELFTEST)
+    deadline = time.monotonic() + TF_BLOCK_BOUND_S
+    while os.path.exists(trigger) and time.monotonic() < deadline:
+        time.sleep(TF_POLL_S)
+
+
+def tf_main():
+    left, target = tf_split(sys.argv[1:])
+    entry = tf_entry(target)
+    if entry == TF_I11_ENTRY:
+        return tf_engine_fail(tf_status_fd(left))
+    if entry == TF_SELF_TEST_ENTRY:
+        tf_hold_self_test()
+    tf_pass_through()
+    return 3        # unreachable: execv replaced the image or raised
+
+
+if __name__ == "__main__":
+    sys.exit(tf_main())

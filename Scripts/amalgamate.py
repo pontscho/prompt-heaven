@@ -166,6 +166,12 @@ HAND_COPY_REASONS: Dict[Tuple[str, str], str] = {
     ("mcp-inspect.py", "_int_param"):
         "takes a parameter NAME and raises, where the canonical takes a default "
         "and falls back to it",
+    ("mcp-skill.py", "_WEB_LINE_SEPARATORS"):
+        "_mcp_websearch.py is a WHOLE source (G-c); mcp-skill needs its "
+        "sanitizer and none of the search",
+    ("mcp-skill.py", "_web_clean"):
+        "_mcp_websearch.py is a WHOLE source (G-c); mcp-skill needs its "
+        "sanitizer and none of the search",
     ("mcp-tshark.py", "_bool_param"):
         "keeps the older (params, key, default) signature",
     ("mcp-webfetch.py", "_bool_param"):

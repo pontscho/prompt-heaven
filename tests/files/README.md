@@ -143,6 +143,76 @@ smoke row of `Scripts/mcp-proxy.py`; nothing imports it. The `tf` prefix is
 kept (tool `tf_stub_call`, functions `tf_*`), and its flags and functions are
 documented in its own docstring.
 
+## sbx_restrict/ — not an LSP fixture
+
+```
+sbx_restrict/ probe_read.py   L1-L8, L11: reads/stat/exec denied, "/" listing, ACL vs flag writes
+              probe_exec.sh   L9: bash subshell, /bin/sh, `kill $!` of a background job
+              probe_node.js   L10: require('os') and a write in the cwd
+              probe_depth.py  L12: the 100-level depth cap (M0:9)
+```
+
+In-sandbox probes for `tests/test_sbx_restrict.py` group L (live restricted
+Seatbelt, macOS). The suite copies each probe into a fresh write scope under
+`.claude/tmp/test_sbx_restrict/` and runs it there under a restricted `sbx`,
+so no repo path is ever granted. Each probe is stdlib only, opens no network
+connection and prints ONE JSON line: per attempt, `"ok"` or the errno name.
+It never prints a byte of what it read. Run unsandboxed, no attempt answers
+`EPERM`, and `probe_depth.py` reports `"ok"` for every form. A missing path
+still answers `ENOENT`. `probe_depth.py` leaves its chains in place for the
+caller to remove.
+The file names are the plan's (Step 6); every symbol inside carries the `tf`
+prefix.
+
+## mcp_sandbox/ — not an LSP fixture
+
+```
+mcp_sandbox/ config.json.tmpl        every runner config: {sbx} {work_root} {interpreters}
+             fake_sbx.py.tmpl        I11: real sbx, except an engine failure after `spawned`
+             escape/e01..e34_*.py    group E: one escape probe per row (python3)
+             escape/e16_env.sh .js   E16: the same env-keys probe in bash and node
+             escape/e34_setuid.sh    E34: setuid binaries through /bin/sh -c (bash)
+```
+
+Read by `tests/test_mcp_sandbox.py`. `config.json.tmpl` holds three UNQUOTED
+placeholders where a JSON value goes, filled ONLY with
+`text.replace(placeholder, json.dumps(value))` (never `str.format`; M0:13);
+the rendered file lands mode 0600 under `.claude/tmp/test_mcp_sandbox/`.
+`fake_sbx.py.tmpl` has two tokens, `@REAL_SBX@` and `@TRIGGER_DIR@`, replaced
+with `repr()` of absolute paths. The `escape/` probes are sent as a run's
+entry file and run INSIDE the sandbox (group E, live, macOS); the suite also
+runs each one OUTSIDE any sandbox as the row's positive control. Each probe
+is stdlib only, opens no network except the test's own loopback listeners
+(E6, E7), never prints a byte of what it read, and prints ONE JSON line (E11
+prints it on stderr, its stdout being the flood). Probes that write leave
+nothing outside their cwd; the runner removes the workdir.
+
+## mcp_skill/ — not an LSP fixture
+
+```
+mcp_skill/ stub_runner.py   a canned mcp-sandbox stand-in: the runner behind a test mcp-proxy --http
+```
+
+Read by `tests/test_mcp_skill.py` groups I and J. It is run as `__main__` as
+the ONE stdio child of a test `mcp-proxy.py --http`, so mcp-skill's runner
+HTTP client talks to a real proxy over Streamable HTTP while the results are
+scripted here; nothing imports it. It is stdlib only (Python 3.9) and speaks
+newline-delimited JSON-RPC: `initialize`, `ping`, `tools/list` (one tool,
+`sandbox_call`) and `tools/call`. Its answers follow the runner's contract: a
+result is one JSON text block plus the same object as `structuredContent`,
+and a refusal is `isError` with `{"error": {...}}`, never a JSON-RPC error.
+Each `run_script` answer is picked by `--mode`, or per call by the first line
+of `--mode-file`, so one proxy serves several rows: `normal`, `echo` (the
+request's files and encodings, metadata only), `hostile` (every class the
+sanitizer must drop, plus a forged frame end marker), `busy`, `unavailable`,
+`sleep` (the SSE keepalive row), `timeout`, `big` and `rpc_error`. With
+`--state-dir` it appends one metadata-only JSON line per received message to
+`stub_runner.events.jsonl` (0600, `O_APPEND`) and its pid to
+`stub_runner.pids`, the evidence behind a row's "the runner saw NO request".
+It never records a file's content, and it exits 0 at stdin EOF. The file
+name is the plan's (Step 18); every symbol inside carries the `tf` prefix,
+and its flags and modes are documented in its own docstring.
+
 ## llm_router/ — not an LSP fixture
 
 ```

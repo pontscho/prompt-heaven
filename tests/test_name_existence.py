@@ -527,7 +527,7 @@ def _rpc_probe(argv, tool):
             client.close()
 
 
-def probe_argv(path, args, sandbox, prefix):
+def probe_argv(path, args, sandbox, prefix, smoke):
     """Child command line for one server, recorded and sandboxed.
 
     `prefix` comes from the launch table's own `launch_prefix(cfg, ("-B",))`:
@@ -545,16 +545,31 @@ def probe_argv(path, args, sandbox, prefix):
         `/tmp`) is REWRITTEN to the fixture sandbox, so a probed child cannot
         touch the shared system temp dir either.  The sandbox holds a minimal
         `project-forge.yaml`, which is also what makes mcp-forge enumerable.
+
+    A `{sandbox_config}` token (`smoke.SANDBOX_CONFIG_TOKEN`, mcp-sandbox's
+    row) is replaced by a config generated from the launch table's one pure
+    text helper and written through this suite's recorded `write_text` into
+    the sandbox, then made 0600 (the runner refuses a group-writable config,
+    and `write_text` honours the umask).  Without it the runner would refuse
+    to start on a literal `{sandbox_config}` and stay a permanent SKIP.
     """
     argv = list(prefix) + [path] + list(args)
     for idx, token in enumerate(argv[:-1]):
         if token == "--project-root":
             argv[idx + 1] = sandbox
+    if smoke.SANDBOX_CONFIG_TOKEN in argv:
+        config_dir = os.path.join(sandbox, "sandbox-config")
+        cfg_path = write_text(
+            os.path.join(config_dir, "sandbox.json"),
+            smoke._sandbox_smoke_config_text(os.path.join(config_dir, "work")))
+        os.chmod(cfg_path, 0o600)
+        argv = [cfg_path if token == smoke.SANDBOX_CONFIG_TOKEN else token
+                for token in argv]
     CHILD_ARGV.append(list(argv))
     return argv
 
 
-def probe_server(cfg, sandbox, prefix):
+def probe_server(cfg, sandbox, prefix, smoke):
     """Enumerate one server: bogus-function probe, then `--list`."""
     inv = ServerInventory(cfg["file"], cfg["tool"])
     path = os.path.join(SCRIPTS_DIR, cfg["file"])
@@ -563,7 +578,7 @@ def probe_server(cfg, sandbox, prefix):
         return inv
 
     os.makedirs(sandbox, exist_ok=True)     # also the children's cwd
-    argv = probe_argv(path, cfg["args"], sandbox, prefix)
+    argv = probe_argv(path, cfg["args"], sandbox, prefix, smoke)
     text, err = _rpc_probe(argv, cfg["tool"])
     names = _parse_available(text)
     if names:
@@ -588,7 +603,7 @@ def build_inventory():
     smoke = H.load_module_from_path("ph_smoke_table", SMOKE_PATH)
     sandbox = os.path.join(FIXTURE_ROOT, "server-root")
     write_text(os.path.join(sandbox, "project-forge.yaml"), "version: 1\n")
-    return [probe_server(cfg, sandbox, smoke.launch_prefix(cfg, ("-B",)))
+    return [probe_server(cfg, sandbox, smoke.launch_prefix(cfg, ("-B",)), smoke)
             for cfg in smoke.SERVERS]
 
 

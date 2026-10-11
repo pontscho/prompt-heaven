@@ -87,7 +87,9 @@ Access. The listener takes an IPv4 literal, loopback by default; any other
 address needs --allow-remote. It is bound before any child is spawned. A bearer
 token is required, from --token-file (owner-only, mode 0600) or from
 MCP_PROXY_TOKEN, which is popped from the environment before any spawn and is
-never logged; it is compared in constant time. Host (loopback binds) and Origin
+never logged; it is compared in constant time. --require-token-file pins the
+source: a set MCP_PROXY_TOKEN then refuses the start, even beside
+--token-file (the skill runner's launch line passes it). Host (loopback binds) and Origin
 are checked, the header phase runs under its own timeout until auth passes, and
 --max-connections, --max-sessions, --max-inflight and --session-idle bound the
 connections, sessions, live request tasks and idle sessions.
@@ -211,7 +213,8 @@ Declared limits (accepted, not gated)
     stops reading holds its thread until the next write times out.
   * A token taken from MCP_PROXY_TOKEN stays readable in /proc/<pid>/environ
     (Linux, same uid) for the proxy's lifetime: popping it from os.environ does
-    not rewrite the initial environment block. --token-file is recommended.
+    not rewrite the initial environment block. --token-file is recommended;
+    --require-token-file enforces it.
   * One token is one principal: sessions are not bound to the token that
     opened them, so any bearer holder can use or DELETE a session whose id it
     knows. Session ids are 256-bit random and never logged in full.
@@ -409,6 +412,11 @@ _SHUTDOWN_GRACE_S = 3.0
 _STOP_WAIT_S = 4 * _SHUTDOWN_GRACE_S + 1.0   # ChildSlot.stop()'s bound on the cancelled restart task (H1)
 # Upper bound on tools/list pages followed via nextCursor per child.
 _MAX_TOOL_PAGES = 100
+# Opt-in relist ("relist": true, KD-12): the bound on one re-listing of a child,
+# and the minimum gap between two relist ATTEMPTS of one child (stamped when the
+# attempt starts, so a failing relist is rate-bounded too, R4:L3, CWE-400).
+_RELIST_TIMEOUT_S = 10.0
+_RELIST_MIN_INTERVAL_S = 1.0
 # The bearer token's environment variable; popped in main() before any spawn (FR-11).
 _TOKEN_ENV = "MCP_PROXY_TOKEN"
 # Allowed child names (config "name"): lowercase, digits, '_' and '-', 1-32 chars.
@@ -473,6 +481,7 @@ class ChildSpec(NamedTuple):
     env: Dict[str, str]
     call_timeout: float
     startup_timeout: float
+    relist: bool = False      # opt-in: every upstream tools/list re-lists this child (name set frozen)
 
 
 class ProxyConfig(NamedTuple):
@@ -483,7 +492,8 @@ class ProxyConfig(NamedTuple):
 
 
 _TOP_KEYS = frozenset({"root", "scripts", "children", "frame_limit"})
-_CHILD_KEYS = frozenset({"name", "command", "args", "env", "wrapper", "call_timeout", "startup_timeout"})
+_CHILD_KEYS = frozenset({"name", "command", "args", "env", "wrapper", "call_timeout", "startup_timeout",
+                         "relist"})
 
 
 def _cfg_executable(value: Any, where: str) -> str:
@@ -617,6 +627,9 @@ def _cfg_child(entry: Any, index: int, root: str, scripts: Optional[str] = None)
     call_timeout = _cfg_timeout(entry.get("call_timeout"), _DEFAULT_CALL_TIMEOUT_S, f"{where}: call_timeout")
     startup_timeout = _cfg_timeout(entry.get("startup_timeout"), _DEFAULT_STARTUP_TIMEOUT_S,
                                    f"{where}: startup_timeout")
+    relist = entry.get("relist", False)
+    if not isinstance(relist, bool):
+        raise ConfigError(f"{where}: relist must be a boolean")
     args = [root if arg == "{root}" else _cfg_subst_scripts(arg, scripts, f"{where}: args") for arg in args]
     return ChildSpec(
         name=name,
@@ -624,6 +637,7 @@ def _cfg_child(entry: Any, index: int, root: str, scripts: Optional[str] = None)
         env=dict(env),
         call_timeout=call_timeout,
         startup_timeout=startup_timeout,
+        relist=relist,
     )
 
 
@@ -787,6 +801,14 @@ def load_http_settings(args, env_token: Optional[str]) -> HttpSettings:
         raise ConfigError(f"--bind {addr} is not a loopback address; pass --allow-remote to listen on it "
                           "(localhost or a VPN interface only, never a public one)")
 
+    if args.require_token_file:
+        # T2: the operator pinned the source -- the environment is refused
+        # even beside --token-file, so a token there never goes unnoticed.
+        if env_token is not None:
+            raise ConfigError(f"--require-token-file refuses a bearer token from {_TOKEN_ENV}; "
+                              "unset it and use --token-file")
+        if args.token_file is None:
+            raise ConfigError("--require-token-file requires --token-file")
     if args.token_file is not None and env_token is not None:
         raise ConfigError(f"give exactly one bearer token source: --token-file or {_TOKEN_ENV}, not both")
     if args.token_file is None and env_token is None:
@@ -1293,6 +1315,8 @@ class ChildSlot:
         self.retry_at = 0.0
         self.init_params: dict = {}                # stored by start_initial, reused by restarts
         self.disabled_reason = ""                  # quoted by call()
+        self.relist_task: Optional[asyncio.Task] = None     # the ONE in-flight _relist_once, or None
+        self.relisted_at = 0.0                     # loop.time() of the last relist ATTEMPT's start (R4:L3)
 
     async def _bring_up(self, client: ChildClient, init_params: dict) -> List[dict]:
         """Spawn *client*, run the MCP handshake and list its tools.
@@ -1398,6 +1422,59 @@ class ChildSlot:
                 return tools
             cursor = next_cursor
         raise ChildStartError(f"child '{name}': tools/list cursor loop (more than {_MAX_TOOL_PAGES} pages)")
+
+    async def refresh_tools(self) -> None:
+        """Re-list this child's tools (opt-in "relist"); the NAME SET is frozen.
+
+        Coalesced: one relist in flight per slot. A failure keeps the last good
+        descriptors (stale is safe); a changed name set disables the slot, exactly
+        as a restart that changed it does. Within _RELIST_MIN_INTERVAL_S of the
+        last ATTEMPT the cached listing is served. The wait on an in-flight relist
+        is bounded by _RELIST_TIMEOUT_S and shielded: a caller giving up never
+        cancels the relist other callers share.
+        """
+        if not self.spec.relist or self.stopping or self.state != "ready" or self.client is None:
+            return
+        loop = asyncio.get_running_loop()
+        if loop.time() - self.relisted_at < _RELIST_MIN_INTERVAL_S:
+            return
+        task = self.relist_task
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._relist_once(self.client))
+            task.add_done_callback(_log_task_failure)
+            self.relist_task = task
+        try:
+            await asyncio.wait_for(asyncio.shield(task), _RELIST_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            pass                                           # the relist keeps running; this list is served stale
+
+    async def _relist_once(self, client: ChildClient) -> None:
+        """One relist of *client*: stale on failure, disable on a changed name set (P9).
+
+        The attempt is stamped FIRST, before any await, so the min interval
+        bounds failing and timing-out relists too (R4:L3, CWE-400). The child's
+        own tool dicts are kept verbatim (ADR 0027, R-8).
+        """
+        self.relisted_at = asyncio.get_running_loop().time()   # FIRST statement: the attempt stamp
+        try:
+            tools = await asyncio.wait_for(self._list_all_tools(client), _RELIST_TIMEOUT_S)
+        except (ChildStartError, ChildUnavailable, asyncio.TimeoutError, OSError) as exc:
+            log.warning("child=%s relist failed: %s; serving the last listing",
+                        self.spec.name, type(exc).__name__)
+            return
+        if client is not self.client or self.state != "ready" or self.stopping:
+            return                                         # a restart or stop raced the listing
+        names = frozenset(t["name"] for t in tools)
+        if names != self.tool_names:
+            self.state = "disabled"
+            self.disabled_reason = "tool set changed on relist"
+            log.error("child=%s tool set changed on relist (added=%s removed=%s); disabled",
+                      self.spec.name, _log_value(sorted(names - self.tool_names)),
+                      _log_value(sorted(self.tool_names - names)))
+            stopper = asyncio.ensure_future(client.stop())
+            stopper.add_done_callback(_log_task_failure)
+            return
+        self.tools = tools
 
     def on_child_death(self, client: ChildClient, why: str) -> None:
         """The ONLY entry into recovery; it only ever starts it (sync, loop thread, no await).
@@ -1538,6 +1615,10 @@ class ChildSlot:
             if not done:
                 log.warning("child=%s restart loop still running after %.0fs; stopping its incarnation directly",
                             self.spec.name, _STOP_WAIT_S)
+        rt = self.relist_task                              # C-L7: no relist outlives its slot
+        if rt is not None and not rt.done():
+            rt.cancel()
+            await asyncio.wait({rt}, timeout=_STOP_WAIT_S)
         for c in (self.pending_client, self.client):
             if c is not None:
                 await c.stop()                             # serialized by c._stop_lock; resumes an interrupted sweep
@@ -1617,6 +1698,8 @@ class McpServer:
         self.slots: Dict[str, ChildSlot] = {c.name: ChildSlot(c, cfg.root, cfg.max_frame) for c in cfg.children}
         self.tools: List[dict] = []                # aggregated, config order
         self.route: Dict[str, ChildSlot] = {}      # tool name -> the slot that exposes it
+        # The slots that opted into "relist", config order; empty -> tools/list unchanged (M4).
+        self._relist_slots: List[ChildSlot] = [s for s in self.slots.values() if s.spec.relist]
         self.sessions: Dict[str, "HttpSession"] = {}
         self.http: Optional["HttpSettings"] = None
         self._http_tasks: Set[asyncio.Task] = set()   # strong refs to every HTTP request task (L5)
@@ -1901,6 +1984,12 @@ class McpServer:
 
         if method == "tools/list":
             # The aggregated table, config order; never paginated upstream.
+            if self._relist_slots:
+                # Opt-in relist (FR-17): each relist slot refreshes its own
+                # descriptors (verbatim, name set frozen), then the table is rebuilt
+                # in config order. Routing is unchanged: the names are unchanged.
+                await asyncio.gather(*(s.refresh_tools() for s in self._relist_slots), return_exceptions=True)
+                self.tools = [tool for slot in self.slots.values() for tool in slot.tools]
             return self._result(msg_id, {"tools": self.tools})
 
         if method == "tools/call":
@@ -2857,6 +2946,7 @@ _HTTP_ONLY_FLAGS = (
     ("--http-path", "http_path", _HTTP_DEFAULT_PATH),
     ("--allow-remote", "allow_remote", False),
     ("--token-file", "token_file", None),
+    ("--require-token-file", "require_token_file", False),
     ("--allowed-origin", "allowed_origin", None),
     ("--max-body-bytes", "max_body_bytes", _HTTP_BODY_LIMIT),
     ("--max-sessions", "max_sessions", _HTTP_SESSION_CAP),
@@ -2914,6 +3004,10 @@ def main() -> None:
                            f"{_TOKEN_MIN_LEN} printable ASCII chars, >= {_TOKEN_MIN_DISTINCT} of them "
                            f"distinct). {_TOKEN_ENV} is the alternative, "
                            "but the environment is readable in /proc/<pid>/environ")
+    http.add_argument("--require-token-file", action="store_true", default=None,
+                      help=f"Accept the bearer token from --token-file only: refuse to start when "
+                           f"{_TOKEN_ENV} is set, even beside --token-file (the runner launch line "
+                           "passes it)")
     http.add_argument("--allowed-origin", action="append", default=None,
                       help="Allowed Origin header, exact scheme://host[:port] (repeatable)")
     http.add_argument("--max-body-bytes", type=int, default=None,
