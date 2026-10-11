@@ -529,3 +529,51 @@ On the same day `a0e2d27` (R-0091) reworded the comment of the proxy's generated
 ### Counts
 
 `mcp_proxy` went from 110 to 112 cases: J48, a header trickle cut at the pre-auth bound before authentication while an authenticated keep-alive keeps the header bound, and J49, a token with too few distinct characters refused from either source.
+
+## Addendum (2026-10-11): relist: a child may opt into a fresh tools/list, its name set frozen
+
+A child entry may now carry `"relist": true`. Only a JSON boolean is accepted: any other value refuses the config, naming the child and the key, and an omitted key is `false` `Scripts/mcp-proxy.py:_cfg_child`. The child it was added for is a skill server whose tool descriptions change while it runs, and whose client sees a new description only by calling `tools/list` again. The body above and its addenda stay as written on their dates; this addendum records what the key does and why the relay rule still holds.
+
+### What it does
+
+- **Pull on `tools/list`.** Each upstream `tools/list` first refreshes every relist child, all of them concurrently, then rebuilds the aggregate in config order `Scripts/mcp-proxy.py:_handle_message`. With no relist child that path is not entered, and the listing is byte-identical to the one before the key existed (M4).
+- **Verbatim.** A refresh lists the child to the end of its `nextCursor` chain through the same `_list_all_tools` the startup uses, bounded by `Scripts/mcp-proxy.py:_RELIST_TIMEOUT_S` (10 s), and keeps the child's own tool dicts `Scripts/mcp-proxy.py:_relist_once`. The proxy still forwards what the child said; it only asks again.
+- **The name set is frozen.** A relist whose tool-name set differs from the startup set disables the slot with the reason `tool set changed on relist` and stops that incarnation, the rule a restart already applied ("Eager start, restart and the disable rule" above). Only descriptions and schemas refresh, so routing never changes. A disabled relist child keeps its last listing in the aggregate, and a call to one of its tools is answered `isError` quoting the reason (M5).
+- **Coalesced, and bounded per attempt (KD-12, R4:L3, CWE-400).** A slot has at most one relist task. The attempt is stamped by the first statement of `_relist_once`, before any await, and within `Scripts/mcp-proxy.py:_RELIST_MIN_INTERVAL_S` (1 s) of the last attempt's start, successful or failed, the cached listing is served `Scripts/mcp-proxy.py:refresh_tools`. A child whose `tools/list` keeps failing or timing out is therefore asked at most once per interval, not once per upstream call. A caller that finds a relist still in flight past the interval waits for it, shielded and bounded by the same 10 s, so a caller giving up never cancels the relist other callers share.
+- **Stale on failure.** A relist that fails with `ChildStartError`, `ChildUnavailable`, a timeout or `OSError` logs `relist failed` and serves the last good listing; the child stays callable (M6). A slot that is not `ready` (restarting, disabled or stopping) is not relisted and its last listing is served at once (M10), and a relist that a restart or a stop raced is discarded. A restart does not replace the slot's listing, so after one the next relist past the interval lists the new process.
+- **Stop cancels the relist (C-L7).** `ChildSlot.stop()` cancels an in-flight relist task and waits for it up to `_STOP_WAIT_S`, after the restart task and before the incarnations are stopped, so no relist outlives its slot or races the final `disabled` `Scripts/mcp-proxy.py:stop` (M11).
+- **No `list_changed` relay.** A child's `notifications/tools/list_changed` is still logged and dropped by the child reader `Scripts/mcp-proxy.py:_reader_loop`, and the proxy sends none upstream: the HTTP front has no server-to-client stream (a GET is refused 405), so the next `tools/list` is the only moment a fresh description is consumed.
+
+### Why this is still a relay
+
+The relist forwards the child's own `tools/list` answer unchanged, it is opt-in per child, and a config without the key behaves exactly as before. What changed is only when the proxy asks. Polling was rejected because it loads a child with no reader waiting, and honouring `list_changed` was rejected because there is no channel to push it on.
+
+### What it does not change
+
+- For a child without the key, the declared limit stands: a restarted child whose names are unchanged but whose schemas changed is not detected. A relist child picks such a change up on the next `tools/list` past the interval.
+- An upstream `tools/list` can now take up to `_RELIST_TIMEOUT_S` longer when a relist child is slow to list.
+
+### Counts
+
+`mcp_proxy` went from 112 to 123 cases with group M `tests/test_mcp_proxy.py:group_m`: M1 the bool-only key, M2 the key omitted keeps the startup descriptions, M3 a description refreshes, M4 omitted and false are byte-identical, M5 a changed name set disables, M6 a failure serves stale and is rate-bounded, M7 coalescing, M8 the min interval, M9 the relist behind the HTTP front, M10 a list during a restart, M11 the relist task cancelled on stop.
+
+## Addendum (2026-10-11): --require-token-file: an operator may pin the bearer source to the file
+
+An HTTP-only flag, `--require-token-file`, was added by security review round 1 (finding T2) for the dedicated instance that fronts the sandboxed script runner (ADR 0032). The body above and its addenda stay as written on their dates.
+
+### What it does
+
+- **The environment is refused, even beside the file.** With the flag, a set `MCP_PROXY_TOKEN` refuses the start with `--require-token-file refuses a bearer token from MCP_PROXY_TOKEN; unset it and use --token-file`, and a missing `--token-file` with `--require-token-file requires --token-file` `Scripts/mcp-proxy.py:load_http_settings`. Both are a `ConfigError`: one `mcp-proxy:` stderr line and exit 2, before any child is spawned. Without the flag the two sources behave exactly as before, exactly one of them required.
+- **HTTP-only.** It sits in `Scripts/mcp-proxy.py:_HTTP_ONLY_FLAGS`, so without `--http` it is refused like every other HTTP-only flag.
+
+### Why
+
+The declared limit "HTTP" above already said an env-sourced token stays readable in `/proc/<pid>/environ` on Linux, and the module docstring recommended `--token-file`. ADR 0031's E28 widened that: inside a restricted Seatbelt run a script reads the argv and environment of any same-uid process through `KERN_PROCARGS2`, and the probe read `MCP_PROXY_TOKEN` out of a runner's environment. A recommendation an operator can miss was therefore not enough for the runner instance, whose children run untrusted scripts. The flag makes the module docstring's limit read "`--token-file` is recommended; `--require-token-file` enforces it".
+
+### Why this is still a relay
+
+The flag changes only where the proxy reads its own credential at startup; nothing it relays changes, and a launch line without it behaves as before. `build_child_env` still drops the token variable from every child's environment.
+
+### Counts
+
+`mcp_proxy` went from 123 to 124 cases with J50 `tests/test_mcp_proxy.py:j50_require_token_file`, run red first: live, the flag refused with `MCP_PROXY_TOKEN` set (beside `--token-file` and alone), without `--token-file` and without `--http`, each rc 2 with the token never on stderr; in-process, the flag with a token file accepted and the default without the flag unchanged.

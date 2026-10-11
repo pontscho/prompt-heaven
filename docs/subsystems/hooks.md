@@ -7,12 +7,13 @@ description: Claude Code hooks in ClaudeCode/hooks -- post-edit formatters and l
 sources:
   - ClaudeCode/hooks
 verified:
-  commit: da3f746
-  date: 2026-10-08
+  commit: 7b603d2
+  date: 2026-10-11
 links:
   - overview
   - scripts
   - 0005-approve-the-wrapper-not-the-command
+  - 0031-sbx-restricted-mode
 ---
 
 # Post-edit Hooks
@@ -29,7 +30,7 @@ identity).
 |------|------|---------|--------|
 | `attention-reminder.py` | Python | PreToolUse / UserPromptSubmit | Emits a per-token-bucket reminder listing the active MCP servers. Its debug log (`--log-path`), and the fatal-error log named by `ATTENTION_REMINDER_LOG` under `ATTENTION_REMINDER_DEBUG=1`, are created `0600`, and a log that already exists is tightened to `0600` `ClaudeCode/hooks/attention-reminder.py:log` |
 | `mcp-first-guard.py` | Python | PreToolUse / matcher `Bash` | MCP-first routing guard: denies file-search / listing / file-read / stream-edit / dir-creation / system-inspection binaries as the *primary* command of a statement, steering to the purity / inspect MCP equivalents `ClaudeCode/hooks/mcp-first-guard.py:BLOCKED`; a downstream pipe stage stays allowed. It also denies specific invocations of innocent binaries `ClaudeCode/hooks/mcp-first-guard.py:BLOCKED_FORMS`: `python3 -m py_compile` / `-m compileall` (they write `.pyc` into the tree), `node --check` / `node -c` (only when node is installed), and `bash -n` / `sh -n` (only when bash is installed). `zsh -n` is deliberately left alone, because the validator it would be steered to parses with bash `ClaudeCode/hooks/mcp-first-guard.py:bash_noexec_mode`. It sees through wrappers, `-c` payloads and command substitution, always exits 0 and fails open (`deny`\|empty polarity) |
-| `sbx-gate.py` | Python | PreToolUse / matcher `Bash` | Grant-only gate: auto-allows a clean, contained, single `sbx` invocation (canonical-path identity, rejects shell metacharacters) and stays silent otherwise (`allow`\|empty polarity, disjoint from `mcp-first-guard.py`, so their order is safe either way). Its accept-set left of the bare `--` is closed `ClaudeCode/hooks/sbx-gate.py:is_clean_sbx`: `--ro`, `--seccomp` and `--dry-run` take no argument (`--seccomp` only narrows a run the gate would already allow, and `--dry-run` execs no child, so it grants strictly less than a plain run), `--write DIR`/`--write=DIR` passes only if the scope resolves inside the project root, `--net` is refused, and every other token is a hard prompt, including the equals-forms `--seccomp=1` and `--dry-run=1`. Rationale: [[0005-approve-the-wrapper-not-the-command]] |
+| `sbx-gate.py` | Python | PreToolUse / matcher `Bash` | Grant-only gate: auto-allows a clean, contained, single `sbx` invocation (canonical-path identity, rejects shell metacharacters) and stays silent otherwise (`allow`\|empty polarity, disjoint from `mcp-first-guard.py`, so their order is safe either way). The raw command must be printable ASCII plus tab, it is split on space and tab only, as bash splits it, every word must match `[A-Za-z0-9._/=+:,@%~-]+` and every `~` must be a bare `~` or a leading `~/`; anything else prompts `ClaudeCode/hooks/sbx-gate.py:_WORD_RE` (security review round 1, 2026-10-11: more prompts, never fewer). Its accept-set left of the bare `--` is closed and table-driven `ClaudeCode/hooks/sbx-gate.py:is_clean_sbx`: the argument-less narrowing flags (`--ro`, `--seccomp`, `--dry-run`, `--restrict-reads`, `--clean-env`) only as exact bare tokens, `--write DIR`/`--write=DIR` only if the scope resolves inside the project root and neither equals nor contains a socket directory (`/run`, `/tmp`, `/var/snap`, `/var/run`) `ClaudeCode/hooks/sbx-gate.py:_buries_sockets` nor lies under `/run`, `/var/run` or `/var/snap` `ClaudeCode/hooks/sbx-gate.py:_under_sockets` (security review round 3: with no `.git` the project root is the cwd, so `--write .` from `/` or `/var` would otherwise pass, and sbx refuses such a scope anyway), the other value flags only with a value proven to narrow (`--rlimit-core` only `0`, `--rlimit-nproc` only an absolute value up to 512), `--net` and `--status-fd` always refused, and every other token a hard prompt, including the equals-forms `--seccomp=1` and `--dry-run=1`. The full table is the sandbox-run skill's. Rationale: [[0005-approve-the-wrapper-not-the-command]], [[0031-sbx-restricted-mode]] |
 | `post-edit-clang-format.sh` | Bash | edit `.c/.cpp/.h/.hpp` | Auto-formats in place with the clang-format recorded in the CMake cache; no CMake build or no `.clang-format` is a silent skip |
 | `post-edit-clang-tidy.sh` | Bash | edit `.c/.cpp/.h/.hpp` | Runs clang-tidy against `build/compile_commands.json`; blocks (exit 2) on warnings, errors (exit 1) on a missing CMake cache or compile database |
 | `post-edit-json-lint.sh` | Bash | edit `.json/.jsonc/.jsonl/.json5` | Validates syntax with `jq` (comments stripped for JSONC/JSON5, line by line for JSONL); skips if jq is absent |

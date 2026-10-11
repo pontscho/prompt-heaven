@@ -336,3 +336,35 @@ A side effect: git and measurement children no longer share the server's control
 Its cancel reclaim class is task, as for gdc and lldb, with one step more: when the read loop cancels a request, the awaited child call is cancelled, and the CancelledError arm of `ChildClient.rpc` (`Scripts/mcp-proxy.py:rpc`) sends notifications/cancelled to the child with the child's own request id, never the upstream one, before re-raising. initialize and an already answered call get no notice. So the cancel travels one hop further and the child applies its own reclaim class.
 
 The proxy is gated where the fleet is: a coroutine row in `tests/test_read_loop.py`, a task row in `tests/test_cancel.py:CLASSES`, and the forwarding proven end to end by case D1 of `tests/test_mcp_proxy.py`, the proxy's own suite.
+
+## Addendum (2026-10-11): mcp-sandbox joins the pool group
+
+`Scripts/mcp-sandbox.py`, the server that runs a caller's script under the sbx restricted mode, is a new server and takes this ADR's shape from its first commit: a single-thread stdin reader executor that no handler can take, and one task per message handed to a worker pool `Scripts/mcp-sandbox.py:run`. It joins the pool group rather than the coroutine group, and that is a decision, not a default. A run blocks its worker for the whole sbx invocation -- the spawn, the capped read of its output and status pipes, the wait -- so the work needs a thread; and the only mutable state a handler reaches is the run-slot and plan bookkeeping, each piece taken under its own lock, while the config is built once in main() and only read afterwards. The pool is sized limits.max_concurrent + 2, so with every run slot taken two workers stay free for the calls that must answer while runs are in flight: capabilities, the status reply, and the refusals, busy among them, that a run beyond the slots receives.
+
+### The row
+
+| server | reader | dispatch | worker | arg | note |
+|---|---|---|---|---|---|
+| mcp-sandbox.py | sandbox-stdin | pool | sandbox-call | arg | blocking sbx runs need a thread; the run slots are the only shared state |
+
+The declared totals move to ten pool servers and eight coroutine servers.
+
+Its cancel reclaim class is kill, with git, inspect and wiki's shape and no exemption: every sbx spawn -- the run, the VSZ probe, --version and the self-test -- goes through `Scripts/mcp-sandbox.py:_spawn_sbx`, which starts sbx in its own session and adopts the Popen into the request's reclaim, and the /bin/ps samples go through the adopting `Scripts/mcp-sandbox.py:_run_child`. The target's process group, reported by sbx on its --status-fd, is adopted as a bare pgid too `Scripts/mcp-sandbox.py:_Reclaim`, so the run thread can kill it if sbx dies without a terminal exit event.
+
+The server is gated where the fleet is: a pool row in `tests/test_read_loop.py`, a kill row in `tests/test_cancel.py`, and an (OUT, FULL) row in `tests/test_wire_log.py`.
+
+## Addendum (2026-10-11): mcp-skill joins the pool group
+
+`Scripts/mcp-skill.py`, the read-only skill loader and runner client, is a new server and takes this ADR's shape from its first commit: a single-thread stdin reader executor that no handler can take, and one task per message handed to a worker pool `Scripts/mcp-skill.py:run`. It joins the pool group rather than the coroutine group, and that is a decision, not a default. Every handler reads skill files through blocking descriptor-relative opens, and the run function `Scripts/mcp-skill.py:fn_run` is the client of a runner over loopback HTTP, bounded by --runner-timeout-s; both block a worker, so the work needs a thread. The only mutable state a handler reaches is the tier index cache, taken under its one lock in `Scripts/mcp-skill.py:load_tier`; the config is built once in main() and only read afterwards, and the function tables are import-time constants. The pool is a fixed MAX_INFLIGHT_REQUESTS workers.
+
+### The row
+
+| server | reader | dispatch | worker | arg | note |
+|---|---|---|---|---|---|
+| mcp-skill.py | skill-stdin | pool | skill-call | arg | blocking file reads and the runner HTTP call need a thread; the index cache has one lock |
+
+The declared totals move to eleven pool servers and eight coroutine servers.
+
+Its cancel reclaim class is reply-only, as for context7, jenkins, search and webfetch: a cancel suppresses the reply, and the runner HTTP call runs to its own deadline in the worker thread. Hanging up on the runner when the request is cancelled is a roadmap item, not part of this shape.
+
+The server is gated where the fleet is: a pool row in `tests/test_read_loop.py`, a reply-only row in `tests/test_cancel.py`, and an (OUT, FULL) row in `tests/test_wire_log.py`.

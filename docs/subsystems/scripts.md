@@ -8,11 +8,15 @@ sources:
   - Scripts
   - Scripts/context-guard.sh
 verified:
-  commit: 6321251
-  date: 2026-10-08
+  commit: 7b603d2
+  date: 2026-10-11
 links:
   - overview
   - mcp-proxy
+  - mcp-sandbox
+  - mcp-skill
+  - 0031-sbx-restricted-mode
+  - 0032-a-runner-behind-a-proxy
   - 0011-a-truncated-payload-carries-the-first-cookie
   - 0023-the-websocket-client-is-a-sixth-domain
   - 0027-the-proxy-relays-it-never-composes
@@ -126,7 +130,9 @@ the servers that learned this later (forge, jenkins, tshark, context7, lldb,
 gdc and the three legacy LSP servers) the sentence is the second generated
 block, `Scripts/_mcp_dispatch.py:_unknown_params_refusal`, read against a hand
 `ACCEPTED_PARAMS` table per function; the servers that refused first still
-write it by hand. The check is a pure function of the params and the table, so
+write it by hand. mcp-sandbox and mcp-skill refuse an unknown key from their
+first commit through the same generated block, read against their own tables
+`Scripts/mcp-sandbox.py:_RUN_PARAMS` and `Scripts/mcp-skill.py:ACCEPTED`. The check is a pure function of the params and the table, so
 it runs before anything that can wait or fail for another reason: before forge
 reads its config `Scripts/mcp-forge.py:handle_forge_call`, before jenkins
 injects its project-scope `job_path` (so the injected key is never what is
@@ -140,9 +146,11 @@ legacy LSP servers took `relative_path` as an alias of `path`, the spelling
 their skills document `Scripts/mcp-clangd.py:PARAM_ALIASES`; lua-lsp's
 `luals_find_references`, `luals_symbol_context` and
 `luals_symbol_change_impact` never read a `path` and now refuse one rather than
-ignore it `Scripts/mcp-lua-lsp.py:ACCEPTED_PARAMS`. Every table is held to
-what its handlers read and its documentation names by `param_contract`
-([[tests]]).
+ignore it `Scripts/mcp-lua-lsp.py:ACCEPTED_PARAMS`. Every `ACCEPTED_PARAMS`
+table is held to what its handlers read and its documentation names by
+`param_contract` ([[tests]]); the two runner servers' tables are not among its
+hosts `tests/test_param_contract.py:HOSTS`, and their refusal is driven live by
+the smoke near-miss probe `Scripts/_mcp_smoke_test.py:NEAR_MISS_PARAM`.
 
 `mcp-git` keeps its documented flag channel instead: a key it does not know
 is forwarded as `--key[=value]`, so a misspelled param reaches git as an
@@ -175,8 +183,10 @@ and the cancelled request is never answered. What the cancel *reclaims* depends
 on the server's class. For gdc, lldb and proxy (`task`), the coroutine stops;
 the proxy's child client also forwards `notifications/cancelled` with the child's
 own request id, from the cancel arm of `ChildClient.rpc` `Scripts/mcp-proxy.py:rpc`. For forge,
-tshark, git, inspect and wiki (`kill`), the request's child process group is
-signalled `Scripts/mcp-forge.py:_Reclaim`, except for declared exemptions such as
+tshark, git, inspect, wiki and sandbox (`kill`), the request's child process group is
+signalled `Scripts/mcp-forge.py:_Reclaim` — for sandbox, every sbx spawn and
+the target's process group reported on sbx's status fd
+`Scripts/mcp-sandbox.py:_Reclaim` — except for declared exemptions such as
 wiki's vendored `Scripts/mcp-wiki.py:git` and mcp-git's mutating stash
 `Scripts/mcp-git.py:_run_git_mutating`, which is never killed mid-way and only
 has its reply suppressed. For the LSP servers (`lsp-cancel`), the generated
@@ -184,9 +194,10 @@ has its reply suppressed. For the LSP servers (`lsp-cancel`), the generated
 (`pg-cancel`), a `CancelRequest` carrying the captured `BackendKeyData` goes out
 on a second socket and the worker drains the error through `ReadyForQuery`
 before releasing the connection `Scripts/mcp-postgres.py:send_cancel_request`.
-For context7, jenkins, webfetch and search (`reply-only`), the reply is suppressed
+For context7, jenkins, webfetch, search and skill (`reply-only`), the reply is suppressed
 and the worker thread runs to its own timeout — for search, a call waiting on or
-holding an endpoint lock runs to its end. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
+holding an endpoint lock runs to its end, and for skill, the runner HTTP call
+runs to its own deadline `tests/test_cancel.py:FLEET`. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
 records the decision, and `tests/test_cancel.py` gates it ([[tests]]).
 
 The unregistered servers below were converted too, even though they never
@@ -231,6 +242,35 @@ registered in a client config yet**, and the smoke check runs it as unregistered
 `Scripts/_mcp_smoke_test.py`. It is the two search CLIs as one server, with a
 worker pool and one locked session per endpoint; see "mcp-search" under Search
 below.
+
+Two more live servers sit outside the table because their consumer is ai-soul,
+not Claude Code, and each reaches it only through an [[mcp-proxy]] instance;
+the smoke check runs both as unregistered servers `Scripts/_mcp_smoke_test.py:SERVERS`.
+
+- `Scripts/mcp-sandbox.py` (`sandbox_call`: `run_script`, `capabilities`
+  `Scripts/mcp-sandbox.py:HANDLERS`) is the sandboxed script runner. It writes a
+  caller's inline files into a fresh work directory, runs one configured
+  interpreter (`python3`, `bash` or `node`) on the entry file through `sbx`'s
+  restricted mode, and answers the exit status, the capped output and the files
+  left under `out/` `Scripts/mcp-sandbox.py:run_one`. Its command line is
+  `--config PATH` plus `--debug`/`--log-file`; every policy lives in that one
+  strict JSON file `Scripts/mcp-sandbox.py:load_config`. It runs behind its own
+  dedicated `mcp-proxy --http` instance, and its consumer is mcp-skill. Its
+  config, run lifecycle, refusal codes, timeout chain and cleanup are
+  [[mcp-sandbox]]. What the restricted mode closes is
+  [[0031-sbx-restricted-mode]], and why the runner sits behind a proxy is
+  [[0032-a-runner-behind-a-proxy]]; both are still drafts.
+- `Scripts/mcp-skill.py` (`skill_call`: `load`, `run`, `list`, `validate`
+  `Scripts/mcp-skill.py:FUNCTIONS`) is the read-only skill loader. It serves a
+  household and a private tier from `--household-root` / `--private-root`, puts
+  the skill index into its own tool description
+  `Scripts/mcp-skill.py:_render_description`, frames every quoted file as
+  sanitized data through a declared hand copy of the websearch sanitizer
+  `Scripts/mcp-skill.py:_web_clean`, and forwards `run` to mcp-sandbox's proxy
+  over a loopback-only HTTP client `Scripts/mcp-skill.py:RunnerClient`
+  (`--runner-url`, `--runner-token-file`). ai-soul reaches it as an mcp-proxy
+  child with `relist` on. Its tiers, file hygiene, framing and the runner client
+  are [[mcp-skill]].
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
 which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`

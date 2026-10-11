@@ -125,9 +125,7 @@ implementation_security_open_items:
     severity: LOW
 documentation_updated: true
 documentation_pages_touched: [scripts, generated-regions, tests, hooks, skills, mcp-sandbox, mcp-skill, mcp-proxy, 0031-sbx-restricted-mode, 0032-a-runner-behind-a-proxy, 0027-the-proxy-relays-it-never-composes, 0005-approve-the-wrapper-not-the-command, 0008-a-serialized-read-loop-looks-like-a-dead-server, spec-sbx-restricted-runner, roadmap]
-documentation_open_items:
-  - "After the commit: promote ADR 0031, ADR 0032 and spec-sbx-restricted-runner (targets -> sources, verified.commit, draft -> active; the ADRs before any further edit)."
-  - "After the commit: bump verified.commit and flip to active on mcp-sandbox and mcp-skill; re-run ingest or bump verified on scripts, tests, hooks, skills, generated-regions and mcp-proxy."
+documentation_open_items: []
 
 requirements:
   - category: architecture

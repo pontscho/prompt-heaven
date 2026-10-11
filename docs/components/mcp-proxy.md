@@ -3,15 +3,15 @@ name: mcp-proxy
 type: component
 status: active
 title: mcp-proxy — one MCP endpoint relaying a project root's child servers
-description: The stdlib-only relay in front of a project root's child MCP servers -- unprefixed tool names with a duplicate refusing startup, verbatim payloads under a framing ceiling, eager start, a restart budget that disables, a cancel forwarded one hop to the child, and a Streamable HTTP front for ai-soul; how it is tested and what it declares rather than gates.
+description: The stdlib-only relay in front of a project root's child MCP servers -- unprefixed tool names with a duplicate refusing startup, verbatim payloads under a framing ceiling, eager start, a restart budget that disables, a cancel forwarded one hop to the child, an opt-in per-child relist with a frozen name set, and a Streamable HTTP front for ai-soul; how it is tested and what it declares rather than gates.
 sources:
   - Scripts/mcp-proxy.py
   - Scripts/_mcp_httpfront.py
   - tests/test_mcp_proxy.py
   - tests/files/mcp_proxy/tf_stub_child.py
 verified:
-  commit: bf17f0c
-  date: 2026-10-08
+  commit: 7b603d2
+  date: 2026-10-11
 links:
   - 0027-the-proxy-relays-it-never-composes
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
@@ -24,6 +24,7 @@ links:
   - 0013-the-ceiling-is-a-payload-class
   - 0015-ambiguity-is-the-defect
   - 0029-the-http-front-is-a-domain
+  - mcp-sandbox
 ---
 
 # mcp-proxy
@@ -157,6 +158,66 @@ are read with plain `json.loads`, since neither is a peer's frame. The child MCP
 hand-written, and its methods are named `rpc` / `notify_child` so the hand-copy
 census never mistakes them for the LSP request block.
 
+## Relist: a fresh tools/list, the name set frozen
+
+A child entry may opt into `"relist": true`. The value must be a JSON boolean —
+anything else refuses the config naming the child and the key — and an omitted
+key is `false` `Scripts/mcp-proxy.py:_cfg_child`, carried as
+`Scripts/mcp-proxy.py:ChildSpec`'s `relist` field. It exists for a child whose
+tool descriptions change while it runs, such as a skill server; why it is still
+a relay is the relist addendum of [[0027-the-proxy-relays-it-never-composes]].
+
+**When.** Every upstream `tools/list` first refreshes each relist child, all
+concurrently, then rebuilds the aggregate in config order
+`Scripts/mcp-proxy.py:_handle_message`. A config with no relist child never
+enters that path, and its listing is byte-identical to the one without the key.
+There is no polling, and a child's `notifications/tools/list_changed` is still
+logged and dropped `Scripts/mcp-proxy.py:_reader_loop`; the proxy sends none
+upstream, so a client sees a new description only by listing again.
+
+**What.** A relist lists the child to the end of its `nextCursor` chain through
+the startup's own `Scripts/mcp-proxy.py:_list_all_tools`, bounded by
+`Scripts/mcp-proxy.py:_RELIST_TIMEOUT_S`, and keeps the child's tool dicts as
+it sent them `Scripts/mcp-proxy.py:_relist_once`. Only descriptions and schemas
+refresh. The tool-name set is frozen: a relist that lists a different set
+disables the slot with the reason `tool set changed on relist` and stops that
+incarnation, the rule a restart already applies. A disabled relist child keeps
+its last listing upstream, and a call to one of its tools is answered `isError`
+quoting the reason.
+
+**How often.** A slot runs at most one relist at a time. The attempt is stamped
+before the first await, and within `Scripts/mcp-proxy.py:_RELIST_MIN_INTERVAL_S`
+of the last attempt's start — successful or failed — the cached listing is
+served `Scripts/mcp-proxy.py:refresh_tools`, so a child whose `tools/list` keeps
+failing is asked at most once per interval. A caller that finds a relist still
+in flight past the interval waits for it, shielded and bounded by the relist
+timeout, so a caller giving up never cancels the relist other callers share.
+
+**Stale is safe.** A relist that fails or times out logs `relist failed` and
+serves the last good listing; the child stays callable. A slot that is
+restarting, disabled or stopping is not relisted, its last listing is served at
+once, and a relist a restart or stop raced is discarded. A restart does not
+replace the slot's listing; the next relist past the interval lists the new
+process. `ChildSlot.stop()` cancels an in-flight relist task and waits for it up
+to `Scripts/mcp-proxy.py:_STOP_WAIT_S`, after the restart task and before the
+incarnations are stopped, so no relist outlives its slot
+`Scripts/mcp-proxy.py:stop`.
+
+**The runner instance.** The relist key needs no HTTP flag, but the dedicated
+proxy instance that fronts the script runner is launched with two existing
+flags raised from their defaults: `--max-body-bytes 8388608` (the default is
+`Scripts/mcp-proxy.py:_HTTP_BODY_LIMIT`, 4 MiB) and `--session-idle 900` (the
+default is `Scripts/mcp-proxy.py:_HTTP_SESSION_IDLE_S`, one day), so the session
+of a client that dies without its shutdown `DELETE` is evicted after 15 minutes
+rather than holding a `--max-sessions` slot for a day. Both are checked at
+startup — a body cap of at least one byte, a positive finite idle time
+`Scripts/mcp-proxy.py:load_http_settings` — and neither needed a proxy code
+change. It also passes `--require-token-file` with its `--token-file`, the one
+flag added for it (above). The token file belongs under `~/.claude`, owner-only:
+`sbx`'s deny set is fixed and covers that directory, while a token file
+anywhere else is readable by a legacy `sbx` run the gate auto-allows. Nothing
+checks the location; the full launch line is on [[mcp-sandbox]] (ADR 0032, T3).
+
 ## The Streamable HTTP front
 
 With `--http` the same core serves Streamable HTTP instead of stdio
@@ -192,6 +253,20 @@ floor (R-0090), checked by the host wrapper both token sources go through
 `Scripts/mcp-proxy.py:_http_token_checked`, so 32 copies of one letter refuse
 the start; it is compared in constant time, and is never logged. HTTP mode refuses `--config-json`, since argv is visible in `ps`
 `Scripts/mcp-proxy.py:_http_cli_defaults`.
+
+**`--require-token-file` pins the source.** A token taken from
+`MCP_PROXY_TOKEN` stays readable for the proxy's lifetime (popping it does not
+rewrite the initial environment block, and a restricted `sbx` run can read a
+same-uid process's environment, ADR 0031's E28), so this HTTP-only flag turns
+"use `--token-file`" from advice into a rule `Scripts/mcp-proxy.py:load_http_settings`.
+With it, a set `MCP_PROXY_TOKEN` refuses the start even beside `--token-file`
+(`--require-token-file refuses a bearer token from MCP_PROXY_TOKEN; unset it
+and use --token-file`), and so does a missing `--token-file`
+(`--require-token-file requires --token-file`); without `--http` it is refused
+like every HTTP-only flag. Each refusal is one `mcp-proxy:` stderr line and
+exit 2. It was added in security review round 1 (T2) for the runner instance
+below, whose launch line passes it; why it is still a relay is the
+`--require-token-file` addendum of [[0027-the-proxy-relays-it-never-composes]].
 
 **Every request, before its body.** A malformed header line, a wrong path, a
 `Host` other than the loopback bind's own (checked on a loopback bind only), an
@@ -275,9 +350,16 @@ start and the duplicate refusal `tests/test_mcp_proxy.py:group_b`, routing
 `call_timeout` `tests/test_mcp_proxy.py:group_h`, orphan-free shutdown
 `tests/test_mcp_proxy.py:group_i`, the HTTP front in three groups
 `tests/test_mcp_proxy.py:group_j` `tests/test_mcp_proxy.py:group_j_hardening`
-`tests/test_mcp_proxy.py:group_j_strict`, static AST rules over the proxy source
-`tests/test_mcp_proxy.py:group_k` and sandbox hygiene
-`tests/test_mcp_proxy.py:group_l`. Its case count is declared once, in
+`tests/test_mcp_proxy.py:group_j_strict` (group J's J50 pins
+`--require-token-file` refusing `MCP_PROXY_TOKEN`, even beside `--token-file`
+`tests/test_mcp_proxy.py:j50_require_token_file`), static AST rules over the proxy source
+`tests/test_mcp_proxy.py:group_k`, the opt-in relist
+`tests/test_mcp_proxy.py:group_m` — M1-M11: the bool-only key, the default off
+and byte-identical, a refreshed description, a changed name set disabling, a
+failure served stale and still rate-bounded, coalescing, the min interval, the
+HTTP front, a list during a restart, and the relist task cancelled on stop — and
+sandbox hygiene `tests/test_mcp_proxy.py:group_l`, which runs after group M so
+its snapshot sees every fixture write. Its case count is declared once, in
 `tests/run.py:SUITES`, and checked against the run; the per-group detail is the
 suite's row in [[tests]].
 
@@ -298,7 +380,10 @@ the reasoning and the review findings left unfixed on purpose. The ones a user
 of the proxy meets first:
 
 - A restarted child whose tool **names** are unchanged but whose schemas changed
-  is not detected; only the name set is compared.
+  is not detected; only the name set is compared. A relist child picks such a
+  change up on the next `tools/list` past the min interval.
+- With a relist child configured, an upstream `tools/list` can take up to the
+  relist timeout longer when that child is slow to list.
 - A disconnect is not a cancel, so up to `--max-inflight` abandoned calls can
   keep children busy until they finish or hit their call timeout.
 - There is no TLS: with `--allow-remote` the bearer travels in plaintext, so a

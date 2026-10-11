@@ -13,9 +13,23 @@ WIP now: 0 of 3. Archive: 77 closed items (68 done, 9 dropped).
 
 | Lane  | Id     | State | Title                                                                                               | Ready |
 |-------|--------|-------|-----------------------------------------------------------------------------------------------------|-------|
+| next  | R-0096 | idea  | Run the sandbox runner under a dedicated OS uid on Linux                                            | yes   |
+| next  | R-0097 | idea  | Live-verify sbx restricted mode and mcp-sandbox on the Linux host                                   | yes   |
+| next  | R-0098 | idea  | mcp-sandbox: pre-check a plan's reads against sbx's 256-entry read cap                              | yes   |
 | later | R-0048 | idea  | Answer a HelloRetryRequest that selects P-384 (FLAG-2)                                              | yes   |
 | later | R-0052 | idea  | Measure the DDG challenge page's structural marker and replace the fallback block predicate         | yes   |
 | later | R-0047 | idea  | implement certificate verification in _ChTls so fingerprint and authenticity stop being a trade-off | yes   |
+| later | R-0099 | idea  | Give the text sanitizer a canonical source and retire the mcp-skill hand copy                       | yes   |
+| later | R-0100 | idea  | Lift the MCP Streamable HTTP client into a canonical source when a second host needs it             | yes   |
+| later | R-0101 | idea  | Sweep orphaned setsid process groups of sandboxed runs on macOS                                     | no    |
+| later | R-0102 | idea  | mcp-proxy: re-read the bearer token file per request                                                | yes   |
+| later | R-0103 | idea  | Add a debug content-logging switch to the sandbox runner path                                       | yes   |
+| later | R-0104 | idea  | Write the skill-proposal Claude Code skill for ai-soul's skill_propose                              | yes   |
+| later | R-0105 | idea  | mcp-skill: hang up the runner connection on cancel                                                  | yes   |
+| later | R-0106 | idea  | Per-run disk quota and RSS watchdog for sandboxed scripts                                           | yes   |
+| later | R-0107 | idea  | bash address-space trampoline, only if bash's effective budget exceeds 8 GiB                        | yes   |
+| later | R-0108 | idea  | Close the exec-to-spawned window on macOS (T11a)                                                    | yes   |
+| later | R-0109 | idea  | Unix-socket transport for the runner proxy so the runner token cannot leak to a port squatter       | yes   |
 | inbox | R-0063 | idea  | Harden --log-file open in the generated logging block (O_NOFOLLOW, owner check)                     | yes   |
 | inbox | R-0064 | idea  | mcp-proxy: per-session share of the global max-inflight budget                                      | yes   |
 | inbox | R-0065 | idea  | mcp-proxy: session table exhaustion holds slots for a full idle period                              | yes   |
@@ -36,6 +50,51 @@ WIP now: 0 of 3. Archive: 77 closed items (68 done, 9 dropped).
 # now
 
 # next
+
+## R-0096 · Run the sandbox runner under a dedicated OS uid on Linux
+
+state: idea
+horizon: next
+origin: user:2026-10-11:sandbox-runner-dedicated-uid
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [mcp-sandbox, sandbox, security]
+
+Deferred item 1 of the Deferred to roadmap list in spec-sbx-restricted-runner (user decision 11). v1 runs mcp-sandbox and the scripts it starts as the same uid as mcp-skill and the operator, so the runner token is the whole boundary (ADR 0032, same-uid trust). A dedicated sandbox uid for the Linux deployment would let file permissions separate the runner from the household data and is also the precondition for a clean orphan sweep. Decisions: ADR 0031 and ADR 0032.
+
+### Log
+
+- 2026-10-11 new->next: filed at close-out of spec-sbx-restricted-runner
+
+## R-0097 · Live-verify sbx restricted mode and mcp-sandbox on the Linux host
+
+state: idea
+horizon: next
+origin: user:2026-10-11:sandbox-runner-linux-live-verification
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [linux, mcp-sandbox, sbx]
+
+Deferred item 2 of the Deferred to roadmap list in spec-sbx-restricted-runner. The Linux (bwrap) half of restricted mode was built and unit-tested but never run live: node under an absolute 1 GiB address-space limit, --clearenv in bwrap 0.6.1, and RLIMIT_NPROC under a user namespace are unmeasured, so the runner reports liveVerified false on Linux. The run needs the 192.168.2.245 host and Zoltan's explicit OK; a green run flips liveVerified. Decision: ADR 0031.
+
+### Log
+
+- 2026-10-11 new->next: filed at close-out of spec-sbx-restricted-runner
+
+## R-0098 · mcp-sandbox: pre-check a plan's reads against sbx's 256-entry read cap
+
+state: idea
+horizon: next
+origin: user:2026-10-11:mcp-sandbox-read-cap-precheck
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [mcp-sandbox, sbx]
+
+Deferred item 15 of the Deferred to roadmap list in spec-sbx-restricted-runner, added at close-out from finding C2. mcp-sandbox admits a Mach-O closure of up to 512 images (_CLOSURE_IMAGES_MAX), but sbx refuses more than 256 read paths (_READ_CAP), so a keg with roughly 250 or more native modules makes node unplannable and the failure surfaces only as sbx's too-many-read-entries usage error. mcp-sandbox should count the computed reads against 256 and fail the plan with a named error. Decisions: ADR 0031 and ADR 0032.
+
+### Log
+
+- 2026-10-11 new->next: filed at close-out of spec-sbx-restricted-runner
 
 # later
 
@@ -94,6 +153,172 @@ Closing the gap is what would let the Chrome path become the default again in we
 - 2026-10-01 new->unset: follow-up of R-0044 (task-056, D15)
 - 2026-10-02 unset->later: Triage 2026-10-02: real gap but narrow exposure (Chrome path is opt-in in webfetch, once-per-host after a block in search); large stdlib X.509 work.
 - 2026-10-05 later->later: edited why: premise drift after 8dde3a6: search is Chrome-only now
+
+## R-0099 · Give the text sanitizer a canonical source and retire the mcp-skill hand copy
+
+state: idea
+horizon: later
+origin: user:2026-10-11:canonical-sanitizer-source
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [generated-regions, mcp-skill]
+
+Deferred item 3 of the Deferred to roadmap list in spec-sbx-restricted-runner. mcp-skill carries a declared hand copy of the fleet's text sanitizer, kept honest by parity rows and a HAND_COPY_REASONS entry in the amalgamate generator. A fifteenth canonical source would generate it instead and let the parity rows go. Decision: ADR 0032 (why the hand copy was accepted for v1).
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0100 · Lift the MCP Streamable HTTP client into a canonical source when a second host needs it
+
+state: idea
+horizon: later
+origin: user:2026-10-11:canonical-mcp-http-client
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [generated-regions, mcp-skill]
+
+Deferred item 4 of the Deferred to roadmap list in spec-sbx-restricted-runner. mcp-skill's bounded stdlib Streamable HTTP client to the runner proxy is hand-written inside the server because it has exactly one host. When a second server needs to call an MCP endpoint over HTTP, lift it into a canonical source rather than copy it. Decision: ADR 0032.
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0101 · Sweep orphaned setsid process groups of sandboxed runs on macOS
+
+state: idea
+horizon: later
+origin: user:2026-10-11:sandbox-macos-orphan-sweep
+spec: spec-sbx-restricted-runner
+blocked_by: [R-0096]
+tags: [macos, mcp-sandbox, sbx]
+
+Deferred item 5 of the Deferred to roadmap list in spec-sbx-restricted-runner (threat T11). A target that escapes its process group with setsid outlives the run's group kill on macOS until its RLIMIT_CPU or exit. A sweep can only be done cleanly when the runner has a dedicated uid (every process of that uid is then fair game), so this follows the dedicated-uid item. Decision: ADR 0031.
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0102 · mcp-proxy: re-read the bearer token file per request
+
+state: idea
+horizon: later
+origin: user:2026-10-11:mcp-proxy-token-reread
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [mcp-proxy, security]
+
+Deferred item 6 of the Deferred to roadmap list in spec-sbx-restricted-runner. ai-soul's sandbox-runner spec says the proxy should preferably re-read its token per request, so a rotated token takes effect without a restart; v1 reads it once at startup. Decision: the ADR 0027 addendum.
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0103 · Add a debug content-logging switch to the sandbox runner path
+
+state: idea
+horizon: later
+origin: user:2026-10-11:sandbox-debug-content-logging
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [logging, mcp-sandbox, mcp-skill]
+
+Deferred item 7 of the Deferred to roadmap list in spec-sbx-restricted-runner. The ai-soul spec allows a debug switch that logs script content and output; v1 logs metadata only, beyond the existing log_content behaviour. A switch must stay off by default and keep the structure-only wire-log rule of ADR 0011. Decision: ADR 0032.
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0104 · Write the skill-proposal Claude Code skill for ai-soul's skill_propose
+
+state: idea
+horizon: later
+origin: user:2026-10-11:skill-proposal-skill
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [ai-soul, mcp-skill, skills]
+
+Deferred item 8 of the Deferred to roadmap list in spec-sbx-restricted-runner. ai-soul's skill_propose schema has been received (R4:CONTRACT in the spec), but a Claude Code skill that drafts and proposes a household skill against it stays out of v1. Decision: ADR 0032 (the contract with ai-soul).
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0105 · mcp-skill: hang up the runner connection on cancel
+
+state: idea
+horizon: later
+origin: user:2026-10-11:mcp-skill-cancel-hangup
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [cancel, mcp-skill]
+
+Deferred item 9 of the Deferred to roadmap list in spec-sbx-restricted-runner. mcp-skill is declared REPLY_ONLY on cancel: it answers the cancel but the HTTP request to the runner keeps running until the runner's own deadline. Closing the runner connection on cancel would let the runner proxy cancel the run one hop further. Decision: ADR 0032.
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0106 · Per-run disk quota and RSS watchdog for sandboxed scripts
+
+state: idea
+horizon: later
+origin: user:2026-10-11:sandbox-disk-quota-rss-watchdog
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [mcp-sandbox, sbx]
+
+Deferred item 10 of the Deferred to roadmap list in spec-sbx-restricted-runner. v1 bounds a run with RLIMIT_FSIZE, an address-space limit and a wall-clock timeout, but a run can still fill the work root through many files and its resident set is not watched. A per-run quota on the workdir and an RSS watchdog close both. Kept as one item because both are per-run resource supervision in the runner. Decision: ADR 0031.
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0107 · bash address-space trampoline, only if bash's effective budget exceeds 8 GiB
+
+state: idea
+horizon: later
+origin: user:2026-10-11:sandbox-bash-as-trampoline
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [mcp-sandbox, sbx]
+
+Deferred item 11 of the Deferred to roadmap list in spec-sbx-restricted-runner. A trampoline that applies the address-space limit to bash itself is needed only if bash's effective budget is above 8 GiB. M0 measured about 1.27 GiB VSZ (M0:11), so it is not triggered; the item stays so a later re-measurement has somewhere to land. Decision: ADR 0031.
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0108 · Close the exec-to-spawned window on macOS (T11a)
+
+state: idea
+horizon: later
+origin: user:2026-10-11:sbx-exec-spawned-window
+spec: spec-sbx-restricted-runner
+blocked_by: []
+tags: [macos, mcp-sandbox, sbx]
+
+Deferred item 13 of the Deferred to roadmap list in spec-sbx-restricted-runner. Between the target's exec and the spawned status record there is a window in which the runner does not yet know the pgid; an sbx killed inside it leaves the target running until its RLIMIT_CPU or exit. One fix is for the sbx parent to pass the pgid to the runner before the exec. Decision: ADR 0031 (declared limit T11a).
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0109 · Unix-socket transport for the runner proxy so the runner token cannot leak to a port squatter
+
+state: idea
+horizon: later
+origin: user:2026-10-11:runner-proxy-unix-socket
+spec: spec-sbx-restricted-runner
+blocked_by: []
+severity: medium
+tags: [mcp-proxy, mcp-skill, security]
+
+Deferred item 14 of the Deferred to roadmap list in spec-sbx-restricted-runner, added at close-out from security finding T1 (A07, CWE-923). mcp-skill sends its bearer token to whatever listens on the loopback runner port, so a process of another uid that binds the port first receives the token. The squat is declared in ADR 0032. A unix socket guarded by filesystem permissions removes it; it needs a unix-socket front in mcp-proxy and a matching client in mcp-skill. Decision: ADR 0032.
+
+### Log
+
+- 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
 
 # inbox
 
