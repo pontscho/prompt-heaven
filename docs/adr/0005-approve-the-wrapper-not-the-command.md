@@ -307,3 +307,30 @@ Only the exact bare token `--seccomp` is accepted. `--seccomp=<value>` is not re
 ### Tests
 
 `tests/test_sbx_gate.py:_run_whitebox` gained five rows in 95f5692 (sbx_gate 94 -> 99). Auto-allowed: `--seccomp -- true` and `--seccomp --write . -- touch f`. Prompted: `--seccomp=1` (R12b), `--seccomp --net` (R11) and `--seccomp --write /etc` (R12).
+
+## Addendum (2026-10-09): the /dev/null sink stays writable under --ro on Seatbelt too, an exception to R21
+
+R21 of [[spec-sandbox-run]] says `--ro` emits no write-allow at all (Seatbelt: no `file-write*` allow; bwrap: drop every `--bind`). On macOS that stopped being literally true in this change: `ClaudeCode/skills/sandbox-run/scripts/sbx:_seatbelt_argv` now always emits `(allow file-write* (literal "/dev/null"))`, `--ro` included. R21 now reads: `--ro` emits no write SCOPE, so even the scratch default is denied; the `/dev/null` sink is the one write-allow it keeps, on both platforms.
+
+### The defect
+
+The Seatbelt profile opens with `(deny default)` and allowed `file-write*` only per writable scope, so `/dev/null` was not writable. `os.open("/dev/null", O_WRONLY)` or `O_RDWR` got EPERM, and with it every subprocess spawned with `stdin=subprocess.DEVNULL`, which CPython opens `O_RDWR`. Measured live: mcp-wiki running under mcp-proxy, whose children run as `sbx --write . --`, failed every git-calling function (`search`, `freshness`) with `[Errno 1] Operation not permitted: '/dev/null'`. mcp-purity and mcp-inspect use the same `DEVNULL` pattern under the proxy.
+
+### The fix
+
+- The allow is emitted right after the write-scope block and before every deny. No deny the profile emits names a path covering `/dev/null`, so last-match-wins cannot shadow it.
+- It is a LITERAL, not a `/dev` subpath. Nothing else in `/dev` becomes writable (measured: a write to `/dev/zero` is still EPERM).
+
+### Why this is parity, not a widening
+
+The Linux branch already behaved this way. `ClaudeCode/skills/sandbox-run/scripts/sbx:_bwrap_argv` mounts a fresh `/dev` and remounts it read-only non-recursively (the first 2026-10-02 addendum), so the device nodes, `/dev/null` among them, stay writable even under `--ro`. Seatbelt was the odd one out. A sink can neither persist nor exfiltrate anything, so what `--ro` promises, that no write lands anywhere, still holds.
+
+### Tests
+
+Red first: 3 FAIL before the fix, 105/105 after.
+
+- In the offline group Q of `tests/test_sbx_gate.py`, the R21 row (c) now excludes the sink literal from its zero-write-allow check, and only that line: any write SCOPE under `--ro` still fails it.
+- A new pure row in group Q asserts the literal is present with and without `--ro`, that no later write-deny shadows it, and that no other `/dev` write-allow sits beside it.
+- A new live group R, `tests/test_sbx_gate.py:_run_live_seatbelt`, runs the real helper under `sandbox-exec`: `stdin=DEVNULL` and an `O_RDWR` open of `/dev/null` work under `--write .` and under `--ro`, and a write outside the scope is still EPERM. Its three rows are INFO off macOS and when a nested sandbox refuses to apply a profile.
+
+sbx_gate 101 -> 105 in `tests/run.py`.

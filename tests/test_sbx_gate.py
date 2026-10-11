@@ -55,9 +55,15 @@ Coverage by group:
        the bwrap --unshare-pid + --proc /proc that stops /proc/<pid>/root from
        walking around every mask, network unshared/denied unless --net AND --net
        actually emitting (allow network*) instead of relying on a missing deny
-       under (deny default), writes confined + --ro zeroed, canonicalize
+       under (deny default), writes confined + --ro zeroed except the /dev/null
+       sink literal (emitted with and without --ro, never shadowed), canonicalize
        injection reject, setrlimit-before-execvp ordering, and the M3 proof that
        importing the helper runs no exec/setrlimit/makedirs
+  R    LIVE Seatbelt, macOS with sandbox-exec only (INFO elsewhere, and when a
+       nested sandbox refuses to apply a profile): the real helper under the
+       real kernel -- subprocess stdin=DEVNULL and an O_RDWR open of /dev/null
+       work under --write . and under --ro, while a write outside the scope is
+       still EPERM
 
 Usage:
   python3 tests/test_sbx_gate.py
@@ -108,6 +114,7 @@ GRP_N = "N. AUTOALLOW (whitebox, identity via WRAPPER_PATH)"
 GRP_O = "O. R13 plumbing / fail-safe"
 GRP_P = "P. PARITY (H-A: gate vs helper resolve_scope/project_root)"
 GRP_Q = "Q. OFFLINE containment (folded Step 9)"
+GRP_R = "R. LIVE Seatbelt (macOS + sandbox-exec only, INFO elsewhere)"
 
 
 def case(group, name, cmd, expect, cwd=REPO, must=(), must_not=(), note=""):
@@ -1322,14 +1329,47 @@ def _run_offline(suite, helper, ws):
          "(b3) bwrap: a cwd under /tmp re-bound ro after the socket masks, before "
          "binds and secret masks; under /run or /var/snap refused (exit 3)", problems)
 
-    # (c) writes confined; --ro yields ZERO writable scopes on both backends.
+    # (c) writes confined; --ro yields ZERO writable scopes on both backends. The
+    # one write-allow --ro keeps is the /dev/null sink literal (asserted by its own
+    # case below), so it is the only line excluded here -- any write SCOPE is not.
     wa = '(allow file-write* (subpath "%s"))' % scratch
+    devnull_allow = '(allow file-write* (literal "/dev/null"))'
     problems = []
     if wa not in profile:
         problems.append("Seatbelt default missing write-allow for scratch")
-    if any(l.startswith("(allow file-write*") for l in seat_ro):
+    if any(l.startswith("(allow file-write*") and l != devnull_allow
+           for l in seat_ro):
         problems.append("Seatbelt --ro still allows a write scope (R21)")
     _rec(suite, GRP_Q, "(c) Seatbelt: scratch writable; --ro = zero write-allow (R21)",
+         problems)
+
+    # (c) Seatbelt: /dev/null is writable, with AND without --ro. Under (deny
+    # default) nothing in /dev was writable, so os.open("/dev/null", O_RDWR) --
+    # which is what subprocess's stdin=DEVNULL does -- failed EPERM and every
+    # git-calling MCP child under `sbx --write .` broke (measured live). bwrap's
+    # fresh /dev keeps /dev/null writable even under --ro, so this is parity, and
+    # a sink can neither persist nor exfiltrate. It must be a LITERAL (not a /dev
+    # subpath), and no LATER write-deny may cover it (last match wins).
+    problems = []
+    for label, prof in (("default", profile), ("--ro", seat_ro)):
+        if devnull_allow not in prof:
+            problems.append("%s: missing %s" % (label, devnull_allow))
+            continue
+        at = prof.index(devnull_allow)
+        for l in prof[at + 1:]:
+            if not l.startswith("(deny file-write*"):
+                continue
+            covered = l.split('"')[1] if '"' in l else ""
+            if l.startswith("(deny file-write* (subpath ") and (
+                    covered == "/" or "/dev/null" == covered
+                    or "/dev/null".startswith(covered.rstrip("/") + "/")):
+                problems.append("%s: later %s shadows /dev/null" % (label, l))
+        other = [l for l in prof if l.startswith("(allow file-write*")
+                 and "/dev" in l and l != devnull_allow]
+        if other:
+            problems.append("%s: extra /dev write-allow %r" % (label, other))
+    _rec(suite, GRP_Q,
+         "(c) Seatbelt: /dev/null literal write-allow, default and --ro, unshadowed",
          problems)
 
     problems = []
@@ -1412,6 +1452,118 @@ def _run_offline(suite, helper, ws):
 
 
 # ---------------------------------------------------------------------------
+# Group R: the real helper under the real sandbox-exec. The offline group proves
+# the profile TEXT; only a live run proves the kernel reads it the way the text
+# claims. Every row is INFO (counted, never omitted) on a host without Seatbelt,
+# or when sandbox-exec cannot apply a profile here (a nested sandbox).
+# ---------------------------------------------------------------------------
+
+# The probe run INSIDE the sandbox. argv[1] is a path outside every write scope;
+# it prints one JSON object naming what worked and what was refused.
+_LIVE_PROBE = r"""
+import json, os, subprocess, sys
+out = {}
+try:
+    subprocess.run(["true"], stdin=subprocess.DEVNULL, check=True)
+    out["devnull_stdin"] = "ok"
+except Exception as exc:
+    out["devnull_stdin"] = repr(exc)
+try:
+    os.close(os.open("/dev/null", os.O_RDWR))
+    out["devnull_rdwr"] = "ok"
+except OSError as exc:
+    out["devnull_rdwr"] = repr(exc)
+try:
+    with open(sys.argv[1], "w") as fh:
+        fh.write("x")
+    out["outside_write"] = "ok"
+except OSError as exc:
+    out["outside_write"] = "errno %d" % exc.errno
+print(json.dumps(out))
+"""
+
+
+def _run_live_seatbelt(suite, ws):
+    import errno
+    import shutil
+    import subprocess
+
+    names = ("live --write .: stdin=DEVNULL and /dev/null O_RDWR work",
+             "live --ro: stdin=DEVNULL and /dev/null O_RDWR work",
+             "live negative control: a write outside the scope is still EPERM "
+             "(--write . and --ro)")
+    def _skip_all(why):
+        for n in names:
+            suite.record(GRP_R, n, [], status=H.INFO,
+                         detail=["skipped     : " + why],
+                         brief="%s | %s | skipped: %s" % (H.INFO, n, why),
+                         text="skipped: " + why)
+
+    if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+        _skip_all("needs macOS with sandbox-exec; this host is %s" % sys.platform)
+        return
+
+    proj = os.path.realpath(ws.subdir("live_proj"))
+    os.makedirs(os.path.join(proj, ".git"), exist_ok=True)
+    outside_dir = os.path.realpath(ws.subdir("live_outside"))
+
+    def _sbx(flags, target):
+        argv = [sys.executable, HELPER] + flags + [
+            "--", sys.executable, "-c", _LIVE_PROBE, target]
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        p = subprocess.run(argv, cwd=proj, env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=60)
+        try:
+            res = json.loads(p.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            res = None
+        return p, res
+
+    # Control: can sandbox-exec apply a profile from here at all? A nested
+    # Seatbelt refuses with "sandbox_apply: Operation not permitted" before the
+    # probe runs -- that is the HOST, not the profile, so it is INFO.
+    ctl, ctl_res = _sbx(["--ro"], os.path.join(outside_dir, "ctl"))
+    if ctl_res is None and "sandbox_apply" in ctl.stderr:
+        _skip_all("sandbox-exec cannot apply a profile here: %s"
+                  % ctl.stderr.strip()[:200])
+        return
+
+    eperm = "errno %d" % errno.EPERM
+    runs = {}
+    for label, flags in (("--write .", ["--write", "."]), ("--ro", ["--ro"])):
+        target = os.path.join(outside_dir, "probe-%s" % label.strip("-. "))
+        runs[label] = (_sbx(flags, target), target)
+
+    for name, label in ((names[0], "--write ."), (names[1], "--ro")):
+        (p, res), _t = runs[label]
+        problems = []
+        if res is None:
+            problems.append("probe produced no JSON (rc %d, stderr %r)"
+                            % (p.returncode, p.stderr.strip()[:300]))
+        else:
+            for key in ("devnull_stdin", "devnull_rdwr"):
+                if res.get(key) != "ok":
+                    problems.append("%s: %s" % (key, res.get(key)))
+        _rec(suite, GRP_R, name, problems,
+             extra=["flags       : %s" % label, "result      : %r" % (res,)])
+
+    problems = []
+    for label in ("--write .", "--ro"):
+        (p, res), target = runs[label]
+        if res is None:
+            problems.append("%s: probe produced no JSON (rc %d, stderr %r)"
+                            % (label, p.returncode, p.stderr.strip()[:300]))
+            continue
+        if res.get("outside_write") != eperm:
+            problems.append("%s: write to %s gave %r (want %s)"
+                            % (label, target, res.get("outside_write"), eperm))
+        if os.path.exists(target):
+            problems.append("%s: %s was created" % (label, target))
+    _rec(suite, GRP_R, names[2], problems)
+
+
+# ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
 
@@ -1447,6 +1599,7 @@ def run(opts=None):
         _run_whitebox(suite, gate, ws)
         _run_parity(suite, gate, helper, ws)
         _run_offline(suite, helper, ws)
+        _run_live_seatbelt(suite, ws)
 
     suite.render()
     suite.print_summary()

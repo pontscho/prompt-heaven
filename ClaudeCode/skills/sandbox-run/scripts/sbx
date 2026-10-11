@@ -146,7 +146,10 @@ def _seatbelt_argv(scope):
       (version 1) / (deny default) / allow the minimal ops a CLI needs (exec, fork,
       self-signal, sysctl-read) / (allow file-read* (subpath "/")) permissive reads /
       per writable scope (allow file-write* (subpath "<canonical>")) UNLESS scope.ro
-      (R21: then none) / so they win, per DIRECTORY secret_paths entry BOTH
+      (R21: then none) / (allow file-write* (literal "/dev/null")) ALWAYS, --ro
+      included -- the sink stdin=DEVNULL opens O_RDWR; bwrap's fresh /dev keeps it
+      writable under --ro too, and no later deny covers it / so they win, per
+      DIRECTORY secret_paths entry BOTH
       (deny file-read* ...) and (deny file-write* ...) (R16/R17/R22/R22b) / per
       scope.carveouts entry (allow file-read* (subpath "<p>")) -- read ONLY, so
       last-match-wins hands the READ back for that subtree while the secret's WRITE
@@ -197,11 +200,19 @@ def _seatbelt_argv(scope):
         # permissive reads; secrets are carved back out LAST, below
         '(allow file-read* (subpath "/"))',
     ]
-    # per writable scope: allow writes -- UNLESS --ro, which emits NO write-allow at
+    # per writable scope: allow writes -- UNLESS --ro, which emits NO write SCOPE at
     # all so even the scratch default is denied (R21).
     if not scope.ro:
         for path in scope.writes:
             lines.append('(allow file-write* (subpath "%s"))' % path)
+    # The one write-allow --ro keeps: the /dev/null sink, as a LITERAL (nothing else
+    # in /dev). Under (deny default) it was not writable, so os.open("/dev/null",
+    # O_WRONLY|O_RDWR) failed EPERM -- and with it every subprocess spawned with
+    # stdin=DEVNULL, which opens it O_RDWR (measured: every git-calling function of
+    # an MCP child under `sbx --write .`). bwrap's fresh /dev keeps /dev/null
+    # writable even under --ro, so this is parity, not a widening: a sink can
+    # neither persist nor exfiltrate. No deny below names a path covering it.
+    lines.append('(allow file-write* (literal "/dev/null"))')
     # LAST, so last-match-wins makes them win over the permissive read-allow: deny
     # BOTH read and write for every DIRECTORY secret, even inside an allowed write
     # scope (R16, R17, R22, R22b). The per-FILE secrets (the .git/config masks) are
