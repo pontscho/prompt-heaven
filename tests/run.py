@@ -872,7 +872,7 @@ SUITES = [
      "proxy in-process, live allowed/refused/direct/DNS/no-network rows)",
      192),
     # TYPED: a fixed case table (A 9, B 10, C 6, D 8, E 5, F 14, G 4, H 6,
-    # I 12, J 13, K 2 = 89), the rows of plan Steps 16, 17 and 18 (J1 is live:
+    # I 12, J 13, K 2, L 3 = 92), the rows of plan Steps 16, 17 and 18 (J1 is live:
     # INFO off macOS and under a nested Seatbelt, counted either way), so a
     # count that moves is the alarm, not noise.  K (validation round 1) is
     # layer D in-process (K1) and through McpServer.run() (K2) -- the smoke
@@ -880,7 +880,9 @@ SUITES = [
     # security round 1 -> 2 added B9, B10 (K3), I12 (M2), J11 (K4), J12 (M2)
     # and J13 (O2), each run RED first = 83.  The lazily created tier root
     # added A6-A9 and E4-E5 (a missing root or skills.json is an empty tier
-    # with no error; ENOTDIR still refused), run RED first = 89.
+    # with no error; ENOTDIR still refused), run RED first = 89.  The flat
+    # params schema added L1-L3 (a schema key the function does not read is
+    # dropped, a key outside the schema still refused), run RED first = 92.
     ("mcp_skill", run_mcp_skill,
      "mcp-skill, the read-only skill loader: startup flags (no roots, a "
      "group-writable root, the runner URL/token pair, the --max-description "
@@ -904,8 +906,9 @@ SUITES = [
      "sanitized and framed, busy passed through, an over-cap body refused "
      "before sending, the smaller serialized encoding per file) and a "
      "handler crash (layer D internal + log.exception, in-process and "
-     "through McpServer.run())",
-     89),
+     "through McpServer.run()) and the flat params schema (a schema key the "
+     "function does not read dropped, a key outside it refused)",
+     92),
     # TYPED: a fixed case table (A 49, B 31, C 16, D 16, E 14, F 25, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 41, K 26, L 20, M 23, N 42,
     # O 18 = 387), so a count that moves is the alarm, not noise.

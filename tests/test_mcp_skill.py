@@ -156,6 +156,17 @@ raiser carrying a secret message, and restore it in a `finally`.
      tool result with isError true and code internal, and the ping after it
      is still answered.
 
+Group L pins the flat params schema against the per-function refusal: the
+inputSchema advertises name, file, script, args, stdin and timeoutMs in ONE
+params object, so a model fills them all. A key that is a property of that
+schema but not read by the called function is dropped before dispatch; a key
+outside the schema is still refused with the did-you-mean pointer. Written
+and run RED first against the server that refused every schema key.
+  L  params schema (in-process) -- L1 list with all six schema keys filled
+     answers the plain list; L2 load with script/args/stdin/timeoutMs filled
+     serves the plain load; L3 "nmae" is refused naming the key and pointing
+     at 'name'.
+
 Usage:
   python3 tests/test_mcp_skill.py [--brief] [--keep]
 Exit code 0 iff every case passes.
@@ -199,6 +210,7 @@ GRP_H = "H. sanitizer parity"
 GRP_I = "I. runner client"
 GRP_J = "J. run"
 GRP_K = "K. handler crash"
+GRP_L = "L. params schema"
 LOGGER = "mcp-skill"
 
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
@@ -3436,6 +3448,73 @@ def _run_crash(suite, fx):
 
 
 # ---------------------------------------------------------------------------
+# L: the flat params schema (in-process)
+# ---------------------------------------------------------------------------
+
+# Every property of the advertised params object, filled the way a model
+# fills a flat schema it was shown.
+_SCHEMA_FILLED = {"name": "dummy", "file": "dummy", "script": "dummy",
+                  "args": [], "stdin": "", "timeoutMs": 0}
+
+
+def _run_schema(suite, fx):
+    def list_all_keys():
+        mod = _mod()
+        root, _sdir = _hygiene_fixture(fx, "l1")
+        problems = []
+        with _Roots(mod, household=root):
+            plain = _call(mod, "list")
+            filled = _call(mod, "list", _SCHEMA_FILLED)
+        if _err(plain) is not None:
+            problems.append("control: plain list refused %r" % (_err(plain),))
+        if _err(filled) is not None:
+            problems.append("list with every schema key refused %r"
+                            % (_err(filled),))
+        elif _text(filled) != _text(plain):
+            problems.append("list with every schema key answered %r, want "
+                            "the plain list %r"
+                            % (_text(filled)[:160], _text(plain)[:160]))
+        return problems, []
+    _guard(suite, GRP_L, "L1 list-every-schema-key-dropped", list_all_keys)
+
+    def load_run_keys():
+        mod = _mod()
+        root, _sdir = _hygiene_fixture(fx, "l2")
+        problems = []
+        with _Roots(mod, household=root):
+            plain = _call(mod, "load", {"name": "h"})
+            filled = _call(mod, "load", {"name": "h", "script": "scripts/x",
+                                         "args": ["a"], "stdin": "in",
+                                         "timeoutMs": 0})
+        if not _loaded(plain, "BODY-h", "control: plain load", problems):
+            return problems, []
+        _loaded(filled, "BODY-h", "load with run's keys", problems)
+        return problems, []
+    _guard(suite, GRP_L, "L2 load-run-keys-dropped", load_run_keys)
+
+    def outside_schema():
+        mod = _mod()
+        root, _sdir = _hygiene_fixture(fx, "l3")
+        problems = []
+        with _Roots(mod, household=root):
+            res = _call(mod, "load", {"name": "h", "nmae": "h",
+                                      "timeoutMs": 0})
+        _refused(res, "load with 'nmae'", problems, code="invalid_params",
+                 token="Unknown params for 'load': nmae.")
+        err = _err(res)
+        if err is not None:
+            if "Did you mean 'name'?" not in err[1]:
+                problems.append("refusal %r has no did-you-mean pointer at "
+                                "'name'" % err[1])
+            if "timeoutMs" in err[1].split("Accepted:")[0]:
+                problems.append("the schema key timeoutMs was refused too: %r"
+                                % err[1])
+        return problems, ["refusal     : %r" % (err,)]
+    _guard(suite, GRP_L, "L3 key-outside-schema-refused-did-you-mean",
+           outside_schema)
+
+
+# ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
 
@@ -3456,6 +3535,7 @@ def run(opts=None):
         _run_client(suite, fx)
         _run_run(suite, fx)
         _run_crash(suite, fx)
+        _run_schema(suite, fx)
     finally:
         _close_live()
         fx.cleanup()

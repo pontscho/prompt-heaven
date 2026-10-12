@@ -1002,7 +1002,8 @@ def _current_view() -> IndexView:
 # ---------------------------------------------------------------------------
 
 # function -> the params it accepts. A key outside the set is refused with the
-# accepted list and a did-you-mean pointer (ADR 0030), never ignored.
+# accepted list and a did-you-mean pointer (ADR 0030) -- unless it is one of
+# the schema's own keys (SCHEMA_PARAMS), which is dropped instead.
 ACCEPTED: Dict[str, frozenset] = {
     "load": frozenset({"name", "file"}),
     "run": frozenset({"name", "script", "args", "stdin", "timeoutMs"}),
@@ -1010,6 +1011,13 @@ ACCEPTED: Dict[str, frozenset] = {
     "validate": frozenset(),
 }
 FUNCTIONS = ("load", "run", "list", "validate")
+
+# The keys the advertised params schema offers, read from the schema itself.
+# The schema is one flat object, so a caller fills every one of them: a key in
+# this set that the called function does not read is dropped before dispatch;
+# a key outside it is still refused with the did-you-mean pointer.
+SCHEMA_PARAMS = frozenset(
+    _tool_definition("", ())["inputSchema"]["properties"]["params"]["properties"])
 
 
 def _tool_refusal(code: str, message: str, **extra: Any) -> dict:
@@ -2126,7 +2134,10 @@ def handle_skill_call(arguments: dict) -> dict:
             f"Unknown function '{function}'."
             + _did_you_mean(function, FUNCTIONS)
             + " Available: " + ", ".join(FUNCTIONS)))
-    unknown = _unknown_params_refusal(function, params, ACCEPTED[function])
+    accepted = ACCEPTED[function]
+    params = {key: value for key, value in params.items()
+              if key in accepted or key not in SCHEMA_PARAMS}
+    unknown = _unknown_params_refusal(function, params, accepted)
     if unknown:
         return _tool_refusal("invalid_params", unknown)
     bad = _check_members(function, params)
