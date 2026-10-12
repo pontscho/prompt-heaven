@@ -617,3 +617,25 @@ The set of schema keys is read from the advertised schema itself, not typed a se
 For the six schema keys this is the silent drop that 0030's 2026-10-08 addendum retired elsewhere: a caller who puts `file` on `run`, or `script` on `load`, meaning it, gets the function's answer without being told the key was ignored. Accepted because each of those keys is one the tool itself offered, while a misspelt or invented key, the case the near-miss pointer exists for, is still refused. The rule is `skill_call`'s alone: `sandbox_call` advertises a `params` object with no properties, so it has no schema key to drop and still refuses every key its function does not read.
 
 Rows `mcp_skill:L1` (`list` with all six schema keys filled answers the plain list), `L2` (`load` with `run`'s keys filled serves the plain load) and `L3` (`nmae` is refused naming the key and pointing at `name`, while the `timeoutMs` beside it is not), run red first against the server that refused every schema key; the suite went from 89 to 92 cases.
+
+## Addendum (2026-10-12): a schema key holding its type's empty value counts as omitted
+
+Shipped in `731e149`; it extends the previous addendum's drop rule for `skill_call` only.
+
+### What broke
+
+With unread schema keys dropped, the next live call filled every field with its type's empty value instead of a placeholder: `load` arrived as `name` `idokep-weather`, `file` `""`, `script` `""`, `args` `[]`, `stdin` `""`, `timeoutMs` `0`. `file` is a key `load` reads, so it was kept, and `""` failed the `refs/<leaf>` / `scripts/<leaf>` check: the load was refused for a field the model meant to leave out.
+
+### The rule now
+
+Each schema key's type is read from the advertised schema, as the key set already was `Scripts/mcp-skill.py:SCHEMA_TYPES`. In the same filter, before the unknown-key refusal and the member checks, a schema key is also dropped when its value is the empty value of its type: `""` for a string, `[]` for an array, `0` for an integer `Scripts/mcp-skill.py:_is_schema_empty` `Scripts/mcp-skill.py:handle_skill_call`. The test is the exact type, so a bool `false` is not taken for `0` and an empty value of the wrong type (`timeoutMs` `""`) is not dropped; both still reach the member type check and are refused there. A key outside the schema is never dropped, empty or not, so the near-miss pointer of [[0030-point-at-the-near-miss-never-resolve-it]] is untouched.
+
+### What changes for a caller
+
+A required key left empty is now a missing key: `name` `""` on `load` or `run` answers `name is required` (it used to answer `Unknown skill name.`), and `script` `""` on `run` answers `script is required` `Scripts/mcp-skill.py:_check_members`. `run` with `args` `[]`, `stdin` `""` or `timeoutMs` `0` behaves exactly as if they were omitted.
+
+### What it costs, accepted
+
+An empty value can no longer be sent on purpose: an explicit `timeoutMs` `0` is not forwarded to the runner, so the runner's own default applies, and an explicit empty `stdin` is the same as no `stdin`. Accepted because a model fills unused fields with exactly these values, so honouring them would keep refusing or misreading the common call to serve a rare deliberate one; a caller that wants a short timeout sends a positive one.
+
+Rows `mcp_skill:L4` (`load` with all six keys empty but a valid `name` serves the plain load), `L5` (`run` with the same fill reaches a recording runner-client stand-in with exactly the plain run's params, no `timeoutMs` `0`) and `L6` (`load` with `name` `""` is refused `name is required`), run red first; the suite went from 92 to 95 cases.

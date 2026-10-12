@@ -9,7 +9,7 @@ sources:
   - tests/test_mcp_skill.py
   - tests/files/mcp_skill/stub_runner.py
 verified:
-  commit: a3601b1
+  commit: 731e149
   date: 2026-10-12
 links:
   - mcp-proxy
@@ -155,7 +155,22 @@ called function is **dropped** before dispatch, and a key outside the schema is
 still **refused** `invalid_params` with the fleet's `Unknown params for`
 sentence, the accepted list and the did-you-mean pointer
 `Scripts/mcp-skill.py:ACCEPTED` `Scripts/mcp-skill.py:handle_skill_call`. A
-dropped key is never resolved into anything — it is simply not read. (The
+dropped key is never resolved into anything — it is simply not read. The same
+filter also drops a schema key the function *does* read when it holds the
+empty value of its schema type — `""` for a string, `[]` for an array, `0` for
+an integer — so such a key counts as omitted
+`Scripts/mcp-skill.py:_is_schema_empty` `Scripts/mcp-skill.py:SCHEMA_TYPES`.
+The live trigger was `load` with `name` set and `file`, `script` and `stdin`
+all `""`, `args` `[]` and `timeoutMs` `0`: the kept `file` `""` failed the
+`refs/`/`scripts/` path check and the load was refused. The test is the exact
+type, so a bool `false` is not taken for integer `0` and is still refused by the
+member check, and an empty value of the wrong type (`timeoutMs` `""`) is not
+dropped either. Because the drop happens before the member checks, a required
+key left empty gets the missing-key refusal — `name` `""` answers `name is
+required` (it used to answer `Unknown skill name.`) and `run`'s `script` `""`
+answers `script is required` `Scripts/mcp-skill.py:_check_members` — while
+`run` with `args` `[]`, `stdin` `""` or `timeoutMs` `0` behaves exactly as if
+they were omitted. A key outside the schema is never dropped, empty or not. (The
 sandbox runner's `sandbox_call` is not affected: its `params` schema advertises
 no properties, see [[mcp-sandbox]].) Every member that is kept is type-checked,
 never coerced
@@ -406,7 +421,12 @@ L `tests/test_mcp_skill.py:_run_schema` pins the flat params schema: `L1`
 (`list` with all six schema keys filled answers the plain list), `L2` (`load`
 with `run`'s keys filled serves the plain load) and `L3` (a key outside the
 schema, `nmae`, is refused naming the key and pointing at `name`, while the
-schema key beside it is not), red first. Its
+schema key beside it is not), red first. `L4`-`L6` pin the empty-value rule
+that followed: `L4` (`load` with all six keys empty but a valid `name` serves
+the plain load), `L5` (`run` with the same fill reaches a recording
+runner-client stand-in with exactly the plain run's params, no `timeoutMs` `0`)
+and `L6` (`load` with `name` `""` is refused `name is required`), red first
+too. Its
 case count is declared once, in `tests/run.py:SUITES`, and checked against the
 run; the forge target is `mcp_skill`.
 
