@@ -9,8 +9,8 @@ sources:
   - tests/test_mcp_skill.py
   - tests/files/mcp_skill/stub_runner.py
 verified:
-  commit: 7b603d2
-  date: 2026-10-11
+  commit: a3601b1
+  date: 2026-10-12
 links:
   - mcp-proxy
   - mcp-sandbox
@@ -141,10 +141,24 @@ A refusal is a tool result with `isError` and an `error.code` — `busy`,
 A call with no `function` gets an unflagged status reply: the function list,
 per-tier counts, the description's size against the ceiling and whether a
 runner is configured — counts only, never a path, a token or skill text
-`Scripts/mcp-skill.py:_status_text`. An unknown function or parameter is refused
-with a did-you-mean pointer that never resolves the call
-`Scripts/mcp-skill.py:ACCEPTED` ([[0030-point-at-the-near-miss-never-resolve-it]]);
-every member is type-checked, never coerced
+`Scripts/mcp-skill.py:_status_text`. An unknown function is refused with a
+did-you-mean pointer that never resolves the call
+`Scripts/mcp-skill.py:FUNCTIONS` ([[0030-point-at-the-near-miss-never-resolve-it]]).
+Parameters split in two by the advertised schema. The tool's `params` object is
+one flat schema offering `name`, `file`, `script`, `args`, `stdin` and
+`timeoutMs` to every function, and the set is read from that schema itself
+`Scripts/mcp-skill.py:SCHEMA_PARAMS`. A model fills every field it is shown —
+`list` arrived with `name`/`file`/`script` set to `dummy`, `args` `[]`, `stdin`
+`""` and `timeoutMs` `0`, was refused `Unknown params for 'list': ... Accepted:
+(none).` and looped. So a key that belongs to the schema but is not read by the
+called function is **dropped** before dispatch, and a key outside the schema is
+still **refused** `invalid_params` with the fleet's `Unknown params for`
+sentence, the accepted list and the did-you-mean pointer
+`Scripts/mcp-skill.py:ACCEPTED` `Scripts/mcp-skill.py:handle_skill_call`. A
+dropped key is never resolved into anything — it is simply not read. (The
+sandbox runner's `sandbox_call` is not affected: its `params` schema advertises
+no properties, see [[mcp-sandbox]].) Every member that is kept is type-checked,
+never coerced
 `Scripts/mcp-skill.py:_check_members`; `params` may arrive as a JSON-encoded
 object string, as everywhere in the fleet. A handler exception is answered
 `internal` with the exception type only, because its message could carry a path
@@ -362,7 +376,7 @@ first.
 ## How it is tested
 
 The `mcp_skill` suite `tests/test_mcp_skill.py` builds its tier fixtures under
-`.claude/tmp/` and runs groups A to K: startup and flags
+`.claude/tmp/` and runs groups A to L: startup and flags
 `tests/test_mcp_skill.py:_run_a`, the `skills.json` schema
 `tests/test_mcp_skill.py:_run_b`, the frontmatter `tests/test_mcp_skill.py:_run_c`,
 rendering — UTF-16 units, the over-ceiling refusal while `tools/list` still
@@ -387,7 +401,12 @@ runner's message only inside a `runner-error` frame), each run red first. The
 lazily created tier root added `A6`-`A9` (a missing household or private root
 starts as an empty tier, a root through a regular file still refuses start, a
 root created after start is seen) and `E4`-`E5` (a missing root, and a root
-without `skills.json`, are an empty tier with no error), red first too. Its
+without `skills.json`, are an empty tier with no error), red first too. Group
+L `tests/test_mcp_skill.py:_run_schema` pins the flat params schema: `L1`
+(`list` with all six schema keys filled answers the plain list), `L2` (`load`
+with `run`'s keys filled serves the plain load) and `L3` (a key outside the
+schema, `nmae`, is refused naming the key and pointing at `name`, while the
+schema key beside it is not), red first. Its
 case count is declared once, in `tests/run.py:SUITES`, and checked against the
 run; the forge target is `mcp_skill`.
 

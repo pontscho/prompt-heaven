@@ -599,3 +599,21 @@ Decided by Zoltán with ADR 0033 ([[0033-egress-through-an-allowlisting-proxy]])
 - **Visibility.** `capabilities` carries `network: {enabled, allow, ports}`, and a run result carries `egress: {tunnels, refused}` only when `network` is configured `Scripts/mcp-sandbox.py:capabilities`.
 
 The Declared limits gain two lines that belong to this runner: TLS is not inspected, so a script can send anything to an allowed host; and on macOS the proxy's TCP endpoint cannot see the peer uid, so another local uid can use the allowlisted tunnels during a run. `mcp_sandbox` went from 154 to 192 cases (A13-A19, D6-D7, H25-H26, I13-I17, group N), every row red first.
+
+## Addendum (2026-10-12): a schema key the called function does not read is dropped, not refused
+
+Decided by Zoltán and shipped in `a3601b1`. The body's dispatcher rule (unknown functions and members get the did-you-mean pointer that never resolves, [[0030-point-at-the-near-miss-never-resolve-it]]) is narrowed for `skill_call` only.
+
+### What broke
+
+`skill_call` advertises one flat `params` object whose properties are `name`, `file`, `script`, `args`, `stdin` and `timeoutMs`, offered to all four functions alike. A model fills every field it is shown: `list` arrived with `name`, `file` and `script` set to `dummy`, `args` `[]`, `stdin` `""` and `timeoutMs` `0`, was answered `Unknown params for 'list': ... Accepted: (none).`, and called again the same way. The refusal named keys the tool's own schema had offered, so the model had no way to read it as its mistake, and it looped.
+
+### The rule now
+
+The set of schema keys is read from the advertised schema itself, not typed a second time `Scripts/mcp-skill.py:SCHEMA_PARAMS`. Before dispatch, a key that is in that set but not in the called function's accepted row is dropped; a key outside the schema is still refused `invalid_params` with the fleet's `Unknown params for` sentence, the accepted list and the near-miss pointer `Scripts/mcp-skill.py:ACCEPTED` `Scripts/mcp-skill.py:handle_skill_call`. The drop happens before the member type check, so a filled-in `timeoutMs` of `0` on `load` is neither refused as unknown nor type-checked. A dropped key is not resolved into anything; it is simply not read, so 0030's rule that a suggestion never resolves is untouched.
+
+### What it costs, accepted
+
+For the six schema keys this is the silent drop that 0030's 2026-10-08 addendum retired elsewhere: a caller who puts `file` on `run`, or `script` on `load`, meaning it, gets the function's answer without being told the key was ignored. Accepted because each of those keys is one the tool itself offered, while a misspelt or invented key, the case the near-miss pointer exists for, is still refused. The rule is `skill_call`'s alone: `sandbox_call` advertises a `params` object with no properties, so it has no schema key to drop and still refuses every key its function does not read.
+
+Rows `mcp_skill:L1` (`list` with all six schema keys filled answers the plain list), `L2` (`load` with `run`'s keys filled serves the plain load) and `L3` (`nmae` is refused naming the key and pointing at `name`, while the `timeoutMs` beside it is not), run red first against the server that refused every schema key; the suite went from 89 to 92 cases.
