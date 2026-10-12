@@ -13,8 +13,8 @@ sources:
   - tests/test_sbx_restrict.py
   - tests/test_mcp_sandbox.py
 verified:
-  commit: 7b603d2
-  date: 2026-10-11
+  commit: c643221
+  date: 2026-10-12
 links:
   - 0005-approve-the-wrapper-not-the-command
   - 0007-a-path-spelled-deny-protects-the-spelling

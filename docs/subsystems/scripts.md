@@ -8,8 +8,8 @@ sources:
   - Scripts
   - Scripts/context-guard.sh
 verified:
-  commit: 7b603d2
-  date: 2026-10-11
+  commit: c643221
+  date: 2026-10-12
 links:
   - overview
   - mcp-proxy
@@ -17,6 +17,7 @@ links:
   - mcp-skill
   - 0031-sbx-restricted-mode
   - 0032-a-runner-behind-a-proxy
+  - 0033-egress-through-an-allowlisting-proxy
   - 0011-a-truncated-payload-carries-the-first-cookie
   - 0023-the-websocket-client-is-a-sixth-domain
   - 0027-the-proxy-relays-it-never-composes
@@ -254,12 +255,17 @@ the smoke check runs both as unregistered servers `Scripts/_mcp_smoke_test.py:SE
   restricted mode, and answers the exit status, the capped output and the files
   left under `out/` `Scripts/mcp-sandbox.py:run_one`. Its command line is
   `--config PATH` plus `--debug`/`--log-file`; every policy lives in that one
-  strict JSON file `Scripts/mcp-sandbox.py:load_config`. It runs behind its own
-  dedicated `mcp-proxy --http` instance, and its consumer is mcp-skill. Its
+  strict JSON file `Scripts/mcp-sandbox.py:load_config`. An optional `network`
+  key in it gives a run egress to an allowlist of hosts, only through a per-run
+  CONNECT proxy the runner owns `Scripts/mcp-sandbox.py:_cfg_network`
+  ([[0033-egress-through-an-allowlisting-proxy]]). It speaks stdio only and
+  runs as an `mcp-proxy --http` child: either the single child of a dedicated
+  proxy instance or, as deployed, a sibling child in the member's own proxy
+  beside mcp-skill; its consumer is mcp-skill either way ([[mcp-sandbox]]). Its
   config, run lifecycle, refusal codes, timeout chain and cleanup are
   [[mcp-sandbox]]. What the restricted mode closes is
   [[0031-sbx-restricted-mode]], and why the runner sits behind a proxy is
-  [[0032-a-runner-behind-a-proxy]]; both are still drafts.
+  [[0032-a-runner-behind-a-proxy]].
 - `Scripts/mcp-skill.py` (`skill_call`: `load`, `run`, `list`, `validate`
   `Scripts/mcp-skill.py:FUNCTIONS`) is the read-only skill loader. It serves a
   household and a private tier from `--household-root` / `--private-root`, puts

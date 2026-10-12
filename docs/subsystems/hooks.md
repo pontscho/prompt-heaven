@@ -7,8 +7,8 @@ description: Claude Code hooks in ClaudeCode/hooks -- post-edit formatters and l
 sources:
   - ClaudeCode/hooks
 verified:
-  commit: 7b603d2
-  date: 2026-10-11
+  commit: c643221
+  date: 2026-10-12
 links:
   - overview
   - scripts

@@ -8,8 +8,8 @@ sources:
   - tests
   - project-forge.yaml
 verified:
-  commit: 7b603d2
-  date: 2026-10-11
+  commit: c643221
+  date: 2026-10-12
 links:
   - agents
   - scripts

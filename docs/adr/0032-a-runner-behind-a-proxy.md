@@ -13,8 +13,8 @@ sources:
   - tests/test_mcp_sandbox.py
   - tests/test_mcp_skill.py
 verified:
-  commit: 7b603d2
-  date: 2026-10-11
+  commit: c643221
+  date: 2026-10-12
 links:
   - 0031-sbx-restricted-mode
   - 0027-the-proxy-relays-it-never-composes

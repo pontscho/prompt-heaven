@@ -4,6 +4,21 @@ type: adr
 status: active
 title: Egress through an allowlisting proxy -- a per-run CONNECT proxy in the runner, one sanctioned endpoint in the sandbox
 description: Decision to give the mcp-sandbox runner network egress without giving the sandbox the network -- an optional global network allowlist in the runner config, a stdlib CONNECT-only proxy inside the runner that vets every name and every resolved address, one proxy per run, and a single sandbox-side hole per platform (a Seatbelt localhost:N allow on macOS, a read-only bound unix socket and an in-sandbox forwarder on Linux), with both new sbx flags always prompting at the gate; with the egress/ work_root entry and the sun_path alias, the Linux RLIMIT_NPROC task-count fix found on the way (amends ADR 0031), the alternatives rejected, the security review of 2026-10-12 and what each finding changed, the live measurements on macOS and Ubuntu 22.04, the user-private-group refinement of the ancestor rule, and the declared limits -- among them that TLS is not inspected and that the macOS endpoint cannot tell which local uid connects.
+sources:
+  - Scripts/mcp-sandbox.py:_cfg_network
+  - Scripts/mcp-sandbox.py:EgressProxy
+  - Scripts/mcp-sandbox.py:_RunEgress
+  - Scripts/mcp-sandbox.py:egress_address_public
+  - ClaudeCode/skills/sandbox-run/scripts/sbx:validate_egress
+  - ClaudeCode/skills/sandbox-run/scripts/sbx:_seatbelt_egress_rule
+  - ClaudeCode/skills/sandbox-run/scripts/sbx:EGRESS_FORWARDER
+  - ClaudeCode/hooks/sbx-gate.py
+  - tests/test_mcp_sandbox.py
+  - tests/test_sbx_restrict.py
+  - tests/test_sbx_gate.py
+verified:
+  commit: c643221
+  date: 2026-10-12
 links:
   - 0031-sbx-restricted-mode
   - 0032-a-runner-behind-a-proxy
@@ -319,3 +334,7 @@ ancestor stays refused there -- and darwin uses `--egress-port`, not the socket.
 - **Linux stays `liveVerified: false`** in `capabilities`
   `Scripts/mcp-sandbox.py:LIVE_VERIFIED`, although para ran the live rows; the
   flag was not changed by this work.
+
+## Addendum (2026-10-12): the code landed in c643221; the page is append-only
+
+The Status paragraph above was written while the code sat uncommitted on top of `5498e8f`. That is no longer true. The runner's `network` config and per-run CONNECT proxy, the two restricted-only sbx egress flags and their gate rows, the Linux `--rlimit-nproc +N` task-count fix, the security-review fixes and their tests were committed as `c643221` (2026-10-12), together with the dated addenda to [[0031-sbx-restricted-mode]] and [[0032-a-runner-behind-a-proxy]]. The page now carries `sources:` and `verified.commit: c643221`. From that commit on this ADR is append-only: a later change to runner egress lands as a dated addendum here, never as an edit of the body.
