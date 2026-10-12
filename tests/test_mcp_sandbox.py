@@ -6503,15 +6503,28 @@ def _live_mod():
     return mod
 
 
+def _live_platform_key():
+    """The server's _platform_key, mirrored: darwin, linux*, else None."""
+    if sys.platform == "darwin":
+        return "darwin"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return None
+
+
 def _live_gate(fx):
-    """P23 BEFORE a runner starts: INFO off macOS and under a nested
-    Seatbelt."""
-    if sys.platform != "darwin":
-        raise _Info("live runner rows are verified on macOS only "
-                    "(LIVE_VERIFIED linux false; platform %s)" % sys.platform)
-    nested = _nested_seatbelt(fx)
-    if nested:
-        raise _Info(nested)
+    """P23 BEFORE a runner starts: INFO on a platform the server's
+    LIVE_VERIFIED does not mark verified, and (darwin) under a nested
+    Seatbelt. No nested-bwrap control exists for linux."""
+    key = _live_platform_key()
+    if not (key and _mod().LIVE_VERIFIED.get(key, False)):
+        raise _Info("live runner rows are not verified on this platform "
+                    "(LIVE_VERIFIED %s false; platform %s)"
+                    % (key, sys.platform))
+    if key == "darwin":
+        nested = _nested_seatbelt(fx)
+        if nested:
+            raise _Info(nested)
 
 
 def _bash_only(path="/bin/bash"):

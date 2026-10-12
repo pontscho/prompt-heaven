@@ -16,6 +16,7 @@ WIP now: 0 of 3. Archive: 77 closed items (68 done, 9 dropped).
 | next  | R-0096 | idea  | Run the sandbox runner under a dedicated OS uid on Linux                                            | yes   |
 | next  | R-0097 | idea  | Live-verify sbx restricted mode and mcp-sandbox on the Linux host                                   | yes   |
 | next  | R-0098 | idea  | mcp-sandbox: pre-check a plan's reads against sbx's 256-entry read cap                              | yes   |
+| next  | R-0110 | idea  | Run the mcp-sandbox live rows on Linux and earn LIVE_VERIFIED linux true                            | yes   |
 | later | R-0048 | idea  | Answer a HelloRetryRequest that selects P-384 (FLAG-2)                                              | yes   |
 | later | R-0052 | idea  | Measure the DDG challenge page's structural marker and replace the fallback block predicate         | yes   |
 | later | R-0047 | idea  | implement certificate verification in _ChTls so fingerprint and authenticity stop being a trade-off | yes   |
@@ -45,6 +46,7 @@ WIP now: 0 of 3. Archive: 77 closed items (68 done, 9 dropped).
 | inbox | R-0086 | idea  | llm-router: keep the OAuth refresh token in the OS keychain instead of the 0600 config              | yes   |
 | inbox | R-0087 | idea  | llm-router: effort learning and an effort field on the req line for the Responses kinds             | yes   |
 | inbox | R-0088 | idea  | llm-router: put the non-stream dropped_thinking count on the req line                               | yes   |
+| inbox | R-0111 | idea  | A planted entry in the runner work_root must not take the whole proxy down                          | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -95,6 +97,21 @@ Deferred item 15 of the Deferred to roadmap list in spec-sbx-restricted-runner, 
 ### Log
 
 - 2026-10-11 new->next: filed at close-out of spec-sbx-restricted-runner
+
+## R-0110 · Run the mcp-sandbox live rows on Linux and earn LIVE_VERIFIED linux true
+
+state: idea
+horizon: next
+origin: user:2026-10-12:linux-live-runner-rows
+blocked_by: []
+severity: medium
+tags: [linux, sandbox, tests]
+
+On 2026-10-12 the 60 live E/G/I rows of the mcp_sandbox suite ran on Linux for the first time (para, Ubuntu 22.04, bwrap 0.6.1) by opening the test's live gate: 168 pass, 16 fail, no host escape observed. 12 E failures and most of G8 are darwin assumptions in the test (EPERM expected where bwrap answers ENOENT or EROFS, Seatbelt wording in E34, darwin-only chflags/ACL probes in E17, /dev/zero in E30, sandbox-exec engine and /bin/bash realpath in G8). Real backend differences to investigate before flipping the flag: E5 a script can write outside its workdir onto bwrap's throwaway tmpfs root (probably not the host, unmeasured; not covered by the workdir/out size limits, so it can fill memory); E16 python3 sees an extra PWD in its env; E22 bwrap as pid 1 can be signalled; E3 a few home entry names are visible; G8 the Linux exec list holds /bin, a symlink on usr-merge hosts. E21 (no exec filter on Linux) is already a declared limit of ADR 0031. The test's live gate now reads the server's LIVE_VERIFIED, so flipping the flag runs the rows. H15/H16 have their own darwin-only gate (_live_runner). Logs: .claude/tmp/para_mcp_sandbox_live2.log.
+
+### Log
+
+- 2026-10-12 new->next: measured on para 2026-10-12
 
 # later
 
@@ -563,3 +580,18 @@ The work: a channel from the adapter's non-stream response path back to the hand
 ### Log
 
 - 2026-10-07 new->unset: proposed by task-060 (docs extras 2026-10-07)
+
+## R-0111 · A planted entry in the runner work_root must not take the whole proxy down
+
+state: idea
+horizon: unset
+origin: user:2026-10-12:work-root-planted-entry-refuses-startup
+blocked_by: []
+severity: medium
+tags: [sandbox, security]
+
+The mcp-sandbox work_root (deployed: ~/mcp/work/tmp) is writable by every sbx child of the proxy and by the model. A non-32-hex entry, a file or a symlink planted under quarantine/ or egress/ makes the runner refuse startup, and since the runner is a child of the member's own mcp-proxy, the restart budget can disable it and the whole sandbox/skill path is gone until a human cleans up. Options: move the runner-owned entries out of any tree a sandboxed child can write, or sweep/quarantine foreign entries instead of refusing. Open since S071.
+
+### Log
+
+- 2026-10-12 new->unset: raised in session 2026-10-12
