@@ -883,6 +883,8 @@ SUITES = [
     # with no error; ENOTDIR still refused), run RED first = 89.  The flat
     # params schema added L1-L3 (a schema key the function does not read is
     # dropped, a key outside the schema still refused), run RED first = 92.
+    # The empty-value rule added L4-L6 (a schema key holding "" / [] / 0
+    # counts as omitted; name "" is "name is required"), run RED first = 95.
     ("mcp_skill", run_mcp_skill,
      "mcp-skill, the read-only skill loader: startup flags (no roots, a "
      "group-writable root, the runner URL/token pair, the --max-description "
@@ -907,8 +909,9 @@ SUITES = [
      "before sending, the smaller serialized encoding per file) and a "
      "handler crash (layer D internal + log.exception, in-process and "
      "through McpServer.run()) and the flat params schema (a schema key the "
-     "function does not read dropped, a key outside it refused)",
-     92),
+     "function does not read or holding its type's empty value dropped, "
+     "a key outside it refused)",
+     95),
     # TYPED: a fixed case table (A 49, B 31, C 16, D 16, E 14, F 25, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 41, K 26, L 20, M 23, N 42,
     # O 18 = 387), so a count that moves is the alarm, not noise.

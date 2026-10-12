@@ -1003,7 +1003,8 @@ def _current_view() -> IndexView:
 
 # function -> the params it accepts. A key outside the set is refused with the
 # accepted list and a did-you-mean pointer (ADR 0030) -- unless it is one of
-# the schema's own keys (SCHEMA_PARAMS), which is dropped instead.
+# the schema's own keys (SCHEMA_PARAMS), which is dropped instead; an accepted
+# schema key holding its type's empty value is dropped too (see below).
 ACCEPTED: Dict[str, frozenset] = {
     "load": frozenset({"name", "file"}),
     "run": frozenset({"name", "script", "args", "stdin", "timeoutMs"}),
@@ -1013,11 +1014,27 @@ ACCEPTED: Dict[str, frozenset] = {
 FUNCTIONS = ("load", "run", "list", "validate")
 
 # The keys the advertised params schema offers, read from the schema itself.
-# The schema is one flat object, so a caller fills every one of them: a key in
-# this set that the called function does not read is dropped before dispatch;
-# a key outside it is still refused with the did-you-mean pointer.
-SCHEMA_PARAMS = frozenset(
-    _tool_definition("", ())["inputSchema"]["properties"]["params"]["properties"])
+# The schema is one flat object, so a caller fills every one of them -- often
+# with its type's empty value. Before any check, a key in this set is dropped
+# when the called function does not read it, OR when its value is the empty
+# value of its schema type ("" string, [] array, 0 integer): such a key counts
+# as omitted, so a required one (name, script) is then refused as missing. A
+# key outside the set is never dropped and is still refused with the
+# did-you-mean pointer.
+_SCHEMA_PROPS = _tool_definition("", ())["inputSchema"]["properties"]["params"]["properties"]
+SCHEMA_PARAMS = frozenset(_SCHEMA_PROPS)
+SCHEMA_TYPES: Dict[str, str] = {key: prop["type"]
+                                for key, prop in _SCHEMA_PROPS.items()}
+_EMPTY_OF_TYPE: Dict[str, Tuple[type, Any]] = {
+    "string": (str, ""), "array": (list, []), "integer": (int, 0)}
+
+
+def _is_schema_empty(key: str, value: Any) -> bool:
+    """True when `value` is the empty value of schema key `key`'s type. The
+    exact-type test keeps False (a bool, == 0) from passing as integer 0."""
+    empty = _EMPTY_OF_TYPE.get(SCHEMA_TYPES.get(key, ""))
+    return (empty is not None and type(value) is empty[0]
+            and value == empty[1])
 
 
 def _tool_refusal(code: str, message: str, **extra: Any) -> dict:
@@ -2136,7 +2153,8 @@ def handle_skill_call(arguments: dict) -> dict:
             + " Available: " + ", ".join(FUNCTIONS)))
     accepted = ACCEPTED[function]
     params = {key: value for key, value in params.items()
-              if key in accepted or key not in SCHEMA_PARAMS}
+              if key not in SCHEMA_PARAMS
+              or (key in accepted and not _is_schema_empty(key, value))}
     unknown = _unknown_params_refusal(function, params, accepted)
     if unknown:
         return _tool_refusal("invalid_params", unknown)

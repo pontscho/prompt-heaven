@@ -166,6 +166,12 @@ and run RED first against the server that refused every schema key.
      answers the plain list; L2 load with script/args/stdin/timeoutMs filled
      serves the plain load; L3 "nmae" is refused naming the key and pointing
      at 'name'.
+     L4-L6 pin the empty-value rule that followed: a schema key holding its
+     type's empty value ("" / [] / 0) counts as omitted. L4 load with all
+     six keys empty but a valid name serves the plain load; L5 run with the
+     same fill (in-process, a recording runner-client stand-in) reaches the
+     runner client with exactly the plain run's params, no timeoutMs 0;
+     L6 load with name "" is refused as "name is required". Run RED first.
 
 Usage:
   python3 tests/test_mcp_skill.py [--brief] [--keep]
@@ -187,6 +193,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unicodedata
 from pathlib import Path
 
@@ -3456,6 +3463,11 @@ def _run_crash(suite, fx):
 _SCHEMA_FILLED = {"name": "dummy", "file": "dummy", "script": "dummy",
                   "args": [], "stdin": "", "timeoutMs": 0}
 
+# Every property filled with its type's empty value -- "" / [] / 0 -- the
+# live failure after a3601b1: load read file "" and refused it.
+_SCHEMA_EMPTY = {"name": "", "file": "", "script": "", "args": [],
+                 "stdin": "", "timeoutMs": 0}
+
 
 def _run_schema(suite, fx):
     def list_all_keys():
@@ -3512,6 +3524,77 @@ def _run_schema(suite, fx):
         return problems, ["refusal     : %r" % (err,)]
     _guard(suite, GRP_L, "L3 key-outside-schema-refused-did-you-mean",
            outside_schema)
+
+    def load_empty_values():
+        mod = _mod()
+        root, _sdir = _hygiene_fixture(fx, "l4")
+        problems = []
+        with _Roots(mod, household=root):
+            plain = _call(mod, "load", {"name": "h"})
+            filled = _call(mod, "load", dict(_SCHEMA_EMPTY, name="h"))
+        if not _loaded(plain, "BODY-h", "control: plain load", problems):
+            return problems, []
+        # Each frame has a fresh 16-hex nonce; compare with it masked.
+        def unframed(res):
+            return re.sub(r"\b[0-9a-f]{16}\b", "<nonce>", _text(res))
+        if _loaded(filled, "BODY-h", "load with every key empty", problems) \
+                and unframed(filled) != unframed(plain):
+            problems.append("load with every key empty answered differently "
+                            "from the plain load")
+        return problems, []
+    _guard(suite, GRP_L, "L4 load-empty-values-omitted", load_empty_values)
+
+    def run_empty_values():
+        # In-process: a recording stand-in for the runner client captures the
+        # request fn_run builds, so the row needs no live runner; it asserts
+        # the filled call passes validation and reaches the runner-client
+        # stage with the same params as the call that omits them.
+        mod = _mod()
+        root = _run_root(fx, "l5", lambda r: _run_skill(r, "runner"))
+        sent = []
+
+        class Recorder:
+            def prepare(self, payload):
+                sent.append(payload["params"])
+                return types.SimpleNamespace(body=b"{}")
+
+            def call(self, request):
+                raise mod.RunnerError("busy", "recorded")
+
+        problems = []
+        saved_runner = mod._RUNNER
+        mod._RUNNER = Recorder()
+        try:
+            with _Roots(mod, household=root):
+                mod._CONFIG = mod._CONFIG._replace(
+                    runner_url="http://127.0.0.1:9/mcp")
+                plain = _call(mod, "run", {"name": "runner",
+                                           "script": "scripts/run.py"})
+                filled = _call(mod, "run", dict(
+                    _SCHEMA_EMPTY, name="runner", script="scripts/run.py"))
+        finally:
+            mod._RUNNER = saved_runner
+        for what, res in (("plain run", plain), ("run with empty keys", filled)):
+            if _err(res) != ("busy", "recorded"):
+                problems.append("%s did not reach the runner client: %r"
+                                % (what, _err(res)))
+        if len(sent) == 2 and sent[0] != sent[1]:
+            keys = sorted(set(sent[1]) - {"files", "entry", "interpreter"})
+            problems.append("run with empty keys sent %r, want what the plain "
+                            "run sent" % {k: sent[1][k] for k in keys})
+        return problems, ["sent        : %d request(s)" % len(sent)]
+    _guard(suite, GRP_L, "L5 run-empty-values-omitted", run_empty_values)
+
+    def load_empty_name():
+        mod = _mod()
+        root, _sdir = _hygiene_fixture(fx, "l6")
+        problems = []
+        with _Roots(mod, household=root):
+            res = _call(mod, "load", {"name": ""})
+        _refused(res, "load with name ''", problems, code="invalid_params",
+                 token="name is required")
+        return problems, ["refusal     : %r" % (_err(res),)]
+    _guard(suite, GRP_L, "L6 load-empty-name-is-missing", load_empty_name)
 
 
 # ---------------------------------------------------------------------------
