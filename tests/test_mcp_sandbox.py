@@ -52,8 +52,9 @@ Groups:
      every numeric range at its edges, the interpreter-name enum, the config
      file's mode and symlink rules, `sbx` absolute and not world-writable, the
      worst-case response bound at exactly 16 MiB, `as_mode: absolute` refused
-     on darwin. Each refusal is a ConfigError naming the key; each row has an
-     accepted control beside it.
+     on darwin, the per-interpreter `site` key (A12: a real bool, default
+     false, python3 only). Each refusal is a ConfigError naming the key; each
+     row has an accepted control beside it.
   B  Mach-O reader and dylib closure (in-process, Step 8) -- parse_macho on
      synthetic thin/fat headers (every bound refused as MachOError, never a
      struct.error), @rpath / @loader_path / @executable_path resolution, weak
@@ -101,15 +102,18 @@ Groups:
      InterpreterPlan built directly: the darwin golden (realpath --exec
      literals incl. Python.app, symlinked parents and /private/var/select/sh
      as --read), the linux golden with --seccomp, the absolute entry with the
-     caller's args after it, and the runner's own environment to sbx being
-     exactly two keys (the script's arrives as --clean-env + --env). RED
+     caller's args after it, the runner's own environment to sbx being
+     exactly two keys (the script's arrives as --clean-env + --env), and
+     (D5) python3's argv_prefix from a loaded config: -I -S -B by default,
+     -I -B with "site": true. RED
      reason before Step 11: build_sbx_argv is missing from the server.
   I  live runs (stdio, Step 11, GREEN in Step 12) -- hello in python3, bash
      and node, a non-zero exit as a normal result, the UTF-8 cut on the cap
      boundary, invalid UTF-8 replaced, stdin, out/ files in utf8 and base64,
      a cancel that kills the run and removes its workdir, an sbx refusal
-     answered sandbox_unavailable, and an engine failure after `spawned`
-     returned as a declared normal result (fixture sbx, KD-16).
+     answered sandbox_unavailable, an engine failure after `spawned`
+     returned as a declared normal result (fixture sbx, KD-16), and (I12) a
+     venv python3 whose site-packages module imports only with "site": true.
   G  startup, plans and refresh (stdio, Step 12) -- every refused start
      (missing sbx, missing / non-Mach-O interpreter, a world-writable or
      symlinked work root, a failed self-test, a held work-root lock) beside
@@ -629,6 +633,61 @@ def _run_a(suite, fx):
             _accepts(mod, path, "as_mode absolute off darwin", problems)
         return problems, ["platform    : %s" % sys.platform]
     _guard(suite, GRP_A, "A10 as-mode-absolute-refused-on-darwin", as_mode)
+
+    def interp_site():
+        """The per-interpreter `site` key: a real JSON bool, default false,
+        accepted ONLY on python3 (it drops -S, so a venv interpreter's
+        site-packages reaches sys.path); on bash and node the key itself is
+        refused, naming it. Unknown interpreter keys are still refused."""
+        mod = _mod()
+        problems = []
+        py = _interpreters(full=False)["python3"]
+        lines = []
+
+        def site_of(cfg, name="python3"):
+            return getattr(cfg.interpreters[name], "site", "<absent>")
+
+        cfg = _accepts(mod, fx.render("a12-default",
+                                      interpreters={"python3": dict(py)}),
+                       "python3 without site (default)", problems)
+        if cfg is not None and site_of(cfg) is not False:
+            problems.append("python3 site default %r, want False"
+                            % (site_of(cfg),))
+        for value in (True, False):
+            cfg = _accepts(mod, fx.render(
+                "a12-py", interpreters={"python3": dict(py, site=value)}),
+                "python3 site %r" % value, problems)
+            if cfg is not None and site_of(cfg) is not value:
+                problems.append("python3 site %r loaded as %r"
+                                % (value, site_of(cfg)))
+        for value in (1, 0, 1.0, "yes-a12", None, [], {}):
+            msg = _refuses(mod, fx.render(
+                "a12-bad", interpreters={"python3": dict(py, site=value)}),
+                "python3 site %r" % (value,), problems,
+                names=("interpreters.python3.site",),
+                not_values=("yes-a12",))
+            if value == "yes-a12":
+                lines.append("non-bool    : %r" % (msg,))
+        for name, path in (("bash", "/bin/bash"),
+                           ("node", "/usr/local/bin/node")):
+            for value in (True, False):
+                interps = {"python3": dict(py),
+                           name: {"path": path, "site": value}}
+                msg = _refuses(mod, fx.render("a12-%s" % name,
+                                              interpreters=interps),
+                               "%s site %r" % (name, value), problems,
+                               names=("interpreters.%s.site" % name,))
+                if value:
+                    lines.append("%-12s: %r" % (name, msg))
+            _accepts(mod, fx.render("a12-%s-ok" % name, interpreters={
+                "python3": dict(py, site=True), name: {"path": path}}),
+                "%s without site beside python3 site true" % name, problems)
+        _refuses(mod, fx.render("a12-unknown", interpreters={
+            "python3": dict(py, sites=True)}),
+            "python3 sites (unknown key)", problems, names=("sites",))
+        return problems, lines
+    _guard(suite, GRP_A, "A12 interpreter-site-bool-python3-only",
+           interp_site)
 
 
 # ---------------------------------------------------------------------------
@@ -2468,6 +2527,41 @@ def _run_d(suite, fx):
         return problems, ["runner env  : %s" % sorted(env or {}),
                           "script env  : %s" % keys]
     _guard(suite, GRP_D, "D4 runner-env-to-sbx-is-two-keys", runner_env)
+
+    def site_golden():
+        """plan_interpreter from a LOADED config: python3 without `site` (and
+        with site false) keeps (path, -I, -S, -B); site true drops -S only
+        -- (path, -I, -B), -I kept -- and the run argv after `--` follows."""
+        mod = _argv_mod(("build_sbx_argv", "plan_interpreter"))
+        problems = []
+        py = _interpreters(full=False)["python3"]
+        path = py["path"]
+        lines = []
+        for site, flags in ((None, ("-I", "-S", "-B")),
+                            (False, ("-I", "-S", "-B")),
+                            (True, ("-I", "-B"))):
+            entry = dict(py) if site is None else dict(py, site=site)
+            label = "site %s" % ("absent" if site is None else site)
+            cfg = mod.load_config(fx.render("d5", interpreters={
+                "python3": entry}))._replace(seccomp="off")
+            plan = mod.plan_interpreter(cfg.interpreters["python3"], cfg)
+            want = (path,) + flags
+            if tuple(plan.argv_prefix) != want:
+                problems.append("%s: argv_prefix %r, want %r"
+                                % (label, plan.argv_prefix, want))
+            req = _d_req(mod, "python3", "main.py", args=("a1",))
+            got = mod.build_sbx_argv(plan, req, _D_WD, _D_STATUS_FD, cfg)
+            golden = _d_golden(cfg, plan._replace(argv_prefix=want), req,
+                               _D_WD, _D_STATUS_FD, False)
+            _d_compare(_d_path(got, plan, label, problems), golden, label,
+                       problems)
+            if isinstance(got, list) and "--" in got:
+                tail = got[got.index("--") + 1:]
+                if tail != list(want) + [_D_WD + "/main.py", "a1"]:
+                    problems.append("%s: target argv %r" % (label, tail))
+            lines.append("%-12s: %s" % (label, " ".join(flags)))
+        return problems, lines
+    _guard(suite, GRP_D, "D5 python3-site-drops-only-S", site_golden)
 
 
 # ---------------------------------------------------------------------------
@@ -5512,6 +5606,62 @@ def _run_i_rows(suite, fx, live):
         return problems, []
     _guard(suite, GRP_I, "I11 engine-failure-after-spawned-is-declared-result",
            engine_failure)
+
+    def venv_site():
+        """A venv python3 (python3 -m venv --without-pip --symlinks under
+        the run's .claude/tmp fixture dir, the venv dir in extra_reads) with
+        a one-line module dropped into its site-packages: with "site": true
+        the script imports it; with "site": false (-S) it gets ImportError.
+        capabilities reports `site` per interpreter either way."""
+        _live_mod()
+        _live_gate(fx)
+        problems = []
+        base = _which("python3", sys.executable)
+        venv = os.path.join(fx.base, fx._name("i12") + "-venv")
+        proc = subprocess.run([base, "-I", "-m", "venv", "--without-pip",
+                               "--symlinks", venv], capture_output=True,
+                              text=True, timeout=120,
+                              stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            return ["fixture: python3 -m venv exited %d: %r"
+                    % (proc.returncode, proc.stderr[-200:])], []
+        lib = os.path.join(venv, "lib")
+        sites = [os.path.join(lib, d, "site-packages")
+                 for d in sorted(os.listdir(lib))
+                 if os.path.isdir(os.path.join(lib, d, "site-packages"))]
+        if len(sites) != 1:
+            return ["fixture: venv site-packages %r, want one" % sites], []
+        with open(os.path.join(sites[0], "ph_i12_mod.py"), "w",
+                  encoding="utf-8") as fh:
+            fh.write('VALUE = "i12-venv-import-ok"\n')
+        exe = os.path.join(venv, "bin", "python")
+        script = ("try:\n    import ph_i12_mod\nexcept ImportError:\n"
+                  "    print('i12-import-error')\nelse:\n"
+                  "    print(ph_i12_mod.VALUE)\n")
+        lines = ["venv        : %s" % os.path.relpath(venv, H.REPO_ROOT)]
+        for site, want in ((True, "i12-venv-import-ok\n"),
+                           (False, "i12-import-error\n")):
+            label = "site %s" % site
+            r = _Runner(fx, "i12-%s" % str(site).lower(), interpreters={
+                "python3": {"path": exe, "extra_reads": [venv],
+                            "site": site}})
+            try:
+                entry = _interp_entry(r.caps(label, problems), "python3")
+                if entry.get("site") is not site:
+                    problems.append("%s: capabilities site %r, want %r"
+                                    % (label, entry.get("site", "<absent>"),
+                                       site))
+                body = _body(r.run(_py(script)), label, problems)
+                _want(body, label, problems, exitCode=0, stdout=want)
+                if body is not None:
+                    lines.append("%-12s: stdout %r stderr %r"
+                                 % (label, body.get("stdout"),
+                                    str(body.get("stderr", ""))[:120]))
+                problems.extend(_wr_residue(r.work_root, wait=2.0))
+            finally:
+                r.close()
+        return problems, lines
+    _guard(suite, GRP_I, "I12 python3-site-imports-venv-packages", venv_site)
 
 
 # ---------------------------------------------------------------------------

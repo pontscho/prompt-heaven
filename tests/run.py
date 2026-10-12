@@ -771,8 +771,8 @@ SUITES = [
      "per-child relist (bool-only, default off byte-identical, name set "
      "frozen, stale on failure, coalesced, min interval, cancelled on "
      "stop)", 124),
-    # TYPED: a fixed case table (A 11, B 23, C 22, D 4, E 34, F 9, G 13,
-    # H 24, I 11 = 151), the rows of plan Steps 7-13, so a count that moves
+    # TYPED: a fixed case table (A 12, B 23, C 22, D 5, E 34, F 9, G 13,
+    # H 24, I 12 = 154), the rows of plan Steps 7-13, so a count that moves
     # is the alarm, not noise.  F9 (validation round 1) drives layer D live
     # through McpServer.run() -- the smoke probe answers -32602 now and no
     # longer reaches the catch-all.  E (Step 13, the spec's acceptance escape
@@ -805,7 +805,10 @@ SUITES = [
     # fd-relative only, the survivor sweep, the out/ path cap) and A11 (the
     # worst-case reply serialized through the real tool-result path stays in
     # 16 MiB: 13 chars per byte, not 12), all written RED; H22/H23 are INFO
-    # off darwin -- counted, never omitted.
+    # off darwin -- counted, never omitted.  The per-interpreter "site" key
+    # added A12 (a real bool, python3 only), D5 (site true drops -S only)
+    # and I12 (live: a venv's site-packages importable only with site true;
+    # INFO off macOS and under a nested Seatbelt), all written RED.
     ("mcp_sandbox", run_mcp_sandbox,
      "mcp-sandbox, the sandboxed script runner: the one JSON config file "
      "(unknown keys at the top and in limits, every numeric range at its "
@@ -844,7 +847,7 @@ SUITES = [
      "control) and the security-round-1 bounds (rpath stack, keg walk "
      "dirs/depth/entries, the closure's plan deadline, out/ and remover "
      "listings, fd-relative darwin fallbacks, the survivor sweep, the out/ "
-     "path cap, the worst-case reply serialized within 16 MiB)", 151),
+     "path cap, the worst-case reply serialized within 16 MiB)", 154),
     # TYPED: a fixed case table (A 9, B 10, C 6, D 8, E 5, F 14, G 4, H 6,
     # I 12, J 13, K 2 = 89), the rows of plan Steps 16, 17 and 18 (J1 is live:
     # INFO off macOS and under a nested Seatbelt, counted either way), so a

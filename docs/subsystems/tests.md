@@ -300,7 +300,9 @@ review round 1 then moved five of them, every added row run red first:
 and `sbx_restrict` 113 to 118 (group X, X10 in round 2 and X11-X14 in round
 3). Measured on 2026-10-11 the fleet ran 6256 cases in 42 suites. The lazily
 created tier root then moved `mcp_skill` 83 to 89 (A6-A9 and E4-E5: a missing
-root or `skills.json` is an empty tier with no error), red first. These are a
+root or `skills.json` is an empty tier with no error), red first, and the
+python3 `site` key moved `mcp_sandbox` 151 to 154 (A12 config, D5 golden argv,
+I12 a live venv import), red first. These are a
 snapshot copied for the reader, not a second authority: the table wins
 wherever the two disagree.
 

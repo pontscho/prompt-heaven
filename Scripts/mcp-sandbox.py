@@ -341,6 +341,7 @@ class InterpreterSpec(NamedTuple):
     name: str                        # "python3" | "bash" | "node"
     path: str                        # absolute spelling, e.g. /usr/local/bin/python3
     extra_reads: Tuple[str, ...]
+    site: bool = False               # python3 only: run the site module (no -S)
 
 
 class InterpreterPlan(NamedTuple):
@@ -350,7 +351,7 @@ class InterpreterPlan(NamedTuple):
     path: str
     realpath: str
     version: str
-    argv_prefix: Tuple[str, ...]     # e.g. (path, "-I", "-S", "-B")
+    argv_prefix: Tuple[str, ...]     # e.g. (path, "-I", "-S", "-B"); no -S when site
     reads: Tuple[str, ...]           # spellings passed as --read (every hop + every target)
     execs: Tuple[str, ...]           # passed as --exec; REALPATHS only (M0:3) + /bin, /usr/bin
     signature: Tuple[Tuple[str, int, int], ...]  # (path, st_ino, st_mtime_ns) per closure file (lstat)
@@ -609,7 +610,10 @@ _CONFIG_MAX_BYTES = 1 * _MIB
 _CONFIG_KEYS = frozenset({"version", "sbx", "work_root", "seccomp", "log_content",
                           "interpreters", "limits"})
 _INTERPRETER_NAMES = frozenset({"python3", "bash", "node"})
-_INTERPRETER_KEYS = frozenset({"path", "extra_reads"})
+_INTERPRETER_KEYS = frozenset({"path", "extra_reads", "site"})
+# "site" drops python3's -S so a venv interpreter's site-packages reaches
+# sys.path; it means nothing to bash or node, where the key is refused.
+_SITE_INTERPRETERS = frozenset({"python3"})
 _EXTRA_READS_MAX = 64
 _SECCOMP_MODES = ("auto", "on", "off")
 _AS_MODES = ("baseline", "absolute")
@@ -784,7 +788,13 @@ def _cfg_interpreters(value: Any) -> Dict[str, InterpreterSpec]:
         if len(reads) > _EXTRA_READS_MAX:
             raise ConfigError(f"{where}.extra_reads: more than {_EXTRA_READS_MAX} entries")
         extra = tuple(_cfg_abs_path(item, f"{where}.extra_reads[{i}]") for i, item in enumerate(reads))
-        out[name] = InterpreterSpec(name=name, path=path, extra_reads=extra)
+        site = entry.get("site", False)
+        if "site" in entry and name not in _SITE_INTERPRETERS:
+            raise ConfigError(f"{where}.site: only {', '.join(sorted(_SITE_INTERPRETERS))} "
+                              f"accepts this key")
+        if type(site) is not bool:
+            raise ConfigError(f"{where}.site: must be true or false")
+        out[name] = InterpreterSpec(name=name, path=path, extra_reads=extra, site=site)
     return out
 
 
@@ -3554,11 +3564,17 @@ _DARWIN_SELECT_SH = "/private/var/select/sh"
 
 # Per interpreter: the flags after its path (argv_prefix), the stdin-blocking
 # VSZ probe, and the self-test script (bash: builtins only -- under env={}
-# bash has no PATH).
+# bash has no PATH). python3 runs with -S unless its config entry says
+# "site": true (_SITE_ARGV_FLAGS): -I is kept either way, so the user site
+# and every PYTHON* variable stay off; only the site module (and with it a
+# venv's site-packages) comes back.
 _ARGV_FLAGS: Dict[str, Tuple[str, ...]] = {
     "python3": ("-I", "-S", "-B"),
     "bash": ("--noprofile", "--norc"),
     "node": (),
+}
+_SITE_ARGV_FLAGS: Dict[str, Tuple[str, ...]] = {
+    "python3": ("-I", "-B"),
 }
 _VSZ_PROBES: Dict[str, Tuple[str, ...]] = {
     "python3": ("-c", "import sys; sys.stdin.read()"),
@@ -3744,12 +3760,15 @@ def plan_interpreter(spec: InterpreterSpec, cfg: SandboxConfig,
         _add(sig_paths, path)
     _add(execs, "/bin")
     _add(execs, "/usr/bin")
+    # argv_prefix feeds the VSZ probe, the --version run, the self-test and
+    # every run alike, so "site" reaches all of them from here.
+    flags = _SITE_ARGV_FLAGS if spec.site else _ARGV_FLAGS
     return InterpreterPlan(
         name=spec.name,
         path=spec.path,
         realpath=real,
         version="",
-        argv_prefix=(spec.path,) + _ARGV_FLAGS.get(spec.name, ()),
+        argv_prefix=(spec.path,) + flags.get(spec.name, ()),
         reads=tuple(reads),
         execs=tuple(execs),
         signature=_chain_signature(sig_paths),
@@ -4182,6 +4201,7 @@ def _interpreter_report(name: str, spec: InterpreterSpec, ps: PlanState) -> dict
     plan = ps.plan if ps.state == "ready" else None
     return {
         "path": spec.path,
+        "site": spec.site,
         "realpath": plan.realpath if plan else None,
         "version": plan.version if plan else None,
         "state": ps.state,

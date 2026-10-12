@@ -110,12 +110,22 @@ level is exactly `version` (1), `sbx`, `work_root`, `seccomp`, `log_content`,
 - `seccomp` is `auto`, `on` or `off`; `auto` means on only on Linux x86_64
   `Scripts/mcp-sandbox.py:_seccomp_on`. `log_content` is a real JSON bool.
 - `interpreters` names at least one of `python3`, `bash` and `node`, each
-  exactly `{path, extra_reads?}` with absolute paths and at most
+  exactly `{path, extra_reads?, site?}` with absolute paths and at most
   `Scripts/mcp-sandbox.py:_EXTRA_READS_MAX` extra reads
   `Scripts/mcp-sandbox.py:_cfg_interpreters`. node's `openssl.cnf` read in the
   example was measured necessary (without it node exits 1 on an OpenSSL
   configuration error); widen it to that directory if a host needs more, never
   further.
+- `site` is a real JSON bool, default false, accepted only on `python3`
+  (`Scripts/mcp-sandbox.py:_SITE_INTERPRETERS`; on bash or node the key is
+  refused whatever its value). python3 normally runs `-I -S -B`; `site: true`
+  drops only `-S` (`Scripts/mcp-sandbox.py:_SITE_ARGV_FLAGS`), so a venv
+  interpreter's `site-packages` reaches `sys.path` and its `.pth` files run;
+  `-I` still ignores `PYTHON*` variables and the user site. The intended use is a
+  venv python as `path` with the venv directory in `extra_reads`:
+  `{"path": "<venv>/bin/python", "extra_reads": ["<venv>"], "site": true}`.
+  Measured live by `mcp_sandbox:I12` (a venv behind a Homebrew framework
+  symlink imports with `site: true`, gets `ImportError` without it).
 - Every integer limit is range-checked without coercion — a bool, a float or a
   string is refused — against `Scripts/mcp-sandbox.py:_LIMIT_RANGES`; the
   ranges are the code's, this page does not copy them. `timeout_ms` runs from
@@ -418,8 +428,8 @@ fleet; a non-object JSON-RPC `params` on `tools/call` stays a protocol-level
 `-32602`.
 
 **`capabilities`** needs no slot, so it answers while every slot is taken
-`Scripts/mcp-sandbox.py:capabilities`: per interpreter its spelling, realpath,
-version, `state` and `reason`, `asLimitBytes`, `effectiveBudgetBytes` and the
+`Scripts/mcp-sandbox.py:capabilities`: per interpreter its spelling, `site`,
+realpath, version, `state` and `reason`, `asLimitBytes`, `effectiveBudgetBytes` and the
 read and exec sets; the limits; the backend (platform, engine, seccomp,
 `liveVerified` — true on macOS, false on Linux
 `Scripts/mcp-sandbox.py:LIVE_VERIFIED` — and the sbx path); `concurrency`
