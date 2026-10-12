@@ -5,7 +5,8 @@ This hook auto-allows a Bash command WITHOUT a permission prompt IFF the command
 is provably a single, clean, un-wrapped invocation of the ONE deployed `sbx`
 wrapper -- identified by canonical-path IDENTITY (never basename), printable
 ASCII made of allowlisted words, free of shell metacharacters, every flag in the gate's narrowing tables, every `--write` scope
-inside the project, and no `--net` / `--status-fd`. Under ANY doubt it emits
+inside the project, and no `--net` / `--status-fd` / `--egress-port` /
+`--egress-socket`. Under ANY doubt it emits
 nothing (empty stdout) and the normal permission prompt runs. It NEVER emits
 "deny": its only two outcomes are "allow" (narrow, proven) and silence
 (everything else). Fail-safe == fail-to-prompt, never fail-to-allow.
@@ -49,8 +50,8 @@ into a false-allow, a fail-closed brick, or an imported see-through parser:
 (d) AUTO-ALLOW ONLY WHAT NARROWS (ADR 0005, restricted-mode addendum) -- the gate
     may NEVER auto-allow a command that can escape containment. sbx's flags are
     split into three tables that together equal its argparse parser, with no
-    overlap (sbx_restrict:S14): _PROMPT_FLAGS (--net, --status-fd) ALWAYS
-    prompt, whatever accompanies them; _BOOL_FLAGS (--ro, --seccomp, --dry-run,
+    overlap (sbx_restrict:S14): _PROMPT_FLAGS (--net, --status-fd,
+    --egress-port, --egress-socket) ALWAYS prompt, whatever accompanies them; _BOOL_FLAGS (--ro, --seccomp, --dry-run,
     --restrict-reads, --clean-env) only narrow and pass as exact bare tokens;
     _VALUE_FLAGS pass only when _value_narrows proves the value under a STRICT
     grammar -- --write contained in the project, --read/--exec absolute, --env
@@ -230,7 +231,9 @@ _VALUE_FLAGS = frozenset({
 # _PROMPT_FLAGS -- flags that ALWAYS prompt, in any form, alongside anything.
 #   --net        opens the network (R11): the one flag that widens containment.
 #   --status-fd  writes to an inherited fd the gate cannot see (R2:S-L1).
-_PROMPT_FLAGS = frozenset({"--net", "--status-fd"})
+#   --egress-port / --egress-socket  open a network endpoint (a narrow --net).
+_PROMPT_FLAGS = frozenset({"--net", "--status-fd",
+                           "--egress-port", "--egress-socket"})
 
 # The --env key grammar (sbx's parse_env refuses the same keys; the gate refuses
 # them FIRST, so a loader-injection pair never reaches an auto-allow).
@@ -295,7 +298,8 @@ def is_clean_sbx(cmd, cwd):
     single, clean, un-wrapped invocation of the ONE deployed `sbx` wrapper (KD-6
     identity, never basename), metacharacter-free, every flag a narrowing table
     member with a strict value (d), every `--write` scope inside the project, and
-    no _PROMPT_FLAGS member (--net, --status-fd). Under ANY doubt -> (False, "") -> the caller stays silent
+    no _PROMPT_FLAGS member (--net, --status-fd, --egress-port,
+    --egress-socket). Under ANY doubt -> (False, "") -> the caller stays silent
     -> the normal permission prompt runs. This classifier shares NOTHING with
     mcp-first-guard.py: it REJECTS metacharacters, it does not see through them (b)."""
     if cwd is None:
@@ -327,7 +331,7 @@ def is_clean_sbx(cmd, cwd):
 
     # Parse sbx's OWN flags up to the first bare "--", driven by the three flag
     # tables and matching argparse's grammar EXACTLY (M-B): _PROMPT_FLAGS (--net,
-    # --status-fd) refuse outright (R11); _BOOL_FLAGS pass as exact bare tokens;
+    # --status-fd, --egress-port, --egress-socket) refuse outright (R11); _BOOL_FLAGS pass as exact bare tokens;
     # _VALUE_FLAGS take `--flag V` AND `--flag=V` (split on the FIRST "=") and the
     # value must pass _value_narrows (--write stays separator-safe-contained, KD-8).
     # ANY unrecognized token before "--" -- an unknown flag OR an unhandled

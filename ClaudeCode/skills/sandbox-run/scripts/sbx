@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import argparse
 import errno
+import grp
 import json
 import os
+import pwd
 import re
 import resource
 import select
@@ -51,7 +53,8 @@ from dataclasses import dataclass
 USAGE = ("Usage: sbx [--write DIR]... [--net] [--ro] [--seccomp] "
          "[--restrict-reads [--read PATH]... [--exec PATH]...] "
          "[--clean-env [--env KEY=VALUE]...] [--timeout S [--status-fd FD]] "
-         "[--rlimit-{as,cpu,nproc,fsize,nofile,core} N] -- <cmd> [args...]")
+         "[--rlimit-{as,cpu,nproc,fsize,nofile,core} N] "
+         "[--egress-port N | --egress-socket PATH] -- <cmd> [args...]")
 
 # R-0061: the standard directories of pathname AF_UNIX sockets (docker, the D-Bus
 # system and session buses, gpg-agent, ssh-agent, tmux, X11). A socket is a
@@ -75,6 +78,110 @@ SOCKET_REFUSED_DIRS = SOCKET_DIRS + ("/var/run",)
 # like a cwd under it: a scope or a repo checkout under /tmp is common, and the
 # sockets a bind there re-exposes are only those inside the bound subtree.
 SOCKET_UNDER_REFUSED_DIRS = ("/run", "/var/run", "/var/snap")
+
+# Egress (restricted mode): the ONE network endpoint a run may reach, the
+# caller's allowlisting CONNECT proxy. On bwrap the caller's unix socket is
+# ro-bound at this FIXED path in the empty root -- outside every
+# SOCKET_DIRS entry, so the socket tmpfs logic is untouched: one explicit
+# bind, not a hole (M0 on para: connect() works through the ro bind, and
+# the target cannot unlink the mountpoint, EBUSY). The forwarder listens on
+# 127.0.0.1:EGRESS_FORWARD_PORT inside the private netns (bwrap brings lo
+# up: M0) -- a fixed port, the proxy URL the caller hands the target.
+EGRESS_SOCKET_DEST = "/.sbx-egress.sock"
+EGRESS_FORWARD_PORT = 3128
+_EGRESS_PORT_RE = r"[0-9]{1,5}"
+
+# The bwrap forwarder: run by EGRESS python (sbx's own interpreter, which
+# must already be visible in the restricted root) as `-I -S -B -c SRC <port>
+# <socket> -- <target...>`. It binds 127.0.0.1:<port> FIRST (no race with
+# the target), forks a relay child that keeps the parent's process group,
+# and the parent execs the target in place -- so the target keeps the pid
+# bwrap waits on, its exit status is the run's, and the relay dies with the
+# pid namespace when the target exits (M0: 0.32 s, rc passed through, no
+# leftover). The relay also exits when its parent changes (the same rule
+# without a pid namespace), redirects its stdio to /dev/null so it never
+# holds the run's output pipes, caps itself at 32 connections (the runner
+# proxy's own cap) and drops -- never dies on -- one it cannot start a
+# thread or fd for, and splices
+# bytes only -- the CONNECT is the caller's proxy's business. Stdlib, no
+# exec of its own, Python 3.6+.
+EGRESS_FORWARDER = r'''
+import os, select, socket, sys, threading, time
+if len(sys.argv) < 5 or sys.argv[3] != "--":
+    sys.stderr.write("sbx-egress: usage: <port> <socket> -- <cmd>\n")
+    sys.exit(127)
+port, path, target = int(sys.argv[1]), sys.argv[2], sys.argv[4:]
+ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+ls.bind(("127.0.0.1", port))
+ls.listen(16)
+parent = os.getpid()
+if os.fork() == 0:
+    try:
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+        slots = threading.BoundedSemaphore(32)
+
+        def splice(c, u):
+            try:
+                c.settimeout(None)
+                u.connect(path)
+                open_ = {c: u, u: c}
+                while open_:
+                    if os.getppid() != parent:
+                        return
+                    ready = select.select(list(open_), [], [], 1.0)[0]
+                    for s in ready:
+                        data = s.recv(65536)
+                        if data:
+                            open_[s].sendall(data)
+                            continue
+                        try:
+                            open_[s].shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                        del open_[s]
+            except OSError:
+                pass
+            finally:
+                c.close()
+                u.close()
+                slots.release()
+
+        ls.settimeout(1.0)
+        while os.getppid() == parent:
+            try:
+                c, _addr = ls.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not slots.acquire(blocking=False):
+                c.close()
+                continue
+            u = None
+            try:
+                u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                threading.Thread(target=splice, args=(c, u),
+                                 daemon=True).start()
+            except (RuntimeError, OSError):
+                # no thread or fd left (RLIMIT_NPROC / NOFILE): drop this
+                # connection, never the relay
+                c.close()
+                if u is not None:
+                    u.close()
+                slots.release()
+                time.sleep(0.05)
+    finally:
+        os._exit(0)
+ls.close()
+try:
+    os.execvp(target[0], target)
+except OSError as exc:
+    sys.stderr.write("sbx-egress: cannot exec %r: %s\n" % (target[0], exc.strerror))
+    os._exit(127)
+'''
 
 
 @dataclass
@@ -160,6 +267,24 @@ class Scope:
       nproc_headroom
                    the `--rlimit-nproc +N` form: N processes above the uid's
                    current count, resolved in main(); None when not used.
+
+    Egress (restricted mode only; the allowlisting CONNECT proxy is the
+    CALLER's -- mcp-sandbox -- and these fields name the ONE endpoint of it
+    the sandbox may reach). Both None = no network at all, the profile and
+    argv byte-identical to a run without them:
+      egress_port  Seatbelt: the 127.0.0.1 port (`--egress-port N`); the
+                   profile keeps (deny network*) and adds ONE
+                   (allow network-outbound (remote tcp "localhost:N")).
+      egress_socket
+                   bwrap: the caller's own unix socket (`--egress-socket
+                   PATH`), ro-bound at EGRESS_SOCKET_DEST; the private netns
+                   stays (--unshare-net) and the target is wrapped in the
+                   stdlib forwarder EGRESS_FORWARDER (127.0.0.1:
+                   EGRESS_FORWARD_PORT inside -> the socket).
+      egress_python
+                   bwrap: the interpreter that runs the forwarder -- sbx's
+                   own realpath, which must already be visible inside the
+                   restricted root (resolved in main()).
     """
     writes: list
     net: bool
@@ -183,6 +308,9 @@ class Scope:
     status_fd: int = None
     limits: tuple = ()
     nproc_headroom: int = None
+    egress_port: int = None
+    egress_socket: str = None
+    egress_python: str = None
 
 
 # ---------------------------------------------------------------------------
@@ -475,12 +603,41 @@ def _seatbelt_argv(scope):
     # Network: EXPLICIT in both directions. (deny default) at the top already denies
     # the network, so merely omitting (deny network*) under --net left the flag inert
     # on macOS -- only (allow network*) actually grants it (R18).
+    if scope.egress_socket is not None:
+        raise ValueError("--egress-socket is the bwrap endpoint; Seatbelt "
+                         "takes --egress-port")
+    if scope.net and scope.egress_port is not None:
+        raise ValueError("--egress-port cannot be combined with --net")
     if scope.net:
         lines.append("(allow network*)")
     else:
         lines.append("(deny network*)")
+        if scope.egress_port is not None:
+            lines.append(_seatbelt_egress_rule(scope))
     profile = "\n".join(lines)
     return ["sandbox-exec", "-p", profile, *scope.argv]
+
+
+def _seatbelt_egress_rule(scope):
+    """The ONE network allow of a restricted Seatbelt run with an egress
+    endpoint, emitted AFTER (deny network*) so last-match-wins grants
+    exactly it -> `(allow network-outbound (remote tcp "localhost:N"))`.
+
+    Measured (M0, macOS 14.2.1): `remote tcp`/`remote ip` with host
+    "localhost" reach 127.0.0.1:N (and [::1]:N -- the caller holds both)
+    and nothing else -- another loopback port, an outside address, UDP, the
+    mDNSResponder unix socket and DNS all stay denied, and a listen() is
+    still EPERM; a "127.0.0.1" host is refused by the SBPL compiler ("host
+    must be * or localhost"). `tcp`, not `ip`: no UDP to that port either.
+    Restricted mode only, an int port 1..65535 (never a bool); anything
+    else is a ValueError (exit 3). Pure."""
+    port = scope.egress_port
+    if not scope.restrict_reads:
+        raise ValueError("--egress-port requires --restrict-reads")
+    if isinstance(port, bool) or not isinstance(port, int) \
+            or not 1 <= port <= 65535:
+        raise ValueError("--egress-port %r is not a port 1..65535" % (port,))
+    return '(allow network-outbound (remote tcp "localhost:%d"))' % port
 
 
 def _bwrap_argv(scope):
@@ -557,8 +714,29 @@ def _bwrap_argv(scope):
     --unshare-uts --hostname sbx and --unshare-cgroup-try / --new-session
     --die-with-parent / --clearenv + --setenv K V per sorted key when scope.env
     is a dict / --chdir <cwd> / seccomp / `--` / *scope.argv.
+
+    Egress (scope.egress_socket, restricted only): ONE `--ro-bind <socket>
+    EGRESS_SOCKET_DEST` right after the socket tmpfs (the DEST is outside
+    every socket directory, so that logic is untouched), --unshare-net kept,
+    and the target after `--` wrapped as `<egress_python> -I -S -B -c
+    EGRESS_FORWARDER EGRESS_FORWARD_PORT EGRESS_SOCKET_DEST -- *scope.argv`.
+    An egress socket outside restricted mode, beside --net, without a
+    forwarder interpreter, or an egress PORT (the Seatbelt endpoint) is a
+    ValueError (exit 3).
     """
     restricted = scope.restrict_reads
+    if scope.egress_port is not None:
+        raise ValueError("--egress-port is the Seatbelt endpoint; bwrap takes "
+                         "--egress-socket")
+    if scope.egress_socket is not None:
+        if not restricted:
+            raise ValueError("--egress-socket requires --restrict-reads")
+        if scope.net:
+            raise ValueError("--egress-socket cannot be combined with --net")
+        if not isinstance(scope.egress_python, str) \
+                or not scope.egress_python.startswith("/"):
+            raise ValueError("--egress-socket: no forwarder interpreter "
+                             "resolved; refusing an unwrapped target")
     if restricted:
         # the base filesystem only (the system trees and the loader's /etc
         # entries); a usr-merge link is re-created as a link, never followed
@@ -635,6 +813,9 @@ def _bwrap_argv(scope):
         # no read overlays either (H2, P2 residual)
         argv += dev
         argv += _socket_mounts()
+        # egress: the ONE socket, at a fixed path outside the socket dirs
+        if scope.egress_socket is not None:
+            argv += ["--ro-bind", scope.egress_socket, EGRESS_SOCKET_DEST]
     # per writable scope: read-write bind -- UNLESS --ro, which emits NO writable
     # bind at all so even the scratch default is denied (R21).
     if not scope.ro:
@@ -753,6 +934,11 @@ def _bwrap_argv(scope):
                 "refusing to build an unfiltered bwrap argv" % (fd,))
         argv += ["--seccomp", str(fd)]
     argv.append("--")             # end-of-options terminator (bubblewrap honors "--")
+    if scope.egress_socket is not None:
+        # the forwarder binds 127.0.0.1:EGRESS_FORWARD_PORT, forks its relay
+        # and execs the target in place (EGRESS_FORWARDER)
+        argv += [scope.egress_python, "-I", "-S", "-B", "-c", EGRESS_FORWARDER,
+                 str(EGRESS_FORWARD_PORT), EGRESS_SOCKET_DEST, "--"]
     argv += scope.argv
     return argv
 
@@ -906,6 +1092,16 @@ def _build_parser():
                             % (name.upper(),
                                "; '+N' = N above the uid's current count"
                                if name == "nproc" else ""))
+    # Egress: the ONE endpoint (the caller's allowlisting proxy) a restricted
+    # run may reach. Never auto-allowed by the gate (_PROMPT_FLAGS).
+    p.add_argument("--egress-port", metavar="N", type=str,
+                   help="macOS: let the target reach 127.0.0.1:N and nothing "
+                        "else (requires --restrict-reads; not with --net)")
+    p.add_argument("--egress-socket", metavar="PATH", type=str,
+                   help="Linux: bind your own unix socket PATH into the "
+                        "sandbox and forward 127.0.0.1:%d inside to it "
+                        "(requires --restrict-reads; not with --net)"
+                        % EGRESS_FORWARD_PORT)
     return p
 
 
@@ -1474,6 +1670,167 @@ def parse_status_fd(raw, timeout):
     return value
 
 
+def parse_egress_port(raw):
+    """`--egress-port N` -> int, or None when absent: plain ASCII decimal
+    (`^[0-9]{1,5}$`, so no sign, space or non-ASCII digit) in 1..65535;
+    anything else exit 2."""
+    if raw is None:
+        return None
+    if not re.fullmatch(_EGRESS_PORT_RE, raw, re.ASCII) \
+            or not 1 <= int(raw) <= 65535:
+        _usage_error("--egress-port %r: not a port 1..65535" % (raw[:32],))
+    return int(raw)
+
+
+def validate_egress(args, platform_key):
+    """The egress flags -> (egress_port, egress_socket spelling), both None
+    when neither was given.
+
+    Usage errors (exit 2): both flags together; either without
+    --restrict-reads (the endpoint is a hole in the restricted network deny
+    and means nothing on the legacy profile); either beside --net (which
+    opens everything); a malformed port; a relative or metacharacter-bearing
+    socket path (canonicalize_read's floor). Platform refusals (exit 3):
+    --egress-port anywhere but darwin (bwrap's private netns cannot reach a
+    host port) and --egress-socket anywhere but linux (Seatbelt takes the
+    TCP endpoint). Pure: the socket itself is checked by
+    egress_socket_refusal, from main() only."""
+    port_raw = getattr(args, "egress_port", None)
+    sock_raw = getattr(args, "egress_socket", None)
+    if port_raw is None and sock_raw is None:
+        return None, None
+    if port_raw is not None and sock_raw is not None:
+        _usage_error("--egress-port and --egress-socket are mutually exclusive")
+    if not args.restrict_reads:
+        _usage_error("--egress-port / --egress-socket require --restrict-reads")
+    if args.net:
+        _usage_error("--egress-port / --egress-socket cannot be combined with "
+                     "--net")
+    if port_raw is not None:
+        port = parse_egress_port(port_raw)
+        if platform_key != "darwin":
+            _containment_refusal(
+                "--egress-port is the Seatbelt (macOS) endpoint; a bwrap "
+                "run's private network namespace cannot reach a host port "
+                "(use --egress-socket)")
+        return port, None
+    path = canonicalize_read(sock_raw)
+    if platform_key != "linux":
+        _containment_refusal(
+            "--egress-socket is the bwrap (Linux) endpoint; Seatbelt takes "
+            "--egress-port")
+    return None, path
+
+
+def _private_group(gid, euid):
+    """Is `gid` a user-private group of `euid`? -> True only when its group
+    entry names no member but the euid's user and no passwd entry but the
+    euid's own has it as primary group. An unknown gid or euid -> False
+    (fail closed). I/O: the grp and pwd databases."""
+    try:
+        me = pwd.getpwuid(euid).pw_name
+        members = grp.getgrgid(gid).gr_mem
+    except KeyError:
+        return False
+    if any(m != me for m in members):
+        return False
+    return not any(p.pw_gid == gid and p.pw_uid != euid
+                   for p in pwd.getpwall())
+
+
+def egress_socket_refusal(path):
+    """May `path` be bound into the sandbox as its egress endpoint? -> None,
+    or the refusal reason.
+
+    The ONE explicit exception to "no socket reaches a restricted run", so
+    it is narrow: the path must be absolute, normalized and its own realpath
+    (no symlink hop anywhere -- the bind source is resolved again by bwrap),
+    lie under no socket directory (SOCKET_REFUSED_DIRS, as spelled and as
+    realpath'd -- /run/docker.sock, a D-Bus or agent socket), be a socket
+    (lstat), owned by the euid, in a directory owned by the euid with no
+    group or other bits (0700: nobody else can swap it). I/O: lstat and
+    realpath, called from main() only."""
+    if not isinstance(path, str) or not path.startswith("/") \
+            or any(ch in _INJECT_CHARS for ch in path):
+        return "%r is not an absolute, metacharacter-free path" % (path,)
+    if os.path.normpath(path) != path or os.path.realpath(path) != path:
+        return ("%r is not its own realpath (a symlink hop or a non-normal "
+                "spelling)" % (path,))
+    for d in SOCKET_REFUSED_DIRS:
+        for sock_dir in {d, os.path.realpath(d)}:
+            if _covered(path, sock_dir):
+                return "%r lies under the socket directory %s" % (path,
+                                                                  sock_dir)
+    try:
+        st = os.lstat(path)
+        parent = os.lstat(os.path.dirname(path))
+    except OSError as exc:
+        return "%r: %s" % (path, exc.strerror or exc)
+    if not stat.S_ISSOCK(st.st_mode):
+        return "%r is not a socket" % (path,)
+    euid = os.geteuid()
+    if st.st_uid != euid:
+        return "%r is not owned by the current user" % (path,)
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != euid \
+            or parent.st_mode & 0o077:
+        return ("%r: its directory must be the current user's own, mode "
+                "0700" % (path,))
+    # Every ancestor above that directory, up to "/": bwrap resolves the
+    # bind source again at mount time, so an ancestor another uid may write
+    # lets that uid rename the 0700 directory away in between. Each must be
+    # owned by root or the euid with no other write bit, and a group write
+    # bit only for the euid's user-private group (umask 0002 under UPG makes
+    # every user dir 0775; that group has nobody else in it) -- or be a
+    # root-owned sticky directory (/tmp), where nobody renames what is not
+    # theirs.
+    anc = os.path.dirname(os.path.dirname(path))
+    while True:
+        try:
+            a = os.lstat(anc)
+        except OSError as exc:
+            return "%r: %s: %s" % (path, anc, exc.strerror or exc)
+        sticky_root = a.st_uid == 0 and a.st_mode & stat.S_ISVTX
+        if not stat.S_ISDIR(a.st_mode) or a.st_uid not in (0, euid):
+            return ("%r: its ancestor %s is not a directory owned by root "
+                    "or the current user" % (path, anc))
+        if a.st_mode & 0o002 and not sticky_root:
+            return ("%r: its ancestor %s is world-writable (writable by "
+                    "another user)" % (path, anc))
+        if a.st_mode & 0o020 and not sticky_root \
+                and not _private_group(a.st_gid, euid):
+            return ("%r: its ancestor %s is group-writable by a shared group "
+                    "(writable by another user)" % (path, anc))
+        if anc == "/":
+            return None
+        anc = os.path.dirname(anc)
+
+
+def egress_python(bound, reads):
+    """The forwarder's interpreter for an `--egress-socket` run -> sbx's own
+    realpath, or None when it would not be visible inside the restricted
+    root: it AND its stdlib prefix (sys.base_prefix) must lie under a
+    linux_base bind (the `("ro-bind", p)` entries of `bound`) or a `--read`
+    grant -- /usr/bin/python3 and /usr on a distribution python. No new read
+    is ever added for it: bwrap has no exec filter to widen, and the read
+    set stays the caller's. I/O: realpath only."""
+    exe = os.path.realpath(sys.executable or "")
+    prefix = os.path.realpath(sys.base_prefix or "")
+    if not exe.startswith("/") or not prefix.startswith("/"):
+        return None
+    grants = [entry[1] for entry in bound if entry[0] == "ro-bind"]
+    grants += [rule[0] for rule in reads if rule[1] in ("dir", "file")]
+    if all(any(_covered(p, g) for g in grants) for p in (exe, prefix)):
+        return exe
+    return None
+
+
+def _containment_refusal(msg):
+    """One `sbx: error:` line and exit 3 -- a request sbx cannot honour
+    here, never run in a weaker form."""
+    sys.stderr.write("sbx: error: %s\n" % (msg,))
+    sys.exit(3)
+
+
 def metadata_ancestors(paths):
     """Every PROPER ancestor (including "/") of every absolute path given --
     the read spellings, write scopes, exec paths and the cwd -- deduplicated
@@ -1707,7 +2064,9 @@ def _restricted_flags_given(args):
     invocation (none) keeps the exact pre-ADR-0031 call sequence in main()."""
     if (args.restrict_reads or args.read or args.exec or args.clean_env
             or args.env or args.timeout is not None
-            or args.status_fd is not None):
+            or args.status_fd is not None
+            or getattr(args, "egress_port", None) is not None
+            or getattr(args, "egress_socket", None) is not None):
         return True
     return any(getattr(args, "rlimit_" + suffix, None) is not None
                for suffix, _name, _low, _high in _RLIMIT_SPECS)
@@ -1730,6 +2089,12 @@ def _format_plan(scope):
         "  shadow_write_denies: %r" % (scope.shadow_write_denies,),
         "  seccomp     : %r" % (scope.seccomp,),
     ]
+    if scope.egress_port is not None or scope.egress_socket is not None:
+        lines += [
+            "  egress_port : %r" % (scope.egress_port,),
+            "  egress_socket: %r" % (scope.egress_socket,),
+            "  egress_python: %r" % (scope.egress_python,),
+        ]
     if (scope.restrict_reads or scope.read_rules or scope.exec_rules
             or scope.env is not None or scope.timeout is not None
             or scope.status_fd is not None or scope.limits
@@ -2122,16 +2487,17 @@ def _apply_rlimits():
 # invocation reaches none of them (sbx_gate row Q, _main_in).
 
 def uid_process_count(uid):
-    """The number of processes whose REAL uid is `uid` -- the base of the
-    `--rlimit-nproc +N` form (RLIMIT_NPROC counts every process of the uid,
-    not only this run's). I/O, called from the supervisor or the non-fork
-    path only when +N was given.
+    """The number of the uid's RLIMIT_NPROC units -- the base of the
+    `--rlimit-nproc +N` form (RLIMIT_NPROC counts everything of the uid, not
+    only this run's). I/O, called from the supervisor or the non-fork path
+    only when +N was given.
 
-    Linux scans /proc/[0-9]*/status for the `Uid:` line (a pid that vanished
-    mid-scan is ignored); macOS runs `/bin/ps -A -o ruid=` with an empty
-    environment and counts the lines equal to `uid` (sbx is not an MCP server,
-    so subprocess.run is fine here). A failure RAISES (OSError, ValueError or
-    subprocess.SubprocessError); the caller turns it into exit 3."""
+    The unit differs by kernel: macOS counts PROCESSES of the real uid, so it
+    runs `/bin/ps -A -o ruid=` with an empty environment and counts the lines
+    equal to `uid` (sbx is not an MCP server, so subprocess.run is fine here);
+    Linux counts TASKS (threads) of the real uid, so it is uid_task_count. A
+    failure RAISES (OSError, ValueError or subprocess.SubprocessError); the
+    caller turns it into exit 3."""
     want = str(int(uid))
     if sys.platform == "darwin":
         proc = subprocess.run(["/bin/ps", "-A", "-o", "ruid="], env={},
@@ -2141,19 +2507,38 @@ def uid_process_count(uid):
             raise OSError("/bin/ps exited %d" % proc.returncode)
         return sum(1 for line in proc.stdout.decode("ascii", "replace").split()
                    if line == want)
+    return uid_task_count(uid)
+
+
+def uid_task_count(uid, proc_root="/proc"):
+    """Linux: the number of TASKS whose real uid is `uid` -- what the kernel
+    charges RLIMIT_NPROC against at clone(), threads included. Counting
+    processes instead under-counts a threaded uid (127 processes, 1054 tasks)
+    and the resulting +N limit makes the sandbox engine's own clone fail
+    EAGAIN. Scans <proc_root>/[0-9]*/status once per pid: the `Uid:` line's
+    real-uid field selects, the `Threads:` line of the SAME read is the task
+    count (1 when absent); a pid that vanished mid-scan is ignored."""
+    want = str(int(uid))
     count = 0
-    for name in os.listdir("/proc"):
+    for name in os.listdir(proc_root):
         if not name.isdigit():
             continue
         try:
-            with open("/proc/%s/status" % name) as fh:
+            with open(os.path.join(proc_root, name, "status")) as fh:
+                mine, threads = False, 1
                 for line in fh:
                     if line.startswith("Uid:"):
                         fields = line.split()
-                        count += len(fields) > 1 and fields[1] == want
-                        break
+                        mine = len(fields) > 1 and fields[1] == want
+                        if not mine:
+                            break
+                    elif line.startswith("Threads:"):
+                        fields = line.split()
+                        if len(fields) > 1 and fields[1].isdigit():
+                            threads = max(1, int(fields[1]))
         except OSError:
             continue                      # the pid exited during the scan
+        count += threads if mine else 0
     return count
 
 
@@ -2537,6 +2922,13 @@ def _restricted_scope(args, target, cwd):
     timeout = parse_timeout(args.timeout)
     status_fd = parse_status_fd(args.status_fd, timeout)
     validate_restricted(args, target[0], cwd, writes)
+    # Egress (exit 2 usage / exit 3 platform), then the socket itself (exit 3).
+    egress_port, egress_socket = validate_egress(args,
+                                                 _platform_key(sys.platform))
+    if egress_socket is not None:
+        reason = egress_socket_refusal(egress_socket)
+        if reason is not None:
+            _containment_refusal("--egress-socket: %s" % (reason,))
 
     read_rules, exec_rules, meta, base = (), (), (), ()
     if args.restrict_reads:
@@ -2546,6 +2938,16 @@ def _restricted_scope(args, target, cwd):
             + [rule[0] for rule in exec_rules] + [cwd])
         if _platform_key(sys.platform) == "linux":
             base = linux_base_reads()
+    # The forwarder's interpreter must already be visible inside the root;
+    # refuse here (exit 3) rather than let the bwrap builder raise later.
+    fwd_python = None
+    if egress_socket is not None:
+        fwd_python = egress_python(base, read_rules)
+        if fwd_python is None:
+            _containment_refusal(
+                "--egress-socket: the forwarder interpreter %s (or its stdlib "
+                "prefix) is not visible inside the restricted root; grant it "
+                "with --read" % (os.path.realpath(sys.executable or ""),))
     return Scope(
         writes=writes,
         net=args.net,
@@ -2566,6 +2968,9 @@ def _restricted_scope(args, target, cwd):
         status_fd=status_fd,
         limits=limits,
         nproc_headroom=nproc_headroom,
+        egress_port=egress_port,
+        egress_socket=egress_socket,
+        egress_python=fwd_python,
     )
 
 

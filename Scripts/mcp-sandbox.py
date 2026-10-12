@@ -36,6 +36,7 @@ import contextvars
 import difflib
 import errno
 import fcntl
+import ipaddress
 import json
 import logging
 import math
@@ -43,9 +44,11 @@ import os
 import platform
 import re
 import secrets
+import select
 import selectors
 import shutil
 import signal
+import socket
 import stat
 import struct
 import subprocess
@@ -386,6 +389,12 @@ class Limits(NamedTuple):
     min_free_bytes: int
 
 
+class NetworkConfig(NamedTuple):
+    allow: Tuple[str, ...]           # exact hosts and "*.suffix" patterns
+    ports: Tuple[int, ...]           # default (443,)
+    nat64: Tuple[Any, ...] = ()      # configured NAT64 prefixes (IPv6Network), refused like 64:ff9b::/96
+
+
 class SandboxConfig(NamedTuple):
     sbx: str
     work_root: str
@@ -393,6 +402,7 @@ class SandboxConfig(NamedTuple):
     limits: Limits
     seccomp: str                     # "auto" | "on" | "off"
     log_content: bool
+    network: Optional[NetworkConfig] = None   # None: no egress at all
 
 
 class RunRequest(NamedTuple):
@@ -609,6 +619,14 @@ _CONFIG_MAX_BYTES = 1 * _MIB
 
 _CONFIG_KEYS = frozenset({"version", "sbx", "work_root", "seccomp", "log_content",
                           "interpreters", "limits"})
+# Optional top-level keys: absent is today's runner.
+_CONFIG_OPTIONAL_KEYS = frozenset({"network"})
+_NETWORK_KEYS = frozenset({"allow", "ports", "nat64"})
+_NETWORK_ALLOW_MAX = 64
+_NETWORK_PORTS_MAX = 8
+_NETWORK_DEFAULT_PORTS = (443,)
+_NETWORK_NAT64_MAX = 8
+_NAT64_PREFIX_LENGTHS = (32, 40, 48, 56, 64, 96)   # RFC 6052 section 2.2
 _INTERPRETER_NAMES = frozenset({"python3", "bash", "node"})
 _INTERPRETER_KEYS = frozenset({"path", "extra_reads", "site"})
 # "site" drops python3's -S so a venv interpreter's site-packages reaches
@@ -860,11 +878,127 @@ def _cfg_limits(value: Any) -> Limits:
     )
 
 
+_HOST_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_HEX_LABEL_RE = re.compile(r"0x[0-9a-f]*")
+
+
+def _hostname_problem(host: Any) -> Optional[str]:
+    """Why *host* is not a lower-case DNS hostname this runner will name, or
+    None. Never quotes the host. An IP literal in any inet_aton spelling (a
+    numeric or hex last label, or anything inet_aton accepts) is refused."""
+    if not isinstance(host, str) or not host:
+        return "must be a non-empty string"
+    if len(host) > 253:
+        return "must be at most 253 characters"
+    if host.endswith("."):
+        return "a trailing dot is refused"
+    labels = host.split(".")
+    for label in labels:
+        if not _HOST_LABEL_RE.fullmatch(label):
+            return ("must be dot-separated lower-case labels of a-z, 0-9 and '-' "
+                    "(1-63 characters, no leading or trailing '-')")
+    last = labels[-1]
+    if last.isdigit() or _HEX_LABEL_RE.fullmatch(last):
+        return "an IP literal is refused"
+    try:
+        socket.inet_aton(host)
+    except (OSError, ValueError):
+        return None
+    return "an IP literal is refused"
+
+
+def _cfg_network(value: Any) -> NetworkConfig:
+    """The optional "network" object: an allowlist of exact hosts or "*."
+    patterns (strict subdomains) and the ports they may be reached on."""
+    net = _cfg_keys(value, "network", _NETWORK_KEYS, frozenset({"allow"}))
+    allow = net["allow"]
+    if not isinstance(allow, list):
+        raise ConfigError("network.allow: must be a list")
+    if not allow:
+        raise ConfigError("network.allow: at least one pattern is required")
+    if len(allow) > _NETWORK_ALLOW_MAX:
+        raise ConfigError(f"network.allow: more than {_NETWORK_ALLOW_MAX} patterns")
+    for i, pattern in enumerate(allow):
+        if not isinstance(pattern, str):
+            raise ConfigError(f"network.allow[{i}]: must be a string")
+        host = pattern[2:] if pattern.startswith("*.") else pattern
+        problem = _hostname_problem(host)
+        if problem is not None:
+            raise ConfigError(f"network.allow[{i}]: {problem} (a pattern is a host or "
+                              f"'*.' followed by a host)")
+        if pattern.startswith("*.") and "." not in host:
+            # "*.com" would allow every name under a whole top-level domain.
+            raise ConfigError(f"network.allow[{i}]: a '*.' pattern needs a host of at least "
+                              f"two labels")
+    if len(set(allow)) != len(allow):
+        raise ConfigError("network.allow: duplicate patterns")
+    ports = net.get("ports", list(_NETWORK_DEFAULT_PORTS))
+    if not isinstance(ports, list):
+        raise ConfigError("network.ports: must be a list")
+    if not ports:
+        raise ConfigError("network.ports: at least one port is required")
+    if len(ports) > _NETWORK_PORTS_MAX:
+        raise ConfigError(f"network.ports: more than {_NETWORK_PORTS_MAX} ports")
+    out = tuple(_cfg_int(port, f"network.ports[{i}]", 1, 65535) for i, port in enumerate(ports))
+    if len(set(out)) != len(out):
+        raise ConfigError("network.ports: duplicate ports")
+    return NetworkConfig(allow=tuple(allow), ports=out, nat64=_cfg_nat64(net.get("nat64", [])))
+
+
+def _cfg_nat64(value: Any) -> Tuple[Any, ...]:
+    """The optional "network.nat64" list: the site's own NAT64 prefixes
+    (RFC 6052 lengths, IPv6 only), refused as egress targets like the
+    well-known ones."""
+    if not isinstance(value, list):
+        raise ConfigError("network.nat64: must be a list")
+    if len(value) > _NETWORK_NAT64_MAX:
+        raise ConfigError(f"network.nat64: more than {_NETWORK_NAT64_MAX} prefixes")
+    nets = []
+    for i, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ConfigError(f"network.nat64[{i}]: must be a string")
+        try:
+            net = ipaddress.ip_network(item, strict=True)
+        except ValueError:
+            raise ConfigError(f"network.nat64[{i}]: must be an IPv6 prefix with no host "
+                              f"bits set") from None
+        if net.version != 6:
+            raise ConfigError(f"network.nat64[{i}]: must be an IPv6 prefix")
+        if net.prefixlen not in _NAT64_PREFIX_LENGTHS:
+            raise ConfigError(f"network.nat64[{i}]: prefix length must be one of "
+                              f"{', '.join(str(n) for n in _NAT64_PREFIX_LENGTHS)}")
+        nets.append(net)
+    if len(set(nets)) != len(nets):
+        raise ConfigError("network.nat64: duplicate prefixes")
+    return tuple(nets)
+
+
 def _default_work_root() -> str:
     """A6: the work root when the config says null."""
     if sys.platform == "darwin":
         return os.path.join(os.path.realpath(tempfile.gettempdir()), f"mcp-sandbox-{os.geteuid()}")
     return os.path.join(os.path.expanduser("~"), ".cache", "mcp-sandbox", "work")
+
+
+def _path_covers(outer: str, inner: str) -> bool:
+    """True when *outer* equals *inner* or is one of its ancestors."""
+    if outer == inner:
+        return True
+    return inner.startswith(outer.rstrip("/") + "/")
+
+
+def _refuse_reads_over_work_root(interpreters: Dict[str, InterpreterSpec], work_root: str) -> None:
+    """An extra_reads entry that equals or contains the work root would let a
+    run read sibling runs' workdirs and egress sockets. Compared spelled and
+    resolved (realpath resolves the existing prefix of a path not created
+    yet, so a work root under a symlinked /tmp is still caught)."""
+    roots = {os.path.normpath(work_root), os.path.realpath(work_root)}
+    for name in sorted(interpreters):
+        for i, entry in enumerate(interpreters[name].extra_reads):
+            forms = {os.path.normpath(entry), os.path.realpath(entry)}
+            if any(_path_covers(form, root) for form in forms for root in roots):
+                raise ConfigError(f"interpreters.{name}.extra_reads[{i}]: must not be the "
+                                  f"work root or one of its ancestors")
 
 
 def load_config(path: str) -> SandboxConfig:
@@ -886,7 +1020,7 @@ def load_config(path: str) -> SandboxConfig:
     except RecursionError:
         raise ConfigError("config: nested too deeply") from None
     _refuse_duplicate_keys_parse(text)
-    cfg = _cfg_keys(obj, "config", _CONFIG_KEYS, _CONFIG_KEYS)
+    cfg = _cfg_keys(obj, "config", _CONFIG_KEYS | _CONFIG_OPTIONAL_KEYS, _CONFIG_KEYS)
 
     version = cfg["version"]
     if not isinstance(version, int) or isinstance(version, bool) or version != 1:
@@ -901,6 +1035,9 @@ def load_config(path: str) -> SandboxConfig:
     else:
         work_root = _cfg_abs_path(work_root, "work_root")
 
+    interpreters = _cfg_interpreters(cfg["interpreters"])
+    _refuse_reads_over_work_root(interpreters, work_root)
+
     seccomp = cfg["seccomp"]
     if not isinstance(seccomp, str) or seccomp not in _SECCOMP_MODES:
         raise ConfigError(f"seccomp: must be one of {', '.join(_SECCOMP_MODES)}")
@@ -912,11 +1049,600 @@ def load_config(path: str) -> SandboxConfig:
     return SandboxConfig(
         sbx=sbx,
         work_root=work_root,
-        interpreters=_cfg_interpreters(cfg["interpreters"]),
+        interpreters=interpreters,
         limits=_cfg_limits(cfg["limits"]),
         seccomp=seccomp,
         log_content=log_content,
+        network=_cfg_network(cfg["network"]) if "network" in cfg else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Egress proxy: a per-run allowlisting CONNECT proxy (stdlib threads)
+# ---------------------------------------------------------------------------
+# CONNECT only; a strict head under a TOTAL deadline and a size bound; a host
+# that is a DNS name on the allowlist and a port on the port list; ONE lookup
+# whose every answer must be a global unicast address; a connect to the vetted
+# address itself (never a re-resolution); a concurrent tunnel cap; idle and
+# connect timeouts; close() ends every tunnel and thread. The log carries
+# metadata (host, port, status, byte counts), never a payload byte.
+# Module globals are read at use, so a test can patch them.
+
+_EGRESS_HEAD_MAX = 8192            # bytes in a request head, terminator included
+_EGRESS_HEADERS_MAX = 64           # header lines after the request line
+_EGRESS_HEAD_DEADLINE_S = 10.0     # TOTAL time to deliver the head
+_EGRESS_MAX_TUNNELS = 8            # concurrent tunnels per run
+_EGRESS_MAX_CONNECTIONS = 32       # concurrent client connections (head + tunnel)
+_EGRESS_GLOBAL_CONNECTIONS = 64    # the same, summed over every run's proxy in this process
+_EGRESS_GLOBAL_BUDGET = threading.BoundedSemaphore(_EGRESS_GLOBAL_CONNECTIONS)
+_EGRESS_CONNECT_TIMEOUT_S = 10.0
+_EGRESS_IDLE_S = 120.0             # a tunnel with no byte either way this long ends
+_EGRESS_SEND_TIMEOUT_S = 30.0
+_EGRESS_TICK_S = 0.1
+_EGRESS_BIND_ATTEMPTS = 8           # ports tried for a free 127.0.0.1:N + [::1]:N pair
+_EGRESS_LINGER_S = 0.25            # drain after a refusal so the answer is not reset
+_EGRESS_CLOSE_S = 1.0              # a run's proxy close bound, after sbx is reaped
+_EGRESS_CHUNK = 64 * _KIB
+_EGRESS_REASONS = {200: "Connection established", 400: "Bad Request", 403: "Forbidden",
+                   405: "Method Not Allowed", 408: "Request Timeout",
+                   431: "Request Header Fields Too Large", 502: "Bad Gateway",
+                   503: "Service Unavailable"}
+_CONNECT_PORT_RE = re.compile(r"[0-9]{1,5}")
+_CONNECT_HOST_RE = re.compile(r"[A-Za-z0-9._\-\[\]:]+")
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_HEADER_VALUE_BAD_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+# 64:ff9b::/96 and 64:ff9b:1::/48 (NAT64) carry an IPv4 address inside.
+_NAT64_NETS = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
+# IANA IPv4 special-purpose ranges that are not globally reachable, checked
+# before is_global: the interpreter's own tables differ by patch level (the
+# CVE-2024-4032 fix), this list does not.
+_EGRESS_V4_DENY = tuple(ipaddress.ip_network(net) for net in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+    "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16",
+    "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+    "255.255.255.255/32"))
+
+
+class EgressRefusal(Exception):
+    """A refused CONNECT: `status` is the HTTP status the client is sent."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def parse_connect_head(head: bytes) -> Tuple[str, int]:
+    """The (lower-cased host, port) of a CONNECT request head, or EgressRefusal:
+    405 for any other method, 431 over the size or header-count bound, 400 for
+    every malformed head. The host is NOT vetted here (egress_host_refusal)."""
+    if len(head) > _EGRESS_HEAD_MAX:
+        raise EgressRefusal(431, "request head too large")
+    if not head.endswith(b"\r\n\r\n"):
+        raise EgressRefusal(400, "request head not terminated by CRLF CRLF")
+    lines = head[:-4].split(b"\r\n")
+    if any(b"\r" in line or b"\n" in line for line in lines):
+        raise EgressRefusal(400, "bare CR or LF in the request head")
+    if len(lines) - 1 > _EGRESS_HEADERS_MAX:
+        raise EgressRefusal(431, "too many header lines")
+    request = lines[0].decode("latin-1")
+    parts = request.split(" ")
+    if parts[0] != "CONNECT":
+        raise EgressRefusal(405, "only CONNECT is served")
+    if len(parts) != 3:
+        raise EgressRefusal(400, "malformed request line")
+    _method, authority, version = parts
+    if version not in ("HTTP/1.1", "HTTP/1.0"):
+        raise EgressRefusal(400, "unsupported HTTP version")
+    host, sep, port_text = authority.rpartition(":")
+    if not sep or not host or not _CONNECT_PORT_RE.fullmatch(port_text):
+        raise EgressRefusal(400, "the target must be host:port")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise EgressRefusal(400, "port out of range")
+    if not _CONNECT_HOST_RE.fullmatch(host):
+        raise EgressRefusal(400, "malformed target host")
+    for raw in lines[1:]:
+        line = raw.decode("latin-1")
+        name, colon, value = line.partition(":")
+        if not colon or not _HEADER_NAME_RE.fullmatch(name):
+            raise EgressRefusal(400, "malformed header line")
+        if _HEADER_VALUE_BAD_RE.search(value):
+            raise EgressRefusal(400, "control character in a header value")
+    return host.lower(), port
+
+
+def egress_host_refusal(host: str) -> Optional[str]:
+    """Why *host* may not be a CONNECT target (an IP literal in any spelling, a
+    trailing dot, a malformed label), or None. Never quotes the host."""
+    return _hostname_problem(host)
+
+
+def egress_host_allowed(host: str, patterns) -> bool:
+    """True when *host* equals an exact pattern or is a STRICT subdomain of a
+    "*.suffix" pattern (the apex never matches)."""
+    for pattern in patterns:
+        if pattern.startswith("*."):
+            suffix = pattern[1:]                      # ".suffix"
+            if host.endswith(suffix) and len(host) > len(suffix):
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
+def egress_address_public(addr: str, nat64: Tuple[Any, ...] = ()) -> bool:
+    """True only for a global unicast address; an address that embeds another
+    (v4-mapped, 6to4, Teredo, NAT64 -- well-known or one of the configured
+    *nat64* prefixes) is refused outright, as is anything that does not
+    parse."""
+    try:
+        ip = ipaddress.ip_address(addr)
+    except (ValueError, TypeError):
+        return False
+    if isinstance(ip, ipaddress.IPv4Address) and any(ip in net for net in _EGRESS_V4_DENY):
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in nat64):
+        return False
+    if (ip.is_multicast or ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_unspecified or ip.is_reserved):
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        if (ip.ipv4_mapped is not None or ip.sixtofour is not None or ip.teredo is not None
+                or ip.is_site_local or any(ip in net for net in _NAT64_NETS)):
+            return False
+    return bool(ip.is_global)
+
+
+def _default_resolver(host: str, port: int) -> list:
+    # Looked up absolute: a relative name lets resolv.conf search/ndots turn
+    # an NXDOMAIN allowlisted name into name.<search-domain>. The client's
+    # own trailing dot is refused before this (egress_host_refusal).
+    return socket.getaddrinfo(host + ".", port, type=socket.SOCK_STREAM,
+                              proto=socket.IPPROTO_TCP)
+
+
+def _default_connector(family: int, sockaddr: tuple, timeout: float,
+                       stop: Optional[threading.Event] = None) -> socket.socket:
+    """Connect within *timeout*, in _EGRESS_TICK_S ticks so a set *stop*
+    abandons the attempt (ECANCELED) instead of holding close() for the
+    whole connect timeout."""
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.setblocking(False)
+        err = sock.connect_ex(sockaddr)
+        if err not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK):
+            raise OSError(err, os.strerror(err))
+        deadline = time.monotonic() + timeout
+        while err != 0:
+            if stop is not None and stop.is_set():
+                raise OSError(errno.ECANCELED, "egress proxy closing")
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise OSError(errno.ETIMEDOUT, "connect timed out")
+            _r, ready, _x = select.select([], [sock], [], min(left, _EGRESS_TICK_S))
+            if ready:
+                err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if err != 0:
+                    raise OSError(err, os.strerror(err))
+        sock.settimeout(timeout)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+# sbx's in-netns forwarder port on Linux (sbx EGRESS_FORWARD_PORT; a hand
+# copy pinned equal by row D7): the script's proxy URL there.
+_EGRESS_LINUX_PORT = 3128
+
+
+# AF_UNIX sun_path bytes usable for a NUL-terminated path (108 / 104 - 1).
+_SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107
+
+
+class EgressSocketTooLong(ValueError):
+    """<sock_dir>/s is over the AF_UNIX limit and no short alias exists here."""
+
+
+class EgressProxy:
+    """One run's CONNECT proxy. `kind` "tcp" listens on 127.0.0.1 (endpoint
+    ("port", N)); "unix" binds <sock_dir>/s (endpoint ("socket", path)), the
+    caller owning a 0700 sock_dir. start() once, close(deadline) once."""
+
+    def __init__(self, network: NetworkConfig, kind: str, resolver=None, connector=None,
+                 sock_dir: Optional[str] = None) -> None:
+        if kind not in ("tcp", "unix"):
+            raise ValueError("kind must be tcp or unix")
+        if kind == "unix" and not sock_dir:
+            raise ValueError("a unix endpoint needs sock_dir")
+        self._network = network
+        self._kind = kind
+        self._resolver = resolver or _default_resolver
+        self._sock_dir = sock_dir
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._connector = connector or (
+            lambda family, sockaddr, timeout: _default_connector(family, sockaddr, timeout,
+                                                                 self._stop))
+        self._listener: Optional[socket.socket] = None
+        self._listener6: Optional[socket.socket] = None
+        self._accept_thread: Optional[threading.Thread] = None
+        self._threads: List[threading.Thread] = []
+        self._socks: set = set()
+        self._active = 0
+        self._connections = 0
+        self._budget = _EGRESS_GLOBAL_BUDGET   # bound at construction: acquire and release pair up
+        self._tunnels = 0
+        self._refused = 0
+        self._closed = False
+        self.endpoint: Optional[Tuple[str, Any]] = None
+
+    # -- lifecycle ---------------------------------------------------------
+    def start(self) -> None:
+        if self._kind == "tcp":
+            lsock, self._listener6 = self._bind_tcp()
+            self.endpoint = ("port", lsock.getsockname()[1])
+        else:
+            st = os.lstat(self._sock_dir)
+            if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
+                    or st.st_mode & 0o077):
+                raise ValueError("sock_dir must be a 0700 directory owned by the current user")
+            path = os.path.join(self._sock_dir, "s")
+            lsock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                self._bind_unix(lsock, path, st)
+                lsock.listen(16)
+            except BaseException:
+                lsock.close()
+                raise
+            self.endpoint = ("socket", path)
+        self._listener = lsock
+        self._accept_thread = threading.Thread(target=self._accept_loop,
+                                               name="sandbox-egress-accept", daemon=True)
+        self._accept_thread.start()
+        log.info("egress: proxy listening (%s)", self._kind)
+
+    def _bind_tcp(self) -> Tuple[socket.socket, Optional[socket.socket]]:
+        """Listen on 127.0.0.1:N and [::1]:N together. sbx's Seatbelt rule
+        (remote tcp "localhost:N") admits both loopbacks, so a [::1]:N left
+        free could be bound by another local uid and receive the script's
+        un-allowlisted connection. A taken [::1]:N retries with a fresh
+        port, then fails closed; a host with no IPv6 loopback stays v4-only
+        (nobody can bind ::1 there either)."""
+        for _attempt in range(_EGRESS_BIND_ATTEMPTS):
+            v4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            v6: Optional[socket.socket] = None
+            try:
+                v4.bind(("127.0.0.1", 0))
+                port = v4.getsockname()[1]
+                try:
+                    v6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                    v6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                    v6.bind(("::1", port))
+                except OSError as exc:
+                    if v6 is not None:
+                        v6.close()
+                        v6 = None
+                    if exc.errno == errno.EADDRINUSE:
+                        v4.close()
+                        continue
+                    if exc.errno not in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL,
+                                         errno.EPROTONOSUPPORT):
+                        raise
+                v4.listen(16)
+                if v6 is not None:
+                    v6.listen(16)
+            except BaseException:
+                if v6 is not None:
+                    v6.close()
+                v4.close()
+                raise
+            return v4, v6
+        raise OSError(errno.EADDRINUSE, "no port free on both 127.0.0.1 and ::1")
+
+    def _bind_unix(self, lsock: socket.socket, path: str, dir_st: os.stat_result) -> None:
+        """Bind *lsock* at *path* (<sock_dir>/s). A path over the AF_UNIX
+        sun_path limit (a deep work_root) is bound on Linux through the short
+        alias /proc/self/fd/<dirfd>/s: the socket inode still lands at *path*,
+        which is what sbx --egress-socket is given and checks. The alias is
+        used only when needed, so the common case never depends on /proc.
+        Elsewhere a too-long path is refused by name."""
+        if len(os.fsencode(path)) <= _SUN_PATH_MAX:
+            lsock.bind(path)
+            return
+        if not sys.platform.startswith("linux"):
+            raise EgressSocketTooLong(
+                "the egress socket path exceeds the AF_UNIX limit; shorten work_root")
+        dfd = os.open(self._sock_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                      | os.O_CLOEXEC)
+        try:
+            fst = os.fstat(dfd)
+            if (fst.st_dev, fst.st_ino) != (dir_st.st_dev, dir_st.st_ino):
+                raise ValueError("sock_dir changed while the egress socket was bound")
+            lsock.bind("/proc/self/fd/%d/s" % dfd)
+        finally:
+            os.close(dfd)
+
+    def close(self, deadline: float) -> None:
+        """End every tunnel and thread by *deadline* (time.monotonic())."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._stop.set()
+        if self._accept_thread is not None:
+            self._accept_thread.join(max(0.0, deadline - time.monotonic()))
+        if self._listener is not None:
+            self._listener.close()
+        if self._listener6 is not None:
+            self._listener6.close()
+        if self.endpoint is not None and self.endpoint[0] == "socket":
+            try:
+                os.unlink(self.endpoint[1])
+            except OSError:
+                pass
+        with self._lock:
+            socks = list(self._socks)
+            threads = list(self._threads)
+        for sock in socks:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        log.info("egress: proxy closed (tunnels %d, refused %d)", self._tunnels, self._refused)
+
+    def summary(self) -> dict:
+        with self._lock:
+            return {"tunnels": self._tunnels, "refused": self._refused}
+
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+    # -- internals ---------------------------------------------------------
+    def _track(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._socks.add(sock)
+        if self._stop.is_set():
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def _untrack_close(self, sock: Optional[socket.socket]) -> None:
+        if sock is None:
+            return
+        with self._lock:
+            self._socks.discard(sock)
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _accept_loop(self) -> None:
+        listeners = [s for s in (self._listener, self._listener6) if s is not None]
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select(listeners, [], [], _EGRESS_TICK_S)
+            except (OSError, ValueError):
+                return
+            if not ready or self._stop.is_set():
+                continue
+            for lsock in ready:
+                self._accept_one(lsock)
+
+    def _accept_one(self, lsock: socket.socket) -> None:
+        try:
+            client, _addr = lsock.accept()
+        except OSError:
+            return
+        with self._lock:
+            over = (self._connections >= _EGRESS_MAX_CONNECTIONS
+                    or not self._budget.acquire(blocking=False))
+            if not over:
+                self._connections += 1
+                self._threads = [t for t in self._threads if t.is_alive()]
+        if over:
+            log.info("egress: connection dropped (connection cap)")
+            client.close()
+            return
+        thread = threading.Thread(target=self._serve, args=(client,),
+                                  name="sandbox-egress-conn", daemon=True)
+        with self._lock:
+            self._threads.append(thread)
+        thread.start()
+
+    def _answer(self, client: socket.socket, status: int) -> None:
+        reply = "HTTP/1.1 %d %s\r\n" % (status, _EGRESS_REASONS.get(status, "Error"))
+        if status != 200:
+            reply += "Content-Length: 0\r\nConnection: close\r\n"
+        try:
+            client.settimeout(_EGRESS_SEND_TIMEOUT_S)
+            client.sendall((reply + "\r\n").encode("ascii"))
+        except OSError:
+            pass
+
+    def _refuse(self, client: socket.socket, status: int, why: str,
+                host: Optional[str] = None, port: Optional[int] = None) -> None:
+        with self._lock:
+            self._refused += 1
+        if host is None:
+            log.info("egress: refused %d (%s)", status, why)
+        else:
+            log.info("egress: refused %d %s:%d (%s)", status, _log_value(host), port, why)
+        self._answer(client, status)
+        # Half-close and drain briefly: closing with unread input would reset
+        # the connection and could discard the answer.
+        try:
+            client.shutdown(socket.SHUT_WR)
+            end = time.monotonic() + _EGRESS_LINGER_S
+            while not self._stop.is_set():
+                left = end - time.monotonic()
+                if left <= 0:
+                    break
+                ready, _, _ = select.select([client], [], [], min(left, _EGRESS_TICK_S))
+                if ready and not client.recv(_EGRESS_CHUNK):
+                    break
+        except (OSError, ValueError):
+            pass
+
+    def _read_head(self, client: socket.socket) -> Tuple[bytes, bytes]:
+        """(head, bytes after it) under the TOTAL deadline, or EgressRefusal."""
+        deadline = time.monotonic() + _EGRESS_HEAD_DEADLINE_S
+        buf = b""
+        while True:
+            end = buf.find(b"\r\n\r\n")
+            if end >= 0:
+                return buf[:end + 4], buf[end + 4:]
+            if b"\n\n" in buf or b"\n\r\n" in buf:
+                return buf, b""                          # parse refuses the bare LF
+            if len(buf) > _EGRESS_HEAD_MAX:
+                raise EgressRefusal(431, "request head too large")
+            if self._stop.is_set():
+                raise EgressRefusal(503, "proxy closing")
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise EgressRefusal(408, "request head deadline")
+            ready, _, _ = select.select([client], [], [], min(left, _EGRESS_TICK_S))
+            if not ready:
+                continue
+            chunk = client.recv(_EGRESS_HEAD_MAX + 1 - len(buf) if len(buf) <= _EGRESS_HEAD_MAX else 1)
+            if not chunk:
+                raise EgressRefusal(400, "connection closed before the head ended")
+            buf += chunk
+
+    def _serve(self, client: socket.socket) -> None:
+        upstream: Optional[socket.socket] = None
+        reserved = False
+        self._track(client)
+        try:
+            try:
+                head, rest = self._read_head(client)
+            except EgressRefusal as exc:
+                self._refuse(client, exc.status, str(exc))
+                return
+            except OSError:
+                return
+            try:
+                host, port = parse_connect_head(head)
+            except EgressRefusal as exc:
+                self._refuse(client, exc.status, str(exc))
+                return
+            problem = egress_host_refusal(host)
+            if problem is not None:
+                self._refuse(client, 403, "host refused: " + problem)
+                return
+            if port not in self._network.ports:
+                self._refuse(client, 403, "port not allowed", host, port)
+                return
+            if not egress_host_allowed(host, self._network.allow):
+                self._refuse(client, 403, "host not allowlisted", host, port)
+                return
+            with self._lock:
+                if self._active >= _EGRESS_MAX_TUNNELS:
+                    full = True
+                else:
+                    full = False
+                    self._active += 1
+                    reserved = True
+            if full:
+                self._refuse(client, 503, "tunnel cap reached", host, port)
+                return
+            try:
+                answers = list(self._resolver(host, port))
+            except (OSError, UnicodeError, ValueError):
+                self._refuse(client, 502, "lookup failed", host, port)
+                return
+            if self._stop.is_set():
+                return
+            if not answers:
+                self._refuse(client, 502, "lookup returned nothing", host, port)
+                return
+            for answer in answers:
+                if not egress_address_public(str(answer[4][0]), self._network.nat64):
+                    self._refuse(client, 403, "a resolved address is not global", host, port)
+                    return
+            last_error = "no address"
+            for family, _type, _proto, _canon, sockaddr in answers:
+                if self._stop.is_set():
+                    return
+                try:
+                    upstream = self._connector(family, sockaddr, _EGRESS_CONNECT_TIMEOUT_S)
+                    break
+                except OSError as exc:
+                    last_error = _errno_name(exc)
+            if upstream is None:
+                if self._stop.is_set():
+                    return
+                self._refuse(client, 502, "connect failed (%s)" % last_error, host, port)
+                return
+            # A connect that returned after close() began is not a tunnel:
+            # the finally closes the late upstream and close()'s summary
+            # stays final.
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                self._socks.add(upstream)
+                self._tunnels += 1
+            log.info("egress: tunnel open %s:%d via %s", _log_value(host), port,
+                     _log_value(str(sockaddr[0])))
+            self._answer(client, 200)
+            up, down = self._splice(client, upstream, rest)
+            log.info("egress: tunnel closed %s:%d (up %d bytes, down %d bytes)",
+                     _log_value(host), port, up, down)
+        finally:
+            self._untrack_close(upstream)
+            self._untrack_close(client)
+            with self._lock:
+                self._connections -= 1
+                self._budget.release()
+                if reserved:
+                    self._active -= 1
+
+    def _splice(self, client: socket.socket, upstream: socket.socket,
+                rest: bytes) -> Tuple[int, int]:
+        """Copy bytes both ways until both sides end, the tunnel idles out,
+        or the proxy closes. An EOF from one side is relayed as a
+        shutdown(SHUT_WR) of the other and the other direction keeps
+        flowing (a half-closed request still gets its whole response).
+        Returns (bytes up, bytes down)."""
+        up = down = 0
+        try:
+            client.settimeout(_EGRESS_SEND_TIMEOUT_S)
+            upstream.settimeout(_EGRESS_SEND_TIMEOUT_S)
+            if rest:
+                upstream.sendall(rest)
+                up += len(rest)
+            peer = {client: upstream, upstream: client}
+            reading = [client, upstream]
+            last = time.monotonic()
+            while reading and not self._stop.is_set():
+                if time.monotonic() - last > _EGRESS_IDLE_S:
+                    log.info("egress: tunnel idle timeout")
+                    break
+                ready, _, _ = select.select(reading, [], [], _EGRESS_TICK_S)
+                if not ready:
+                    continue
+                last = time.monotonic()
+                for sock in ready:
+                    data = sock.recv(_EGRESS_CHUNK)
+                    if not data:
+                        reading.remove(sock)
+                        try:
+                            peer[sock].shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                        continue
+                    peer[sock].sendall(data)
+                    if sock is client:
+                        up += len(data)
+                    else:
+                        down += len(data)
+        except (OSError, ValueError):
+            pass
+        return up, down
 
 
 # ---------------------------------------------------------------------------
@@ -1856,6 +2582,8 @@ _LEAF_OPEN = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _WORKDIR_RE = re.compile(r"^[0-9a-f]{32}\Z")
 _LOCK_NAME = ".lock"
 _QUARANTINE_NAME = "quarantine"
+# The runner's own parent of the Linux per-run egress socket directories.
+_EGRESS_NAME = "egress"
 
 # KD-18 step 6: more quarantined workdirs than this and the runner is degraded.
 _QUARANTINE_MAX = 16
@@ -1934,6 +2662,32 @@ def _vet_owned_dir(st: os.stat_result, what: str) -> None:
         _refuse_start("%s must not be accessible to group or others (chmod 700)" % what)
 
 
+def _open_egress_root(root_fd: int, create: bool) -> int:
+    """Create (when *create*), open and vet egress/ under the work root, the
+    runner's own parent of every Linux run's <32-hex>/s egress socket
+    directory: never inside a run workdir, never under a socket directory
+    sbx refuses (/tmp). A non-directory or a symlink at the name refuses
+    the start, exactly as one at quarantine/ does. Returns the fd; the
+    caller closes it."""
+    if create:
+        try:
+            os.mkdir(_EGRESS_NAME, 0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            _refuse_start("cannot create egress/ (%s)" % _errno_name(exc))
+    try:
+        e_fd = os.open(_EGRESS_NAME, _DIR_OPEN, dir_fd=root_fd)
+    except OSError as exc:
+        _refuse_start("cannot open egress/ (%s)" % _errno_name(exc))
+    try:
+        _vet_owned_dir(os.fstat(e_fd), "egress/")
+    except BaseException:
+        _close_quietly(e_fd)
+        raise
+    return e_fd
+
+
 def prepare_work_root(path: str) -> Tuple[int, int, int]:
     """Open the work root, take its single-owner lock and open quarantine/.
 
@@ -1989,6 +2743,7 @@ def prepare_work_root(path: str) -> Tuple[int, int, int]:
         except OSError as exc:
             _refuse_start("cannot open quarantine/ (%s)" % _errno_name(exc))
         _vet_owned_dir(os.fstat(q_fd), "quarantine/")
+        _close_quietly(_open_egress_root(root_fd, create=True))
     except BaseException:
         _close_quietly(q_fd, lock_fd, root_fd)
         raise
@@ -2018,8 +2773,10 @@ def sweep_work_root(root_fd: int, quarantine_fd: int, deadline: float) -> int:
     """The startup sweep, under ONE shared absolute *deadline* (R3:M4).
 
     Every name is validated before anything is removed: the work root may
-    hold only ^[0-9a-f]{32}$ leftovers, .lock and quarantine; quarantine/
-    only ^[0-9a-f]{32}$ entries; anything else refuses the start. Leftovers
+    hold only ^[0-9a-f]{32}$ leftovers, .lock, quarantine and egress;
+    quarantine/ and egress/ only ^[0-9a-f]{32}$ entries; anything else
+    refuses the start. Stale egress/ entries are removed first (a failure
+    is logged, never quarantined: they hold only a runner socket). Leftovers
     are removed with remove_tree against the shared deadline; one that
     resists, or is not reached, is quarantined. The quarantine is then
     retried until the deadline. Returns the quarantine count; a count above
@@ -2032,7 +2789,7 @@ def sweep_work_root(root_fd: int, quarantine_fd: int, deadline: float) -> int:
         _refuse_start("cannot list the work root (%s)" % _errno_name(exc))
     leftovers = []
     for name in top:
-        if name in (_LOCK_NAME, _QUARANTINE_NAME):
+        if name in (_LOCK_NAME, _QUARANTINE_NAME, _EGRESS_NAME):
             continue
         if not _WORKDIR_RE.match(name):
             _refuse_start("the work root holds a foreign entry %s" % _log_value(name))
@@ -2040,6 +2797,22 @@ def sweep_work_root(root_fd: int, quarantine_fd: int, deadline: float) -> int:
     for name in held:
         if not _WORKDIR_RE.match(name):
             _refuse_start("quarantine/ holds a foreign entry %s" % _log_value(name))
+    e_fd = _open_egress_root(root_fd, create=True)
+    try:
+        try:
+            stale = sorted(os.listdir(e_fd))
+        except OSError as exc:
+            _refuse_start("cannot list egress/ (%s)" % _errno_name(exc))
+        for name in stale:
+            if not _WORKDIR_RE.match(name):
+                _refuse_start("egress/ holds a foreign entry %s" % _log_value(name))
+        # A SIGKILLed runner's socket directories: no run can still use one
+        # (the work root lock is ours), and nothing of a script's is there.
+        for name in stale:
+            if not remove_tree(e_fd, name, None, deadline):
+                log.warning("startup: a stale egress/ entry was not removed")
+    finally:
+        _close_quietly(e_fd)
     quarantine = Quarantine(root_fd, quarantine_fd)
     abs_root = _root_path(root_fd)
     for name in leftovers:
@@ -3003,11 +3776,13 @@ def _script_path(plan: InterpreterPlan) -> str:
 
 
 def build_sbx_argv(plan: InterpreterPlan, req: RunRequest, wd: str, status_fd: int,
-                   cfg: SandboxConfig) -> List[str]:
+                   cfg: SandboxConfig,
+                   egress: Optional[Tuple[str, Any]] = None) -> List[str]:
     """The sbx command line of one run (pure; golden per platform, rows D).
 
     sbx's environment is _spawn_sbx's two keys; the SCRIPT's is exactly
-    PATH, HOME, TMPDIR, LANG and OUT (--clean-env + --env). The entry is
+    PATH, HOME, TMPDIR, LANG and OUT (--clean-env + --env), plus the proxy
+    variables when *egress* (an EgressProxy endpoint) is given. The entry is
     always absolute (<wd>/<entry>) and the caller's args follow it
     unchanged, after the `--` that ends sbx's own flags.
     """
@@ -3016,7 +3791,21 @@ def build_sbx_argv(plan: InterpreterPlan, req: RunRequest, wd: str, status_fd: i
     argv = [sys.executable, "-I", "-B", cfg.sbx, "--restrict-reads", "--clean-env",
             "--env", "PATH=" + _script_path(plan), "--env", "HOME=" + wd,
             "--env", "TMPDIR=" + wd + "/tmp", "--env", "LANG=C.UTF-8",
-            "--env", "OUT=" + wd + "/out", "--write", wd]
+            "--env", "OUT=" + wd + "/out"]
+    egress_flag: List[str] = []
+    if egress is not None:
+        if egress[0] == "port":
+            url = "http://127.0.0.1:%d" % int(egress[1])
+            egress_flag = ["--egress-port", str(int(egress[1]))]
+        elif egress[0] == "socket":
+            url = "http://127.0.0.1:%d" % _EGRESS_LINUX_PORT
+            egress_flag = ["--egress-socket", str(egress[1])]
+        else:
+            raise ValueError("unknown egress endpoint kind %r" % (egress[0],))
+        for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+            argv += ["--env", "%s=%s" % (key, url)]
+        argv += ["--env", "NO_PROXY=", "--env", "no_proxy="]
+    argv += ["--write", wd]
     for path in plan.reads:
         argv += ["--read", path]
     for path in plan.execs:
@@ -3028,6 +3817,7 @@ def build_sbx_argv(plan: InterpreterPlan, req: RunRequest, wd: str, status_fd: i
              "--rlimit-fsize", str(lim.fsize),
              "--rlimit-nofile", str(lim.nofile),
              "--rlimit-core", "0"]
+    argv += egress_flag
     if _seccomp_on(cfg.seccomp):
         argv.append("--seccomp")
     argv.append("--")
@@ -3320,6 +4110,55 @@ def _abandon(proc: subprocess.Popen, status: Optional[_StatusCapture]) -> None:
         _kill_target_group(status.pgid)
 
 
+class _RunEgress:
+    """One run's EgressProxy plus, on Linux, the 0700 socket directory it
+    binds in -- <work_root>/egress/<32-hex>, created OUTSIDE the run
+    workdir (the script can never touch it) and never under /tmp (sbx's
+    egress_socket_refusal refuses a socket directory), removed by close()
+    and, after a SIGKILL, by the next startup sweep. tcp on darwin, unix
+    elsewhere."""
+
+    def __init__(self, network: NetworkConfig, work_root: str) -> None:
+        self._network = network
+        self._egress_root = os.path.join(os.path.normpath(work_root), _EGRESS_NAME)
+        self._dir: Optional[str] = None
+        self._proxy: Optional[EgressProxy] = None
+        self.endpoint: Optional[Tuple[str, Any]] = None
+
+    def start(self) -> None:
+        if sys.platform == "darwin":
+            self._proxy = EgressProxy(self._network, "tcp")
+        else:
+            path = os.path.join(self._egress_root, secrets.token_hex(16))
+            os.mkdir(path, 0o700)
+            self._dir = path
+            self._proxy = EgressProxy(self._network, "unix", sock_dir=self._dir)
+        self._proxy.start()
+        self.endpoint = self._proxy.endpoint
+
+    def close(self, deadline: float) -> None:
+        try:
+            if self._proxy is not None:
+                self._proxy.close(deadline)
+        finally:
+            if self._dir is not None:
+                try:
+                    os.unlink(os.path.join(self._dir, "s"))
+                except OSError:
+                    pass
+                try:
+                    os.rmdir(self._dir)
+                except OSError as exc:
+                    log.warning("egress: socket directory not removed (%s)",
+                                _errno_name(exc))
+                self._dir = None
+
+    def summary(self) -> dict:
+        if self._proxy is None:
+            return {"tunnels": 0, "refused": 0}
+        return self._proxy.summary()
+
+
 def _spawn_and_read(cfg: SandboxConfig, req: RunRequest, plan: InterpreterPlan, wd: str,
                     wd_fd: int, run_deadline: float,
                     seen: Optional[Dict[str, Optional[int]]] = None) -> dict:
@@ -3328,12 +4167,36 @@ def _spawn_and_read(cfg: SandboxConfig, req: RunRequest, plan: InterpreterPlan, 
     the target's pgid (== its sid) from `spawned`, for the cleanup's
     survivor sweep (W6)."""
     limits = cfg.limits
-    status_r, status_w = os.pipe()
+    egress: Optional[_RunEgress] = None
+    if cfg.network is not None:
+        egress = _RunEgress(cfg.network, cfg.work_root)
+        try:
+            egress.start()
+        except EgressSocketTooLong as exc:
+            egress.close(time.monotonic() + _EGRESS_CLOSE_S)
+            log.warning("run: egress proxy could not start: %s", exc)
+            return _tool_refusal("sandbox_unavailable", str(exc))
+        except (OSError, ValueError) as exc:
+            egress.close(time.monotonic() + _EGRESS_CLOSE_S)
+            # an errno name, never an OSError message (it may carry a path);
+            # an errno-less OSError (AF_UNIX path too long) carries none
+            reason = (_errno_name(exc) if isinstance(exc, OSError) and exc.errno
+                      else "%s: %s" % (type(exc).__name__, exc))
+            log.warning("run: egress proxy could not start (%s)", reason)
+            return _tool_refusal("sandbox_unavailable",
+                                 "the egress proxy could not be started")
+    try:
+        status_r, status_w = os.pipe()
+    except BaseException:
+        if egress is not None:
+            egress.close(time.monotonic() + _EGRESS_CLOSE_S)
+        raise
     proc: Optional[subprocess.Popen] = None
     status: Optional[_StatusCapture] = None
     done = False
     try:
-        argv = build_sbx_argv(plan, req, wd, status_w, cfg)
+        argv = build_sbx_argv(plan, req, wd, status_w, cfg,
+                              egress=egress.endpoint if egress is not None else None)
         try:
             proc = _spawn_sbx(argv, stdin_pipe=req.stdin is not None, status_w=status_w, cwd=wd)
         except OSError as exc:
@@ -3367,6 +4230,11 @@ def _spawn_and_read(cfg: SandboxConfig, req: RunRequest, plan: InterpreterPlan, 
         if writer is not None:
             writer.join(max(0.0, drain - time.monotonic()))
         done = True
+        # sbx is reaped and its target group swept: no tunnel outlives the
+        # run -- close the proxy now (bounded), so the summary is final.
+        if egress is not None:
+            egress.close(min(time.monotonic() + _EGRESS_CLOSE_S,
+                             run_deadline - _CLEANUP_DEADLINE_S))
 
         if status.overflow:
             return _tool_refusal("internal", "sbx status protocol overflow")
@@ -3423,6 +4291,8 @@ def _spawn_and_read(cfg: SandboxConfig, req: RunRequest, plan: InterpreterPlan, 
             "outFiles": out_files,
             "outFilesTruncated": out_truncated,
         }
+        if egress is not None:
+            result["egress"] = egress.summary()
         log.info("run: interpreter=%s exit=%s signal=%s timedOut=%s durationMs=%d "
                  "stdout=%d stderr=%d outFiles=%d", req.interpreter, exit_code, sig_name,
                  timed_out, duration, out.size, err.size, len(out_files))
@@ -3445,6 +4315,10 @@ def _spawn_and_read(cfg: SandboxConfig, req: RunRequest, plan: InterpreterPlan, 
                         pass
             # proc.stdin belongs to the writer thread (or was never opened).
         os.close(status_r)
+        if egress is not None:
+            # Idempotent after the close above; the path for every early
+            # return and exception (sbx already abandoned/reaped here).
+            egress.close(time.monotonic() + _EGRESS_CLOSE_S)
 
 
 def _cleanup_workdir(state: Any, name: str, sid: Optional[int] = None) -> None:
@@ -4253,6 +5127,9 @@ def capabilities() -> dict:
         },
         "concurrency": {"max": state.slots.max, "inFlight": state.slots.in_flight()},
         "quarantine": {"count": state.quarantine.count(), "max": _QUARANTINE_MAX},
+        "network": ({"enabled": False, "allow": [], "ports": []} if cfg.network is None
+                    else {"enabled": True, "allow": list(cfg.network.allow),
+                          "ports": list(cfg.network.ports)}),
         "degraded": state.degraded,
     }
 

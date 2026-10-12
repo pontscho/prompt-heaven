@@ -434,6 +434,10 @@ def _run_whitebox(suite, gate, ws):
          "%s --seccomp -- true" % wrapper, repo_real),
         ("<WRAPPER> --seccomp --write . -- touch f (combines with a scope)",
          "%s --seccomp --write . -- touch f" % wrapper, repo_real),
+        # EG-ctl: the restricted form the egress rows in group M extend
+        # still auto-allows, so those rows prompt on the egress flag alone.
+        ("EG-ctl --restrict-reads --clean-env -- /bin/true",
+         "%s --restrict-reads --clean-env -- /bin/true" % wrapper, repo_real),
         # Controls for the round-2 security rows in group M: each pins the
         # NARROW form that must stay auto-allowed, so a gate that merely
         # prompts for everything cannot pass those rows.
@@ -573,6 +577,29 @@ def _run_whitebox(suite, gate, ws):
          "%s --write . -- true" % wrapper, "/var/run/user"),
         ("R2 cwd=/var/snap/lxd --write=sub (under /var/snap)",
          "%s --write=sub -- true" % wrapper, "/var/snap/lxd"),
+        # Egress (mcp-sandbox's allowlisting proxy): --egress-port and
+        # --egress-socket open ONE network path out of a restricted run --
+        # a host port or a host socket the gate cannot judge -- so they are
+        # _PROMPT_FLAGS members, like --net, in every spelling and beside
+        # every narrowing flag. Control: N `--restrict-reads` alone is not
+        # here; sbx_restrict:S17 pins the table membership.
+        ("EG1 --restrict-reads --egress-port 3128",
+         "%s --restrict-reads --egress-port 3128 -- /bin/true" % wrapper,
+         repo_real),
+        ("EG2 --restrict-reads --egress-port=3128 (equals-form)",
+         "%s --restrict-reads --egress-port=3128 -- /bin/true" % wrapper,
+         repo_real),
+        ("EG3 --restrict-reads --egress-socket /x/s",
+         "%s --restrict-reads --egress-socket /x/s -- /bin/true" % wrapper,
+         repo_real),
+        ("EG4 --dry-run --restrict-reads --clean-env --egress-socket=/x/s",
+         "%s --dry-run --restrict-reads --clean-env --egress-socket=/x/s -- "
+         "/bin/true" % wrapper, repo_real),
+        # an argparse abbreviation of either egress flag is not a table
+        # token, so it prompts as an unknown flag (never MORE permissive)
+        ("EG5 --restrict-reads --egress 3128 (abbreviation)",
+         "%s --restrict-reads --egress 3128 -- /bin/true" % wrapper,
+         repo_real),
     ]
     for name, cmd, cwd in flag_prompt:
         ok, reason = _clean(gate, cmd, cwd, wrapper_real)

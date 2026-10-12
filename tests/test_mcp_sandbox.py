@@ -138,6 +138,36 @@ Groups:
      existence oracle (E4, L5/IMPL:029) and the surviving setsid orphan
      (E10, T11).
 
+Rows added by the egress work (domain-allowlisted network for a run; a
+per-run allowlisting CONNECT proxy owned by the runner is the ONE endpoint
+the sandbox may reach):
+  A13-A15 the optional top-level "network" object -- absent is None and
+     today's runner; allow patterns (exact or a leading "*." for strict
+     subdomains; lower-case labels, no IP literal in any inet_aton spelling,
+     no bare "*", no trailing dot, at most 64, no duplicates), ports (1..65535,
+     default [443], at most 8), unknown keys -- each refusal naming the key.
+  D6/D7 the run argv with an egress endpoint: --egress-port N (darwin) or
+     --egress-socket PATH (linux) after --rlimit-core, and HTTPS_PROXY /
+     HTTP_PROXY (both cases) = http://127.0.0.1:<port> with NO_PROXY empty;
+     the linux URL's port is sbx's in-netns forwarder port (pinned equal).
+  N  the egress proxy in-process, with a stub resolver and connector (no
+     network): CONNECT-only head parsing (absolute-form 405, every malformed
+     head 400, oversize 431), IP literals in every spelling refused, the
+     allowlist (a "*." pattern never matches its apex), every resolved
+     address global (a DNS answer mixing a public and a private address is
+     refused; v4-mapped, 6to4, Teredo, NAT64, metadata, CGNAT, multicast),
+     the policy refusing before any lookup, one lookup and a connect to the
+     vetted address itself, the head's TOTAL deadline (a trickle is cut),
+     the concurrent tunnel cap, close() ending every tunnel and thread, a
+     metadata-only log, and the unix endpoint linux uses.
+  I13-I16 live through the real runner (macOS; linux too when bwrap is on
+     PATH): urllib HTTPS to the one allowlisted host (INFO when the host
+     itself cannot reach it), a non-allowlisted host / port / plain-HTTP
+     request refused by the proxy, a direct socket to an outside address or
+     another loopback port denied, DNS denied inside. I17 (with the I runner,
+     no "network"): capabilities says disabled, no proxy variable, no egress
+     member, loopback denied -- today's behaviour.
+
 Nested-sandbox INFO path (P23): F6 first runs one control sbx invocation; no
 result plus "sandbox_apply" on its stderr means a nested Seatbelt that refuses
 every profile, and F6 is recorded INFO with the stderr's first 200 chars. The
@@ -153,6 +183,7 @@ Exit code 0 iff every case passes.
 import asyncio
 import base64
 import collections
+import errno
 import json
 import logging
 import math
@@ -194,6 +225,7 @@ GRP_H = "H. workdir lifecycle, cleanup and quarantine"
 GRP_I = "I. live runs"
 GRP_G = "G. startup, plans and refresh"
 GRP_E = "E. escape suite (live)"
+GRP_N = "N. egress proxy (in-process)"
 
 MIB = 1024 * 1024
 RESPONSE_BOUND = 16 * MIB          # plan section 5: worst case <= 16 MiB
@@ -360,6 +392,14 @@ def _set_limit(key, value):
 def _set_limits(**values):
     def mutate(obj):
         obj["limits"].update(values)
+    return mutate
+
+
+def _set_network(value):
+    """A config with the optional top-level "network" object set to
+    `value` (any JSON value: the refusal rows pass non-objects too)."""
+    def mutate(obj):
+        obj["network"] = value
     return mutate
 
 
@@ -688,6 +728,210 @@ def _run_a(suite, fx):
         return problems, lines
     _guard(suite, GRP_A, "A12 interpreter-site-bool-python3-only",
            interp_site)
+
+    def network_absent():
+        """No "network" key is today's runner (no egress at all); a valid
+        object loads as NetworkConfig(allow, ports) with ports defaulting
+        to (443,)."""
+        mod = _mod()
+        problems = []
+        cfg = _accepts(mod, fx.render("a13-none"), "template (no network)",
+                       problems)
+        if cfg is not None and getattr(cfg, "network", "<absent>") is not None:
+            problems.append("no network key: cfg.network %r, want None"
+                            % (getattr(cfg, "network", "<absent>"),))
+        for label, net, allow, ports in (
+                ("one host", {"allow": ["api.github.com"]},
+                 ("api.github.com",), (443,)),
+                ("wildcard + ports", {"allow": ["*.example.org",
+                                                "xn--bcher-kva.example"],
+                                      "ports": [443, 8443]},
+                 ("*.example.org", "xn--bcher-kva.example"), (443, 8443))):
+            cfg = _accepts(mod, fx.render("a13", mutate=_set_network(net)),
+                           label, problems)
+            got = getattr(cfg, "network", None) if cfg is not None else None
+            if cfg is not None and (
+                    tuple(getattr(got, "allow", ()) or ()) != allow
+                    or tuple(getattr(got, "ports", ()) or ()) != ports):
+                problems.append("%s: loaded %r, want allow %r ports %r"
+                                % (label, got, allow, ports))
+        return problems, []
+    _guard(suite, GRP_A, "A13 network-absent-none-present-loaded",
+           network_absent)
+
+    def network_patterns():
+        """D1's grammar: lower-case hostnames, exact or a leading "*." that
+        matches strict subdomains, labels 1-63 of [a-z0-9-] not starting or
+        ending with "-", no IP literal in any spelling, no bare "*", no
+        trailing dot, at most 64 patterns, no duplicates. Each refusal names
+        network.allow, never the value."""
+        mod = _mod()
+        problems = []
+        label63 = "a" * 63
+        for ok in ("api.github.com", "*.example.org", "a.b-c.d",
+                   label63 + ".example", "xn--bcher-kva.example",
+                   "123abc.example.com", "localhostlike"):
+            _accepts(mod, fx.render("a14-ok", mutate=_set_network(
+                {"allow": [ok]})), "pattern %r" % ok, problems)
+        bad = ("API.github.com", "*", "*.", "a.*.b", "*foo.com", "*.*.com",
+               "foo.com.", "1.2.3.4", "127.1", "0x7f000001", "2130706433",
+               "0177.0.0.1", "[::1]", "::1", "foo..com", "-a.com", "a-.com",
+               "a_b.com", "a" * 64 + ".com", "", "foo.com:443", "foo.123",
+               "tf-a14-" + chr(0xE9) + ".com", " a.com", "a .com")
+        for value in bad:
+            _refuses(mod, fx.render("a14", mutate=_set_network(
+                {"allow": ["ok.example", value]})), "pattern %r" % value,
+                problems, names=("network.allow",),
+                not_values=(value,) if value.startswith("tf-a14") else ())
+        for label, net in (
+                ("not a list", {"allow": "api.github.com"}),
+                ("empty", {"allow": []}),
+                ("non-string", {"allow": [1]}),
+                ("65 patterns", {"allow": ["h%d.example" % i
+                                           for i in range(65)]}),
+                ("duplicate", {"allow": ["a.example", "a.example"]})):
+            _refuses(mod, fx.render("a14-shape", mutate=_set_network(net)),
+                     label, problems, names=("network.allow",))
+        _accepts(mod, fx.render("a14-64", mutate=_set_network(
+            {"allow": ["h%d.example" % i for i in range(64)]})),
+            "64 patterns (edge)", problems)
+        return problems, ["refused     : %d patterns" % len(bad)]
+    _guard(suite, GRP_A, "A14 network-allow-pattern-grammar",
+           network_patterns)
+
+    def network_ports():
+        """ports: integers 1..65535, never coerced, at most 8, no
+        duplicates; network is an object with allow and optional ports,
+        nothing else, and an explicit null is refused like a non-object."""
+        mod = _mod()
+        problems = []
+        _accepts(mod, fx.render("a15-ok", mutate=_set_network(
+            {"allow": ["a.example"], "ports": [1, 65535]})),
+            "ports [1, 65535] (edges)", problems)
+        _accepts(mod, fx.render("a15-8", mutate=_set_network(
+            {"allow": ["a.example"], "ports": list(range(440, 448))})),
+            "8 ports (edge)", problems)
+        for value in ([0], [65536], [True], ["443"], [443.0], [], 443,
+                      list(range(440, 449)), [443, 443], None):
+            _refuses(mod, fx.render("a15", mutate=_set_network(
+                {"allow": ["a.example"], "ports": value})),
+                "ports %r" % (value,), problems, names=("network.ports",))
+        for label, net, name in (
+                ("unknown key", {"allow": ["a.example"], "deny": []}, "deny"),
+                ("missing allow", {"ports": [443]}, "allow"),
+                ("not an object", ["a.example"], "network"),
+                ("null", None, "network")):
+            _refuses(mod, fx.render("a15-shape", mutate=_set_network(net)),
+                     label, problems, names=(name,))
+        return problems, []
+    _guard(suite, GRP_A, "A15 network-ports-and-shape", network_ports)
+
+    def hex_letter_tlds():
+        """Security round 2 (H): a last label of plain hex LETTERS is a TLD,
+        not a number -- only all-decimal, 0x-prefixed and leading-0 octal
+        labels are inet_aton number forms."""
+        mod = _mod()
+        problems = []
+        for ok in ("example.be", "a.cafe", "x.ad", "y.bad", "z.dad",
+                   "*.example.be"):
+            _accepts(mod, fx.render("a16-ok", mutate=_set_network(
+                {"allow": [ok]})), "pattern %r" % ok, problems)
+        for value in ("1.2.3.4", "0x7f.1", "017", "a.0x1f", "a.123"):
+            _refuses(mod, fx.render("a16", mutate=_set_network(
+                {"allow": [value]})), "pattern %r" % value, problems,
+                names=("network.allow",))
+        return problems, []
+    _guard(suite, GRP_A, "A16 network-allow-hex-letter-tlds-accepted",
+           hex_letter_tlds)
+
+    def wildcard_two_labels():
+        """Security round 2 (F4): a "*." pattern over a single label would
+        allow a whole top-level domain; refused, naming the key."""
+        mod = _mod()
+        problems = []
+        for value in ("*.com", "*.io"):
+            _refuses(mod, fx.render("a17", mutate=_set_network(
+                {"allow": ["ok.example", value]})), "pattern %r" % value,
+                problems, names=("network.allow[1]",))
+        _accepts(mod, fx.render("a17-ok", mutate=_set_network(
+            {"allow": ["*.example.com"]})), "*.example.com", problems)
+        return problems, []
+    _guard(suite, GRP_A, "A17 network-allow-wildcard-needs-two-labels",
+           wildcard_two_labels)
+
+    def nat64_prefixes():
+        """Security round 2 (F5b): network.nat64 is an optional list of at
+        most 8 distinct IPv6 prefixes of an RFC 6052 length; each refusal
+        names the key, never the value; absent loads as ()."""
+        mod = _mod()
+        problems = []
+        cfg = _accepts(mod, fx.render("a18-absent", mutate=_set_network(
+            {"allow": ["a.example"]})), "no nat64", problems)
+        if cfg is not None and tuple(getattr(cfg.network, "nat64",
+                                             None) or ()) != ():
+            problems.append("no nat64: %r, want ()"
+                            % (getattr(cfg.network, "nat64", None),))
+        good = ["2606:4700:64::/96", "2001:db8:100::/40", "2001:db8::/32"]
+        cfg = _accepts(mod, fx.render("a18-ok", mutate=_set_network(
+            {"allow": ["a.example"], "nat64": good})), "three prefixes",
+            problems)
+        if cfg is not None and [str(n) for n in getattr(
+                cfg.network, "nat64", ())] != good:
+            problems.append("loaded %r, want %r"
+                            % (getattr(cfg.network, "nat64", None), good))
+        for label, value, name in (
+                ("not a list", "2606:4700:64::/96", "network.nat64"),
+                ("non-string", [64], "network.nat64[0]"),
+                ("v4", ["10.64.0.0/16"], "network.nat64[0]"),
+                ("bad length", ["2606:4700:64::/80"], "network.nat64[0]"),
+                ("host bits", ["2606:4700:64::1/96"], "network.nat64[0]"),
+                ("garbage", ["tf-a18-nope"], "network.nat64[0]"),
+                ("duplicate", ["2606:4700:64::/96", "2606:4700:64:0::/96"],
+                 "network.nat64"),
+                ("9 prefixes", ["2606:4700:%x::/48" % i for i in range(9)],
+                 "network.nat64")):
+            _refuses(mod, fx.render("a18", mutate=_set_network(
+                {"allow": ["a.example"], "nat64": value})), label, problems,
+                names=(name,), not_values=("tf-a18-nope", "2606:4700:64::"))
+        return problems, []
+    _guard(suite, GRP_A, "A18 network-nat64-prefixes", nat64_prefixes)
+
+    def reads_over_work_root():
+        """Security round 2 (F9): an extra_reads entry that is the work root
+        or one of its ancestors -- spelled or through a symlink -- would
+        expose sibling runs' workdirs and egress sockets; refused, naming
+        interpreters.<name>.extra_reads[i]."""
+        mod = _mod()
+        problems = []
+        link = os.path.join(fx.base, "a19-link")
+
+        def with_reads(pick):
+            def mutate(obj):
+                wr = obj["work_root"]
+                obj["interpreters"]["python3"]["extra_reads"] = [
+                    "/usr/share", pick(wr)]
+            return mutate
+
+        def via_link(wr):
+            if not os.path.lexists(link):
+                os.symlink(os.path.dirname(wr), link)
+            return link
+        for label, pick in (
+                ("the work root", lambda wr: wr),
+                ("its parent", os.path.dirname),
+                ("the root", lambda wr: "/"),
+                ("a symlink to its parent", via_link)):
+            _refuses(mod, fx.render("a19", interpreters=_interpreters(False),
+                                    mutate=with_reads(pick)),
+                     label, problems,
+                     names=("interpreters.python3.extra_reads[1]",))
+        _accepts(mod, fx.render("a19-ok", interpreters=_interpreters(False),
+                                mutate=with_reads(
+                                    lambda wr: os.path.join(wr + "-sib"))),
+                 "a sibling sharing a name prefix", problems)
+        return problems, []
+    _guard(suite, GRP_A, "A19 extra-reads-over-work-root-refused",
+           reads_over_work_root)
 
 
 # ---------------------------------------------------------------------------
@@ -2563,6 +2807,1123 @@ def _run_d(suite, fx):
         return problems, lines
     _guard(suite, GRP_D, "D5 python3-site-drops-only-S", site_golden)
 
+    def egress_golden(kind, endpoint, url):
+        """The run argv with an egress endpoint: the D1 golden plus the six
+        proxy variables after OUT (both cases, NO_PROXY empty) and the
+        endpoint flag after --rlimit-core 0; without one, D1 unchanged."""
+        mod = _argv_mod()
+        problems = []
+        plan = _d_plan(mod)
+        cfg = _d_cfg(mod, fx, "off")
+        req = _d_req(mod, "python3", "main.py", args=("a",))
+        base = _d_golden(cfg, plan, req, _D_WD, _D_STATUS_FD, False)
+        try:
+            got = mod.build_sbx_argv(plan, req, _D_WD, _D_STATUS_FD, cfg,
+                                     egress=endpoint)
+        except TypeError as exc:
+            return ["build_sbx_argv takes no egress endpoint (%s)" % exc], []
+        flag = "--egress-port" if kind == "port" else "--egress-socket"
+        env = []
+        for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy",
+                    "http_proxy"):
+            env += ["--env", "%s=%s" % (key, url)]
+        env += ["--env", "NO_PROXY=", "--env", "no_proxy="]
+        at = base.index("OUT=" + _D_WD + "/out") + 1
+        core = base.index("--rlimit-core") + 2
+        want = (base[:at] + env + base[at:core] + [flag, str(endpoint[1])]
+                + base[core:])
+        _d_compare(_d_path(got, plan, kind, problems), want, kind, problems)
+        none = mod.build_sbx_argv(plan, req, _D_WD, _D_STATUS_FD, cfg,
+                                  egress=None)
+        _d_compare(_d_path(none, plan, "no egress", problems), base,
+                   "no egress", problems)
+        return problems, ["endpoint    : %s %s" % (flag, endpoint[1])]
+
+    _guard(suite, GRP_D, "D6 darwin-egress-port-argv-golden",
+           lambda: egress_golden("port", ("port", 48123),
+                                 "http://127.0.0.1:48123"))
+
+    def linux_endpoint():
+        """The socket endpoint's URL is sbx's fixed in-netns forwarder port,
+        a hand copy in the runner pinned equal to sbx's own constant."""
+        mod = _argv_mod()
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import test_sbx_gate as G
+        helper = G._load_helper("sbx_for_mcp_sandbox_d7")
+        want = getattr(helper, "EGRESS_FORWARD_PORT", None)
+        got = getattr(mod, "_EGRESS_LINUX_PORT", None)
+        problems = []
+        if want is None or got != want:
+            problems.append("runner _EGRESS_LINUX_PORT %r != sbx "
+                            "EGRESS_FORWARD_PORT %r" % (got, want))
+        more, lines = egress_golden(
+            "socket", ("socket", "/w/0123456789abcdef0123456789abcdef/s"),
+            "http://127.0.0.1:%s" % (got,))
+        return problems + more, lines
+    _guard(suite, GRP_D, "D7 linux-egress-socket-argv-golden", linux_endpoint)
+
+
+# ---------------------------------------------------------------------------
+# N: the egress proxy (in-process; stub resolver and connector, no network)
+# ---------------------------------------------------------------------------
+
+_EGRESS_NAMES = ("NetworkConfig", "EgressProxy", "EgressRefusal",
+                 "parse_connect_head", "egress_host_refusal",
+                 "egress_host_allowed", "egress_address_public")
+N_PUBLIC = "93.184.215.14"
+N_SECRET = b"tf-egress-SECRET-payload"
+
+
+def _egress_mod():
+    """The server held to the egress proxy's names; their absence is the
+    stated RED reason, never an AttributeError."""
+    mod = _mod()
+    missing = [n for n in _EGRESS_NAMES if not hasattr(mod, n)]
+    if missing:
+        raise _Red("Scripts/mcp-sandbox.py has no %s (the egress proxy is "
+                   "not implemented)" % ", ".join(missing))
+    return mod
+
+
+def _n_net(mod, allow=("allowed.example", "*.wild.example"), ports=(443,)):
+    return mod.NetworkConfig(allow=tuple(allow), ports=tuple(ports))
+
+
+class _NStub:
+    """The proxy's resolver and connector, recorded. `answers` maps a host
+    to a list of address strings or to an exception to raise. connect()
+    hands the proxy one end of a socketpair and keeps the other (peers)."""
+
+    def __init__(self, answers=None):
+        self.answers = dict(answers or {})
+        self.resolved, self.connected, self.peers = [], [], []
+        self._lock = threading.Lock()
+
+    def resolve(self, host, port):
+        with self._lock:
+            self.resolved.append((host, port))
+        answer = self.answers.get(host, [N_PUBLIC])
+        if isinstance(answer, BaseException):
+            raise answer
+        out = []
+        for ip in answer:
+            if ":" in ip:
+                out.append((socket.AF_INET6, socket.SOCK_STREAM, 6, "",
+                            (ip, port, 0, 0)))
+            else:
+                out.append((socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                            (ip, port)))
+        return out
+
+    def connect(self, family, sockaddr, timeout):
+        a, b = socket.socketpair()
+        with self._lock:
+            self.connected.append(tuple(sockaddr[:2]))
+            self.peers.append(b)
+        return a
+
+    def close(self):
+        for peer in self.peers:
+            try:
+                peer.close()
+            except OSError:
+                pass
+
+
+def _n_proxy(mod, stub, network=None, kind="tcp", **kw):
+    proxy = mod.EgressProxy(network or _n_net(mod), kind,
+                            resolver=stub.resolve, connector=stub.connect,
+                            **kw)
+    proxy.start()
+    return proxy
+
+
+def _n_client(proxy, head=b"", timeout=5.0):
+    kind, where = proxy.endpoint
+    if kind == "port":
+        sock = socket.create_connection(("127.0.0.1", where), timeout=timeout)
+    else:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(where)
+    if head:
+        sock.sendall(head)
+    return sock
+
+
+def _n_status(sock, timeout=5.0):
+    """The proxy's status code (an int) read off `sock`, or None on EOF /
+    timeout before a full status line."""
+    sock.settimeout(timeout)
+    buf = b""
+    try:
+        while b"\r\n" not in buf and len(buf) < 4096:
+            chunk = sock.recv(1)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError:
+        pass
+    parts = buf.split(b" ", 2)
+    if len(parts) >= 2 and parts[0] in (b"HTTP/1.1", b"HTTP/1.0") \
+            and parts[1].isdigit():
+        # drain the rest of the head so a tunnel's first byte is the peer's
+        try:
+            while not buf.endswith(b"\r\n\r\n") and len(buf) < 8192:
+                chunk = sock.recv(1)
+                if not chunk:
+                    break
+                buf += chunk
+        except OSError:
+            pass
+        return int(parts[1])
+    return None
+
+
+def _n_connect(host, port=443, extra=b""):
+    return (b"CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n" % (
+        host.encode(), port, host.encode(), port)) + extra + b"\r\n"
+
+
+def _n_eof(sock, timeout=3.0):
+    """True when `sock` reads EOF (or is reset) within `timeout`."""
+    sock.settimeout(timeout)
+    try:
+        while True:
+            if not sock.recv(4096):
+                return True
+    except socket.timeout:
+        return False
+    except OSError:
+        return True
+
+
+def _n_until(predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+def _run_n(suite, fx):
+    def heads():
+        mod = _egress_mod()
+        problems = []
+        for head, want in (
+                (_n_connect("allowed.example"), ("allowed.example", 443)),
+                (b"CONNECT Allowed.EXAMPLE:443 HTTP/1.1\r\n\r\n",
+                 ("allowed.example", 443)),
+                (b"CONNECT a.wild.example:8443 HTTP/1.0\r\nUser-Agent: x\r\n"
+                 b"Proxy-Connection: keep-alive\r\n\r\n",
+                 ("a.wild.example", 8443))):
+            try:
+                got = mod.parse_connect_head(head)
+            except mod.EgressRefusal as exc:
+                problems.append("control %r refused %r" % (head[:40], exc))
+                continue
+            if tuple(got) != want:
+                problems.append("control %r: %r, want %r"
+                                % (head[:40], got, want))
+        refused = (
+            (b"GET http://allowed.example/ HTTP/1.1\r\nHost: allowed.example"
+             b"\r\n\r\n", 405),
+            (b"POST / HTTP/1.1\r\n\r\n", 405),
+            (b"connect allowed.example:443 HTTP/1.1\r\n\r\n", 405),
+            (b"CONNECT allowed.example HTTP/1.1\r\n\r\n", 400),
+            (b"CONNECT allowed.example:44x HTTP/1.1\r\n\r\n", 400),
+            (b"CONNECT allowed.example:+443 HTTP/1.1\r\n\r\n", 400),
+            (b"CONNECT allowed.example:0 HTTP/1.1\r\n\r\n", 400),
+            (b"CONNECT allowed.example:99999 HTTP/1.1\r\n\r\n", 400),
+            (b"CONNECT allowed.example:443 HTTP/2\r\n\r\n", 400),
+            (b"CONNECT  allowed.example:443 HTTP/1.1\r\n\r\n", 400),
+            (b"CONNECT user@allowed.example:443 HTTP/1.1\r\n\r\n", 400),
+            (b"CONNECT allowed.example:443 HTTP/1.1\nHost: x\n\n", 400),
+            (b"CONNECT allowed.example:443 HTTP/1.1\r\nHost x\r\n\r\n", 400),
+            (b"CONNECT allowed.example:443 HTTP/1.1\r\n folded\r\n\r\n", 400),
+            (b"CONNECT allowed.example:443 HTTP/1.1\r\nX: a\x00b\r\n\r\n",
+             400),
+            (b"CONNECT allowed.example:443 HTTP/1.1\r\n"
+             + b"X-A: b\r\n" * 65 + b"\r\n", 431),
+            (b"CONNECT allowed.example:443 HTTP/1.1\r\nX: " + b"a" * 9000
+             + b"\r\n\r\n", 431),
+        )
+        for head, want in refused:
+            try:
+                got = mod.parse_connect_head(head)
+            except mod.EgressRefusal as exc:
+                if getattr(exc, "status", None) != want:
+                    problems.append("%r: status %r, want %d"
+                                    % (head[:48], getattr(exc, "status",
+                                                          None), want))
+                continue
+            problems.append("%r: accepted %r, want %d" % (head[:48], got,
+                                                         want))
+        return problems, ["refused     : %d heads" % len(refused)]
+    _guard(suite, GRP_N, "N1 connect-head-parsing", heads)
+
+    def literals():
+        mod = _egress_mod()
+        problems = []
+        for host in ("example.com", "a1.example.com", "xn--bcher-kva.example",
+                     "123abc.example.com", "x.y-z.example"):
+            why = mod.egress_host_refusal(host)
+            if why is not None:
+                problems.append("control %r refused: %r" % (host, why))
+        for host in ("1.2.3.4", "127.0.0.1", "127.1", "0x7f000001",
+                     "0X7F.0.0.1", "2130706433", "0177.0.0.1", "017700000001",
+                     "[::1]", "::1", "[::ffff:127.0.0.1]", "::ffff:127.0.0.1",
+                     "1.2.3.4.", "example.com.", "", "a..b", "-a.com",
+                     "a_b.com", "foo.123", "a" * 64 + ".com"):
+            why = mod.egress_host_refusal(host)
+            if not isinstance(why, str) or not why:
+                problems.append("%r: %r, want a refusal" % (host, why))
+        return problems, []
+    _guard(suite, GRP_N, "N2 ip-literal-and-bad-host-forms-refused", literals)
+
+    def matching():
+        mod = _egress_mod()
+        problems = []
+        pats = ("api.github.com", "*.example.org")
+        for host, want in (("api.github.com", True), ("github.com", False),
+                           ("x.api.github.com", False),
+                           ("a.example.org", True), ("a.b.example.org", True),
+                           ("example.org", False), ("badexample.org", False),
+                           ("example.org.evil.com", False),
+                           ("a.example.org.evil.com", False),
+                           ("xexample.org", False)):
+            got = mod.egress_host_allowed(host, pats)
+            if got is not want:
+                problems.append("%r against %r: %r, want %r"
+                                % (host, pats, got, want))
+        return problems, []
+    _guard(suite, GRP_N, "N3 allowlist-exact-and-strict-subdomains", matching)
+
+    def vetting():
+        mod = _egress_mod()
+        problems = []
+        for addr in ("8.8.8.8", "1.1.1.1", N_PUBLIC,
+                     "2606:4700:4700::1111"):
+            if mod.egress_address_public(addr) is not True:
+                problems.append("control %s judged not public" % addr)
+        for addr in ("127.0.0.1", "127.0.0.53", "10.0.0.1", "172.16.0.1",
+                     "192.168.1.1", "169.254.169.254", "100.64.0.1",
+                     "0.0.0.0", "224.0.0.1", "239.255.255.250",
+                     "255.255.255.255", "192.0.2.1", "198.18.0.1",
+                     "240.0.0.1", "::", "::1", "fe80::1", "fc00::1",
+                     "fd00:ec2::254", "fec0::1", "ff02::1",
+                     "::ffff:127.0.0.1", "::ffff:8.8.8.8",
+                     "2002:7f00:1::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+                     "64:ff9b::7f00:1", "not-an-address"):
+            if mod.egress_address_public(addr) is not False:
+                problems.append("%s judged public" % addr)
+        return problems, []
+    _guard(suite, GRP_N, "N4 resolved-address-must-be-global", vetting)
+
+    def tunnel():
+        mod = _egress_mod()
+        stub = _NStub()
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        try:
+            kind, port = proxy.endpoint
+            if kind != "port" or not isinstance(port, int):
+                problems.append("endpoint %r, want ('port', N)"
+                                % (proxy.endpoint,))
+            c = _n_client(proxy, _n_connect("allowed.example"))
+            status = _n_status(c)
+            if status != 200:
+                return problems + ["CONNECT allowed.example: %r, want 200"
+                                   % (status,)], []
+            c.sendall(b"tf-up")
+            peer = stub.peers[0]
+            peer.settimeout(3)
+            if peer.recv(64) != b"tf-up":
+                problems.append("client -> upstream bytes lost")
+            peer.sendall(b"tf-down")
+            if c.recv(64) != b"tf-down":
+                problems.append("upstream -> client bytes lost")
+            c.close()
+            if not _n_eof(peer):
+                problems.append("upstream saw no EOF after the client closed")
+            if stub.resolved != [("allowed.example", 443)]:
+                problems.append("resolved %r, want one lookup"
+                                % (stub.resolved,))
+            if stub.connected != [(N_PUBLIC, 443)]:
+                problems.append("connected %r, want the vetted %s:443 (no "
+                                "re-resolution)" % (stub.connected, N_PUBLIC))
+            if not _n_until(lambda: proxy.summary().get("tunnels") == 1):
+                problems.append("summary %r, want tunnels 1"
+                                % (proxy.summary(),))
+            if proxy.summary().get("refused") != 0:
+                problems.append("summary %r, want refused 0"
+                                % (proxy.summary(),))
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+        return problems, ["summary     : %r" % (proxy.summary(),)]
+    _guard(suite, GRP_N, "N5 tunnel-splices-to-the-vetted-address", tunnel)
+
+    def mixed():
+        mod = _egress_mod()
+        stub = _NStub({"allowed.example": [N_PUBLIC, "10.0.0.5"],
+                       "b.wild.example": ["::ffff:127.0.0.1"],
+                       "c.wild.example": ["169.254.169.254"],
+                       "d.wild.example": OSError("nxdomain")})
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        try:
+            for host, want in (("allowed.example", 403),
+                               ("b.wild.example", 403),
+                               ("c.wild.example", 403),
+                               ("d.wild.example", 502)):
+                c = _n_client(proxy, _n_connect(host))
+                got = _n_status(c)
+                c.close()
+                if got != want:
+                    problems.append("%s: %r, want %d" % (host, got, want))
+            if stub.connected:
+                problems.append("connected %r after a refused answer"
+                                % (stub.connected,))
+            if len(stub.resolved) != 4:
+                problems.append("resolved %r, want once per host"
+                                % (stub.resolved,))
+            if not _n_until(lambda: proxy.summary().get("refused") == 4):
+                problems.append("summary %r, want refused 4"
+                                % (proxy.summary(),))
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+        return problems, []
+    _guard(suite, GRP_N, "N6 any-non-global-answer-refuses", mixed)
+
+    def before_dns():
+        mod = _egress_mod()
+        stub = _NStub()
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        try:
+            for label, head, want in (
+                    ("not allowlisted", _n_connect("other.example"), 403),
+                    ("port not allowed", _n_connect("allowed.example", 8443),
+                     403),
+                    ("IP literal", _n_connect(N_PUBLIC), 403),
+                    ("wildcard apex", _n_connect("wild.example"), 403),
+                    ("absolute-form GET",
+                     b"GET http://allowed.example/ HTTP/1.1\r\nHost: "
+                     b"allowed.example\r\n\r\n", 405)):
+                c = _n_client(proxy, head)
+                got = _n_status(c)
+                c.close()
+                if got != want:
+                    problems.append("%s: %r, want %d" % (label, got, want))
+            if stub.resolved:
+                problems.append("resolved %r before the policy refused"
+                                % (stub.resolved,))
+            c = _n_client(proxy, _n_connect("a.wild.example"))
+            got = _n_status(c)
+            c.close()
+            if got != 200:
+                problems.append("control a.wild.example: %r, want 200"
+                                % (got,))
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+        return problems, []
+    _guard(suite, GRP_N, "N7 policy-refuses-before-any-lookup", before_dns)
+
+    def deadline():
+        mod = _egress_mod()
+        saved = []
+        _patch(mod, saved, "_EGRESS_HEAD_DEADLINE_S", 0.6)
+        stub = _NStub()
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        try:
+            c = _n_client(proxy, b"CONNECT allowed")
+            t0 = time.monotonic()
+            got = _n_status(c, timeout=5)
+            took = time.monotonic() - t0
+            c.close()
+            if got != 408 or took > 2.5:
+                problems.append("stalled head: %r after %.2fs, want 408 "
+                                "within ~0.6s" % (got, took))
+            # a trickle that keeps every single read short must still be cut
+            head = _n_connect("allowed.example")
+            c = _n_client(proxy)
+            t0 = time.monotonic()
+            for i in range(len(head)):
+                # stop as soon as the proxy answered: a send after its close
+                # would draw a reset that can discard the answer
+                if select.select([c], [], [], 0)[0]:
+                    break
+                try:
+                    c.sendall(head[i:i + 1])
+                except OSError:
+                    break
+                time.sleep(0.1)
+                if time.monotonic() - t0 > 2.0:
+                    break
+            got = _n_status(c, timeout=3)
+            took = time.monotonic() - t0
+            c.close()
+            if got != 408 or took > 2.6:
+                problems.append("trickled head: %r after %.2fs, want 408 at "
+                                "the total deadline" % (got, took))
+            c = _n_client(proxy, _n_connect("allowed.example"))
+            got = _n_status(c)
+            c.close()
+            if got != 200:
+                problems.append("control prompt head: %r, want 200" % (got,))
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+            _restore(mod, saved)
+        return problems, []
+    _guard(suite, GRP_N, "N8 head-total-deadline", deadline)
+
+    def cap():
+        mod = _egress_mod()
+        saved = []
+        _patch(mod, saved, "_EGRESS_MAX_TUNNELS", 2)
+        stub = _NStub()
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        held = []
+        try:
+            for i in range(2):
+                c = _n_client(proxy, _n_connect("allowed.example"))
+                held.append(c)
+                if _n_status(c) != 200:
+                    problems.append("tunnel %d not established" % (i + 1))
+            c = _n_client(proxy, _n_connect("allowed.example"))
+            got = _n_status(c)
+            c.close()
+            if got != 503:
+                problems.append("third concurrent tunnel: %r, want 503"
+                                % (got,))
+            # A tunnel ends when both sides have (N18: a half-close keeps
+            # the other direction), so close the second tunnel's upstream too.
+            held.pop().close()
+            stub.peers[1].close()
+            ok = _n_until(lambda: proxy.active() < 2)
+            c = _n_client(proxy, _n_connect("allowed.example"))
+            got = _n_status(c)
+            held.append(c)
+            if got != 200:
+                problems.append("after one tunnel closed: %r, want 200 (the "
+                                "cap is concurrent, not total; active "
+                                "dropped=%s)" % (got, ok))
+            if proxy.summary().get("refused", 0) < 1:
+                problems.append("summary %r, want refused >= 1"
+                                % (proxy.summary(),))
+        finally:
+            for c in held:
+                c.close()
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+            _restore(mod, saved)
+        return problems, ["summary     : %r" % (proxy.summary(),)]
+    _guard(suite, GRP_N, "N9 concurrent-tunnel-cap", cap)
+
+    def close_all():
+        mod = _egress_mod()
+        stub = _NStub()
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        c = _n_client(proxy, _n_connect("allowed.example"))
+        try:
+            if _n_status(c) != 200:
+                return ["the tunnel was not established"], []
+            _kind, port = proxy.endpoint
+            t0 = time.monotonic()
+            proxy.close(time.monotonic() + 1.0)
+            took = time.monotonic() - t0
+            if took > 1.5:
+                problems.append("close took %.2fs, want <= the 1 s given"
+                                % took)
+            if not _n_eof(c, 2.0):
+                problems.append("the client side of the tunnel is still open")
+            if not _n_eof(stub.peers[0], 2.0):
+                problems.append("the upstream side is still open")
+            alive = [t.name for t in threading.enumerate()
+                     if t.name.startswith("sandbox-egress")]
+            if not _n_until(lambda: not [t for t in threading.enumerate()
+                                         if t.name.startswith(
+                                             "sandbox-egress")], 2.0):
+                problems.append("proxy threads outlived close: %s" % alive)
+            s = socket.socket()
+            s.settimeout(1)
+            try:
+                s.connect(("127.0.0.1", port))
+                problems.append("the endpoint still accepts after close")
+            except OSError:
+                pass
+            finally:
+                s.close()
+        finally:
+            c.close()
+            stub.close()
+        return problems, []
+    _guard(suite, GRP_N, "N10 close-ends-every-tunnel-and-thread", close_all)
+
+    def log_meta():
+        mod = _egress_mod()
+
+        class _Grab(logging.Handler):
+            def __init__(self):
+                super().__init__(logging.DEBUG)
+                self.lines = []
+
+            def emit(self, record):
+                self.lines.append(record.getMessage())
+        grab = _Grab()
+        logger = logging.getLogger(LOGGER)
+        level = logger.level
+        logger.addHandler(grab)
+        logger.setLevel(logging.DEBUG)
+        stub = _NStub()
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        try:
+            c = _n_client(proxy, _n_connect("allowed.example"))
+            if _n_status(c) != 200:
+                return ["the tunnel was not established"], []
+            c.sendall(N_SECRET)
+            stub.peers[0].settimeout(3)
+            stub.peers[0].recv(64)
+            stub.peers[0].sendall(N_SECRET[::-1])
+            c.recv(64)
+            c.close()
+            c = _n_client(proxy, _n_connect("other.example"))
+            _n_status(c)
+            c.close()
+            _n_until(lambda: proxy.summary().get("refused") == 1)
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+            logger.removeHandler(grab)
+            logger.setLevel(level)
+        text = "\n".join(grab.lines)
+        if "allowed.example" not in text or "other.example" not in text:
+            problems.append("the tunnel log lacks the host metadata: %r"
+                            % (text[-300:],))
+        for needle in (N_SECRET, N_SECRET[::-1]):
+            if needle.decode() in text:
+                problems.append("a payload reached the log")
+        return problems, ["log lines   : %d" % len(grab.lines)]
+    _guard(suite, GRP_N, "N11 log-is-metadata-only", log_meta)
+
+    def unix_endpoint():
+        mod = _egress_mod()
+        sdir = os.path.join(fx.base, fx._name("n12"))
+        os.mkdir(sdir, 0o700)
+        stub = _NStub()
+        problems = []
+        try:
+            proxy = _n_proxy(mod, stub, kind="unix", sock_dir=sdir)
+        except OSError as exc:
+            raise _Info("cannot bind a unix socket under %s here (%s)"
+                        % (sdir, exc))
+        try:
+            kind, path = proxy.endpoint
+            if kind != "socket" or path != os.path.join(sdir, "s"):
+                problems.append("endpoint %r, want ('socket', <dir>/s)"
+                                % (proxy.endpoint,))
+            elif not stat.S_ISSOCK(os.lstat(path).st_mode):
+                problems.append("%s is not a socket" % path)
+            c = _n_client(proxy, _n_connect("allowed.example"))
+            got = _n_status(c)
+            c.close()
+            if got != 200:
+                problems.append("CONNECT over the unix endpoint: %r" % (got,))
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+        if os.path.lexists(os.path.join(sdir, "s")):
+            problems.append("the socket outlived close")
+        return problems, []
+    _guard(suite, GRP_N, "N12 unix-endpoint-in-a-0700-dir", unix_endpoint)
+
+    def run_egress_dir_under_work_root():
+        """N13: on Linux a run's unix endpoint lives in a fresh 0700
+        <work_root>/egress/<32-hex>/ -- never in tempfile's directory, which
+        is /tmp, a directory sbx's egress_socket_refusal refuses. The
+        platform and the EgressProxy are injected, so the row runs anywhere;
+        close() removes the per-run directory and keeps egress/."""
+        mod = _h_mod(_STEP10_NAMES + ("_RunEgress", "EgressProxy"))
+        problems = []
+        seen = {}
+
+        class _SysAs:
+            def __getattr__(self, name):
+                return "linux" if name == "platform" else getattr(sys, name)
+
+        class _FakeProxy:
+            def __init__(self, network, kind, sock_dir=None, **_kw):
+                seen.update(kind=kind, sock_dir=sock_dir)
+                self.endpoint = None
+
+            def start(self):
+                self.endpoint = ("socket",
+                                 os.path.join(seen["sock_dir"] or "", "s"))
+
+            def close(self, _deadline):
+                pass
+
+            def summary(self):
+                return {"tunnels": 0, "refused": 0}
+
+        root = _Root(mod, fx.work_root("n13"))
+        saved = []
+        _patch(mod, saved, "sys", _SysAs())
+        _patch(mod, saved, "EgressProxy", _FakeProxy)
+        try:
+            egress = mod._RunEgress(_n_net(mod), root.path)
+            egress.start()
+            sdir = seen.get("sock_dir")
+            want_parent = os.path.join(os.path.normpath(root.path), "egress")
+            if seen.get("kind") != "unix":
+                problems.append("proxy kind %r, want 'unix'" % (seen.get("kind"),))
+            if not isinstance(sdir, str) or os.path.dirname(sdir) != want_parent \
+                    or not _HEX32.match(os.path.basename(sdir)):
+                problems.append("socket dir %r, want %s/<32-hex>"
+                                % (sdir, want_parent))
+            else:
+                if os.path.realpath(sdir) != sdir:
+                    problems.append("socket dir %r is not its own realpath" % sdir)
+                st = os.lstat(sdir)
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() \
+                        or st.st_mode & 0o077:
+                    problems.append("socket dir mode %o uid %d, want a 0700 "
+                                    "directory of the euid"
+                                    % (st.st_mode, st.st_uid))
+                if egress.endpoint != ("socket", os.path.join(sdir, "s")):
+                    problems.append("endpoint %r, want ('socket', <dir>/s)"
+                                    % (egress.endpoint,))
+            egress.close(time.monotonic() + 2.0)
+            if isinstance(sdir, str) and os.path.lexists(sdir):
+                problems.append("the per-run socket dir outlived close")
+            if not os.path.isdir(root.egress):
+                problems.append("egress/ itself was removed by close")
+        finally:
+            _restore(mod, saved)
+            root.close()
+            root.scrub()
+        return problems, ["socket dir  : %s" % (seen.get("sock_dir"),)]
+    _guard(suite, GRP_N, "N13 linux-socket-dir-under-work-root-egress",
+           run_egress_dir_under_work_root)
+
+    def unix_endpoint_long_path():
+        """N14: a sock_dir whose <dir>/s exceeds the AF_UNIX sun_path limit
+        (a deep work_root). On Linux start() binds through the short
+        /proc/self/fd alias and the socket still lands at the real <dir>/s
+        (what sbx --egress-socket checks); elsewhere it is refused by name
+        (EgressSocketTooLong), never an opaque OSError."""
+        mod = _egress_mod()
+        problems = []
+        top = os.path.join(fx.base, fx._name("n14"))
+        os.mkdir(top, 0o700)
+        sdir = os.path.join(top, "d" * max(1, 112 - len(top)))
+        os.mkdir(sdir, 0o700)
+        path = os.path.join(sdir, "s")
+        notes = ["socket path : %d bytes" % len(os.fsencode(path))]
+        stub = _NStub()
+        try:
+            if not sys.platform.startswith("linux"):
+                try:
+                    proxy = _n_proxy(mod, stub, kind="unix", sock_dir=sdir)
+                except Exception as exc:  # the type is the assertion
+                    if not (hasattr(mod, "EgressSocketTooLong")
+                            and isinstance(exc, mod.EgressSocketTooLong)
+                            and "AF_UNIX limit" in str(exc)):
+                        problems.append("start() raised %s: %s, want "
+                                        "EgressSocketTooLong naming the "
+                                        "AF_UNIX limit"
+                                        % (type(exc).__name__, exc))
+                else:
+                    proxy.close(time.monotonic() + 2.0)
+                    problems.append("start() bound %r past the AF_UNIX limit"
+                                    % (proxy.endpoint,))
+                return problems, notes + ["platform    : %s (refusal path)"
+                                          % sys.platform]
+            try:
+                proxy = _n_proxy(mod, stub, kind="unix", sock_dir=sdir)
+            except (OSError, ValueError) as exc:
+                return ["start() failed on a long sock_dir: %s: %s"
+                        % (type(exc).__name__, exc)], notes
+            try:
+                if proxy.endpoint != ("socket", path):
+                    problems.append("endpoint %r, want ('socket', <dir>/s)"
+                                    % (proxy.endpoint,))
+                elif not stat.S_ISSOCK(os.lstat(path).st_mode):
+                    problems.append("the real <dir>/s is not a socket")
+                c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                c.settimeout(5.0)
+                dfd = os.open(sdir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    c.connect("/proc/self/fd/%d/s" % dfd)
+                finally:
+                    os.close(dfd)
+                c.sendall(_n_connect("allowed.example"))
+                got = _n_status(c)
+                c.close()
+                if got != 200:
+                    problems.append("CONNECT over the long endpoint: %r" % (got,))
+            finally:
+                proxy.close(time.monotonic() + 2.0)
+            if os.path.lexists(path):
+                problems.append("the socket outlived close")
+            return problems, notes
+        finally:
+            stub.close()
+            for p in (path, sdir, top):
+                try:
+                    (os.rmdir if p != path else os.unlink)(p)
+                except OSError:
+                    pass
+    _guard(suite, GRP_N, "N14 unix-endpoint-past-the-sun-path-limit",
+           unix_endpoint_long_path)
+
+    def dual_stack():
+        """N15 (security F1): the tcp endpoint holds [::1]:N beside
+        127.0.0.1:N. sbx's Seatbelt rule (remote tcp "localhost:N") admits
+        both, so a free [::1]:N could be bound by another local uid and
+        receive the script's un-allowlisted connection. The ::1 listener
+        serves CONNECT like the v4 one and close() releases it. INFO on a
+        host without an IPv6 loopback (nobody can bind ::1 there)."""
+        mod = _egress_mod()
+        probe = None
+        try:
+            probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            probe.bind(("::1", 0))
+        except (OSError, AttributeError) as exc:
+            raise _Info("no IPv6 loopback on this host (%s)" % exc)
+        finally:
+            if probe is not None:
+                probe.close()
+        stub = _NStub()
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        port = proxy.endpoint[1]
+        try:
+            squat = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            try:
+                squat.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                squat.bind(("::1", port))
+                problems.append("[::1]:%d was free for another listener" % port)
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE:
+                    problems.append("binding [::1]:%d: %s, want EADDRINUSE"
+                                    % (port, exc))
+            finally:
+                squat.close()
+            c = None
+            try:
+                c = socket.create_connection(("::1", port), timeout=5.0)
+                c.sendall(_n_connect("allowed.example"))
+                got = _n_status(c)
+                if got != 200:
+                    problems.append("CONNECT over [::1]:%d: %r, want 200"
+                                    % (port, got))
+            except OSError as exc:
+                problems.append("CONNECT over [::1]:%d: %s" % (port, exc))
+            finally:
+                if c is not None:
+                    c.close()
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+        after = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            after.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            after.bind(("::1", port))
+        except OSError as exc:
+            problems.append("[::1]:%d still held after close: %s" % (port, exc))
+        finally:
+            after.close()
+        return problems, ["port        : %d" % port]
+    _guard(suite, GRP_N, "N15 tcp-endpoint-holds-both-loopbacks", dual_stack)
+
+    def absolute_lookup():
+        """N16 (security F3): the default resolver looks the allowlisted
+        name up as an absolute name ("host."), so resolv.conf search/ndots
+        can never expand an NXDOMAIN allowlisted name into
+        name.<search-domain>. The client's own trailing dot stays refused
+        (N2); the dot is appended only for the lookup."""
+        mod = _egress_mod()
+        seen = []
+
+        def getaddrinfo(host, port, *args, **kw):
+            seen.append(host)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (N_PUBLIC, port))]
+
+        fake = types.SimpleNamespace(getaddrinfo=getaddrinfo,
+                                     SOCK_STREAM=socket.SOCK_STREAM,
+                                     IPPROTO_TCP=socket.IPPROTO_TCP)
+        saved = []
+        _patch(mod, saved, "socket", fake)
+        try:
+            mod._default_resolver("allowed.example", 443)
+        finally:
+            _restore(mod, saved)
+        problems = []
+        if seen != ["allowed.example."]:
+            problems.append("getaddrinfo saw %r, want ['allowed.example.']" % (seen,))
+        try:
+            host, _port = mod.parse_connect_head(_n_connect("allowed.example."))
+            if mod.egress_host_refusal(host) is None:
+                problems.append("a client's trailing dot was not refused")
+        except mod.EgressRefusal:
+            pass
+        return problems, []
+    _guard(suite, GRP_N, "N16 default-lookup-is-absolute", absolute_lookup)
+
+    def stop_during_connect():
+        """N17 (security F6): a connector that returns only after close()
+        began yields no counted tunnel -- the late upstream is closed, the
+        summary close() leaves behind is final -- and the default connector
+        honours the stop event within a tick instead of the 10 s connect
+        timeout."""
+        mod = _egress_mod()
+        stub = _NStub()
+        entered, gate = threading.Event(), threading.Event()
+        late = []
+
+        def connector(family, sockaddr, timeout):
+            entered.set()
+            gate.wait(5.0)
+            a, b = socket.socketpair()
+            late.append(b)
+            return a
+
+        proxy = mod.EgressProxy(_n_net(mod), "tcp", resolver=stub.resolve,
+                                connector=connector)
+        proxy.start()
+        problems = []
+        c = _n_client(proxy, _n_connect("allowed.example"))
+        try:
+            if not entered.wait(5.0):
+                return ["the connector was never reached"], []
+            closer = threading.Thread(target=proxy.close,
+                                      args=(time.monotonic() + 2.0,))
+            closer.start()
+            time.sleep(0.2)
+            gate.set()
+            closer.join(5.0)
+            final = proxy.summary()
+            if final.get("tunnels") != 0:
+                problems.append("summary %r after close, want tunnels 0" % (final,))
+            if late and not _n_eof(late[0], 2.0):
+                problems.append("the late upstream socket was left open")
+            time.sleep(0.3)
+            if proxy.summary() != final:
+                problems.append("summary moved after close: %r -> %r"
+                                % (final, proxy.summary()))
+        finally:
+            gate.set()
+            c.close()
+            for s in late:
+                s.close()
+            stub.close()
+        stop = threading.Event()
+        threading.Timer(0.3, stop.set).start()
+        t0 = time.monotonic()
+        try:
+            sock = mod._default_connector(socket.AF_INET, ("192.0.2.1", 9), 10.0, stop)
+            sock.close()
+            problems.append("a TEST-NET-1 connect succeeded")
+        except TypeError as exc:
+            problems.append("the default connector takes no stop event: %s" % exc)
+        except OSError:
+            pass
+        took = time.monotonic() - t0
+        if took > 2.0:
+            problems.append("the default connector ignored stop for %.2fs" % took)
+        return problems, ["default stop: %.2fs" % took]
+    _guard(suite, GRP_N, "N17 stop-during-connect-counts-no-tunnel",
+           stop_during_connect)
+
+    def half_close():
+        """N18 (security F13): a client that half-closes after its request
+        still receives the upstream's whole response -- an EOF on one side
+        is relayed as a shutdown(SHUT_WR) and the other direction keeps
+        flowing until it too ends."""
+        mod = _egress_mod()
+        stub = _NStub()
+        proxy = _n_proxy(mod, stub)
+        problems = []
+        body = b"tf-response-" * 4096
+        c = _n_client(proxy, _n_connect("allowed.example"))
+        try:
+            if _n_status(c) != 200:
+                return ["the tunnel was not established"], []
+            c.sendall(b"tf-request")
+            c.shutdown(socket.SHUT_WR)
+            peer = stub.peers[0]
+            peer.settimeout(3.0)
+            got = b""
+            try:
+                while True:
+                    chunk = peer.recv(4096)
+                    if not chunk:
+                        break
+                    got += chunk
+            except OSError as exc:
+                problems.append("upstream read: %s" % exc)
+            if got != b"tf-request":
+                problems.append("upstream got %r, want the request then EOF" % got[:40])
+            try:
+                peer.sendall(body)
+                peer.shutdown(socket.SHUT_WR)
+            except OSError as exc:
+                problems.append("upstream send after the client's EOF: %s" % exc)
+            c.settimeout(3.0)
+            down = b""
+            try:
+                while True:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    down += chunk
+            except OSError as exc:
+                problems.append("client read: %s" % exc)
+            if down != body:
+                problems.append("client got %d of %d response bytes"
+                                % (len(down), len(body)))
+        finally:
+            c.close()
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+        return problems, []
+    _guard(suite, GRP_N, "N18 half-close-keeps-the-other-direction", half_close)
+
+    def hex_letter_hosts():
+        """Security round 2 (H): a CONNECT host whose last label is plain hex
+        letters is a name; the number forms stay refused."""
+        mod = _egress_mod()
+        problems = []
+        for host in ("example.be", "a.cafe", "x.ad", "y.bad", "z.dad"):
+            why = mod.egress_host_refusal(host)
+            if why is not None:
+                problems.append("%r refused: %r" % (host, why))
+        for host in ("1.2.3.4", "0x7f.1", "017", "a.0x1f", "a.123"):
+            if not mod.egress_host_refusal(host):
+                problems.append("%r accepted, want a refusal" % host)
+        return problems, []
+    _guard(suite, GRP_N, "N19 hex-letter-tld-hosts-accepted", hex_letter_hosts)
+
+    def v4_denylist():
+        """Security round 2 (F5a): the IANA not-globally-reachable IPv4
+        ranges are refused even when the interpreter's tables call them
+        global (pre-CVE-2024-4032 patch levels differ)."""
+        mod = _egress_mod()
+        problems = []
+        cls = mod.ipaddress.IPv4Address
+        names = ("is_global", "is_private", "is_reserved")
+        saved = {n: cls.__dict__[n] for n in names if n in cls.__dict__}
+        try:
+            cls.is_global = property(lambda self: True)
+            cls.is_private = property(lambda self: False)
+            cls.is_reserved = property(lambda self: False)
+            if mod.egress_address_public("8.8.8.8") is not True:
+                problems.append("control 8.8.8.8 judged not public")
+            for addr in ("0.1.2.3", "10.0.0.1", "100.64.0.1", "127.0.0.1",
+                         "169.254.169.254", "172.16.0.1", "192.0.0.8",
+                         "192.0.2.1", "192.88.99.1", "192.168.1.1",
+                         "198.18.0.1", "198.51.100.1", "203.0.113.1",
+                         "224.0.0.1", "240.0.0.1", "255.255.255.255"):
+                if mod.egress_address_public(addr) is not False:
+                    problems.append("%s judged public under permissive "
+                                    "tables" % addr)
+        finally:
+            for n in names:
+                if n in saved:
+                    setattr(cls, n, saved[n])
+        return problems, []
+    _guard(suite, GRP_N, "N20 v4-special-purpose-refused-whatever-the-tables",
+           v4_denylist)
+
+    def nat64_configured():
+        """Security round 2 (F5b): an answer inside a configured NAT64
+        prefix is refused 403 before any connect, like 64:ff9b::/96."""
+        mod = _egress_mod()
+        problems = []
+        prefix = mod.ipaddress.ip_network("2606:4700:64::/96")
+        addr = "2606:4700:64::808:808"
+        if mod.egress_address_public(addr) is not True:
+            problems.append("control %s judged not public without nat64"
+                            % addr)
+        if mod.egress_address_public(addr, (prefix,)) is not False:
+            problems.append("%s judged public inside a configured prefix"
+                            % addr)
+        net = mod.NetworkConfig(allow=("allowed.example",), ports=(443,),
+                                nat64=(prefix,))
+        stub = _NStub({"allowed.example": [addr]})
+        proxy = _n_proxy(mod, stub, network=net)
+        try:
+            c = _n_client(proxy, _n_connect("allowed.example"))
+            got = _n_status(c)
+            c.close()
+            if got != 403:
+                problems.append("CONNECT to a nat64 answer: %r, want 403"
+                                % (got,))
+            if stub.connected:
+                problems.append("connected %r, want no connect"
+                                % (stub.connected,))
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+        return problems, []
+    _guard(suite, GRP_N, "N21 configured-nat64-prefix-refused", nat64_configured)
+
+    def global_budget():
+        """Security round 2 (F12): a process-wide connection budget shared by
+        every run's proxy; over it a connection is dropped like the per-run
+        cap, and a released slot is usable again."""
+        mod = _egress_mod()
+        saved = []
+        _patch(mod, saved, "_EGRESS_GLOBAL_BUDGET", threading.BoundedSemaphore(2))
+        stub = _NStub()
+        problems = []
+        held = []
+        proxies = []
+        try:
+            proxies = [_n_proxy(mod, stub), _n_proxy(mod, stub)]
+            for i, proxy in enumerate(proxies):
+                c = _n_client(proxy, _n_connect("allowed.example"))
+                held.append(c)
+                if _n_status(c) != 200:
+                    problems.append("tunnel on proxy %d not established" % i)
+            c = _n_client(proxies[0], _n_connect("allowed.example"))
+            got = _n_status(c)
+            c.close()
+            if got is not None:
+                problems.append("third connection across two proxies: %r, "
+                                "want dropped (budget 2)" % (got,))
+            held.pop().close()
+            stub.peers[1].close()
+            _n_until(lambda: proxies[1].active() < 1)
+            time.sleep(0.2)
+            c = _n_client(proxies[0], _n_connect("allowed.example"))
+            got = _n_status(c)
+            held.append(c)
+            if got != 200:
+                problems.append("after one connection ended: %r, want 200"
+                                % (got,))
+        finally:
+            for c in held:
+                c.close()
+            for proxy in proxies:
+                proxy.close(time.monotonic() + 2.0)
+            stub.close()
+            _restore(mod, saved)
+        return problems, []
+    _guard(suite, GRP_N, "N22 global-connection-budget-across-proxies",
+           global_budget)
+
 
 # ---------------------------------------------------------------------------
 # the server: stdio child
@@ -3431,9 +4792,19 @@ class _Root:
     def quarantine(self):
         return os.path.join(self.path, "quarantine")
 
+    @property
+    def egress(self):
+        return os.path.join(self.path, "egress")
+
     def entries(self):
         try:
             return sorted(os.listdir(self.quarantine))
+        except OSError:
+            return []
+
+    def egress_entries(self):
+        try:
+            return sorted(os.listdir(self.egress))
         except OSError:
             return []
 
@@ -3446,21 +4817,24 @@ class _Root:
         self.fds = []
 
     def residue(self):
-        """Problems unless the root holds only .lock and an empty
-        quarantine/ (plan section 8, R2:S-H1a)."""
+        """Problems unless the root holds only .lock, an empty egress/ and
+        an empty quarantine/ (plan section 8, R2:S-H1a)."""
         try:
             top = sorted(os.listdir(self.path))
         except OSError as exc:
             return ["work root unreadable: %s" % type(exc).__name__]
         out = []
-        if top != [".lock", "quarantine"]:
-            out.append("work root holds %s, want ['.lock', 'quarantine']"
-                       % top[:6])
+        if top != [".lock", "egress", "quarantine"]:
+            out.append("work root holds %s, want ['.lock', 'egress', "
+                       "'quarantine']" % top[:6])
         left = self.entries()
         if left:
             out.append("quarantine/ holds %d entr%s %s"
                        % (len(left), "y" if len(left) == 1 else "ies",
                           left[:3]))
+        stale = self.egress_entries()
+        if stale:
+            out.append("egress/ holds %s" % stale[:3])
         return out
 
     def scrub(self, deep=False):
@@ -3469,10 +4843,13 @@ class _Root:
         except OSError:
             return
         for name in names:
-            if name not in (".lock", "quarantine"):
+            if name not in (".lock", "quarantine", "egress"):
                 _scrub_entry(self.path, name, deep)
         for name in self.entries():
             _scrub_entry(self.quarantine, name, deep)
+        if os.path.isdir(self.egress) and not os.path.islink(self.egress):
+            for name in self.egress_entries():
+                _scrub_entry(self.egress, name, deep)
 
 
 def _h_cfg(mod, fx, label, interpreters=None):
@@ -4956,6 +6333,82 @@ def _run_h(suite, fx):
     _guard(suite, GRP_H, "H24 out-path-over-cap-skipped",
            out_row("h24", plant_h24, {h24_kept: ("h24", "utf8")}, True))
 
+    def egress_stale_swept():
+        """H25: egress/ is the runner's own entry beside quarantine/; what a
+        SIGKILLed runner left in it (a per-run dir holding its socket name,
+        an empty one) is removed by the startup sweep, which still starts."""
+        mod = _h_mod()
+        problems = []
+        root = _Root(mod, fx.work_root("h25"))
+        try:
+            os.makedirs(root.egress, 0o700, exist_ok=True)
+            stale = _plant(root.egress, 2, "h25")
+            try:
+                got = mod.sweep_work_root(
+                    root.root_fd, root.q_fd,
+                    time.monotonic() + mod._STARTUP_SWEEP_DEADLINE_S)
+            except SystemExit as exc:
+                problems.append("the sweep refused the start: SystemExit(%r)"
+                                % (exc.code,))
+            else:
+                if got != 0:
+                    problems.append("sweep returned %r, want 0" % (got,))
+            problems.extend(root.residue())
+        finally:
+            root.close()
+            root.scrub()
+        return problems, ["stale       : %d egress/ entries planted" % len(stale)]
+    _guard(suite, GRP_H, "H25 startup-sweeps-stale-egress", egress_stale_swept)
+
+    def egress_planted_refused():
+        """H26: prepare_work_root creates egress/ 0700 like quarantine/, and a
+        non-directory or a symlink planted at its name refuses the start the
+        way one at quarantine/ does -- nothing is followed or removed."""
+        mod = _h_mod()
+        problems = []
+        lines = []
+        outside = os.path.realpath(tempfile.mkdtemp(prefix="h26-outside-",
+                                                    dir=fx.base))
+        for label, plant in (
+                ("a regular file", lambda p: _write(p, "h26")),
+                ("a symlink to a directory", lambda p: os.symlink(outside, p))):
+            path = fx.work_root("h26")
+            target = os.path.join(path, "egress")
+            plant(target)
+            try:
+                fds = mod.prepare_work_root(path)
+            except SystemExit as exc:
+                if exc.code in (0, None):
+                    problems.append("%s: SystemExit(%r), want a refusal"
+                                    % (label, exc.code))
+                else:
+                    lines.append("%s: SystemExit(%r)" % (label, exc.code))
+            else:
+                for fd in fds:
+                    os.close(fd)
+                problems.append("%s at egress/: prepare_work_root accepted it"
+                                % label)
+            if not os.path.lexists(target):
+                problems.append("%s: the planted entry was removed" % label)
+        if os.listdir(outside):
+            problems.append("the symlink's target gained %s"
+                            % sorted(os.listdir(outside))[:3])
+        # Control: a clean root gets a 0700 egress/ of the euid.
+        root = _Root(mod, fx.work_root("h26-ok"))
+        try:
+            st = os.lstat(root.egress) if os.path.lexists(root.egress) else None
+            if st is None or not stat.S_ISDIR(st.st_mode) \
+                    or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+                problems.append("control: egress/ is %r, want a 0700 "
+                                "directory of the euid"
+                                % (None if st is None else oct(st.st_mode),))
+        finally:
+            root.close()
+            root.scrub()
+        return problems, lines
+    _guard(suite, GRP_H, "H26 planted-egress-entry-refused",
+           egress_planted_refused)
+
 
 # H23's session: the leader forks one member that leaves the leader's group
 # (setpgid) and the work tree (chdir /), prints its pid and exits; the member
@@ -5204,21 +6657,24 @@ def _hello_ok(body, label, stdout, problems, quiet=True):
 
 
 def _wr_residue(path, wait=0.0):
-    """Problems unless the work root holds only .lock and an empty
-    quarantine/, polled up to `wait` seconds."""
+    """Problems unless the work root holds only .lock, an empty egress/ and
+    an empty quarantine/, polled up to `wait` seconds."""
     deadline = time.monotonic() + wait
     while True:
         out = []
         try:
             top = sorted(os.listdir(path))
             left = sorted(os.listdir(os.path.join(path, "quarantine")))
+            stale = sorted(os.listdir(os.path.join(path, "egress")))
         except OSError as exc:
             return ["work root unreadable: %s" % type(exc).__name__]
-        if top != [".lock", "quarantine"]:
-            out.append("work root holds %s, want ['.lock', 'quarantine']"
-                       % top[:6])
+        if top != [".lock", "egress", "quarantine"]:
+            out.append("work root holds %s, want ['.lock', 'egress', "
+                       "'quarantine']" % top[:6])
         if left:
             out.append("quarantine/ holds %s" % left[:3])
+        if stale:
+            out.append("egress/ holds %s" % stale[:3])
         if not out or time.monotonic() >= deadline:
             return out
         time.sleep(0.1)
@@ -5346,9 +6802,297 @@ def _run_i(suite, fx):
 
     try:
         _run_i_rows(suite, fx, live)
+        _run_i_no_egress(suite, fx, live)
     finally:
         if "r" in shared:
             shared["r"].close()
+    _run_i_egress(suite, fx)
+
+
+# The live egress rows (I13-I16): one runner whose config carries a network
+# allowlist naming ONE stable host, used only here. Linux runs them too when
+# bwrap is present (the egress path is per platform); INFO otherwise.
+I_EGRESS_HOST = "example.com"
+I_EGRESS_OTHER = "www.iana.org"
+I_EGRESS_MARK = b"Example Domain"
+
+
+def _egress_gate(fx):
+    if sys.platform == "darwin":
+        nested = _nested_seatbelt(fx)
+        if nested:
+            raise _Info(nested)
+        return
+    if sys.platform.startswith("linux"):
+        if not shutil.which("bwrap"):
+            raise _Info("bwrap is not on PATH")
+        return
+    raise _Info("no egress endpoint for platform %s" % sys.platform)
+
+
+def _host_reaches(host, port=443, timeout=5.0):
+    """The positive control of the live egress rows: this host itself can
+    resolve and reach host:port; None, or why not."""
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except OSError as exc:
+        return "%s:%d unreachable from the host itself (%s)" % (
+            host, port, exc)
+    sock.close()
+    return None
+
+
+def _ca_reads(python):
+    """The read grants `python`'s ssl module needs for its default trust
+    store: the directory of the default CA file (spelled) and of its
+    realpath, plus the CA directory, when they exist."""
+    try:
+        proc = subprocess.run(
+            [python, "-I", "-S", "-c",
+             "import json, ssl; p = ssl.get_default_verify_paths(); "
+             "print(json.dumps([p.cafile, p.capath, p.openssl_cafile, "
+             "p.openssl_capath]))"],
+            capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL, env={})
+        paths = json.loads(proc.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+    out = []
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        for cand in ((os.path.dirname(path), os.path.dirname(
+                os.path.realpath(path))) if os.path.isfile(path)
+                     else (path, os.path.realpath(path))):
+            if cand not in out and cand not in ("/", "/etc", "/usr"):
+                out.append(cand)
+    return out
+
+
+def _egress_interpreters():
+    py = _interpreters(full=False)["python3"]
+    reads = _ca_reads(py["path"])
+    if reads:
+        py = dict(py, extra_reads=reads)
+    return {"python3": py}
+
+
+def _run_i_egress(suite, fx):
+    shared = {}
+
+    def runner():
+        if "e" in shared:
+            raise shared["e"]
+        if "r" not in shared:
+            try:
+                shared["r"] = _Runner(
+                    fx, "i-egress", interpreters=_egress_interpreters(),
+                    mutate=_set_network({"allow": [I_EGRESS_HOST],
+                                         "ports": [443]}))
+            except BaseException as exc:      # noqa: BLE001 -- every row
+                shared["e"] = exc
+                raise
+        return shared["r"]
+
+    def live(fn, needs_net=False):
+        def body():
+            _live_mod()
+            _egress_mod()
+            _egress_gate(fx)
+            if needs_net:
+                why = _host_reaches(I_EGRESS_HOST)
+                if why:
+                    raise _Info(why)
+            r = runner()
+            problems, lines = fn(r)
+            problems = list(problems) + _wr_residue(r.work_root, wait=2.0)
+            return problems, lines
+        return body
+
+    def egress_of(body, label, problems):
+        got = (body or {}).get("egress")
+        if not isinstance(got, dict) or set(got) != {"tunnels", "refused"}:
+            problems.append("%s: egress summary %r, want {tunnels, refused}"
+                            % (label, got))
+            return {}
+        return got
+
+    def allowed_https(r):
+        problems = []
+        caps = r.caps("capabilities", problems)
+        net = caps.get("network")
+        if net != {"enabled": True, "allow": [I_EGRESS_HOST], "ports": [443]}:
+            problems.append("capabilities.network %r" % (net,))
+        script = (
+            "import json, os, urllib.request\n"
+            "out = {'proxy': os.environ.get('HTTPS_PROXY'),\n"
+            "       'no_proxy': os.environ.get('NO_PROXY')}\n"
+            "try:\n"
+            "    with urllib.request.urlopen('https://%s/', timeout=30) as r:\n"
+            "        body = r.read(400000)\n"
+            "        out['status'] = r.status\n"
+            "        out['mark'] = %r in body\n"
+            "except Exception as e:\n"
+            "    out['error'] = '%%s: %%s' %% (type(e).__name__, str(e)[:200])\n"
+            "print(json.dumps(out))\n" % (I_EGRESS_HOST, I_EGRESS_MARK))
+        body = _body(r.run(_py(script)), "allowed https", problems)
+        got = _json_line((body or {}).get("stdout", "")) or {}
+        if got.get("status") != 200 or got.get("mark") is not True:
+            problems.append("urllib to https://%s/: %r (stderr %r)"
+                            % (I_EGRESS_HOST, got, _short(
+                                (body or {}).get("stderr"))))
+        proxy = got.get("proxy") or ""
+        if not proxy.startswith("http://127.0.0.1:") or got.get("no_proxy") \
+                != "":
+            problems.append("HTTPS_PROXY %r / NO_PROXY %r"
+                            % (proxy, got.get("no_proxy")))
+        eg = egress_of(body, "allowed https", problems)
+        if eg and (eg.get("tunnels", 0) < 1 or eg.get("refused") != 0):
+            problems.append("egress summary %r, want tunnels >= 1, refused 0"
+                            % (eg,))
+        return problems, ["result      : %r" % (got,),
+                          "egress      : %r" % ((body or {}).get("egress"),)]
+    _guard(suite, GRP_I, "I13 egress-allowed-host-https-urllib",
+           live(allowed_https, needs_net=True))
+
+    def not_allowlisted(r):
+        problems = []
+        script = (
+            "import json, urllib.request\n"
+            "out = {}\n"
+            "for key, url in (('other', 'https://%s/'),\n"
+            "                 ('port', 'https://%s:8443/'),\n"
+            "                 ('plain', 'http://%s/')):\n"
+            "    try:\n"
+            "        urllib.request.urlopen(url, timeout=20).close()\n"
+            "        out[key] = 'fetched'\n"
+            "    except Exception as e:\n"
+            "        out[key] = '%%s: %%s' %% (type(e).__name__, str(e)[:120])\n"
+            "print(json.dumps(out))\n"
+            % (I_EGRESS_OTHER, I_EGRESS_HOST, I_EGRESS_HOST))
+        body = _body(r.run(_py(script)), "not allowlisted", problems)
+        got = _json_line((body or {}).get("stdout", "")) or {}
+        for key, needle in (("other", "403"), ("port", "403"),
+                            ("plain", "405")):
+            if needle not in str(got.get(key)):
+                problems.append("%s: %r, want the proxy's %s"
+                                % (key, got.get(key), needle))
+        eg = egress_of(body, "not allowlisted", problems)
+        if eg and (eg.get("refused", 0) < 3 or eg.get("tunnels") != 0):
+            problems.append("egress summary %r, want refused >= 3, tunnels 0"
+                            % (eg,))
+        return problems, ["result      : %r" % (got,)]
+    _guard(suite, GRP_I, "I14 egress-not-allowlisted-refused",
+           live(not_allowlisted))
+
+    def direct(r):
+        problems = []
+        ls = socket.socket()
+        ls.bind(("127.0.0.1", 0))
+        ls.listen(4)
+        other = ls.getsockname()[1]
+        try:
+            script = (
+                "import json, os, socket, sys\n"
+                "def tcp(host, port):\n"
+                "    s = socket.socket(); s.settimeout(3)\n"
+                "    try:\n"
+                "        s.connect((host, port)); return 'connected'\n"
+                "    except OSError as e:\n"
+                "        return 'denied:%s' % (e.errno,)\n"
+                "    finally:\n"
+                "        s.close()\n"
+                "proxy = os.environ['HTTPS_PROXY'].rsplit(':', 1)\n"
+                "print(json.dumps({'proxy': tcp('127.0.0.1', int(proxy[1])),\n"
+                "                  'other': tcp('127.0.0.1', int(sys.argv[1])),\n"
+                "                  'outside': tcp('1.1.1.1', 443),\n"
+                "                  'outside80': tcp('8.8.8.8', 80)}))\n")
+            body = _body(r.run(_py(script, args=[str(other)])), "direct",
+                         problems)
+        finally:
+            ls.close()
+        got = _json_line((body or {}).get("stdout", "")) or {}
+        if got.get("proxy") != "connected":
+            problems.append("control: the proxy endpoint itself %r"
+                            % (got.get("proxy"),))
+        for key in ("other", "outside", "outside80"):
+            if not str(got.get(key, "")).startswith("denied"):
+                problems.append("%s: %r, want denied" % (key, got.get(key)))
+        return problems, ["result      : %r" % (got,)]
+    _guard(suite, GRP_I, "I15 egress-direct-sockets-denied", live(direct))
+
+    def dns(r):
+        problems = []
+        try:
+            socket.getaddrinfo(I_EGRESS_HOST, 443)
+        except OSError as exc:
+            raise _Info("the host itself cannot resolve %s (%s)"
+                        % (I_EGRESS_HOST, exc))
+        script = (
+            "import json, socket\n"
+            "out = {}\n"
+            "for name in (%r, %r):\n"
+            "    try:\n"
+            "        socket.getaddrinfo(name, 443); out[name] = 'resolved'\n"
+            "    except OSError as e:\n"
+            "        out[name] = 'failed'\n"
+            "u = socket.socket(socket.AF_UNIX)\n"
+            "try:\n"
+            "    u.connect('/var/run/mDNSResponder'); out['mdns'] = 'connected'\n"
+            "except OSError:\n"
+            "    out['mdns'] = 'failed'\n"
+            "print(json.dumps(out))\n" % (I_EGRESS_HOST, I_EGRESS_OTHER))
+        body = _body(r.run(_py(script)), "dns", problems)
+        got = _json_line((body or {}).get("stdout", "")) or {}
+        for key in (I_EGRESS_HOST, I_EGRESS_OTHER, "mdns"):
+            if got.get(key) != "failed":
+                problems.append("%s: %r, want failed" % (key, got.get(key)))
+        return problems, ["result      : %r" % (got,)]
+    _guard(suite, GRP_I, "I16 egress-dns-denied-inside", live(dns))
+
+    if "r" in shared:
+        shared["r"].close()
+
+
+def _run_i_no_egress(suite, fx, live):
+    def absent(r):
+        """(e): a config without "network" is today's runner -- capabilities
+        says disabled, a result carries no egress member, the script sees no
+        proxy variable and reaches no loopback port."""
+        problems = []
+        caps = r.caps("capabilities", problems)
+        if caps.get("network") != {"enabled": False, "allow": [],
+                                   "ports": []}:
+            problems.append("capabilities.network %r, want disabled"
+                            % (caps.get("network"),))
+        ls = socket.socket()
+        ls.bind(("127.0.0.1", 0))
+        ls.listen(4)
+        try:
+            script = (
+                "import json, os, socket, sys\n"
+                "s = socket.socket(); s.settimeout(3)\n"
+                "try:\n"
+                "    s.connect(('127.0.0.1', int(sys.argv[1]))); got = 'connected'\n"
+                "except OSError as e:\n"
+                "    got = 'denied:%s' % (e.errno,)\n"
+                "print(json.dumps({'loopback': got, 'proxy_env': sorted(\n"
+                "    k for k in os.environ if k.lower().endswith('_proxy'))}))\n")
+            body = _body(r.run(_py(script, args=[str(ls.getsockname()[1])])),
+                         "no network", problems)
+        finally:
+            ls.close()
+        got = _json_line((body or {}).get("stdout", "")) or {}
+        if not str(got.get("loopback", "")).startswith("denied"):
+            problems.append("loopback %r, want denied" % (got.get("loopback"),))
+        if got.get("proxy_env") != []:
+            problems.append("proxy variables %r, want none"
+                            % (got.get("proxy_env"),))
+        if body is not None and "egress" in body:
+            problems.append("a run without network carries egress %r"
+                            % (body.get("egress"),))
+        return problems, ["result      : %r" % (got,)]
+    _guard(suite, GRP_I, "I17 no-network-config-unchanged", live(absent))
 
 
 def _run_i_rows(suite, fx, live):
@@ -7620,6 +9364,7 @@ def run(opts=None):
         _run_macho(suite, fx)
         _run_c(suite, fx)
         _run_d(suite, fx)
+        _run_n(suite, fx)
         _run_f(suite, fx)
         _run_h(suite, fx)
         _run_i(suite, fx)

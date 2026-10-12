@@ -92,14 +92,34 @@ both OSes; each refusal beside its control):
      reason still fits and ends in `}\\n`; G3 `~+` / `~-` / `~user` write
      scopes are refused; P4 the --env help says values travel in argv.
 
+Group added by the egress work (domain-allowlisted network for mcp-sandbox
+runs; the allowlisting CONNECT proxy itself is mcp-sandbox's, so this group
+gates only sbx's half -- one endpoint the sandbox may reach):
+  N  egress flags -- --egress-port (Seatbelt) / --egress-socket (bwrap) need
+     --restrict-reads, refuse --net and each other, and each is refused on
+     the other platform (exit 3); the port grammar; the socket must be the
+     caller's own socket in a 0700 directory, no symlink hop, never under a
+     socket directory; the Seatbelt golden keeps (deny network*) and adds ONE
+     (allow network-outbound (remote tcp "localhost:N")) after it (M0: a
+     "127.0.0.1" host is refused by the SBPL compiler); the bwrap golden
+     binds the one socket at /.sbx-egress.sock after the socket tmpfs, keeps
+     --unshare-net and wraps the target in the stdlib forwarder (127.0.0.1:
+     3128 -> the socket); the forwarder relays, passes the target's exit
+     code and dies with it; live: Seatbelt reaches only 127.0.0.1:N (no DNS,
+     no other port, no outside address, no mDNSResponder socket), and bwrap
+     reaches the bound socket through the forwarder only (Linux, INFO here
+     otherwise). S17 pins the gate side: both flags always prompt.
+
 Usage:
   python3 tests/test_sbx_restrict.py [--brief] [--keep]
 Exit code 0 iff every case passes.
 """
 
+import grp
 import io
 import json
 import os
+import pwd
 import random
 import shutil
 import signal
@@ -132,6 +152,7 @@ GRP_T = "T. clean env"
 GRP_L = "L. restricted Seatbelt (live)"
 GRP_S = "S. gate grammar"
 GRP_X = "X. security review round 1"
+GRP_N = "N. egress flags"
 
 # P1's payload: a directory NAME that closes the SBPL string literal it is
 # interpolated into and appends a write-anywhere rule of its own.
@@ -1785,7 +1806,8 @@ def _token_pids(token):
 
 
 def _uid_count():
-    """The uid's process count, the way sbx's uid_process_count counts it."""
+    """The uid's RLIMIT_NPROC units, the way sbx's uid_process_count counts
+    them: processes on macOS, tasks (threads) on Linux."""
     uid = str(os.getuid())
     if sys.platform == "darwin":
         p = subprocess.run(["/bin/ps", "-A", "-o", "ruid="], env={},
@@ -1799,12 +1821,12 @@ def _uid_count():
             continue
         try:
             with open("/proc/%s/status" % name) as fh:
-                for line in fh:
-                    if line.startswith("Uid:"):
-                        count += line.split()[1] == uid
-                        break
+                text = fh.read()
         except OSError:
             continue
+        fields = dict(ln.split(":", 1) for ln in text.splitlines() if ":" in ln)
+        if fields.get("Uid", "").split()[:1] == [uid]:
+            count += int(fields.get("Threads", "1").split()[0])
     return count
 
 
@@ -2991,6 +3013,26 @@ def _run_s(suite, helper, fx):
          "--restrict-reads --timeout 5 --status-fd 3",
          "--restrict-reads --timeout=5 --status-fd=9"])
 
+    def s17():
+        # egress opens a network path the gate cannot judge: both flags are
+        # _PROMPT_FLAGS members and prompt in every spelling, beside the
+        # restricted control that still auto-allows
+        problems = allowed("--restrict-reads", "--restrict-reads --clean-env")
+        table = getattr(gate, "_PROMPT_FLAGS", ())
+        for flag in ("--egress-port", "--egress-socket"):
+            if flag not in table:
+                problems.append("%s is not in _PROMPT_FLAGS %r"
+                                % (flag, sorted(table)))
+        problems += prompts(
+            "--restrict-reads --egress-port 3128",
+            "--restrict-reads --egress-port=3128",
+            "--egress-port 3128 --restrict-reads --clean-env",
+            "--restrict-reads --egress-socket /x/s",
+            "--restrict-reads --egress-socket=/x/s",
+            "--restrict-reads --dry-run --egress-socket /x/s")
+        return problems, []
+    _guard(suite, GRP_S, "S17 egress-flags-always-prompt", s17)
+
 
 # ---------------------------------------------------------------------------
 # X: security review round 1 (pure / in-process; both OSes)
@@ -3472,6 +3514,797 @@ def _run_x(suite, helper, fx):
         return problems, []
     _guard(suite, GRP_X, "X14 write-scope-under-socket-dir-refused", x14)
 
+    def x15():
+        # Linux RLIMIT_NPROC counts TASKS (threads) of the real uid, so the
+        # `--rlimit-nproc +N` base must too: a uid with 127 processes but
+        # 1054 threads got limit 191 and bwrap's clone failed EAGAIN (para,
+        # Ubuntu 22.04). A fake proc tree pins the count; runs on both OSes.
+        root = tempfile.mkdtemp(prefix="proc-", dir=fx["root"])
+        want = 4242
+        rows = {"100": "Uid:\t4242\t4242\t4242\t4242\nThreads:\t7\n",
+                "101": "Uid:\t1\t1\t1\t1\nThreads:\t50\n",
+                "102": "Uid:\t4242\t4242\t4242\t4242\nThreads:\t1\n",
+                "104": "Uid:\t4242\t4242\t4242\t4242\n",  # no Threads: -> 1
+                "105": "Uid:\t1\t4242\t4242\t4242\nThreads:\t3\n",
+                "self": "Uid:\t4242\t4242\t4242\t4242\nThreads:\t99\n"}
+        for name, text in rows.items():
+            os.makedirs(os.path.join(root, name))
+            with open(os.path.join(root, name, "status"), "w") as fh:
+                fh.write(text)
+        os.makedirs(os.path.join(root, "103"))  # exited mid-scan: no status
+        got = helper.uid_task_count(want, root)
+        if got != 9:
+            return ["uid_task_count over the fake tree = %r, want 9 (7 + 1 "
+                    "+ 1 tasks of real uid %d; effective-only uid, a "
+                    "non-pid entry and a vanished pid ignored)"
+                    % (got, want)], []
+        return [], []
+    _guard(suite, GRP_X, "X15 nproc-plus-base-counts-tasks", x15)
+
+
+# ---------------------------------------------------------------------------
+# N: egress flags (--egress-port on Seatbelt, --egress-socket on bwrap)
+# ---------------------------------------------------------------------------
+
+# The fixed in-sandbox endpoint of the Linux path (sbx's EGRESS_SOCKET_DEST
+# and EGRESS_FORWARD_PORT), typed here, never read from the helper.
+N_SOCKET_DEST = "/.sbx-egress.sock"
+N_FORWARD_PORT = 3128
+# The forwarder's connection cap: the runner proxy's _EGRESS_MAX_CONNECTIONS
+# (Scripts/mcp-sandbox.py), typed here, never read from either file.
+N_FORWARD_SLOTS = 32
+N_PORT = 48123
+N_PY = "/usr/bin/python3"
+N_SB_NET = ["(deny network*)",
+            '(allow network-outbound (remote tcp "localhost:%d"))' % N_PORT]
+N_EGRESS_DEFAULTS = dict(egress_port=None, egress_socket=None,
+                         egress_python=None)
+
+
+def _n_private_group(gid, euid):
+    """Is `gid` a user-private group of `euid` (no other gr_mem name, no
+    other passwd entry's primary group)? An unknown gid or euid -> False.
+    Typed here, independent of the helper's rule."""
+    try:
+        me = pwd.getpwuid(euid).pw_name
+        members = grp.getgrgid(gid).gr_mem
+    except KeyError:
+        return False
+    if [m for m in members if m != me]:
+        return False
+    return not [p for p in pwd.getpwall()
+                if p.pw_gid == gid and p.pw_uid != euid]
+
+
+def _n_exposed_ancestor(d):
+    """The first of `d` and its ancestors another uid may write (an other
+    write bit, or a group write bit whose group is not the euid's private
+    one -- neither on a root-owned sticky dir; or a foreign owner) -> its
+    path, or None. Typed here, independent of the helper's walk."""
+    euid = os.geteuid()
+    while True:
+        st = os.lstat(d)
+        sticky_root = st.st_uid == 0 and st.st_mode & stat.S_ISVTX
+        if st.st_uid not in (0, euid) or (
+                not sticky_root
+                and (st.st_mode & 0o002
+                     or (st.st_mode & 0o020
+                         and not _n_private_group(st.st_gid, euid)))):
+            return d
+        if d == "/":
+            return None
+        d = os.path.dirname(d)
+
+
+def _n_host_flag(fx):
+    """The egress flag this host's backend takes, as a dry-run would pass
+    it: --egress-port on darwin, --egress-socket <fixture socket> on linux."""
+    if sys.platform == "darwin":
+        return ["--egress-port", str(N_PORT)]
+    return ["--egress-socket", _n_socket(fx)[0]]
+
+
+def _n_socket(fx):
+    """(path, listener) of a unix socket in a 0700 fixture dir, bound once
+    per run through a relative name (no sun_path limit)."""
+    if "n_sock" in fx:
+        return fx["n_sock"]
+    sdir = os.path.join(fx["root"], "egress")
+    os.makedirs(sdir, exist_ok=True)
+    os.chmod(sdir, 0o700)
+    path = os.path.join(sdir, "s")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    here = os.getcwd()
+    try:
+        os.chdir(sdir)
+        sock.bind("s")
+    finally:
+        os.chdir(here)
+    sock.listen(8)
+    fx["n_sock"] = (path, sock)
+    return fx["n_sock"]
+
+
+def _n_echo_tcp():
+    """A host TCP listener on 127.0.0.1:0 answering `ECHO:<data>`; (port,
+    socket). The thread is a daemon and ends when the socket is closed."""
+    import threading
+    ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ls.bind(("127.0.0.1", 0))
+    ls.listen(8)
+
+    def loop():
+        while True:
+            try:
+                conn, _addr = ls.accept()
+            except OSError:
+                return
+            try:
+                conn.settimeout(5)
+                conn.sendall(b"ECHO:" + conn.recv(64))
+            except OSError:
+                pass
+            conn.close()
+    threading.Thread(target=loop, daemon=True).start()
+    return ls.getsockname()[1], ls
+
+
+def _n_echo_unix(path):
+    """A host unix listener at `path` (bound relatively) answering
+    `ECHO:<data>`, for the forwarder rows; returns the socket."""
+    import threading
+    if os.path.lexists(path):
+        os.unlink(path)
+    ls = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    here = os.getcwd()
+    try:
+        os.chdir(os.path.dirname(path))
+        ls.bind(os.path.basename(path))
+    finally:
+        os.chdir(here)
+    ls.listen(8)
+
+    def loop():
+        while True:
+            try:
+                conn, _addr = ls.accept()
+            except OSError:
+                return
+            try:
+                conn.settimeout(5)
+                conn.sendall(b"ECHO:" + conn.recv(64))
+            except OSError:
+                pass
+            conn.close()
+    threading.Thread(target=loop, daemon=True).start()
+    return ls
+
+
+# One probe for the live egress rows: every outcome as one JSON line.
+N_PROBE = r'''
+import json, os, socket, sys
+allowed, other = int(sys.argv[1]), int(sys.argv[2])
+out = {}
+def tcp(host, port, fam=socket.AF_INET):
+    s = socket.socket(fam, socket.SOCK_STREAM)
+    s.settimeout(3)
+    try:
+        s.connect((host, port))
+        s.sendall(b"tf")
+        return s.recv(64).decode("ascii", "replace")
+    except OSError as e:
+        return "EPERM" if e.errno == 1 else (os.strerror(e.errno) if e.errno
+                                             else type(e).__name__)
+    finally:
+        s.close()
+out["allowed"] = tcp("127.0.0.1", allowed)
+out["other"] = tcp("127.0.0.1", other)
+out["outside"] = tcp("1.1.1.1", 443)
+try:
+    socket.getaddrinfo("example.com", 443)
+    out["dns"] = "resolved"
+except OSError as e:
+    out["dns"] = "failed"
+u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    u.connect("/var/run/mDNSResponder")
+    out["mdns"] = "connected"
+except OSError as e:
+    out["mdns"] = "EPERM" if e.errno == 1 else "failed"
+finally:
+    u.close()
+if len(sys.argv) > 3:
+    try:
+        os.unlink(sys.argv[3])
+        out["unlink_dest"] = "removed"
+    except OSError as e:
+        out["unlink_dest"] = "refused"
+print(json.dumps(out, sort_keys=True))
+'''
+
+
+def _run_n(suite, helper, fx, skips):
+    host_flag = _n_host_flag(fx)
+
+    def n1():
+        problems = _accepted(helper, fx, host_flag, "restricted + egress")
+        problems += _refused(helper, fx, host_flag,
+                             "egress without --restrict-reads",
+                             needle="--restrict-reads", restrict=False)
+        return problems, ["flag        : %s" % " ".join(host_flag)]
+    _guard(suite, GRP_N, "N1 egress-requires-restrict-reads", n1)
+
+    def n2():
+        problems = _accepted(helper, fx, host_flag, "restricted + egress")
+        problems += _refused(helper, fx, ["--net"] + host_flag,
+                             "egress with --net", needle="--net")
+        problems += _refused(helper, fx,
+                             ["--egress-port", str(N_PORT), "--egress-socket",
+                              _n_socket(fx)[0]],
+                             "both egress flags", needle="--egress-")
+        return problems, []
+    _guard(suite, GRP_N, "N2 egress-net-and-both-flags-refused", n2)
+
+    def n3():
+        fn = getattr(helper, "parse_egress_port", None)
+        if fn is None:
+            return ["helper has no parse_egress_port"], []
+        problems = []
+        for raw, want in (("1", 1), ("3128", 3128), ("65535", 65535)):
+            code, got, err = _call(fn, raw)
+            if code is not None or got != want:
+                problems.append("control %r: exit %r / %r (%s)"
+                                % (raw, code, got, _first(err)))
+        for raw in ("0", "65536", "+1", "-1", "08x", "", "1e3", "3128 ",
+                    chr(0x0663), "000000000000000000001"):
+            code, got, _err = _call(fn, raw)
+            if code != 2:
+                problems.append("%r: exit %r (got %r), want 2"
+                                % (raw, code, got))
+        return problems, []
+    _guard(suite, GRP_N, "N3 egress-port-grammar", n3)
+
+    def n4():
+        fn = getattr(helper, "validate_egress", None)
+        if fn is None:
+            return ["helper has no validate_egress"], []
+        sock = _n_socket(fx)[0]
+        port_args = _parse(helper, ["--restrict-reads", "--egress-port",
+                                    str(N_PORT)])
+        sock_args = _parse(helper, ["--restrict-reads", "--egress-socket",
+                                    sock])
+        problems = []
+        for label, args, key, want_code, want in (
+                ("port on darwin", port_args, "darwin", None, (N_PORT, None)),
+                ("socket on linux", sock_args, "linux", None, (None, sock)),
+                ("port on linux", port_args, "linux", 3, None),
+                ("socket on darwin", sock_args, "darwin", 3, None),
+                ("port elsewhere", port_args, "win32", 3, None)):
+            code, got, err = _call(fn, args, key)
+            if code != want_code:
+                problems.append("%s: exit %r, want %r (%s)"
+                                % (label, code, want_code, _first(err)))
+            elif want_code is None and tuple(got or ()) != want:
+                problems.append("%s: %r, want %r" % (label, got, want))
+            elif want_code and "sbx: error" not in err:
+                problems.append("%s: no 'sbx: error' line" % label)
+        return problems, []
+    _guard(suite, GRP_N, "N4 egress-flag-is-per-platform", n4)
+
+    def n5():
+        fn = getattr(helper, "egress_socket_refusal", None)
+        if fn is None:
+            return ["helper has no egress_socket_refusal"], []
+        sock, _l = _n_socket(fx)
+        problems = []
+        notes = []
+        why = fn(sock)
+        # The control's verdict depends on the checkout's own ancestors
+        # (N12, N14): under an other-writable one, or a group-writable one
+        # whose group is shared, the correct answer is the ancestor refusal,
+        # never acceptance -- a 0775 clone under a user-private group (UPG,
+        # umask 0002) is not exposed.
+        exposed = _n_exposed_ancestor(os.path.dirname(os.path.dirname(sock)))
+        if exposed:
+            notes.append("control     : %s is foreign-writable -> refusal "
+                         "expected" % exposed)
+            if not isinstance(why, str) or "ancestor" not in why:
+                problems.append("control under a foreign-writable ancestor "
+                                "%s: %r, want the ancestor refusal"
+                                % (exposed, why))
+        elif why is not None:
+            problems.append("control (own socket, 0700 dir): refused %r"
+                            % (why,))
+        # the refusals: not a socket, a symlink hop, a group/other-readable
+        # parent, under a socket directory, missing
+        plain = os.path.join(fx["root"], "egress", "plain")
+        with open(plain, "w") as fh:
+            fh.write("x")
+        link = os.path.join(fx["root"], "egress-link")
+        if not os.path.lexists(link):
+            os.symlink(sock, link)
+        open_dir = os.path.join(fx["root"], "egress-open")
+        os.makedirs(open_dir, exist_ok=True)
+        os.chmod(open_dir, 0o755)
+        open_sock = os.path.join(open_dir, "s")
+        if not os.path.lexists(open_sock):
+            s2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            here = os.getcwd()
+            try:
+                os.chdir(open_dir)
+                s2.bind("s")
+            finally:
+                os.chdir(here)
+                s2.close()
+        cases = (("a regular file", plain), ("a symlink to the socket", link),
+                 ("a socket in a 0755 dir", open_sock),
+                 ("under /tmp", "/tmp/sbx-egress-n5/s"),
+                 ("under /run", "/run/user/1000/bus"),
+                 ("under /var/run", "/var/run/docker.sock"),
+                 ("missing", os.path.join(fx["root"], "egress", "nope")))
+        for label, path in cases:
+            why = fn(path)
+            if not isinstance(why, str) or not why:
+                problems.append("%s (%s): %r, want a refusal reason"
+                                % (label, path, why))
+        return problems, ["socket      : %s" % sock] + notes
+    _guard(suite, GRP_N, "N5 egress-socket-must-be-own-socket", n5)
+
+    def n6():
+        problems = []
+        base = _sb_lines(helper, env=SB_ENV_PATH)
+        problems += _first_diff(base, SB_VARIANTS[0][2])
+        try:
+            got = _sb_lines(helper, env=SB_ENV_PATH, egress_port=N_PORT)
+        except Exception as exc:          # noqa: BLE001 -- the red reason
+            return problems + ["egress_port scope raised %r" % (exc,)], []
+        want = SB_VARIANTS[0][2][:-1] + N_SB_NET
+        problems += _sb_restricted(got, "egress") + _first_diff(got, want)
+        for label, kw in (
+                ("legacy scope", dict(LEGACY_SCOPE, egress_port=N_PORT)),
+                ("port 0", dict(SB_SCOPE, egress_port=0)),
+                ("port 65536", dict(SB_SCOPE, egress_port=65536)),
+                ("bool port", dict(SB_SCOPE, egress_port=True)),
+                ("str port", dict(SB_SCOPE, egress_port="3128"))):
+            why = _raises_value_error(helper._seatbelt_argv,
+                                      helper.Scope(**kw))
+            if why:
+                problems.append("%s: %s, want ValueError" % (label, why))
+        return problems, ["network     : %s" % " | ".join(got[-2:])]
+    _guard(suite, GRP_N, "N6 seatbelt-egress-golden", n6)
+
+    def n7():
+        problems = _first_diff(_bw(helper, BW_SCOPE_SPLIT), BW_GOLDEN_SPLIT,
+                               "argv item")
+        fwd = getattr(helper, "EGRESS_FORWARDER", None)
+        if not isinstance(fwd, str) or not fwd:
+            return problems + ["helper has no EGRESS_FORWARDER source"], []
+        try:
+            compile(fwd, "<egress forwarder>", "exec")
+        except SyntaxError as exc:
+            problems.append("the forwarder does not compile: %s" % exc)
+        sock = "/s/e/s"
+        got = _bw(helper, BW_SCOPE_SPLIT, egress_socket=sock,
+                  egress_python=N_PY)
+        sep = BW_GOLDEN_SPLIT.index("--bind")
+        cut = BW_GOLDEN_SPLIT.index("--")
+        want = (BW_GOLDEN_SPLIT[:sep] + ["--ro-bind", sock, N_SOCKET_DEST]
+                + BW_GOLDEN_SPLIT[sep:cut + 1]
+                + [N_PY, "-I", "-S", "-B", "-c", fwd, str(N_FORWARD_PORT),
+                   N_SOCKET_DEST, "--"] + BW_GOLDEN_SPLIT[cut + 1:])
+        problems += _bw_restricted(got, "egress") + _first_diff(
+            got, want, "argv item")
+        if "--unshare-net" not in got:
+            problems.append("egress dropped --unshare-net")
+        for label, kw in (
+                ("no forwarder python", dict(BW_SCOPE_SPLIT,
+                                             egress_socket=sock)),
+                ("legacy scope", dict(LEGACY_SCOPE, egress_socket=sock,
+                                      egress_python=N_PY))):
+            why = _raises_value_error(helper._bwrap_argv, helper.Scope(**kw))
+            if why:
+                problems.append("%s: %s, want ValueError" % (label, why))
+        return problems, ["argv        : %d items" % len(got)]
+    _guard(suite, GRP_N, "N7 bwrap-egress-golden", n7)
+
+    def n8():
+        rc, out, err, execs = _cli(helper, fx["w"], [
+            "--restrict-reads", "--write", fx["w"], "--dry-run"] + host_flag
+            + ["--", ARGV0, "x"])
+        problems = [] if rc == 0 else ["rc %r (%s)" % (rc, _first(err))]
+        if execs:
+            problems.append("exec'd on a dry run")
+        field = "egress_port" if sys.platform == "darwin" else "egress_socket"
+        if field not in out:
+            problems.append("the plan does not print %s" % field)
+        legacy = helper.Scope(**dict(LEGACY_SCOPE, **N_EGRESS_DEFAULTS))
+        if helper._seatbelt_argv(legacy) != LEGACY_SEATBELT:
+            problems.append("legacy seatbelt differs with egress defaults")
+        if helper._bwrap_argv(legacy) != LEGACY_BWRAP:
+            problems.append("legacy bwrap differs with egress defaults")
+        if not helper._restricted_flags_given(_parse(helper, host_flag)):
+            problems.append("an egress flag alone is not routed to the "
+                            "restricted path")
+        return problems, []
+    _guard(suite, GRP_N, "N8 dry-run-prints-egress-legacy-unchanged", n8)
+
+    def n9():
+        # The forwarder, host side (no bwrap): listen on a free port, fork,
+        # exec the target; the target talks to a unix echo server through
+        # it; the target's exit code is the run's; the forwarder child is
+        # gone once the target has exited (its parent-watch, which the pid
+        # namespace makes redundant inside bwrap).
+        fwd = getattr(helper, "EGRESS_FORWARDER", None)
+        if not isinstance(fwd, str) or not fwd:
+            return ["helper has no EGRESS_FORWARDER source"], []
+        path = os.path.join(fx["root"], "egress", "fwd")
+        srv = _n_echo_unix(path)
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        client = ("import socket, sys, time\n"
+                  "for _ in range(50):\n"
+                  "    s = socket.socket(); s.settimeout(3)\n"
+                  "    try:\n"
+                  "        s.connect(('127.0.0.1', %d)); break\n"
+                  "    except OSError:\n"
+                  "        time.sleep(0.05)\n"
+                  "s.sendall(b'tf-n9'); print(s.recv(64).decode())\n"
+                  "sys.exit(5)\n" % port)
+        problems = []
+        try:
+            p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", fwd,
+                                str(port), path, "--", sys.executable, "-I",
+                                "-S", "-c", client],
+                               capture_output=True, text=True, timeout=30,
+                               stdin=subprocess.DEVNULL)
+            if p.returncode != 5:
+                problems.append("rc %r, want the target's 5 (%s)"
+                                % (p.returncode, p.stderr.strip()[:200]))
+            if p.stdout.strip() != "ECHO:tf-n9":
+                problems.append("stdout %r, want ECHO:tf-n9"
+                                % (p.stdout.strip()[:80],))
+            deadline = time.monotonic() + 5
+            gone = False
+            while time.monotonic() < deadline:
+                s = socket.socket()
+                s.settimeout(1)
+                try:
+                    s.connect(("127.0.0.1", port))
+                except OSError:
+                    gone = True
+                    break
+                finally:
+                    s.close()
+                time.sleep(0.1)
+            if not gone:
+                problems.append("the forwarder still listens 5 s after the "
+                                "target exited")
+        finally:
+            srv.close()
+        return problems, ["port        : %d" % port]
+    _guard(suite, GRP_N, "N9 forwarder-relays-and-dies-with-target", n9)
+
+    def n10():
+        # live Seatbelt: --egress-port P reaches ONLY 127.0.0.1:P
+        port, ls = _n_echo_tcp()
+        other, ls2 = _n_echo_tcp()
+        try:
+            argv0, flags = _l_plan("python3")
+            wd = os.path.join(fx["root"], "N-seatbelt")
+            os.makedirs(wd, exist_ok=True)
+            script = os.path.join(wd, "probe.py")
+            with open(script, "w") as fh:
+                fh.write(N_PROBE)
+            res = _live({"w": wd}, flags + ["--egress-port", str(port)],
+                        [argv0, "-I", "-S", script, str(port), str(other)],
+                        status=False)
+            ctl = _live({"w": wd}, flags,
+                        [argv0, "-I", "-S", script, str(port), str(other)],
+                        status=False)
+        finally:
+            ls.close()
+            ls2.close()
+        got, base = _json_out(res), _json_out(ctl)
+        problems = [] if res["rc"] == 0 else ["rc %r: %s" % (
+            res["rc"], res["err"].strip()[:200])]
+        if not isinstance(got, dict) or not isinstance(base, dict):
+            return problems + ["probe printed no JSON: %r / %r"
+                               % (res["out"][:120], ctl["out"][:120])], []
+        problems += ["control (no egress): " + p for p in _l_compare(
+            base, (("allowed", "EPERM"),))]
+        problems += _l_compare(got, (("allowed", "ECHO:tf"),
+                                     ("other", "EPERM"), ("outside", "EPERM"),
+                                     ("dns", "failed"), ("mdns", "EPERM")))
+        return problems, ["egress      : %r" % (got,),
+                          "control     : %r" % (base,)]
+    _live_row(suite, GRP_N, "N10 seatbelt-egress-port-only (live)",
+              skips["darwin"], n10)
+
+    def n11():
+        # live bwrap: --egress-socket S reaches S through the forwarder at
+        # 127.0.0.1:3128 inside the private netns, and nothing else
+        path = os.path.join(fx["root"], "egress", "live")
+        srv = _n_echo_unix(path)
+        try:
+            wd = os.path.join(fx["root"], "N-bwrap")
+            os.makedirs(wd, exist_ok=True)
+            script = os.path.join(wd, "probe.py")
+            with open(script, "w") as fh:
+                fh.write(N_PROBE)
+            py = os.path.realpath(sys.executable)
+            # the cwd is the write scope _live adds; the echo socket stays
+            # outside every grant (reached only through --egress-socket)
+            flags = ["--restrict-reads", "--timeout", "30", "--clean-env",
+                     "--env", "PATH=/usr/bin:/bin"]
+            res = _live({"w": wd}, flags + ["--egress-socket", path],
+                        [py, "-I", "-S", script, str(N_FORWARD_PORT), "9",
+                         N_SOCKET_DEST], status=False)
+            ctl = _live({"w": wd}, flags,
+                        [py, "-I", "-S", script, str(N_FORWARD_PORT), "9"],
+                        status=False)
+        finally:
+            srv.close()
+        got, base = _json_out(res), _json_out(ctl)
+        problems = [] if res["rc"] == 0 else ["rc %r: %s" % (
+            res["rc"], res["err"].strip()[:200])]
+        if not isinstance(got, dict) or not isinstance(base, dict):
+            return problems + ["probe printed no JSON: %r / %r"
+                               % (res["out"][:120], res["err"][:200])], []
+        if base.get("allowed") == "ECHO:tf":
+            problems.append("control (no egress) reached the forwarder port")
+        problems += _l_compare(got, (("allowed", "ECHO:tf"),
+                                     ("unlink_dest", "refused"),
+                                     ("dns", "failed")))
+        for key in ("other", "outside"):
+            if got.get(key) == "ECHO:tf" or got.get(key) is None:
+                problems.append("%s %r: reached" % (key, got.get(key)))
+        return problems, ["egress      : %r" % (got,),
+                          "control     : %r" % (base,)]
+    _live_row(suite, GRP_N, "N11 bwrap-egress-socket-forwarder (live)",
+              skips["linux"], n11)
+
+    def n12():
+        # Security review F8 (CWE-367): bwrap re-resolves the bind source at
+        # mount time, so every ancestor above the 0700 directory must be one
+        # no other uid can write -- here a 0777 grandparent, and a sticky
+        # one the caller (not root) owns, both refused.
+        fn = getattr(helper, "egress_socket_refusal", None)
+        if fn is None:
+            return ["helper has no egress_socket_refusal"], []
+        problems = []
+        for label, mode in (("a 0777 grandparent", 0o777),
+                            ("a user-owned 01777 grandparent", 0o1777)):
+            gp = os.path.join(fx["root"], "egress-gp%o" % mode)
+            par = os.path.join(gp, "p")
+            os.makedirs(par, exist_ok=True)
+            os.chmod(par, 0o700)
+            os.chmod(gp, mode)
+            sock = os.path.join(par, "s")
+            if not os.path.lexists(sock):
+                s2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                here = os.getcwd()
+                try:
+                    os.chdir(par)
+                    s2.bind("s")
+                finally:
+                    os.chdir(here)
+                    s2.close()
+            why = fn(sock)
+            os.chmod(gp, 0o700)
+            if not isinstance(why, str) or not why:
+                problems.append("%s (%s): %r, want a refusal reason"
+                                % (label, sock, why))
+        # A root-owned grandparent cannot be made here without root, so it
+        # is injected through os.lstat: every ancestor reads as the euid's,
+        # write bits cleared, and the grandparent as root's -- sticky 01777
+        # accepted (/tmp), plain 0777 refused.
+        gp = os.path.join(fx["root"], "egress-gp777")
+        sock = os.path.join(gp, "p", "s")
+        real_lstat = os.lstat
+
+        def fake_lstat(p, mode):
+            def lstat(q, *a, **kw):
+                st = real_lstat(q, *a, **kw)
+                if q == gp:
+                    return os.stat_result((stat.S_IFDIR | mode, st.st_ino,
+                                           st.st_dev, st.st_nlink, 0,
+                                           st.st_gid, st.st_size,
+                                           st.st_atime, st.st_mtime,
+                                           st.st_ctime))
+                if q != "/" and not gp.startswith(q.rstrip("/") + "/"):
+                    return st
+                return os.stat_result((st.st_mode & ~0o022, st.st_ino,
+                                       st.st_dev, st.st_nlink,
+                                       os.geteuid() if st.st_uid else 0,
+                                       st.st_gid, st.st_size, st.st_atime,
+                                       st.st_mtime, st.st_ctime))
+            return lstat
+        for label, mode, want_ok in (("a root-owned 01777 grandparent",
+                                      0o1777, True),
+                                     ("a root-owned 0777 grandparent",
+                                      0o777, False)):
+            os.lstat = fake_lstat(gp, mode)
+            try:
+                why = fn(sock)
+            finally:
+                os.lstat = real_lstat
+            if want_ok and why is not None:
+                problems.append("%s: refused %r, want accepted" % (label, why))
+            elif not want_ok and not why:
+                problems.append("%s: %r, want a refusal reason" % (label, why))
+        return problems, []
+    _guard(suite, GRP_N, "N12 egress-socket-ancestors-not-foreign-writable",
+           n12)
+
+    def n14():
+        # Measured on Ubuntu 22.04: umask 0002 with user-private groups
+        # (UPG) makes every user dir 0775, so N12's rule refused every
+        # egress run. A GROUP-writable ancestor is acceptable when its group
+        # is the euid's private one: no other gr_mem name, no other passwd
+        # entry with it as primary group, the ancestor owned by the euid or
+        # root; an unknown gid fails closed, and o+w stays refused. The
+        # grandparent's stat is injected through os.lstat (as N12), the
+        # group and passwd databases through the helper's grp/pwd modules.
+        fn = getattr(helper, "egress_socket_refusal", None)
+        if fn is None:
+            return ["helper has no egress_socket_refusal"], []
+        euid = os.geteuid()
+        me = "sbx-n14-me"
+        gid = 0x7ffff00e
+        gp = os.path.join(fx["root"], "egress-gp-upg")
+        par = os.path.join(gp, "p")
+        os.makedirs(par, exist_ok=True)
+        os.chmod(par, 0o700)
+        os.chmod(gp, 0o700)
+        sock = os.path.join(par, "s")
+        if not os.path.lexists(sock):
+            s2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            here = os.getcwd()
+            try:
+                os.chdir(par)
+                s2.bind("s")
+            finally:
+                os.chdir(here)
+                s2.close()
+        real_lstat = os.lstat
+
+        def fake_lstat(mode, uid):
+            def lstat(q, *a, **kw):
+                st = real_lstat(q, *a, **kw)
+                if q == gp:
+                    return os.stat_result((stat.S_IFDIR | mode, st.st_ino,
+                                           st.st_dev, st.st_nlink, uid, gid,
+                                           st.st_size, st.st_atime,
+                                           st.st_mtime, st.st_ctime))
+                if q != "/" and not gp.startswith(q.rstrip("/") + "/"):
+                    return st
+                return os.stat_result((st.st_mode & ~0o022, st.st_ino,
+                                       st.st_dev, st.st_nlink,
+                                       euid if st.st_uid else 0,
+                                       st.st_gid, st.st_size, st.st_atime,
+                                       st.st_mtime, st.st_ctime))
+            return lstat
+
+        class _Rec(object):
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        def fake_dbs(members, others_gid, known=True):
+            def getgrgid(g):
+                if g != gid or not known:
+                    raise KeyError(g)
+                return _Rec(gr_name=me, gr_gid=gid, gr_mem=list(members))
+
+            def getpwuid(u):
+                if u != euid:
+                    raise KeyError(u)
+                return _Rec(pw_name=me, pw_uid=euid, pw_gid=gid)
+
+            def getpwall():
+                return [_Rec(pw_name=me, pw_uid=euid, pw_gid=gid),
+                        _Rec(pw_name="sbx-n14-other", pw_uid=euid + 1,
+                             pw_gid=others_gid)]
+            return (_Rec(getgrgid=getgrgid),
+                    _Rec(getpwuid=getpwuid, getpwall=getpwall))
+
+        cases = (
+            ("a UPG 0775 grandparent (no gr_mem)", 0o775, euid, [], 100,
+             True, True),
+            ("a UPG 0775 grandparent (gr_mem = the user)", 0o775, euid, [me],
+             100, True, True),
+            ("a root-owned 0775 grandparent in the user's UPG", 0o775, 0, [],
+             100, True, True),
+            ("a 0775 grandparent whose group has another member", 0o775,
+             euid, [me, "sbx-n14-other"], 100, True, False),
+            ("a 0775 grandparent whose gid is another user's primary group",
+             0o775, euid, [], gid, True, False),
+            ("a 0775 grandparent with an unknown gid", 0o775, euid, [], 100,
+             False, False),
+            ("a world-writable 0777 grandparent in the user's UPG", 0o777,
+             euid, [], 100, True, False),
+            ("a foreign-owned 0775 grandparent in the user's UPG", 0o775,
+             euid + 1, [], 100, True, False))
+        problems = []
+        saved = (getattr(helper, "grp", None), getattr(helper, "pwd", None))
+        for label, mode, uid, members, others_gid, known, want_ok in cases:
+            helper.grp, helper.pwd = fake_dbs(members, others_gid, known)
+            os.lstat = fake_lstat(mode, uid)
+            try:
+                why = fn(sock)
+            finally:
+                os.lstat = real_lstat
+                helper.grp, helper.pwd = saved
+            if want_ok and why is not None:
+                problems.append("%s: refused %r, want accepted" % (label, why))
+            elif not want_ok and (not isinstance(why, str)
+                                  or "ancestor" not in why):
+                problems.append("%s: %r, want the ancestor refusal"
+                                % (label, why))
+        return problems, []
+    _guard(suite, GRP_N, "N14 egress-socket-upg-group-writable-ancestor", n14)
+
+    def n13():
+        # Security review F14 (CWE-755): a thread the forwarder cannot start
+        # (RLIMIT_NPROC) drops that one connection, never the relay -- the
+        # first Thread.start raises, the second connection still echoes;
+        # and the slot cap is the runner proxy's 32, typed here.
+        fwd = getattr(helper, "EGRESS_FORWARDER", None)
+        if not isinstance(fwd, str) or not fwd:
+            return ["helper has no EGRESS_FORWARDER source"], []
+        problems = []
+        if "BoundedSemaphore(%d)" % N_FORWARD_SLOTS not in fwd:
+            problems.append("the forwarder's slot cap is not %d"
+                            % N_FORWARD_SLOTS)
+        path = os.path.join(fx["root"], "egress", "fwe")
+        srv = _n_echo_unix(path)
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        shim = ("import threading\n"
+                "_start, _n = threading.Thread.start, [0]\n"
+                "def start(self):\n"
+                "    _n[0] += 1\n"
+                "    if _n[0] == 1:\n"
+                "        raise RuntimeError(\"can't start new thread\")\n"
+                "    return _start(self)\n"
+                "threading.Thread.start = start\n"
+                "exec(compile(%r, '<fwd>', 'exec'), {'__name__': '__main__'})\n"
+                % fwd)
+        client = ("import socket, sys, time\n"
+                  "for _ in range(50):\n"
+                  "    s = socket.socket(); s.settimeout(3)\n"
+                  "    try:\n"
+                  "        s.connect(('127.0.0.1', %d)); break\n"
+                  "    except OSError:\n"
+                  "        time.sleep(0.05)\n"
+                  "try:\n"
+                  "    s.recv(64)\n"
+                  "except OSError:\n"
+                  "    pass\n"
+                  "s.close(); time.sleep(0.2)\n"
+                  "s = socket.socket(); s.settimeout(3)\n"
+                  "s.connect(('127.0.0.1', %d))\n"
+                  "s.sendall(b'tf-n13'); print(s.recv(64).decode())\n"
+                  "sys.exit(5)\n" % (port, port))
+        try:
+            p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", shim,
+                                str(port), path, "--", sys.executable, "-I",
+                                "-S", "-c", client],
+                               capture_output=True, text=True, timeout=30,
+                               stdin=subprocess.DEVNULL)
+            if p.returncode != 5 or p.stdout.strip() != "ECHO:tf-n13":
+                problems.append("rc %r stdout %r, want 5 and ECHO:tf-n13 -- "
+                                "the relay died with the failed thread (%s)"
+                                % (p.returncode, p.stdout.strip()[:80],
+                                   p.stderr.strip()[-200:]))
+        finally:
+            srv.close()
+        return problems, ["port        : %d" % port]
+    _guard(suite, GRP_N, "N13 forwarder-survives-thread-start-failure", n13)
+
 
 # ---------------------------------------------------------------------------
 # driver
@@ -3498,7 +4331,10 @@ def run(opts=None):
         _run_l(suite, helper, fx, skips)
         _run_s(suite, helper, fx)
         _run_x(suite, helper, fx)
+        _run_n(suite, helper, fx, skips)
     finally:
+        if "n_sock" in fx:
+            fx["n_sock"][1].close()
         if opts.keep:
             print("\n[--keep] fixtures retained at: %s" % fx["root"])
         else:

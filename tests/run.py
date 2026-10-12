@@ -284,8 +284,12 @@ SUITES = [
      "mcp-inspect VALIDATION family", 280),
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 381),
+    # The egress work added five rows (M EG1-EG4: --egress-port /
+    # --egress-socket prompt in every spelling; N EG-ctl, the restricted
+    # control they extend). Not red first: an unknown flag already prompts,
+    # so these pin the verdict; sbx_restrict:S17 is the red-first table row.
     ("sbx_gate", run_sbx_gate,
-     "sbx PreToolUse grant-only gate", 135),
+     "sbx PreToolUse grant-only gate", 141),
     # TYPED: a fixed case table.  The one Linux-only row per group C and D is
     # recorded as INFO on any other host rather than omitted, so the count is
     # the same on macOS and on Linux.
@@ -297,7 +301,7 @@ SUITES = [
      "wiring, the fail-closed refusal off Linux x86_64, and the live prctl "
      "probe on Linux", 33),
     # TYPED: a fixed case table (A 15, B 8, C 4, D 4, E 10, F 11, U 9, V 8,
-    # T 7, L 12, S 16, X 14) -- the Step 2 rows, the Step 3 Seatbelt and bwrap
+    # T 7, L 12, S 17, X 15, N 14) -- the Step 2 rows, the Step 3 Seatbelt and bwrap
     # goldens (F11, IMPL:025: --clean-env without --restrict-reads keeps
     # bwrap's --clearenv/--setenv), the Step 4 supervisor / strict-rlimit /
     # clean-env rows, the Step 6 live restricted-Seatbelt rows (L12 the
@@ -309,11 +313,18 @@ SUITES = [
     # all pure or in-process). A live row that cannot run here (the other
     # OS, or a nested sandbox per the P23 control) is recorded INFO, never
     # omitted, and L7 is INFO by declaration, so the count is the same on
-    # macOS and on Linux.
+    # macOS and on Linux. The egress work added group N (11: the
+    # --egress-port / --egress-socket grammar and platform split, the socket
+    # ownership rules, both builder goldens, the forwarder, one live row per
+    # platform -- N10 INFO off macOS, N11 INFO off Linux) and S17 (the gate
+    # prompts for both), all written RED: 118 -> 130. Later fixes added N12
+    # (foreign-writable socket ancestors), N13 (the forwarder survives a
+    # thread-start failure), N14 (a user-private-group-writable ancestor is
+    # accepted) and X15 (--rlimit-nproc +N counts Linux tasks): 130 -> 134.
     ("sbx_restrict", run_sbx_restrict,
      "sbx restricted mode: reads, exec filter, clean env, supervised timeout, "
      "strict rlimits, live restricted Seatbelt, gate grammar, security "
-     "review round 1", 118),
+     "review round 1, egress endpoint flags", 134),
     ("purity_lsp", run_purity_lsp,
      "purity_call semantic navigation: clangd + luals absorption", 155),
     ("purity_file_ops", run_purity_file_ops,
@@ -771,8 +782,8 @@ SUITES = [
      "per-child relist (bool-only, default off byte-identical, name set "
      "frozen, stale on failure, coalesced, min interval, cancelled on "
      "stop)", 124),
-    # TYPED: a fixed case table (A 12, B 23, C 22, D 5, E 34, F 9, G 13,
-    # H 24, I 12 = 154), the rows of plan Steps 7-13, so a count that moves
+    # TYPED: a fixed case table (A 19, B 23, C 22, D 7, E 34, F 9, G 13,
+    # H 26, I 17, N 22 = 192), the rows of plan Steps 7-13, so a count that moves
     # is the alarm, not noise.  F9 (validation round 1) drives layer D live
     # through McpServer.run() -- the smoke probe answers -32602 now and no
     # longer reaches the catch-all.  E (Step 13, the spec's acceptance escape
@@ -808,7 +819,16 @@ SUITES = [
     # off darwin -- counted, never omitted.  The per-interpreter "site" key
     # added A12 (a real bool, python3 only), D5 (site true drops -S only)
     # and I12 (live: a venv's site-packages importable only with site true;
-    # INFO off macOS and under a nested Seatbelt), all written RED.
+    # INFO off macOS and under a nested Seatbelt), all written RED.  The
+    # egress work added A13-A15 (the optional "network" object), D6/D7 (the
+    # egress argv), group N (12, the allowlisting CONNECT proxy in-process
+    # against a stub resolver/connector) and I13-I17 (live: allowed HTTPS,
+    # refusals, direct sockets, DNS, no-network unchanged; I13 INFO when the
+    # host itself has no network), all written RED: 154 -> 176
+    # (A 15, D 7, N 12, I 17).  Security round 2 added A16-A19 (hex-letter
+    # TLDs, "*." over two labels, network.nat64, extra_reads over the work
+    # root) and N19-N22 (hex-letter hosts, the IPv4 denylist, configured
+    # NAT64, the process-wide connection budget): 184 -> 192.
     ("mcp_sandbox", run_mcp_sandbox,
      "mcp-sandbox, the sandboxed script runner: the one JSON config file "
      "(unknown keys at the top and in limits, every numeric range at its "
@@ -847,7 +867,10 @@ SUITES = [
      "control) and the security-round-1 bounds (rpath stack, keg walk "
      "dirs/depth/entries, the closure's plan deadline, out/ and remover "
      "listings, fd-relative darwin fallbacks, the survivor sweep, the out/ "
-     "path cap, the worst-case reply serialized within 16 MiB)", 154),
+     "path cap, the worst-case reply serialized within 16 MiB) and the "
+     "egress allowlist (the network object, the egress argv, the CONNECT "
+     "proxy in-process, live allowed/refused/direct/DNS/no-network rows)",
+     192),
     # TYPED: a fixed case table (A 9, B 10, C 6, D 8, E 5, F 14, G 4, H 6,
     # I 12, J 13, K 2 = 89), the rows of plan Steps 16, 17 and 18 (J1 is live:
     # INFO off macOS and under a nested Seatbelt, counted either way), so a

@@ -3,7 +3,7 @@ name: mcp-sandbox
 type: component
 status: active
 title: mcp-sandbox — the sandboxed script runner
-description: The stdio MCP server that runs a caller's inline script under one configured interpreter through sbx restricted mode behind one sandbox_call tool -- one strict JSON config file and no policy flags, the run lifecycle from a non-blocking slot through a self-refreshing interpreter plan, an fd-relative workdir, the supervised sbx spawn and its status protocol, to the flatten remover and the quarantine; the four refusal codes, the KD-17 timeout chain and the startup bound, its launch behind mcp-proxy --http, how it is tested and what it declares rather than gates.
+description: The stdio MCP server that runs a caller's inline script under one configured interpreter through sbx restricted mode behind one sandbox_call tool -- one strict JSON config file and no policy flags, the run lifecycle from a non-blocking slot through a self-refreshing interpreter plan, an fd-relative workdir, the supervised sbx spawn and its status protocol, to the flatten remover and the quarantine; the optional network allowlist and the per-run CONNECT proxy that is a run's only way out; the four refusal codes, the KD-17 timeout chain and the startup bound, its launch behind mcp-proxy --http, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/mcp-sandbox.py
   - tests/test_mcp_sandbox.py
@@ -25,6 +25,7 @@ links:
   - 0015-ambiguity-is-the-defect
   - 0027-the-proxy-relays-it-never-composes
   - 0030-point-at-the-near-miss-never-resolve-it
+  - 0033-egress-through-an-allowlisting-proxy
   - spec-sbx-restricted-runner
 ---
 
@@ -49,7 +50,9 @@ design and the measurements behind each — is
 [ADR 0031](../adr/0031-sbx-restricted-mode.md), which amends
 [[0005-approve-the-wrapper-not-the-command]]; why the runner sits behind its
 own proxy, the timeout chain and the same-uid trust model are
-[ADR 0032](../adr/0032-a-runner-behind-a-proxy.md). Where the server sits in the
+[ADR 0032](../adr/0032-a-runner-behind-a-proxy.md). Why a run may reach the
+network only through an allowlisting proxy the runner owns is
+[[0033-egress-through-an-allowlisting-proxy]]. Where the server sits in the
 fleet is [[scripts]]; the sbx flags it drives are the sandbox-run skill's
 ([[skills]]).
 
@@ -71,9 +74,11 @@ it is read up to `Scripts/mcp-sandbox.py:_CONFIG_MAX_BYTES` and must be UTF-8
 job is to refuse a repeated key `Scripts/mcp-sandbox.py:_refuse_duplicate_keys_parse`
 (declared in the strict-JSON exception table on [[generated-regions]]).
 
-**Every key is required, unknown keys are refused at every level.** The top
-level is exactly `version` (1), `sbx`, `work_root`, `seccomp`, `log_content`,
-`interpreters` and `limits` `Scripts/mcp-sandbox.py:load_config`:
+**Every key is required but one, unknown keys are refused at every level.** The
+top level is `version` (1), `sbx`, `work_root`, `seccomp`, `log_content`,
+`interpreters` and `limits`, plus the one optional key `network`
+`Scripts/mcp-sandbox.py:_CONFIG_OPTIONAL_KEYS` `Scripts/mcp-sandbox.py:load_config`
+(the example below leaves it out, which is a run with no network):
 
 ```json
 {
@@ -126,6 +131,25 @@ level is exactly `version` (1), `sbx`, `work_root`, `seccomp`, `log_content`,
   `{"path": "<venv>/bin/python", "extra_reads": ["<venv>"], "site": true}`.
   Measured live by `mcp_sandbox:I12` (a venv behind a Homebrew framework
   symlink imports with `site: true`, gets `ImportError` without it).
+- An `extra_reads` entry that equals or is an ancestor of `work_root`, spelled
+  or realpath'd, is refused: it would show a run its siblings' workdirs and, on
+  Linux, their egress sockets
+  `Scripts/mcp-sandbox.py:_refuse_reads_over_work_root` (`mcp_sandbox:A19`).
+- `network` is optional, and absent means a run has no network at all, exactly
+  as before. Present, it is `{allow, ports?, nat64?}`
+  `Scripts/mcp-sandbox.py:_cfg_network`: `allow` is a non-empty list of exact
+  hosts or `*.` patterns that match strict subdomains only (never the apex),
+  lower-case DNS labels with an IP literal in any `inet_aton` spelling and a
+  trailing dot refused `Scripts/mcp-sandbox.py:_hostname_problem`, and a `*.`
+  over a single label (`*.com`) refused; `ports` defaults to `[443]`; `nat64`
+  lists the site's own NAT64 prefixes, which are refused as egress targets like
+  the well-known ones `Scripts/mcp-sandbox.py:_cfg_nat64`. The bounds are the
+  code's `Scripts/mcp-sandbox.py:_NETWORK_ALLOW_MAX`
+  `Scripts/mcp-sandbox.py:_NETWORK_PORTS_MAX`
+  `Scripts/mcp-sandbox.py:_NAT64_PREFIX_LENGTHS`; duplicates are refused, and a
+  refusal names `network.allow[i]`, `network.ports[i]` or `network.nat64[i]`,
+  never the value. The allowlist is the runner's, not a skill's. How a run uses
+  it is "Network egress" below.
 - Every integer limit is range-checked without coercion — a bool, a float or a
   string is refused — against `Scripts/mcp-sandbox.py:_LIMIT_RANGES`; the
   ranges are the code's, this page does not copy them. `timeout_ms` runs from
@@ -184,12 +208,17 @@ line `mcp-sandbox: refusing to start: …` and exit 1
    **one runner per work root**: an exclusive non-blocking `flock` on
    `<work_root>/.lock`, held CLOEXEC for the process lifetime — a second runner
    refuses to start with "in use by another runner (lock held)". Then
-   `quarantine/` is created and vetted the same way
-   `Scripts/mcp-sandbox.py:prepare_work_root`.
+   `quarantine/` and `egress/` (the parent of every Linux run's egress socket
+   directory) are created and vetted the same way
+   `Scripts/mcp-sandbox.py:prepare_work_root`
+   `Scripts/mcp-sandbox.py:_open_egress_root`.
 3. **The sweep.** Every name is validated before anything is removed: the work
-   root may hold only 32-hex-digit workdirs, `.lock` and `quarantine`, and
-   `quarantine/` only 32-hex-digit entries — anything else refuses the start.
-   Leftovers are removed, and the quarantine retried, against **one** shared
+   root may hold only 32-hex-digit workdirs, `.lock`, `quarantine` and
+   `egress`, and `quarantine/` and `egress/` only 32-hex-digit entries —
+   anything else, a planted file or symlink at `egress` included, refuses the
+   start (`mcp_sandbox:H26`). Stale `egress/` entries, a SIGKILLed runner's
+   socket directories, are removed first, and one that resists is logged, never
+   quarantined (`mcp_sandbox:H25`). Leftovers are removed, and the quarantine retried, against **one** shared
    deadline `Scripts/mcp-sandbox.py:_STARTUP_SWEEP_DEADLINE_S`; whatever resists
    or is not reached stays quarantined and counts
    `Scripts/mcp-sandbox.py:sweep_work_root`. A leftover whose move into
@@ -288,15 +317,21 @@ admitted by the plan cache. Every refusal is `invalid_params` naming the member.
 5. **The workdir**: a fresh 0700 32-hex-digit directory with `tmp/` and `out/`
    `Scripts/mcp-sandbox.py:create_workdir`, the files created fd-relative with
    `O_EXCL|O_NOFOLLOW` `Scripts/mcp-sandbox.py:materialize`.
-6. **The spawn.** sbx is started with a fresh status pipe, `close_fds`,
+6. **The egress proxy**, only when `network` is configured: the run's own
+   proxy is started before sbx, and if it cannot start the run is refused
+   `sandbox_unavailable` ("the egress proxy could not be started", or the
+   too-long socket path message) `Scripts/mcp-sandbox.py:_spawn_and_read`.
+   See "Network egress" below.
+7. **The spawn.** sbx is started with a fresh status pipe, `close_fds`,
    `start_new_session` and an environment of exactly `PATH` and `LANG`; the
    script's own environment is exactly `PATH`, `HOME`, `TMPDIR`, `LANG` and `OUT`
    through `--clean-env`; the workdir is the one write scope, the plan's reads and
    execs follow, then the timeout, the status fd and the rlimits (address space,
    CPU, a process headroom over the uid's count, file size, open files, no core),
-   and after `--` the interpreter and the absolute entry
+   with egress the endpoint flag and the four proxy variables, and after `--`
+   the interpreter and the absolute entry
    `Scripts/mcp-sandbox.py:build_sbx_argv`.
-7. **The read.** stdout and stderr are kept up to their caps and **read and
+8. **The read.** stdout and stderr are kept up to their caps and **read and
    discarded** after, so the script's exit status stays its own and the server's
    memory stays flat `Scripts/mcp-sandbox.py:_read_capped`. Every status line is
    parsed strictly; the first `spawned` event's pgid is adopted, the first
@@ -310,14 +345,15 @@ admitted by the plan cache. Every refusal is `invalid_params` naming the member.
    surviving orphan could withhold; if sbx died without a terminal event, the
    runner kills the adopted target group itself
    `Scripts/mcp-sandbox.py:_kill_target_group`.
-8. **The result.** No `spawned` event means the script never ran: the answer is
+9. **The result.** No `spawned` event means the script never ran: the answer is
    `sandbox_unavailable` with the fixed message `sbx refused the run (exit N)`.
    sbx's own stderr line can name host paths (it quotes a refused `--read`), so
    since security review round 1 (O2) that line goes to the runner's own log
    only, never to the caller. After `spawned`
    every outcome is a normal result — `exitCode`, `signal` (a name such as
    `SIGKILL`), `timedOut`, `durationMs`, `stdout`, `stderr`, their truncation
-   flags, `outFiles` and `outFilesTruncated` `Scripts/mcp-sandbox.py:_spawn_and_read`.
+   flags, `outFiles` and `outFilesTruncated`, and, only when `network` is
+   configured, `egress: {tunnels, refused}` `Scripts/mcp-sandbox.py:_spawn_and_read`.
    `out/` is collected fd-relative: symlinks, hard links and FIFOs are skipped,
    a replaced `out/` yields nothing, the walk is bounded in depth and entries,
    a path longer than `Scripts/mcp-sandbox.py:_OUT_PATH_MAX_BYTES` is skipped,
@@ -325,7 +361,9 @@ admitted by the plan cache. Every refusal is `invalid_params` naming the member.
    (only that bounded list is sorted, Q1), every skip sets
    `outFilesTruncated`, and a file is sent as `utf8` when it is strict UTF-8,
    else `base64` `Scripts/mcp-sandbox.py:collect_out`.
-9. **Cleanup** in a `finally`: the run's survivors are swept, then the workdir
+10. **Cleanup** in a `finally`: the egress proxy, if any, is closed once sbx is
+   reaped, bounded by the earlier of one second and the run deadline minus the
+   cleanup term, so no tunnel outlives the run; the run's survivors are swept, then the workdir
    is removed within `Scripts/mcp-sandbox.py:_CLEANUP_DEADLINE_S`, or
    quarantined; the result is returned either way, and the opportunistic
    quarantine retry shares the same deadline
@@ -334,6 +372,60 @@ admitted by the plan cache. Every refusal is `invalid_params` naming the member.
 Logging is one line per run with metadata only — interpreter, exit, signal,
 duration, sizes — and content only when `log_content` is true; the wire log is
 structure-only ([[0011-a-truncated-payload-carries-the-first-cookie]]).
+
+## Network egress
+
+**The sandbox never gets the network; the runner owns the one way out.**
+Neither Seatbelt nor bwrap can filter by domain, so with `network` configured
+each run gets its own host-side, CONNECT-only proxy that enforces the allowlist,
+and the sandbox may reach only that proxy
+([[0033-egress-through-an-allowlisting-proxy]]).
+
+**One proxy per run** `Scripts/mcp-sandbox.py:_RunEgress`. On macOS it listens
+on `127.0.0.1:N` **and** `[::1]:N` (`IPV6_V6ONLY`), because the Seatbelt rule
+sbx emits for `--egress-port N` reaches both loopbacks and no other uid may
+squat the v6 side; it retries up to
+`Scripts/mcp-sandbox.py:_EGRESS_BIND_ATTEMPTS` ports and fails closed, and binds
+v4 only on a host with no `::1`. On Linux it listens on a unix socket
+`<work_root>/egress/<32-hex>/s` in a 0700 per-run directory, passed as
+`--egress-socket`, and the script reaches it through sbx's in-sandbox forwarder
+on `127.0.0.1:3128` `Scripts/mcp-sandbox.py:_EGRESS_LINUX_PORT`. When `<dir>/s`
+is over the `AF_UNIX` path limit, Linux binds through `/proc/self/fd/<dirfd>/s`
+after a device-and-inode match; elsewhere the run is refused "the egress socket
+path exceeds the AF_UNIX limit; shorten work_root"
+`Scripts/mcp-sandbox.py:EgressProxy`. The script's environment gains
+`HTTPS_PROXY`, `HTTP_PROXY`, `https_proxy` and `http_proxy` pointing at the
+proxy, with `NO_PROXY` and `no_proxy` empty `Scripts/mcp-sandbox.py:build_sbx_argv`.
+
+**What the proxy admits.** CONNECT only, anything else 405; a head bounded in
+bytes and header lines (431) under one total deadline; a strict request line,
+host and port grammar (400) `Scripts/mcp-sandbox.py:parse_connect_head`. The host must pass the config's name rules, the allowlist and the port list, refused 403
+before any lookup `Scripts/mcp-sandbox.py:egress_host_refusal`
+`Scripts/mcp-sandbox.py:egress_host_allowed`. Then **one** lookup of the
+absolute name (`host.`, so no resolver search list applies)
+`Scripts/mcp-sandbox.py:_default_resolver`; **every** answer must be public or
+the request is 403 `Scripts/mcp-sandbox.py:egress_address_public` — an explicit
+IPv4 special-purpose denylist checked before `is_global`
+`Scripts/mcp-sandbox.py:_EGRESS_V4_DENY`, the v4-mapped, 6to4, Teredo and
+site-local IPv6 forms, the well-known NAT64 prefixes
+`Scripts/mcp-sandbox.py:_NAT64_NETS` and the configured `network.nat64`; and
+the connect goes to the vetted address itself, never a second resolution
+`Scripts/mcp-sandbox.py:_default_connector`.
+
+**Bounds** are the code's: tunnels per run (503 beyond)
+`Scripts/mcp-sandbox.py:_EGRESS_MAX_TUNNELS`, connections per run
+`Scripts/mcp-sandbox.py:_EGRESS_MAX_CONNECTIONS`, connections across every run's
+proxy in the process `Scripts/mcp-sandbox.py:_EGRESS_GLOBAL_CONNECTIONS`, and the
+head, connect, idle and send timeouts beside them. A half-close is relayed: EOF
+on one side shuts down the other side's write half, and the tunnel ends when
+both directions are done, on idle, or on stop. `close()` interrupts a connect
+in progress; a connect that completes after it began is closed and not counted.
+The log carries host, port, status, the vetted address and byte counts, never a
+payload byte.
+
+**The caller sees it.** `capabilities` carries `network: {enabled, allow,
+ports}`, and a run result carries `egress: {tunnels, refused}` when `network` is
+configured `Scripts/mcp-sandbox.py:capabilities`.
 
 ## Cleanup: the flatten remover and the quarantine
 
@@ -410,8 +502,8 @@ never a JSON-RPC error `Scripts/mcp-sandbox.py:_tool_refusal`
   ([[0030-point-at-the-near-miss-never-resolve-it]]).
 - `busy` — every run slot is taken; retry after `retryAfterMs`.
 - `sandbox_unavailable` — the runner cannot run this script now: not started,
-  degraded, low disk, an interpreter not ready or a refresh out of time, sbx
-  refusing before `spawned` (always the fixed `sbx refused the run (exit N)`,
+  degraded, low disk, an interpreter not ready or a refresh out of time, the
+  run's egress proxy unable to start, sbx refusing before `spawned` (always the fixed `sbx refused the run (exit N)`,
   never sbx's own line).
 - `internal` — a handler bug or a status-protocol overflow; the message is the
   exception **type** only, because a message could carry the caller's payload,
@@ -433,7 +525,8 @@ realpath, version, `state` and `reason`, `asLimitBytes`, `effectiveBudgetBytes` 
 read and exec sets; the limits; the backend (platform, engine, seccomp,
 `liveVerified` — true on macOS, false on Linux
 `Scripts/mcp-sandbox.py:LIVE_VERIFIED` — and the sbx path); `concurrency`
-(`max`, `inFlight`); `quarantine` (`count`, `max`); and `degraded`.
+(`max`, `inFlight`); `quarantine` (`count`, `max`); `network` (`enabled`,
+`allow`, `ports`; disabled and empty without a `network` key); and `degraded`.
 
 ## Concurrency and cancel
 
@@ -526,7 +619,7 @@ means one runner per uid.
 
 The `mcp_sandbox` suite `tests/test_mcp_sandbox.py` renders every config from
 `tests/files/mcp_sandbox/config.json.tmpl` with `json.dumps`-quoted values into
-`.claude/tmp/test_mcp_sandbox/`, and runs nine groups: the config file
+`.claude/tmp/test_mcp_sandbox/`, and runs ten groups: the config file
 `tests/test_mcp_sandbox.py:_run_a`, the Mach-O reader on synthetic images built
 from header bytes plus one live python3 closure
 `tests/test_mcp_sandbox.py:_run_macho`, `run_script` validation
@@ -550,6 +643,21 @@ tool-result path, `B21`-`B23` pin the closure's rpath-stack cap, its keg-walk
 caps and its plan deadline and cancel, and `H20`-`H24` the bounded `out/` and
 remover listings, the fd-relative macOS fallbacks, the survivor sweep and the
 `out/` path cap (H22 and H23 INFO off macOS, counted).
+
+The egress work (2026-10-12, [[0033-egress-through-an-allowlisting-proxy]])
+added a tenth group and rows to four others, every one run red first: `A13`-`A19`
+the `network` key, its pattern grammar, ports, NAT64 prefixes and the
+`extra_reads`-over-`work_root` refusal; `D6` and `D7` the egress argv golden per
+platform; `H25` and `H26` the `egress/` sweep and a planted entry; group N, the
+proxy in-process against a stub resolver and connector
+`tests/test_mcp_sandbox.py:_run_n` — head parsing, host forms, the allowlist,
+address vetting, the tunnel, the deadline and caps, `close()`, the metadata-only
+log, both endpoints, the sun_path alias, the dual loopback (N15), the absolute
+lookup (N16), a stop during connect (N17), the half-close (N18), the IPv4
+denylist, configured NAT64 and the process-wide budget (N19-N22); and `I13`-`I17`
+live `tests/test_mcp_sandbox.py:_run_i_egress` — an allowed HTTPS fetch, a host
+off the list refused, direct sockets and DNS denied inside, and no `network` key
+unchanged (I13 INFO when the host itself cannot reach the test host).
 
 Live rows are INFO off macOS and under a nested Seatbelt — detected by one
 control sbx run whose stderr carries `sandbox_apply` — counted either way
@@ -603,7 +711,7 @@ These are recorded, not closed; the reasoning and measurements are in
 - **An engine failure after `spawned` is reported as a normal result**; nothing
   ran unconfined, and the profile shape is the one the self-test proved.
 - **Every binary under `/bin` and `/usr/bin` is exec-able** inside the profile,
-  still with no network and one write scope; a setuid exec is refused by
+  still with no network beyond the run's egress proxy and one write scope; a setuid exec is refused by
   Seatbelt itself. **Linux has no exec filter**: a script may exec a binary it
   wrote into its workdir.
 - **Linux is not live-verified** (`liveVerified: false`); its rows are golden
@@ -612,3 +720,15 @@ These are recorded, not closed; the reasoning and measurements are in
   images and extra reads — to its caller, who is the runner token's holder.
 - **Same-uid trust.** Anyone who can read the runner proxy's token file can call
   `run_script` directly; the token is the boundary.
+- **Egress does not inspect TLS.** A script can send anything to an allowed
+  host; the allowlist bounds where, not what. Only proxy-aware clients
+  (`urllib`, `requests`, `curl`) use the proxy; a raw socket or a non-HTTP
+  protocol fails closed, and node's `fetch` with the environment proxy is
+  unverified. [[0033-egress-through-an-allowlisting-proxy]].
+- **The macOS egress endpoint cannot see the peer uid** (`LOCAL_PEERCRED` is
+  `AF_UNIX`-only), so another local uid can use a run's allowlisted tunnels
+  while it lasts; it cannot intercept the script's own connection.
+- **A `work_root` under `/tmp` or `/run` cannot host a Linux egress socket**
+  (sbx refuses a socket under its socket directories), and a proxy thread
+  blocked in `getaddrinfo` runs on until the OS resolver gives up, no longer
+  counting or relaying after `close()`.

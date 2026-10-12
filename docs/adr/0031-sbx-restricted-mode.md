@@ -674,3 +674,15 @@ Accepted and declared, not gated beyond what is named.
 ## Addendum (2026-10-11): the code landed in 7b603d2; the page is active and append-only
 
 The Status paragraph above was written while the code sat uncommitted on top of `4d3640c` and says the frontmatter is `draft` with `targets:`. That is no longer true. The implementation, the four security-review rounds' fixes and their tests were committed as `7b603d2` (2026-10-11), and the page was promoted to `status: active` with `sources:` and `verified.commit: 7b603d2`. From that commit on this ADR is append-only: a later change to restricted mode lands as a dated addendum here, never as an edit of the body. The shipped plan is kept as a record in [[spec-sbx-restricted-runner]].
+
+## Addendum (2026-10-12): two restricted-only egress endpoints, and --rlimit-nproc +N counts tasks on Linux
+
+Decided by Zoltán with ADR 0033 ([[0033-egress-through-an-allowlisting-proxy]]), which carries the reasoning, the security review and the measurements.
+
+### Egress endpoints
+
+`sbx` gains two restricted-only flags; each requires `--restrict-reads`, they are mutually exclusive and neither combines with `--net` `ClaudeCode/skills/sandbox-run/scripts/sbx:validate_egress`. `--egress-port N` (macOS) keeps `(deny network*)` and adds after it `(allow network-outbound (remote tcp "localhost:N"))` `ClaudeCode/skills/sandbox-run/scripts/sbx:_seatbelt_egress_rule`; the caller must hold both 127.0.0.1:N and [::1]:N. `--egress-socket PATH` (Linux) keeps `--unshare-net`, read-only binds the caller's unix socket at `/.sbx-egress.sock` and runs the target behind an in-sandbox stdlib forwarder on 127.0.0.1:3128 `ClaudeCode/skills/sandbox-run/scripts/sbx:EGRESS_FORWARDER`, whose interpreter must already be visible in the restricted root `ClaudeCode/skills/sandbox-run/scripts/sbx:egress_python`. The socket must be its own realpath, under no socket directory, a socket owned by the euid in a 0700 euid-owned directory, and every ancestor up to `/` owned by root or the euid and writable by nobody else: world-writable only when root-owned and sticky, group-writable only when the group is the euid's user-private group (added after Ubuntu 22.04's umask 0002 refused every run) `ClaudeCode/skills/sandbox-run/scripts/sbx:egress_socket_refusal` `ClaudeCode/skills/sandbox-run/scripts/sbx:_private_group`. The gate always prompts for both flags `ClaudeCode/hooks/sbx-gate.py:_PROMPT_FLAGS`. Rows `sbx_restrict` group N (N1-N14) and S17, `sbx_gate` EG-ctl and EG1-EG5.
+
+### The nproc base counts tasks on Linux
+
+A defect in what `7b603d2` shipped: `--rlimit-nproc +N` resolved against the uid's process count, but Linux charges RLIMIT_NPROC per task (thread). On an Ubuntu host with 127 processes and 1054 threads the limit came out at 191, bwrap's clone failed EAGAIN, and the runner could not start on Linux at all. The base is now the sum of `Threads:` over `/proc/<pid>/status` for the real uid `ClaudeCode/skills/sandbox-run/scripts/sbx:uid_task_count`; macOS still counts processes. Row `sbx_restrict:X15`, red first. `sbx_restrict` went from 118 to 134 cases with this and the egress rows.
