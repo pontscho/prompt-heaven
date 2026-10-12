@@ -5143,9 +5143,11 @@ SANDBOX_CALL_TOOL = {
     "description": (
         "Run a short script in a locked-down sandbox: one configured "
         "interpreter (python3, bash or node) on files you pass inline, with "
-        "reads restricted to the interpreter's own closure, no network, one "
-        "writable work directory that is removed afterwards, and hard limits "
-        "on time, memory, processes, file size and output.\n\n"
+        "reads restricted to the interpreter's own closure, no network unless "
+        "the operator configured a host allowlist (then HTTPS to those hosts "
+        "only, through the proxy in HTTPS_PROXY; see capabilities.network), "
+        "one writable work directory that is removed afterwards, and hard "
+        "limits on time, memory, processes, file size and output.\n\n"
         "A failing script is a normal result: a non-zero exitCode, a signal "
         "or a timeout comes back with isError false, together with the "
         "captured stdout and stderr. isError is set only when the runner "
@@ -5160,7 +5162,8 @@ SANDBOX_CALL_TOOL = {
         "  run_script    params: files [{path, content, executable?}], entry, "
         "interpreter, args?, stdin?, timeoutMs?\n"
         "  capabilities  no params -- the configured interpreters and their "
-        "state, the limits, the backend, the concurrency and the quarantine.\n"
+        "state, the limits, the backend, the concurrency, the quarantine and "
+        "the network allowlist.\n"
         "Called without function: a short status and the function list."
     ),
     "inputSchema": {
