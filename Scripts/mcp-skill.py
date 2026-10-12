@@ -10,7 +10,9 @@ to internal handlers via the 'function' parameter -- load, run, list and
 validate. Skills live in up to two TIER roots, each holding a `skills.json`
 index and one directory per skill: the household tier (shared by every
 member) and the private tier (one member's own), which shadows the household
-on a name clash. Nothing here writes to a tier root.
+on a name clash. Nothing here writes to a tier root. A root that does not
+exist yet, or holds no `skills.json` yet, is an empty tier with no error:
+ai-soul creates both lazily on its first publish, and the next call sees them.
 
 The tool's description IS the skill index: re-rendered on every `tools/list`
 from the two tiers, refused as a whole -- never cut -- when it would exceed
@@ -372,19 +374,26 @@ class RootRefused(Exception):
     is the rule broken, never the path."""
 
 
+class RootMissing(RootRefused):
+    """The tier root (or a parent of it) does not exist yet: ENOENT. ai-soul
+    creates each root lazily on its first publish, so this is an EMPTY tier,
+    never a refused start (_check_root) or a tier error (load_tier)."""
+
+
 def _open_root(path: str) -> int:
     """Open a tier root as a directory fd and check it on that fd.
 
     `path` is the root's realpath (fixed once at startup by _check_root), so
     O_NOFOLLOW refuses a root swapped for a symlink since. The opened
     directory must be owned by the euid or by root and carry no group/other
-    write bit. Raises RootRefused; the caller closes the returned fd.
+    write bit. Raises RootMissing on ENOENT, RootRefused for every other
+    fault; the caller closes the returned fd.
     """
     try:
         fd = os.open(path, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     except OSError as exc:
         if exc.errno == errno.ENOENT:
-            raise RootRefused("the root does not exist") from None
+            raise RootMissing("the root does not exist") from None
         if exc.errno == errno.ENOTDIR:
             raise RootRefused("the root is not a directory") from None
         if exc.errno in _SYMLINK_ERRNOS:
@@ -409,9 +418,18 @@ def _open_root(path: str) -> int:
 
 def _check_root(path: str) -> str:
     """The startup check of a tier root: resolve it once, open and check it
-    (_open_root), and return the realpath every later operation opens."""
+    (_open_root), and return the realpath every later operation opens.
+
+    A root that does not exist -- ENOENT on the root or on any parent -- is
+    accepted: ai-soul creates it lazily, and every later operation opens the
+    realpath fixed here and re-checks it on the fd. Every other refusal (not
+    a directory, ENOTDIR through a regular file, a symlink loop, a foreign
+    owner, a group/other write bit, any other errno) still refuses start."""
     real = os.path.realpath(path)
-    os.close(_open_root(real))
+    try:
+        os.close(_open_root(real))
+    except RootMissing:
+        pass
     return real
 
 
@@ -830,12 +848,19 @@ def load_tier(tier: str, root_path: str) -> TierIndex:
     """The tier rooted at `root_path` (a realpath from _check_root), from its
     skills.json. Never raises: a root or index fault is the tier's `error`.
 
+    A root that does not exist yet, or one with no skills.json yet, is the
+    empty tier with NO error -- ai-soul creates both lazily on its first
+    publish. Neither state is cached, so a root or index that appears later
+    is read on the next call.
+
     Cached on the stat keys (st_dev, st_ino, st_mtime_ns, st_size) of
     skills.json and of each indexed dir and its SKILL.md, so an atomic rename
     of either is seen on the next call (D8).
     """
     try:
         root_fd = _open_root(root_path)
+    except RootMissing:
+        return _empty_tier(tier)
     except RootRefused as exc:
         return _empty_tier(tier)._replace(error=str(exc))
     try:
@@ -850,6 +875,8 @@ def load_tier(tier: str, root_path: str) -> TierIndex:
         try:
             raw = _read_leaf(root_fd, _INDEX_FILE, _INDEX_MAX_BYTES)
         except FileRefused as exc:
+            if exc.reason == "missing":
+                return _empty_tier(tier)
             return _empty_tier(tier)._replace(
                 error=f"skills.json refused: {exc.reason}")
         error, skills = _parse_index(raw)
@@ -2454,8 +2481,10 @@ def main() -> None:
             parser.error(f"--runner-url: {exc}")
 
     # A tier root is checked once here and refuses start (A2); the refusal
-    # names the flag and the rule, never the path. Later operations open the
-    # resolved path and re-check it on the fd (_open_root).
+    # names the flag and the rule, never the path. A root that does not exist
+    # yet is accepted as an empty tier (A6/A7: ai-soul creates it lazily).
+    # Later operations open the resolved path and re-check it on the fd
+    # (_open_root).
     roots: Dict[str, Optional[str]] = {}
     for flag, value in (("--household-root", args.household_root),
                         ("--private-root", args.private_root)):

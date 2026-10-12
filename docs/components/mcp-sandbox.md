@@ -499,6 +499,19 @@ without their shutdown `DELETE`; `--max-body-bytes` is what mcp-skill's
 reopens the crash loop the startup bound exists to prevent. The skill side of
 the deployment is on [[mcp-skill]].
 
+**The deployed shape is a sibling child** (2026-10-12, ADR 0032 addendum of
+that day). Every household member gets an own proxy instance, so nothing is
+shared that a dedicated runner proxy would serialize. The runner is one more
+child of the member's own proxy (no wrapper: it spawns `sbx` itself and
+Seatbelt does not nest, `call_timeout` 190, `startup_timeout` 120), and
+mcp-skill reaches it by calling back into that same proxy:
+`--runner-url http://127.0.0.1:<proxy port>/mcp`, `--runner-token-file` the
+proxy's own token file, `--runner-max-body` equal to that proxy's
+`--max-body-bytes` (its default is 4 MiB). Two runners must never share a
+`work_root`: the second refuses to start on the work-root lock, and a child that
+fails startup takes the whole proxy down with it. With `work_root: null` that
+means one runner per uid.
+
 ## How it is tested
 
 The `mcp_sandbox` suite `tests/test_mcp_sandbox.py` renders every config from

@@ -38,8 +38,9 @@ carries it as an unregistered server `Scripts/_mcp_smoke_test.py:SERVERS`.
 
 Everything below is the *shape*. The decision record — the four layers, the
 runner behind a dedicated proxy, the sanitizer kept as a hand copy, the
-same-uid trust model — is ADR 0032 (a runner behind a proxy), which is still
-being written; where the server sits in the fleet is [[scripts]].
+same-uid trust model — is [[0032-a-runner-behind-a-proxy]]; its 2026-10-12
+addendum records the deployment where the runner is a sibling child of the same
+per-uid proxy instead. Where the server sits in the fleet is [[scripts]].
 
 ## Tiers and the index
 
@@ -48,9 +49,17 @@ member, `--private-root` is one member's own; either may be omitted, and with
 neither the index is empty `Scripts/mcp-skill.py:TIERS`. A root is resolved and
 checked once at startup — a directory owned by the euid or by root with no
 group or other write bit — and a refusal names the flag and the rule, never the
-path `Scripts/mcp-skill.py:_check_root`. Every later operation reopens that
-realpath with `O_NOFOLLOW` and re-checks it on the descriptor, so a root swapped
-for a symlink since startup is refused `Scripts/mcp-skill.py:_open_root`.
+path `Scripts/mcp-skill.py:_check_root`. One state is not a refusal: a root
+that does not exist yet — `ENOENT` on the root or on any parent, which is also
+what a dangling symlink resolves to — is accepted, because ai-soul creates each
+root lazily on its first publish (see the ai-soul contract below). `_open_root`
+raises it as `Scripts/mcp-skill.py:RootMissing`, a subclass of
+`Scripts/mcp-skill.py:RootRefused`, so every other refusal is unchanged: a path
+through a regular file (`ENOTDIR`), a non-directory, a symlink, a foreign
+owner, a group or other write bit or any other errno still refuses start.
+Every later operation reopens that realpath with `O_NOFOLLOW` and re-checks it
+on the descriptor, so a root swapped for a symlink since startup is refused
+`Scripts/mcp-skill.py:_open_root`.
 
 **`skills.json` is the only enumeration.** A tier root is opened, never listed
 `Scripts/mcp-skill.py:load_tier`. The index is parsed strictly — the generated
@@ -59,7 +68,11 @@ for a symlink since startup is refused `Scripts/mcp-skill.py:_open_root`.
 `{version, skills}` with version 1 and at most
 `Scripts/mcp-skill.py:_INDEX_MAX_SKILLS` entries
 `Scripts/mcp-skill.py:_parse_index`. A top-level violation makes the whole tier
-an `error`; a bad entry makes only that entry `invalid`, with a fixed reason and
+an `error`, and so does a root or index refused on the descriptor — but a root
+that does not exist, or exists without a `skills.json`, is the **empty tier
+with no error**, and neither state is cached, so a root or index that appears
+later is read on the next call `Scripts/mcp-skill.py:load_tier`. Every other
+`skills.json` refusal is still `skills.json refused: <reason>`. A bad entry makes only that entry `invalid`, with a fixed reason and
 never the offending text `Scripts/mcp-skill.py:INVALID_REASONS`. An entry is
 exactly `{name, dir, description, scripts}`; `name` and `dir` are one lower-case
 component, every script is exactly `{path, interpreter}` with the path under
@@ -314,7 +327,13 @@ worker thread `tests/test_cancel.py:FLEET`.
 
 ## The ai-soul contract
 
-ai-soul writes the tiers; mcp-skill reads them. The grammar mcp-skill enforces is
+ai-soul writes the tiers; mcp-skill reads them. ai-soul creates each tier root
+lazily, mode 0700, on its first publish, and writes `skills.json` atomically, so
+before that first publish a configured root may not exist or may hold no index.
+mcp-skill therefore starts with a missing root and serves it as an empty tier
+with no error, and sees the root and its index on the next call after they
+appear, with no restart `Scripts/mcp-skill.py:_check_root`
+`Scripts/mcp-skill.py:load_tier`. The grammar mcp-skill enforces is
 its own — the leaf grammar, the per-run bundle caps, the `writable-by-others`
 refusal, the UTF-16 ceiling — and it never emits
 `notifications/tools/list_changed`; a client sees a changed skill by listing
@@ -364,7 +383,11 @@ the next request. Security review round 1 added `B9` and `B10` (the
 per-entry script cap and duplicate refusal, the fstat-only check), `I12` (the
 response cap equal to the runner's bound plus the framing allowance), `J11`
 (the bounded bundle listing), `J12` (the answer ceiling) and `J13` (the
-runner's message only inside a `runner-error` frame), each run red first. Its
+runner's message only inside a `runner-error` frame), each run red first. The
+lazily created tier root added `A6`-`A9` (a missing household or private root
+starts as an empty tier, a root through a regular file still refuses start, a
+root created after start is seen) and `E4`-`E5` (a missing root, and a root
+without `skills.json`, are an empty tier with no error), red first too. Its
 case count is declared once, in `tests/run.py:SUITES`, and checked against the
 run; the forge target is `mcp_skill`.
 

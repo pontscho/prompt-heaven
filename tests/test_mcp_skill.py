@@ -33,8 +33,11 @@ The in-process contract these rows hold the server to (plan Step 16):
 Groups:
   A  startup/flags (stdio) -- no roots is an empty index, a group-writable
      root refuses start, a runner URL without its token file (and vice versa)
-     is a usage error, --max-description's 512..4096 range at both edges, and
-     tools/list answering exactly one tool.
+     is a usage error, --max-description's 512..4096 range at both edges,
+     tools/list answering exactly one tool, a missing household or private
+     root (and its missing parent) starting as an empty tier with no error, a
+     root path through a regular file refused, and a root created after
+     start (first bare, then published) picked up by the next call.
   B  skills.json schema (in-process) -- top-level violations make the tier an
      error; per-entry violations make only that entry invalid, a valid
      sibling beside each one as the control.
@@ -43,8 +46,11 @@ Groups:
   D  rendering -- the constant preamble, the [private] mark and shadowing,
      sorted lines, UTF-16 units, the over-ceiling refusal naming both tier
      sums while tools/list still succeeds, the name enum, the stat-keyed cache.
-  E  dirs (in-process) -- a symlinked or non-directory `dir` is invalid, and
-     the tier root is never listed.
+  E  dirs (in-process) -- a symlinked or non-directory `dir` is invalid, the
+     tier root is never listed, a missing root and an existing root without
+     skills.json are each the empty tier with no error (load, run, list,
+     validate and the status answering without a crash), while a
+     group-writable root and a symlinked skills.json stay tier errors.
 
 Step 17 adds groups F-H. They were written and run RED before `load`, `list`,
 `validate`, the framing and the sanitizer hand copy existed; each row then
@@ -511,6 +517,97 @@ def _run_a(suite, fx):
             problems.append("name enum %r" % (_name_enum(tool),))
         return problems, []
     _guard(suite, GRP_A, "A5 tools-list-one-tool", one_tool)
+
+    # A6-A9: ai-soul creates a tier root lazily, on its first publish, so a
+    # root that does not exist yet -- or whose parent does not -- is an EMPTY
+    # tier, not a refused start and not a tier error. A path through a regular
+    # file (ENOTDIR) is still refused.
+    def missing_root(flag, tier):
+        def fn():
+            path = os.path.join(fx.base, "absent-" + tier, "parent", "root")
+            problems = []
+            with _client(flag, path) as cl:
+                tools = _tools(cl)
+                is_err, listed = cl.call_tool("list")
+                v_err, validated = cl.call_tool("validate")
+            if len(tools) != 1:
+                return ["%s missing: %d tools, want 1" % (flag, len(tools))], []
+            desc = tools[0].get("description") or ""
+            if _index_lines(desc):
+                problems.append("index lines for a missing root: %r"
+                                % _index_lines(desc))
+            if "REFUSED" in desc or "not exist" in desc:
+                problems.append("a missing root rendered as an error: %r"
+                                % desc[-160:])
+            if is_err or "(no skills)" not in listed:
+                problems.append("list: isError %r, text %r"
+                                % (is_err, listed[:200]))
+            want = "  %s: valid 0, invalid 0, error null" % tier
+            if want not in listed.split("\n"):
+                problems.append("list has no %r line: %r" % (want, listed))
+            if "not exist" in listed or "not exist" in validated:
+                problems.append("the missing root surfaced as an error text")
+            try:
+                report = json.loads(validated)
+            except ValueError:
+                report = {}
+            got = ((report.get("tiers") or {}).get(tier) or {})
+            if v_err or got.get("error", "absent") is not None:
+                problems.append("validate: isError %r, %s error %r"
+                                % (v_err, tier, got.get("error", "absent")))
+            return problems, ["list        : %r" % listed[-120:]]
+        return fn
+    _guard(suite, GRP_A, "A6 missing-household-root-starts-empty",
+           missing_root("--household-root", "household"))
+    _guard(suite, GRP_A, "A7 missing-private-root-starts-empty",
+           missing_root("--private-root", "private"))
+
+    def through_file():
+        problems = []
+        blocker = _write(os.path.join(fx.base, "a8-file"), "not a dir\n")
+        path = os.path.join(blocker, "root")
+        for flag in ("--household-root", "--private-root"):
+            rc, err = _start_rc(flag, path)
+            if rc != 2:
+                problems.append("%s through a file: rc %r, want 2"
+                                % (flag, rc))
+            if "not a directory" not in err:
+                problems.append("%s through a file: stderr %r names no rule"
+                                % (flag, err.strip()[-160:]))
+            if path in err:
+                problems.append("%s: the refusal echoed the path" % flag)
+        return problems, []
+    _guard(suite, GRP_A, "A8 root-through-file-refused", through_file)
+
+    def appears_later():
+        path = os.path.join(fx.base, "a9-later")
+        problems = []
+        with _client("--household-root", path) as cl:
+            is_err, before = cl.call_tool("list")
+            if is_err or "(no skills)" not in before:
+                problems.append("before: isError %r, %r"
+                                % (is_err, before[:160]))
+            _mkdir(path, 0o700)
+            is_err, bare = cl.call_tool("list")
+            if (is_err or "(no skills)" not in bare
+                    or "household: valid 0, invalid 0, error null" not in bare):
+                problems.append("root without skills.json: isError %r, %r"
+                                % (is_err, bare[-200:]))
+            _index(path, [_skill(path, "late")])
+            is_err, after = cl.call_tool("list")
+            if is_err or "late - Does late." not in after.split("\n"):
+                problems.append("after publish: isError %r, %r"
+                                % (is_err, after[:200]))
+            tools = _tools(cl)
+            if not tools or _name_enum(tools[0]) != ["late"]:
+                problems.append("tools/list enum %r after publish"
+                                % (_name_enum(tools[0]) if tools else None,))
+            is_err, body = cl.call_tool("load", {"name": "late"})
+            if is_err or "Body text." not in body:
+                problems.append("load after publish: isError %r, %r"
+                                % (is_err, body[:160]))
+        return problems, []
+    _guard(suite, GRP_A, "A9 root-created-after-start-seen", appears_later)
 
 
 # ---------------------------------------------------------------------------
@@ -1037,6 +1134,79 @@ def _run_e(suite, fx):
                             % ", ".join(sorted(set(seen))))
         return problems, []
     _guard(suite, GRP_E, "E3 root-never-listed", never_listed)
+
+    def missing_root():
+        """A root that does not exist (nor its parent) is the empty tier with
+        no error, and load/run/list/validate/status answer without crashing;
+        a group-writable root at runtime is still the tier's error."""
+        mod = _mod()
+        problems = []
+        h = os.path.join(fx.base, "e4-absent", "household")
+        p = os.path.join(fx.base, "e4-absent-private")
+        for tier, path in (("household", h), ("private", p)):
+            idx = mod.load_tier(tier, path)
+            if idx != _empty_tier(mod, tier):
+                problems.append("%s missing: %r, want the empty tier"
+                                % (tier, idx))
+        with _Roots(mod, household=h, private=p):
+            listed = _text(_call(mod, "list"))
+            for tier in ("household", "private"):
+                want = "  %s: valid 0, invalid 0, error null" % tier
+                if want not in listed.split("\n"):
+                    problems.append("list has no %r: %r" % (want, listed))
+            report = _call(mod, "validate")
+            errors = {t: (report.get("tiers") or {}).get(t, {}).get("error",
+                                                                  "absent")
+                      for t in ("household", "private")}
+            if errors != {"household": None, "private": None}:
+                problems.append("validate errors %r" % (errors,))
+            status = mod._status_text()
+            if status.count("valid 0, invalid 0, error null") != 2:
+                problems.append("status %r" % status)
+            err = _err(_call(mod, "load", {"name": "x"}))
+            if err is None or err[0] != "invalid_params" \
+                    or "Unknown skill name" not in err[1]:
+                problems.append("load against a missing root: %r" % (err,))
+            # With no runner configured the dispatcher answers
+            # sandbox_unavailable before fn_run; either way never internal.
+            err = _err(_call(mod, "run", {"name": "x",
+                                          "script": "scripts/run.py"}))
+            if err is None or err[0] not in ("invalid_params",
+                                             "sandbox_unavailable"):
+                problems.append("run against a missing root: %r" % (err,))
+        control = fx.root("e4-gw")
+        _index(control, [_skill(control, "ok")])
+        os.chmod(control, 0o775)
+        try:
+            idx = mod.load_tier("household", control)
+        finally:
+            os.chmod(control, 0o700)
+        if not idx.error or "writable by group" not in idx.error:
+            problems.append("control: a group-writable root gave error %r"
+                            % (idx.error,))
+        return problems, []
+    _guard(suite, GRP_E, "E4 missing-root-empty-tier-no-error", missing_root)
+
+    def no_index():
+        """An existing root with no skills.json is the empty tier with no
+        error; a skills.json that is a symlink is still the tier's error."""
+        mod = _mod()
+        problems = []
+        root = fx.root("e5")
+        _skill(root, "stray")                   # a skill dir, no index yet
+        idx = mod.load_tier("household", root)
+        if idx != _empty_tier(mod, "household"):
+            problems.append("no skills.json: %r, want the empty tier" % (idx,))
+        control = fx.root("e5-link")
+        target = _write(os.path.join(fx.base, "e5-target.json"),
+                        json.dumps({"version": 1, "skills": []}))
+        os.symlink(target, os.path.join(control, "skills.json"))
+        idx = mod.load_tier("household", control)
+        if idx.error != "skills.json refused: symlink":
+            problems.append("control: a symlinked skills.json gave error %r"
+                            % (idx.error,))
+        return problems, []
+    _guard(suite, GRP_E, "E5 no-skills-json-empty-tier-no-error", no_index)
 
 
 # ---------------------------------------------------------------------------
