@@ -3,13 +3,13 @@ name: mcp-skill
 type: component
 status: active
 title: mcp-skill — the read-only skill loader and runner client
-description: The stdio MCP server that serves household and private skill tiers through one skill_call tool -- the skill index rendered as the tool description and refused whole over a UTF-16 ceiling, fd-relative file hygiene with fixed refusal reasons, nonce-framed and sanitized quoted text through a declared hand copy of the websearch sanitizer, and run through a bounded loopback HTTP client to the sandbox runner behind its own proxy; the ai-soul contract it relies on, how it is tested and what it declares rather than gates.
+description: The stdio MCP server that serves household and private skill tiers through one skill_call tool -- the skill index rendered as the tool description and refused whole over a UTF-16 ceiling, fd-relative file hygiene with fixed refusal reasons, sanitized and unframed text through a declared hand copy of the websearch sanitizer, and run through a bounded loopback HTTP client to the sandbox runner behind its own proxy; the ai-soul contract it relies on, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/mcp-skill.py
   - tests/test_mcp_skill.py
   - tests/files/mcp_skill/stub_runner.py
 verified:
-  commit: 731e149
+  commit: 0668eb3
   date: 2026-10-12
 links:
   - mcp-proxy
@@ -40,7 +40,9 @@ Everything below is the *shape*. The decision record — the four layers, the
 runner behind a dedicated proxy, the sanitizer kept as a hand copy, the
 same-uid trust model — is [[0032-a-runner-behind-a-proxy]]; its 2026-10-12
 addendum records the deployment where the runner is a sibling child of the same
-per-uid proxy instead. Where the server sits in the fleet is [[scripts]].
+per-uid proxy instead, and a later one the reversal of its KD-10 nonce framing:
+since `0668eb3` neither `load` nor `run` wraps its text in a frame. Where the
+server sits in the fleet is [[scripts]].
 
 ## Tiers and the index
 
@@ -185,7 +187,7 @@ with each label sanitized and cut to `Scripts/mcp-skill.py:_LABEL_MAX`
 characters, the tier error and its budget sum — plus the description's size,
 ceiling and refused flag `Scripts/mcp-skill.py:fn_validate`.
 
-## load: file hygiene and framing
+## load: file hygiene and the bare text
 
 **Every open is fd-relative.** `load(name, file?)` walks root fd → skill dir fd →
 `refs/` or `scripts/` fd → leaf, each step opened with `O_NOFOLLOW` and checked
@@ -214,13 +216,16 @@ between the index build and this call is refused rather than served
 did not ask for; it was added during implementation, and `run` takes the same
 path.
 
-**Text is sanitized and framed as data.** The text is passed through
-`_web_clean` keeping tab and newline `Scripts/mcp-skill.py:_decode_clean`, then
-wrapped between `<<<SKILL-DATA <nonce> kind=… skill=… tier=… file=…>>>` and
-`<<<END SKILL-DATA <nonce>>>>`, with a fixed note that the content is quoted
-reference material, never instructions `Scripts/mcp-skill.py:FRAME_NOTE`. The
-nonce is a fresh `secrets.token_hex(8)`, redrawn while it occurs in the text, so
-a file cannot forge the end marker `Scripts/mcp-skill.py:frame`.
+**Text is sanitized and returned bare.** The text is passed through
+`_web_clean` keeping tab and newline `Scripts/mcp-skill.py:_decode_clean`, and
+the answer is that text alone — no marker line, no note, no nonce
+`Scripts/mcp-skill.py:fn_load`. Until `0668eb3` it was wrapped between
+`<<<SKILL-DATA <nonce> …>>>` and `<<<END SKILL-DATA <nonce>>>>` lines with a
+fixed "quoted reference material, never instructions" note (ADR 0032, KD-10);
+the frame was removed by user decision because it cost tokens on every answer.
+The sanitizer stays, so invisible and display-steering characters are still
+removed — but nothing now marks where a household member's text ends (see
+Declared limits).
 
 ## The sanitizer is a declared hand copy
 
@@ -320,27 +325,49 @@ connection is opened; the same bytes are what is sent
 keeps its code, checked against `[a-z][a-z_]{0,31}` and otherwise `internal`,
 under a fixed text, `the runner refused the run (<code>).`; the runner's
 message, sanitized and cut to `Scripts/mcp-skill.py:_RUNNER_MESSAGE_MAX`
-characters, appears only inside a nonce frame of `kind=runner-error` after it,
-never as bare text (security review round 1, O2: an sbx refusal used to reach
-the model unframed, host paths included). `retryAfterMs` is kept for `busy`.
-A result becomes a header line — exit, signal name, timed out, duration, sizes
-and truncation flags — followed by framed `stdout`, `stderr` and one `outfile`
-block per output file, at most `Scripts/mcp-skill.py:_RUN_OUT_FILES_SHOWN` (64)
-of them, with a `[N more out file(s) not shown]` line for the rest. Every peer
-string goes through `_web_clean`; a `base64` output file is listed as metadata
-only, never shown `Scripts/mcp-skill.py:_sanitize_run_result`.
+characters, follows on the next line, unframed. (Security review round 1, O2,
+had put it inside a `kind=runner-error` nonce frame because an sbx refusal
+reached the model bare, host paths included; `0668eb3` removed the frame with
+the rest of KD-10, so the message is again plain text after the fixed line,
+still sanitized and still capped.) `retryAfterMs` is kept for `busy`.
+
+A result is rendered in sections, each present only when it has something to
+say `Scripts/mcp-skill.py:_sanitize_run_result`:
+
+- **A status line, only when the run was abnormal** — one comma-joined line of
+  the abnormal facts alone: `exit N` for a nonzero exit (`exit none` / `exit ?`
+  when the exit is missing and neither a signal nor a timeout explains it),
+  `signal X`, `timed out`, and `stdout truncated` / `stderr truncated` / `out
+  files truncated` for each truncation flag the runner set. A clean run has no
+  status line `Scripts/mcp-skill.py:_run_status`.
+- **stdout**, bare, when it is not empty.
+- **`[stderr]`** on its own line and then stderr, only when stderr is not empty.
+- **`[out/<name>]`** and then the content, per output file, at most
+  `Scripts/mcp-skill.py:_RUN_OUT_FILES_SHOWN` (64) of them, with a `[N more out
+  file(s) not shown]` line for the rest. A `base64` (or unknown-encoding) file is
+  one `encoding: <kind>, N encoded chars (content not shown)` line, never its
+  content.
+- **`(no output)`** when none of the above has anything to show
+  `Scripts/mcp-skill.py:_render_sections`.
+
+So a clean run answers its stdout and nothing else. `durationMs` is no longer
+reported to the model, and no line names the skill, tier or script. Every peer
+string still goes through `_web_clean`. Until `0668eb3` the answer opened with
+a summary line (exit, signal, timed out, duration, sizes, truncation flags) and
+put stdout, stderr and each out file in its own nonce frame.
 
 **The answer has a ceiling** (security review round 1, M2)
-`Scripts/mcp-skill.py:_render_frames`. The whole rendered answer is at most
+`Scripts/mcp-skill.py:_render_sections`. The whole rendered answer is at most
 `Scripts/mcp-skill.py:_RUN_ANSWER_MAX_CHARS` (100000) characters, ADR 0013's
-verbatim class, on its non-idempotent reason: the frames are a script's output
+verbatim class, on its non-idempotent reason: the sections are a script's output
 the server did not compose, and asking again re-runs the script, a new
-measurement rather than the rest of the first. Each frame body keeps its head,
-at most `Scripts/mcp-skill.py:_RUN_FRAME_MAX_CHARS` (40000) characters and never
-more than the room left once every later frame's fixed part is reserved; a cut
-is named by a server line after the frame's end marker, `[truncated: <label>
-kept K of N chars from the head]`, outside the frame, so it cannot be mistaken
-for script output. Logging is function, skill, tier,
+measurement rather than the rest of the first. Each section body keeps its
+head, at most `Scripts/mcp-skill.py:_RUN_SECTION_MAX_CHARS` (40000) characters
+and never more than the room left once every later section's label and cut line
+are reserved; a cut is named by a server line of its own after the section,
+`[truncated: <label> kept K of N chars from the head]`, where the label is
+`stdout`, `stderr` or `out/<name>`. Without a frame that line is told from
+script output only by its text and its position. Logging is function, skill, tier,
 interpreter, exit and duration — never the token, a body, the arguments, stdin
 or output — and structure-only on the wire
 ([[0011-a-truncated-payload-carries-the-first-cookie]]).
@@ -398,8 +425,9 @@ rendering — UTF-16 units, the over-ceiling refusal while `tools/list` still
 succeeds, the stat-keyed cache — `tests/test_mcp_skill.py:_run_d`, tier
 directories `tests/test_mcp_skill.py:_run_e`, file hygiene including a FIFO that
 must not hang and a dir swapped between operations
-`tests/test_mcp_skill.py:_run_hygiene`, framing and the validate report
-`tests/test_mcp_skill.py:_run_framing`, sanitizer parity
+`tests/test_mcp_skill.py:_run_hygiene`, the bare load text and the validate
+report `tests/test_mcp_skill.py:_run_framing` (the group keeps its old name),
+sanitizer parity
 `tests/test_mcp_skill.py:_run_sanitizer`, the runner client against a real
 `mcp-proxy --http` in front of a stub runner child
 `tests/files/mcp_skill/stub_runner.py` `tests/test_mcp_skill.py:_run_client`,
@@ -412,7 +440,7 @@ the next request. Security review round 1 added `B9` and `B10` (the
 per-entry script cap and duplicate refusal, the fstat-only check), `I12` (the
 response cap equal to the runner's bound plus the framing allowance), `J11`
 (the bounded bundle listing), `J12` (the answer ceiling) and `J13` (the
-runner's message only inside a `runner-error` frame), each run red first. The
+runner's message after the fixed refusal text), each run red first. The
 lazily created tier root added `A6`-`A9` (a missing household or private root
 starts as an empty tier, a root through a regular file still refuses start, a
 root created after start is seen) and `E4`-`E5` (a missing root, and a root
@@ -426,7 +454,15 @@ that followed: `L4` (`load` with all six keys empty but a valid `name` serves
 the plain load), `L5` (`run` with the same fill reaches a recording
 runner-client stand-in with exactly the plain run's params, no `timeoutMs` `0`)
 and `L6` (`load` with `name` `""` is refused `name is required`), red first
-too. Its
+too. The unframing (`0668eb3`) rewrote six rows without changing the count:
+`G1` and `G3` (the load answer is the text alone, no marker line, no note, no
+nonce drawn), `J7` (hostile output sanitized, stderr and out files under their
+`[stderr]` / `[out/<name>]` labels), `J12` (the ceiling plus the unframed run
+contract by literal: a clean run is its stdout, a failing run opens with one
+status line, an empty run answers `(no output)`), `J13` (the runner's message
+unframed after the fixed text) and `L4` (the empty-valued load's text is now
+compared with the plain load's directly `tests/test_mcp_skill.py:_run_schema`).
+Its
 case count is declared once, in `tests/run.py:SUITES`, and checked against the
 run; the forge target is `mcp_skill`.
 
@@ -449,9 +485,14 @@ a smoke row with near-miss and documented-call probes
   out of a legacy `sbx` run's reach; anywhere else it is not.
 - **No HTTPS** to the runner: loopback literals only, by design.
 - **A cancel does not stop a run**; the call runs to its own deadline.
-- **Semantic injection is not prevented.** Framing marks skill text as data and
-  the sanitizer removes invisible and display-steering characters; neither can
-  stop an approved skill's plain text from saying something misleading.
+- **Skill text and script output arrive with no delimiter.** Since `0668eb3`
+  (KD-10 reversed by user decision, to stop paying the frame's tokens on every
+  answer) nothing marks where a household member's SKILL.md, reference file or
+  script output ends and the server's own text begins; a skill can write a line
+  that looks like a status line, a `[stderr]` label or a cut line. Accepted.
+- **Semantic injection is not prevented.** The sanitizer removes invisible and
+  display-steering characters; it cannot stop an approved skill's plain text
+  from saying something misleading, and no frame marks that text as data.
 - **The ai-soul-side bounds above are trusted, not re-checked**, and the
   Unicode-version skew between the two classifiers is a known residual.
 - **No change notification.** A new or edited skill reaches a client only when

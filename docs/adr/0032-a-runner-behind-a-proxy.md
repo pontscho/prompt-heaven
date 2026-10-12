@@ -639,3 +639,29 @@ A required key left empty is now a missing key: `name` `""` on `load` or `run` a
 An empty value can no longer be sent on purpose: an explicit `timeoutMs` `0` is not forwarded to the runner, so the runner's own default applies, and an explicit empty `stdin` is the same as no `stdin`. Accepted because a model fills unused fields with exactly these values, so honouring them would keep refusing or misreading the common call to serve a rare deliberate one; a caller that wants a short timeout sends a positive one.
 
 Rows `mcp_skill:L4` (`load` with all six keys empty but a valid `name` serves the plain load), `L5` (`run` with the same fill reaches a recording runner-client stand-in with exactly the plain run's params, no `timeoutMs` `0`) and `L6` (`load` with `name` `""` is refused `name is required`), run red first; the suite went from 92 to 95 cases.
+
+## Addendum (2026-10-12): KD-10 reversed: skill_call answers carry no nonce frame
+
+Decided by Zoltán on 2026-10-12 and shipped in `0668eb3`. It reverses the nonce framing of KD-10 and Decision item 4's "the nonce framing", and it changes the answer shape that Contract item 6 and the 2026-10-11 security review rows O2 and M2 described. Everything else in item 4 stays: the tiers, the file hygiene, the rendered description, the sanitizer and the runner client.
+
+### What changed
+
+`load` returns the sanitized file text alone. There is no `<<<SKILL-DATA <nonce> ...>>>` / `<<<END SKILL-DATA <nonce>>>` pair and no quoted-reference-material note, and no nonce is drawn `Scripts/mcp-skill.py:fn_load`. `FRAME_NOTE`, `frame`, `_render_frames`, the `secrets` import and the run summary line are gone.
+
+`run` returns stdout alone on a clean run. When a run is abnormal, the answer opens with one status line that lists only the abnormal facts: `exit N`, `signal X`, `timed out`, and `stdout truncated` / `stderr truncated` / `out files truncated` `Scripts/mcp-skill.py:_run_status`. After that comes stdout. A `[stderr]` section follows only when stderr is not empty, and each out file gets an `[out/<name>]` section. A base64 file gets a one-line note and its content is not shown. A run with nothing to show answers `(no output)`. Each section keeps at most 40000 characters `Scripts/mcp-skill.py:_RUN_SECTION_MAX_CHARS`, and the whole answer is still held to the 100000-character verbatim class with each cut named on a line of its own `Scripts/mcp-skill.py:_render_sections` `Scripts/mcp-skill.py:_sanitize_run_result`. `durationMs` is no longer reported to the model; the server's own log still records the duration.
+
+A runner refusal is still its grammar-checked code under the fixed text `the runner refused the run (<code>).`. The runner's message, sanitized and capped at 512 characters, now follows on the next line as plain text. O2 had put it inside a `kind=runner-error` frame; that frame went with the rest.
+
+### Why
+
+Token cost. Every `load` and every `run` answer paid for two marker lines, a note and a 16-hex nonce. A `run` also paid for a summary line that restated what a clean run does not need. The model reads these answers on every skill use, so that overhead recurred on every call.
+
+### What it costs, accepted
+
+The frame was the only thing that marked where untrusted text ends. Household-tier skill text is written by other household members, and it now reaches the model with no delimiter around it. A skill's SKILL.md, reference file or script output can contain a line that looks like the server's own status line, a `[stderr]` or `[out/<name>]` label, or a `[truncated: ...]` cut line, and nothing distinguishes the two. The Declared limit "Semantic injection is not prevented" therefore loses its first clause, "Framing marks skill text as data". The trust that remains is the approval step on the ai-soul side and the household's own same-uid trust model. Zoltán accepted this trade-off.
+
+### What stays
+
+The sanitizer is unchanged. Every peer string still goes through the declared hand copy of `_web_clean` `Scripts/mcp-skill.py:_web_clean`, with tab and newline kept for bodies, so bidi controls, zero-width and tag characters and C0/C1 controls are still removed. H1 and H2 still pin its parity with `Scripts/_mcp_websearch.py`. The ceilings, the runner client, the file hygiene and `--allow-private-scripts` are untouched. `_RUNNER_FRAMING_ALLOWANCE` keeps its name: it sizes the JSON-RPC envelope and the SSE lines, which are not the reversed frame.
+
+Rows `mcp_skill:G1` and `G3` now pin the absence of the frame (no marker, no note, no nonce drawn). `J7` checks hostile output sanitized under the `[stderr]` / `[out/<name>]` labels. `J12` checks the ceiling plus the unframed contract by literal (clean, failing, killed, empty, out file). `J13` checks the runner's message as plain text after the fixed line. `L4` compares the empty-valued load with the plain load directly. All six were rewritten; the suite stays at 95 cases. The shape is on [[mcp-skill]].

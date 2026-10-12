@@ -270,13 +270,14 @@ the smoke check runs both as unregistered servers `Scripts/_mcp_smoke_test.py:SE
   `Scripts/mcp-skill.py:FUNCTIONS`) is the read-only skill loader. It serves a
   household and a private tier from `--household-root` / `--private-root`, puts
   the skill index into its own tool description
-  `Scripts/mcp-skill.py:_render_description`, frames every quoted file as
-  sanitized data through a declared hand copy of the websearch sanitizer
+  `Scripts/mcp-skill.py:_render_description`, returns every quoted file and
+  every run's output sanitized but unframed (no delimiter since `0668eb3`)
+  through a declared hand copy of the websearch sanitizer
   `Scripts/mcp-skill.py:_web_clean`, and forwards `run` to mcp-sandbox's proxy
   over a loopback-only HTTP client `Scripts/mcp-skill.py:RunnerClient`
   (`--runner-url`, `--runner-token-file`). ai-soul reaches it as an mcp-proxy
-  child with `relist` on. Its tiers, file hygiene, framing and the runner client
-  are [[mcp-skill]].
+  child with `relist` on. Its tiers, file hygiene, answer shape and the runner
+  client are [[mcp-skill]].
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
 which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`
