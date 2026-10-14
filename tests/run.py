@@ -238,6 +238,10 @@ def run_llm_router(opts):
     return run_python_suite("test_llm_router", opts)
 
 
+def run_tshark_fields(opts):
+    return run_python_suite("test_tshark_fields", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -923,6 +927,12 @@ SUITES = [
      "and openai Responses kinds (request translation and stream), OAuth "
      "token store, login and config write-back, timeouts and disconnects "
      "per kind, secret leaks, static rules, hygiene", 387),
+    # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
+    ("tshark_fields", run_tshark_fields,
+     "mcp-tshark analyze's `fields` parameter, in-process with tshark "
+     "stubbed: a JSON list and a comma-separated string build the same -e "
+     "argv, a non-str / non-list value is a ValueError refusal and an error "
+     "reply, never an AttributeError", 10),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

@@ -1036,6 +1036,11 @@ def _run_analyze(params: dict, project_root: str) -> str:
     max_chars      = _int_param(params.get("max_answer_chars"), DEFAULT_MAX_OUTPUT_CHARS)
     timeout_sec    = min(MAX_ANALYZE_SEC, max(1, _int_param(params.get("timeout"), 120)))
 
+    if isinstance(custom_fields, (list, tuple)):
+        # models send a JSON array as often as a comma-separated string
+        custom_fields = ",".join(str(f) for f in custom_fields)
+    elif not isinstance(custom_fields, str):
+        raise ValueError("fields must be a comma-separated string or a list of field names")
     if custom_fields:
         fields = [f.strip() for f in custom_fields.split(",") if f.strip()]
     else:
