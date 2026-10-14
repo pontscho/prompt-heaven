@@ -2186,6 +2186,29 @@ def _glob_matches(rel_path: str, glob: str) -> bool:
     return False
 
 
+def _exclude_prunes_dir(dir_rel: str, globs) -> bool:
+    """True if an exclude glob provably drops EVERY file below `dir_rel`, so the
+    walk need not descend into it.
+
+    Uses the same two candidates _glob_matches builds (the glob, and the glob
+    with every ``**/`` removed). Only a candidate ending in ``/**`` or ``/*``
+    can prune: fnmatch's ``*`` crosses separators, so when the part before that
+    last separator matches the directory, the candidate matches every path
+    beneath it. A glob without such a tail (``*.md``) never prunes -- it is a
+    per-file filter and stays one. The caller never asks about the search root
+    itself, only its children.
+    """
+    for glob in globs:
+        candidates = [glob]
+        if "**/" in glob:
+            candidates.append(glob.replace("**/", ""))
+        for c in candidates:
+            if (c.endswith("/**") or c.endswith("/*")) \
+                    and fnmatch.fnmatch(dir_rel, c.rsplit("/", 1)[0]):
+                return True
+    return False
+
+
 def handle_search_for_pattern(params: dict, project_root: str, strict: bool = False) -> dict:
     # The ExitStack owns the regex worker's lifetime (see the ReDoS guard): the
     # child is killed on EVERY way out -- the rows, a refusal, the between-files
@@ -2450,6 +2473,18 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
                 dirnames[:] = [
                     d for d in dirnames
                     if not _ignore_skips(d, os.path.join(dir_rel, d), patterns)
+                ]
+            if exclude_globs:
+                # An exclude glob that drops everything below a directory
+                # (``vendor/**``) prunes it here, so the walk -- which counts
+                # against the call's budget -- never descends. Children only;
+                # the search root is always walked. Measured from the project
+                # root like file_rel.
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not _exclude_prunes_dir(
+                        os.path.relpath(os.path.join(dirpath, d), project_root),
+                        exclude_globs)
                 ]
         for name in filenames:
             full = os.path.join(dirpath, name)

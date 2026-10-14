@@ -353,12 +353,14 @@ SUITES = [
      "regex matched in-process byte-identical to the worker, a total-budget "
      "overrun named as such (backtracking blamed only for a slow file), "
      "nested repos below the search root skipped, and an out-of-root root "
-     "filtered by its own repo's .gitignore",
-     230),
+     "filtered by its own repo's .gitignore, and an exclude glob pruning "
+     "whole directories during the walk",
+     236),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline; a real unexposed subcommand "
      "refused with no near-miss pointer, a key no git option can be spelled "
-     "from refused", 314),
+     "from refused, a `git grep` exit 1 with no output a plain no-match "
+     "answer", 317),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,

@@ -1251,6 +1251,41 @@ def run(opts=None):
                      brief="%s | error-reply-keeps-exit-and-argv"
                            % (H.FAIL if problems else H.PASS))
 
+        # `git grep` exits 1 for "no matches": an ANSWER, not a failure. Only
+        # grep gets this -- merge-base --is-ancestor above, diff --quiet and
+        # ls-remote --exit-code use exit 1 as a different verdict and keep the
+        # error envelope. Any stderr, or an rc other than 1, is still an error
+        # (ADR 0010: a handler failure reaches the caller with isError set).
+        rep = drv.call("grep", {"args": ["-n", "nothing-here"]}, rc=1,
+                       stdout="", stderr="")
+        problems = []
+        if rep["error"]:
+            problems.append("grep rc=1 with no stdout and no stderr is a "
+                            "normal no-match answer, got an error reply")
+        if "(exit" in rep["text"]:
+            problems.append("no-match reply carries the exit echo")
+        if "no matches" not in rep["text"]:
+            problems.append("no-match reply does not say 'no matches'")
+        suite.record("K", "grep-exit-1-no-match-is-not-error", problems,
+                     detail=["reply       : %r" % rep["text"]],
+                     brief="%s | grep-exit-1-no-match-is-not-error"
+                           % (H.FAIL if problems else H.PASS))
+        for cid, rc, err in (
+                ("grep-exit-1-with-stderr-is-still-error", 1,
+                 "fatal: bad pattern\n"),
+                ("grep-exit-128-is-still-error", 128, "")):
+            rep = drv.call("grep", {"args": ["-n", "x"]}, rc=rc, stdout="",
+                           stderr=err)
+            problems = []
+            if not rep["error"]:
+                problems.append("CONTROL: grep rc=%d stderr=%r must stay an "
+                                "error reply" % (rc, err))
+            if "(exit %d)" % rc not in rep["text"]:
+                problems.append("CONTROL: the exit echo is missing")
+            suite.record("K", cid, problems,
+                         detail=["reply       : %r" % rep["text"]],
+                         brief="%s | %s" % (H.FAIL if problems else H.PASS, cid))
+
         # --- a fence only where Markdown would damage the payload ---
         for cid, out, fenced, why in [
             ("sha-single-line", "28eca15a1def7e1978387b15ad0470c2914c9c0a\n",

@@ -1609,7 +1609,15 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
     parts: List[str] = []
     if cwd != project_root:
         parts.append(f"_cwd: `{os.path.relpath(cwd, project_root)}`_")
-    if result.returncode != 0:
+    # `git grep` exits 1 for "no matches" -- an answer, not a failure. Strictly
+    # grep: for merge-base --is-ancestor, diff --quiet and ls-remote --exit-code
+    # exit 1 is a different verdict and keeps the error envelope. Any stderr
+    # (or an rc other than 1, e.g. 128/129) is still an error (ADR 0010).
+    no_match = (function == "grep" and result.returncode == 1
+                and not had_stdout and not (result.stderr or "").strip())
+    if no_match:
+        parts.append("no matches")
+    elif result.returncode != 0:
         # The failure path is where verbosity pays: an exit code is only
         # diagnosable next to the argv that produced it. Full echo stays here.
         parts.append(f"`{cmd_str}` (exit {result.returncode})")
@@ -1660,7 +1668,7 @@ def handle_git_call(arguments: dict, project_root: str, strict: bool = False) ->
         parts.append(err_notice)
 
     md = "\n".join(parts)
-    is_error = result.returncode != 0 and not had_stdout
+    is_error = result.returncode != 0 and not had_stdout and not no_match
     if is_error:
         return {"error": md}
     return {"__raw_text__": md}

@@ -3307,6 +3307,130 @@ def group_s(suite, drv, foreign_root):
 
 
 # ---------------------------------------------------------------------------
+# Group T -- an exclude glob prunes whole directories during the walk
+# ---------------------------------------------------------------------------
+
+# No .gitignore, so a directory skipped by the exclude prune cannot be confused
+# with one skipped by the ignore filter.  `vendor2` shares a prefix with
+# `vendor` (a prefix is not a boundary); `keep/vendor` is a nested directory of
+# the same name (`**/vendor/**` must reach it, `vendor/**` must not).
+PR_FILES = ("top.txt", "notes.md", "keep/k.txt", "keep/n.md", "vendor/v.txt",
+            "vendor/deep/d.txt", "vendor2/w.txt", "keep/vendor/z.txt")
+
+
+def make_prune_fixture(ws, subdir):
+    ws.subdir(subdir)
+    for rel in PR_FILES:
+        ws.write_text(os.path.join(subdir, rel), LINE)
+    return os.path.realpath(ws.join(subdir))
+
+
+def group_t(suite, root):
+    mod = H.load_module_from_path("mcp_purity_prune", SERVER)
+    search = mod.handle_search_for_pattern
+
+    def walked_and_found(params, prune=True):
+        """(set of dirs os.walk yielded, set of reported files, text)."""
+        seen = []
+        real_walk = os.walk
+
+        def counting_walk(top, *a, **kw):
+            for item in real_walk(top, *a, **kw):
+                seen.append(os.path.relpath(item[0], root))
+                yield item
+
+        orig_prunes = getattr(mod, "_exclude_prunes_dir", None)
+        os.walk = counting_walk
+        if not prune:
+            mod._exclude_prunes_dir = lambda dir_rel, globs: False
+        try:
+            text = handler_text(search(
+                dict(params, substring_pattern=NEEDLE), root))
+        except Exception as exc:                                 # noqa: BLE001
+            text = "%s: %s" % (type(exc).__name__, exc)
+        finally:
+            os.walk = real_walk
+            if not prune:
+                if orig_prunes is not None:
+                    mod._exclude_prunes_dir = orig_prunes
+                else:
+                    del mod._exclude_prunes_dir
+        return set(seen), search_paths(text), text
+
+    def rec(cid, params, must, must_not, walked, not_walked, detail):
+        dirs, found, text = walked_and_found(params)
+        problems = polarity(text, False, must, must_not, search_paths)
+        for d in walked:
+            if d not in dirs:
+                problems.append("os.walk never reached %r" % d)
+        for d in not_walked:
+            if d in dirs:
+                problems.append("os.walk descended into %r" % d)
+        suite.record("T", cid, problems,
+                     detail=list(detail) + [
+                         "params : %s" % (params,),
+                         "walked : %s" % ", ".join(sorted(dirs)),
+                         "found  : %s" % ", ".join(sorted(found))],
+                     text=text, showable=True)
+
+    everything = list(PR_FILES)
+    rec("prune-excluded-dir-never-walked",
+        {"paths_exclude_glob": "vendor/**"},
+        [p for p in everything if not p.startswith("vendor/")],
+        ["vendor/v.txt", "vendor/deep/d.txt"],
+        walked=[".", "keep", "keep/vendor", "vendor2"],
+        not_walked=["vendor", "vendor/deep"],
+        detail=["`vendor/**` drops every file below vendor/, so the walk",
+                "must not descend there; `vendor2` and `keep/vendor` stay"])
+    rec("prune-globstar-spelling",
+        {"paths_exclude_glob": "**/vendor/**"},
+        ["top.txt", "keep/k.txt", "vendor2/w.txt"],
+        ["vendor/v.txt", "vendor/deep/d.txt", "keep/vendor/z.txt"],
+        walked=[".", "keep", "vendor2"],
+        not_walked=["vendor", "vendor/deep", "keep/vendor"],
+        detail=["the `**/` spelling prunes at any depth (ADR 0017 globstar",
+                "rule: the glob and the glob with `**/` removed)"])
+    rec("prune-list-form",
+        {"paths_exclude_glob": ["vendor/**", "*.md"]},
+        ["top.txt", "keep/k.txt", "vendor2/w.txt", "keep/vendor/z.txt"],
+        ["vendor/v.txt", "notes.md", "keep/n.md"],
+        walked=[".", "keep", "vendor2"],
+        not_walked=["vendor", "vendor/deep"],
+        detail=["a list prunes by its `/**` element and keeps filtering by",
+                "its per-file element (ADR 0021 list form)"])
+    rec("non-subtree-glob-walks-everything-filters-per-file",
+        {"paths_exclude_glob": "*.md"},
+        [p for p in everything if not p.endswith(".md")],
+        ["notes.md", "keep/n.md"],
+        walked=[".", "keep", "vendor", "vendor/deep", "vendor2", "keep/vendor"],
+        not_walked=[],
+        detail=["CONTROL: a glob with no trailing `/**` or `/*` never prunes"])
+    rec("exclude-search-root-itself-is-walked",
+        {"paths_exclude_glob": "vendor/**", "relative_path": "vendor"},
+        [], everything,
+        walked=["vendor"], not_walked=[],
+        detail=["CONTROL: only CHILDREN are pruned; the search root is walked",
+                "(its files are still dropped by the per-file filter)"])
+
+    # Identical results with and without the prune, over a spread of globs.
+    problems = []
+    specs = ("vendor/**", "**/vendor/**", "vendor/*", "keep/**", "*.md",
+             ["vendor/**", "*.md"], "vendor2/**", "**/deep/**", "ven*/**",
+             "nonexistent/**", "**/*")
+    for spec in specs:
+        params = {"paths_exclude_glob": spec}
+        with_p = walked_and_found(params, prune=True)
+        without = walked_and_found(params, prune=False)
+        if with_p[2] != without[2]:
+            problems.append("%r differs:\n  pruned  : %r\n  unpruned: %r"
+                            % (spec, with_p[2][:200], without[2][:200]))
+    suite.record("T", "prune-result-identical-to-per-file-filter", problems[:6],
+                 detail=["%d globs, each run with the prune and with the" % len(specs),
+                         "helper forced to False: the reply text must be",
+                         "byte-identical -- the prune is an optimisation only"])
+
+
+# ---------------------------------------------------------------------------
 # Group F -- hygiene
 # ---------------------------------------------------------------------------
 
@@ -3498,7 +3622,14 @@ def run(opts=None):
         finally:
             drv_ns.close()
 
-        workspaces = [basename_root, pathshaped_root, glob_root, multi_root,
+        # Group T is in-process too (it counts what os.walk yields).
+        prune_root = make_prune_fixture(ws, "prune")
+        suite.note("      fixture (T)   : %s  no .gitignore, files=%s"
+                   % (prune_root, list(PR_FILES)))
+        group_t(suite, prune_root)
+
+        workspaces = [prune_root, basename_root, pathshaped_root, glob_root,
+                      multi_root,
                       read_root, git_root, outside_root, literal_root,
                       onlymatch_root, class_root, redos_root, replace_root,
                       fastpath_root, nested_root, foreign_root]
