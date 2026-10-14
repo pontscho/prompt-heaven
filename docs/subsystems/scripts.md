@@ -686,6 +686,25 @@ declared 53, and the suite has grown again since — it is declared once in
 `tests/run.py:SUITES` and asserted on every run against what the suite actually
 recorded, which is the arrangement a prose copy exists to avoid.)
 
+Two parameters models kept sending were not synonyms of anything and so became
+real, accepted parameters rather than aliases (the point of
+[[0030-point-at-the-near-miss-never-resolve-it]]: a near miss is pointed at, never
+resolved — here the name simply exists). `max_depth` on `find_file`, `list_dir`
+and `search_for_pattern` limits descent below the search root (0 = its own
+entries); it is the same `dirnames[:]` prune the ignore and exclude rules use,
+omitted means unbounded and byte-identical to before, and a negative or
+non-integer value is refused by name rather than read as "unbounded"
+`Scripts/mcp-purity.py:_max_depth_param`. In `list_dir` it implies `recursive`,
+and an explicit `recursive:false` beside a depth of 1 or more is the ambiguity
+error. `multiline` on `search_for_pattern` runs the pattern over the whole file
+text with `MULTILINE | DOTALL` — `.` crosses newlines (`(?-s:.)` is the line-bounded
+dot), a match may span lines — through a third worker op and its in-process twin
+`Scripts/mcp-purity.py:_RegexWorker.multiline_hits`, so the ReDoS guard and the
+budget blame logic cover it unchanged. A row is one non-empty match at its START
+line, its text the matched text with each newline shown as `\n` (a declared lossy
+flattening: backslashes are not doubled), context taken around the start line, and
+`offset` / `head_limit` / `count` counting matches; the default stays line by line.
+
 A third escape had to be carved from the *value* side rather than the key side.
 `relative_path` is a global alias of `path`/`paths`/`file`/`root`, so a caller
 who sends a **list** reaches every handler through one name — and only two of

@@ -354,8 +354,11 @@ SUITES = [
      "overrun named as such (backtracking blamed only for a slow file), "
      "nested repos below the search root skipped, and an out-of-root root "
      "filtered by its own repo's .gitignore, and an exclude glob pruning "
-     "whole directories during the walk",
-     236),
+     "whole directories during the walk, `max_depth` on find_file, list_dir "
+     "and search (0 = the root's own entries, omitted unchanged, junk "
+     "refused), and search's `multiline` over the whole file text (one row "
+     "per match at its start line, in-process and worker identical)",
+     317),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline; a real unexposed subcommand "
      "refused with no near-miss pointer, a key no git option can be spelled "

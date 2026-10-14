@@ -146,6 +146,15 @@ Groups:
      (worktree, submodule, nested clone) is skipped unless the filter is off,
      the root itself never; an out-of-root root takes its ignore rules from
      its OWN git toplevel's .gitignore, paths measured from that toplevel
+  T  an exclude glob ending in `/**` or `/*` prunes whole directories during
+     the walk, the reply identical with the prune forced off
+  U  `max_depth` on find_file, list_dir and search_for_pattern: depth below the
+     search root (0 = its own entries), omitted = unbounded and unchanged, a
+     negative or non-integer value refused by name, list_dir's `recursive`
+     implied by it (and refused when explicitly false beside a depth >= 1)
+  V  search's `multiline`: the pattern runs over the whole file text with
+     MULTILINE | DOTALL, one row per non-empty match at its START line, the
+     in-process matcher and the worker identical, the default unchanged
 """
 
 import os
@@ -3431,6 +3440,567 @@ def group_t(suite, root):
 
 
 # ---------------------------------------------------------------------------
+# Group U -- max_depth in find_file, list_dir and search_for_pattern
+#
+# Models call `max_depth` and were answered "Unknown params": a real missing
+# capability, so it is a NEW accepted parameter on three handlers, not an alias
+# (ADR 0030: a near-miss is pointed at, never resolved -- here the name is real).
+# Semantics: depth below the SEARCH ROOT; 0 = the root's own entries, no descent;
+# omitted = unbounded, today's behaviour byte for byte.  The cut is a prune of
+# os.walk's dirnames, the mechanism the ignore and exclude prunes already use.
+# ---------------------------------------------------------------------------
+
+MD_GITIGNORE = ("ign",)
+MD_FILES = ("top.txt", "a/a1.txt", "a/b/b1.txt", "a/b/c/c1.txt", ".hid/h.txt",
+            "ign/i.txt", "ign/deeper/d.txt", "vendor/v.txt",
+            "vendor/deep/d.txt")
+MD_DIRS = ("a", "a/b", "a/b/c", ".hid", "ign", "ign/deeper", "vendor",
+           "vendor/deep")
+
+
+def make_depth_fixture(ws, subdir):
+    """Group U's tree, REALPATH'd for the same reason group G's is."""
+    ws.subdir(subdir)
+    ws.write_text(os.path.join(subdir, ".gitignore"),
+                  "\n".join(MD_GITIGNORE) + "\n")
+    for rel in MD_FILES:
+        ws.write_text(os.path.join(subdir, rel), LINE)
+    return os.path.realpath(ws.join(subdir))
+
+
+def md_entries(depth, hidden=False, skip=(), files_only=False):
+    """What a depth-limited listing must hold: entries whose depth (slashes in
+    the root-relative path) is <= *depth*."""
+    names = list(MD_FILES) + ([] if files_only else list(MD_DIRS))
+    if not files_only:
+        names.append(".gitignore")
+    out = set()
+    for rel in names:
+        if rel.count("/") > depth:
+            continue
+        if not hidden and any(p.startswith(".") for p in rel.split("/")):
+            continue
+        if any(rel == s or rel.startswith(s + "/") for s in skip):
+            continue
+        out.add(rel)
+    return out
+
+
+def group_u(suite, drv, root):
+    mod = H.load_module_from_path("mcp_purity_depth", SERVER)
+    ff, ld, sp = (mod.handle_find_file, mod.handle_list_dir,
+                  mod.handle_search_for_pattern)
+
+    def call(handler, params):
+        try:
+            return None, handler_text(handler(dict(params), root))
+        except Exception as exc:                                 # noqa: BLE001
+            return exc, "%s: %s" % (type(exc).__name__, exc)
+
+    def rec_set(cid, handler, params, extract, want, detail=()):
+        exc, text = call(handler, params)
+        problems = ["raised %s" % exc] if exc else []
+        got = extract(text)
+        if not exc and got != set(want):
+            problems.append("missing %s, unexpected %s"
+                            % (sorted(set(want) - got) or "-",
+                               sorted(got - set(want)) or "-"))
+        suite.record("U", cid, problems,
+                     detail=list(detail) + ["params: %s" % (params,),
+                                            "got   : %s" % sorted(got)],
+                     text=text, showable=True)
+
+    def rec_refused(cid, handler, params, must_say):
+        exc, text = call(handler, params)
+        low = str(exc).lower() if exc else ""
+        problems = []
+        if not isinstance(exc, ValueError):
+            problems.append("expected ValueError, got: %s" % text[:160])
+        else:
+            problems += ["refusal does not mention %r" % t
+                         for t in must_say if t.lower() not in low]
+        suite.record("U", cid, problems,
+                     detail=["params : %s" % (params,),
+                             "outcome: %s" % text[:240]],
+                     text=text, showable=True)
+
+    def rec_same(cid, handler, a, b, detail=()):
+        ea, ta = call(handler, a)
+        eb, tb = call(handler, b)
+        problems = []
+        if ea or eb:
+            problems.append("raised %s / %s" % (ea, eb))
+        elif ta != tb:
+            problems.append("replies differ:\n  %r\n  %r" % (ta[:240], tb[:240]))
+        suite.record("U", cid, problems,
+                     detail=list(detail) + ["a: %s" % (a,), "b: %s" % (b,)],
+                     text=ta, showable=True)
+
+    # -- find_file ---------------------------------------------------------
+    for d in (0, 1, 2, 3):
+        rec_set("find-depth-%d" % d, ff,
+                {"file_mask": "*.txt", "max_depth": d}, found_paths,
+                md_entries(d, hidden=True, files_only=True),
+                detail=["depth 0 = files directly in the root, 1 = one directory",
+                        "level below it, ...; find_file lists hidden dirs, so",
+                        ".hid/h.txt appears at depth 1"])
+    rec_set("find-depth-below-search-root", ff,
+            {"file_mask": "*.txt", "relative_path": "a", "max_depth": 0},
+            found_paths, ["a/a1.txt"],
+            detail=["depth is measured from relative_path, not the project root"])
+    rec_set("find-depth-path-style-mask", ff,
+            {"file_mask": "**/*.txt", "max_depth": 1}, found_paths,
+            md_entries(1, hidden=True, files_only=True),
+            detail=["a path-style mask is cut by the same prune"])
+    rec_set("find-depth-with-ignore-filter", ff,
+            {"file_mask": "*.txt", "max_depth": 2, "skip_ignored_files": True},
+            found_paths,
+            md_entries(2, hidden=True, skip=("ign",), files_only=True),
+            detail=["CONTROL: the ignore prune still applies beside the cut"])
+    rec_set("find-depth-string-and-integral-float", ff,
+            {"file_mask": "*.txt", "max_depth": "1"}, found_paths,
+            md_entries(1, hidden=True, files_only=True),
+            detail=["wire values are often stringy: the digit string '1' is 1"])
+    rec_same("find-omitted-is-unbounded", ff, {"file_mask": "*.txt"},
+             {"file_mask": "*.txt", "max_depth": 99},
+             detail=["omitting max_depth changes nothing"])
+    rec_set("find-omitted-reaches-depth-3", ff, {"file_mask": "*.txt"},
+            found_paths, md_entries(9, hidden=True, files_only=True),
+            detail=["CONTROL: the unbounded walk reaches a/b/c/c1.txt"])
+    for bad in (-1, "x", 1.5, True, [1], ""):
+        rec_refused("find-depth-refuses-%r" % (bad,), ff,
+                    {"file_mask": "*.txt", "max_depth": bad},
+                    ("max_depth",))
+
+    # -- list_dir ----------------------------------------------------------
+    for d in (0, 1, 2, 3):
+        rec_set("list-depth-%d-recursive" % d, ld,
+                {"recursive": True, "max_depth": d}, listing_paths,
+                md_entries(d),
+                detail=["depth 0 = the root's direct entries; hidden names are",
+                        "left out as ever"])
+    rec_set("list-depth-implies-recursive", ld, {"max_depth": 1},
+            listing_paths, md_entries(1),
+            detail=["max_depth without `recursive` walks: asking for a depth of",
+                    "two levels and getting one would be the surprising answer"])
+    rec_same("list-depth-0-is-the-flat-listing", ld, {"max_depth": 0}, {},
+             detail=["max_depth 0 descends nowhere: the plain listing, byte for byte"])
+    rec_same("list-depth-0-recursive-false-is-the-flat-listing", ld,
+             {"max_depth": 0, "recursive": False}, {})
+    rec_refused("list-depth-1-beside-recursive-false-refused", ld,
+                {"max_depth": 1, "recursive": False},
+                ("max_depth", "recursive"))
+    rec_same("list-depth-with-recursive-true-same-as-alone", ld,
+             {"max_depth": 2, "recursive": True}, {"max_depth": 2})
+    rec_same("list-omitted-recursive-unchanged", ld, {"recursive": True},
+             {"recursive": True, "max_depth": 99},
+             detail=["omitting max_depth changes nothing"])
+    rec_set("list-omitted-reaches-depth-3", ld, {"recursive": True},
+            listing_paths, md_entries(9),
+            detail=["CONTROL: the unbounded walk reaches a/b/c/c1.txt"])
+    rec_set("list-depth-show-hidden", ld,
+            {"max_depth": 1, "show_hidden": True}, listing_paths,
+            md_entries(1, hidden=True))
+    rec_set("list-depth-with-ignore-filter", ld,
+            {"max_depth": 2, "skip_ignored_files": True}, listing_paths,
+            md_entries(2, skip=("ign",)),
+            detail=["CONTROL: the ignore prune still applies beside the cut"])
+    rec_set("list-depth-below-search-root", ld,
+            {"relative_path": "a", "max_depth": 0}, listing_paths,
+            ["a/a1.txt", "a/b"])
+    for bad in (-1, "x", 1.5, True):
+        rec_refused("list-depth-refuses-%r" % (bad,), ld,
+                    {"recursive": True, "max_depth": bad}, ("max_depth",))
+
+    # -- search_for_pattern ------------------------------------------------
+    exc, base_text = call(sp, {"substring_pattern": NEEDLE})
+    base = search_paths(base_text)
+    vac = []
+    if exc or "top.txt" not in base or "a/b/c/c1.txt" not in base:
+        vac.append("baseline search is vacuous: %s" % sorted(base))
+    suite.record("U", "search-baseline-reaches-depth-3", vac,
+                 detail=["rows: %s" % sorted(base)], text=base_text,
+                 showable=True)
+    for d in (0, 1, 2):
+        rec_set("search-depth-%d" % d, sp,
+                {"substring_pattern": NEEDLE, "max_depth": d}, search_paths,
+                {p for p in base if p.count("/") <= d},
+                detail=["the unbounded result cut to depth <= %d" % d])
+    rec_set("search-depth-0-is-only-the-root-file", sp,
+            {"substring_pattern": NEEDLE, "max_depth": 0}, search_paths,
+            ["top.txt"])
+    rec_set("search-depth-with-exclude-glob", sp,
+            {"substring_pattern": NEEDLE, "max_depth": 2,
+             "paths_exclude_glob": "vendor/**"}, search_paths,
+            {p for p in base if p.count("/") <= 2
+             and not p.startswith("vendor/")},
+            detail=["the exclude prune and the depth cut compose"])
+    rec_set("search-depth-with-include-glob", sp,
+            {"substring_pattern": NEEDLE, "max_depth": 1,
+             "paths_include_glob": "a/**"}, search_paths, ["a/a1.txt"])
+    rec_set("search-depth-per-root-in-a-list", sp,
+            {"substring_pattern": NEEDLE, "max_depth": 0,
+             "relative_path": ["a", "vendor"]}, search_paths,
+            ["a/a1.txt", "vendor/v.txt"],
+            detail=["depth is measured from EACH root"])
+    rec_set("search-depth-file-root-unaffected", sp,
+            {"substring_pattern": NEEDLE, "max_depth": 0,
+             "relative_path": "a/b/c/c1.txt"}, search_paths,
+            ["a/b/c/c1.txt"],
+            detail=["a file root has no directory to descend: still searched"])
+    exc, text = call(sp, {"substring_pattern": NEEDLE, "max_depth": 0,
+                          "output_mode": "count"})
+    suite.record("U", "search-depth-count-mode",
+                 ([] if text.splitlines()[0] == "1 match(es) in 1 file(s)"
+                  else ["count header: %r" % text.splitlines()[:1]]),
+                 text=text, showable=True)
+    rec_same("search-omitted-is-unbounded", sp,
+             {"substring_pattern": NEEDLE},
+             {"substring_pattern": NEEDLE, "max_depth": 99})
+    rec_refused("search-depth-refuses-negative", sp,
+                {"substring_pattern": NEEDLE, "max_depth": -1},
+                ("max_depth",))
+    rec_refused("search-depth-refuses-garbage", sp,
+                {"substring_pattern": NEEDLE, "max_depth": "deep"},
+                ("max_depth",))
+
+    # -- the wire: the accepted-param tables carry the new name ------------
+    for fn, params in (("find_file", {"file_mask": "*.txt", "max_depth": 1}),
+                       ("list_dir", {"max_depth": 1}),
+                       ("search_for_pattern", {"substring_pattern": NEEDLE,
+                                               "max_depth": 1})):
+        is_error, text = drv.call(fn, params)
+        suite.record("U", "wire-accepts-max_depth-%s" % fn,
+                     ["refused over the wire: %s" % text.strip()[:200]]
+                     if is_error else [],
+                     detail=["params: %s" % (params,)], text=text,
+                     showable=True)
+    record_error(suite, "U", "wire-near-miss-is-pointed-not-resolved", drv,
+                 "find_file", {"file_mask": "*.txt", "maxdepth": 1},
+                 must_say=("maxdepth", "max_depth"),
+                 detail=["ADR 0030: the typo is refused with a pointer; only the",
+                         "exact name is a parameter"])
+
+
+# ---------------------------------------------------------------------------
+# Group V -- search_for_pattern `multiline`
+#
+# `multiline:true` compiles the pattern with re.MULTILINE | re.DOTALL and runs it
+# over the WHOLE file text: `.` crosses newlines, ^/$ sit at line boundaries,
+# a match may span lines.  Row rules (decided here, documented in the tool
+# description): one row per NON-EMPTY match, reported at its START line, text =
+# the matched text with each LF rendered as the two characters `\n` (a declared,
+# lossy flattening: backslashes are not doubled); context is taken around the
+# start line; only_matching emits the same text; count / files / paging count
+# matches.  A zero-length match is not a match.  The default (false) is today's
+# line-by-line behaviour, byte for byte.
+# ---------------------------------------------------------------------------
+
+ML_TASKS = ("tasks:\n"
+            "  - id: task-016\n"
+            "    status: done\n"
+            "  - id: task-017\n"
+            "    title: x\n"
+            "    status: open\n"
+            "  - id: task-018\n"
+            "    status: blocked\n"
+            "  - id: task-019\n"
+            "    title: y\n"
+            "    owner: z\n"
+            "    status: done\n")
+ML_FILES = (("tasks.yaml", ML_TASKS),
+            ("dot.txt", "alpha\nbeta\ngamma\n"),
+            ("two.txt", "ab ab\nab\n"))
+ML_MANY = 30
+ML_P1 = (r"^  - id: task-0(1[7-9])\n(?:[^\n]*\n){0,12}?    status: \S+")
+ML_M1 = "  - id: task-017\n    title: x\n    status: open"
+ML_M2 = "  - id: task-018\n    status: blocked"
+ML_M3 = "  - id: task-019\n    title: y\n    owner: z\n    status: done"
+
+
+def ml_flat(text):
+    return text.replace("\n", "\\n")
+
+
+def make_multiline_fixture(ws, subdir):
+    ws.subdir(subdir)
+    for rel, body in ML_FILES:
+        ws.write_text(os.path.join(subdir, rel), body)
+    for i in range(ML_MANY):
+        ws.write_text(os.path.join(subdir, "many", "f%02d.txt" % i), LINE)
+    return os.path.realpath(ws.join(subdir))
+
+
+def group_v(suite, drv, root):
+    mod = H.load_module_from_path("mcp_purity_multiline", SERVER)
+    sp = mod.handle_search_for_pattern
+    real_worker = mod._RegexWorker
+    spawned = []
+
+    class RecordingWorker(real_worker):
+        def _start(self):
+            spawned.append(self._pattern)
+            super()._start()
+
+    mod._RegexWorker = RecordingWorker
+    try:
+        _group_v_body(suite, drv, root, mod, sp, real_worker, spawned)
+    finally:
+        mod._RegexWorker = real_worker
+
+
+def _group_v_body(suite, drv, root, mod, sp, real_worker, spawned):
+    def call(params):
+        return _budget_raise(lambda: sp(dict(params), root))
+
+    def rec(cid, params, want_rows=None, want_lines=(), want_in=(),
+            want_not_in=(), detail=(), want_error=False):
+        exc, text = call(params)
+        problems = (["raised %s" % exc] if exc and not want_error else
+                    ["expected a refusal, call was accepted"]
+                    if want_error and not exc else [])
+        if not exc and want_rows is not None:
+            got = match_rows(text)
+            if got != list(want_rows):
+                problems.append("rows %r, want %r" % (got, list(want_rows)))
+        lines = [ln.strip() for ln in text.splitlines()]
+        for want in want_lines:
+            if not any(re.fullmatch(want, ln) for ln in lines):
+                problems.append("no line matches %r" % want)
+        for frag in want_in:
+            if frag not in text:
+                problems.append("reply lacks %r" % frag)
+        for frag in want_not_in:
+            if frag in text:
+                problems.append("reply must not hold %r" % frag)
+        suite.record("V", cid, problems,
+                     detail=list(detail) + ["params: %s" % (params,),
+                                            "reply : %s" % " | ".join(
+                                                text.splitlines())[:400]],
+                     text=text, showable=True)
+
+    p1 = {"substring_pattern": ML_P1, "multiline": True}
+    row1 = "tasks.yaml:4: " + ml_flat(ML_M1)
+    row2 = "tasks.yaml:7: " + ml_flat(ML_M2)
+    row3 = "tasks.yaml:9: " + ml_flat(ML_M3)
+
+    # -- the match, its row and its start line ----------------------------
+    rec("cross-line-match-reported-at-start-line", p1, [row1, row2, row3],
+        want_lines=[r"3 match\(es\)"],
+        detail=["the shape of the original failing call: a task id, up to 12",
+                "lines, then its status -- one row per match, at the line the",
+                "match STARTS on, LFs shown as `\\n`"])
+    rec("default-is-line-by-line-no-cross-line-match",
+        {"substring_pattern": ML_P1}, [], want_lines=[r"0 match\(es\)"],
+        detail=["CONTROL: without multiline the same pattern cannot match"])
+    e1, t1 = call({"substring_pattern": "ab", "multiline": False})
+    e2, t2 = call({"substring_pattern": "ab"})
+    suite.record("V", "multiline-false-byte-identical-to-omitted",
+                 ([] if (not e1 and not e2 and t1 == t2)
+                  else ["replies differ: %r / %r" % (t1[:120], t2[:120])]),
+                 text=t1, showable=True)
+    rec("default-rows-unchanged-per-line", {"substring_pattern": "ab"},
+        ["two.txt:1: ab ab", "two.txt:2: ab"], want_lines=[r"2 match\(es\)"],
+        detail=["CONTROL: default = one row per matching LINE"])
+    rec("dotall-dot-crosses-newline",
+        {"substring_pattern": "alpha.beta", "multiline": True},
+        ["dot.txt:1: alpha\\nbeta"],
+        detail=["`.` matches the LF under multiline"])
+    rec("dot-does-not-cross-newline-by-default",
+        {"substring_pattern": "alpha.beta"}, [],
+        detail=["CONTROL"])
+    rec("scoped-no-dotall-keeps-dot-on-one-line",
+        {"substring_pattern": "alpha(?-s:.)beta", "multiline": True}, [],
+        detail=["the escape hatch for a line-bounded dot: (?-s:.)"])
+    rec("caret-and-dollar-at-line-boundaries",
+        {"substring_pattern": "^beta$", "multiline": True},
+        ["dot.txt:2: beta"],
+        detail=["MULTILINE: ^ and $ sit at every line boundary"])
+    rec("literal-over-whole-text",
+        {"substring_pattern": "alpha\nbeta", "regex": False,
+         "multiline": True}, ["dot.txt:1: alpha\\nbeta"],
+        detail=["regex:false stays literal, now over the whole text: a literal",
+                "newline matches across the line break"])
+    rec("literal-dot-stays-a-dot",
+        {"substring_pattern": "alpha.beta", "regex": False,
+         "multiline": True}, [],
+        detail=["CONTROL: DOTALL does not turn an escaped `.` into a wildcard"])
+    rec("zero-length-matches-are-not-matches",
+        {"substring_pattern": "Q*", "multiline": True}, [],
+        want_lines=[r"0 match\(es\)"],
+        detail=["`Q*` matches empty everywhere and non-empty nowhere"])
+    rec("one-row-per-match-not-per-line",
+        {"substring_pattern": "ab", "multiline": True},
+        ["two.txt:1: ab", "two.txt:1: ab", "two.txt:2: ab"],
+        want_lines=[r"3 match\(es\)"],
+        detail=["two matches start on line 1: two rows, unlike the default"])
+
+    # -- modes -------------------------------------------------------------
+    rec("only-matching-same-text-and-header",
+        dict(p1, only_matching=True), [row1, row2, row3],
+        want_lines=[r"3 match\(es\) on 3 line\(s\), one row per match"])
+    rec("only-matching-line-count-is-distinct-start-lines",
+        {"substring_pattern": "ab", "multiline": True, "only_matching": True},
+        ["two.txt:1: ab", "two.txt:1: ab", "two.txt:2: ab"],
+        want_lines=[r"3 match\(es\) on 2 line\(s\), one row per match"])
+    rec("context-taken-around-the-start-line",
+        dict(p1, context_lines=1, head_limit=1, offset=1), None,
+        want_in=["tasks.yaml:7:\n    status: open\n  - id: task-018\n"
+                 "    status: blocked"],
+        want_not_in=["\\n"],
+        detail=["match 2 starts on line 7: lines 6-8, raw (not flattened)"])
+    rec("count-mode", dict(p1, output_mode="count"), None,
+        want_lines=[r"3 match\(es\) in 1 file\(s\)", r"tasks\.yaml: 3"])
+    rec("files-with-matches-mode", dict(p1, output_mode="files_with_matches"),
+        None, want_lines=[r"1 file\(s\) with matches", r"tasks\.yaml"])
+    rec("paging-head-limit", dict(p1, head_limit=2), [row1, row2],
+        want_in=["offset=2"])
+    rec("paging-offset", dict(p1, offset=1, head_limit=1), [row2])
+    rec("paging-offset-past-the-matches", dict(p1, offset=3), [],
+        want_in=["no rows at offset 3 of 3"])
+    rec("invalid-regex-refused-by-name",
+        {"substring_pattern": "(", "multiline": True}, None,
+        want_in=["ValueError", "Invalid regex"], want_error=True)
+
+    # -- the in-process matcher and the worker answer identically ---------
+    pats = ("ab", "alpha.beta", ML_P1, "^beta", r"task-01\d\n", "Q*")
+    modes = ({}, {"output_mode": "count"}, {"output_mode": "files_with_matches"},
+             {"only_matching": True}, {"context_lines": 1},
+             {"head_limit": 2, "offset": 1})
+    problems, compared = [], 0
+    orig = mod._is_plain_literal
+    try:
+        for pat in pats:
+            for mode in modes:
+                params = dict(mode, substring_pattern=pat, multiline=True)
+                mod._is_plain_literal = lambda s: True
+                del spawned[:]
+                exc_i, inproc = call(params)
+                inproc_spawned = len(spawned)
+                mod._is_plain_literal = lambda s: False
+                del spawned[:]
+                exc_w, worker = call(params)
+                compared += 1
+                if exc_i or exc_w:
+                    problems.append("%r %s raised: %s / %s"
+                                    % (pat, mode, exc_i, exc_w))
+                elif inproc_spawned:
+                    problems.append("%r %s: in-process run spawned a worker"
+                                    % (pat, mode))
+                elif not spawned:
+                    problems.append("%r %s: VACUOUS -- the forced-worker run "
+                                    "spawned nothing" % (pat, mode))
+                elif inproc != worker:
+                    problems.append("%r %s differ:\n  inproc: %r\n  worker: %r"
+                                    % (pat, mode, inproc[:300], worker[:300]))
+    finally:
+        mod._is_plain_literal = orig
+    suite.record("V", "inprocess-identical-to-worker", problems[:8],
+                 detail=["%d pattern x mode pairs, each run twice: the same"
+                         % compared,
+                         "pattern forced through the in-process matcher and",
+                         "through the killable child"])
+    del spawned[:]
+    call({"substring_pattern": "ab", "multiline": True})
+    suite.record("V", "plain-literal-multiline-no-worker",
+                 ["a worker was spawned for a metachar-free pattern"]
+                 if spawned else [],
+                 detail=["the literal fast path serves multiline too"])
+    del spawned[:]
+    call({"substring_pattern": "alpha.beta", "multiline": True})
+    suite.record("V", "regex-multiline-uses-worker",
+                 [] if spawned else ["no worker spawned for a real regex"],
+                 detail=["CONTROL: the ReDoS guard covers the new op"])
+
+    # -- the budget: still the whole call's, still named correctly --------
+    rx_files = re.compile(r"after (?:scanning )?(\d+) file\(s\)")
+    for cid, pat, label in (
+            ("budget-total-literal-many-files", NEEDLE, "fast path"),
+            ("budget-total-regex-many-files", "NEEDLE_A.PHA", "regex worker")):
+        clock = StepClock(0.0, 0.5)
+        orig_clock = getattr(mod, "_search_clock", None)
+        mod._search_clock = clock
+        try:
+            exc, text = call({"substring_pattern": pat, "multiline": True,
+                              "relative_path": "many"})
+        finally:
+            if orig_clock is not None:
+                mod._search_clock = orig_clock
+        low = str(exc).lower() if exc else ""
+        problems = []
+        if not isinstance(exc, ValueError):
+            problems.append("expected ValueError, got %s" % (text[:200],))
+        else:
+            for token in ("total", "time budget", "relative_path"):
+                if token not in low:
+                    problems.append("message does not mention %r" % token)
+            if "backtrack" in low:
+                problems.append("message blames backtracking for a WIDE walk")
+            m = rx_files.search(low)
+            if not m or not 0 < int(m.group(1)) < ML_MANY:
+                problems.append("file count missing or outside 1..%d: %r"
+                                % (ML_MANY - 1, m and m.group(1)))
+        suite.record("V", cid, problems,
+                     detail=["%s, multiline, a clock advancing 0.5 s per read" % label,
+                             "reply: %s" % text[:300]],
+                     text=text, showable=True)
+    for cid, values, want_backtrack in (
+            ("budget-worker-short-inflight-total", [4.9, 5.1], False),
+            ("budget-worker-long-inflight-backtrack", [1.0, 5.1], True)):
+        orig_clock = getattr(mod, "_search_clock", None)
+        mod._search_clock = SeqClock(values)
+        worker = None
+        try:
+            try:
+                worker = real_worker(
+                    "x+", 5.0, budget=5.0,
+                    total_budget_message=lambda where, used:
+                        mod._search_budget_message(3, 5.0, (where, used)))
+                exc, text = _budget_raise(
+                    lambda: worker.multiline_hits(["xxx\n"], "f.txt"))
+            except Exception as e:                               # noqa: BLE001
+                exc, text = e, "%s: %s" % (type(e).__name__, e)
+        finally:
+            if worker is not None:
+                worker.close()
+            if orig_clock is not None:
+                mod._search_clock = orig_clock
+        low = str(exc).lower() if exc else ""
+        problems = []
+        if not isinstance(exc, ValueError):
+            problems.append("expected ValueError, got %s" % text[:200])
+        elif want_backtrack:
+            for token in ("backtrack", "regex:false", "f.txt"):
+                if token not in low:
+                    problems.append("message does not mention %r" % token)
+        else:
+            if "backtrack" in low:
+                problems.append("blamed backtracking for a file in flight 0.2 s")
+            for token in ("total", "after scanning 3 file(s)"):
+                if token not in low:
+                    problems.append("message does not mention %r" % token)
+        suite.record("V", cid, problems,
+                     detail=["the multiline op through the real child, clock "
+                             "seam swapped",
+                             "reply: %s" % text[:300]],
+                     text=text, showable=True)
+
+    # -- the wire ----------------------------------------------------------
+    is_error, text = drv.call("search_for_pattern", p1)
+    suite.record("V", "wire-accepts-multiline",
+                 ["refused over the wire: %s" % text.strip()[:200]]
+                 if is_error else
+                 ([] if row1 in text else ["no row for task-017 in %r"
+                                           % text[:200]]),
+                 text=text, showable=True)
+    record_error(suite, "V", "wire-near-miss-is-pointed-not-resolved", drv,
+                 "search_for_pattern",
+                 {"substring_pattern": "x", "multi_line": True},
+                 must_say=("multi_line", "multiline"),
+                 detail=["ADR 0030: the typo is refused with a pointer"])
+
+
+# ---------------------------------------------------------------------------
 # Group F -- hygiene
 # ---------------------------------------------------------------------------
 
@@ -3628,7 +4198,29 @@ def run(opts=None):
                    % (prune_root, list(PR_FILES)))
         group_t(suite, prune_root)
 
-        workspaces = [prune_root, basename_root, pathshaped_root, glob_root,
+        # Groups U and V: in-process rows on their own trees, plus one wire
+        # child each for the accepted-param table and the near-miss pointer.
+        depth_root = make_depth_fixture(ws, "depth")
+        suite.note("      fixture (U)   : %s  .gitignore=%s, files=%s"
+                   % (depth_root, list(MD_GITIGNORE), list(MD_FILES)))
+        drv_u = Driver(depth_root)
+        try:
+            group_u(suite, drv_u, depth_root)
+            stderr_bytes += len(drv_u.stderr_text)
+        finally:
+            drv_u.close()
+        multiline_root = make_multiline_fixture(ws, "multiline")
+        suite.note("      fixture (V)   : %s  no .gitignore, files=%s + "
+                   "many/ x%d" % (multiline_root,
+                                  [rel for rel, _ in ML_FILES], ML_MANY))
+        drv_v = Driver(multiline_root)
+        try:
+            group_v(suite, drv_v, multiline_root)
+            stderr_bytes += len(drv_v.stderr_text)
+        finally:
+            drv_v.close()
+
+        workspaces = [depth_root, multiline_root, prune_root,basename_root, pathshaped_root, glob_root,
                       multi_root,
                       read_root, git_root, outside_root, literal_root,
                       onlymatch_root, class_root, redos_root, replace_root,

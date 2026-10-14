@@ -228,7 +228,11 @@ def _check_regex_len(pattern: str, param_name: str = "pattern") -> None:
 # already translated); str.splitlines() would also cut at \f, \x1c, U+2028...
 # `f` keeps a line's non-empty matches with the line terminator stripped --
 # the only_matching row rule, applied here so a zero-length `x*` does not ship
-# one empty string per character. RLIMIT_CPU is the child's own backstop: it
+# one empty string per character. `m` (search's multiline) takes the text as
+# ONE string and finditers it, compiled lazily from the pattern's own source
+# with MULTILINE | DOTALL; it answers [start line index, matched text] per
+# NON-empty match -- the line is counted from the match offset, so a match
+# spanning lines is reported where it starts. RLIMIT_CPU is the child's own backstop: it
 # dies of SIGXCPU if the server is gone and nobody is left to kill it.
 _REGEX_WORKER_SRC = r'''
 import json, re, resource, struct, sys
@@ -248,6 +252,7 @@ def frame():
         sys.exit(0)
     return body
 pat = re.compile(frame().decode("utf-8", "surrogatepass"))
+mpat = None
 def reply(res):
     data = json.dumps(res).encode("ascii")
     out.write(struct.pack("!Q", len(data)))
@@ -269,6 +274,18 @@ while True:
             reply({"error": str(exc)})
         continue
     op, text = req[:1], req[1:].decode("utf-8", "surrogatepass")
+    if op == b"m":
+        if mpat is None:
+            mpat = re.compile(pat.pattern, re.M | re.S)
+        res, pos, ln = [], 0, 0
+        for m in mpat.finditer(text):
+            if m.end() == m.start():
+                continue
+            ln += text.count("\n", pos, m.start())
+            pos = m.start()
+            res.append([ln, m.group(0)])
+        reply(res)
+        continue
     parts = text.split("\n")
     lines = [p + "\n" for p in parts[:-1]]
     if parts[-1]:
@@ -293,6 +310,23 @@ class _InProcessMatcher:
 
     def __init__(self, pattern: "re.Pattern") -> None:
         self._p = pattern
+        self._mp: Optional["re.Pattern"] = None
+
+    def multiline_hits(self, lines: List[str], where: str) -> List[list]:
+        """The child's `m` op: [start line index, text] per non-empty match of
+        the pattern (MULTILINE | DOTALL) over the whole text."""
+        if self._mp is None:
+            self._mp = re.compile(self._p.pattern, re.M | re.S)
+        text = "".join(lines)
+        res: List[list] = []
+        pos = ln = 0
+        for m in self._mp.finditer(text):
+            if m.end() == m.start():
+                continue
+            ln += text.count("\n", pos, m.start())
+            pos = m.start()
+            res.append([ln, m.group(0)])
+        return res
 
     def search_lines(self, lines: List[str], where: str) -> set:
         return {i for i, ln in enumerate(lines) if self._p.search(ln)}
@@ -427,6 +461,9 @@ class _RegexWorker:
 
     def finditer_lines(self, lines: List[str], where: str) -> Dict[int, List[str]]:
         return {i: hits for i, hits in self._ask(b"f", lines, where)}
+
+    def multiline_hits(self, lines: List[str], where: str) -> List[list]:
+        return self._ask(b"m", lines, where)
 
     def close(self) -> None:
         self._closed = True
@@ -656,6 +693,44 @@ def _bool_param(value, default=False):
         return value.strip().lower() not in ("", "false", "0", "no", "off", "none")
     return bool(value)
 # END GENERATED: df133cd7c299
+
+
+def _max_depth_param(params: dict) -> Optional[int]:
+    """Resolve `max_depth` for the three walkers: None = unbounded (omitted or
+    null), else a non-negative int. Depth is counted below the SEARCH ROOT:
+    0 = the root's own entries and no descent, 1 = one directory level below it.
+
+    Unlike `_int_param` this does NOT fall back on junk: a depth silently read
+    as "unbounded" would answer a bounded request with the whole tree -- the
+    silent wrong answer ADR 0017 refuses. A wire value is accepted as an int, an
+    integral float (1.0) or a digit string ("2"); a bool is not a depth.
+    """
+    value = params.get("max_depth")
+    if value is None:
+        return None
+    depth = None
+    if isinstance(value, bool):
+        pass
+    elif isinstance(value, int):
+        depth = value
+    elif isinstance(value, float):
+        if value.is_integer():
+            depth = int(value)
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        depth = int(value.strip())
+    if depth is None or depth < 0:
+        raise ValueError(
+            "Parameter 'max_depth' must be a non-negative integer (0 = only the "
+            f"search root's own entries, no descent); got {repr(value)[:40]}. "
+            "Omit it for an unbounded walk."
+        )
+    return depth
+
+
+def _walk_depth(root: str, dirpath: str) -> int:
+    """How many directory levels *dirpath* lies below *root* (0 for the root)."""
+    rel = os.path.relpath(dirpath, root)
+    return 0 if rel == "." else rel.count(os.sep) + 1
 
 
 def _skip_ignored_param(params: dict, default: bool) -> bool:
@@ -1676,6 +1751,18 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
     grep_pattern = params.get("grep", None) or params.get("grep_pattern", None)
     head_limit = _int_param(params.get("head_limit", 0), 0)
     offset = _offset(params)
+    # max_depth implies a walk: a caller asking for two levels and getting one
+    # would be the surprise. An EXPLICIT recursive:false beside a depth of 1 or
+    # more contradicts it and is refused (ADR 0015: ambiguity is the defect);
+    # depth 0 descends nowhere, so it agrees with either spelling.
+    max_depth = _max_depth_param(params)
+    if (max_depth and params.get("recursive") is not None and not recursive):
+        raise ValueError(
+            f"Parameters 'max_depth' ({max_depth}) and 'recursive' (false) "
+            "contradict each other: a depth below 1 level needs the walk. Drop "
+            "recursive, or pass recursive:true."
+        )
+    walk = recursive or bool(max_depth)
     if glob_pattern:
         _reject_brace_glob(glob_pattern, "filter")
 
@@ -1702,8 +1789,12 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
         return True
 
     raw: List[tuple] = []  # (display_rel, is_dir, abs_path)
-    if recursive:
+    if walk:
         for dirpath, dirnames, filenames in os.walk(path):
+            # Cut AFTER this level's directories are listed (below): the
+            # entries at depth max_depth are shown, only the descent stops.
+            at_depth_limit = (max_depth is not None
+                              and _walk_depth(path, dirpath) >= max_depth)
             if skip_ignored:
                 dir_rel = os.path.relpath(dirpath, project_root)
                 dirnames[:] = [
@@ -1729,6 +1820,8 @@ def handle_list_dir(params: dict, project_root: str, strict: bool = False) -> di
                 if skip_ignored and _ignore_skips(entry_rel, entry_rel, ignore_patterns):
                     continue
                 raw.append((entry_rel, False, os.path.join(dirpath, name)))
+            if at_depth_limit:
+                dirnames[:] = []
     else:
         for name in sorted(os.listdir(path)):
             full = os.path.join(path, name)
@@ -1877,6 +1970,7 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
     # list_dir's default (False), not search's (True): a finder that started
     # hiding `build/` would change the answer every existing caller gets.
     skip_ignored = _skip_ignored_param(params, False)
+    max_depth = _max_depth_param(params)
     path = safe_path(project_root, rel, strict)
     _refuse_git_root(path, rel, project_root)
     _require_dir(path, rel)
@@ -1906,6 +2000,10 @@ def handle_find_file(params: dict, project_root: str, strict: bool = False) -> d
             ]
         else:
             dirnames[:] = [d for d in dirnames if d != ".git"]
+        # max_depth: this level's files are still listed, only the descent
+        # stops (0 = the search root's own files).
+        if max_depth is not None and _walk_depth(path, dirpath) >= max_depth:
+            dirnames[:] = []
         for name in filenames:
             full = os.path.join(dirpath, name)
             if skip_ignored:
@@ -2240,6 +2338,7 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
     max_chars = _max_answer_chars(params)
     head_limit = _int_param(params.get("head_limit", 0), 0)  # 0 = unlimited
     offset = _offset(params)
+    max_depth = _max_depth_param(params)  # None = unbounded
 
     # One root or several — `relative_path` may be a LIST here (see
     # MULTI_PATH_FUNCTIONS, which is what lets one past the alias resolver). The
@@ -2350,8 +2449,14 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
         # LLMs frequently escape | as \| which turns alternation into a literal pipe
         pattern_str = pattern_str.replace(r"\|", "|")
 
+    # `multiline`: the SAME pattern, run over the whole file text with
+    # MULTILINE | DOTALL (see the matchers' multiline_hits). Compiled once here
+    # so a pattern that only fails under those flags is refused by name too.
+    multiline = _bool_param(params.get("multiline", False), False)
     try:
         pattern = re.compile(pattern_str)
+        if multiline:
+            re.compile(pattern_str, re.M | re.S)
     except re.error as exc:
         raise ValueError(
             f"Invalid regex pattern: {exc}; substring_pattern is a regex: escape "
@@ -2454,6 +2559,11 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
                        [], [os.path.basename(root)])
             else:
                 for dirpath_, dirnames_, filenames_ in os.walk(root):
+                    # max_depth, measured from THIS root: cut the descent here,
+                    # before the consumer's own prunes see the list.
+                    if (max_depth is not None
+                            and _walk_depth(root, dirpath_) >= max_depth):
+                        dirnames_[:] = []
                     yield (False, bound, patterns, ign_base, dirpath_,
                            dirnames_, filenames_)
 
@@ -2554,7 +2664,48 @@ def _search_for_pattern(params: dict, project_root: str, strict: bool,
             file_hit_count = 0
             need_context = output_mode == "content" and (ctx_before or ctx_after)
 
-            if need_context:
+            if multiline:
+                # One row per NON-EMPTY match of the whole-text pattern, at the
+                # line the match STARTS on. Content rows carry the matched text
+                # with each LF shown as the two characters `\n` (so a row is
+                # still one physical line; backslashes are not doubled -- a
+                # declared, lossy flattening); with context lines the row is the
+                # raw window around the start line, as in the line mode.
+                try:
+                    lines = fh.readlines()
+                finally:
+                    fh.close()
+                last_start = -1
+                for i, mtext in matcher.multiline_hits(lines, file_rel):
+                    if _search_clock() > _deadline:
+                        raise _over_budget()
+                    file_hit_count += 1
+                    total_match_count += 1
+                    if only_matching and i != last_start:
+                        total_line_count += 1
+                    last_start = i
+                    if output_mode != "content":
+                        continue
+                    if total_match_count <= offset:
+                        continue          # paged past: costs no budget
+                    if need_context:
+                        start = max(0, i - ctx_before)
+                        end = min(len(lines), i + ctx_after + 1)
+                        ctx = "".join(lines[start:end]).rstrip("\n")
+                        entry = f"{file_rel}:{i + 1}:\n{ctx}"
+                    else:
+                        flat = mtext.replace("\n", "\\n")
+                        entry = f"{file_rel}:{i + 1}: {flat}"
+                    if (row_budget > 0 and content_entries
+                            and total_chars + len(entry) + 1 > row_budget):
+                        truncated = True
+                        break
+                    content_entries.append(entry)
+                    total_chars += len(entry) + 1
+                    if head_limit > 0 and len(content_entries) >= head_limit:
+                        truncated = True
+                        break
+            elif need_context:
                 # Need surrounding lines — read all lines for context access
                 try:
                     lines = fh.readlines()
@@ -6732,11 +6883,16 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         "long", "show_hidden", "all", "hidden",
         "paths_include_glob", "filter", "grep", "grep_pattern",
         "head_limit", "offset", "max_answer_chars",
+        # Depth below the listed directory (0 = its own entries); implies
+        # `recursive`, refused beside an explicit recursive:false.
+        "max_depth",
     },
     "find_file": {
         "file_mask", "pattern", "substring_pattern", "relative_path",
         "skip_ignored_files", "no_ignore",
         "head_limit", "offset", "max_answer_chars",
+        # Depth below relative_path (0 = files directly in it); omitted = all.
+        "max_depth",
     },
     "replace_content": {
         "relative_path", "needle", "repl", "mode",
@@ -6764,6 +6920,11 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
         # ripgrep's `-o`: one `path:line: <match>` row per match. Content mode
         # only; refused beside count/files_with_matches or nonzero context.
         "only_matching",
+        # The pattern runs over the WHOLE file text (MULTILINE | DOTALL): a match
+        # may span lines; one row per non-empty match at its START line.
+        "multiline",
+        # Depth below each search root (0 = the root's own files); omitted = all.
+        "max_depth",
         # ripgrep's `--no-ignore`, the INVERSE of skip_ignored_files. Flipped in
         # _skip_ignored_param, not in the alias table — see the docstring there.
         "no_ignore",
@@ -7063,6 +7224,17 @@ PURITY_CALL_TOOL = {
         "by default; pass regex:false for a literal match (`size(` needs no escaping) - use it when\n"
         "you want text, not a symbol. only_matching:true (rg -o) makes each match its own\n"
         "`path:line: <match>` row; content mode only, refused beside context lines.\n"
+        "multiline:true runs the pattern over the WHOLE file text (MULTILINE | DOTALL: `.`\n"
+        "crosses newlines, ^/$ match at every line boundary, a match may span lines;\n"
+        "(?-s:.) is a line-bounded dot; regex:false stays literal, a literal newline\n"
+        "included). One row per non-empty match at its START line, text = the matched\n"
+        "text with each newline shown as `\\n` (backslashes are not doubled); context\n"
+        "lines surround the start line; count/head_limit/offset count matches, not\n"
+        "lines. Default false = line-by-line.\n"
+        "max_depth (find_file, list_dir, search_for_pattern) limits descent below the\n"
+        "search root: 0 = its own entries only, 1 = one directory level more; omitted =\n"
+        "unbounded; negative or non-integer is refused. In list_dir it implies\n"
+        "recursive:true (an explicit recursive:false beside a depth >= 1 is refused).\n"
         "Its row cap head_limit also answers to max_results/max/count/max_matches/limit.\n"
         "It skips, like an ignored dir, any dir BELOW the search root holding a `.git`\n"
         "file or dir (worktree, submodule, nested clone); no_ignore:true searches them.\n"
