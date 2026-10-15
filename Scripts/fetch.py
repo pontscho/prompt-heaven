@@ -6,10 +6,19 @@ Usage:
   python3 fetch.py URL [--out FILE] [--meta FILE] [--delay-min S] [--delay-max S]
                        [--retries N] [--cache-dir DIR] [--verified]
                        [--timeout S] [--max-bytes N]
+                       [--method {GET,POST}] [--data-file FILE|-] [--header 'K: V']...
 
   import fetch                                  # from Scripts/, no side effects
   status, final_url, body = fetch.fetch(url)    # a shared Fetcher: one cookie
                                                 # jar and one delay pacing
+  fetch.fetch(url, method="POST", data=b"a=1",  # a POST: bytes body, extra headers
+              headers={"Content-Type": "application/x-www-form-urlencoded"})
+
+A POST uses the client's cors mode (an XHR-like request), is never cached (the
+cache key is the URL alone; --cache-dir with --method POST is a usage error) and
+is paced, retried and cookie-jarred exactly like a GET. The meta JSON carries
+"method". --data-file needs --method POST; headers the Chrome profile owns
+(User-Agent, Content-Length, Host, ...) are refused by the client.
   f = fetch.Fetcher(); f.fetch_full(url); f.close()
 
 The body bytes go to stdout (binary-safe) or to --out (written atomically,
@@ -7071,6 +7080,50 @@ def _permanent(exc):
 	return isinstance(exc, ChromeBodyTooLarge) or str(exc).startswith(("url:", "headers:", "policy:", "redirect:", "transport:"))
 
 
+def parse_header(text):
+	"""One `Name: value` command-line header as (name, value): split on the first colon, both stripped; ValueError when malformed."""
+	name, sep, value = text.partition(":")
+	name, value = name.strip(), value.strip()
+	if not sep or not name:
+		raise ValueError("a header must look like 'Name: value': %s" % clean_text(text, 60))
+	return name, value
+
+
+def _check_request(method, data, headers):
+	"""Validate method/data/headers; return (method, data, extra headers dict, referer or None).
+
+	The extra dict starts with Accept-Language (a caller Accept-Language
+	replaces it); a caller Referer is lifted out of it into the referer value,
+	after the client's own header screen, so the client derives Origin and
+	Sec-Fetch-Site from it. Every other caller header is passed on untouched
+	for the client to screen on each request.
+	"""
+	if method not in ("GET", "POST"):
+		raise ValueError("method must be GET or POST")
+	if data is not None and not isinstance(data, bytes):
+		raise TypeError("data must be bytes or None")
+	if data is not None and method != "POST":
+		raise ValueError("data requires method POST")
+	if headers is not None and not isinstance(headers, dict):
+		raise TypeError("headers must be a dict or None")
+	extra = {"Accept-Language": ACCEPT_LANGUAGE}
+	referer = None
+	for name, value in (headers or {}).items():
+		if isinstance(name, str) and name.lower() == "referer":
+			if not isinstance(value, str):
+				raise FetchError("ChromeClientError: headers: every header must be a (name, value) pair of str")
+			try:
+				_ch_check_caller_headers([(name, value)])
+			except ChromeClientError as exc:
+				raise FetchError("%s: %s" % (type(exc).__name__, clean_text(str(exc)))) from None
+			referer = value
+		elif isinstance(name, str) and name.lower() == "accept-language":
+			extra["Accept-Language"] = value
+		else:
+			extra[name] = value
+	return method, data, extra, referer
+
+
 def _utc_now():
 	return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -7181,7 +7234,7 @@ class Fetcher:
 		status = meta.get("status")
 		if not isinstance(status, int) or isinstance(status, bool) or not 200 <= status < 300 or meta.get("bytes") != len(body):
 			return None
-		return {"status": status, "final_url": str(meta.get("final_url") or url), "content_type": meta.get("content_type"), "bytes": len(body), "fetched_at": meta.get("fetched_at"), "transport": meta.get("transport"), "from_cache": True, "attempts": 0, "body": body}
+		return {"status": status, "final_url": str(meta.get("final_url") or url), "content_type": meta.get("content_type"), "bytes": len(body), "fetched_at": meta.get("fetched_at"), "transport": meta.get("transport"), "from_cache": True, "attempts": 0, "method": "GET", "body": body}
 
 	def _cache_write(self, cache_dir, url, result):
 		"""Store a 2xx result: the body first, the sidecar (the commit) second; both atomic."""
@@ -7193,8 +7246,8 @@ class Fetcher:
 
 	# -- the fetch -----------------------------------------------------------
 
-	def fetch_full(self, url, *, delay_min=None, delay_max=None, retries=None, cache_dir=None, timeout=None):
-		"""GET `url`; return a dict {status, final_url, content_type, bytes, fetched_at, transport, from_cache, attempts, body}.
+	def fetch_full(self, url, *, delay_min=None, delay_max=None, retries=None, cache_dir=None, timeout=None, method="GET", data=None, headers=None):
+		"""GET (or POST) `url`; return a dict {status, final_url, content_type, bytes, fetched_at, transport, from_cache, attempts, method, body}.
 
 		Per-call overrides replace the Fetcher's settings for this call only
 		(a cache_dir of None means the Fetcher's). A 403/429/503 or a transport
@@ -7202,11 +7255,20 @@ class Fetcher:
 		RETURNED (the last one) and a transport failure raises FetchError. A
 		2xx answer is cached when a cache directory is set.
 
+		`method` is "GET" or "POST" (ValueError otherwise); `data` is the POST
+		body as bytes or None (a str is a TypeError, data with GET a
+		ValueError); `headers` is a dict of extra request headers, screened by
+		the client (User-Agent, Content-Length, Host and the like are refused:
+		FetchError, never retried). A POST never reads or writes the cache (the
+		key is the URL alone) and ignores cache_dir; pacing, the cookie jar and
+		the backoff apply as for a GET.
+
 		The session is rebuilt only after REBUILD_AFTER_FAILURES consecutive
 		transport failures. The tradeoff is the cookie jar: a rebuild drops it,
 		so a site that hands out a session cookie on the first page starts over,
 		while a session that keeps resetting is worth more than its cookies.
 		"""
+		method, data, extra, referer = _check_request(method, data, headers)
 		if not isinstance(url, str) or not url.startswith(("http://", "https://")):
 			raise FetchError("not an http(s) URL: %s" % clean_text(url))
 		low = self.delay_min if delay_min is None else delay_min
@@ -7215,6 +7277,8 @@ class Fetcher:
 		limit = self.retries if retries is None else self._check_retries(retries)
 		wait_for = self.timeout if timeout is None else self._check_timeout(timeout)
 		directory = cache_dir if cache_dir is not None else self.cache_dir
+		if method != "GET":
+			directory = None  # the cache key is the URL alone: a POST neither reads nor writes it
 		if directory is not None:
 			cached = self._cache_read(directory, url)
 			if cached is not None:
@@ -7226,7 +7290,20 @@ class Fetcher:
 				if self._session is None:
 					self._session = self._new_session()
 					self._owned = True
-				response = self._session.get(url, headers={"Accept-Language": ACCEPT_LANGUAGE}, timeout=wait_for)
+				# A transport error may arrive after a POST was sent; the retry
+				# repeats it anyway: the ingest's POSTs are idempotent reads.
+				if method == "POST":
+					# mode="cors" is the client's XHR-like mode: Sec-Fetch-Mode cors,
+					# Sec-Fetch-Dest empty, Accept */*, Content-Length, and no Origin
+					# while the referer (default: the URL itself) is same-origin, which
+					# is what jQuery's XHR from the page of the same site sends. The
+					# caller's Content-Type, X-Requested-With, Accept pass as headers;
+					# a Referer becomes referer= so Origin and Sec-Fetch-Site follow it.
+					response = self._session.request("POST", url, headers=extra, body=data if data is not None else b"", timeout=wait_for, mode="cors", referer=referer)
+				elif referer is not None:
+					response = self._session.get(url, headers=extra, timeout=wait_for, referer=referer)
+				else:
+					response = self._session.get(url, headers=extra, timeout=wait_for)
 				status = response.status_code
 				final_url = response.url
 				content_type = response.headers.get("content-type")
@@ -7250,7 +7327,7 @@ class Fetcher:
 				self._sleep(wait if floor is None else max(wait, floor))
 				continue
 			break
-		result = {"status": status, "final_url": clean_text(final_url, 2048), "content_type": clean_text(content_type, 200) if content_type else None, "bytes": len(body), "fetched_at": _utc_now(), "transport": self.transport, "from_cache": False, "attempts": attempt + 1, "body": body}
+		result = {"status": status, "final_url": clean_text(final_url, 2048), "content_type": clean_text(content_type, 200) if content_type else None, "bytes": len(body), "fetched_at": _utc_now(), "transport": self.transport, "from_cache": False, "attempts": attempt + 1, "method": method, "body": body}
 		if directory is not None and 200 <= status < 300:
 			try:
 				self._cache_write(directory, url, result)
@@ -7269,8 +7346,8 @@ class Fetcher:
 _SHARED = {}
 
 
-def fetch(url, *, delay_min=DEFAULT_DELAY_MIN, delay_max=DEFAULT_DELAY_MAX, retries=DEFAULT_RETRIES, cache_dir=None, timeout=DEFAULT_TIMEOUT, max_bytes=DEFAULT_MAX_BYTES, transport="chrome", session=None):
-	"""GET `url` through the shared Fetcher; return (status, final_url, body_bytes).
+def fetch(url, *, method="GET", data=None, headers=None, delay_min=DEFAULT_DELAY_MIN, delay_max=DEFAULT_DELAY_MAX, retries=DEFAULT_RETRIES, cache_dir=None, timeout=DEFAULT_TIMEOUT, max_bytes=DEFAULT_MAX_BYTES, transport="chrome", session=None):
+	"""GET (or POST, see Fetcher.fetch_full) `url` through the shared Fetcher; return (status, final_url, body_bytes).
 
 	With `session=` the call uses a one-off Fetcher around that session (it keeps
 	its own pacing, and the session stays the caller's to close). Raises
@@ -7284,7 +7361,7 @@ def fetch(url, *, delay_min=DEFAULT_DELAY_MIN, delay_max=DEFAULT_DELAY_MAX, retr
 		fetcher = _SHARED.get(key)
 		if fetcher is None:
 			fetcher = _SHARED[key] = Fetcher(transport=transport, max_bytes=max_bytes)
-	return fetcher.fetch(url, delay_min=delay_min, delay_max=delay_max, retries=retries, cache_dir=cache_dir, timeout=timeout)
+	return fetcher.fetch(url, delay_min=delay_min, delay_max=delay_max, retries=retries, cache_dir=cache_dir, timeout=timeout, method=method, data=data, headers=headers)
 
 
 # ---------------------------------------------------------------------------
@@ -7309,6 +7386,9 @@ def _parser():
 	parser.add_argument("--verified", action="store_true", help="use the certificate-verifying stdlib transport instead of the Chrome one")
 	parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, metavar="S", help="seconds per request (default 30)")
 	parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, metavar="N", help="body size cap in bytes (default 16 MiB)")
+	parser.add_argument("--method", choices=("GET", "POST"), default="GET", help="request method (default GET)")
+	parser.add_argument("--data-file", metavar="FILE", help="POST body bytes from FILE ('-' = stdin); needs --method POST")
+	parser.add_argument("--header", action="append", default=[], metavar="'K: V'", help="an extra request header, repeatable (split on the first colon)")
 	return parser
 
 
@@ -7321,9 +7401,33 @@ def main(argv=None):
 		parser.error(str(exc))
 	if not args.url.startswith(("http://", "https://")):
 		parser.error("the URL must start with http:// or https://")
+	if args.data_file is not None and args.method != "POST":
+		parser.error("--data-file needs --method POST")
+	if args.method == "POST" and args.cache_dir is not None:
+		parser.error("--cache-dir cannot be used with --method POST (a POST is never cached)")
+	headers = {}
+	for text in args.header:
+		try:
+			name, value = parse_header(text)
+		except ValueError as exc:
+			parser.error("--header: %s" % exc)
+		for known in [k for k in headers if k.lower() == name.lower()]:
+			del headers[known]
+		headers[name] = value
+	data = None
+	if args.data_file is not None:
+		try:
+			if args.data_file == "-":
+				data = sys.stdin.buffer.read()
+			else:
+				with open(args.data_file, "rb") as handle:
+					data = handle.read()
+		except OSError as exc:
+			_fail("cannot read --data-file: %s" % exc)
+			return 2
 	try:
 		try:
-			result = fetcher.fetch_full(args.url)
+			result = fetcher.fetch_full(args.url, method=args.method, data=data, headers=headers or None)
 		except FetchError as exc:
 			return _fail(str(exc))
 		finally:

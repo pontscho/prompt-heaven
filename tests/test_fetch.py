@@ -21,6 +21,9 @@ Groups:
   D  pure helpers: the backoff schedule, Retry-After, the stderr sanitizer
   E  the Fetcher loop on a scripted session: pacing, retries, rebuild, caching
   F  main() in-process: --meta on an HTTP-error exit, stdout bytes, exit codes
+  H  POST (offline only): method/data/header validation, the header parser,
+     the cache bypass, the scripted-session request (body, headers, cors mode,
+     pacing, backoff, refusals) and the CLI usage errors
   G  hygiene
 """
 
@@ -94,16 +97,26 @@ class StubSession:
     def __init__(self, script):
         self.script = list(script)
         self.calls = []
+        self.requests = []
         self.closed = False
 
-    def get(self, url, params=None, headers=None, timeout=None, **kw):
-        self.calls.append((url, dict(headers or {}), timeout))
+    def _answer(self, url):
         item = self.script.pop(0)
         if isinstance(item, BaseException):
             raise item
         status, hdrs, body = item if isinstance(item, tuple) else (item, {}, b"body%d" % item)
         return types.SimpleNamespace(status_code=status, url=url + "#final",
                                      headers=Headers(hdrs), content=body)
+
+    def get(self, url, params=None, headers=None, timeout=None, **kw):
+        self.calls.append((url, dict(headers or {}), timeout))
+        return self._answer(url)
+
+    def request(self, method, url, headers=None, body=None, timeout=None, mode="navigate",
+                referer=None, on_headers=None):
+        self.requests.append({"method": method, "url": url, "headers": dict(headers or {}),
+                              "body": body, "timeout": timeout, "mode": mode, "referer": referer})
+        return self._answer(url)
 
     def close(self):
         self.closed = True
@@ -574,6 +587,208 @@ def group_f(suite, mod, ws):
         mod._ch_session_new = original
 
 
+FORM = {"Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest"}
+POST_URL = "http://example.test/post"
+
+
+def group_h(suite, mod, ws):
+    # Validation: nothing reaches the session on bad input.
+    problems = []
+    for cid, kwargs, exc in (("method PUT", {"method": "PUT"}, ValueError),
+                             ("method lowercase", {"method": "post"}, ValueError),
+                             ("method None", {"method": None}, ValueError),
+                             ("str data", {"method": "POST", "data": "a=1"}, TypeError),
+                             ("bytearray data", {"method": "POST", "data": bytearray(b"a")}, TypeError),
+                             ("data with GET", {"data": b"a=1"}, ValueError),
+                             ("headers list", {"headers": [("A", "b")]}, TypeError)):
+        fetcher, session, clock = make(mod, [200])
+        try:
+            fetcher.fetch(POST_URL, **kwargs)
+            problems.append("%s accepted" % cid)
+        except exc:
+            pass
+        if session.calls or session.requests:
+            problems.append("%s reached the session" % cid)
+    suite.record("H", "method-data-headers-validation", problems)
+
+    rows = (("X-A: b", ("X-A", "b")), ("  X-A :  b c  ", ("X-A", "b c")), ("X-A:b:c", ("X-A", "b:c")),
+            ("X-A:", ("X-A", "")))
+    problems = []
+    for text, want in rows:
+        if mod.parse_header(text) != want:
+            problems.append("parse_header(%r) = %r, wanted %r" % (text, mod.parse_header(text), want))
+    for bad in ("nocolon", ": value", "   : v", ""):
+        try:
+            mod.parse_header(bad)
+            problems.append("parse_header accepted %r" % bad)
+        except ValueError:
+            pass
+    suite.record("H", "parse-header-helper", problems)
+
+    # A pre-seeded entry for the very URL must not be served to a POST, and a POST writes none.
+    directory = os.path.join(ws, "cache-post")
+    seed(mod, directory, POST_URL, b"SEEDED")
+    before = sorted(os.listdir(directory))
+    fetcher, session, clock = make(mod, [(200, {}, b"live")], cache_dir=directory)
+    result = fetcher.fetch_full(POST_URL, method="POST", data=b"a=1")
+    other = os.path.join(ws, "cache-post-fresh")
+    fetcher2, session2, _c = make(mod, [(200, {}, b"live")])
+    fetcher2.fetch_full("http://example.test/p2", method="POST", data=b"a=1", cache_dir=other)
+    problems = []
+    if result["body"] != b"live" or result["from_cache"] or len(session.requests) != 1:
+        problems.append("the seeded entry was served: %r / %d requests" % (result["body"], len(session.requests)))
+    if sorted(os.listdir(directory)) != before:
+        problems.append("a POST touched the cache directory")
+    if os.path.exists(other):
+        problems.append("a per-call cache_dir created a cache for a POST")
+    suite.record("H", "post-never-reads-or-writes-the-cache", problems)
+
+    # The request the session sees.
+    fetcher, session, clock = make(mod, [(201, {"Content-Type": "text/html"}, b"<p>ok</p>")])
+    body = b"a=1&b=\xff"
+    result = fetcher.fetch_full(POST_URL, method="POST", data=body, headers=dict(FORM))
+    problems = []
+    if len(session.requests) != 1 or session.calls:
+        problems.append("%d request(), %d get() calls" % (len(session.requests), len(session.calls)))
+    else:
+        req = session.requests[0]
+        want_headers = dict(FORM, **{"Accept-Language": mod.ACCEPT_LANGUAGE})
+        if req["method"] != "POST" or req["url"] != POST_URL or req["body"] != body:
+            problems.append("method/url/body %r %r %r" % (req["method"], req["url"], req["body"]))
+        if req["headers"] != want_headers:
+            problems.append("headers %r, wanted %r" % (req["headers"], want_headers))
+        if req["mode"] != "cors" or req["referer"] is not None:
+            problems.append("mode/referer %r/%r" % (req["mode"], req["referer"]))
+    if result["method"] != "POST" or result["status"] != 201 or result["attempts"] != 1:
+        problems.append("result %r" % dict((k, v) for k, v in result.items() if k != "body"))
+    suite.record("H", "post-reaches-the-session-with-body-headers-cors", problems)
+
+    # No data: an empty POST body; a caller Referer is lifted into referer=, Accept-Language overridable.
+    fetcher, session, clock = make(mod, [200])
+    fetcher.fetch(POST_URL, method="POST",
+                  headers={"referer": "http://example.test/page", "accept-language": "en", "Accept": "*/*"})
+    problems = []
+    req = session.requests[0] if session.requests else {}
+    if req.get("body") != b"":
+        problems.append("body %r, wanted b''" % (req.get("body"),))
+    if req.get("referer") != "http://example.test/page":
+        problems.append("referer %r" % (req.get("referer"),))
+    if req.get("headers") != {"Accept-Language": "en", "Accept": "*/*"}:
+        problems.append("headers %r" % (req.get("headers"),))
+    suite.record("H", "post-referer-lifted-accept-language-overridden", problems)
+
+    # Pacing counts a POST, the one session (cookie jar) serves GET and POST, backoff repeats the body.
+    fetcher, session, clock = make(mod, [200, 503, 200, 200], delay_min=3.0, delay_max=3.0, retries=3)
+    fetcher.fetch("http://example.test/1")
+    fetcher.fetch(POST_URL, method="POST", data=b"x=1")
+    fetcher.fetch("http://example.test/3")
+    problems = []
+    if clock.sleeps != [3.0, 3.0, 5.0, 3.0] and clock.sleeps != [3.0, 5.0, 3.0]:
+        problems.append("sleeps %r" % clock.sleeps)
+    if len(session.requests) != 2 or len(session.calls) != 2 or session.closed:
+        problems.append("one session did not serve all: %d request(), %d get(), closed %r"
+                        % (len(session.requests), len(session.calls), session.closed))
+    elif [r["body"] for r in session.requests] != [b"x=1", b"x=1"]:
+        problems.append("the retry did not resend the body: %r" % [r["body"] for r in session.requests])
+    suite.record("H", "post-pacing-session-and-backoff-as-for-get", problems,
+                 detail=["sleeps %r" % clock.sleeps])
+
+    fetcher, session, clock = make(mod, [mod.ChromeClientError("tls: connection reset"), 200], retries=3)
+    result = fetcher.fetch_full(POST_URL, method="POST", data=b"x=1")
+    problems = []
+    if result["attempts"] != 2 or len(session.requests) != 2 or clock.sleeps != [5.0]:
+        problems.append("attempts %r, %d requests, sleeps %r" % (result["attempts"], len(session.requests), clock.sleeps))
+    suite.record("H", "post-transport-error-is-retried", problems)
+
+    # A header refusal by the client is a FetchError with its message and no retry.
+    fetcher, session, clock = make(mod, [mod.ChromeClientError("headers: user-agent is fixed by the Chrome profile"), 200])
+    try:
+        fetcher.fetch(POST_URL, method="POST", data=b"x", headers={"User-Agent": "x"})
+        problems = ["no FetchError"]
+    except mod.FetchError as exc:
+        problems = [] if "headers: user-agent is fixed by the Chrome profile" in str(exc) and \
+            len(session.requests) == 1 and not clock.sleeps else \
+            ["text %r, %d requests, sleeps %r" % (str(exc), len(session.requests), clock.sleeps)]
+    suite.record("H", "post-client-header-refusal-is-not-retried", problems)
+
+    # A hostile Referer value is refused before any request, with the client's message.
+    fetcher, session, clock = make(mod, [200])
+    try:
+        fetcher.fetch(POST_URL, method="POST", data=b"x", headers={"Referer": "http://a/\r\nX: y"})
+        problems = ["no FetchError"]
+    except mod.FetchError as exc:
+        problems = [] if "headers:" in str(exc) and "\n" not in str(exc) and not session.requests else \
+            ["text %r, %d requests" % (str(exc), len(session.requests))]
+    suite.record("H", "hostile-referer-refused-before-the-session", problems)
+
+    fetcher, session, clock = make(mod, [200])
+    result = fetcher.fetch_full("http://example.test/g")
+    problems = []
+    if result["method"] != "GET" or session.requests:
+        problems.append("method %r, %d request() calls" % (result["method"], len(session.requests)))
+    if session.calls[0][1] != {"Accept-Language": mod.ACCEPT_LANGUAGE}:
+        problems.append("GET headers changed: %r" % (session.calls[0][1],))
+    suite.record("H", "get-is-unchanged-and-meta-says-get", problems)
+
+    session = StubSession([(200, {}, b"lib")])
+    got = mod.fetch(POST_URL, method="POST", data=b"x=1", headers=dict(FORM), session=session,
+                    delay_min=0, delay_max=0)
+    suite.record("H", "library-fetch-keeps-the-tuple-shape",
+                 [] if got == (200, POST_URL + "#final", b"lib") and session.requests[0]["method"] == "POST"
+                 else ["got %r" % (got,)])
+
+    # CLI usage errors: exit 2 before any network.
+    data_file = os.path.join(ws, "post.bin")
+    with open(data_file, "wb") as handle:
+        handle.write(b"a=1")
+    for cid, args, want in (
+            ("data-file-without-post", ["--data-file", data_file, "http://example.test/"], None),
+            ("malformed-header", ["--header", "nocolon", "http://example.test/"], None),
+            ("cache-dir-with-post", ["--method", "POST", "--cache-dir", os.path.join(ws, "c"),
+                                     "http://example.test/"], None),
+            ("unreadable-data-file", ["--method", "POST", "--data-file", os.path.join(ws, "nope.bin"),
+                                      "http://example.test/"], "cannot read --data-file")):
+        rc, out, err = run_cli(args)
+        problems = []
+        if rc != 2:
+            problems.append("exit %d, wanted 2 (stderr %r)" % (rc, err[:120]))
+        if out:
+            problems.append("a usage error wrote to stdout")
+        if want and (len(err.splitlines()) != 1 or not err.startswith("fetch.py: ") or want not in err):
+            problems.append("stderr %r" % err[:200])
+        suite.record("H", "cli-exit-2-" + cid, problems)
+
+    # main() in-process: --method POST, --data-file, repeated --header, meta carries the method.
+    original = mod._ch_session_new
+    try:
+        stub = StubSession([(200, {"Content-Type": "application/json"}, b"{}")])
+        mod._ch_session_new = lambda **kw: stub
+        meta_path = os.path.join(ws, "post-meta.json")
+        rc, out, err = capture(mod.main, [POST_URL, "--method", "POST", "--data-file", data_file,
+                                          "--header", "Content-Type: application/x-www-form-urlencoded",
+                                          "--header", "x-requested-with:XMLHttpRequest",
+                                          "--meta", meta_path, "--delay-min", "0", "--delay-max", "0"])
+        problems = []
+        if rc != 0 or out != b"{}" or err:
+            problems.append("rc=%r stdout=%r stderr=%r" % (rc, out[:40], err[:80]))
+        req = stub.requests[0] if stub.requests else {}
+        if req.get("method") != "POST" or req.get("body") != b"a=1" or req.get("mode") != "cors":
+            problems.append("request %r" % (req,))
+        if req.get("headers", {}).get("Content-Type") != "application/x-www-form-urlencoded" or \
+                req.get("headers", {}).get("x-requested-with") != "XMLHttpRequest":
+            problems.append("headers %r" % (req.get("headers"),))
+        try:
+            with open(meta_path, "r", encoding="utf-8") as handle:
+                meta = json.load(handle)
+            if meta.get("method") != "POST":
+                problems.append("meta method %r" % (meta.get("method"),))
+        except (OSError, ValueError) as exc:
+            problems.append("meta unreadable: %s" % exc)
+        suite.record("H", "main-post-data-file-headers-and-meta", problems)
+    finally:
+        mod._ch_session_new = original
+
+
 def group_g(suite, before, pyc_before):
     new = sorted(H.repo_tree() - before)
     suite.record("G", "no-new-repo-paths",
@@ -607,6 +822,7 @@ def run(opts=None):
         group_d(suite, mod)
         group_e(suite, mod)
         group_f(suite, mod, ws.path)
+        group_h(suite, mod, ws.path)
     group_g(suite, before, pyc_before)
     suite.print_summary()
     return suite

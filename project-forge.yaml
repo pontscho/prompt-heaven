@@ -358,7 +358,7 @@ test:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|PROBLEM'
 
   fetch:
-    description: "Scripts/fetch.py, the browser-like single-URL fetcher (the generated Chrome client plus the pacing, backoff and cache of its own half), offline and with no network: no import side effects, --help and usage errors, a refused URL as one `fetch.py:` stderr line and exit 1 without a retry, the sha256 cache (a pre-seeded hit, --out, --meta, binary stdout, damaged and non-2xx entries ignored), the backoff schedule and Retry-After parsing, and the pacing / retry / session-rebuild loop on a scripted session. 43 typed cases. Writes only into a mkdtemp workspace."
+    description: "Scripts/fetch.py, the browser-like single-URL fetcher (the generated Chrome client plus the pacing, backoff and cache of its own half), offline and with no network: no import side effects, --help and usage errors, a refused URL as one `fetch.py:` stderr line and exit 1 without a retry, the sha256 cache (a pre-seeded hit, --out, --meta, binary stdout, damaged and non-2xx entries ignored), the backoff schedule and Retry-After parsing, and the pacing / retry / session-rebuild loop on a scripted session, plus the offline POST path (method/data/header validation, header parser, cache bypass, the cors request on the scripted session, CLI usage errors). 59 typed cases. Writes only into a mkdtemp workspace."
     requires: [syntax]
     commands:
       - python3 tests/run.py fetch

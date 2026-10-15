@@ -942,15 +942,16 @@ SUITES = [
      "stubbed: a JSON list and a comma-separated string build the same -e "
      "argv, a non-str / non-list value is a ValueError refusal and an error "
      "reply, never an AttributeError", 10),
-    # TYPED: a fixed case table (A 7, B 3, C 7, D 5, E 14, F 5, G 2), so a
-    # count that moves is the alarm.
+    # TYPED: a fixed case table (A 7, B 3, C 7, D 5, E 14, F 5, H 16, G 2), so
+    # a count that moves is the alarm.
     ("fetch", run_fetch,
      "Scripts/fetch.py, offline: no import side effects, --help and usage "
      "errors, a refused URL as one `fetch.py:` line and exit 1 without a "
      "retry, the sha256 cache (a pre-seeded hit with no network, --out, "
      "--meta, binary stdout, damaged and non-2xx entries ignored), the "
      "backoff schedule and Retry-After parsing, and the pacing / retry / "
-     "session-rebuild loop on a scripted session", 43),
+     "session-rebuild loop on a scripted session, and the offline POST path "
+     "(validation, cache bypass, cors request, CLI usage errors)", 59),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]
