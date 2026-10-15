@@ -206,7 +206,8 @@ CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
 # any edit to it. `target-glob` asserts the two spellings agree, and
 # `fleet-ok` gates these alongside the servers -- a declared host the gate did
 # not walk would be a target whose drift nothing reports.
-DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py", "llm-router.py")
+DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py", "llm-router.py",
+                  "fetch.py")
 
 # The sources a host takes WHOLE or not at all (G-c): the Chrome client and its
 # two decoders are one state machine whose blocks call one another, so a host
@@ -2378,8 +2379,9 @@ def group_tabs(suite, mod):
     problems += problem_if(
         declared_styles != {"search_duckduckgo.py": "tab",
                             "search_github.py": "tab",
-                            "llm-router.py": "space"},
-        "expected both search scripts to be tab hosts and the router a space host, got %s"
+                            "llm-router.py": "space",
+                            "fetch.py": "tab"},
+        "expected both search scripts and fetch.py to be tab hosts and the router a space host, got %s"
         % declared_styles,
     )
     suite.record(GF, "host-indent-from-tokens", problems,

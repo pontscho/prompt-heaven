@@ -97,7 +97,7 @@ CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 # callback wrapper, and the stdlib HTTP front (Scripts/_mcp_httpfront.py) it
 # shares with mcp-proxy.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py",
-                  "llm-router.py")
+                  "llm-router.py", "fetch.py")
 
 # Canonical sources a host takes WHOLE or not at all (G-c): the Chrome client
 # and its two decoders are one state machine whose blocks call each other, so a

@@ -242,6 +242,10 @@ def run_tshark_fields(opts):
     return run_python_suite("test_tshark_fields", opts)
 
 
+def run_fetch(opts):
+    return run_python_suite("test_fetch", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -719,7 +723,7 @@ SUITES = [
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
-     "builder declared", 63),
+     "builder declared", 64),
     # TYPED: a fixed case table (A 6, B 9, C 5, E 2).
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
@@ -938,6 +942,15 @@ SUITES = [
      "stubbed: a JSON list and a comma-separated string build the same -e "
      "argv, a non-str / non-list value is a ValueError refusal and an error "
      "reply, never an AttributeError", 10),
+    # TYPED: a fixed case table (A 7, B 3, C 7, D 5, E 14, F 5, G 2), so a
+    # count that moves is the alarm.
+    ("fetch", run_fetch,
+     "Scripts/fetch.py, offline: no import side effects, --help and usage "
+     "errors, a refused URL as one `fetch.py:` line and exit 1 without a "
+     "retry, the sha256 cache (a pre-seeded hit with no network, --out, "
+     "--meta, binary stdout, damaged and non-2xx entries ignored), the "
+     "backoff schedule and Retry-After parsing, and the pacing / retry / "
+     "session-rebuild loop on a scripted session", 43),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]
