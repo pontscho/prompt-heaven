@@ -163,8 +163,9 @@ Run every command from the repo root. Scratch output goes under `.claude/tmp/`.
 7. **Regenerate the hosts:** `python3 Scripts/amalgamate.py`. `_mcp_chrome.py` is
    a whole source (`Scripts/amalgamate.py:WHOLE_SOURCES`) and no host imports it
    ([[0025-generate-do-not-import]]); its blocks live as generated regions in
-   `Scripts/mcp-webfetch.py`, in `Scripts/mcp-search.py`, and in the two declared
-   non-server hosts `Scripts/search_duckduckgo.py` and `Scripts/search_github.py`
+   `Scripts/mcp-webfetch.py`, in `Scripts/mcp-search.py`, and in the three declared
+   non-server hosts that carry it, `Scripts/search_duckduckgo.py`,
+   `Scripts/search_github.py` and `Scripts/fetch.py`
    (`Scripts/amalgamate.py:DECLARED_HOSTS`). See [[generated-regions]].
 
 8. **Re-gate:** `forge_call test {targets: [mcp_chrome, generated_region, amalgamate_check]}`

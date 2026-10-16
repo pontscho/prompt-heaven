@@ -7,7 +7,7 @@ description: Delegate-able sub-agents invoked via the Task tool to keep the main
 sources:
   - ClaudeCode/agents
 verified:
-  commit: ef4b6a4
+  commit: 2c3e9e5
   date: 2026-10-16
 links:
   - overview

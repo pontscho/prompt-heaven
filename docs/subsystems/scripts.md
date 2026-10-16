@@ -3,13 +3,13 @@ name: scripts
 type: subsystem
 status: active
 title: Scripts & MCP Servers
-description: The standalone scripts in Scripts/ -- the MCP servers and the canonical sources their generated regions come from, the llm-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, and the shell scripts behind restartable sessions.
+description: The standalone scripts in Scripts/ -- the MCP servers and the canonical sources their generated regions come from, the llm-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, the fetch.py browser-like fetcher, and the shell scripts behind restartable sessions.
 sources:
   - Scripts
   - Scripts/context-guard.sh
 verified:
-  commit: c643221
-  date: 2026-10-12
+  commit: 2c3e9e5
+  date: 2026-10-16
 links:
   - overview
   - mcp-proxy
@@ -47,7 +47,8 @@ links:
 
 `Scripts/` holds standalone scripts, Python 3.9+ unless named otherwise: the MCP servers, the canonical
 sources their shared helpers are generated from `Scripts/amalgamate.py`, the
-`requirements.yaml` task utilities, the search tools, one HTTP server that is
+`requirements.yaml` task utilities, the search tools, a browser-like
+single-URL fetcher ("fetch.py" below), one HTTP server that is
 not an MCP server, the LLM router ("LLM router" below), and the shell scripts
 behind a restartable session ("Restartable sessions" below). The servers share that
 plumbing by generation rather than import; the canonical sources, the
@@ -487,7 +488,13 @@ Two things about that launch line are deliberate, not incidental:
   indexers and backups move it without a fetch.
 
 Other servers: `mcp-tshark.py`, `mcp-jenkins.py`, `mcp-gdc.py`,
-`mcp-postgres.py`.
+`mcp-postgres.py`. One tshark detail is a contract rather than an implementation
+choice: `analyze`'s `fields` takes the documented comma-separated string **or** a
+JSON list of field names, because models send the list as often as the string;
+the list is joined into the string form and any other type is a `ValueError`
+refusal `Scripts/mcp-tshark.py:_run_analyze`. Before that a list died as an
+`AttributeError` that escaped the handler's refusal envelope as an internal error
+(`tshark_fields`, [[tests]]).
 
 ### webfetch's reply shape: `raw`, `show_headers`, `save_to`
 
@@ -803,6 +810,17 @@ mask and `list_dir`'s filter stay one glob each, and a non-string handed to
 either is now a `ValueError` naming the parameter, raised by that same function
 before anything reaches `re.search`.
 
+An exclude glob is also a **walk prune**, not only a per-file filter: one ending
+in `/**` or `/*` whose head matches a directory drops that directory during the
+walk, so an excluded `build/` or `vendor/` tree no longer spends the call's 5 s
+budget being walked and then filtered file by file
+`Scripts/mcp-purity.py:_exclude_prunes_dir`. It tries the same two candidates
+`_glob_matches` builds (the glob, and the glob with every `**/` removed), so it
+never drops a file the per-file filter would keep; a glob without such a tail
+(`*.md`) stays per-file, and the search root itself is always walked. Pinned,
+with the reply byte-identical when the prune is forced off, by
+`tests/test_purity_file_ops.py:group_t`.
+
 **A name a tool prints in its answers is a name it has to accept in its asks.**
 mcp-wiki reached the same table from a third direction: `get_page` refused `path`
 as an unknown param while `_fn_get_page` already matched `relpath == slug`
@@ -992,6 +1010,16 @@ server that defines no resolver. Quoting it in full is therefore reserved in thi
 file, which is why the docstring spells the name around rather than out
 `Scripts/mcp-git.py:_passthrough_args`.
 
+**`git grep` finding nothing is an answer, not a failure.** git exits 1 for "no
+matches", and the error envelope used to report that as a failed call. An exit 1
+from `grep` with no stdout and empty stderr is now the plain text `no matches`,
+with no exit echo and no `isError` `Scripts/mcp-git.py:handle_git_call`. The rule
+is held to `grep` on purpose: for `merge-base --is-ancestor`, `diff --quiet` and
+`ls-remote --exit-code` an exit 1 is a different verdict and keeps the envelope,
+as does a grep with any stderr or an exit such as 128
+([[0010-a-handler-failure-must-reach-iserror]]); the `mcp_git_params` suite pins
+both sides ([[tests]]).
+
 ## Task utilities
 
 Operate on the `requirements.yaml` workflow (see [[overview]]):
@@ -1018,7 +1046,8 @@ and no `--doc` it no longer injects the default plan document,
 `feature-implementation-plan.md` at the `docs/` root — which belongs to whichever feature wrote
 it last, so printing it beside another feature's tasks paired the wrong plan with
 them silently — and says so in one stderr warning instead; `--doc` names the
-document, `--no-doc` silences it, and with neither flag the default is injected as
+document, `--no-doc` silences it (the two are mutually exclusive, giving both is an
+argparse usage error, exit 2), and with neither flag the default is injected as
 before `Scripts/task-implementation-plan.py:main`. The deployed copy
 `ClaudeCode/scripts/task-implementation-plan.py` is held byte-identical to it by
 the `task_scripts` suite ([[tests]]).
@@ -1253,6 +1282,72 @@ longer reach the `run()` catch-all `Scripts/_mcp_smoke_test.py`; the catch-all's
 `-32603` is proven live by the `run-catch-all-live-32603` row of the server's own
 suite `tests/test_mcp_search.py:group_g`, `mcp_search` in [[tests]].
 
+## fetch.py — one URL like a browser
+
+`Scripts/fetch.py` is a polite single-URL fetcher that looks like a browser: a CLI
+and an importable module, written as the HTTP leg of an ingest tool, and
+deliberately a fetcher rather than a crawler — no JavaScript, no proxy, no
+environment variable read for networking, and what a path means is the
+caller's concern `Scripts/fetch.py`. It is not an MCP server and not a search
+tool; it shares their client, not their code paths.
+
+**The client is generated, not imported.** `fetch.py` is the fourth hand-declared
+non-server host of the generator `Scripts/amalgamate.py:DECLARED_HOSTS`, taking
+the three whole Chrome sources — `Scripts/_mcp_chrome.py` and the brotli and
+zstd decoders — exactly as the two search scripts do, so it imports nothing
+outside the standard library on any platform ([[generated-regions]],
+[[0024-pure-python-39-and-the-stdlib]]); `py_deps` holds it to the 3.9 API floor.
+Its sessions use the Chrome transport by default, which verifies **no
+certificate**, behind the public-only connect policy that refuses private,
+loopback and metadata addresses, including a redirect into them
+`Scripts/fetch.py:Fetcher._new_session`; what an active MITM gains on that path
+is stated in [[0026-speak-chrome-from-the-stdlib-verify-by-default]]. `--verified`
+(library: `transport="verified"`) selects the certificate-verifying stdlib
+transport instead, which is not impersonated.
+
+**One session, one cookie jar, one pacing per run.** A `Fetcher` holds the
+session and sleeps a random `delay_min`..`delay_max` (default 2-5 s) before every
+request but the first, a cache hit never waiting `Scripts/fetch.py:Fetcher._pace`.
+A 403, 429 or 503, and a transport error, is retried up to `retries` times (default
+3) after `5 * 2^k` seconds plus up to 25% jitter, capped at 300 s
+`Scripts/fetch.py:backoff_seconds`, with a seconds-form `Retry-After` honoured as a
+floor and capped at 120 s — the HTTP-date form is deliberately not parsed
+`Scripts/fetch.py:retry_after_seconds`. A refusal the client makes itself (URL,
+headers, policy, redirect, an over-size body) is never retried
+`Scripts/fetch.py:_permanent`. The session is rebuilt only after two consecutive
+transport failures `Scripts/fetch.py:REBUILD_AFTER_FAILURES`, a declared trade:
+a rebuild drops the cookie jar, so a site that sets a session cookie on its first
+page starts over, while a session that keeps resetting is worth less than its
+cookies `Scripts/fetch.py:Fetcher.fetch_full`. The module-level `fetch()` keeps
+one shared `Fetcher` per transport and body cap, so successive calls in a process
+share the jar and the pacing `Scripts/fetch.py:fetch`.
+
+**POST is an XHR, and never cached.** `--method POST` with `--data-file FILE|-`
+and repeatable `--header 'K: V'` (library: `method=`, `data=` bytes, `headers=`)
+sends the client's `cors` mode — `Sec-Fetch-Mode: cors`, no `Origin` while the
+referer is same-origin, the shape a page's own jQuery XHR has; a caller `Referer`
+becomes the client's `referer=` so `Origin` and `Sec-Fetch-Site` follow it, and
+headers the Chrome profile owns (`User-Agent`, `Content-Length`, `Host`, ...) are
+refused by the client `Scripts/fetch.py:_check_request`. The cache key is the URL
+alone, so a POST neither reads nor writes it, and `--cache-dir` beside
+`--method POST` is a usage error `Scripts/fetch.py:main`. A transport error after
+a POST was sent is retried anyway, on the stated premise that the ingest's POSTs
+are idempotent reads.
+
+**Output and exit contract.** The body goes to stdout binary-safe or to `--out`,
+written atomically through a `0600` temp file and `os.replace`
+`Scripts/fetch.py:atomic_write`; `--meta FILE` gets a JSON object (status, final
+URL, content type, bytes, `fetched_at`, transport, `from_cache`, attempts,
+method), written also on an HTTP-error exit when a response existed. Exit 0 is a
+2xx answer, 1 an HTTP status of 400 or more after the retries or a transport
+failure — one sanitized stderr line `fetch.py: <reason>` `Scripts/fetch.py:_fail` —
+and 2 a usage error. `--cache-dir DIR` caches 2xx GET answers as a body file plus
+a JSON sidecar named by the URL's sha256, the sidecar written second as the
+commit; a damaged, mismatched or non-2xx entry reads as a miss
+`Scripts/fetch.py:Fetcher._cache_read`. The body cap defaults to 16 MiB
+(`--max-bytes`), the per-request timeout to 30 s. The suite is `fetch`, fully
+offline ([[tests]]).
+
 ## LLM router
 
 `Scripts/llm-router.py` is **not an MCP server**: it is a stdlib-only HTTP server
@@ -1309,8 +1404,9 @@ the tail of the session transcript named by `transcript_path`, takes the last
 `assistant` entry that is not a sidechain and carries `message.usage`, and sums
 `input_tokens`, `cache_creation_input_tokens` and `cache_read_input_tokens` into
 the current context size. That is compared with `CLAUDE_CTX_LIMIT`, default
-`300000` `Scripts/context-guard.sh` (the same default `Scripts/claude-loop.sh`
-prints at the start of each round). The transcript JSONL and its `usage` field are
+`250000` `Scripts/context-guard.sh` (the same default `Scripts/claude-loop.sh`
+prints at the start of each round; its header comment still says 300000, the
+value both carried before `2c3e9e5`). The transcript JSONL and its `usage` field are
 an undocumented internal format, which the script's header says in so many words
 `Scripts/context-guard.sh`. Nothing latches: once over the limit, every later tool
 call in the main session repeats the message.

@@ -8,8 +8,8 @@ sources:
   - requirements.yaml
   - Scripts/task-validator.py
 verified:
-  commit: 2ef3ef9
-  date: 2026-10-07
+  commit: 2c3e9e5
+  date: 2026-10-16
 links:
   - scripts
   - skills
@@ -17,6 +17,7 @@ links:
   - 0002-index-claims-no-freshness
   - spec-purity-unification
   - spec-purity-luals-phase1
+  - spec-sbx-restricted-runner
   - 0022-a-someday-maybe-is-a-roadmap-item
 ---
 
@@ -207,7 +208,18 @@ graph (3538 in and 3243 out), whose header likewise says it is not a roadmap ite
 `requirements.yaml`. The llm-router graph went the same way in `2ef3ef9`,
 replaced by the graph for the router's `codex` and `openai` Responses kinds and the
 OAuth canonical source (2930 in and 3549 out), whose header again says it is not a
-roadmap item `requirements.yaml`.
+roadmap item `requirements.yaml`. The Responses-kinds graph went the same way in
+`18f2b24`, replaced by the R-0072 graph that lifted the stdlib HTTP front into a
+canonical source (2327 in and 2988 out) — the first since the R-0044 graph to
+name its owner again, `roadmap_item: R-0072` — whose completion record `6bd19e2` then
+amended in place (29 in and 15 out). The R-0072 graph went the same way in
+`7b603d2`, replaced by the graph for sbx restricted mode, the mcp-sandbox runner,
+the mcp-skill loader and the mcp-proxy relist (5676 in and 2369 out), which
+carries no `roadmap_item` key and names [[spec-sbx-restricted-runner]] as its
+source of truth; `cc5066b` emptied its `documentation_open_items` once the wiki
+work it listed was done `requirements.yaml`. Since then the path has not been
+written: the per-feature pipeline (`d2b8ebf`) means the next feature can take a
+slot of its own rather than this one.
 
 That is the plainest argument for this wiki that the repo makes on its own. Both
 displaced *features* still have readable designs here — [[spec-purity-unification]]

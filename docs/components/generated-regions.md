@@ -22,8 +22,8 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: 7b603d2
-  date: 2026-10-11
+  commit: 2c3e9e5
+  date: 2026-10-16
 links:
   - scripts
   - tests
@@ -56,7 +56,9 @@ Not every host is a server. Both search scripts, `Scripts/search_duckduckgo.py`
 and `Scripts/search_github.py`, take the stdlib HTTP client and its two content
 decoders they share with `Scripts/mcp-webfetch.py` and `Scripts/mcp-search.py`,
 and each takes the search domain it shares with `Scripts/mcp-search.py` — web
-search for the DDG script, code search for the grep.app one. The LLM router
+search for the DDG script, code search for the grep.app one. The browser-like
+fetcher `Scripts/fetch.py` takes the same client and decoders and no search
+domain. The LLM router
 `Scripts/llm-router.py`, an HTTP server that is not an MCP server, takes the
 two logging regions, the OAuth client and the stdlib HTTP front it shares with
 `Scripts/mcp-proxy.py`. They are targets because the generator **names them
@@ -500,8 +502,8 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 <!-- BEGIN MEASURED: canonical-block-hosts -->
 | Canonical block | Source | Hosts | Generated into |
 |---|---|---|---|
-| `all 21 blocks (whole source)` | `Scripts/_mcp_brotli.py` | 4 | `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
-| `all 137 blocks (whole source)` | `Scripts/_mcp_chrome.py` | 4 | `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
+| `all 21 blocks (whole source)` | `Scripts/_mcp_brotli.py` | 5 | `Scripts/fetch.py`, `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
+| `all 137 blocks (whole source)` | `Scripts/_mcp_chrome.py` | 5 | `Scripts/fetch.py`, `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 | `all 19 blocks (whole source)` | `Scripts/_mcp_codesearch.py` | 2 | `Scripts/mcp-search.py`, `Scripts/search_github.py` |
 | `MAX_INFLIGHT_REQUESTS` | `Scripts/_mcp_concurrency.py` | 12 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_did_you_mean` | `Scripts/_mcp_dispatch.py` | 19 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
@@ -625,10 +627,10 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_ws_sync_connect` | `Scripts/_mcp_websocket.py` | 0 | no host |
 | `_ws_sync_recv` | `Scripts/_mcp_websocket.py` | 0 | no host |
 | `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 0 | no host |
-| `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 4 | `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
+| `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 5 | `Scripts/fetch.py`, `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 
-22 hosts scanned; 360 canonical blocks, of which 356 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
-<!-- END MEASURED: fb1b25c01063 -->
+23 hosts scanned; 360 canonical blocks, of which 356 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
+<!-- END MEASURED: b92f4919913f -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
@@ -761,8 +763,9 @@ measures both on every run: `tab-safety-real-blocks` asserts the unsafe set is
 exactly `_rows_note` over the real canonical text, and `host-indent-from-tokens`
 that the tab-indented servers are exactly `mcp-forge.py` and `mcp-webfetch.py`
 `tests/test_generated_region.py:group_tabs`, and — in the same case — that the
-two search scripts among the declared hosts `Scripts/amalgamate.py:DECLARED_HOSTS`
-are tab-indented, and `llm-router.py` is a space host. A block added to a source moves that set or
+two search scripts and `fetch.py` among the declared hosts
+`Scripts/amalgamate.py:DECLARED_HOSTS` are tab-indented, and `llm-router.py` is a
+space host. A block added to a source moves that set or
 fails there. The websocket source was written for the rule from the start: its tab
 host was the DDG search script, so every one of its blocks fits one call per
 physical line, the request built by appending rather than as one bracketed list,
@@ -840,6 +843,13 @@ blocks, and the Chrome client is a source a host takes whole or not at all — s
 the hand-copy census reports those copies with their declared reason instead of
 as `[UNDECLARED]`.
 
+`Scripts/fetch.py` (`e03045a`) is the fourth declared host, and the first with no
+domain of its own to take: the three whole Chrome sources and nothing else, as a
+tab host. Adding it was the tuple entry in both spellings, the expected indent
+style in `tests/test_generated_region.py:group_tabs`, and the file in `py_deps`'
+3.10+ API scope — no generator change. What the script does with the client is
+in [[scripts]].
+
 They are **not** in the `--census fleet` count, deliberately: that census is
 about the server fleet and says so in its first line, so its measured block above
 counts the servers only. A block generated only into a declared host, or into no
@@ -886,9 +896,9 @@ copy has gone:
 - `Scripts/mcp-webfetch.py`: `_result` -- declared: annotates result as dict where the canonical says Any -- a body difference no re-indenting removes
 - `Scripts/mcp-webfetch.py`: `_rows_note` -- declared: excluded twice over: it is not tab-safe (its else aligns under an open paren) and its body diverged -- (start, shown, total) against the canonical (start, shown, total, exact), with no lower-bound branch
 
-12 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 6 of the 22 hosts scanned; 12 carry a declared reason and 0 do not.
+12 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 6 of the 23 hosts scanned; 12 carry a declared reason and 0 do not.
 Declared reasons with no hand copy left to explain: none.
-<!-- END MEASURED: 89b883e16107 -->
+<!-- END MEASURED: 338aec37bd17 -->
 
 The `Scripts/mcp-skill.py` rows are the websearch sanitizer, and they follow the
 router's precedent for the same reason: `Scripts/_mcp_websearch.py` is a whole
