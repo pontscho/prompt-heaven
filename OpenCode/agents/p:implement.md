@@ -95,7 +95,7 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
    - This loads only the essential data (complete, context_summary, success_criteria, implementation_plan)
    - If task ID is specified, only that single task is loaded from the plan
    - Token-efficient: excludes original_request, requirements, constraints
-   - Default: searches for requirements.yaml in current/parent directories
+   - Default (no `--yaml`): walks up from the current directory, at most 5 levels (the current directory plus 4 parents), and takes the first `requirements.yaml` it finds; with `--yaml PATH` there is no walk and exactly that file is read
 3. Validate structure:
    - Check `complete: true`
    - Verify `implementation_plan` section exists

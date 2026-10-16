@@ -21,7 +21,7 @@ Groups:
      walk-up unchanged
   C  task-implementation-plan.py: --yaml without --doc skips the default plan
      document and warns once, --doc injects exactly that one, --no-doc is
-     silent, the default unchanged
+     silent, the default unchanged, --doc with --no-doc is a usage error
   D  the deployed copy under ClaudeCode/scripts is byte-identical
   E  hygiene: the repo tree and bytecode untouched
 
@@ -309,6 +309,18 @@ def group_c(suite, fx):
     rc, out, err = py(PLAN, ["--yaml", fx["missing"], "task-001"], fx["cwd"])
     p = one_line_error(rc, out, err)
     suite.record("C", "plan-missing-yaml-one-line", p)
+
+    rc, out, err = py(PLAN, ["--yaml", fx["feat"], "--doc", fx["doc"], "--no-doc",
+                             "task-001"], fx["cwd"])
+    p = []
+    if rc != 2:
+        p.append("--doc with --no-doc must be an argparse usage error (exit 2): "
+                 "rc %r" % rc)
+    if out:
+        p.append("nothing may reach stdout: %r" % out[:120])
+    if "not allowed with" not in err:
+        p.append("stderr must be the argparse mutual-exclusion error: %r" % err[:200])
+    suite.record("C", "plan-doc-no-doc-exclusive", p)
 
 
 def group_d(suite):

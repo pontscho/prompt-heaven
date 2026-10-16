@@ -4,7 +4,7 @@
 # a normal exit (/exit, Ctrl-C) ends the loop.
 #
 # Usage (from the repo root): claude-loop.sh [claude flags...]
-# With no flags it uses the Safranek launch line. Env: CLAUDE_CTX_LIMIT (default 300000, read by context-guard.sh).
+# With no flags it uses the Safranek launch line. Env: CLAUDE_CTX_LIMIT (default 250000, read by context-guard.sh).
 set -u
 
 if [ ! -f .claude/tmp/checkpoint.md ]; then

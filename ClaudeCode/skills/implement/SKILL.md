@@ -15,7 +15,7 @@ Execute a planned implementation based on a structured YAML document generated b
 ```
 
 - `path_to_yaml`: Optional path to the implementation plan YAML file (default: `requirements.yaml` in project root)
-- `--doc <plan-doc>`: Optional path to the feature plan document the mason reads for architectural context (default: `docs/feature-implementation-plan.md`). Do not confuse it with `--plan <path>` (see Command Parameters): in `/p:implement` that is a legacy alias of the positional YAML path, whereas in `/p:task-plan` `--plan` names the plan DOCUMENT.
+- `--doc <plan-doc>`: Optional path to the feature plan document the mason reads for architectural context (default: `docs/feature-implementation-plan.md`).
 
 At the start resolve ONE `YAML_PATH` (the positional argument, else `requirements.yaml`) and ONE `DOC_PATH` (the `--doc` value, else `docs/feature-implementation-plan.md`), both project-root-relative or absolute, and use exactly those two values in every script call, mason brief and inspector brief below. With no arguments the behavior is unchanged. Per-feature runs pass both, e.g. `/p:implement requirements-rtp.yaml --doc docs/plans/feature-rtp-plan.md`. A non-default `YAML_PATH` makes `task-implementation-plan.py` skip the default plan document, so always pass `--doc ${DOC_PATH}` there (or `--no-doc` when there is none).
 
@@ -468,7 +468,7 @@ Documentation: 2 pages updated, 1 created
 
 The command accepts optional parameters:
 
-- `--plan <path>`: Legacy alias of the positional `path_to_yaml` — the YAML plan file, NOT the plan document (default: requirements.yaml). Resolves to `YAML_PATH`.
+- `[path_to_yaml]` (positional): the task YAML (default: requirements.yaml). Resolves to `YAML_PATH`.
 - `--doc <path>`: Path to the feature plan document (default: docs/feature-implementation-plan.md). Resolves to `DOC_PATH`.
 - `--dry-run`: Show execution plan without making changes
 - `--continue`: Continue from last completed task (resume interrupted implementation)
@@ -476,7 +476,7 @@ The command accepts optional parameters:
 
 Example:
 ```
-/p:implement --plan ./docs/feature-x-plan.yaml
+/p:implement ./docs/feature-x-plan.yaml
 /p:implement requirements-rtp.yaml --doc docs/plans/feature-rtp-plan.md
 /p:implement --continue
 /p:implement --task task-003

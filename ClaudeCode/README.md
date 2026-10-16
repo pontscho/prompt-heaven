@@ -161,7 +161,7 @@ Once `requirements.yaml` exists (created by `/p:task-plan`), execute the impleme
 ```
 
 **Prerequisites:**
-- `requirements.yaml` must exist in project root (or pass its path as the positional argument; `--plan` is a legacy alias). The plan document defaults to `docs/feature-implementation-plan.md`; override with `--doc <path>`
+- `requirements.yaml` must exist in project root (or pass its path as the positional argument). The plan document defaults to `docs/feature-implementation-plan.md`; override with `--doc <path>`
 - The YAML must have `complete: true`
 - The `implementation_plan` section must be populated with tasks
 
@@ -188,7 +188,7 @@ For each task in dependency order:
 
 ```bash
 /p:implement                              # Use default requirements.yaml
-/p:implement --plan ./docs/my-plan.yaml   # Use specific plan file (legacy alias of the positional YAML path)
+/p:implement ./docs/my-plan.yaml          # Use a specific task YAML (positional path)
 /p:implement my-plan.yaml --doc docs/plans/my-plan.md   # YAML plus its plan document
 /p:implement --dry-run                    # Show what would be executed
 /p:implement --task task-003              # Execute only specific task (debugging)
@@ -648,7 +648,7 @@ EOF
 /p:implement ./features/auth/requirements.yaml --doc ./features/auth/auth-plan.md
 ```
 
-(`--plan <path>` still works as an alias of the positional YAML path. For a custom plan document pass `--doc`; produce both with `/p:feature-plan --output` and `/p:task-plan --plan <doc> --yaml <out>`.)
+(For a custom plan document pass `--doc`; produce both with `/p:feature-plan --output` and `/p:task-plan --plan <doc> --yaml <out>`.)
 
 ### Debug Specific Task
 

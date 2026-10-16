@@ -178,9 +178,10 @@ Examples:
 	)
 
 	parser.add_argument('task_ids', nargs='*', help='Task IDs to extract (if none, extract full plan)')
-	parser.add_argument('--doc', dest='doc_path', metavar='PATH',
+	doc_group = parser.add_mutually_exclusive_group()
+	doc_group.add_argument('--doc', dest='doc_path', metavar='PATH',
 		help='Path to feature implementation plan document (default: ${PROJECT_ROOT}/docs/feature-implementation-plan.md; with --yaml there is no default)')
-	parser.add_argument('--no-doc', dest='no_doc', action='store_true',
+	doc_group.add_argument('--no-doc', dest='no_doc', action='store_true',
 		help='Skip including the implementation plan document')
 	parser.add_argument('--yaml', '-y', dest='yaml_path', metavar='PATH',
 		help='Path to requirements.yaml (default: auto-detect)')

@@ -325,7 +325,7 @@ Commands are slash commands that provide specialized functionality for common de
 **Example:**
 ```
 /p:implement
-/p:implement --plan ./docs/feature-plan.yaml
+/p:implement ./docs/feature-plan.yaml
 /p:implement --continue
 ```
 
@@ -705,7 +705,7 @@ python3 ~/.claude/scripts/task-update.py completed task-001
 | `/analyze-api` | `<api-name>` | API documentation |
 | `/task-plan` | None | Feature planning |
 | `/feature-plan` | None | Detailed architecture planning |
-| `/p:implement` | `--plan <path>` `--continue` `--task <id>` | Execute implementation |
+| `/p:implement` | `[path_to_yaml]` `--doc <path>` `--continue` `--task <id>` | Execute implementation |
 | `/project-explore` | None | Project overview |
 
 ---
