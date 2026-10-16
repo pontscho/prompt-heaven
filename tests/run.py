@@ -476,7 +476,7 @@ SUITES = [
      "boundary test calls located and compared on its own because it sits "
      "outside the slice -- then the boundary DRIVEN through a real symlinked "
      "$HOME, because identical text in a file is not the same claim as "
-     "identical behaviour in the loaded module", 132),
+     "identical behaviour in the loaded module", 133),
     ("checkpoint", run_checkpoint,
      "checkpoint.py section reader + TOC writer: Start/End land on the block "
      "and nothing else, the numbers describe the file AFTER the region was "

@@ -1073,6 +1073,7 @@ SUBCOMMAND_ARGV = {
     "pr-approve": ["pr-approve", str(PR_ID)],
     "pr-decline": ["pr-decline", str(PR_ID)],
     "pr-reopen": ["pr-reopen", str(PR_ID)],
+    "pr-update": ["pr-update", str(PR_ID), "--title", "a new title"],
     "pr-merge": ["pr-merge", str(PR_ID), "--yes"],
 }
 
@@ -1080,15 +1081,16 @@ SUBCOMMAND_ARGV = {
 # --project would be an argparse error, not a finding.
 UNSCOPED = ("version", "whoami")
 
-# The six writes, spelled as main() sees them.  Used by the read-only table
+# The seven writes, spelled as main() sees them.  Used by the read-only table
 # below; the SWEEP deliberately does not read this -- it measures.
 READ_ONLY_INVOCATIONS = {name: SUBCOMMAND_ARGV[name]
                          for name in ("pr-approve", "pr-comment", "pr-create",
-                                      "pr-decline", "pr-merge", "pr-reopen")}
+                                      "pr-decline", "pr-merge", "pr-reopen",
+                                      "pr-update")}
 
 
 def fleet_response(mod, method, url):
-    """Answer any request the fifteen subcommands can make, by path shape."""
+    """Answer any request the sixteen subcommands can make, by path shape."""
     path = urllib.parse.urlsplit(url).path
     if path.endswith("/application-properties"):
         return response(mod, 200,

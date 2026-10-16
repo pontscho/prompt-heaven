@@ -2,8 +2,9 @@
 """Read from and write to a Bitbucket Server / Data Center instance from the terminal.
 
 Pull requests are the whole subject: list them, read one, read its activity feed, ask
-whether it could merge, then create one, comment on it, set a review status, decline it,
-reopen it, or merge it.  Stdlib only, no third-party HTTP client.
+whether it could merge, then create one, update its title, description or draft state,
+comment on it, set a review status, decline it, reopen it, or merge it.  Stdlib only, no
+third-party HTTP client.
 
 WHY SERVER/DC ONLY.  Bitbucket Cloud and Bitbucket Server are not two dialects of one
 API the way Jira Cloud and Jira Data Center are -- they are different products with
@@ -58,7 +59,8 @@ pr-get, pr-activities, pr-mergeability, pr-builds, pr-reviewers, and a create th
 opened a real pull request.  Each of those call sites is marked `# VERIFIED` with
 that date.  `whoami` is included on purpose: it prints the X-AUSERNAME header off
 the application-properties response, so a run that printed a real username IS the
-observation of that header.
+observation of that header.  `pr-update` followed on 2026-10-06: its PUT replaced
+a real pull request's description and is marked `# VERIFIED` with that date.
 
 Still only READ, never accepted by a server: the comment POST, the participant PUT
 behind `pr-approve`, decline, reopen and merge.  Their bodies have been assembled
@@ -87,6 +89,7 @@ Usage:
 	bitbucket.py pr-builds 1211
 	bitbucket.py pr-reviewers --from my-branch --to master
 	bitbucket.py pr-create --from my-branch --title "..." --description-file -
+	bitbucket.py pr-update 1211 --description-file body.md
 	bitbucket.py pr-comment 1211 -
 	bitbucket.py pr-approve 1211
 	bitbucket.py pr-decline 1211 --comment "superseded"
@@ -195,6 +198,7 @@ WRITE_COMMANDS = (
 	"pr-decline",
 	"pr-merge",
 	"pr-reopen",
+	"pr-update",
 )
 
 RX_PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -1584,6 +1588,77 @@ def cmd_pr_reopen(args: argparse.Namespace, client: Bitbucket) -> int:
 	return _state_change(args, client, "reopen", "OPEN")
 
 
+def cmd_pr_update(args: argparse.Namespace, client: Bitbucket) -> int:
+	"""Change a pull request's title, description or draft state.
+
+	The PUT replaces the editable fields wholesale and the server demands a
+	title in every body, so the pull request is read first: its version is the
+	optimistic lock, and its current title, description and reviewers fill in
+	whatever was not asked to change.  The reviewers are echoed back unchanged
+	rather than omitted, so the update cannot be read as "no reviewers".
+	`draft` is sent only when --draft or --no-draft was given.
+	"""
+	project, repo = _target(args)
+	if args.title is None and args.description_file is None \
+			and args.draft is None:
+		raise SetupError(
+			"nothing to update — pass --title, --description-file, --draft or "
+			"--no-draft")
+
+	description = None				# type: Optional[str]
+	if args.description_file is not None:
+		description = _file_text(args.description_file)
+
+	pull_request = client.pull_request(project, repo, args.id)
+	version = _assert_version(args, pull_request)
+
+	title = args.title if args.title is not None else pull_request.get("title")
+	if not title or not str(title).strip():
+		raise SetupError("refusing to send an empty title — the server requires one")
+	if description is None:
+		description = pull_request.get("description") or ""
+
+	reviewers = []					# type: List[Dict[str, Any]]
+	for reviewer in pull_request.get("reviewers") or []:
+		user = reviewer.get("user") if isinstance(reviewer, dict) else None
+		if isinstance(user, dict) and user.get("name"):
+			reviewers.append({"user": {"name": user["name"]}})
+
+	body = {
+		"version": version,
+		"title": title,
+		"description": description,
+		"reviewers": reviewers,
+	}								# type: Dict[str, Any]
+	if args.draft is not None:
+		body["draft"] = args.draft
+
+	path = pr_path(project, repo, args.id)
+	if args.dry_run:
+		return _dry_run("PUT", client.cfg.base_url, path, body)
+
+	# VERIFIED 2026-10-06 against Bitbucket 9.4.23: this body replaced the
+	# description of PR 1224 (version 4 -> 5), title and draft state untouched.
+	# The server trims trailing whitespace off the stored description.
+	payload = client.request(
+		"PUT", path, body=body,
+		subject="updating pull request %d" % args.id)
+	if args.json:
+		emit_json(payload)
+	else:
+		print(md_heading(2, "Pull request %d updated" % args.id))
+		print(md_kv([
+			("title", payload.get("title")),
+			("state", payload.get("state")),
+			("draft", payload.get("draft")),
+			("version", payload.get("version")),
+			("url", _self_link(payload)),
+		]))
+	summary("pull request %d updated to version %s" % (
+		args.id, payload.get("version")))
+	return OK
+
+
 def cmd_pr_merge(args: argparse.Namespace, client: Bitbucket) -> int:
 	"""Merge a pull request, behind four separate refusals.
 
@@ -1871,6 +1946,7 @@ HANDLERS = {
 	"pr-approve": cmd_pr_approve,
 	"pr-decline": cmd_pr_decline,
 	"pr-reopen": cmd_pr_reopen,
+	"pr-update": cmd_pr_update,
 	"pr-merge": cmd_pr_merge,
 }
 
@@ -1994,6 +2070,24 @@ def build_parser() -> argparse.ArgumentParser:
 	p = sub.add_parser("pr-reopen", parents=[common, scoped, dry],
 		help="reopen a declined pull request")
 	p.add_argument("id", type=int)
+	p.add_argument("--version", type=int,
+		help="assert the server currently holds this version")
+
+	p = sub.add_parser("pr-update", parents=[common, scoped, dry],
+		help="change a pull request's title, description or draft state")
+	p.add_argument("id", type=int)
+	p.add_argument("--title",
+		help="new title; the current one is kept when omitted")
+	p.add_argument("--description-file",
+		help="read the new description from this file, or - for stdin; the "
+			"current one is kept when omitted")
+	draft = p.add_mutually_exclusive_group()
+	draft.add_argument("--draft", dest="draft", action="store_const",
+		const=True, default=None,
+		help="mark the pull request as a draft (Bitbucket 8.18+)")
+	draft.add_argument("--no-draft", dest="draft", action="store_const",
+		const=False,
+		help="mark the pull request as ready for review")
 	p.add_argument("--version", type=int,
 		help="assert the server currently holds this version")
 

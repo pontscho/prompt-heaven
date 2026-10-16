@@ -4,7 +4,8 @@ description: >-
   Read and write pull requests on a Bitbucket Server / Data Center instance from the
   terminal via the bundled stdlib-only Python CLI at scripts/bitbucket.py — list pull
   requests, read one with its reviewers and activity feed, ask whether it could merge,
-  then open one, comment on it, set a review status, decline it, reopen it, or merge it.
+  then open one, update its title, description or draft state, comment on it, set a
+  review status, decline it, reopen it, or merge it.
   Server/Data Center ONLY: Bitbucket Cloud is a different product with a different REST
   API and is refused at the door rather than half-supported. Auth is a personal HTTP
   access token sent as a bearer token, always from the environment, never a flag value
@@ -13,8 +14,9 @@ description: >-
   blockers explained, or mentions a Bitbucket PR id. Nothing project-specific lives in
   the script: pr-create reads its defaults from a `.claude/bitbucket.json` profile found
   by walking up from the working directory. Merging is deliberately gated behind four
-  separate refusals. Deliberately does NOT delete anything, does not edit a pull
-  request's metadata, and does not post inline diff comments.
+  separate refusals. Editing a pull request is limited to its title, description and
+  draft state; it deliberately does NOT delete anything, does not change reviewers or
+  the target branch, and does not post inline diff comments.
 ---
 
 # Bitbucket
@@ -85,6 +87,7 @@ pull request. `pr-merge` in particular needs repository write.
 | Command | What it does |
 | --- | --- |
 | `pr-create` | Open a pull request from the profile's defaults plus the flags given. |
+| `pr-update` | Change the title (`--title`), description (`--description-file`, `-` for stdin) or draft state (`--draft` / `--no-draft`); re-reads the version first and keeps every field not given. |
 | `pr-comment` | Add a general comment, or a reply with `--parent`. |
 | `pr-approve` | Set this token's review status: `APPROVED`, `NEEDS_WORK` or `UNAPPROVED`. |
 | `pr-decline` | Decline, at the version the server currently holds. |
@@ -120,6 +123,10 @@ Verified 2026-09-15 against Bitbucket 9.4.23 with a real token: `version`, `whoa
 carry a `# VERIFIED` marker with that date. `whoami` counts because it observes
 nothing but the `X-AUSERNAME` header on the `version` response — a run that printed a
 real username is that header, observed.
+
+Verified 2026-10-06 against the same instance: `pr-update`, whose PUT replaced a real
+pull request's description at the version it had just re-read, leaving the title and
+draft state untouched. The server trims trailing whitespace off the stored description.
 
 Not yet accepted by any server: `pr-comment`, `pr-approve`, `pr-decline`, `pr-reopen`
 and `pr-merge`. Their bodies have been assembled against real pull-request data under
@@ -193,7 +200,8 @@ the way past it.
 
 The blast radius is wider than `pr-create`. The profile supplies the project and the
 repository for **every scoped subcommand**, so a planted profile selects the
-repository that `pr-approve`, `pr-decline`, `pr-comment` and `pr-merge` act in. The
+repository that `pr-approve`, `pr-decline`, `pr-comment`, `pr-update` and `pr-merge`
+act in. The
 pull request id stays caller-supplied, so a planted profile does not fabricate an
 operation — it re-aims the one you asked for, at a pull request of that number in a
 repository you did not name. Two things bound it: `--project` and `--repo` beat the
@@ -237,6 +245,11 @@ nearest profile, so one inside your own tree wins over anything further up.
   since Bitbucket 4.2, and its replacement then deprecated its own `version` query
   parameter in favour of `lastReviewedCommit`. Two deprecation layers on one feature is
   why older recipes for this go wrong.
+- **`pr-update` edits metadata, nothing else.** The PUT demands a title and the current
+  version in every body, so the pull request is re-read first and every field not given
+  is sent back as it was — including the reviewer list, so the update cannot be read as
+  "no reviewers". `draft` is sent only when `--draft` or `--no-draft` is given. It does
+  not change reviewers or the target branch, and nothing in this skill deletes.
 - **Only un-anchored comments.** An inline comment needs a diff anchor with both commit
   hashes, a line number and a line type; assembling one from CLI flags is how a comment
   lands on the wrong line of the wrong file.
