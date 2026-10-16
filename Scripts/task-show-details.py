@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Display raw YAML blocks for specific tasks from requirements.yaml file.
-Usage: task-show-details.py task-001 task-002 task-003 ...
+Usage: task-show-details.py [--yaml PATH] task-001 task-002 task-003 ...
+--yaml / -y / --yaml=PATH reads exactly that file (no walk-up).
 """
 
 import re
@@ -40,36 +41,73 @@ def find_task_yaml_block(content, task_id):
     yaml_block = content[start_pos:end_pos].rstrip()
     return yaml_block
 
+def split_yaml_flag(argv):
+    """Pull `--yaml PATH` / `-y PATH` / `--yaml=PATH` out of argv, at any position.
+
+    Returns (yaml_path_or_None, remaining_args). A flag with no value exits 1
+    with one stderr line.
+    """
+    yaml_path = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("--yaml", "-y"):
+            if i + 1 >= len(argv):
+                print(f"task-show-details.py: {arg} needs a PATH", file=sys.stderr)
+                sys.exit(1)
+            yaml_path = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--yaml="):
+            yaml_path = arg[len("--yaml="):]
+        else:
+            rest.append(arg)
+        i += 1
+    return yaml_path, rest
+
+
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: task-show-details.py task-001 task-002 task-003 ...")
+    yaml_arg, task_ids = split_yaml_flag(sys.argv[1:])
+
+    if not task_ids:
+        print("Usage: task-show-details.py [--yaml PATH] task-001 task-002 task-003 ...")
         print("\nExample:")
         print("  task-show-details.py task-001")
         print("  task-show-details.py task-001 task-002 task-003")
+        print("  task-show-details.py --yaml feat/requirements.yaml task-001")
+        print("\n--yaml, -y PATH: read exactly this file (no walk-up);")
+        print("default: requirements.yaml in the current or a parent directory")
         sys.exit(1)
 
-    task_ids = sys.argv[1:]
-
-    # Find requirements.yaml in current directory or parent directories
     yaml_file = None
-    current_dir = os.getcwd()
+    if yaml_arg is not None:
+        # An explicit file is read as named: no walk-up, no fallback.
+        yaml_file = yaml_arg
+    else:
+        # Find requirements.yaml in current directory or parent directories
+        current_dir = os.getcwd()
 
-    for _ in range(5):  # Check up to 5 levels up
-        candidate = os.path.join(current_dir, 'requirements.yaml')
-        if os.path.exists(candidate):
-            yaml_file = candidate
-            break
-        parent = os.path.dirname(current_dir)
-        if parent == current_dir:  # Reached root
-            break
-        current_dir = parent
+        for _ in range(5):  # Check up to 5 levels up
+            candidate = os.path.join(current_dir, 'requirements.yaml')
+            if os.path.exists(candidate):
+                yaml_file = candidate
+                break
+            parent = os.path.dirname(current_dir)
+            if parent == current_dir:  # Reached root
+                break
+            current_dir = parent
 
-    if not yaml_file:
-        print("Error: requirements.yaml not found in current directory or parent directories")
+        if not yaml_file:
+            print("Error: requirements.yaml not found in current directory or parent directories")
+            sys.exit(1)
+
+    try:
+        with open(yaml_file, 'r') as f:
+            content = f.read()
+    except OSError as e:
+        print(f"task-show-details.py: cannot read {yaml_file}: {e.strerror or e}", file=sys.stderr)
         sys.exit(1)
-
-    with open(yaml_file, 'r') as f:
-        content = f.read()
 
     found_tasks = []
     not_found_tasks = []

@@ -558,7 +558,7 @@ python3 ~/.claude/scripts/task-update.py completed task-001
 
 **Usage:**
 ```bash
-~/.claude/scripts/task-implementation-plan.py [path_to_yaml]
+~/.claude/scripts/task-implementation-plan.py [task_id ...] [--yaml path_to_yaml] [--doc plan_doc | --no-doc]
 ```
 
 **Output:** Compact YAML with:

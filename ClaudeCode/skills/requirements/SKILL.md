@@ -35,6 +35,7 @@ When this skill is activated:
      ```bash
      ~/.claude/scripts/task-plan.py requirements.yaml
      ```
+   - For a per-feature YAML (e.g. `requirements-rtp.yaml`, planned with `/p:task-plan --yaml`), pass that path instead; the same goes for `--yaml <path>` on the two scripts below. With no path everything below means `requirements.yaml`.
    - This will show a formatted table with all tasks, their status, and progress summary
    - The script outputs: Task ID, Status (✅ completed or ⏳ pending, ❌ cancel, 🚧 in_progress), Description, and overall progress
    - Never process the output of this script, just display it.
@@ -42,7 +43,7 @@ When this skill is activated:
 1.25. **Display raw YAML blocks for specific tasks**
    - Use the task-show-details.py script to extract and display the raw YAML blocks for one or more tasks:
      ```bash
-     ~/.claude/scripts/task-show-details.py task-001 task-002 task-003
+     ~/.claude/scripts/task-show-details.py task-001 task-002 task-003 [--yaml PATH]
      ```
    - This displays the complete raw YAML block for each task including all fields (task_id, description, status, type, file_path, function_name, implementation_details, dependencies, test_requirements, code_references, api_references)
    - Use this when:
@@ -54,14 +55,15 @@ When this skill is activated:
    - Examples:
      - Single task: `~/.claude/scripts/task-show-details.py task-017`
      - Multiple tasks: `~/.claude/scripts/task-show-details.py task-017 task-018 task-019`
-   - The script automatically finds requirements.yaml in the current directory or parent directories
+   - Without `--yaml` the script automatically finds requirements.yaml in the current directory or parent directories; `--yaml PATH` reads that file instead
    - Output is the raw YAML exactly as it appears in requirements.yaml - use this to understand implementation details
 
 1.5. **Update task status (single or batch)**
    - Use the task-update.py script to update task status in requirements.yaml:
      ```bash
-     ~/.claude/scripts/task-update.py <status> <task1> <task2> ...
+     ~/.claude/scripts/task-update.py <status> <task1> <task2> ... [--yaml PATH]
      ```
+   - `--yaml PATH` (alias `-y`) selects another task YAML; the default is `./requirements.yaml` resolved against the working directory
    - Valid statuses: `pending`, `completed`, `in_progress`, `cancel`
    - Examples:
      - Single task: `~/.claude/scripts/task-update.py completed task-017`
@@ -104,11 +106,12 @@ When this skill is activated:
    - After updating status, optionally show updated task list to confirm progress
 
 2. **Read the requirements file for detailed information**
-   - Read the project's own `requirements.yaml`, the one in the project root
-   - Run the scripts above from the project root. They do not agree on how they
-     find the file: only `task-show-details.py` walks up from the working
+   - Read the project's own `requirements.yaml`, the one in the project root (or the per-feature YAML the user names)
+   - Run the scripts above from the project root. They differ in how they
+     find the file by default: only `task-show-details.py` walks up from the working
      directory, `task-plan.py` takes the path as an argument, and
-     `task-update.py` resolves it against the working directory with no override
+     `task-update.py` resolves `requirements.yaml` against the working directory.
+     `task-update.py` and `task-show-details.py` both accept `--yaml PATH` to override it
    - This file contains the complete project requirements specification
 
 3. **Analyze the structure**

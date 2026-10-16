@@ -7,8 +7,8 @@ description: Why skills, agents and fragments are three non-overlapping layers, 
 sources:
   - ClaudeCode/ARCHITECTURE.md
 verified:
-  commit: f691801
-  date: 2026-10-02
+  commit: ef4b6a4
+  date: 2026-10-16
 links:
   - agents
   - skills
@@ -58,7 +58,7 @@ distinguishes them:
 
 | Executor | Its unit of work | Where its acceptance criterion comes from |
 |---|---|---|
-| `p:minion-mason` | one planned task | **given** — the task spec in `requirements.yaml` |
+| `p:minion-mason` | one planned task | **given** — the task spec in the task YAML (`requirements.yaml` unless the brief's `YAML_PATH` names another) |
 | `p:minion-bug-hunter` | one reported bug | **manufactured** — it must build its own reproduction |
 
 That second column is the whole justification for the second executor; the
@@ -122,9 +122,15 @@ hack.
 One consequence is worth writing down here, because it reads like a wiki-layout
 defect and is not. **`feature-implementation-plan.md` is a slot at the
 `docs/` root rather than under `specs/`, deliberately** — the path `/p:feature-plan`
-writes the current plan to, empty between plans. Its path is pinned by the
-handoff contract itself `ClaudeCode/skills/_lib/handoff-contracts.md`, by the
-default in `ClaudeCode/scripts/task-implementation-plan.py`, and by the skills
-and agents of the plan→task→implement chain. A live interface
-outranks the wiki's own layout rule, so the slot stays put — the audit has been
-run, and the move should not be proposed again.
+writes the current plan to when no `--output` is given, empty between plans. Since
+the per-feature pipeline it is a *default* rather than the only path: each stage
+takes the plan and the task YAML explicitly (`/p:feature-plan --output`,
+`/p:task-plan --plan --yaml`, `/p:implement <yaml> --doc`), so two features planned
+in parallel no longer share one slot `ClaudeCode/skills/_lib/handoff-contracts.md`.
+The default name is still pinned by the handoff contract, by the default in
+`ClaudeCode/scripts/task-implementation-plan.py` — which now injects it only when
+no explicit `--yaml` names another feature's tasks
+`ClaudeCode/scripts/task-implementation-plan.py:main` — and by the skills and
+agents of the plan→task→implement chain. A live interface outranks the wiki's own
+layout rule, so the default slot stays put — the audit has been run, and the move
+should not be proposed again.

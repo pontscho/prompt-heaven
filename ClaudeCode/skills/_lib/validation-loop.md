@@ -21,11 +21,11 @@ A validation loop runs a **reviewer** (a minion or a sub-skill) up to **5 iterat
 When a skill references this pattern, it MUST declare these specifics:
 
 1. **Reviewer**: which minion (or sub-skill via `Skill(...)`) is invoked each iteration.
-2. **Target artifact**: which file gets validated and fixed (`docs/feature-implementation-plan.md`, branch diff, `requirements.yaml`, etc.).
+2. **Target artifact**: which file gets validated and fixed (the feature plan — default `docs/feature-implementation-plan.md`, or the `--output` path —, branch diff, the task YAML — default `requirements.yaml`, or the `--yaml` path —, etc.).
 3. **Verdict vocabulary**: what verdict values the reviewer returns (e.g. `APPROVE / REVISE / REJECT` for inspector-plan; `COMPLETE / INCOMPLETE` for inspector-implementation; `APPROVE / REVISE / REJECT` for security-review).
 4. **Fix-mode**: how this loop applies fixes between iterations. Options:
    - **`edit-and-retry`** — caller directly `Edit`s the target artifact based on findings, then re-invokes reviewer. (Generic in-place mode for text/markdown artifacts. The feature/task pipelines no longer use it — they delegate all plan writing to a dedicated writer minion; see `delegate-fix`.)
-   - **`delegate-fix`** — caller delegates a fix to another minion, then re-invokes reviewer. (Used by implement: `p:minion-mason` re-implements the re-opened task based on inspector-implementation gaps, and `p:minion-builder` confirms the full-suite green build. Used by feature-plan: a single `p:minion-feature-planner` refinement per round addresses the inspector + security findings — the planner is the SOLE writer of `docs/feature-implementation-plan.md`, so even markdown fixes are delegated, never hand-edited.)
+   - **`delegate-fix`** — caller delegates a fix to another minion, then re-invokes reviewer. (Used by implement: `p:minion-mason` re-implements the re-opened task based on inspector-implementation gaps, and `p:minion-builder` confirms the full-suite green build. Used by feature-plan: a single `p:minion-feature-planner` refinement per round addresses the inspector + security findings — the planner is the SOLE writer of the plan file (`PLAN_PATH`, default `docs/feature-implementation-plan.md`), so even markdown fixes are delegated, never hand-edited.)
    - **`escalate-immediately`** — certain verdict values (e.g. `REJECT` with CRITICAL severity) must NOT be auto-fixed; surface to user immediately.
 5. **Loop name**: human label for per-iteration user messages (e.g. "Plan correctness", "Plan security review", "Implementation completeness", "Implementation security audit").
 
@@ -166,8 +166,8 @@ When you reference this pattern in a skill, write something like:
 
 Follow the validation loop pattern in `skills/_lib/validation-loop.md`, with these specifics:
 
-- **Reviewer**: `Agent(p:minion-inspector-plan, prompt: "audit docs/feature-implementation-plan.md, iteration N")`
-- **Target artifact**: `docs/feature-implementation-plan.md`
+- **Reviewer**: `Agent(p:minion-inspector-plan, prompt: "audit <PLAN_PATH>, iteration N")` (`PLAN_PATH` defaults to `docs/feature-implementation-plan.md`)
+- **Target artifact**: `PLAN_PATH`
 - **Verdict vocabulary**: `APPROVE / REVISE / REJECT`
 - **Fix-mode**: `delegate-fix` — delegate a single `Agent(p:minion-feature-planner, …)` refinement to address CRITICAL and HIGH findings; anchor every fix to the inspector's `file:line` evidence. The planner is the SOLE writer of the plan file — never hand-edit it.
 - **Loop name**: "Plan correctness"
@@ -183,12 +183,12 @@ For the **parallel fan-out variant**, declare the lanes instead of a single revi
 Follow the parallel fan-out variant in `skills/_lib/validation-loop.md`, with these specifics:
 
 - **Reviewer lanes** (fanned out each round, one message, parallel `Agent` calls):
-  - correctness: `Agent(p:minion-inspector-plan, prompt: "audit docs/feature-implementation-plan.md, round N")`
+  - correctness: `Agent(p:minion-inspector-plan, prompt: "audit <PLAN_PATH>, round N")`
   - security (gated): `Agent(p:minion-inspector-security-officer, prompt: "PHASE: triage … plan-mode, round N")`
-- **Target artifact**: `docs/feature-implementation-plan.md`
+- **Target artifact**: `PLAN_PATH` (default `docs/feature-implementation-plan.md`)
 - **Aggregate exit**: both lanes APPROVE (security triage = no hit counts as APPROVE).
 - **Fix-modes**: both lanes → `delegate-fix` — one `Agent(p:minion-feature-planner, …)` refinement per round addresses the merged correctness + security findings (security fixes fold in after the gated deep-review resolves). The planner is the SOLE writer; the skill never hand-edits the plan, and the round-0 perspective lenses do NOT re-run during validation.
-- **Gated deep-review**: on a triage hit, after the round closes run `Skill(p:security-review, mode=plan)` sequentially, then feed its verdict into the next round.
+- **Gated deep-review**: on a triage hit, after the round closes run `Skill(p:security-review, args="<PLAN_PATH> --mode plan")` sequentially, then feed its verdict into the next round.
 - **Loop name**: "Plan validation fan-out"
 ```
 

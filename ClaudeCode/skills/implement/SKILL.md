@@ -1,7 +1,7 @@
 ---
 name: implement
 description: >-
-  Execute a task-planned implementation. Reads requirements.yaml (produced by /p:task-plan), runs tasks in dependency order by delegating each task/batch to p:minion-mason (self-sufficient per-task executor — LSP context-gathering + forge build/test), with p:minion-watson for failure investigation and p:minion-builder for the green-build gate, then runs a parallel validation fan-out (completeness lane via p:minion-inspector-implementation + security lane via p:minion-inspector-security-officer PHASE: triage, gated to Skill(p:security-review, mode=code) on a hit) before marking implementation_complete: true, then syncs the docs/ wiki with the shipped code via Skill(p:wiki, ingest) (→ p:minion-librarian) as the final step. Output: implemented code + updated requirements.yaml + refreshed docs/ wiki. See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
+  Execute a task-planned implementation. Reads the task YAML (requirements.yaml by default, produced by /p:task-plan), runs tasks in dependency order by delegating each task/batch to p:minion-mason (self-sufficient per-task executor — LSP context-gathering + forge build/test), with p:minion-watson for failure investigation and p:minion-builder for the green-build gate, then runs a parallel validation fan-out (completeness lane via p:minion-inspector-implementation + security lane via p:minion-inspector-security-officer PHASE: triage, gated to Skill(p:security-review, mode=code) on a hit) before marking implementation_complete: true, then syncs the docs/ wiki with the shipped code via Skill(p:wiki, ingest) (→ p:minion-librarian) as the final step. Output: implemented code + updated task YAML + refreshed docs/ wiki. See ClaudeCode/ARCHITECTURE.md and skills/_lib/{validation-loop,handoff-contracts}.md.
 ---
 
 # Implement
@@ -11,15 +11,18 @@ Execute a planned implementation based on a structured YAML document generated b
 # Usage
 
 ```bash
-/p:implement [path_to_yaml]
+/p:implement [path_to_yaml] [--doc <plan-doc>]
 ```
 
 - `path_to_yaml`: Optional path to the implementation plan YAML file (default: `requirements.yaml` in project root)
+- `--doc <plan-doc>`: Optional path to the feature plan document the mason reads for architectural context (default: `docs/feature-implementation-plan.md`). Do not confuse it with `--plan <path>` (see Command Parameters): in `/p:implement` that is a legacy alias of the positional YAML path, whereas in `/p:task-plan` `--plan` names the plan DOCUMENT.
+
+At the start resolve ONE `YAML_PATH` (the positional argument, else `requirements.yaml`) and ONE `DOC_PATH` (the `--doc` value, else `docs/feature-implementation-plan.md`), both project-root-relative or absolute, and use exactly those two values in every script call, mason brief and inspector brief below. With no arguments the behavior is unchanged. Per-feature runs pass both, e.g. `/p:implement requirements-rtp.yaml --doc docs/plans/feature-rtp-plan.md`. A non-default `YAML_PATH` makes `task-implementation-plan.py` skip the default plan document, so always pass `--doc ${DOC_PATH}` there (or `--no-doc` when there is none).
 
 # Purpose
 
 This command takes a completed implementation plan (from `/p:task-plan`) and executes it step-by-step:
-- Reads the requirements.yaml with use `~/.claude/scripts/task-plan.py [path_to_yaml]`
+- Reads the task YAML with use `~/.claude/scripts/task-plan.py ${YAML_PATH}`
 - Validates the plan is complete and ready for implementation
 - Executes tasks in dependency order by delegating each task/batch to `p:minion-mason`
 - The mason implements + builds + tests each task in its own sandbox (LSP for context, forge for build/test)
@@ -107,23 +110,23 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 0. Don't forget read that fuckin' CLAUDE.md and relevant language-specific instruction files!
 1. **Load implementation plan using the extraction script**:
    ```bash
-   ~/.claude/scripts/task-plan.py [path_to_yaml]
+   ~/.claude/scripts/task-plan.py ${YAML_PATH}
    ```
    - This loads only the essential data (complete, context_summary, success_criteria, implementation_plan)
    - It also emits the **batch plan**: execution levels (topological) + greedy best-fit batches
    - Token-efficient: excludes original_request, requirements, constraints
-   - Default: searches for requirements.yaml in current/parent directories
+   - Default (no path given): `requirements.yaml` relative to the current directory — it does NOT search parent directories. Always pass the resolved `${YAML_PATH}` explicitly.
 2. Validate structure:
    - Check `complete: true`
    - Verify `implementation_plan` section exists
    - Verify `tasks` array is not empty
-3. **Check task status in requirements.yaml**:
+3. **Check task status in `${YAML_PATH}`**:
    - Each task has a `status` field: `pending`, `in_progress`, `completed`, or `cancel`
    - Skip tasks that are already `completed`
    - Continue from tasks that are `pending` or `in_progress`
    - This allows resuming interrupted implementations
 4. **Determine execution order**: create a dependency graph from task dependencies, topological-sort into execution levels (excluding completed tasks), and use `task-plan.py`'s batch plan in Section 3.
-5. **Do NOT pre-load implementation context.** `context_summary`, `reference_files`, `api_references`, and `pattern_excerpt`s are the **mason's** concern — it pulls the full spec + feature plan via `task-implementation-plan.py` and gathers context via LSP in its own sandbox. You only need enough of the plan structure to order and batch tasks. (Read `docs/feature-implementation-plan.md` yourself only if you need architectural context to brief the mason or resolve an ambiguity.)
+5. **Do NOT pre-load implementation context.** `context_summary`, `reference_files`, `api_references`, and `pattern_excerpt`s are the **mason's** concern — it pulls the full spec + feature plan via `task-implementation-plan.py --yaml ${YAML_PATH} --doc ${DOC_PATH}` and gathers context via LSP in its own sandbox. You only need enough of the plan structure to order and batch tasks. (Read `${DOC_PATH}` yourself only if you need architectural context to brief the mason or resolve an ambiguity.)
 
 ## 2. Task Status Update Policy
 
@@ -132,8 +135,9 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 **Script location**: `~/.claude/scripts/task-update.py`
 
 **Syntax**:
-- Single task: `~/.claude/scripts/task-update.py <status> <task_id>`
-- Multiple tasks: `~/.claude/scripts/task-update.py <status> <task1> <task2> ...`
+- Single task: `~/.claude/scripts/task-update.py <status> <task_id> --yaml ${YAML_PATH}`
+- Multiple tasks: `~/.claude/scripts/task-update.py <status> <task1> <task2> ... --yaml ${YAML_PATH}`
+- `--yaml` (alias `-y`) defaults to `./requirements.yaml`; ALWAYS pass the resolved `${YAML_PATH}` so a per-feature YAML is never confused with the default one.
 
 **When you (the orchestrator) use it**:
 - Cancelling multiple tasks at once (interruption, scope change, user abort)
@@ -142,10 +146,10 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 **Examples**:
 ```bash
 # Re-open a task during the validation fan-out
-~/.claude/scripts/task-update.py in_progress task-001
+~/.claude/scripts/task-update.py in_progress task-001 --yaml ${YAML_PATH}
 
 # Batch cancel - abort remaining tasks
-~/.claude/scripts/task-update.py cancel task-005 task-006 task-007
+~/.claude/scripts/task-update.py cancel task-005 task-006 task-007 --yaml ${YAML_PATH}
 ```
 
 ## 3. Task Execution Loop
@@ -154,7 +158,7 @@ Execute tasks by **delegating each task (or compatible batch) to `p:minion-mason
 
 ### Batching & order
 
-Use the batch plan from Section 1 (or recompute via `~/.claude/scripts/task-plan.py [path_to_yaml]`):
+Use the batch plan from Section 1 (or recompute via `~/.claude/scripts/task-plan.py ${YAML_PATH}`):
 - **Execution levels** (topological): a task runs only after all its dependencies are `completed`.
 - **Batches** within a level: tasks with no interdependencies, disjoint files, and combined T-shirt score ≤ 6 can be implemented by ONE mason together.
 - **Parallel launches**: independent batches at the same level can be launched as parallel `Agent(p:minion-mason, …)` calls in a single message. Each mason marks its own task(s) `completed`; only advance to the next level once ALL parallel masons return PASS.
@@ -163,7 +167,7 @@ Skip tasks already `completed`; resume `in_progress` / `pending`.
 
 ### a. Launch the mason (per task or batch)
 
-**Use the `Agent` tool with `subagent_type: "p:minion-mason"`.** Pass a MINIMAL brief — the mason pulls the full spec + feature plan itself (via `task-implementation-plan.py`) and gathers its own context via LSP. Do NOT inline code references or file contents.
+**Use the `Agent` tool with `subagent_type: "p:minion-mason"`.** Pass a MINIMAL brief — the mason pulls the full spec + feature plan itself (via `task-implementation-plan.py --yaml ${YAML_PATH} --doc ${DOC_PATH}`) and gathers its own context via LSP. Do NOT inline code references or file contents.
 
 **Single-task brief:**
 ```
@@ -176,8 +180,10 @@ File: {file_path}   Function: {function_name}
 Dependencies completed: {completed dependency IDs}
 
 PROJECT ROOT: {project_root}
+YAML_PATH: {YAML_PATH}   (the task YAML; pass it as --yaml to every task script)
+DOC_PATH: {DOC_PATH}     (the feature plan document; pass it as --doc to task-implementation-plan.py)
 
-Implement this task end to end: pull the spec via task-implementation-plan.py,
+Implement this task end to end: pull the spec via task-implementation-plan.py --yaml {YAML_PATH} --doc {DOC_PATH},
 navigate + read the referenced patterns via LSP, implement following them exactly,
 then build + test via forge. Mark the task completed ONLY after build + test pass.
 ```
@@ -204,16 +210,16 @@ Escalate once a mason FAILURE persists — the initial mason run (with its own W
   2. Skip this task and continue (keep task `in_progress`)
   3. Abort implementation:
      - Keep the failed task as `in_progress`
-     - **Batch cancel all remaining `pending` tasks**: `~/.claude/scripts/task-update.py cancel <remaining_task_ids>`
+     - **Batch cancel all remaining `pending` tasks**: `~/.claude/scripts/task-update.py cancel <remaining_task_ids> --yaml ${YAML_PATH}`
 
 Do NOT proceed past a failed task until a mason run succeeds or the user explicitly chooses to skip.
 
 ### d. Progress tracking
 
 - Use TodoWrite to track task/batch progress in the current session.
-- requirements.yaml status stays current via: the masons (per-task `in_progress`/`completed`) + your `cancel`/rollback + the fan-out's re-opens.
+- `${YAML_PATH}` status stays current via: the masons (per-task `in_progress`/`completed`) + your `cancel`/rollback + the fan-out's re-opens.
 - Keep the user informed of progress.
-- **CRITICAL**: NEVER manually edit requirements.yaml — status is written ONLY by the mason or the `task-update.py` script.
+- **CRITICAL**: NEVER manually edit `${YAML_PATH}` — status is written ONLY by the mason or the `task-update.py` script.
 
 ## 4. Post-implementation — Validation Fan-Out (MANDATORY)
 
@@ -233,12 +239,12 @@ Follow the **parallel fan-out variant** in `skills/_lib/validation-loop.md`, wit
 
 - **Green-build gate (every round, BEFORE the fan-out)**: invoke `p:minion-builder` with the full test target (e.g. `ctest --test-dir build`, or `forge_call test all` if forge is configured). Confirm PASS before fanning out — a failing suite means there's nothing worth auditing yet; fix the failures first (re-launch the mason for the offending task; use `p:minion-watson` if non-obvious). The build gate is SEQUENTIAL, not part of the parallel fan-out (the auditors need a green tree).
 - **Reviewer lanes** (fanned out each round in ONE message, parallel `Agent` calls — a fresh sub-agent per lane, no memory of prior rounds, so always pass the round number, the plan path(s), and the changed-file scope):
-  - **completeness** — `Agent(p:minion-inspector-implementation, …)`: read the plan from `docs/feature-implementation-plan.md` AND/OR `requirements.yaml` (pass both if both exist), detect changed files via git, return its bidirectional report (Readiness verdict, plan→code completion table, code→plan coverage, plan gaps, deviations, checklist). Verdict vocabulary: `COMPLETE / NEARLY COMPLETE / INCOMPLETE / BLOCKED`.
+  - **completeness** — `Agent(p:minion-inspector-implementation, …)`: read the plan from `${DOC_PATH}` AND/OR `${YAML_PATH}` (pass both paths explicitly if both exist), detect changed files via git, return its bidirectional report (Readiness verdict, plan→code completion table, code→plan coverage, plan gaps, deviations, checklist). Verdict vocabulary: `COMPLETE / NEARLY COMPLETE / INCOMPLETE / BLOCKED`.
   - **security (gated lane)** — `Agent(p:minion-inspector-security-officer, …)` with a `PHASE: triage` directive: a threat-surface checklist over the changed files. Returns a minimal verdict block (no-hit = APPROVE for this round; hit = the threat surface to deep-review).
 - **Target artifact**: the changed source files (auto-detected via `git_call diff --name-only <base>...HEAD`, or the explicit tracked list).
 - **Aggregate exit**: completeness lane COMPLETE (no CRITICAL plan gaps) AND security lane clean (triage no-hit, or the gated deep-review returned APPROVE). Then proceed to Phase C.
 - **Fix-mode (both lanes)**: `delegate-fix` — delegate the fix to `p:minion-mason` (re-open the mapped task, or give it a focused fix brief), then re-run the green-build gate (`p:minion-builder`) before re-fanning-out. Address findings in priority order:
-  - **completeness**: MISSING items mapped to a wrongly-`completed` task → re-open (status → `in_progress` via `task-update.py`), re-launch `p:minion-mason` for that task (it implements + forge build/test + marks `completed`), then confirm via the green-build gate; PARTIAL items → re-launch the mason to finish, then green-build gate; plan gaps / unplanned non-supporting changes → flag to the user, do NOT silently expand scope; DEVIATED items with concerning risk → flag for review.
+  - **completeness**: MISSING items mapped to a wrongly-`completed` task → re-open (status → `in_progress` via `task-update.py ... --yaml ${YAML_PATH}`), re-launch `p:minion-mason` for that task (it implements + forge build/test + marks `completed`), then confirm via the green-build gate; PARTIAL items → re-launch the mason to finish, then green-build gate; plan gaps / unplanned non-supporting changes → flag to the user, do NOT silently expand scope; DEVIATED items with concerning risk → flag for review.
   - **security**: CRITICAL → escalate first (see exception below); HIGH → delegate a fix to the mason (parameterize the query, `httpOnly` cookie, input validation, bounded string copy, …); MEDIUM → fix where small and in-scope; LOW/INFO → record under `implementation_open_items`; detected secrets → remove from the file, suggest external rotation, audit git history (`git_call log/show`).
   - **BLOCKED** (completeness) → stop and escalate to the user immediately; do not keep iterating until the user unblocks.
 - **Gated deep-review (security lane)**: on a triage **hit**, AFTER the fan-out round closes, run `Skill(p:security-review, args="--branch --mode code")` SEQUENTIALLY in the main context — it runs the full 3-phase pipeline (triage → find → verify → assemble) in fresh sub-agent contexts to break anchoring bias, which the security-officer (a leaf worker) cannot reproduce on its own (see the bounded-nesting rule in `ARCHITECTURE.md`). NEVER put this `Skill(...)` call inside the parallel fan-out — it would serialize the round. Feed its `APPROVE / REVISE / REJECT` verdict into the next round's aggregate. After any security fix (delegated to the mason), re-run the green-build gate (`p:minion-builder`) to confirm no regression (delegate to `p:minion-watson` if the build breaks after a security fix).
@@ -271,7 +277,7 @@ Generate the implementation summary:
 - Any security findings accepted as residual risk (with OWASP/CWE)
 - Any warnings or issues encountered
 
-Update the YAML file:
+Update the YAML file (`${YAML_PATH}`):
 - Add `implementation_complete: true`
 - Add `implementation_date: YYYY-MM-DD`
 - Add any notes about implementation deviations
@@ -286,7 +292,7 @@ After writing the completion record, proceed to **Section 6 (Documentation & Wik
 
 Before marking implementation complete (i.e., before Phase C's YAML update):
 
-- All tasks executed successfully (status `completed` in requirements.yaml)
+- All tasks executed successfully (status `completed` in `${YAML_PATH}`)
 - All tests pass (final `p:minion-builder` green-build gate returned PASS)
 - No language-specific linting warnings (clang-tidy for C/C++, luac for Lua, etc.) — verified by the mason (per task) and the final `p:minion-builder` green-build gate, NEVER inline
 - Build succeeds without errors — verified via the mason (per task) and the `p:minion-builder` green-build gate
@@ -349,7 +355,7 @@ Page prose is owned by the librarian; task status stays owned by the mason / `ta
 `/p:implement` does not commit — committing is the User's step. So it never closes a
 roadmap item itself; it names the step. After Section 6, and only if Phase C wrote
 `implementation_complete: true`, read the optional top-level `roadmap_item` from
-`requirements.yaml` (Read; `task-plan.py` does not print it). If it is set, end the
+`${YAML_PATH}` (Read; `task-plan.py` does not print it). If it is set, end the
 final summary with exactly this next step, the id filled in and `<sha>` left for the
 User:
 
@@ -369,12 +375,12 @@ Next step, after you commit this work:
 
 If implementation is interrupted:
 - The TodoWrite task list shows progress in the current session
-- **Task status is automatically saved in requirements.yaml** (written by the mason):
+- **Task status is automatically saved in `${YAML_PATH}`** (written by the mason):
   - `completed` tasks are automatically marked and will be skipped on resume
   - `in_progress` tasks will be re-executed (re-launched to a fresh mason)
   - `pending` tasks haven't been started yet
-- Re-run `/p:implement` to continue from where it stopped
-- The command automatically skips completed tasks based on status in requirements.yaml
+- Re-run `/p:implement` (with the same `path_to_yaml` / `--doc`) to continue from where it stopped
+- The command automatically skips completed tasks based on status in `${YAML_PATH}`
 - Use `/p:requirements` to view current task status before resuming
 
 # Important Notes
@@ -441,13 +447,13 @@ Round 1/5:
 
 Phase C — Summary & YAML:
 ✓ All success criteria met
-✓ requirements.yaml updated: implementation_complete=true, inspector_verdict=COMPLETE, security_verdict=APPROVE, validation_fan_out_rounds=1
+✓ ${YAML_PATH} updated: implementation_complete=true, inspector_verdict=COMPLETE, security_verdict=APPROVE, validation_fan_out_rounds=1
 
 [Documentation & Wiki — Section 6]
 → Skill(p:wiki, args="ingest master") → p:minion-librarian
 ✓ 3 changed files mapped to 2 pages (websocket-protocol.md, api-reference.md); prose + anchors updated, INDEX reindexed
 ⚠ [PROPOSE-NEW-PAGE] ping-pong-keepalive → surfaced to user → approved → page created
-✓ requirements.yaml: documentation_updated=true, documentation_pages_touched=[websocket-protocol, api-reference, ping-pong-keepalive]
+✓ ${YAML_PATH}: documentation_updated=true, documentation_pages_touched=[websocket-protocol, api-reference, ping-pong-keepalive]
 
 Implementation complete!
 Modified files: 2
@@ -462,7 +468,8 @@ Documentation: 2 pages updated, 1 created
 
 The command accepts optional parameters:
 
-- `--plan <path>`: Path to YAML plan file (default: requirements.yaml)
+- `--plan <path>`: Legacy alias of the positional `path_to_yaml` — the YAML plan file, NOT the plan document (default: requirements.yaml). Resolves to `YAML_PATH`.
+- `--doc <path>`: Path to the feature plan document (default: docs/feature-implementation-plan.md). Resolves to `DOC_PATH`.
 - `--dry-run`: Show execution plan without making changes
 - `--continue`: Continue from last completed task (resume interrupted implementation)
 - `--task <task_id>`: Execute only specific task (for debugging)
@@ -470,6 +477,7 @@ The command accepts optional parameters:
 Example:
 ```
 /p:implement --plan ./docs/feature-x-plan.yaml
+/p:implement requirements-rtp.yaml --doc docs/plans/feature-rtp-plan.md
 /p:implement --continue
 /p:implement --task task-003
 ```
@@ -479,8 +487,8 @@ Example:
 Before or during implementation, you can check task status:
 ```
 /p:requirements                    # Show all tasks with current status
-~/.claude/scripts/task-show-all.py requirements.yaml
-~/.claude/scripts/task-show-details.py task-001 task-002
+~/.claude/scripts/task-show-all.py ${YAML_PATH}
+~/.claude/scripts/task-show-details.py task-001 task-002 --yaml ${YAML_PATH}
 ```
 
 This helps you understand:

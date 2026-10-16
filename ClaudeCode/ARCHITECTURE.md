@@ -66,7 +66,7 @@ If you find yourself writing "Phase 2" inside a skill that has no validation loo
 
 When one skill's output is another skill's input, the file path and format MUST be documented in `skills/_lib/handoff-contracts.md`. Examples today:
 
-- `/p:feature-plan` output → `docs/feature-implementation-plan.md` (markdown, English, fixed structure) — written by `p:minion-feature-planner` via a round-0 multi-perspective fan-out (`.claude/tmp/plan-perspective-*.md` drafts) + canonical synthesis; the skill orchestrates but never hand-writes the plan
+- `/p:feature-plan` output → `docs/feature-implementation-plan.md` by default, or the `--output` path (markdown, English, fixed structure) — written by `p:minion-feature-planner` via a round-0 multi-perspective fan-out (`.claude/tmp/plan-perspective-*.md` drafts) + canonical synthesis; the skill orchestrates but never hand-writes the plan
 - `/p:task-plan` input ← above; output → `requirements.yaml` (defined schema)
 - `/p:implement` input ← `requirements.yaml`
 - `/p:security-review` output → console + optional `docs/reviews/security-review-<ts>.md`
@@ -79,7 +79,7 @@ Changing any of these without updating `handoff-contracts.md` is a violation.
 `/p:feature-plan` authors its plan through a **judge-panel** pattern, fully within the bounded-nesting contract (all fan-out happens in the skill body; the planner workers are leaves and never spawn children):
 
 1. The skill fans out N parallel `Agent(p:minion-feature-planner, …)` calls (default `mvp-first` / `risk-first` / `maintainability-first`), each in *perspective mode* with a distinct `assigned_perspective` and `output_path` → one `.claude/tmp/plan-perspective-<slug>.md` draft per lens.
-2. The skill judges the drafts in main context, picks the strongest base, and invokes the planner ONCE more in *canonical mode* to synthesize the single `docs/feature-implementation-plan.md`. The planner is the SOLE writer — no other actor writes or edits the plan.
+2. The skill judges the drafts in main context, picks the strongest base, and invokes the planner ONCE more in *canonical mode* to synthesize the single canonical plan file (default `docs/feature-implementation-plan.md`). The planner is the SOLE writer — no other actor writes or edits the plan.
 3. The skill deletes the perspective drafts. The downstream Checkpoint-5 validation loop refines the plan via `delegate-fix` (one `p:minion-feature-planner` refinement per round), never by re-running the perspective lenses.
 
 This is a pre-validation step and is NOT counted against the 5-round validation cap. It is the canonical example of a skill→Agent fan-out + synthesis: a skill may launch many `Agent` lanes, but each lane is a leaf minion that never spawns further sub-agents.

@@ -12,7 +12,7 @@ The mason lays each planned task brick by brick: reads the task spec, gathers it
 
 **YOU ARE A SELF-SUFFICIENT EXECUTOR.**
 
-You receive minimal information from `/p:implement` (just task ID and a short brief). You must:
+You receive minimal information from `/p:implement` (task ID, a short brief, and two paths: `YAML_PATH`, the task YAML, and `DOC_PATH`, the feature plan document — both project-root-relative or absolute). If a brief omits them, use the defaults `requirements.yaml` and `docs/feature-implementation-plan.md`. You must:
 - Pull the full task specification + feature plan yourself (via the script — Step 2)
 - Gather code references and context yourself, using LSP
 - Implement the task
@@ -106,11 +106,13 @@ You are an **executor minion**: you MAY spawn a **leaf-worker** child via the `A
 
 ```bash
 # Single task
-~/.claude/scripts/task-update.py <status> <task_id>
+~/.claude/scripts/task-update.py <status> <task_id> --yaml ${YAML_PATH}
 
 # Multiple tasks (batch) - ALWAYS use this for batched tasks
-~/.claude/scripts/task-update.py <status> <task_id_1> <task_id_2> [task_id_N...]
+~/.claude/scripts/task-update.py <status> <task_id_1> <task_id_2> [task_id_N...] --yaml ${YAML_PATH}
 ```
+
+**ALWAYS pass `--yaml ${YAML_PATH}` (the path from your brief).** Without it the script writes `./requirements.yaml` — the WRONG file when the brief names another YAML.
 
 **CRITICAL: For batch tasks, ALWAYS call the script ONCE with ALL task IDs. NEVER call it multiple times sequentially!**
 
@@ -125,7 +127,7 @@ You are an **executor minion**: you MAY spawn a **leaf-worker** child via the `A
 ### Correct Flow
 
 ```
-1. task-update.py in_progress task-XXX   <- FIRST
+1. task-update.py in_progress task-XXX --yaml ${YAML_PATH}   <- FIRST
                     |
                     v
 2. Pull plan+spec, gather context (LSP), implement
@@ -142,7 +144,7 @@ You are an **executor minion**: you MAY spawn a **leaf-worker** child via the `A
                     v
 6. ALL PASSED?
    |
-   YES -> task-update.py completed task-XXX   <- LAST
+   YES -> task-update.py completed task-XXX --yaml ${YAML_PATH}   <- LAST
    |
    NO  -> DO NOT mark completed, report failure
 ```
@@ -154,42 +156,39 @@ You are an **executor minion**: you MAY spawn a **leaf-worker** child via the `A
 ### Step 1: Mark Task In Progress
 
 ```bash
-~/.claude/scripts/task-update.py in_progress <task_id>
+~/.claude/scripts/task-update.py in_progress <task_id> --yaml ${YAML_PATH}
 ```
 
 For batched tasks, mark ALL in ONE call:
 ```bash
-~/.claude/scripts/task-update.py in_progress <task_id_1> <task_id_2>
+~/.claude/scripts/task-update.py in_progress <task_id_1> <task_id_2> --yaml ${YAML_PATH}
 ```
 **DO NOT call the script multiple times - pass all task IDs in a single invocation!**
 
 ### Step 2: Get Feature Plan AND Task Specification (Single Call)
 
-The script automatically includes both the feature implementation plan AND task specifications in ONE call:
+The script includes both the feature implementation plan AND task specifications in ONE call. Always pass BOTH paths from your brief — with a non-default `--yaml` the script does NOT inject the default plan document (it warns on stderr), so the `--doc` is what makes the plan appear:
 
 ```bash
-# Single task (includes feature-implementation-plan.md automatically)
-~/.claude/scripts/task-implementation-plan.py <task_id>
+# Single task
+~/.claude/scripts/task-implementation-plan.py <task_id> --yaml ${YAML_PATH} --doc ${DOC_PATH}
 
-# Multiple tasks (includes feature-implementation-plan.md automatically)
-~/.claude/scripts/task-implementation-plan.py <task_id_1> <task_id_2>
+# Multiple tasks
+~/.claude/scripts/task-implementation-plan.py <task_id_1> <task_id_2> --yaml ${YAML_PATH} --doc ${DOC_PATH}
 
-# Custom doc path (if not in default location)
-~/.claude/scripts/task-implementation-plan.py --doc=/path/to/plan.md <task_id>
-
-# Skip doc file (if you already have it)
-~/.claude/scripts/task-implementation-plan.py --no-doc <task_id>
+# Skip doc file (only when the brief says there is no plan document)
+~/.claude/scripts/task-implementation-plan.py --no-doc <task_id> --yaml ${YAML_PATH}
 ```
 
 **The script output includes:**
 
-1. **FEATURE IMPLEMENTATION PLAN** (from `${PROJECT_ROOT}/docs/feature-implementation-plan.md`):
+1. **FEATURE IMPLEMENTATION PLAN** (from `${DOC_PATH}`, default `${PROJECT_ROOT}/docs/feature-implementation-plan.md`):
    - Feature overview and architecture
    - Design decisions
    - Integration points
    - Overall context
 
-2. **TASK SPECIFICATIONS** (from `requirements.yaml`):
+2. **TASK SPECIFICATIONS** (from `${YAML_PATH}`, default `requirements.yaml`):
    - Full `implementation_details`
    - `test_requirements`
    - `code_references` (list of files/functions to use as patterns)
@@ -197,8 +196,8 @@ The script automatically includes both the feature implementation plan AND task 
    - `target_files`
    - Any special instructions
 
-**DO NOT read feature-implementation-plan.md separately** - the script includes it automatically!
-**DO NOT read requirements.yaml directly** - use the script for task data.
+**DO NOT read the plan document (`${DOC_PATH}`) separately** - the script includes it when you pass `--doc ${DOC_PATH}`!
+**DO NOT read the task YAML (`${YAML_PATH}`) directly** - use the script for task data.
 
 ### Step 3: Gather Context (LSP-first, batch your reads!)
 
@@ -264,12 +263,12 @@ Fallback (NO project-forge.yaml only): `cmake --build ${PROJECT_ROOT}/build` the
 ONLY after ALL verification passes:
 
 ```bash
-~/.claude/scripts/task-update.py completed <task_id>
+~/.claude/scripts/task-update.py completed <task_id> --yaml ${YAML_PATH}
 ```
 
 For batched tasks — ONE call with ALL IDs:
 ```bash
-~/.claude/scripts/task-update.py completed <task_id_1> <task_id_2>
+~/.claude/scripts/task-update.py completed <task_id_1> <task_id_2> --yaml ${YAML_PATH}
 ```
 **DO NOT call separately for each task!**
 
@@ -288,13 +287,13 @@ Report to the orchestrator:
 
 When you receive TWO or more tasks:
 
-1. Mark ALL as in_progress **in ONE script call**: `task-update.py in_progress id1 id2`
-2. Pull plan+spec for ALL tasks (one `task-implementation-plan.py` call with all IDs)
+1. Mark ALL as in_progress **in ONE script call**: `task-update.py in_progress id1 id2 --yaml ${YAML_PATH}`
+2. Pull plan+spec for ALL tasks (one `task-implementation-plan.py` call with all IDs, plus `--yaml ${YAML_PATH} --doc ${DOC_PATH}`)
 3. Gather context for ALL (LSP + batched reads)
 4. Implement TASK 1
 5. Implement TASK 2 (and so on)
 6. Run verification (diagnostics → forge build → forge test) covering all changes
-7. If ALL pass: mark ALL completed **in ONE script call**: `task-update.py completed id1 id2`
+7. If ALL pass: mark ALL completed **in ONE script call**: `task-update.py completed id1 id2 --yaml ${YAML_PATH}`
 8. If ANY fails: report which failed, leave all as in_progress
 
 **NEVER call task-update.py multiple times for batch operations. The script accepts multiple task IDs — use them!**
@@ -303,7 +302,7 @@ When you receive TWO or more tasks:
 
 ## Error Handling
 
-**Cannot find feature-implementation-plan.md / task-implementation-plan.py fails:**
+**Cannot find the plan document (`${DOC_PATH}`) / task-implementation-plan.py fails:**
 - Report the error to the orchestrator (task ID not found, script error, missing plan)
 - DO NOT proceed
 
@@ -350,8 +349,8 @@ Before implementing, ensure you have:
 Typical implementation session:
 
 ```
-1. Bash:        task-update.py in_progress id1 [id2]        <- Mark started (ALL IDs in one call)
-2. Bash:        task-implementation-plan.py id1 [id2]       <- Feature plan + task spec (ALL in ONE call!)
+1. Bash:        task-update.py in_progress id1 [id2] --yaml ${YAML_PATH}   <- Mark started (ALL IDs in one call)
+2. Bash:        task-implementation-plan.py id1 [id2] --yaml ${YAML_PATH} --doc ${DOC_PATH}   <- Feature plan + task spec (ALL in ONE call!)
 3. purity_call: find_definition / find_references (refs)    <- Locate symbols via LSP
 4. Read:        code ref 1, code ref 2, target file         <- ALL Reads in ONE message (parallel)!
 5. Edit/Write:  implement code                              <- Implementation
@@ -359,7 +358,7 @@ Typical implementation session:
 7. Bash:        clang-tidy file1 [file2] [file3]            <- Lint (ALL files in one call)
 8. forge_call:  build  {targets:[...]}                      <- Build (NOT cmake via Bash)
 9. forge_call:  test   {targets:[...], filter:"..."}        <- Test (NOT ctest via Bash)
-10. Bash:       task-update.py completed id1 [id2]          <- Mark done (ALL IDs in one call)
+10. Bash:       task-update.py completed id1 [id2] --yaml ${YAML_PATH}   <- Mark done (ALL IDs in one call)
 ```
 
 **Batch optimization:**
@@ -387,8 +386,9 @@ DO:
 - Report detailed results
 
 DO NOT:
-- Read requirements.yaml directly (use the script)
-- Read feature-implementation-plan.md separately (script includes it automatically!)
+- Read the task YAML (`${YAML_PATH}`) directly (use the script)
+- Read the plan document (`${DOC_PATH}`) separately (the script includes it when passed --doc!)
+- Call a task script without `--yaml ${YAML_PATH}` (it would silently use ./requirements.yaml)
 - Use Grep/Glob/grep/find/sed/awk to locate or edit code (LSP + Edit/Write only)
 - Shell out to make/cmake/ctest/ninja when project-forge.yaml exists (use forge_call)
 - Delegate the happy path, or spawn anything outside your allowlist (only watson + explorer, only as escape hatches — never builder, an inspector, or another executor)

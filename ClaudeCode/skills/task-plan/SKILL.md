@@ -190,8 +190,15 @@ IMPORTANT: output of this step is the sole input for task generation. IT MUST BE
 
 The final output of the plan command is a YAML document that serves as input for the `p:implement` command.
 
-- Create a comprehensive implementation plan in YAML format (requirements.yaml in project root)
-- Add a detailed technical specification document to the `docs/` folder if `docs/feature-implementation-plan.md` does not already exist, naming the file according to the feature being implemented
+- Create a comprehensive implementation plan in YAML format at `YAML_PATH` (default `requirements.yaml` in project root)
+- Read the feature plan at `DOC_PATH` (default `docs/feature-implementation-plan.md`) when it exists. Add a detailed technical specification document to the `docs/` folder ONLY if `DOC_PATH` does not exist, naming the new file according to the feature being implemented and using that file as `DOC_PATH` from then on
+
+**Arguments.** `/p:task-plan [--plan <doc>] [--yaml <out>]` — both optional, both project-root-relative or absolute. Resolve them ONCE at the start:
+
+- `DOC_PATH` = the `--plan` value, otherwise `docs/feature-implementation-plan.md`. It is the input plan document (the `/p:feature-plan` output).
+- `YAML_PATH` = the `--yaml` value, otherwise `requirements.yaml` in the project root. It is the ONLY file this run writes (via `p:minion-task-planner`) and the file the validator and the plan-slot check inspect.
+
+With no argument the behavior is unchanged. Use the flags when several features are planned in parallel, e.g. `/p:task-plan --plan docs/plans/feature-rtp-plan.md --yaml requirements-rtp.yaml`; each feature then has its own plan doc, its own YAML and its own roadmap plan slot. Pass `YAML_PATH` and `DOC_PATH` on to `p:minion-task-planner` in every brief, and tell the User the `--yaml` / `--doc` values to give `/p:implement` at the end.
 - The YAML must include:
   - All gathered requirements with answers
   - All constraints and their impacts
@@ -210,8 +217,8 @@ The final output of the plan command is a YAML document that serves as input for
 
 ## Workflow
 
-0. Don't forget read that fuckin' CLAUDE.md and docs/feature-implementation-plan.md if they exist!
-0.5. **Plan-slot check** — before `requirements.yaml` is written for the first time in this run, apply the slot check in [Roadmap item](#roadmap-item). If it says stop, stop and ask the User; never overwrite.
+0. Don't forget read that fuckin' CLAUDE.md and the plan document `DOC_PATH` (default docs/feature-implementation-plan.md) if they exist!
+0.5. **Plan-slot check** — before `YAML_PATH` is written for the first time in this run, apply the slot check in [Roadmap item](#roadmap-item). If it says stop, stop and ask the User; never overwrite.
 1. Search repository for existing patterns, similar implementations, and architectural decisions:
    - Use Glob and Grep to find similar **code patterns** (source code in any language: C, Lua, Python, etc.)
    - Search for relevant **documentation** (in docs/ directory)
@@ -220,7 +227,7 @@ The final output of the plan command is a YAML document that serves as input for
    - Note why each reference is relevant (e.g., "similar error handling pattern", "same API structure")
    - Link documentation that explains APIs, protocols, or architecture
 2. Think hard to determine complexity, approach (integration/implementation), and affected files
-3. Collect a set of questions and put them in `requirements.yaml` (in project root) file based on #Schema. If the plan is for a roadmap item, write `roadmap_item` in this first write and move the item to `planned` (see [Roadmap item](#roadmap-item))
+3. Collect a set of questions and put them in the `YAML_PATH` file (default `requirements.yaml` in project root) based on #Schema. If the plan is for a roadmap item, write `roadmap_item` in this first write and move the item to `planned` (see [Roadmap item](#roadmap-item))
 4. Prioritize questions in this order:
    a. Architecture & Approach: Core technical decisions
    b. Dependencies & Integration: External systems, libraries, APIs, interfaces, types
@@ -279,9 +286,9 @@ The final output of the plan command is a YAML document that serves as input for
       - Implementation approach
       - File and function organization
       - Testing strategy
-      - References to requirements.yaml
+      - References to the task YAML (`YAML_PATH`)
    c. Verify the implementation_plan is complete and unambiguous
-   d. **Validate the finished YAML**: run `~/.claude/scripts/task-validator.py requirements.yaml`
+   d. **Validate the finished YAML**: run `~/.claude/scripts/task-validator.py <YAML_PATH>`
       directly as an executable — it is `+x` with a `#!/usr/bin/env python3` shebang, so do
       NOT prefix it with `python3`.
       Only declare the plan complete when it returns **0 ERRORs** (exit code 0). Fix every
@@ -427,8 +434,8 @@ implementation_plan:
 
 # Roadmap item
 
-`requirements.yaml` holds ONE plan at a time; the `p:roadmap` roadmap
-(`docs/roadmap/roadmap.md`) holds many items. The optional top-level `roadmap_item`
+A task YAML file (`YAML_PATH`, default `requirements.yaml`) holds ONE plan at a time; the `p:roadmap` roadmap
+(`docs/roadmap/roadmap.md`) holds many items. Plan slots are per file: a per-feature `--yaml` file is its own slot, independent of any other YAML. The optional top-level `roadmap_item`
 is the only link between them, and it points one way: the roadmap never mirrors
 task status. The state meanings are in `ClaudeCode/skills/roadmap/SKILL.md`
 ("What the three live states mean"). Every roadmap command below runs
@@ -439,8 +446,8 @@ and state names and single-quoted `.claude/tmp/roadmap-stage-*` paths.
 **Which item.** Set `roadmap_item` only when the User names the item this plan is
 for (or the feature plan names it). Never guess one from a title.
 
-**The slot check (Workflow step 0.5).** At most one item owns the plan slot. If a
-`requirements.yaml` already exists and carries `roadmap_item: R-NNNN`, run
+**The slot check (Workflow step 0.5).** At most one item owns the plan slot. If the
+file at `YAML_PATH` (the one this run is about to write — never another YAML in the repo) already exists and carries `roadmap_item: R-NNNN`, run
 `roadmap.py show R-NNNN` before writing anything:
 
 - it prints an **archive page** (frontmatter `type: roadmap-item` with a `closed:`
@@ -454,13 +461,13 @@ for (or the feature plan names it). Never guess one from a title.
 An existing file without `roadmap_item` is overwritten as before. Updating the plan
 of the SAME item you are planning is not an overwrite of another item's slot.
 
-**Writing the link (Workflow step 3).** In the first write of `requirements.yaml`,
+**Writing the link (Workflow step 3).** In the first write of `YAML_PATH`,
 add `roadmap_item: R-NNNN`. Then read the item's state and lane from
 `roadmap.py show R-NNNN` and move it to `planned`:
 
 - `idea` in `now` / `next` / `later`: stage a reason file with `purity_call`
   `create_text_file` at `.claude/tmp/roadmap-stage-<ts>-<n>.txt` holding one line,
-  `planned in requirements.yaml`, then run
+  `planned in <YAML_PATH>` (e.g. `planned in requirements.yaml`), then run
   `roadmap.py move R-NNNN <its current lane> --state planned --reason-file '.claude/tmp/roadmap-stage-<ts>-<n>.txt'`;
 - `idea` in the inbox: the same, but to `next` (`planned` is not allowed in the inbox);
 - already `planned`: no move (roadmap.py would refuse it as "nothing to move");
@@ -474,14 +481,14 @@ User rather than routing around it. Never edit `docs/roadmap/` by hand.
 
 # Validation
 
-`requirements.yaml` is the **sole input** for `p:implement` / `p:requirements`. A
+The task YAML (`requirements.yaml` by default) is the **sole input** for `p:implement` / `p:requirements`. A
 schema-invalid or inconsistent plan (dangling dependency, dependency cycle, wrong
 `effort_breakdown`, bad enum) is otherwise only discovered mid-implementation, expensively.
 `Scripts/task-validator.py` catches these deterministically — it is the gate before
 `complete: true`.
 
 ```
-~/.claude/scripts/task-validator.py [requirements.yaml] [--strict] [--quiet] [--json]
+~/.claude/scripts/task-validator.py [<YAML_PATH>, default requirements.yaml] [--strict] [--quiet] [--json]
 ```
 
 - **Phase-aware**: with `complete: false` only `requirements` / `constraints` /

@@ -181,6 +181,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|READ_ONLY|ORIGIN|VERDICT|UNVERIFIED|control'
 
+  task_scripts:
+    description: "The task-script family's explicit --yaml PATH (task-update, task-show-details, task-implementation-plan), each run as a child beside a decoy ./requirements.yaml that must stay untouched: position-independent --yaml / -y / --yaml=, an unreadable file as one stderr line and exit 1 with no fallback to the cwd, and an explicit --yaml without --doc skipping the default plan document with one warning instead of another feature's plan."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py task_scripts
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared'
+
   checkpoint:
     description: "The checkpoint section reader and TOC writer. Writes only inside a mkdtemp sandbox -- never the live .claude/tmp/checkpoint.md, which is the script's own default target: line ranges, the two-render offset fix point, idempotence, byte preservation, and the refusals."
     requires: [syntax]

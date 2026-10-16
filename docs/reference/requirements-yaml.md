@@ -34,8 +34,8 @@ skill. See [[skills]] and [[scripts]] for those.
 
 ## Why a second artifact at all
 
-The plan and the YAML have different readers. The plan — written to the
-`feature-implementation-plan.md` slot at the `docs/` root by `/p:feature-plan` — is prose, judged
+The plan and the YAML have different readers. The plan — written by `/p:feature-plan`
+to `feature-implementation-plan.md` at the `docs/` root unless `--output` names another path — is prose, judged
 by a validation loop and read by a human.
 The YAML is read and *rewritten* by programs: `Scripts/task-update.py` flips a
 task's status in place while preserving the file's formatting, `Scripts/task-plan.py`
@@ -152,9 +152,15 @@ hop count rather than by an owner — five levels, so where it stops is a functi
 how deep the working directory happens to be `Scripts/task-show-details.py:main`;
 `task-plan.py` takes the path as a positional argument and falls back to the working
 directory `Scripts/task-plan.py:main`; and `task-update.py` resolves it against the
-working directory with no override of any kind `Scripts/task-update.py`. The
-operational consequence is the reader's, and it is written where instructions
-belong rather than here `ClaudeCode/skills/requirements/SKILL.md`.
+working directory `Scripts/task-update.py`. Those are the *defaults*. Since the
+per-feature task YAML, `task-update.py` and `task-show-details.py` also take an
+explicit `--yaml PATH` that is read exactly as named — no walk-up, no fallback to
+the working directory when it cannot be read `Scripts/task-update.py:split_yaml_flag`
+`Scripts/task-show-details.py:main` — and `/p:implement` passes its resolved path
+to every script call rather than relying on any default
+`ClaudeCode/skills/implement/SKILL.md`. So the divergence is now confined to the
+no-flag case. The operational consequence is the reader's, and it is written where
+instructions belong rather than here `ClaudeCode/skills/requirements/SKILL.md`.
 
 What belongs here is the asymmetry, because no single file shows it. In the same
 repo in the same week, the *other* family of upward file-walks was hardened rather
@@ -173,7 +179,12 @@ and it gets the same treatment: stated, not invented.
 `requirements.yaml` is a fixed output slot rather than a document with versions.
 `/p:task-plan` writes it at one well-known path and the next planning run overwrites
 it whole — no prompt, no backup, no second file, and nothing in the pipeline reads
-the previous contents first. That holds only for a slot whose plan carries no live
+the previous contents first. The well-known path is now a default rather than the
+only choice: `/p:task-plan --plan <doc> --yaml <out>` writes a per-feature YAML,
+and slots are per file — a `--yaml` file is its own slot, the plan-slot check below
+inspects only the file the run is about to write, and another feature's YAML is
+never touched `ClaudeCode/skills/task-plan/SKILL.md`. Within one file nothing
+changed: the next run that names the same path still overwrites it whole. That holds only for a slot whose plan carries no live
 `roadmap_item`: one that does is checked first, and the run stops and asks before
 overwriting it (see the `roadmap_item` section below,
 `ClaudeCode/skills/task-plan/SKILL.md`). The file said so about itself for as long as the
@@ -207,8 +218,8 @@ into a page before the slot was reused. Whatever stayed only in the slot is gone
 
 The roadmap ([[0022-a-someday-maybe-is-a-roadmap-item]]) holds many items and
 caps how many may sit in `now` (its `wip_now`, which starts at
-`ClaudeCode/skills/roadmap/scripts/roadmap.py:WIP_DEFAULT`); this file holds one
-plan. Until the optional top-level
+`ClaudeCode/skills/roadmap/scripts/roadmap.py:WIP_DEFAULT`); a task YAML holds one
+plan, and each per-feature YAML is a slot of its own `ClaudeCode/skills/roadmap/SKILL.md`. Until the optional top-level
 `roadmap_item: R-NNNN` existed nothing connected the two, so the roadmap state
 `planned` had invariants but no meaning, and a planning run could silently
 overwrite the one plan a live item depended on. The field is the only link and it

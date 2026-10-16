@@ -246,6 +246,10 @@ def run_fetch(opts):
     return run_python_suite("test_fetch", opts)
 
 
+def run_task_scripts(opts):
+    return run_python_suite("test_task_scripts", opts)
+
+
 def run_smoke(opts):
     """Invoke the standalone smoke harness as a subprocess; parse its rc."""
     rc, out, err = H.run_process([sys.executable, SMOKE], timeout=300,
@@ -952,6 +956,16 @@ SUITES = [
      "backoff schedule and Retry-After parsing, and the pacing / retry / "
      "session-rebuild loop on a scripted session, and the offline POST path "
      "(validation, cache bypass, cors request, CLI usage errors)", 59),
+    # TYPED: a fixed case table (A 12, B 6, C 8, D 1, E 2).
+    ("task_scripts", run_task_scripts,
+     "the task-script family's explicit --yaml PATH (task-update, "
+     "task-show-details, task-implementation-plan), each run as a child "
+     "beside a decoy ./requirements.yaml that must stay untouched and unread: "
+     "position-independent --yaml / -y / --yaml=, an unreadable file as one "
+     "stderr line and exit 1 with no fallback to the cwd, and an explicit "
+     "--yaml without --doc skipping the default plan document with one "
+     "warning rather than printing another feature's plan, the deployed copy "
+     "byte-identical", 29),
     ("smoke", run_smoke,
      "MCP JSON-RPC plumbing invariants across the fleet", None),
 ]

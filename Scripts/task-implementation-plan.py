@@ -9,7 +9,9 @@ Usage:
 
 Options:
     --doc=PATH    Path to feature implementation plan document to include in output
-                  Default: ${PROJECT_ROOT}/docs/feature-implementation-plan.md
+                  Default: ${PROJECT_ROOT}/docs/feature-implementation-plan.md,
+                  but NOT when --yaml is given: then no document is included
+                  (one warning on stderr) unless --doc names one
     --no-doc      Skip including the implementation plan document
     --yaml, -y    Path to requirements.yaml (default: auto-detect)
 
@@ -177,7 +179,7 @@ Examples:
 
 	parser.add_argument('task_ids', nargs='*', help='Task IDs to extract (if none, extract full plan)')
 	parser.add_argument('--doc', dest='doc_path', metavar='PATH',
-		help='Path to feature implementation plan document (default: ${PROJECT_ROOT}/docs/feature-implementation-plan.md)')
+		help='Path to feature implementation plan document (default: ${PROJECT_ROOT}/docs/feature-implementation-plan.md; with --yaml there is no default)')
 	parser.add_argument('--no-doc', dest='no_doc', action='store_true',
 		help='Skip including the implementation plan document')
 	parser.add_argument('--yaml', '-y', dest='yaml_path', metavar='PATH',
@@ -195,8 +197,12 @@ Examples:
 		print("Error: requirements.yaml not found", file=sys.stderr)
 		sys.exit(1)
 
-	with open(yaml_file, 'r') as f:
-		content = f.read()
+	try:
+		with open(yaml_file, 'r') as f:
+			content = f.read()
+	except OSError as e:
+		print(f"Error: cannot read {yaml_file}: {e.strerror or e}", file=sys.stderr)
+		sys.exit(1)
 
 	plan_data = extract_full_implementation_plan(content)
 
@@ -209,17 +215,27 @@ Examples:
 
 	# Handle --doc parameter
 	if not args.no_doc:
-		if args.doc_path:
+		if args.yaml_path and not args.doc_path:
+			# An explicit --yaml names another feature's requirements; the
+			# default plan document belongs to whichever feature wrote it last,
+			# so printing it here would silently pair the wrong plan with these
+			# tasks.  Skip it and say so.
+			print("task-implementation-plan.py: --yaml given without --doc: "
+				"plan document skipped (pass --doc PATH to include one, "
+				"or --no-doc to silence this)", file=sys.stderr)
+			doc_path = None
+		elif args.doc_path:
 			doc_path = args.doc_path
 		else:
 			# Default doc path
 			doc_path = os.path.join(find_project_root(), 'docs', 'feature-implementation-plan.md')
 
-		# Expand environment variables
-		doc_path = os.path.expandvars(doc_path)
+		if doc_path is not None:
+			# Expand environment variables
+			doc_path = os.path.expandvars(doc_path)
 
-		if args.doc_path or os.path.exists(doc_path):
-			dump_doc_file(doc_path)
+			if args.doc_path or os.path.exists(doc_path):
+				dump_doc_file(doc_path)
 
 	print("=" * 80)
 	if args.task_ids:

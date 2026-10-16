@@ -19,6 +19,16 @@ USER → /p:implement    → implemented code + requirements.yaml (status update
 USER → /p:security-review → console + optional docs/reviews/security-review-<ts>.md
 ```
 
+**The two file names in the diagram are DEFAULTS, overridable per run.** Two features planned in parallel each need their own plan document and task YAML, so each stage takes the path explicitly and the next stage is handed the same path (the transitions are user-mediated, so the user carries it):
+
+| Stage | Plan document (`PLAN_PATH` / `DOC_PATH`) | Task YAML (`YAML_PATH`) |
+|---|---|---|
+| `/p:feature-plan [--output <plan.md>]` | writes it (default `docs/feature-implementation-plan.md`) | — |
+| `/p:task-plan [--plan <plan.md>] [--yaml <out.yaml>]` | reads it (same default) | writes it (default `requirements.yaml`) |
+| `/p:implement [<yaml>] [--doc <plan.md>]` | reads it, passed to the mason as `--doc` (same default) | reads + updates it, passed to every task script as `--yaml` (same default) |
+
+Example: `--output docs/plans/feature-rtp-plan.md` → `--plan docs/plans/feature-rtp-plan.md --yaml requirements-rtp.yaml` → `requirements-rtp.yaml --doc docs/plans/feature-rtp-plan.md`. Every contract below uses the default names; read them as "or the overriding path". Custom plan names should contain `plan` (the `/p:security-review` mode heuristic keys on it), though the skills also pass `--mode plan` explicitly.
+
 Each transition is **user-mediated** — there is no auto-handoff between skills. The user decides when to move from one stage to the next.
 
 ## Per-skill contracts
@@ -27,10 +37,11 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 
 **Inputs:**
 - A natural-language feature request (interactive)
-- Optionally: an existing `docs/feature-implementation-plan.md` to refine
+- Optionally: `--output <path>` — the canonical plan path (default `docs/feature-implementation-plan.md`)
+- Optionally: an existing plan file at that path to refine
 
 **Outputs:**
-- `docs/feature-implementation-plan.md` — markdown, English only. **Written by `p:minion-feature-planner`** (the skill orchestrates; it never hand-writes or hand-edits the plan). Structured per the planner's 8-mandatory-section contract / the template in the skill body. MUST contain at minimum:
+- `docs/feature-implementation-plan.md` (or the `--output` path) — markdown, English only. **Written by `p:minion-feature-planner`** (the skill orchestrates; it never hand-writes or hand-edits the plan). Structured per the planner's 8-mandatory-section contract / the template in the skill body. MUST contain at minimum:
   - `## Requirements Summary` (with success criteria, scope, assumptions, constraints, NFRs)
   - `## Architecture Analysis`
   - `## Captured Information (for implementation phase)` (file locations, imports, types, signatures, patterns, error handling, tests)
@@ -41,25 +52,26 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
   - `## Post-Implementation Checklist`
 
 **Plan authoring (delegated):**
-- The skill does NOT write the plan itself. It runs a **round-0 multi-perspective fan-out**: N parallel `Agent(p:minion-feature-planner, …)` calls (default `mvp-first` / `risk-first` / `maintainability-first`), each writing a draft to its own `.claude/tmp/plan-perspective-<slug>.md`. The skill judges the drafts, then invokes the planner ONCE more in canonical mode to synthesize the single `docs/feature-implementation-plan.md`, and finally deletes the perspective drafts.
+- The skill does NOT write the plan itself. It runs a **round-0 multi-perspective fan-out**: N parallel `Agent(p:minion-feature-planner, …)` calls (default `mvp-first` / `risk-first` / `maintainability-first`), each writing a draft to its own `.claude/tmp/plan-perspective-<slug>.md`. The skill judges the drafts, then invokes the planner ONCE more in canonical mode to synthesize the single canonical plan file (the planner receives it as `output_path`, which WITHOUT `assigned_perspective` means the canonical path), and finally deletes the perspective drafts.
 - Validation fixes are delegated too: each round's CRITICAL/HIGH findings are addressed by ONE `Agent(p:minion-feature-planner, …)` refinement (`delegate-fix`) — never a hand-edit, never a perspective re-fan-out.
 
 **Side effects:**
 - Writes / reads / deletes `.claude/tmp/plan-perspective-*.md` (round-0 drafts; deleted after synthesis) and other `.claude/tmp/` files during interactive exploration (cleaned up by the temp-file rule)
-- Does NOT write code, does NOT modify other files; `docs/feature-implementation-plan.md` is written EXCLUSIVELY by `p:minion-feature-planner`
+- Does NOT write code, does NOT modify other files; the canonical plan file is written EXCLUSIVELY by `p:minion-feature-planner`
 
-**Validation:** runs a parallel validation fan-out before declaring done — correctness lane (`p:minion-inspector-plan`) + security lane (`p:minion-inspector-security-officer` `PHASE: triage`, gated to `Skill(p:security-review, mode=plan)` on a hit); CRITICAL/HIGH findings fixed via a single delegated `p:minion-feature-planner` refinement per round (`delegate-fix`). See `_lib/validation-loop.md` § Parallel fan-out variant.
+**Validation:** runs a parallel validation fan-out before declaring done — correctness lane (`p:minion-inspector-plan`) + security lane (`p:minion-inspector-security-officer` `PHASE: triage`, gated to `Skill(p:security-review, args="<plan> --mode plan")` on a hit); CRITICAL/HIGH findings fixed via a single delegated `p:minion-feature-planner` refinement per round (`delegate-fix`). See `_lib/validation-loop.md` § Parallel fan-out variant.
 
 ---
 
 ### `/p:task-plan`
 
 **Inputs:**
-- `docs/feature-implementation-plan.md` (REQUIRED — produced by `/p:feature-plan`)
-- Existing `requirements.yaml` (if updating, not creating from scratch)
+- `docs/feature-implementation-plan.md` (REQUIRED — produced by `/p:feature-plan`; override: `--plan <path>`)
+- Output path: `--yaml <path>` (default `requirements.yaml`)
+- Existing task YAML at that path (if updating, not creating from scratch)
 
 **Outputs:**
-- `requirements.yaml` — YAML, schema documented in the `p:task-plan` SKILL.md. MUST contain:
+- `requirements.yaml` (or the `--yaml` path) — YAML, schema documented in the `p:task-plan` SKILL.md. MUST contain:
   - `complete: true` (when task-planning is finished)
   - `context_summary` block (captured from the plan: error_handling, memory_management, logging_pattern, naming_conventions, etc.)
   - `success_criteria` array
@@ -69,8 +81,8 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
   - Optional `roadmap_item: R-NNNN` — the `p:roadmap` item the plan is for (named by the user, or by the feature plan's `Roadmap item:` line). The only link between the two files; the roadmap never mirrors task status
 
 **Side effects:**
-- Writes `requirements.yaml`
-- Plan-slot check: before overwriting a `requirements.yaml` whose `roadmap_item` names an item that `roadmap.py show` still prints as a live block, STOPS and asks the user
+- Writes the task YAML (`requirements.yaml` or the `--yaml` path) — only that file, via `p:minion-task-planner`
+- Plan-slot check: before overwriting the YAML it is about to write, when that file's `roadmap_item` names an item that `roadmap.py show` still prints as a live block, STOPS and asks the user
 - When it writes `roadmap_item`, moves that item to `planned` with `roadmap.py move` (reason staged in `.claude/tmp/roadmap-stage-<ts>-<n>.txt`; an inbox item goes to `next`)
 
 ---
@@ -78,13 +90,13 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 ### `/p:implement`
 
 **Inputs:**
-- `requirements.yaml` (REQUIRED — produced by `/p:task-plan`)
-- `docs/feature-implementation-plan.md` (optional — read if exists for additional context)
+- `requirements.yaml` (REQUIRED — produced by `/p:task-plan`; override: the positional `path_to_yaml`)
+- `docs/feature-implementation-plan.md` (optional — read if exists for additional context; override: `--doc <path>`)
 - `context_summary` from YAML (preferred over re-reading reference files)
 
 **Outputs:**
 - Implemented source code (per the task list)
-- `requirements.yaml` updates:
+- `requirements.yaml` (or the overriding YAML path) updates:
   - Per-task `status` transitions: `pending` → `in_progress` → `completed`
   - On full completion: `implementation_complete: true`
   - On open items at escape hatch: `implementation_open_items: [...]` and/or `implementation_security_open_items: [...]`
@@ -106,8 +118,8 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 
 **Inputs (mode-dependent):**
 - `mode=code` (default when target is a directory, file, or `--branch`): paths or branch diff to audit
-- `mode=plan` (default when target is a `.md` file matching `*plan*.md` or `*feature-implementation-plan*`): markdown plan file path
-- Mode can be auto-inferred from the target shape, or explicitly set via `--mode plan|code`
+- `mode=plan` (default when target is a `.md` file whose basename contains `plan`, e.g. `*plan*.md` — this covers `feature-implementation-plan.md` and per-feature names like `feature-rtp-plan.md`): markdown plan file path
+- Mode can be auto-inferred from the target shape, or explicitly set via `--mode plan|code`. A plan file whose name does NOT contain `plan` MUST be reviewed with `--mode plan` (the pipeline skills always pass it explicitly)
 
 **Outputs:**
 - Console block (always): verdict + severity counts + top findings + escalations
@@ -190,8 +202,8 @@ Each transition is **user-mediated** — there is no auto-handoff between skills
 | File | Producer | Consumer | Format |
 |---|---|---|---|
 | `.claude/tmp/plan-perspective-<slug>.md` | `/p:feature-plan` round-0 fan-out (`p:minion-feature-planner`, perspective mode) | `/p:feature-plan` (judge + synthesis), then deleted after synthesis | markdown, per the planner's plan structure |
-| `docs/feature-implementation-plan.md` | `/p:feature-plan` → `p:minion-feature-planner` (canonical mode) | `/p:task-plan`, `/p:implement` (reads for context), `/p:security-review mode=plan` | markdown, structured |
-| `requirements.yaml` | `/p:task-plan` | `/p:implement` | YAML, schema in the `p:task-plan` SKILL.md |
+| `docs/feature-implementation-plan.md` (default; `--output` overrides) | `/p:feature-plan` → `p:minion-feature-planner` (canonical mode) | `/p:task-plan` (`--plan`), `/p:implement` (`--doc`; reads for context), `/p:security-review mode=plan` | markdown, structured |
+| `requirements.yaml` (default; `--yaml` overrides) | `/p:task-plan` | `/p:implement` (positional path) | YAML, schema in the `p:task-plan` SKILL.md |
 | `.claude/tmp/security-findings-<ts>-<lane>.md` | `p:minion-inspector-security-officer PHASE: find` (one per lane, parallel) | `/p:security-review` Step 2 merge/dedup barrier → deduped findings then passed INLINE to `PHASE: verify` | markdown, `[Fn]` ID format |
 | `docs/reviews/security-review-<ts>.md` | `/p:security-review` Step 4 | end-user (audit trail) | markdown, full report |
 | `docs/reviews/code-review-<name>-<date>.md` | `/p:code-review` Step 4 (Synthesize) | end-user (audit trail) | markdown, full report — only when `--output` includes markdown |

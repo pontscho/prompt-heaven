@@ -7,8 +7,8 @@ description: Delegate-able sub-agents invoked via the Task tool to keep the main
 sources:
   - ClaudeCode/agents
 verified:
-  commit: 5f419b3
-  date: 2026-09-29
+  commit: ef4b6a4
+  date: 2026-10-16
 links:
   - overview
   - skills
@@ -57,9 +57,9 @@ because a CI run is an outward-facing action on shared infrastructure
 | `minion-inspector-security-officer.md` | OWASP/CWE security review (plan- and code-mode) |
 | `minion-web-explorer.md` | Single-shot external/web lookups |
 | `minion-deep-researcher.md` | Comprehensive web research (10-15 parallel queries, `ClaudeCode/agents/minion-deep-researcher.md`) |
-| `minion-mason.md` | Per-task build executor (LSP + forge) — the engine behind `p:implement` |
-| `minion-feature-planner.md` | Authoritative feature implementation-plan writer — LSP-verified plan against the live codebase (Vitruvius) |
-| `minion-task-planner.md` | Task-plan writer — emits `requirements.yaml` with function-level tasks + dependency graph (Gantt) |
+| `minion-mason.md` | Per-task build executor (LSP + forge) — the engine behind `p:implement`; its brief carries `YAML_PATH` and `DOC_PATH`, passed as `--yaml` to every task script and as `--doc` to `task-implementation-plan.py` (defaults `requirements.yaml` and `feature-implementation-plan.md` at the `docs/` root when a brief omits them) `ClaudeCode/agents/minion-mason.md` |
+| `minion-feature-planner.md` | Authoritative feature implementation-plan writer — LSP-verified plan against the live codebase (Vitruvius); in canonical mode an `output_path` without `assigned_perspective` names the plan file, default `feature-implementation-plan.md` at the `docs/` root `ClaudeCode/agents/minion-feature-planner.md` |
+| `minion-task-planner.md` | Task-plan writer — emits the task YAML (`requirements.yaml`, or the caller's `yaml_path`) with function-level tasks + dependency graph (Gantt) `ClaudeCode/agents/minion-task-planner.md` |
 | `minion-code-reviewer.md` | Single-lens code-review finder — surfaces candidate findings through one lens (Statler) |
 | `minion-code-verifier.md` | Single-candidate code-review verifier — CONFIRMED/PLAUSIBLE/REFUTED on a fresh read (Waldorf) |
 | `minion-librarian.md` | Executor for the `p:wiki` skill — ingest/lint/query/init/adopt against the `docs/` wiki (Dewey) |
@@ -73,7 +73,7 @@ non-obvious failure -> `minion-watson`; plan written -> `minion-inspector-plan`
 then `minion-inspector-security-officer`; implementation finished ->
 `minion-inspector-implementation` then `minion-inspector-security-officer`. The
 planning chain is written by `minion-feature-planner` (implementation plan) then
-`minion-task-planner` (`requirements.yaml`); the `p:code-review` / `p:branch-review`
+`minion-task-planner` (the task YAML, `requirements.yaml` by default); the `p:code-review` / `p:branch-review`
 pipeline fans out `minion-code-reviewer` (one per lens) into `minion-code-verifier`
 (one per candidate); and `minion-librarian` maintains the `docs/` wiki.
 

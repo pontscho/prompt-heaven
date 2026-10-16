@@ -1004,6 +1004,25 @@ line and exits 2). What the file they all
 operate on is *for*, and why the plan-to-implement handoff needs a validated task
 graph beside the prose plan, is [[requirements-yaml]].
 
+The file name is a default, not a fixed slot: two features planned in parallel
+each keep their own task YAML, so the three scripts a mason calls take the path
+explicitly. `task-update.py` and `task-show-details.py` accept `--yaml PATH`,
+`-y PATH` or `--yaml=PATH` at any position, pulled out of argv before the
+positional arguments are read `Scripts/task-update.py:split_yaml_flag`
+`Scripts/task-show-details.py:split_yaml_flag`; a named file is read exactly as
+named, with no walk-up and no fallback to the working directory, and a file that
+cannot be read is one stderr line and exit 1 `Scripts/task-show-details.py:main`.
+`task-implementation-plan.py` already had `--yaml` and `--doc`, and the fix it
+gained is about the plan document it prints in front of the tasks: with `--yaml`
+and no `--doc` it no longer injects the default plan document,
+`feature-implementation-plan.md` at the `docs/` root — which belongs to whichever feature wrote
+it last, so printing it beside another feature's tasks paired the wrong plan with
+them silently — and says so in one stderr warning instead; `--doc` names the
+document, `--no-doc` silences it, and with neither flag the default is injected as
+before `Scripts/task-implementation-plan.py:main`. The deployed copy
+`ClaudeCode/scripts/task-implementation-plan.py` is held byte-identical to it by
+the `task_scripts` suite ([[tests]]).
+
 ## Search
 
 Two CLIs and one MCP server answer search, and all three carry the same generated

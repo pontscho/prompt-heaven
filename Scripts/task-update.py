@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Mass update task status in requirements.yaml file.
-Usage: task-update.py <status> <task1> <task2> ...
+Usage: task-update.py [--yaml PATH] <status> <task1> <task2> ...
 Example: task-update.py completed task-001 task-002 task-003
+         task-update.py --yaml feat/requirements.yaml completed task-001
+--yaml / -y / --yaml=PATH may appear anywhere; default is ./requirements.yaml.
 """
 
 import re
@@ -71,15 +73,50 @@ def update_task_status(yaml_file, status, task_ids):
     if updated:
         print(f"\n📝 File updated: {yaml_file}")
 
+def split_yaml_flag(argv):
+    """Pull `--yaml PATH` / `-y PATH` / `--yaml=PATH` out of argv, at any position.
+
+    Returns (yaml_path_or_None, remaining_args). A flag with no value exits 1
+    with one stderr line.
+    """
+    yaml_path = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("--yaml", "-y"):
+            if i + 1 >= len(argv):
+                print(f"task-update.py: {arg} needs a PATH", file=sys.stderr)
+                sys.exit(1)
+            yaml_path = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--yaml="):
+            yaml_path = arg[len("--yaml="):]
+        else:
+            rest.append(arg)
+        i += 1
+    return yaml_path, rest
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: task-update.py <status> <task1> <task2> ...")
+    yaml_file, args = split_yaml_flag(sys.argv[1:])
+
+    if len(args) < 2:
+        print("Usage: task-update.py [--yaml PATH] <status> <task1> <task2> ...")
         print("Example: task-update.py completed task-001 task-002")
+        print("         task-update.py --yaml feat/requirements.yaml completed task-001")
         print("Valid statuses: pending, completed, in_progress")
+        print("--yaml, -y PATH: the requirements file to update (default: ./requirements.yaml)")
         sys.exit(1)
 
-    status = sys.argv[1]
-    task_ids = sys.argv[2:]
+    status = args[0]
+    task_ids = args[1:]
 
-    yaml_file = "requirements.yaml"
-    update_task_status(yaml_file, status, task_ids)
+    if yaml_file is None:
+        yaml_file = "requirements.yaml"
+    try:
+        update_task_status(yaml_file, status, task_ids)
+    except OSError as e:
+        print(f"task-update.py: cannot access {yaml_file}: {e.strerror or e}", file=sys.stderr)
+        sys.exit(1)

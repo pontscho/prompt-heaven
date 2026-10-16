@@ -27,7 +27,7 @@ Execute a planned implementation based on a structured YAML document generated b
 # Purpose
 
 This command takes a completed implementation plan (from `/p:task-plan`) and executes it step-by-step:
-- **MUST** Reads the requirements.yaml with use `~/.claude/scripts/task-implementation-plan.py [path_to_yaml] [task_id] [task_id] ...`
+- **MUST** Reads the requirements.yaml with use `~/.claude/scripts/task-implementation-plan.py [task_id] [task_id] ... [--yaml path_to_yaml --doc plan_doc]`
 - **MUST** Find relevant parts from feature-implementation-plan.md file.
 - Validates the plan is complete and ready for implementation
 - Executes tasks in dependency order
@@ -88,9 +88,10 @@ If `code_references` points to `websocket_send_frame()` for implementing `websoc
 1. **CRITICAL** Read feature-implementation-plan.md file if it's exists.
 2. **CRITICAL** **Load implementation plan using the extraction script**:
    ```bash
-   ~/.claude/scripts/task-implementation-plan.py [path_to_yaml] [task_id]
+   ~/.claude/scripts/task-implementation-plan.py [task_id] [--yaml path_to_yaml --doc plan_doc]
    ```
    - If a specific task ID was provided as parameter, pass it to the script
+   - The YAML path is the `--yaml` option, NOT a positional argument (a positional is read as a task id). With a non-default `--yaml` also pass `--doc` (or `--no-doc`), otherwise the default plan document is not injected
    - This loads only the essential data (complete, context_summary, success_criteria, implementation_plan)
    - If task ID is specified, only that single task is loaded from the plan
    - Token-efficient: excludes original_request, requirements, constraints
@@ -402,7 +403,7 @@ Before or during implementation, you can check task status:
 ```
 /p:requirements                    # Show all tasks with current status
 ~/.claude/scripts/task-plan.py requirements.yaml
-~/.claude/scripts/task-implementation-plan.py requirements.yaml task-003
+~/.claude/scripts/task-implementation-plan.py task-003 --yaml requirements.yaml
 ```
 
 This helps you understand:

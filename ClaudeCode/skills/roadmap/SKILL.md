@@ -7,7 +7,7 @@ description: Keep the project's known-but-unscheduled work in the wiki as roadma
 
 A roadmap item is **known work that is not scheduled yet**: the gap between an
 ADR's declared-limits prose, which records a limit but not a plan to lift it, and
-`requirements.yaml`, which holds exactly one plan at a time and keeps no history.
+`requirements.yaml` (or any task YAML), which holds exactly one plan at a time and keeps no history.
 The roadmap is where a vague someday-maybe goes instead of a wiki page (the p:wiki
 anti-scope says so), and it is itself a pair of wiki page types, so `wiki_call`
 `search` finds items like any other page. The decision, and every alternative that
@@ -38,16 +38,17 @@ as evidence, and the user decides.
 
 - **`idea`** -- the work is known, not worked out.
 - **`planned`** -- the item **has a plan**: either its `spec:` names a wiki page
-  carrying the design, or a `requirements.yaml` carries `roadmap_item: R-NNNN`
+  carrying the design, or a task YAML (`requirements.yaml` by default) carries `roadmap_item: R-NNNN`
   naming it. `/p:task-plan` writes that field and moves the item to `planned`
   (`ClaudeCode/skills/task-plan/SKILL.md`, "Roadmap item").
 - **`active`** -- the item is being worked on. A small item goes `idea` -> `active`
   directly with `start` and skips planning.
 
-The optional top-level `roadmap_item` in `requirements.yaml` is the ONLY link
-between the two files, and it points one way: the roadmap never mirrors task
-status. `requirements.yaml` holds one plan at a time, so at most one item owns
-that slot: `/p:task-plan` stops and asks before it overwrites a plan whose
+The optional top-level `roadmap_item` in `requirements.yaml` (or in whichever
+`--yaml` file `/p:task-plan` wrote) is the ONLY link between the two files, and it
+points one way: the roadmap never mirrors task
+status. A task YAML file holds one plan at a time, so at most one item owns
+that file's slot (per-feature YAML files are separate slots): `/p:task-plan` stops and asks before it overwrites a plan whose
 `roadmap_item` names an item that is still live. The one sync point is the green
 end of `/p:implement`, which does not commit: when `roadmap_item` is set, its final
 handoff prints `close R-NNNN --commit <sha>` as the next step to run after the
@@ -391,7 +392,7 @@ op is four hops:
      - ADR "declared limits" / Consequences sections;
      - draft spec pages (status: draft) with planned `targets:`;
      - "Open Questions" / "Next Steps" sections (e.g. docs/concepts/spec-ddg.md:711);
-     - pending leftovers in requirements.yaml (tasks not completed).
+     - pending leftovers in requirements.yaml and any per-feature task YAML (tasks not completed).
    For each ADR limit, classify it KEPT (a decision: "permanent, not a TODO",
    "declared, not deferred") or DEFERRED (work not done yet), and quote the sentence
    that decides it. Only DEFERRED limits are candidates; list KEPT ones separately.
