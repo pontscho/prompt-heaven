@@ -378,6 +378,7 @@ docs/
   components/<name>.md
   reference/<name>.md
   analysis/<name>.md
+  reviews/<name>.md    # code / security review reports, type analysis; a filed report is a frozen record (status deprecated)
   concepts/<name>.md
   specs/<name>.md
   runbooks/<name>.md
